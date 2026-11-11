@@ -235,7 +235,8 @@ if (options.payload) {
     'node_modules/@meowfilm/script-host/src/index.js',
     'node_modules/@meowfilm/source-runtime/src/index.js',
     'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs',
-    'app/modules/source-candidates.mjs',
+    'app/modules/source-candidates.mjs', 'app/modules/source-library.mjs', 'app/modules/source-web.mjs',
+    'app/modules/source-rules.mjs', 'node_modules/@meowfilm/novel-rules/novel-rules.js',
     'node_modules/@meowfilm/runtime-bridge/src/index.js',
   ];
   if (manifest?.status !== 'complete' || !Array.isArray(manifest.files) || required.some(path =>

@@ -18,13 +18,15 @@ const MODULE_FILES = Object.freeze({
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
 const SHARED_FILES = ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
-  'modules/source-candidates.mjs', ...Object.values(MODULE_FILES), 'modules/metadata-data.mjs',
+  'modules/source-candidates.mjs', 'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs',
+  ...Object.values(MODULE_FILES), 'modules/metadata-data.mjs',
   'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
   'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs'];
 const SHARED_IMPORTS = new Set([
-  'node:buffer', 'node:crypto', 'node:http', 'node:https',
+  'node:buffer', 'node:crypto', 'node:http', 'node:https', 'node:stream',
   '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
   '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/netease-token',
+  '@meowfilm/novel-rules', '@meowfilm/script-host/native-json',
 ]);
 const NATIVE_POLICY = 'scripts/script-host-native.json';
 const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.node';
@@ -595,7 +597,7 @@ function buildGraph(root, product, target) {
     if (value.link) safeRelative(value.resolved);
   }
   const selected = ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-    'film-rules', 'film-search', 'film-playback', 'netease-token'];
+    'film-rules', 'film-search', 'film-playback', 'netease-token', 'novel-rules'];
   const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
   const nodes = new Map(), edges = [], omitted = [];
   const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];

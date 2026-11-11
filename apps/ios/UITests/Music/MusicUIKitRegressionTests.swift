@@ -18,7 +18,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let additional = SearchCategoryUIKitFixture()
         let target = SearchTargetOption(id: "film", title: "影视", placeholder: "搜索影视")
         let root = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
-            router: MusicUIKitRegressionRouter(), additionalCategory: .init(target: target) { additional })
+            router: MusicUIKitRegressionRouter(), additionalCategories: [.init(target: target) { additional }])
         let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
         navigation.setViewControllers([root], animated: false)
         let window = mount(navigation)
@@ -71,7 +71,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await service.allowResultSearch {}
         let content = SearchCategoryUIKitFixture()
         let page = MusicSearchResultsViewController(model: model, query: "旧词", appearance: MusicAppearancePreferencesStore(),
-            router: nil, history: SearchHistoryStore(), additionalCategory: .init(target: .init(id: "film", title: "影视", placeholder: "搜索影视")) { content })
+            router: nil, history: SearchHistoryStore(), additionalCategories: [.init(target: .init(id: "film", title: "影视", placeholder: "搜索影视")) { content }])
         let navigation = PageNavigationController(themeProvider: page.themeProvider)
         navigation.setViewControllers([page], animated: false)
         let window = mount(navigation)
@@ -92,7 +92,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await model.close()
     }
 
-    func testGlobalSearchAddsAllFourCategoriesWhenMusicPlaylistSearchIsDisabled() async throws {
+    func testGlobalSearchAddsAllFiveCategoriesWhenMusicPlaylistSearchIsDisabled() async throws {
         let key = MusicSearchPreferencesStore.preferencesKey
         let previous = UserDefaults.standard.object(forKey: key)
         UserDefaults.standard.set(try JSONEncoder().encode(MusicSearchPreferences(searchPlaylists: false)), forKey: key)
@@ -100,20 +100,61 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService()
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
         await model.load()
-        let content = SearchCategoryUIKitFixture()
+        let content = SearchCategoryUIKitFixture(), novel = SearchCategoryUIKitFixture()
         let page = MusicSearchResultsViewController(model: model, query: "影视词", appearance: MusicAppearancePreferencesStore(),
-            router: nil, history: SearchHistoryStore(), additionalCategory: .init(target: .init(id: "film", title: "影视", placeholder: "搜索影视")) { content },
-            initialAdditional: true)
+            router: nil, history: SearchHistoryStore(), additionalCategories: [.init(target: .init(id: "film", title: "影视", placeholder: "搜索影视")) { content },
+                .init(target: .init(id: "novel", title: "小说", placeholder: "搜索小说")) { novel }],
+            initialTargetID: "film")
         let navigation = PageNavigationController(themeProvider: page.themeProvider)
         navigation.setViewControllers([page], animated: false)
         let window = mount(navigation)
         defer { release(navigation, window: window) }
-        for (index, title) in ["综合", "单曲", "歌单", "影视"].enumerated() {
+        for (index, title) in ["综合", "单曲", "歌单", "影视", "小说"].enumerated() {
             XCTAssertEqual(try resultButton(id: "music.search.results.tab.\(index)", in: page.view).title(for: .normal), title)
         }
         XCTAssertEqual(page.searchTargetID, "film")
         PageViewController.invalidatePages(in: page)
         XCTAssertEqual(content.closes, 1)
+        XCTAssertEqual(novel.closes, 1)
+        await model.close()
+    }
+    func testThreeTargetsKeepIndependentDomainConsumersAndCancelHiddenCategoryWithoutLosingSession() async throws {
+        let service = MusicUIKitRegressionService()
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        await model.load(); await service.allowResultSearch {}
+        let film = SearchCategoryUIKitFixture(), novel = SearchCategoryUIKitFixture()
+        let root = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(), router: MusicUIKitRegressionRouter(),
+            additionalCategories: [
+                .init(target: .init(id: "film", title: "影视", placeholder: "搜索影视")) { film },
+                .init(target: .init(id: "novel", title: "小说", placeholder: "搜索小说")) { novel }])
+        let navigation = PageNavigationController(themeProvider: root.themeProvider)
+        navigation.setViewControllers([root], animated: false)
+        let window = mount(navigation); defer { release(navigation, window: window) }
+        XCTAssertEqual(root.searchTargetButton.menu?.children.compactMap { ($0 as? UIAction)?.title }, ["音乐", "影视", "小说"])
+        invoke(try XCTUnwrap(root.searchTargetButton.menu?.children.compactMap { $0 as? UIAction }.first { $0.title == "小说" }))
+        root.onSubmit?("雨夜来信")
+        await waitForResult { navigation.topViewController !== root }
+        let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        await waitForResult { novel.submissions == ["雨夜来信"] }
+        XCTAssertTrue(film.submissions.isEmpty)
+        let musicReads = await service.resultReads(); XCTAssertTrue(musicReads.isEmpty)
+        let filmTab = try resultButton(id: "music.search.results.tab.3", in: results.view)
+        let novelTab = try resultButton(id: "music.search.results.tab.4", in: results.view)
+        let cancels = novel.cancels
+        filmTab.sendActions(for: .touchUpInside)
+        await waitForResult { filmTab.accessibilityTraits.contains(.selected) && !film.submissions.isEmpty }
+        XCTAssertGreaterThan(novel.cancels, cancels)
+        XCTAssertEqual(novel.submissions, ["雨夜来信"])
+        novelTab.sendActions(for: .touchUpInside)
+        await waitForResult { novelTab.accessibilityTraits.contains(.selected) }
+        XCTAssertEqual(novel.submissions, ["雨夜来信"], "Same-query category return keeps its native session")
+        let detail = PageViewController(themeProvider: root.themeProvider)
+        navigation.pushViewController(detail, animated: false)
+        XCTAssertEqual(novel.closes, 0)
+        navigation.popViewController(animated: false)
+        XCTAssertTrue(navigation.topViewController === results)
+        XCTAssertEqual(results.searchTargetID, "novel"); XCTAssertEqual(results.query, "雨夜来信")
+        XCTAssertEqual(novel.submissions, ["雨夜来信"]); XCTAssertEqual(film.submissions, ["雨夜来信"])
         await model.close()
     }
 
@@ -6657,9 +6698,10 @@ private final class SearchCategoryUIKitFixture: UIViewController, SearchResultCo
     var controller: UIViewController { self }
     var submissions: [String] = []
     var closes = 0
+    var cancels = 0
     func submit(_ query: String) { if submissions.last != query { submissions.append(query) } }
     func applyTheme(_ theme: PageTheme) {}
-    func cancel() {}
+    func cancel() { cancels += 1 }
     func close() { closes += 1 }
 }
 #endif

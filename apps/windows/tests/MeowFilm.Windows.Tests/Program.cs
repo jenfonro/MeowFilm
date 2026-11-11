@@ -9,6 +9,7 @@ internal static class Program
     private static async Task<int> Main(string[] args)
     {
         TestWorkspace.Initialize();
+        if (args is ["--novel-restore", var path]) return await NovelTests.RestoreChild(path);
         var groups = Assembly.GetExecutingAssembly().GetTypes()
             .Where(type => type.Name.EndsWith("Tests", StringComparison.Ordinal))
             .Select(type => type.GetMethod("Cases", BindingFlags.Public | BindingFlags.Static))
@@ -52,6 +53,8 @@ internal static class Program
             {
                 failed++;
                 Console.WriteLine($"FAIL {test.Name}: {error.GetType().Name}: {error.Message}");
+                Console.WriteLine($"ERROR_HRESULT 0x{error.HResult:X8}");
+                Console.WriteLine(error.StackTrace);
             }
         }
         Console.WriteLine($"TOTAL {tests.Length}; PASSED {tests.Length - failed}; FAILED {failed}; SKIPPED 0");

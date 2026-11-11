@@ -10,6 +10,7 @@
     "packages/pan-runtime",
     "packages/film-rules",
     "packages/film-search",
+    "packages/novel-rules",
     "packages/film-playback",
     "packages/netease-token"
   ],

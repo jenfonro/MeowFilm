@@ -33,7 +33,7 @@ packages/netease-token/、apps/runtime/modules/netease-token.mjs
 | --- | --- | --- |
 | `music@0.8.0` | `music.script.v3` | 原始 LX 音源 |
 | `cat@0.2.0` | `cat.script.v2` | CatNode、HTTP 服务、direct Spider、私有卷和管理同步 |
-| `source@0.2.0` | `source.runtime.v2` | Legado、异次元、轻悦时光、独立 CatVod Spider |
+| `source@0.3.0` | `source.runtime.v2` | Legado、异次元、轻悦时光、独立 CatVod Spider |
 
 受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)、`tmdb@0.1.0/tmdb.data.v1` 与 `douban@0.1.0/douban.data.v1` 的[元数据能力](metadata-data.md)，以及 `film@0.1.0/film.playback.v1` 的[影视播放业务](film-playback.md)。这些是 Node 内置业务，不是新的脚本执行所有者；通用默认三模块不变。
 

@@ -13,6 +13,7 @@ import { createRuntimeClient } from '../apps/runtime/client.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
 import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
 import { verifyPanAndDoubanAssembly, verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
+import { seedSourceLibrary, verifyRecoveredSourceLibrary } from './source-library-assembly-support.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const windows = { skip: process.platform !== 'win32' ? 'Requires real Windows named pipes' : false, timeout: 20000 };
@@ -116,7 +117,7 @@ async function assertRealBusiness(client) {
   assert.deepEqual(description.modules.map(({ id, version, contract }) => ({ id, version, contract })), [
     { id: 'music', version: '0.8.0', contract: 'music.script.v3' },
     { id: 'cat', version: '0.2.0', contract: 'cat.script.v2' },
-    { id: 'source', version: '0.2.0', contract: 'source.runtime.v2' },
+    { id: 'source', version: '0.3.0', contract: 'source.runtime.v2' },
     { id: 'pan', version: '0.1.0', contract: 'pan.runtime.v1' },
     { id: 'tmdb', version: '0.1.0', contract: 'tmdb.data.v1' },
     { id: 'douban', version: '0.1.0', contract: 'douban.data.v1' },
@@ -129,7 +130,9 @@ async function assertRealBusiness(client) {
       'sources.check', 'resolve', 'invoke', 'close'],
     cat: ['start', 'status', 'refresh', 'install', 'import', 'edit', 'update', 'restart',
       'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
-    source: ['load', 'unload', 'invoke', 'status', 'close'],
+    source: ['load', 'unload', 'invoke', 'status', 'close',
+      'library.list', 'library.get', 'library.import', 'library.save', 'library.update', 'library.remove',
+      'library.export', 'library.invoke', 'library.image', 'library.releaseImage', 'web.pending', 'web.respond', 'rules.process'],
     pan: ['providers', 'settings.get', 'settings.set', 'settings.clear', 'login.start',
       'login.poll', 'login.cancel', 'list', 'prepare', 'play', 'refresh'],
     tmdb: ['settings.get', 'settings.update', 'request'],
@@ -155,6 +158,10 @@ async function assertRealBusiness(client) {
   assert.deepEqual(await client.call('source.runtime.status'), {
     ok: true, contract: 'source.runtime.v2', value: { instances: [] },
   });
+  assert.deepEqual(await client.call('source.runtime.rules.process', {
+    request: { operation: 'identity', book: { name: '《测试书》', author: '作者：甲' } },
+  }), { ok: true, contract: 'source.runtime.v2',
+    value: { name: '测试书', author: '甲', key: JSON.stringify(['book', '测试书', '甲']) } });
   for (const method of ['music.library.list', 'reader.content.chapter', 'eval'])
     await assert.rejects(client.call(method), { code: 'METHOD_NOT_FOUND' });
   assert.deepEqual(await client.call('film.playback.recognize'), {
@@ -335,6 +342,7 @@ async function runProduct(t, entry, payload, dataRoot, manifest) {
   await verifyPanAndDoubanAssembly(client);
   await verifyScriptExecution(t, client, dataRoot);
   await verifySourceExecution(t, client);
+  const sourceLibrary = await seedSourceLibrary(client);
   await verifyCatExecution(client);
   assert.equal(server.replies.length, 1);
   assert.deepEqual(await client.shutdown(), {
@@ -347,6 +355,7 @@ async function runProduct(t, entry, payload, dataRoot, manifest) {
   const recovered = await pipeServer(t, dataRoot);
   const second = spawnRuntime(t, entry, recovered.argv, payload);
   const connected = await bounded(recovered.connection);
+  await verifyRecoveredSourceLibrary(connected.client, sourceLibrary);
   const restoredSettings = await connected.client.call('tmdb.data.settings.get');
   assert.equal(typeof restoredSettings.value?.revision, 'string');
   const { revision, ...restoredConfiguration } = restoredSettings.value;

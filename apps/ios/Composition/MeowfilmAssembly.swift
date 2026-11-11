@@ -8,6 +8,7 @@ import MeowMusicNativeService
 import MeowFilmFeature
 import MeowUI
 import MeowRuntime
+import MeowNovelFeature
 
 /// Music services are admitted once per process and revoked only on shutdown.
 /// Documents, credentials and device sessions stay readable after first unlock,
@@ -34,6 +35,8 @@ final class MeowfilmAssembly: ObservableObject {
     @Published private(set) var music: MusicViewModel?
     @Published private(set) var filmSettings: FilmSettingsModel?
     private(set) var filmSearch: FilmSearchService?
+    @Published private(set) var novel: NovelFeature?
+    private var closeNovel: (@MainActor @Sendable () async -> Void)?
     @Published private(set) var startupFailed = false
     @Published private(set) var shutdownError: String?
     private(set) var resources: MeowfilmResources?
@@ -72,6 +75,8 @@ final class MeowfilmAssembly: ObservableObject {
             forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.novel?.suspend()
+                self?.saveNovelInBackground()
                 self?.foreground = false
                 self?.refreshAutomaticSync()
             }
@@ -133,6 +138,9 @@ final class MeowfilmAssembly: ObservableObject {
         self.resources = resources
         filmSearch = FilmSearchService(sources: resources.filmSourceSettings,
             connection: { try await resources.scriptSession.connection() })
+        let novel = NovelFeature(library: resources.novelLibrary, rules: resources.novelRules, runtime: resources.novelRuntime)
+        closeNovel = { await novel.close() }
+        self.novel = novel; novel.start()
         let publicQQ = resources.musicPublicQQ
         self.publicQQ = publicQQ
         let tmdb = FilmTMDBSettingsModel(service: resources.filmMetadata) { [weak filmSearch = self.filmSearch] in
@@ -381,6 +389,7 @@ final class MeowfilmAssembly: ObservableObject {
         let resources = resources, pendingScripts = scriptStartup, lease = lease
         let pendingStartup = startup
         let filmSearch = filmSearch, film = filmPlayback, filmMedia = filmMedia, filmBackground = filmBackground
+        let novel = novel
         stopping = Task { [weak self] in
             await model?.close()
             await service?.prepareForClose()
@@ -390,6 +399,7 @@ final class MeowfilmAssembly: ObservableObject {
             publicQQ?.revokeAccess(generation: musicAccessGeneration)
             resources?.musicClients.close()
             await pendingStartup?.value
+            await novel?.close()
             await filmSearch?.close()
             await filmBackground?.value
             await film?.close()
@@ -414,6 +424,18 @@ final class MeowfilmAssembly: ObservableObject {
         }
     }
 
+    private func saveNovelInBackground() {
+        guard let novel else { return }
+        var identifier = UIBackgroundTaskIdentifier.invalid
+        identifier = UIApplication.shared.beginBackgroundTask(withName: "novel-position") {
+            if identifier != .invalid { UIApplication.shared.endBackgroundTask(identifier); identifier = .invalid }
+        }
+        Task {
+            await novel.flush()
+            if identifier != .invalid { UIApplication.shared.endBackgroundTask(identifier); identifier = .invalid }
+        }
+    }
+
     func waitForStartup() async {
         await startup?.value
         await scriptStartup?.value
@@ -424,6 +446,9 @@ final class MeowfilmAssembly: ObservableObject {
     /// Resources produced after cancellation still belong to this start attempt.
     /// No service may survive just because its install was never published.
     private nonisolated static func closeSettings(_ resources: MeowfilmResources) async {
+        await resources.novelRules.close()
+        try? await resources.novelRuntime.close()
+        await resources.novelLibrary.close()
         await resources.filmRules.close()
         await resources.filmSourceSettings.close()
         try? await resources.musicScripts.close()
@@ -439,6 +464,7 @@ final class MeowfilmAssembly: ObservableObject {
         let closeMusic = closeMusic, service = service, publicQQ = publicQQ, resources = resources, lease = lease
         let pendingScripts = scriptStartup, stopping = stopping, filmSearch = filmSearch
         let film = filmPlayback, filmMedia = filmMedia, filmBackground = filmBackground
+        let closeNovel = closeNovel
         Task { @MainActor in
             if let stopping { await stopping.value; return }
             await closeMusic?()
@@ -446,6 +472,7 @@ final class MeowfilmAssembly: ObservableObject {
             service?.revokeAccess(generation: musicAccessGeneration)
             publicQQ?.revokeAccess(generation: musicAccessGeneration)
             resources?.musicClients.close()
+            await closeNovel?()
             await filmSearch?.close()
             await filmBackground?.value
             await film?.close()

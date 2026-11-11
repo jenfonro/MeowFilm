@@ -62,7 +62,7 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
         {
             // This is an explicit presentation receipt, not a simulation of Node association or playback.
             var value = FilmPlaybackFixture.Snapshot(sessionId, session.Value.GetProperty("sequence").GetInt64() + 1,
-                FilmJson.Target(session.Value.GetProperty("target")), FilmJson.Member(input, "metadata"));
+                FilmJson.Target(session.Value.GetProperty("target")), FilmJson.Member(session.Value, "metadata"));
             sessions[sessionId] = (value, session.Events);
             return Success(value);
         }

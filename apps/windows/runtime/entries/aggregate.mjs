@@ -10,7 +10,7 @@ await startWindowsAppRuntime({
     try {
       modules.push(createMusicScriptModule({ dataRoot }));
       modules.push(createCatScriptModule({ dataRoot }));
-      modules.push(createSourceRuntimeModule({ platform: 'windows' }));
+      modules.push(createSourceRuntimeModule({ dataRoot, platform: 'windows' }));
       modules.push(createPanRuntimeModule({ dataRoot }));
       modules.push(createTMDBDataModule({ dataRoot }));
       modules.push(createDoubanDataModule({ dataRoot }));

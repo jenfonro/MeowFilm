@@ -99,6 +99,8 @@ internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageCl
         runtime.UploadSourceAsync(module, installationId, sourceRevision, source, basename, cancellationToken);
     public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
         runtime.ReadImageAsync(reference, maximumBytes, cancellationToken);
+    public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
+        runtime.ReadImageAsync(reference, cancellationToken);
     public async IAsyncEnumerable<JsonElement> EventsAsync(string module, Guid sessionId, long after = 0,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {

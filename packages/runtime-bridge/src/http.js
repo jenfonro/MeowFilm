@@ -338,14 +338,15 @@ export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
   const agent = new transport.Agent({ keepAlive: true });
   const pending = new Set();
   let closed = false, closing;
-  function request({ method = 'POST', path, body, contract = HTTP_PROTOCOL, codes = publicCodes,
-    signal, timeout: deadline = timeout, requestId = randomUUID(), raw = false } = {}) {
+  function send({ method = 'POST', path, body, contract = HTTP_PROTOCOL, codes = publicCodes,
+    signal, timeout: deadline = timeout, requestId = randomUUID(), raw = false } = {}, withDeadline) {
     if (closed) return Promise.reject(new BridgeError('CLOSED'));
     if (signal?.aborted) return Promise.reject(new BridgeError('CANCELLED'));
     let bytes;
     try {
       if (typeof path !== 'string' || !path.startsWith('/v1/') || path.startsWith('//') ||
-          !uuid.test(requestId) || !Number.isSafeInteger(deadline) || deadline < 1 || deadline > 300000) invalid();
+          !uuid.test(requestId)) invalid();
+      if (withDeadline && (!Number.isSafeInteger(deadline) || deadline < 1 || deadline > 300000)) invalid();
       const url = new URL(path, endpoint);
       if (url.pathname + url.search !== path || url.hash ||
           !['GET', 'POST', 'PUT'].includes(method)) invalid();
@@ -367,7 +368,8 @@ export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
       });
       pending.add(owner);
       const abort = () => owner.cancel('CANCELLED');
-      const timer = setTimeout(() => owner.cancel('TIMEOUT'), deadline);
+      let timer;
+      if (withDeadline) timer = setTimeout(() => owner.cancel('TIMEOUT'), deadline);
       function drain() {
         if (!transportClosed || reading) return;
         settle(failure ?? (received ? undefined : new BridgeError('CLOSED')), result);
@@ -375,7 +377,9 @@ export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
       }
       function settle(error, value) {
         if (settled) return;
-        settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
+        settled = true;
+        if (withDeadline) clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
         if (error) reject(error); else resolve(value);
       }
       outgoing.on('response', response => {
@@ -413,7 +417,10 @@ export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
       else outgoing.end(bytes);
     });
   }
-  return Object.freeze({ request, get state() { return { closed, pending: pending.size }; },
+  return Object.freeze({
+    request: options => send(options, true),
+    requestWithoutDeadline: options => send(options, false),
+    get state() { return { closed, pending: pending.size }; },
     close() {
       return closing ??= (async () => {
         closed = true;

@@ -66,7 +66,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         try await waitFor { main.isPageVisible }
         try await dismissKnownMusicNotice(root)
         try await waitFor { main.canPresentPageAlert }
-        for (page, target) in [(MeowfilmPrimaryPage.recommend, "music"), (.channels, "music"), (.film, "film")] {
+        for (page, target) in [(MeowfilmPrimaryPage.recommend, "music"), (.channels, "music"), (.film, "film"), (.novel, "novel")] {
             try await select(page, on: main)
             try await navigate(root.navigation, to: { $0 is MusicSearchViewController }) {
                 coordinator.showSearch()
@@ -119,7 +119,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
             themeProvider: assembly.appearance) { coordinator.showFilmSearchResult($0) }
         let results = MusicSearchResultsViewController(model: try XCTUnwrap(assembly.music), query: "真实原查询",
             appearance: assembly.appearance, router: coordinator, history: SearchHistoryStore(),
-            primaryTarget: MeowfilmSearchComposition.music, additionalCategory: category, initialAdditional: true)
+            primaryTarget: MeowfilmSearchComposition.music, additionalCategories: [category], initialTargetID: "film")
         try await navigate(root.navigation, to: { $0 === results }) {
             root.navigation.pushViewController(results, animated: false)
         }
@@ -370,18 +370,56 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         previous?.makeKey()
     }
     private func navigate(_ navigation: PageNavigationController,
-                          to matches: @escaping (UIViewController) -> Bool, action: () -> Void) async throws {
+                          to matches: @escaping (UIViewController) -> Bool,
+                          file: StaticString = #filePath, line: UInt = #line, action: () -> Void) async throws {
         try await settleNavigation(navigation)
+        func identifier(_ controller: UIViewController?) -> String {
+            guard let controller else { return "nil" }
+            return "\(type(of: controller))@\(ObjectIdentifier(controller))"
+        }
         let shown = XCTestExpectation(description: "The real navigation owner finished showing the requested page")
-        let previous = navigation.didShowPage
+        let previousWillShow = navigation.willShowPage
+        let previousDidShow = navigation.didShowPage
+        var lastWillShow = "none"
+        var lastDidShow = "none"
+        navigation.willShowPage = { page, animated in
+            lastWillShow = "\(identifier(page)) animated=\(animated)"
+            previousWillShow?(page, animated)
+        }
         navigation.didShowPage = { page in
-            previous?(page)
+            lastDidShow = identifier(page)
+            previousDidShow?(page)
             if matches(page) { shown.fulfill() }
         }
-        defer { navigation.didShowPage = previous }
+        defer {
+            navigation.willShowPage = previousWillShow
+            navigation.didShowPage = previousDidShow
+        }
         action()
         let result = await XCTWaiter.fulfillment(of: [shown], timeout: 10)
-        XCTAssertEqual(result, .completed)
+        var diagnostics = ""
+        if result != .completed {
+            func state(_ controller: UIViewController?) -> String {
+                guard let controller else { return "nil" }
+                let visible = (controller as? PageViewController).map { String($0.isPageVisible) } ?? "n/a"
+                let transition = controller.transitionCoordinator.map {
+                    "animated=\($0.isAnimated),interactive=\($0.isInteractive),cancelled=\($0.isCancelled)"
+                } ?? "nil"
+                return "\(identifier(controller)){window=\(controller.viewIfLoaded?.window != nil)," +
+                    "pageVisible=\(visible),beingPresented=\(controller.isBeingPresented)," +
+                    "beingDismissed=\(controller.isBeingDismissed),transition=\(transition)}"
+            }
+            let root = navigation.parent
+            diagnostics = """
+            [FilmSearchHostNavigation] phase=\(file):\(line)
+            lastWillShow=\(lastWillShow) lastDidShow=\(lastDidShow)
+            stack=[\(navigation.viewControllers.map { identifier($0) }.joined(separator: ", "))]
+            top=\(state(navigation.topViewController)) visible=\(state(navigation.visibleViewController))
+            navigation=\(state(navigation)) root=\(state(root))
+            presented: root=\(state(root?.presentedViewController)) navigation=\(state(navigation.presentedViewController)) top=\(state(navigation.topViewController?.presentedViewController))
+            """
+        }
+        XCTAssertEqual(result, .completed, diagnostics, file: file, line: line)
         guard result == .completed else { throw HostFailure.navigation }
         try await settleNavigation(navigation)
         let page = try XCTUnwrap(navigation.topViewController as? PageViewController)

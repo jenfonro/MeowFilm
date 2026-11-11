@@ -149,6 +149,16 @@ class SourceScopeTests(unittest.TestCase):
         self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import MeowMusicPlatform\n")
         self.assertIn("Shared target depends on business: MeowUI", scope.check(self.root))
 
+    def test_shared_ui_cannot_depend_on_novel_business(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        declared = path.read_text().replace('.target(name: "MeowUI", dependencies: [])',
+            '.target(name: "MeowUI", dependencies: ["MeowNovelFeature"])')
+        path.write_text(declared + '\n.target(name: "MeowNovelFeature", dependencies: [])\n'
+            '.library(name: "MeowNovelFeature", targets: ["MeowNovelFeature"])\n')
+        self.write("native/MeowKit/Sources/MeowNovelFeature/Fixture.swift", "")
+        self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import MeowNovelFeature\n")
+        self.assertIn("Shared target depends on business: MeowUI", scope.check(self.root))
+
     def test_video_kernel_requires_its_exact_local_package_and_explicit_dependency(self):
         path = self.root / "native/MeowKit/Package.swift"
         text = path.read_text().replace('.target(name: "MeowUI", dependencies: [])',
@@ -165,8 +175,6 @@ class SourceScopeTests(unittest.TestCase):
         path.write_text('.package(path: "../VideoKernel")\n' + text)
         self.write("native/MeowKit/Sources/MeowJSON/Fixture.swift", "import MeowVideoKernel\n")
         self.assertTrue(any("Undeclared imports for MeowJSON" in error for error in scope.check(self.root)))
-
-
 
 if __name__ == "__main__":
     unittest.main()

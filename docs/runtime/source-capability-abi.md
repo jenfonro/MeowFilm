@@ -2,7 +2,9 @@
 
 本文件是[共同契约索引](../common/README.md)中来源宿主能力的唯一来源。`@meowfilm/source-runtime` 的 Reader 与 CatVod Spider adapter 通过版本化 capability ABI 请求宿主能力；纯规则包不导入 `node:*`、Node／平台全局、JVM、文件系统或平台 WebView 类型。
 
-适用入口为 `source@0.2.0`／`source.runtime.v2`。LX 的原有网络适配器与请求 `context.storage`、CatNode 的有限 Node 兼容和私有卷继续遵循各自契约，不改由本 ABI 包装。Node-independent 只描述该纯规则包，不描述当前 script-host 或 CatNode 承载。
+适用入口为 `source@0.3.0`／`source.runtime.v2`。LX 的原有网络适配器与请求 `context.storage`、CatNode 的有限 Node 兼容和私有卷继续遵循各自契约，不改由本 ABI 包装。Node-independent 只描述该纯规则包，不描述当前 script-host 或 CatNode 承载。
+
+小说应用纯计算使用同一 source 模块的 `rules.process {request}`，由 Node owner 通过 `NativeJsonProgram` 执行受信 `@meowfilm/novel-rules` 程序；它不是 guest capability，也不向来源脚本开放任意程序执行。净化／简繁与 Web URL 正则不再由客户端另持引擎；规则配置和阅读本地状态仍由原生拥有。固定 operation、逐条预算和错误契约见[小说纯规则](source-library.md#小说纯规则)。独立计算不持有 source profile，URL 匹配结果不能越过原 Web 请求取消、generation 退休和 Cookie 写回 fence。
 
 ## 版本与调用
 
@@ -44,7 +46,7 @@ Reader/CatVod 的 HTTP 与显式 Cookie 操作共用 source profile 下的 `:htt
 
 Promise／原生 await／异步迭代与清理回调保留登记任务身份；A 已结束或取消后由 B 唤醒的旧延续仍属 A，发能力时返回 `STALE_SESSION`，不会进入 B 的 owner scope。初始化保存的 Cat `req`／`local` 按有效当前动作工作；Legado 动作 helper 与 DOM handle 仍绑定所属请求，旧延续也不能借取 B 的 helper／handle 绕过身份检查。纯 JavaScript 计算不因此被禁用，正常动作内的 await／then／timer 及 thenable 继续工作。
 
-默认 Node owner 的 storage、Cookie、虚拟路由，以及规则会话变量不保留旧单项/累计脚本内存预算；既有业务字段和数据格式仍检查。DOM 文档/节点/字符串、分页、远程 HTML 候选与外部脚本解析预算继续存在，不得转用于普通 HTTP body 或变量。资源按请求、generation 和 profile 生命周期回收，不以配额删除为由遗弃物理工作。
+默认 Node owner 的 storage、Cookie、虚拟路由，以及规则会话变量不保留旧单项/累计脚本内存预算；既有业务字段和数据格式仍检查。DOM 文档/节点/字符串、远程 HTML 候选与外部脚本解析预算继续存在，不得转用于普通 HTTP body 或变量。目录与正文使用多链接去重队列，取消和截止控制执行，不设固定页数截断。资源按请求、generation 和 profile 生命周期回收，不以配额删除为由遗弃物理工作。
 
 同一动作产生的一批虚拟路由在返回业务结果前统一注册。任一路由注册失败时，运行时注销本批已尝试项并丢弃未提交项；只有注销明确返回 `true` 才清除债务，`false` 或抛错的项由 session close 再次回收，仍失败则报告清理失败。
 
@@ -56,7 +58,9 @@ guest 只得到能力调用结果，不得到 Node socket、`fetch` 实现、Coo
 
 ## 平台实现
 
-通用 Node 主控的 `createNodeSourceCapabilities` 负责异步 HTTP、Cookie、内存作用域存储和虚拟路由等 I/O/profile 所有权；不承担编码或加解密同步计算。`encoding.*`、`crypto.*` 由 source core 在实例所属 native 线程执行，不为这些计算往返 Node 主线程。真实 `web.interact` 未注入时返回 `CAPABILITY_UNAVAILABLE`。自定义 storage 必须同时实现 get/set/delete 和 `releaseProfiles`，不能把未清理状态当作成功。该实现不承诺原生永久落盘或向源开放 CatNode 私有卷。
+通用 Node 主控的 `createNodeSourceCapabilities` 负责异步 HTTP、Cookie、作用域存储和虚拟路由等 I/O/profile 所有权；不承担编码或加解密同步计算。`encoding.*`、`crypto.*` 由 source core 在实例所属 native 线程执行，不为这些计算往返 Node 主线程。独立 owner 未注入 `web` 时返回 `CAPABILITY_UNAVAILABLE`；source 模块默认注入可取消的 `web.pending/respond` broker，由平台实际呈现。自定义 storage 必须同时实现 get/set/delete 和 `releaseProfiles`，不能把未清理状态当作成功。持久仓库另使用 profile snapshot/restore 与接受写入回调恢复私有状态，不向源开放 CatNode 私有卷；RPC、Cookie 回传格式和受信二进制图片见[书源仓库](source-library.md)。
+
+`web.interact` 的 request 由 owner 注入权威 `cookies:[{name,value,domain,hostOnly,path,secure,httpOnly,sameSite,expires}]`，仅含当前源 HTTP profile 未过期 Cookie；显式 Cookie header 只合并到临时种子，不提前持久化。平台使用 cookies 初始化隔离 Web store，不从 header 扩大作用域。结果封套为 `{value,url,headers,cookieChanges?:[{url,setCookie}]}`；每条变化按自身 HTTP(S) origin 处理，与响应 headers 的 Set-Cookie 合为一次可回滚持久化事务，受取消及 generation fence 约束，再仅返回 value。sameSite 为 null／Lax／Strict／None，expires 为 null／Unix 毫秒；旧持久 Cookie 缺 httpOnly／sameSite 时默认 false／null。参数顺序、标量类型、前缀与删除规则见[Web ABI 有据表](source-library.md#已核实的-web-helper-abi)。
 
 iOS 通过内置 `MeowScriptHost.framework`、Windows 通过受信原生 Node addon 承载原生核心，均使用 HTTP v1 和此能力 ABI，source 与音乐、Cat 共用各自平台的 Node 主控；平台装配与验证边界分别见[iOS 平台预检](../ios/runtime-preflight.md)和[Windows 平台接入](../windows/app-runtime.md)。不将通用验证视为全平台通过，也不据此声明 Android 已接入。Reader/CatVod 的规则与动作维护一份；只有新增现有 ABI 无法表达的系统语义时才扩展 ABI，并由各平台分别实现。不能据此宣称 CatNode 的 Node 兼容层可脱离 Node。
 

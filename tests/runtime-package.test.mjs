@@ -96,6 +96,9 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   add('packages/film-search', '@meowfilm/film-search', '0.1.0',
     { files: ['film-search.js'], main: './film-search.js', exports: './film-search.js' }, true);
   file('packages/film-search/film-search.js', sourceCode);
+  add('packages/novel-rules', '@meowfilm/novel-rules', '0.1.0',
+    { files: ['novel-rules.js'], main: './novel-rules.js', exports: './novel-rules.js' }, true);
+  file('packages/novel-rules/novel-rules.js', sourceCode);
   add('packages/film-playback', '@meowfilm/film-playback', '0.1.0',
     { files: ['src'], dependencies: {
       '@meowfilm/film-rules': '0.1.0', '@meowfilm/film-search': '0.1.0', '@meowfilm/script-host': '0.2.0',
@@ -133,6 +136,7 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('apps/runtime/modules/film-playback.mjs', `import '@meowfilm/film-playback';\n${sourceCode}`);
   file('apps/runtime/modules/netease-token.mjs', sourceCode);
   for (const path of ['entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
+    'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs',
     'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
     'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs']) {
     file(`apps/runtime/${path}`, sourceCode);
@@ -197,13 +201,14 @@ test('common runtime packaging stages the eight-module App closure with exact ha
       'app/modules/cat-script.mjs', 'app/modules/film-playback.mjs', 'app/modules/metadata-data.mjs', 'app/modules/metadata/douban.mjs',
       'app/modules/metadata/network.mjs', 'app/modules/metadata/settings.mjs', 'app/modules/metadata/tmdb.mjs',
       'app/modules/music-script.mjs',
-      'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-runtime.mjs',
+      'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-library.mjs',
+      'app/modules/source-rules.mjs', 'app/modules/source-runtime.mjs', 'app/modules/source-web.mjs',
       'app/pan-entry.mjs']);
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
     'node_modules/@meowfilm/source-runtime', 'node_modules/@meowfilm/pan-runtime',
     'node_modules/@meowfilm/film-rules', 'node_modules/@meowfilm/film-search', 'node_modules/@meowfilm/film-playback',
-    'node_modules/@meowfilm/netease-token',
+    'node_modules/@meowfilm/netease-token', 'node_modules/@meowfilm/novel-rules',
     'node_modules/shared', 'node_modules/host-lib', 'node_modules/peer-lib',
     'node_modules/fixture-lib', 'node_modules/fixture-lib/node_modules/shared', 'node_modules/@fixture/token',
     'node_modules/music-lib', 'node_modules/@meowfilm/script-host/node_modules/fixture-dom',
@@ -226,6 +231,7 @@ test('common runtime packaging stages the eight-module App closure with exact ha
 
 for (const [workspace, file] of [
   ['film-rules', 'film-rules.js'], ['film-search', 'film-search.js'], ['film-playback', 'src/index.js'],
+  ['novel-rules', 'novel-rules.js'],
 ]) {
   test(`the App closure requires the ${workspace} workspace and its public file`, async () => {
     const absent = fixture({ missing: [`packages/${workspace}`] });
@@ -314,6 +320,8 @@ test('missing required bootstrap leaves an explicit failed payload', async () =>
 
 for (const [module, file] of [
   ['music', 'music-script.mjs'], ['cat', 'cat-script.mjs'], ['source', 'source-runtime.mjs'],
+  ['source library', 'source-library.mjs'], ['source Web broker', 'source-web.mjs'],
+  ['source rules', 'source-rules.mjs'],
 ]) {
   test(`missing shared ${module} module cannot leave a complete runtime`, async () => {
     await fails(fixture({ omitFiles: [`apps/runtime/modules/${file}`] }), 'MISSING_SOURCE');

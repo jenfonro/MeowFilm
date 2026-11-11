@@ -31,6 +31,7 @@ const sources = [
   'GPL-2.0-only.txt', 'LGPL-2.1-only.txt', 'FFmpeg-LICENSE.md', 'libxml2-MIT.txt',
   'GCC-Runtime-Library-Exception-3.1.txt',
   'MinGW-w64-runtime-NOTICE.txt', 'winpthreads-LICENSE.txt',
+  'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt',
 ].map(name => ({ source: `LICENSES/${name}`, path: name }));
 function boundedPath(path) {
   const rel = relative(temporary, path);

@@ -888,3 +888,113 @@ test('positional host and preprocessing hooks are hidden before source and LX us
   assert.deepEqual(await host.invoke(target()), { atLoad: expected, current: expected });
   await host.close();
 });
+
+test('Legado browser helpers expose StrResponse instead of the platform browser result', async t => {
+  const requests = [];
+  const url = 'https://fixture.invalid/browser';
+  const owner = createNodeSourceCapabilities({ web: async input => {
+    requests.push(input.request);
+    const value = input.request.title === 'string' ? 'String page' : input.request.title === 'object'
+      ? { url: `${url}/final`, statusCode: 201, html: 'Object page',
+        headers: { 'Content-Type': ['text/html'], 'set-cookie': ['visible=yes; Path=/'] } }
+      : true;
+    return { value, url, headers: {}, cookieChanges: [] };
+  } });
+  const { session } = await sourceSession(t, {
+    protocol: 'legado', owner, source: {
+      bookSourceName: 'Browser ABI', bookSourceUrl: 'https://fixture.invalid/',
+      coverDecodeJs: `
+        const first = java.startBrowser('${url}', 'string');
+        const second = java.startBrowserAwait('${url}', 'object');
+        const third = java.showBrowser('${url}', 'acknowledgement');
+        JSON.stringify([
+          [first.body(), String(first), first.url(), first.code(), first.raw().request().url()],
+          [second.body(), second.responseUrl, second.statusCode(), second.isSuccessful(),
+            second.header('content-type'), second.cookies().get('visible'), second.raw().code(),
+            second.cookies().visible, String(second.cookies()), second.cookie('missing'),
+            second.headers().get('Content-Type'), second.headers().containsKey('CONTENT-TYPE'),
+            second.raw().headers('Location')],
+          [third.body(), third.url(), third.code(), third.raw().priorResponse()]
+        ])
+      `,
+    },
+  });
+  assert.deepEqual(JSON.parse((await session.invoke('image')).body), [
+    ['String page', 'String page', url, 200, url],
+    ['Object page', `${url}/final`, 201, true, 'text/html', 'yes', 201, 'yes', 'visible=yes', '',
+      'text/html', true, `${url}/final`],
+    ['true', url, 200, null],
+  ]);
+  assert.deepEqual(requests.map(request => [request.url, request.title]), [
+    [url, 'string'], [url, 'object'], [url, 'acknowledgement'],
+  ]);
+});
+
+test('Legado Web helpers keep Reader argument positions, delay defaults and unwrapped result types', async t => {
+  const requests = [];
+  const url = 'https://fixture.invalid/page', resource = 'https://fixture.invalid/resource';
+  const owner = createNodeSourceCapabilities({ web: async input => {
+    requests.push(input.request);
+    const request = input.request;
+    const value = request.sourceRegex ? resource : request.overrideUrlRegex ? `${url}/next`
+      : request.script === 'false' ? false : request.script === '7.25' ? 7.25 : null;
+    return { value, url, headers: {}, cookieChanges: [] };
+  } });
+  const { session } = await sourceSession(t, {
+    protocol: 'legado', owner, source: {
+      bookSourceName: 'Web ABI', bookSourceUrl: 'https://fixture.invalid/',
+      coverDecodeJs: `
+        const plain = java.webView('<p>Page</p>', '${url}', 'false', 17);
+        const sniffed = java.webViewGetSource(null, '${url}', null, '^https://fixture.invalid/resource$', 23);
+        const overridden = java.webViewGetOverrideUrl('', '${url}', '', '^https://fixture.invalid/page/next$', 29);
+        const defaults = java.webView('', '${url}');
+        const number = java.webView('', '${url}', '7.25', 0);
+        JSON.stringify([plain, sniffed, overridden, defaults, number])
+      `,
+    },
+  });
+  assert.deepEqual(JSON.parse((await session.invoke('image')).body),
+    [false, resource, `${url}/next`, null, 7.25]);
+  assert.deepEqual(requests.map(request => [
+    request.html, request.url, request.script, request.sourceRegex, request.overrideUrlRegex, request.delayTime,
+  ]), [
+    ['<p>Page</p>', url, 'false', '', '', 17],
+    ['', url, '', '^https://fixture.invalid/resource$', '', 23],
+    ['', url, '', '', '^https://fixture.invalid/page/next$', 29],
+    ['', url, '', '', '', 1000],
+    ['', url, '7.25', '', '', 0],
+  ]);
+});
+
+test('QYSG HTML-first Web bridge retains null slots and receives only the original scalar', async t => {
+  const url = 'https://fixture.invalid/private/page', requests = [];
+  const owner = createNodeSourceCapabilities({ web: async input => {
+    requests.push(input.request);
+    return { value: false, url, headers: {}, cookieChanges: [
+      { url, setCookie: 'returned=yes; Path=/private; Secure' },
+    ] };
+  } });
+  await owner.invoke('cookie.set', { version: 2, profile: 'source:sdk:1:http', url,
+    values: ['existing=private; Path=/private; Secure; HttpOnly; SameSite=Lax'] });
+  const { session } = await sourceSession(t, {
+    protocol: 'qysg', owner, source: { bookSourceName: 'Raw Web ABI', bookSourceUrl: url,
+      html: `<script>
+        async function content() {
+          const value = await window.flutter_inappwebview.callHandler(
+            'webViewGetSource', null, '${url}', null, '^https://fixture.invalid/resource$');
+          return {content:JSON.stringify({value, type:typeof value})};
+        }
+      </script>`,
+    },
+  });
+  assert.equal((await session.invoke('content', { chapterUrl: url, bookUrl: url })).content,
+    '{"value":false,"type":"boolean"}');
+  assert.deepEqual(requests[0].arguments, [null, url, null, '^https://fixture.invalid/resource$']);
+  assert.equal(requests[0].headers.Cookie, 'existing=private');
+  assert.deepEqual(requests[0].cookies, [
+    { name: 'existing', value: 'private', domain: 'fixture.invalid', hostOnly: true, path: '/private',
+      secure: true, httpOnly: true, sameSite: 'Lax', expires: null },
+  ]);
+  assert.equal(await owner.invoke('cookie.get', { version: 2, profile: 'source:sdk:1:http', url }),
+    'existing=private; returned=yes');
+});

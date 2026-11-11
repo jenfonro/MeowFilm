@@ -6,6 +6,7 @@ import MeowMusicPlatform
 import MeowMusicNativeService
 import MeowFilmFeature
 import MeowRuntime
+import MeowNovelFeature
 
 /// Filesystem preparation is off MainActor. Music and Cat borrow the App's
 /// script session; their installations and private data belong to Node.
@@ -25,6 +26,9 @@ struct MeowfilmResources: Sendable {
     let filmSourceSettings: FilmSourceService
     let filmMetadata: FilmTMDBService
     let filmDoubanSettings: FilmDoubanSettingsService
+    let novelLibrary: NovelLibrary
+    let novelRules: NovelRuleProcessor
+    let novelRuntime: NovelRuntime
 
     init() throws {
         // A sideloading host may rewrite the installed bundle identifier while
@@ -59,6 +63,10 @@ struct MeowfilmResources: Sendable {
         let connection: @Sendable () async throws -> RuntimeHTTPClient = {
             try await scriptSession.connection()
         }
+        novelLibrary = NovelLibrary(store: try Self.documentFactory(base: libraryRoot, namespace: NovelLibrary.namespace)())
+        let novelRuntime = NovelRuntime(connection: connection)
+        self.novelRuntime = novelRuntime
+        novelRules = NovelRuleProcessor(runtime: novelRuntime)
         musicScripts = NativeMusicScriptService(connection: connection)
         let neteaseToken = RuntimeMusicNeteaseTokenProvider(connection: connection)
         filmMetadata = FilmTMDBService(connection: connection)

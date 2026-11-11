@@ -4,8 +4,8 @@ public enum RuntimeHTTPError: Error, Sendable, Equatable {
     case cancelled, timeout, closed, invalidRequest, invalidResponse, remote(String)
 }
 
-/// One HTTP client. Business modules borrow this client; only its
-/// App owner closes it. URLSession owns the actual HTTP tasks and their drain.
+/// One HTTP client with ordinary and rules-only transports. Business modules
+/// borrow it; only its App owner closes and drains the URLSessions.
 public final class RuntimeHTTPClient: @unchecked Sendable {
     private static let protocolName = "runtime.http.v1"
     private static let neteaseTokenTimeout: TimeInterval = 60
@@ -14,6 +14,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     private let state = RuntimeHTTPState()
     private let session: URLSession
     private let eventConfiguration: URLSessionConfiguration
+    private let delegateQueue: OperationQueue?
 
     public convenience init(baseURL: URL, timeout: TimeInterval = 30) throws {
         try self.init(baseURL: baseURL, timeout: timeout, configuration: .ephemeral)
@@ -30,6 +31,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
               timeout.isFinite, timeout > 0 else { throw RuntimeHTTPError.invalidRequest }
         self.baseURL = baseURL
         self.timeout = timeout
+        self.delegateQueue = delegateQueue
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
@@ -40,6 +42,20 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         eventConfiguration = configuration.copy() as! URLSessionConfiguration
         // Events have an idle timeout, but no whole-observation RPC deadline.
         eventConfiguration.timeoutIntervalForResource = 0
+        session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
+                             delegateQueue: delegateQueue)
+    }
+
+    /// Rule execution starts after an unbounded shared queue wait. Its Node
+    /// owner enforces each execution budget; HTTP must not add a batch timer.
+    private init(rulesFor parent: RuntimeHTTPClient) {
+        baseURL = parent.baseURL
+        timeout = 0
+        delegateQueue = parent.delegateQueue
+        let configuration = parent.eventConfiguration.copy() as! URLSessionConfiguration
+        configuration.timeoutIntervalForRequest = 0
+        configuration.timeoutIntervalForResource = 0
+        eventConfiguration = configuration
         session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
                              delegateQueue: delegateQueue)
     }
@@ -64,7 +80,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
               case .array(let modules)? = description["modules"], modules.count == 8 else {
             throw RuntimeHTTPError.invalidResponse
         }
-        let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.2.0"),
+        let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.3.0"),
                                                    (.pan, "0.1.0"), (.tmdb, "0.1.0"), (.douban, "0.1.0"),
                                                    (.film, "0.1.0"), (.netease, "0.1.0")]
         for ((module, version), supplied) in zip(expected, modules) {
@@ -108,6 +124,21 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     public func readMetadataImage(_ reference: URL) async throws -> Data {
         guard reference.baseURL == nil, reference.scheme == nil,
               let provider = Self.metadataImageProvider(reference.absoluteString) else { throw RuntimeHTTPError.invalidRequest }
+        return try await readTrustedImage(reference, provider: provider)
+    }
+
+    public static func sourceImageURL(_ path: String) -> URL? {
+        guard path.range(of: #"^/v1/source/images/[A-Za-z0-9_-]+$"#,
+                         options: .regularExpression)?.upperBound == path.endIndex else { return nil }
+        return URL(string: path)
+    }
+
+    public func readSourceImage(_ reference: String) async throws -> Data {
+        guard let url = Self.sourceImageURL(reference) else { throw RuntimeHTTPError.invalidRequest }
+        return try await readTrustedImage(url, provider: .source)
+    }
+
+    private func readTrustedImage(_ reference: URL, provider: RuntimeModule) async throws -> Data {
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         let requestID = UUID().uuidString.lowercased()
         var request = URLRequest(url: URL(string: reference.absoluteString, relativeTo: baseURL)!.absoluteURL,
@@ -134,7 +165,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
 
     public func call(module: RuntimeModule, operation: String,
                      parameters: RuntimeValue = .object([:])) async throws -> RuntimeValue {
-        guard operation.range(of: #"^[a-z]+(?:\.[a-z]+)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
+        guard operation.range(of: #"^[a-z]+(?:\.[a-z][A-Za-z]*)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
             throw RuntimeHTTPError.invalidRequest
         }
         if module == .netease {
@@ -143,9 +174,18 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         let body: Data
         do { body = try RuntimeJSON.encode(parameters) }
         catch { throw RuntimeHTTPError.invalidRequest }
+        if module == .source, operation == "rules.process" {
+            let transport = try state.rulesClient { RuntimeHTTPClient(rulesFor: self) }
+            let value = try await transport.request(method: "POST", path: "/v1/source/rules.process",
+                                                    body: body, module: .source)
+            guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+            guard !isClosed else { throw RuntimeHTTPError.closed }
+            return value
+        }
         return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
                                  body: body, module: module,
-                                 timeout: module == .netease ? max(timeout, Self.neteaseTokenTimeout) : timeout)
+                                 timeout: module == .netease ? max(timeout, Self.neteaseTokenTimeout) : timeout,
+                                 preservingAcceptedReceipt: module == .source && operation == "library.image")
     }
 
     /// Observes snapshots without owning the business session or the App runtime.
@@ -194,6 +234,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
 
     public func close() async {
         invalidate()
+        await state.acceptedRulesClient?.close()
         await state.waitForInvalidation()
     }
 
@@ -202,7 +243,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     private func request(method: String, path: String, body: Data? = nil, raw: Bool = false,
-                         module: RuntimeModule? = nil, timeout: TimeInterval? = nil) async throws -> RuntimeValue {
+                         module: RuntimeModule? = nil, timeout: TimeInterval? = nil,
+                         preservingAcceptedReceipt: Bool = false) async throws -> RuntimeValue {
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
@@ -227,7 +269,9 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                     let task = session.dataTask(with: outgoingRequest) { data, response, error in
                         let cancelled = owner.finish()
                         if state.isClosed { continuation.resume(throwing: RuntimeHTTPError.closed) }
-                        else if cancelled { continuation.resume(throwing: RuntimeHTTPError.cancelled) }
+                        else if cancelled && !(preservingAcceptedReceipt && error == nil && data != nil && response is HTTPURLResponse) {
+                            continuation.resume(throwing: RuntimeHTTPError.cancelled)
+                        }
                         else if let error {
                             let code = (error as NSError).code
                             continuation.resume(throwing: code == NSURLErrorTimedOut ? RuntimeHTTPError.timeout
@@ -241,10 +285,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                 }
             }
         } onCancel: { owner.cancel() }
-        guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+        // A successfully completed resource-acquisition response transfers a
+        // lease to its owner. Late cancellation must not hide that receipt.
+        guard preservingAcceptedReceipt || !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         let result = Result { try Self.value(data: data, response: response, requestID: requestID, module: module) }
-        guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+        guard preservingAcceptedReceipt || !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         return try result.get()
     }
@@ -311,9 +357,22 @@ private final class RuntimeHTTPState: @unchecked Sendable {
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var closureWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var events: [UUID: RuntimeHTTPEventConnection] = [:]
+    private var rulesTransport: RuntimeHTTPClient?
     var isClosed: Bool {
         lock.lock(); defer { lock.unlock() }
         return closed
+    }
+    var acceptedRulesClient: RuntimeHTTPClient? {
+        lock.lock(); defer { lock.unlock() }
+        return rulesTransport
+    }
+    func rulesClient(create: () -> RuntimeHTTPClient) throws -> RuntimeHTTPClient {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { throw RuntimeHTTPError.closed }
+        if let rulesTransport { return rulesTransport }
+        let client = create()
+        rulesTransport = client
+        return client
     }
     func start<T>(continuation: CheckedContinuation<T, Error>, body: () -> Void) {
         lock.lock()
@@ -328,9 +387,11 @@ private final class RuntimeHTTPState: @unchecked Sendable {
         let pending = Array(closureWaiters.values)
         closureWaiters.removeAll()
         let active = Array(events.values)
+        let rules = rulesTransport
         lock.unlock()
         for waiter in pending { waiter.resume() }
         for connection in active { connection.cancel(.closed) }
+        rules?.invalidate()
         return true
     }
     func waitUntilClosed() async throws {
@@ -390,7 +451,7 @@ private final class RuntimeHTTPState: @unchecked Sendable {
 /// A task delegate on the same owner session: budget and failure stop the read,
 /// but its continuation settles only in didComplete, never at cancel().
 private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private static let maximumBytes = 4 * 1_024 * 1_024
+    private static let maximumMetadataBytes = 4 * 1_024 * 1_024
     private let lock = NSLock()
     private let requestID: String
     private let provider: RuntimeModule
@@ -422,7 +483,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
            response.value(forHTTPHeaderField: "X-Meow-Request-Id") == requestID {
             self.response = response
             let type = response.mimeType?.lowercased() ?? ""
-            if response.expectedContentLength > Self.maximumBytes {
+            if provider != .source, response.expectedContentLength > Self.maximumMetadataBytes {
                 failure = URLError(.dataLengthExceedsMaximum)
             } else if response.statusCode == 200 && type.hasPrefix("image/") {
                 // Native ImageIO still validates and decodes the complete image.
@@ -437,7 +498,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
         guard !cancelled, failure == nil else { lock.unlock(); return }
-        if data.count > Self.maximumBytes - bytes.count {
+        if provider != .source, data.count > Self.maximumMetadataBytes - bytes.count {
             failure = URLError(.dataLengthExceedsMaximum)
             lock.unlock(); dataTask.cancel(); return
         }

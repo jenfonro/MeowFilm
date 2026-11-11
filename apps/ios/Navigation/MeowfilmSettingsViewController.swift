@@ -7,6 +7,7 @@ import MeowUI
 final class MeowfilmSettingsViewController: PageViewController, UITableViewDataSource, UITableViewDelegate {
     var openMusic: (() -> Void)?
     var openFilm: (() -> Void)?
+    var openNovel: (() -> Void)?
     var openPreferences: (() -> Void)?
     private let resetUserData: (@MainActor () async throws -> Void)?
     private var requestingReset = false
@@ -32,13 +33,14 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
     }
     override func applyTheme() { super.applyTheme(); if isViewLoaded { table.reloadData() } }
     func numberOfSections(in tableView: UITableView) -> Int { resetUserData == nil ? 2 : 3 }
-    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 0 ? 2 : 1 }
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 0 ? 3 : 1 }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         let label: String, identifier: String
         switch (indexPath.section, indexPath.row) {
         case (0, 0): label = "音乐设置"; identifier = "settings.category.music"
-        case (0, _): label = "影视设置"; identifier = "settings.category.film"
+        case (0, 1): label = "影视设置"; identifier = "settings.category.film"
+        case (0, _): label = "小说设置"; identifier = "settings.category.novel"
         case (1, _): label = "偏好设置"; identifier = "settings.preferences"
         default: label = requestingReset ? "正在记录清除请求…" : "清空本机数据"; identifier = "settings.clearUserData"
         }
@@ -62,7 +64,8 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
         tableView.deselectRow(at: indexPath, animated: true)
         switch (indexPath.section, indexPath.row) {
         case (0, 0): openMusic?()
-        case (0, _): openFilm?()
+        case (0, 1): openFilm?()
+        case (0, _): openNovel?()
         case (1, _): openPreferences?()
         default: confirmUserDataReset()
         }
@@ -71,7 +74,7 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
     func confirmUserDataReset() {
         guard resetUserData != nil, !requestingReset, canPresentPageAlert else { return }
         let alert = UIAlertController(title: "清空本机数据？",
-            message: "将删除本机登录凭据、设备身份和密钥、本地歌单与收藏、历史、导入音源、偏好及缓存，无法撤销。云端数据和 App 外的原始文件不受影响。\n\n确认后需从多任务列表关闭 App，再重新打开才能完成清除。",
+            message: "将删除本机登录凭据、设备身份和密钥、本地歌单、收藏与书架、历史与阅读进度、导入音源与书源、偏好及缓存，无法撤销。云端数据和 App 外的原始文件不受影响。\n\n确认后需从多任务列表关闭 App，再重新打开才能完成清除。",
             preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         alert.addAction(UIAlertAction(title: "清除并等待重启", style: .destructive) { [weak self, weak alert] _ in

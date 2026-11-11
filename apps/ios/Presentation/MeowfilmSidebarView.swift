@@ -7,6 +7,7 @@ import MeowFilmFeature
 @MainActor
 enum MeowfilmSidebarContent {
     case music(source: MusicHomeSourceSettingsModel, selectedPage: MeowfilmPrimaryPage)
+    case novel(home: () -> Void, shelf: () -> Void)
     case film(home: FilmHomeModel, settings: FilmSettingsModel?)
 }
 
@@ -162,6 +163,13 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             sourceButton = button
             lower.addArrangedSubview(button)
             renderMusicSource()
+        case .novel(let home, let shelf):
+            for (title, symbol, action) in [("首页", "house", home), ("书架", "books.vertical", shelf)] {
+                let button = UIButton(type: .system); configureButton(button, title: title, symbol: symbol)
+                button.addAction(UIAction { [weak self] _ in action(); self?.onDismiss?() }, for: .touchUpInside)
+                upper.addArrangedSubview(button)
+            }
+            lower.heightAnchor.constraint(equalToConstant: 0).isActive = true
         case .film(let home, let model):
             let button = UIButton(type: .system)
             configureButton(button, title: "影视数据源", symbol: "film")
@@ -232,6 +240,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             source.objectWillChange.receive(on: RunLoop.main)
                 .sink { [weak self] in self?.renderMusicSource() }.store(in: &observations)
             source.activate()
+        case .novel: break
         case .film(let home, let settings):
             home.$selectedSourceID.receive(on: RunLoop.main)
                 .sink { [weak self, weak home] _ in

@@ -40,4 +40,6 @@ public sealed record RuntimeModule(string Id, string Version);
 public interface IRuntimeImageClient
 {
     Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default);
+    /// <summary>Reads the complete image without a caller's thumbnail/card byte quota.</summary>
+    Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default);
 }

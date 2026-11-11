@@ -52,7 +52,7 @@ public static class AppCompositionTests
         {
             ("music", "0.8.0"),
             ("cat", "0.2.0"),
-            ("source", "0.2.0"),
+            ("source", "0.3.0"),
             ("pan", "0.1.0"),
             ("tmdb", "0.1.0"),
             ("douban", "0.1.0"),
@@ -62,6 +62,9 @@ public static class AppCompositionTests
         Check(AppIdentity.NativeCollections.Count == 0, "music sources are stored by the shared runtime module");
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
         Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
+        Check(AppIdentity.NativeNamespaces.Contains("music.fm-selection.v1"));
+        Check(AppIdentity.NativeNamespaces.Contains("film.library.v1"));
+        Check(AppIdentity.NativeNamespaces.Contains("novel.library.v1"));
         Check(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { "music.accounts.v1", "music.platform-context.v1" }));
         Check(AppDataPaths.Current.Caches != AppDataPaths.Current.Documents &&
             !AppDataPaths.Current.Caches.StartsWith(AppDataPaths.Current.Documents + Path.DirectorySeparatorChar,
