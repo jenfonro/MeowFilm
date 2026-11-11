@@ -73,7 +73,6 @@ public sealed partial class MusicCapability
         var key = PlaybackPresentationKey + "\0" + target.SourceKey + "\0" + epoch;
         var durableKey = PlaybackCache.MusicChorusCache.Key(target.AccountScope ?? "script:" + target.Installation,
             current.Id, platform, id, expected);
-        var statusStamp = statusEpoch;
         if (key == chorusKey) { ChorusBindings(); return; }
         ClearChorus(); chorusKey = key; chorusIssuedEpoch = epoch;
         var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -99,24 +98,6 @@ public sealed partial class MusicCapability
                 {
                     chorusStart = start; chorusEnd = end; ChorusBindings();
                     await persistentChorus.PutAsync(durableKey, expected, start, end, request.Token);
-                }
-            }
-            catch (MusicPlaybackCacheDataException error)
-            {
-                if (!request.IsCancellationRequested && chorusKey == key &&
-                    epoch == Interlocked.Read(ref chorusAccountEpoch) && statusStamp == statusEpoch)
-                {
-                    status = ErrorText(error);
-                    Changed(nameof(Status));
-                }
-            }
-            catch (MusicPlaybackCacheCommitException error)
-            {
-                if (!request.IsCancellationRequested && chorusKey == key &&
-                    epoch == Interlocked.Read(ref chorusAccountEpoch) && statusStamp == statusEpoch)
-                {
-                    status = ErrorText(error);
-                    Changed(nameof(Status));
                 }
             }
             catch { /* Optional official metadata stays absent; never infer a fixed marker. */ }

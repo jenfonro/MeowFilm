@@ -266,8 +266,6 @@ public sealed partial class MusicNativeApplication
             if (session is not null && e.Code is "AUTH_EXPIRED" or "AUTH_REQUIRED") accounts.Revoke(session);
             return Failed(e.Code);
         }
-        catch (MusicPlaybackCacheCommitException) { return Failed("COMMIT_UNKNOWN"); }
-        catch (MusicPlaybackCacheDataException) { return Failed("CACHE_DATA_INCOMPATIBLE"); }
         catch (JsonException) { return Failed("INVALID_REQUEST"); }
         catch (Exception e) when (e is InvalidOperationException or ArgumentException or FormatException or OverflowException)
         { return Failed("INVALID_RESPONSE"); }

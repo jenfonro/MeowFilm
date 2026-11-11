@@ -71,7 +71,9 @@ import MeowStorage
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let f = try MusicNeteaseNativeFixture(urlCacheStore: .init(baseURL: root, namespace: "feedback-protocol"))
+        let f = try MusicNeteaseNativeFixture(feedbackOutboxStoreFactory: {
+            try DocumentStore(baseURL: root, namespace: "feedback-protocol")
+        })
         try await f.enable()
         try await f.service.configurePlaybackFeedback(.init(revision: 1,
             platforms: [.netease: .init(enabled: true, generation: 1)]))

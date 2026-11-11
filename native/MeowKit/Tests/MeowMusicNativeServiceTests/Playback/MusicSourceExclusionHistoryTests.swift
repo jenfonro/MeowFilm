@@ -271,9 +271,9 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
         let pending = Task { try await session.match(intent: .exact(b)) }
         await notification.started(1)
         // B's return reads: pre-declaration inspectionCheck, post-declaration
-        // inspectionCheck, provider admission, then the session's owner check.
-        // Notify only in the last read, after inspectionResolve has returned.
-        document.arm(afterReads: 4) {
+        // inspectionCheck, recording admission and provider admission, then
+        // the session's owner check. Notify only in the last read, after resolve.
+        document.arm(afterReads: 6) {
             let completed = DispatchSemaphore(value: 0)
             Task.detached {
                 await native.exclusionsChanged(songID: queue.entries[0].track.songId,

@@ -346,7 +346,7 @@ public sealed partial class MusicCapability
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception error) { if (CurrentRecovery(state)) MusicRecoveryFailed(error); }
+        catch (Exception) { if (CurrentRecovery(state)) MusicRecoveryFailed(); }
     }
     private bool TryMusicRecovery()
     {
@@ -547,17 +547,14 @@ public sealed partial class MusicCapability
             }
             throw;
         }
-        catch (Exception error)
+        catch (Exception)
         {
             DiscardPendingMedia(state);
             if (CurrentRecovery(state))
             {
                 if (playback.OwnerId == Id && playback.Identity == state.Song.EntryId) await playback.StopAsync();
-                MusicRecoveryFailed(error);
+                MusicRecoveryFailed();
             }
-            // Callers may report a normal exhausted recovery themselves. A cache data
-            // failure must keep its type all the way to that outer status owner.
-            if (PlaybackCacheFailure(error)) throw;
             return false;
         }
         finally
@@ -568,11 +565,8 @@ public sealed partial class MusicCapability
             CheckMediaDuration();
         }
     }
-    private static bool PlaybackCacheFailure(Exception? error) => error is
-        PlaybackCache.MusicPlaybackCacheDataException or PlaybackCache.MusicPlaybackCacheCommitException or
-        MusicOperationException { Code: "CACHE_DATA_INCOMPATIBLE" };
-    private void MusicRecoveryFailed(Exception? error = null)
-    { FinishFeedback("error"); status = PlaybackCacheFailure(error) ? ErrorText(error!) : "播放失败"; Changed(nameof(Status)); }
+    private void MusicRecoveryFailed()
+    { FinishFeedback("error"); status = "播放失败"; Changed(nameof(Status)); }
     private void TrackMusicRecovery(Task task)
     {
         var observed = ObserveRecovery();
@@ -582,7 +576,7 @@ public sealed partial class MusicCapability
         {
             try { await task; }
             catch (OperationCanceledException) { }
-            catch (Exception error) { if (!stopping) MusicRecoveryFailed(error); }
+            catch (Exception) { if (!stopping) MusicRecoveryFailed(); }
         }
         async Task Remove() { await observed; eventWrites.Remove(observed); }
     }

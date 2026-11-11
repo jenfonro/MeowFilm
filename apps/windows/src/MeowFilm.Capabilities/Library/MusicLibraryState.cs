@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryOwner
     private static readonly string[] CurrentAreas =
     [
         "library", LibrarySyncArea, "queue", "history", "online-settings",
-        CatalogSourceArea, OfficialSourcesArea, QualityPolicyArea, LyricDisplayArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
+        CatalogSourceArea, OfficialSourcesArea, QualityPolicyArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
         SourceExclusionsArea,
         SearchPolicyArea, SearchHistoryArea, LocalLyricsArea, "playback-settings"
     ];
@@ -79,7 +79,6 @@ public sealed partial class MusicLibraryOwner
             if (HasValue(doc, OfficialSourcesArea))
                 ValidateOfficialSources(LJ.Object(Value(doc, OfficialSourcesArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, QualityPolicyArea)) ValidateQualityPolicy(LJ.Object(Value(doc, QualityPolicyArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, LyricDisplayArea)) ValidateLyricDisplay(LJ.Object(Value(doc, LyricDisplayArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, MetadataPolicyArea)) ValidateMetadataPolicy(LJ.Object(Value(doc, MetadataPolicyArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, AppearanceArea)) ValidateAppearance(LJ.Object(Value(doc, AppearanceArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, DeviceSettingsArea)) ValidateDeviceSettings(LJ.Object(Value(doc, DeviceSettingsArea), "CORRUPT_STORAGE"));

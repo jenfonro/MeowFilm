@@ -18,11 +18,11 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
             identity = try MusicAccountFixture.identity("wy"); self.document = document
             credentials.seed(try MusicUpdateProvider.credential(), for: identity)
             service = .init(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
-                providers: [.netease: provider], urlCacheStore: document, clock: { [clock] in clock.now() })
+                providers: [.netease: provider], feedbackOutboxStoreFactory: { [document] in document }, clock: { [clock] in clock.now() })
         }
         func cold() -> NativeMusicAccountService {
             .init(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
-                providers: [.netease: provider], urlCacheStore: document, clock: { [clock] in clock.now() })
+                providers: [.netease: provider], feedbackOutboxStoreFactory: { [document] in document }, clock: { [clock] in clock.now() })
         }
     }
     private let settings = MusicPlaybackFeedbackSettings(revision: 1,
@@ -41,6 +41,55 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
     }
     private func report(_ event: MusicPlaybackFeedbackReport.Event, instance: UUID) -> MusicPlaybackFeedbackReport {
         MusicAccountFeedbackFixture.report(event, platform: .netease, instance: instance)
+    }
+    func testClearingIndependentCacheKeepsPendingFeedbackForColdRecovery() async throws {
+        let f = try fixture()
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: cacheRoot) }
+        let cache = try DocumentStore(baseURL: cacheRoot, namespace: "account-cache")
+        let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: f.credentials),
+            scopes: [.netease: f.identity], providers: [.netease: f.provider], urlCacheStore: cache,
+            feedbackOutboxStoreFactory: { [document = f.document] in document }, clock: { [clock = f.clock] in clock.now() })
+        try await ready(owner)
+        await f.provider.setUploadOutcome(.notSent)
+        let lease = try await owner.beginPlaybackFeedback(platform: .netease, authorization: .init())
+        _ = try await lease.report(report(.start, instance: UUID()))
+        await owner.flushPendingPlaybackFeedback()
+        let pending = try XCTUnwrap(f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try cache.read(key: MusicNeteaseFeedbackOutbox.key))
+        _ = await owner.close()
+        try FileManager.default.removeItem(at: cacheRoot)
+        XCTAssertEqual(try f.document.read(key: MusicNeteaseFeedbackOutbox.key), pending)
+        let before = await f.provider.uploads().count
+        await f.provider.setUploadOutcome(.confirmed)
+        let cold = f.cold()
+        try await ready(cold)
+        let after = await f.provider.uploads().count
+        XCTAssertEqual(after, before + 1)
+        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        _ = await cold.close()
+    }
+    func testUnavailableFeedbackStoreDoesNotPreventAccountPreparationOrValidation() async throws {
+        let f = try fixture()
+        let opened = expectation(description: "Feedback store opens only when feedback is configured")
+        let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: f.credentials),
+            scopes: [.netease: f.identity], providers: [.netease: f.provider],
+            feedbackOutboxStoreFactory: {
+                opened.fulfill()
+                throw DocumentStoreError.storageFailure
+            }, clock: { [clock = f.clock] in clock.now() })
+        _ = try await owner.setAccess(available: true, generation: 1)
+        try await owner.prepareLocalAccounts()
+        _ = try await owner.validate(platform: .netease)
+        do { try await owner.configurePlaybackFeedback(settings); XCTFail("Feedback cannot configure an unavailable business store") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
+        await fulfillment(of: [opened], timeout: 3)
+        _ = try await owner.validate(platform: .netease)
+        await owner.flushPendingPlaybackFeedback()
+        let calls = await f.provider.uploads()
+        XCTAssertTrue(calls.isEmpty)
+        _ = await owner.close()
     }
     func testOfflinePairRegistersLocallyThenRecoversInOrderWithoutMovingOriginalTime() async throws {
         let f = try fixture(); try await ready(f.service)

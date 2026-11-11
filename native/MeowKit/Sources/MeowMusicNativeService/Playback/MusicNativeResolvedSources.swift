@@ -44,7 +44,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
                             force: Bool, contentFailed: Set<String> = [], recheckOnly: Bool = false)
         async throws -> (song: MJ, searched: Set<String>) {
         try inspectionCheck(seed)
-        let state = await sourceDiscoveryState(seed.song)
+        let state = try await sourceDiscoveryState(seed.song)
         try inspectionCheck(seed)
         let cache = state.current(window: MusicSourceDiscoveryWindow.playback)
         let staged = mergeSourceDiscoveryCache(seed.song, entries: cache)
@@ -119,7 +119,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
     func inspectionOptions(_ seed: MusicSourceInspectionSeed, staged: MJ, label: String,
                            receive: @escaping @Sendable ([MusicPlaybackOption]) async -> Void) async throws {
         try inspectionCheck(seed)
-        let excluded = await sourceDiscoveryExcluded(seed.song)
+        let excluded = try recordingSourceExclusions(seed.song)
         try inspectionCheck(seed)
         let rows = try MusicModel.sources(staged).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         try await withThrowingTaskGroup(of: [MusicPlaybackOption].self) { group in
@@ -195,7 +195,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try requirePlatform(source.platform)
         try musicRequire(source.platform == selection.siteId, .targetChanged)
         try admitSource(seed.song, selection: selection)
-        let excluded = await sourceDiscoveryExcluded(seed.song)
+        let excluded = try recordingSourceExclusions(seed.song)
         try inspectionCheck(seed)
         try musicRequire(!excluded.contains(source.sourceKey), .sourceUnavailable)
         let values: [MusicPlaybackOption]
@@ -325,7 +325,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try musicRequire(seed.ref.kind == .queue && seed.ref.id == occurrenceID &&
             seed.state.revision == expectedRevision, .targetChanged)
         try musicRequire(seed.song["sources"].array.first?["sourceKey"].string != sourceKey, .invalidRequest)
-        await excludeSourceDiscovery(seed.song, sourceKey: sourceKey)
+        try await excludeRecordingSource(seed.song, sourceKey: sourceKey)
         try inspectionCheck(seed)
         let rows = seed.song["sources"].array
         guard rows.contains(where: { $0["sourceKey"].string == sourceKey }) else { return seed }

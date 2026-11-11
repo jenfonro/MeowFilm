@@ -212,8 +212,9 @@ public static class MusicNativeQqAccountTests
         string path = DataPath();
         using var http = MusicPlatformHttp.CreateWithHandler(new QqAccountFixtureHandler());
         await using var store = new LocalDocumentStore(path, ["music.accounts.v1"], protectedNamespaces: ["music.accounts.v1"]);
+        await using var detailsCache = new CacheDocumentStore();
         await using var clientContext1 = new MusicClientContextFixture(http);
-        await using (var owner = clientContext1.CreateAccountOwner(store))
+        await using (var owner = clientContext1.CreateAccountOwner(store, detailsCacheStore: detailsCache))
         {
             var result = await Login(owner); Check(Ok(result) && AccountState(result) == "verified");
             var details = await owner.ReadDetailsAsync("tx");
@@ -225,7 +226,7 @@ public static class MusicNativeQqAccountTests
         foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
             Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_MUSICKEY"));
         await using var clientContext2 = new MusicClientContextFixture(http);
-        await using var reopened = clientContext2.CreateAccountOwner(store);
+        await using var reopened = clientContext2.CreateAccountOwner(store, detailsCacheStore: detailsCache);
         Check(RowState(await reopened.CallAsync("music.accounts.list")) == "saved");
         Check((await reopened.ReadDetailsAsync("tx")).Membership.Vip == true);
         Check(AccountState(await reopened.CallAsync("music.accounts.validate", new { platform = "tx" })) == "verified");

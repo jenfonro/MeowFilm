@@ -81,7 +81,7 @@ extension NativeMusicService {
         let own = epoch
         var result: [MJ] = []
         for song in songs {
-            let state = await cachedSourceDiscoveryState(song)
+            let state = try await cachedSourceDiscoveryState(song)
             try check(own)
             result.append(mergeSourceDiscoveryCache(song, entries: state.entries))
         }

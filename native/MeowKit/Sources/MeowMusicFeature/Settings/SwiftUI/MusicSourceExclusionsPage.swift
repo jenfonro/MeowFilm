@@ -85,7 +85,7 @@ struct MusicSourceExclusionsContent: View {
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(row.title + " — " + row.artist)
-                            Text(providerName(row) + " · " + (MusicPublicBrowsePlatform(rawValue: row.platform)?.title ?? row.platform))
+                            Text(exclusionLabel(row))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -96,6 +96,13 @@ struct MusicSourceExclusionsContent: View {
         }
         .disabled(state.busy || !state.model.isAvailable)
         .modifier(MusicSettingsListStyle(theme: theme))
+    }
+    private func exclusionLabel(_ row: MusicSourceExclusion) -> String {
+        let platform = MusicPublicBrowsePlatform(rawValue: row.platform)?.title ?? row.platform
+        switch row.scope {
+        case .providerPlatform: return providerName(row) + " · " + platform + " · 全部录音"
+        case .recording(_, _, let key): return "录音来源 · " + platform + " · " + key
+        }
     }
     private func providerName(_ row: MusicSourceExclusion) -> String {
         row.provider.hasPrefix("official:") ? "官方音源" : state.scripts.first { $0.id == row.provider }?.name ?? row.provider

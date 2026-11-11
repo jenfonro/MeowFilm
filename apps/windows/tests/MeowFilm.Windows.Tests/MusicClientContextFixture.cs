@@ -28,8 +28,8 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
     internal MusicAccountProtocol CreateAccountProtocol(TimeSpan? timeout = null, TimeProvider? clock = null) =>
         new(Http, Owner, timeout: timeout, clock: clock ?? Protocol.Clock, clientProtocol: Protocol);
     internal MusicAccountOwner CreateAccountOwner(IDocumentStore accountStore, IMusicAccountProtocol? protocol = null,
-        TimeSpan? timeout = null, TimeProvider? clock = null) =>
-        new(accountStore, protocol ?? CreateAccountProtocol(timeout, clock), Owner, Protocol, clock ?? Protocol.Clock);
+        TimeSpan? timeout = null, TimeProvider? clock = null, IDocumentStore? detailsCacheStore = null) =>
+        new(accountStore, protocol ?? CreateAccountProtocol(timeout, clock), Owner, Protocol, clock ?? Protocol.Clock, detailsCacheStore);
     internal async Task SeedQqAsync(TimeProvider? clock = null)
     {
         var now = (clock ?? Protocol.Clock).GetUtcNow();

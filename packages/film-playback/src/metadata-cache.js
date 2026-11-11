@@ -1,4 +1,6 @@
-import { PrivateDocuments } from '@meowfilm/script-host';
+import fs from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { isAbsolute, join } from 'node:path';
 import { isUtf8 } from 'node:buffer';
 import { canonicalMetadataRequest, dueComponents, failedMetadata, mergeMetadata, metadataKind,
   metadataRecord, requestedComponents } from './metadata-policy.js';
@@ -6,8 +8,15 @@ import { fail, identity, object, requireValue } from './identity.js';
 
 /** The data owner shares its bounded memory cache with process-only data.
  * Metadata alone has durable documents; there is no second response Map. */
-export function createMetadataCache({ dataRoot, cache, owner, now, normalizeError }) {
-  const documents = dataRoot === undefined ? undefined : new PrivateDocuments(dataRoot, 'film-metadata');
+export function createMetadataCache({ dataRoot, cache, owner, now, normalizeError, decodeValue }) {
+  requireValue(dataRoot === undefined || typeof dataRoot === 'string' && isAbsolute(dataRoot));
+  const root = dataRoot === undefined ? undefined : join(dataRoot, 'film-metadata');
+  const writes = new Map(), reads = new Map(), generations = new Map(), publications = new Map();
+  const invalidated = new Set();
+  let closed = false, closing;
+  const generation = provider => generations.get(provider) ?? 0;
+  const current = (provider, epoch) => !closed && generation(provider) === epoch;
+  function check(provider, epoch) { requireValue(current(provider, epoch), closed ? 'CLOSED' : 'CANCELLED'); }
   const keyOf = request => identity('film-metadata', canonicalMetadataRequest(request));
   const filename = request => `${request.provider}/${keyOf(request)}.json`;
   const dependencies = request => [owner, { kind: 'metadata', domain: request.provider,
@@ -15,41 +24,82 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
   const retention = state => Math.max(0, ...Object.values(state.components).map(row => row.expiresAt ?? 0));
   const readMemory = request => cache.read(keyOf(request), { allowStale: true });
 
-  function publish(state) {
-    const { request, attempted, ...durable } = state;
-    try { documents?.write(filename(request), Buffer.from(JSON.stringify({
-      version: 1, key: keyOf(request), state: durable,
-    }) + '\n')); }
-    catch { throw fail('STORAGE_ERROR'); }
+  function enqueue(provider, run) {
+    // Serial publication/cleanup belongs to this owner, not to the business
+    // document queue. Observe every failure without changing a request result.
+    const work = (writes.get(provider) ?? Promise.resolve()).then(run);
+    const observed = work.catch(() => { console.warn('film metadata cache I/O failed'); });
+    writes.set(provider, observed);
+    observed.then(() => { if (writes.get(provider) === observed) writes.delete(provider); });
+    return work;
   }
-  function read(request, hydrate = true) {
+  function publish(state) {
+    if (!root || closed) return;
+    const { request, attempted, ...durable } = state;
+    const provider = request.provider, epoch = generation(provider);
+    publications.set(provider, (publications.get(provider) ?? 0) + 1);
+    return enqueue(provider, async () => {
+      if (!current(provider, epoch)) return;
+      const parent = join(root, provider), path = join(root, filename(request));
+      await fs.mkdir(parent, { recursive: true });
+      const temporary = join(parent, `.${randomUUID()}.tmp`);
+      try {
+        await fs.writeFile(temporary, JSON.stringify({ key: keyOf(request), state: durable }) + '\n',
+          { flag: 'wx', mode: 0o600 });
+        if (current(provider, epoch)) await fs.rename(temporary, path);
+      } finally {
+        await fs.rm(temporary, { force: true });
+      }
+    });
+  }
+  async function read(request) {
     const retained = readMemory(request);
-    if (retained || !documents) return retained;
-    let bytes;
-    try { bytes = documents.read(filename(request)); } catch { throw fail('STORAGE_ERROR'); }
-    if (bytes === null) return undefined;
-    let state;
-    try {
-      requireValue(isUtf8(bytes));
-      const document = JSON.parse(bytes.toString('utf8'));
-      state = { ...document.state, request: canonicalMetadataRequest(request) };
-      requireValue(document.version === 1 && object(state) && object(state.request) &&
-        document.key === keyOf(request) && object(state.components) &&
-        (object(state.value) || Array.isArray(state.value)) &&
-        (state.summaryValue === undefined || object(state.summaryValue) || Array.isArray(state.summaryValue)) &&
-        Object.values(state.components).every(row =>
-          object(row) && ['ready', 'empty', 'missing', 'failed'].includes(row.status) &&
-          (row.fetchedAt === undefined || Number.isFinite(row.fetchedAt) && Number.isFinite(row.expiresAt))));
-    } catch { throw fail('CORRUPT_STORAGE'); }
-    return hydrate ? cache.seed(keyOf(request), state, { completeness: 'complete', expiresAt: retention(state),
-      retainStale: true, dependencies: dependencies(request), supersede: false }) : state;
+    if (retained || !root || invalidated.has(request.provider) || writes.has(request.provider)) return retained;
+    const epoch = generation(request.provider), publication = publications.get(request.provider);
+    const work = (async () => {
+      try {
+        const path = join(root, filename(request));
+        const bytes = await fs.readFile(path);
+        requireValue(isUtf8(bytes));
+        const document = JSON.parse(bytes.toString('utf8'));
+        const state = { ...document.state, request: canonicalMetadataRequest(request) };
+        // These are the fields consumed by metadata policy, not a separate
+        // format/version probe. An unusable decoded object is simply a miss.
+        requireValue(document.key === keyOf(request) && object(state.components) &&
+          Object.values(state.components).every(row =>
+            object(row) && ['ready', 'empty', 'missing', 'failed'].includes(row.status) &&
+            (row.fetchedAt === undefined ? ['missing', 'failed'].includes(row.status)
+              : Number.isFinite(row.fetchedAt) && Number.isFinite(row.expiresAt))));
+        decodeValue(request.provider, request.path, state.value, 'partial');
+        if (state.summaryValue !== undefined) decodeValue(request.provider, request.path, state.summaryValue, 'partial');
+        const available = Object.entries(state.components)
+          .filter(([, row]) => ['ready', 'empty'].includes(row.status)).map(([name]) => name);
+        // Decode claimed components through the same receipt rules as an
+        // upstream response; persisted readiness cannot replace their bodies.
+        const decoded = mergeMetadata(undefined, request, state.value, available, now(), 'complete');
+        requireValue(available.every(name => ['ready', 'empty'].includes(decoded.components[name]?.status)));
+        if (!current(request.provider, epoch)) return undefined;
+        // A producer/seed may have completed while the read was in flight.
+        const memory = readMemory(request);
+        if (memory) return memory;
+        if (publications.get(request.provider) !== publication) return undefined;
+        return cache.seed(keyOf(request), state, { completeness: 'complete', expiresAt: retention(state),
+          retainStale: true, dependencies: dependencies(request), supersede: false });
+      } catch { return undefined; }
+    })();
+    reads.set(work, request.provider);
+    try { return await work; } finally { reads.delete(work); }
   }
 
   function parentRequest(request) {
     if (metadataKind(request) !== 'season') return undefined;
     return { ...canonicalMetadataRequest(request), path: request.path.replace(/\/season\/\d+$/, '') };
   }
-  function parentOf(request) {
+  function memoryParentOf(request) {
+    const parent = parentRequest(request);
+    return parent && readMemory(parent);
+  }
+  async function parentOf(request) {
     const parent = parentRequest(request);
     return parent && read(parent);
   }
@@ -57,16 +107,21 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
   async function load(request, producer, { signal, completeness, refresh = false, requestedEpisode,
     checkSchedule, parent: checkedParent } = {}) {
     const required = requestedComponents(request, completeness);
-    let state = read(request);
-    let parent = parentOf(request) ?? checkedParent;
+    const epoch = generation(request.provider);
+    let state = await read(request);
+    check(request.provider, epoch);
+    let parent = memoryParentOf(request) ?? checkedParent ?? await parentOf(request);
+    check(request.provider, epoch);
     let selected = dueComponents(state, required, now(), { refresh, parent, requestedEpisode });
     while (selected.length) {
+      check(request.provider, epoch);
       checkSchedule?.();
       let dispatched = false;
       state = await cache.load(keyOf(request), async ownedSignal => {
         dispatched = true;
-        let previous = read(request, false);
-        parent = parentOf(request) ?? checkedParent;
+        let previous = readMemory(request) ?? state;
+        parent = memoryParentOf(request) ?? parent;
+        check(request.provider, epoch);
         selected = dueComponents(previous, required, now(), { refresh, parent, requestedEpisode });
         if (!selected.length) return previous;
         const query = { ...canonicalMetadataRequest(request).query };
@@ -75,12 +130,12 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
         try {
           const raw = await producer({ ...request, query }, ownedSignal);
           requireValue(!ownedSignal.aborted, 'CANCELLED');
-          previous = read(request, false) ?? previous;
+          previous = readMemory(request) ?? previous;
           return { ...mergeMetadata(previous, request, raw, selected, now(), completeness, parent), attempted: selected };
         } catch (error) {
           const normalized = normalizeError(error);
           if (ownedSignal.aborted || ['CANCELLED', 'CLOSED', 'STALE_METADATA'].includes(normalized.code)) throw normalized;
-          previous = read(request, false) ?? previous;
+          previous = readMemory(request) ?? previous;
           if (!previous) throw normalized;
           return { ...failedMetadata(previous, selected, normalized.code), attempted: selected };
         }
@@ -89,7 +144,7 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
       // A caller for different append components may have joined this entity's
       // producer. It performs its own missing-component request after that work.
       if (dispatched) break;
-      parent = parentOf(request) ?? checkedParent;
+      parent = memoryParentOf(request) ?? parent;
       selected = dueComponents(state, required, now(), { parent, requestedEpisode })
         .filter(name => !state.attempted?.includes(name));
     }
@@ -111,18 +166,21 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
       }
       checkSchedule?.();
     }
-    const state = parentError ? read(request) : await load(request, producer,
+    const state = parentError ? await read(request) : await load(request, producer,
       { signal, completeness, refresh, requestedEpisode, checkSchedule, parent });
     if (!state) throw fail(parentError.code);
     return metadataRecord(state, request, requestedComponents(request, completeness), now(),
-      { parent: parentError ? parent : parentOf(request) ?? parent, parentError, requestedEpisode });
+      { parent: parentError ? parent : memoryParentOf(request) ?? parent, parentError, requestedEpisode });
   }
 
-  function entry(request, { minimumCompleteness = 'partial' } = {}) {
+  async function entry(request, { minimumCompleteness = 'partial' } = {}) {
     requireValue(['partial', 'complete'].includes(minimumCompleteness));
-    const state = read(request);
+    const epoch = generation(request.provider);
+    const state = await read(request);
+    check(request.provider, epoch);
     if (!state) return undefined;
-    const at = now(), context = { parent: parentOf(request) };
+    const at = now(), context = { parent: await parentOf(request) };
+    check(request.provider, epoch);
     let record = metadataRecord(state, request, requestedComponents(request, 'complete'), at, context);
     if (record.cache.status !== 'fresh' && minimumCompleteness === 'partial') {
       record = metadataRecord(state, request, requestedComponents(request, 'partial'), at, context);
@@ -134,7 +192,9 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
   }
 
   function seed(request, value, { completeness, fetchedAt, expiresAt }) {
-    const previous = read(request);
+    const epoch = generation(request.provider);
+    const previous = readMemory(request);
+    check(request.provider, epoch);
     const required = requestedComponents(request, completeness);
     if (previous) {
       if (required.length === 1 && required[0] === 'summary') {
@@ -147,7 +207,9 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
             (current.completeness === 'complete' || completeness === 'partial')) return undefined;
       }
     }
-    const state = mergeMetadata(previous, request, value, required, fetchedAt, completeness, parentOf(request));
+    const parent = memoryParentOf(request);
+    check(request.provider, epoch);
+    const state = mergeMetadata(previous, request, value, required, fetchedAt, completeness, parent);
     state.components = Object.fromEntries(Object.entries(state.components).map(([name, row]) =>
       [name, required.includes(name) && row.fetchedAt === fetchedAt
         ? { ...row, expiresAt: Math.min(row.expiresAt, expiresAt) } : row]));
@@ -157,13 +219,41 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
   }
 
   function invalidate(matches) {
-    if (!documents) return;
-    try {
-      for (const provider of ['tmdb', 'douban']) {
-        if (!matches({ kind: 'metadata', domain: provider })) continue;
-        for (const name of documents.list(provider)) documents.remove(name);
-      }
-    } catch { throw fail('STORAGE_ERROR'); }
+    const cleanup = [], selectedReads = [];
+    for (const provider of ['tmdb', 'douban']) {
+      if (!matches({ kind: 'metadata', domain: provider })) continue;
+      const epoch = generation(provider) + 1;
+      generations.set(provider, epoch);
+      selectedReads.push(...[...reads].filter(([, domain]) => domain === provider).map(([work]) => work));
+      // Even failed deletion must not make a revoked disk value eligible again
+      // until cleanup succeeds. New results still use the shared bounded memory cache.
+      invalidated.add(provider);
+      if (root) cleanup.push(enqueue(provider, async () => {
+        let names;
+        try { names = await fs.readdir(join(root, provider)); }
+        catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          if (current(provider, epoch)) invalidated.delete(provider);
+          return;
+        }
+        for (const name of names) {
+          if (!/^[a-f0-9]+\.json$/.test(name)) continue;
+          try { await fs.unlink(join(root, provider, name)); }
+          catch (error) { if (error.code !== 'ENOENT') throw error; }
+        }
+        if (current(provider, epoch)) invalidated.delete(provider);
+      }));
+    }
+    return Promise.allSettled([...cleanup, ...selectedReads]).then(results => {
+      if (results.some(result => result.status === 'rejected')) throw fail('STORAGE_ERROR');
+    });
   }
-  return { get, entry, seed, invalidate };
+  function close() {
+    if (closing) return closing;
+    // Accepted publications drain on close; no producer can enqueue new work
+    // after the data owner has revoked it. Closing is not cache invalidation.
+    closing = Promise.all([...writes.values(), ...reads.keys()]).then(() => { closed = true; });
+    return closing;
+  }
+  return { get, entry, seed, invalidate, close };
 }

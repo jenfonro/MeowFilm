@@ -1265,6 +1265,8 @@ public static partial class MusicUiTests
     {
         public required string Root;
         public required IDocumentStore Store;
+        public required IDocumentStore CacheBacking;
+        public required CacheDocumentStore Cache;
         public required NativeMusicScriptTestRuntime Runtime;
         public required MusicNativeApplication Application;
         public required ObservedApplication Calls;
@@ -1278,15 +1280,21 @@ public static partial class MusicUiTests
             root ??= NewRoot();
             IDocumentStore store = persistent
                 ? new LocalDocumentStore(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces) : new DocumentProbe();
+            string cacheRoot = Path.Combine(root, "cache-documents");
+            Directory.CreateDirectory(cacheRoot);
+            IDocumentStore cacheBacking = persistent
+                ? new LocalDocumentStore(cacheRoot, AppIdentity.CacheNamespaces, protectedNamespaces: AppIdentity.CacheProtectedNamespaces)
+                : new DocumentProbe();
+            var cache = new CacheDocumentStore(cacheBacking);
             var runtime = new NativeMusicScriptTestRuntime(); MusicCapability? module = null;
-            var application = new MusicNativeApplication(store, runtime, new NoUpstream());
+            var application = new MusicNativeApplication(store, runtime, cache, new NoUpstream());
             try
             {
                 var calls = new ObservedApplication(application, feedback); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
                 module = native is null
                     ? new MusicCapability(calls, store, output ?? playback, withPlaybackCache ?
-                        new MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache(Path.Combine(root, "playback-cache"), store) : null, dialogs)
-                    : new MusicCapability(calls, store, native, dialogs);
+                        new MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache(Path.Combine(root, "playback-cache"), cache) : null, dialogs, cacheStore: cache)
+                    : new MusicCapability(calls, store, native, dialogs, cacheStore: cache);
                 await module.InitializeAsync(default);
                 Equal("wy", module.CatalogSourcePlatform);
                 True(module.CanEditCatalogSource && !module.HasCatalogSourceError, "shared UI fixture restores the native catalog source");
@@ -1294,12 +1302,12 @@ public static partial class MusicUiTests
                 Equal(0, calls.Count("music.catalogSource.settings.save"));
                 await module.NavigateAsync("favorites", default);
                 True(!runtime.HasStarted, "native initialization never starts Node");
-                return new(playback, dialogs) { Root = root, Store = store, Runtime = runtime, Application = application, Calls = calls, Module = module };
+                return new(playback, dialogs) { Root = root, Store = store, CacheBacking = cacheBacking, Cache = cache, Runtime = runtime, Application = application, Calls = calls, Module = module };
             }
             catch
             {
                 try { if (module is not null) await module.DisposeAsync(); else await application.DisposeAsync(); }
-                finally { await runtime.DisposeAsync(); await store.DisposeAsync(); }
+                finally { await cache.DisposeAsync(); await cacheBacking.DisposeAsync(); await runtime.DisposeAsync(); await store.DisposeAsync(); }
                 throw;
             }
         }
@@ -1343,7 +1351,7 @@ public static partial class MusicUiTests
         {
             Calls.ReleaseAll();
             try { await Module.DisposeAsync(); }
-            finally { try { await Runtime.DisposeAsync(); } finally { await Store.DisposeAsync(); } }
+            finally { try { await Cache.DisposeAsync(); await CacheBacking.DisposeAsync(); await Runtime.DisposeAsync(); } finally { await Store.DisposeAsync(); } }
         }
     }
     private sealed class NoUpstream : System.Net.Http.HttpMessageHandler

@@ -43,7 +43,7 @@ extension NativeMusicService: MusicLibrarySyncing {
         }
         try musicRequire(try read().library["revision"].int == round.revision, .revisionConflict)
     }
-    func syncCheckpoint(_ round: inout MusicNativeSyncRound) throws {
+    func syncCheckpoint(_ round: inout MusicNativeSyncRound, mappingBaseline: MJ? = nil) throws {
         try check(round.epoch)
         let expected = round.revision, ledger = try round.ledger.json()
         var library = round.library
@@ -53,6 +53,14 @@ extension NativeMusicService: MusicLibrarySyncing {
             ("issues", .array(round.ledger.issues.map { .obj([("code", .string($0.code))]) }))])
         try transaction(["library"]) { d in
             try musicRequire(d.library["revision"].int == expected, .revisionConflict)
+            if let mappingBaseline {
+                // The acquired remote members precede optional mapping. Keep
+                // those original sources, including newly imported recordings.
+                for (id, song) in library["songs"].fields {
+                    library["songs"][id] = filteringRecordingSourceAdditions(song,
+                        existing: mappingBaseline["songs"][id]["sources"].array, playback: d.playback)
+                }
+            }
             d.library["library"] = library; d.library["sync"] = ledger; d.library["revision"] = .n(expected + 1)
         }
         round.library = library; round.revision = expected + 1
@@ -110,6 +118,7 @@ extension NativeMusicService: MusicLibrarySyncing {
         round.ledger.selections = request.selections
         round.ledger.phase = .pulling; round.ledger.issues = []
         try syncCheckpoint(&round)
+        var mappingBaseline: MJ?
         do {
             for selection in request.selections {
                 try check(round.epoch)
@@ -154,9 +163,14 @@ extension NativeMusicService: MusicLibrarySyncing {
                 round.library["accounts"][platform] = .string(session.accountID); round.ledger.scopes[platform] = session.scope
             }
             if relationshipsOnly { try syncMergeSubscriptions(&round) }
-            else { try syncMerge(&round); try await syncMapMissing(&round) }
+            else {
+                try syncMerge(&round)
+                mappingBaseline = round.library
+                try await syncMapMissing(&round)
+            }
             round.ledger.phase = .pushing
-            try await syncCurrent(round); try syncCheckpoint(&round)
+            try await syncCurrent(round); try syncCheckpoint(&round, mappingBaseline: mappingBaseline)
+            mappingBaseline = nil
             if relationshipsOnly { try await syncPushSubscriptions(&round) }
             else { try await syncPush(&round); syncAcknowledge(&round) }
             round.ledger.phase = round.ledger.issues.isEmpty && round.ledger.fences.isEmpty ? .synced : .partial
@@ -169,7 +183,7 @@ extension NativeMusicService: MusicLibrarySyncing {
             // Durable fences already exist before dispatch and remain intact.
             if !Task.isCancelled, (try? await syncCurrent(round)) != nil {
                 round.issue(MusicNativeSyncLogic.code(failure)); round.ledger.phase = .blocked
-                do { try syncCheckpoint(&round) } catch { failure = MusicServiceError.sanitized(error) }
+                do { try syncCheckpoint(&round, mappingBaseline: mappingBaseline) } catch { failure = MusicServiceError.sanitized(error) }
             }
             for session in round.sessions.values { await port.endLibrarySync(session) }
             throw failure

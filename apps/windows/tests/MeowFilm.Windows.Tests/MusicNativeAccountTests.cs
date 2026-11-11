@@ -293,7 +293,7 @@ public static class MusicNativeAccountTests
         var all = await Task.WhenAll(Import(f.Owner), Import(f.Owner, "tx"), Import(f.Owner, "kg"));
         foreach (var r in all) Ok(r);
         var doc = f.Store.Document();
-        Check(doc.Count == 2 && doc["entries"]!.AsArray().Count == 6);
+        Check(doc.Count == 2 && doc["entries"]!.AsArray().Count == 3);
         foreach (var platform in new[] { "wy", "tx", "kg" })
             Check(f.Store.Row(platform).Count == 6 && f.Store.Row(platform)["generation"]!.GetValue<long>() == 1);
     }

@@ -31,6 +31,11 @@ public protocol MusicSourcePlaybackServing: MusicResolvedSourcesServing {
     func sourceConfigurationChanged() async
 }
 
+public enum MusicSourceExclusionScope: Sendable, Equatable {
+    case providerPlatform
+    case recording(fingerprint: String, duration: Double, sourceKey: String)
+}
+
 public struct MusicSourceExclusion: Sendable, Equatable, Identifiable {
     public let id: String
     public let songID: String
@@ -38,9 +43,11 @@ public struct MusicSourceExclusion: Sendable, Equatable, Identifiable {
     public let artist: String
     public let provider: String
     public let platform: String
-    public init(id: String, songID: String, title: String, artist: String, provider: String, platform: String) {
+    public let scope: MusicSourceExclusionScope
+    public init(id: String, songID: String, title: String, artist: String, provider: String, platform: String,
+                scope: MusicSourceExclusionScope = .providerPlatform) {
         self.id = id; self.songID = songID; self.title = title; self.artist = artist
-        self.provider = provider; self.platform = platform
+        self.provider = provider; self.platform = platform; self.scope = scope
     }
     public static func providerID(_ id: String, platform: String) -> String {
         id.hasPrefix("official:") ? "official:" + platform : id

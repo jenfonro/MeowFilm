@@ -82,7 +82,7 @@ public sealed partial class MusicCapability
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
         var attempt = new MusicPreloadAttempt(state, cancellation);
         musicPreload = attempt;
-        TrackPlaybackCache(Preload(attempt), state);
+        TrackPlaybackCache(Preload(attempt));
     }
 
     private async Task Preload(MusicPreloadAttempt attempt)
@@ -125,8 +125,6 @@ public sealed partial class MusicCapability
             // Complete validated bytes remain provisional until this exact queue entry really starts.
             await ownedPrepared.Work;
         }
-        catch (Exception error) when (error is PlaybackCache.MusicPlaybackCacheDataException or
-            PlaybackCache.MusicPlaybackCacheCommitException) { throw; }
         catch (OperationCanceledException) { }
         catch { /* Speculative failure is retried by the actual playback request, not a background loop. */ }
         finally

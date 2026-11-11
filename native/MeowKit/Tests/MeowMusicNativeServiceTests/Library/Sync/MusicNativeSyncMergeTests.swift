@@ -204,17 +204,60 @@ import MeowMusicFeature
         for cached in [true, false] {
             let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
             if cached { await record(cache, song: song, source: source) }
-            await cache.exclude(fingerprint: MusicModel.fingerprint(song), duration: 180, sourceKey: source["sourceKey"].string)
             let store = try mappingStore([MusicNativeCandidateDiscoveryFixture.track()])
             let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
             let http = MusicNativeCandidateDiscoveryHTTP()
             let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+            try await service.excludeRecordingSource(song, sourceKey: source["sourceKey"].string)
             let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
             XCTAssertEqual(state.phase, .partial)
             let saved = try NativeSyncFixture.document(store).library["library"]["songs"][song["songId"].string]
             XCTAssertEqual(try MusicModel.sources(saved).map(\.platform), ["tx"])
             let calls = await http.calls(), writes = await peer.calls()
             XCTAssertEqual(calls.count, cached ? 0 : 1); XCTAssertTrue(writes.isEmpty)
+            await service.close()
+        }
+    }
+
+    func testMappingCheckpointFiltersDecisionsCommittedAfterCacheOrNetworkMappingAcrossSongIDs() async throws {
+        for cached in [true, false] {
+            let primary = try MusicNativeCandidateDiscoveryFixture.song()
+            let existing = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "existing"))
+            let song = try MusicModel.mergeSources(primary, adding: existing["sources"].array)
+            let source = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321"))["sources"].array[0]
+            let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+            if cached { await record(cache, song: song, source: source) }
+            let store = try mappingStore([MusicNativeCandidateDiscoveryFixture.track()])
+            var initial = try NativeSyncFixture.document(store)
+            initial.library["library"]["songs"][song["songId"].string] = song
+            store.replace(try initial.encode(changed: ["library"]))
+            let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
+            let http = MusicNativeCandidateDiscoveryHTTP()
+            let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+            let document = try await service.read(), epoch = await service.epoch
+            let request = NativeSyncFixture.request(favorites: true, playlists: false)
+            var round = MusicNativeSyncRound(request: request, epoch: epoch, port: peer,
+                library: document.library["library"], ledger: try MusicNativeSyncLedger.load(document.library),
+                revision: document.library["revision"].int)
+            round.sessions["wy"] = try await peer.beginLibrarySync(platform: .netease)
+            let baseline = round.library
+            try await service.syncMapMissing(&round)
+            let id = song["songId"].string, key = source["sourceKey"].string
+            XCTAssertTrue(round.library["songs"][id]["sources"].array.contains { $0["sourceKey"].string == key })
+            let calls = await http.calls()
+            XCTAssertEqual(calls, cached ? [] : ["wy"])
+
+            // Mapping has completed, but its business transaction is still pending.
+            var otherEntrance = primary
+            otherEntrance["songId"] = .string("song:other-entrance")
+            try await service.excludeRecordingSource(otherEntrance, sourceKey: key)
+            try await service.excludeRecordingSource(otherEntrance, sourceKey: existing["sources"].array[0]["sourceKey"].string)
+            try await service.syncCheckpoint(&round, mappingBaseline: baseline)
+            let saved = try NativeSyncFixture.document(store).library["library"]["songs"][id]
+            XCTAssertEqual(saved["sources"], song["sources"])
+            XCTAssertEqual(round.library["songs"][id]["sources"], song["sources"],
+                "The subsequent push must consume the filtered committed library")
+            XCTAssertEqual(saved["songId"], song["songId"])
             await service.close()
         }
     }

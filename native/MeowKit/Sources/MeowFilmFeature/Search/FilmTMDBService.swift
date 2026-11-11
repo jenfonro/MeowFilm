@@ -44,7 +44,12 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
         ]
         let value = try await client.call(module: .film, operation: "data.metadata", parameters: .object(input))
         input["kind"] = .string("metadata")
-        let entry = try await client.call(module: .film, operation: "data.cache.entry", parameters: .object(input))
+        let entry: RuntimeValue
+        do {
+            entry = try await client.call(module: .film, operation: "data.cache.entry", parameters: .object(input))
+        } catch RuntimeHTTPError.remote(let code) where ["STORAGE_ERROR", "CORRUPT_STORAGE", "CACHE_LOAD_FAILED"].contains(code) {
+            entry = .null
+        }
         try Task.checkCancellation()
         guard !client.isClosed else { throw RuntimeHTTPError.closed }
         return .init(value: value, producer: client, cacheEntry: entry == .null ? nil : entry)

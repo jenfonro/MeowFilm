@@ -22,14 +22,14 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
         let otherEntrance = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
             "tx", id: "OtherMID", title: "Song 301", artist: "Synthetic"))
-        let unknown = await service.cachedSourceDiscoveryState(otherEntrance)
+        let unknown = try await service.cachedSourceDiscoveryState(otherEntrance)
         XCTAssertTrue(unknown.entries.isEmpty)
         _ = try await startPlaying(service)
         let before = store.snapshot().0, writes = store.snapshot().2
 
         let previewValue = try await preview(service), preview = try XCTUnwrap(previewValue)
         XCTAssertEqual(preview.candidates.map(\.song.title), ["Song 301"])
-        let acquired = await service.cachedSourceDiscoveryState(otherEntrance)
+        let acquired = try await service.cachedSourceDiscoveryState(otherEntrance)
         XCTAssertEqual(Set(acquired.entries.keys), ["wy"])
         let known = try XCTUnwrap(acquired.entries["wy"])
         let recommended = try MusicModel.normalize(SimilarModeAccountFixture.track("301"))
@@ -43,7 +43,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         XCTAssertEqual(reused["sources"].array.first?["sourceKey"], otherEntrance["sources"].array.first?["sourceKey"])
         let mapped = try XCTUnwrap(reused["sources"].array.first { $0["source"].string == "wy" })
         XCTAssertEqual(mapped["sourceKey"], recommended["sources"].array[0]["sourceKey"])
-        let unchangedEvidence = await service.cachedSourceDiscoveryState(otherEntrance)
+        let unchangedEvidence = try await service.cachedSourceDiscoveryState(otherEntrance)
         XCTAssertTrue(unchangedEvidence.entries.values.allSatisfy { $0.checkedAt == 0 && $0.observations.isEmpty })
         XCTAssertTrue(unchangedEvidence.checks.isEmpty)
         let cachedPreview = try await service.queueRecommendationSnapshot()

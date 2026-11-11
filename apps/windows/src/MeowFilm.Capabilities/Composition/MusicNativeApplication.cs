@@ -65,6 +65,8 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private readonly MusicScriptOwner scripts;
     private readonly MusicLyricApplication lyrics;
     private readonly CatalogSessions sessions;
+    private readonly CacheDocumentStore cacheStore;
+    private readonly bool ownsCacheStore;
     private readonly object gate = new();
     private CancellationTokenSource lifetime = new();
     private TaskCompletionSource drained = Completed();
@@ -74,7 +76,11 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private long accountReceiptEpoch;
 
     public MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime)
-        : this(store, scriptRuntime, null) { }
+        : this(store, scriptRuntime, (HttpMessageHandler?)null) { }
+
+    public MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime,
+        CacheDocumentStore cacheStore, HttpMessageHandler? transportHandler = null)
+        : this(store, scriptRuntime, transportHandler, null, null, cacheStore: cacheStore) { }
 
     /// <summary>
     /// Trusted synthetic-transport seam. Fixed platform origins, redirect rejection and
@@ -95,21 +101,24 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         HttpMessageHandler? transportHandler,
         Func<IMusicPlatformSessionSource, MusicPlatformHttp, IMusicFeedbackProtocol>? feedbackFactory,
         Func<IMusicPlatformSessionSource, MusicPlatformHttp, IMusicSearchDiscovery>? discoveryFactory,
-        TimeProvider? searchClock = null)
+        TimeProvider? searchClock = null, CacheDocumentStore? cacheStore = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(scriptRuntime);
+        this.cacheStore = cacheStore ?? new CacheDocumentStore();
+        ownsCacheStore = cacheStore is null;
         http = transportHandler is null ? new MusicPlatformHttp() : MusicPlatformHttp.CreateWithHandler(transportHandler);
         clients = new(store);
         var clientProtocol = new MusicPlatformClientProtocol(http);
-        library = new(store);
-        accounts = new(store, new MusicAccountProtocol(http, clients, clientProtocol: clientProtocol), clients, clientProtocol);
+        library = new(store, cacheStore: this.cacheStore);
+        accounts = new(store, new MusicAccountProtocol(http, clients, clientProtocol: clientProtocol), clients, clientProtocol,
+            detailsCacheStore: this.cacheStore);
         vipPage = new(accounts, new MusicVipPageProtocol(http, clients));
         officialAudio = new(http, clients);
-        sourceCache = new(store);
+        sourceCache = new(this.cacheStore);
         sessions = new(accounts);
         catalog = new(sessions, http, clients, clientProtocol: clientProtocol, authenticationFailed: failed => accounts.Revoke(failed));
-        songMatcher = new(library, new(store), SearchCatalogAsync, searchClock);
+        songMatcher = new(library, new(this.cacheStore), SearchCatalogAsync, searchClock);
         library.SongsObserved = songMatcher.ObserveSongs;
         library.SongFactsProjection = songMatcher.ProjectKnownFacts;
         library.PrepareSongFacts = PrepareSongFactsAsync;
@@ -369,6 +378,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         await Attempt(() => scripts.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(() => library.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(clients.PrepareShutdownAsync).ConfigureAwait(false);
+        await Attempt(cacheStore.DrainAsync).ConfigureAwait(false);
         // The account port may have returned an unknown receipt while its physical
         // CAS is still running. Without an explicit list/reconciliation, preparation
         // must fail rather than authorize the capability to dispose the shared App store.
@@ -517,6 +527,8 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         try { catalog.Dispose(); } catch (Exception e) { failure ??= e; }
         await Attempt(catalog.DrainAsync).ConfigureAwait(false);
         await Attempt(() => clients.DisposeAsync().AsTask()).ConfigureAwait(false);
+        await Attempt(cacheStore.DrainAsync).ConfigureAwait(false);
+        if (ownsCacheStore) await Attempt(() => cacheStore.DisposeAsync().AsTask()).ConfigureAwait(false);
         try { http.Dispose(); } catch (Exception e) { failure ??= e; }
         try { recommendationLifetime.Dispose(); } catch (Exception e) { failure ??= e; }
         try { lifetime.Dispose(); } catch (Exception e) { failure ??= e; }

@@ -681,3 +681,15 @@ test('F4/F5 forced refresh merges current work and publishes before returning ev
   assert.deepEqual(await second, value);
   assert.deepEqual(published, [value]);
 });
+
+test('publication observes the already updated memory entry for load and seed', async () => {
+  const cache = createPlaybackCache();
+  const first = { value: 'loaded' }, second = { value: 'seeded' };
+  await cache.load('ordered-publication', () => first, options({
+    publish: value => assert.deepEqual(cache.read('ordered-publication'), value),
+  }));
+  cache.seed('ordered-publication', second, options({ replace: true,
+    publish: value => assert.deepEqual(cache.read('ordered-publication'), value),
+  }));
+  await cache.close();
+});

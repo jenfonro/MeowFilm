@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -8,30 +7,13 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 
 /// <summary>
 /// Private resolution candidates and confirmed playback history, never library or download data.
-/// Operational cache unavailability is a miss. Existing non-current data is an explicit
-/// failure and is never interpreted, replaced or rewritten.
+/// Unreadable or unusable cached values are misses; persistence is optional.
 /// </summary>
-internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time = null)
+internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? time = null)
 {
     internal const string Namespace = "music.playback-sources.v1";
     internal const long HistoryTtl = 30L * 86400000;
     private const int MaximumBytes = 1024 * 1024, MaximumScopes = 4;
-    private static readonly string[] CandidateFields =
-    [
-        "ok", "kind", "platform", "songId", "sourceKey", "scope", "generation",
-        "quality", "requestedQuality", "actualQuality", "qualityVerified", "playbackVerified",
-        "qualityPolicySignature", "qualityCacheSignature", "url", "headers", "expiresAt",
-        "duration", "size", "full", "licenseExpiresAt", "delivery", "offlineAllowed",
-        "authorizationExpiresAt"
-    ];
-    private static readonly string[] HistoryFields =
-    [
-        "platform", "songId", "sourceKey", "scope", "generation", "quality", "actualQuality",
-        "qualityVerified", "duration", "delivery", "requestedQuality",
-        "qualityPolicySignature", "recording"
-    ];
-    private static readonly HashSet<string> RecordingFields =
-        "sourceKey source musicInfo".Split(' ').ToHashSet(StringComparer.Ordinal);
     private readonly TimeProvider clock = time ?? TimeProvider.System;
     private readonly SemaphoreSlim gate = new(1, 1);
 
@@ -44,6 +26,9 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
         return Access(scope, false, false, (record, now) =>
         {
             var url = record["urls"]![song] as JsonObject;
+            if (url is null) return (null, false);
+            var expires = ValidateCandidate(JsonSerializer.SerializeToElement(url["info"]), scope, song, signature);
+            if (expires is { } expiry && expiry <= now + 10000) return (null, false);
             return (url?["signature"]?.GetValue<string>() == signature &&
                 url["until"]!.GetValue<long>() > now ? url["info"]?.DeepClone().AsObject() : null, false);
         }, token);
@@ -63,6 +48,7 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
             if (info?["qualityPolicySignature"]?.GetValue<string>() != policy ||
                 info["requestedQuality"]?.GetValue<string>() != request ||
                 info["generation"]?.GetValue<long>() != generation) return (null, false);
+            ValidateHistory(JsonSerializer.SerializeToElement(info), scope, song);
             var copy = info.DeepClone().AsObject();
             copy["confirmedAt"] = pointer!["at"]!.DeepClone();
             return (copy, false);
@@ -73,7 +59,6 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
     {
         ValidateIdentity(scope, song);
         RequireHash(signature);
-        ValidateCandidate(JsonSerializer.SerializeToElement(info), scope, song, signature);
         await Access(scope, true, true, (record, at) =>
         {
             long? expires = info["expiresAt"]?.GetValue<long>();
@@ -138,10 +123,11 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
     private async Task<JsonObject?> Access(string scope, bool write, bool create,
         Func<JsonObject, long, (JsonObject? Result, bool Changed)> action, CancellationToken token)
     {
-        await gate.WaitAsync(token).ConfigureAwait(false);
+        if (write) await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var saved = await store.ReadAsync(Namespace, token).ConfigureAwait(false);
+            var saved = write ? store.ReadMemory(Namespace) :
+                await store.ReadAsync(Namespace, token).ConfigureAwait(false);
             var root = Decode(saved);
 
             long now = Now;
@@ -149,15 +135,20 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
             bool pruned = false;
             foreach (var pair in scopes.ToArray())
             {
-                var record = pair.Value!.AsObject();
-                long at = record["at"]!.GetValue<long>();
-                if (at > now || at <= now - HistoryTtl)
+                try
                 {
-                    scopes.Remove(pair.Key);
-                    pruned = true;
-                    continue;
+                    var record = pair.Value!.AsObject();
+                    long at = record["at"]!.GetValue<long>();
+                    if (at > now || at <= now - HistoryTtl)
+                    {
+                        scopes.Remove(pair.Key);
+                        pruned = true;
+                        continue;
+                    }
+                    pruned |= Prune(record, now);
                 }
-                pruned |= Prune(record, now);
+                catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+                { scopes.Remove(pair.Key); pruned = true; }
             }
 
             bool existing = scopes[scope] is JsonObject;
@@ -165,7 +156,9 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
                 new JsonObject { ["at"] = now, ["urls"] = new JsonObject(), ["pointers"] = new JsonObject() };
             if (!existing && !create)
             {
-                if (write && pruned) await Write(root, saved.Fingerprint, token).ConfigureAwait(false);
+                // Even an empty invalidation must supersede an initial disk read
+                // that has not loaded yet; otherwise it can resurrect the rejected URL.
+                if (write) await Write(root, token).ConfigureAwait(false);
                 return null;
             }
 
@@ -179,63 +172,29 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
                 scopes[scope] = current;
                 while (scopes.Count > MaximumScopes) scopes.Remove(scopes.First().Key);
             }
-            if (changed || pruned)
-                await Write(root, saved.Fingerprint, token).ConfigureAwait(false);
+            if (changed || pruned || !create)
+                await Write(root, token).ConfigureAwait(false);
             return result;
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
-        { throw MusicPlaybackCacheDataException.FromStore(error); }
-        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
         { return null; }
-        finally { gate.Release(); }
+        finally { if (write) gate.Release(); }
     }
 
     private static JsonObject Decode(DocumentSnapshot saved)
     {
-        if (saved.Data is null)
-        {
-            if (saved.Fingerprint != DocumentFingerprint.Missing)
-                throw MusicPlaybackCacheDataException.Corrupt();
-            return Empty();
-        }
-        if (saved.Data.Length == 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (saved.Data.Length > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
+        if (saved.Data is null || saved.Data.Length > MaximumBytes) return Empty();
         try
         {
-            using var document = JsonDocument.Parse(saved.Data, new JsonDocumentOptions { MaxDepth = 16 });
-            CheckJson(document.RootElement);
-            RequireFields(document.RootElement, "schema", "scopes");
-            var schema = document.RootElement.GetProperty("schema");
-            if (schema.ValueKind != JsonValueKind.Number || schema.GetRawText() != "1")
-                throw MusicPlaybackCacheDataException.UnsupportedVersion();
-            var scopes = document.RootElement.GetProperty("scopes");
-            if (scopes.ValueKind != JsonValueKind.Object) throw MusicPlaybackCacheDataException.Corrupt();
-            int scopeCount = 0;
-            foreach (var scope in scopes.EnumerateObject())
-            {
-                if (++scopeCount > MaximumScopes) throw MusicPlaybackCacheDataException.Limit();
-                RequireText(scope.Name, 128);
-                RequireFields(scope.Value, "at", "urls", "pointers");
-                long recordAt = CanonicalLong(scope.Value.GetProperty("at"));
-                var urls = scope.Value.GetProperty("urls");
-                var pointers = scope.Value.GetProperty("pointers");
-                if (urls.ValueKind != JsonValueKind.Object || pointers.ValueKind != JsonValueKind.Object)
-                    throw MusicPlaybackCacheDataException.Corrupt();
-                ValidateEntries(scope.Name, urls, true, recordAt);
-                ValidateEntries(scope.Name, pointers, false, recordAt);
-            }
-            return JsonNode.Parse(document.RootElement.GetRawText())!.AsObject();
+            var root = JsonNode.Parse(saved.Data)!.AsObject();
+            _ = root["scopes"]!.AsObject();
+            return root;
         }
-        catch (MusicPlaybackCacheDataException) { throw; }
-        catch (MusicLibraryException) { throw MusicPlaybackCacheDataException.Corrupt(); }
-        catch (Exception error) when (error is JsonException or InvalidOperationException or
-            FormatException or OverflowException or KeyNotFoundException or ArgumentException)
-        { throw MusicPlaybackCacheDataException.Corrupt(); }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return Empty(); }
     }
 
-    private async Task Write(JsonObject root, DocumentFingerprint before, CancellationToken token)
+    private Task Write(JsonObject root, CancellationToken token)
     {
         var scopes = root["scopes"]!.AsObject();
         byte[] encoded = JsonSerializer.SerializeToUtf8Bytes(root);
@@ -253,46 +212,17 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
             }
             encoded = JsonSerializer.SerializeToUtf8Bytes(root);
         }
-        var expected = DocumentFingerprint.FromBytes(encoded);
-        _ = Decode(new DocumentSnapshot(encoded, expected));
         token.ThrowIfCancellationRequested();
-        var receipt = await store.WriteAsync(Namespace, encoded, before, token).ConfigureAwait(false);
-        if (receipt != expected) throw new MusicPlaybackCacheCommitException();
+        store.Save(Namespace, encoded);
+        return Task.CompletedTask;
     }
 
     private static JsonObject Empty() =>
-        new() { ["schema"] = 1, ["scopes"] = new JsonObject() };
+        new() { ["scopes"] = new JsonObject() };
 
-    private static void ValidateEntries(string scope, JsonElement entries, bool urls, long recordAt)
-    {
-        int count = 0, maximum = urls ? 50 : 200;
-        foreach (var property in entries.EnumerateObject())
-        {
-            if (++count > maximum) throw MusicPlaybackCacheDataException.Limit();
-            string song = property.Name;
-            RequireText(song, 2048);
-            if (urls) RequireFields(property.Value, "signature", "at", "until", "info");
-            else RequireFields(property.Value, "signature", "at", "info");
-            string signature = Text(property.Value.GetProperty("signature"), 64);
-            RequireHash(signature);
-            long at = CanonicalLong(property.Value.GetProperty("at"));
-            if (at > recordAt) throw MusicPlaybackCacheDataException.Corrupt();
-            if (urls)
-            {
-                long until = CanonicalLong(property.Value.GetProperty("until"));
-                if (until <= at) throw MusicPlaybackCacheDataException.Corrupt();
-                long? expires = ValidateCandidate(property.Value.GetProperty("info"), scope, song, signature);
-                long ttl = at > long.MaxValue - HistoryTtl ? long.MaxValue : at + HistoryTtl;
-                long expected = expires is null ? ttl : Math.Min(expires.Value - 10000, ttl);
-                if (until != expected) throw MusicPlaybackCacheDataException.Corrupt();
-            }
-            else ValidateHistory(property.Value.GetProperty("info"), scope, song);
-        }
-    }
 
     internal static long? ValidateCandidate(JsonElement info, string scope, string song, string signature)
     {
-        RequireFields(info, CandidateFields);
         if (info.GetProperty("ok").ValueKind != JsonValueKind.True ||
             Text(info.GetProperty("kind"), 32) != "official")
             throw MusicPlaybackCacheDataException.Corrupt();
@@ -340,8 +270,6 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
             if (info["recording"] is not JsonObject rawRecording)
                 throw MusicPlaybackCacheDataException.Corrupt();
             var recording = NativeMusicSong.DurableSource(rawRecording);
-            if (!JsonNode.DeepEquals(rawRecording, recording))
-                throw MusicPlaybackCacheDataException.Corrupt();
             var metadata = new JsonObject
             {
                 ["platform"] = info["platform"]?.DeepClone(),
@@ -358,7 +286,6 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
                 ["qualityPolicySignature"] = info["qualityPolicySignature"]?.DeepClone(),
                 ["recording"] = recording
             };
-            ValidateHistory(JsonSerializer.SerializeToElement(metadata), scope, song);
             return metadata;
         }
         catch (MusicPlaybackCacheDataException) { throw; }
@@ -369,7 +296,6 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
 
     private static void ValidateHistory(JsonElement info, string scope, string song)
     {
-        RequireFields(info, HistoryFields);
         string platform = Text(info.GetProperty("platform"), 16);
         if (platform is not ("wy" or "tx" or "kg") ||
             Text(info.GetProperty("songId"), 2048) != song ||
@@ -394,14 +320,9 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
         var rawRecording = info.GetProperty("recording");
         if (rawRecording.ValueKind != JsonValueKind.Object)
             throw MusicPlaybackCacheDataException.Corrupt();
-        var names = rawRecording.EnumerateObject().Select(property => property.Name).ToArray();
-        if (names.Any(name => !RecordingFields.Contains(name)) ||
-            RecordingFields.Any(field => !names.Contains(field, StringComparer.Ordinal)))
-            throw MusicPlaybackCacheDataException.Corrupt();
         var recording = JsonNode.Parse(rawRecording.GetRawText())!.AsObject();
-        var canonical = NativeMusicSong.DurableSource(recording);
-        if (!JsonNode.DeepEquals(recording, canonical) ||
-            recording["source"]?.GetValue<string>() != platform ||
+        _ = NativeMusicSong.DurableSource(recording);
+        if (recording["source"]?.GetValue<string>() != platform ||
             recording["sourceKey"]?.GetValue<string>() != sourceKey ||
             NativeMusicSong.SourceKey(recording) != sourceKey)
             throw MusicPlaybackCacheDataException.Corrupt();
@@ -415,13 +336,18 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
             var entries = record[field]!.AsObject();
             foreach (var entry in entries.ToArray())
             {
-                long at = entry.Value!["at"]!.GetValue<long>();
-                if (at > now || at <= now - HistoryTtl ||
-                    field == "urls" && entry.Value!["until"]!.GetValue<long>() <= now)
+                try
                 {
-                    entries.Remove(entry.Key);
-                    changed = true;
+                    long at = entry.Value!["at"]!.GetValue<long>();
+                    if (at > now || at <= now - HistoryTtl ||
+                        field == "urls" && entry.Value!["until"]!.GetValue<long>() <= now)
+                    {
+                        entries.Remove(entry.Key);
+                        changed = true;
+                    }
                 }
+                catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+                { entries.Remove(entry.Key); changed = true; }
             }
             while (entries.Count > maximum)
             {
@@ -438,36 +364,11 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
         RequireText(song, 2048);
     }
 
-    private static void CheckJson(JsonElement value)
-    {
-        if (value.ValueKind == JsonValueKind.Object)
-        {
-            var names = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var property in value.EnumerateObject())
-            {
-                if (!names.Add(property.Name)) throw MusicPlaybackCacheDataException.Corrupt();
-                CheckJson(property.Value);
-            }
-        }
-        else if (value.ValueKind == JsonValueKind.Array)
-            foreach (var item in value.EnumerateArray()) CheckJson(item);
-    }
 
-    private static void RequireFields(JsonElement value, params string[] fields)
-    {
-        if (value.ValueKind != JsonValueKind.Object) throw MusicPlaybackCacheDataException.Corrupt();
-        var names = value.EnumerateObject().Select(property => property.Name).ToArray();
-        if (names.Length != fields.Length || fields.Any(field => !names.Contains(field, StringComparer.Ordinal)))
-            throw MusicPlaybackCacheDataException.Corrupt();
-    }
 
     private static long CanonicalLong(JsonElement value, bool allowZero = false)
     {
-        string raw = value.ValueKind == JsonValueKind.Number ? value.GetRawText() : "";
-        if (raw.Length is < 1 or > 19 || raw.Length > 1 && raw[0] == '0' ||
-            raw.Any(character => character is < '0' or > '9') ||
-            !long.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out long result) ||
-            (allowZero ? result < 0 : result <= 0))
+        if (!value.TryGetInt64(out long result) || (allowZero ? result < 0 : result <= 0))
             throw MusicPlaybackCacheDataException.Corrupt();
         return result;
     }
@@ -478,8 +379,7 @@ internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time 
     private static double CanonicalDouble(JsonElement value, bool allowZero = false)
     {
         if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out double result) ||
-            !double.IsFinite(result) || (allowZero ? result < 0 : result <= 0) ||
-            value.GetRawText() != JsonSerializer.Serialize(result))
+            !double.IsFinite(result) || (allowZero ? result < 0 : result <= 0))
             throw MusicPlaybackCacheDataException.Corrupt();
         return result;
     }

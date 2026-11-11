@@ -12,7 +12,7 @@ extension NativeMusicService {
                           timing: MusicCandidateDiscoveryTiming) async throws -> MusicNativeCandidateDiscoveryOptions {
         try candidateCheck(seed)
         // A source confirmed as another recording is never offered for playback.
-        let excluded = await sourceDiscoveryExcluded(seed.song)
+        let excluded = try recordingSourceExclusions(seed.song)
         let playback = try candidateCheck(seed).playback
         let rows = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         // Do not probe accounts or a script host for disabled-only saved rows.

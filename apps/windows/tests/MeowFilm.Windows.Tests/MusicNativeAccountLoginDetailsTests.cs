@@ -21,8 +21,10 @@ public static partial class MusicNativeAccountDetailsTests
             yield return Case(p + "-login-cancel-rights-never-saves-account-or-details", () => LoginCancelRights(p));
         }
         yield return Case("login-replacement-fences-late-rights-and-keeps-new-cache", LoginReplacement);
+        yield return Case("login-success-does-not-await-first-cache-disk-read", LoginSlowCache);
+        yield return Case("default-display-cache-never-borrows-credential-store", LoginDefaultCache);
         yield return Case("login-CAS-conflict-never-saves-partial-account-or-retries", LoginDetailsConflict);
-        yield return Case("login-lost-CAS-receipt-local-observation-recovers-account-and-rights", LoginDetailsReceipt);
+        yield return Case("login-lost-CAS-receipt-local-observation-recovers-account-without-cache-proof", LoginDetailsReceipt);
     }
     private static Task<JsonElement> Login(MusicAccountDetailsFixture f, CancellationToken token = default, string? cookie = null) =>
         f.Owner.CallAsync("music.accounts.import",
@@ -50,11 +52,11 @@ public static partial class MusicNativeAccountDetailsTests
             f.Wrapper.Writes == 1, "Login must authenticate once, fetch rights once and commit once");
         var root = await f.Document();
         var account = MusicAccountDetailsFixture.AccountRow(root);
-        var cache = MusicAccountDetailsFixture.DetailsRow(root);
-        Check(root["entries"]!.AsArray().Count == 2 &&
+        var cache = MusicAccountDetailsFixture.DetailsRow(await f.CacheDocument());
+        Check(root["entries"]!.AsArray().Count == 1 &&
             cache["accountGeneration"]!.GetValue<long>() == account["generation"]!.GetValue<long>() &&
-            cache["accountScope"]!.GetValue<string>() == account["scope"]!.GetValue<string>() &&
-            cache["revision"]!.GetValue<long>() == 1);
+            cache["accountScope"]!.GetValue<string>() == account["scope"]!.GetValue<string>());
+        await f.Cache.DrainAsync();
         await using var reopen = new MusicAccountDetailsFixture(platform, f.Root);
         var restored = await reopen.Owner.ReadDetailsAsync(platform);
         Check(restored.State == "saved" && restored.Profile == local.Profile && restored.Membership == local.Membership &&
@@ -62,6 +64,27 @@ public static partial class MusicNativeAccountDetailsTests
             restored.MembershipFreshness == MusicAccountDetailsFreshness.Fresh && reopen.Steps.Count == 0);
         for (int i = 0; i < 3; i++) _ = await f.Owner.ReadDetailsAsync(platform);
         Check(f.Steps.Count(step => step == "rights") == 1 && f.Wrapper.Writes == 1, "A local read refreshed login rights");
+    }
+    private static async Task LoginSlowCache()
+    {
+        await using var f = new MusicAccountDetailsFixture("wy");
+        f.CacheBacking.HoldRead = true;
+        LoginOk(await Login(f).WaitAsync(TimeSpan.FromSeconds(4)));
+        await Wait(f.CacheBacking.Entered.Task);
+        Check(f.Wrapper.Writes == 1);
+        var local = await f.Owner.ReadDetailsAsync("wy").WaitAsync(TimeSpan.FromSeconds(4));
+        Check(local.State == "verified" && local.Membership.Vip == true);
+        var draining = f.Cache.DrainAsync(); await Pending(draining);
+        f.CacheBacking.Release.TrySetResult(); await Wait(draining);
+    }
+    private static async Task LoginDefaultCache()
+    {
+        await using var f = new MusicAccountDetailsFixture("wy");
+        LoginOk(await Login(f));
+        await using var independent = f.Clients.CreateAccountOwner(f.Wrapper);
+        var snapshot = await independent.ReadDetailsAsync("wy");
+        Check(snapshot.State == "saved" && snapshot.Profile?.UserId == UserId && snapshot.Membership.Vip is null &&
+            snapshot.MembershipFreshness == MusicAccountDetailsFreshness.Missing && f.Wrapper.Writes == 1);
     }
     private static async Task LoginAwaitRights(string platform)
     {
@@ -106,7 +129,7 @@ public static partial class MusicNativeAccountDetailsTests
             f.Steps.Count(step => step == "rights") == 1 && f.Wrapper.Writes == 1);
         var refreshed = await f.Owner.RefreshDetailsAsync(platform, cached.Generation);
         Check(refreshed.Membership.Vip == true && refreshed.Generation == cached.Generation &&
-            f.Steps.Count(step => step == "rights") == 2 && f.Wrapper.Writes == 2);
+            f.Steps.Count(step => step == "rights") == 2 && f.Wrapper.Writes == 1);
         Check((await f.Owner.ReadDetailsAsync(platform)).Membership.Vip == true);
     }
     private static async Task LoginUnknown(string platform)
@@ -184,6 +207,6 @@ public static partial class MusicNativeAccountDetailsTests
         LoginOk(await f.Owner.CallAsync("music.accounts.list"));
         var observed = await f.Owner.ReadDetailsAsync("wy");
         Check(observed.State == "saved" && observed.Profile?.DisplayName == "Fresh name" &&
-            observed.Membership.Vip == true && f.Wrapper.Writes == 1 && f.Steps.Count == 2);
+            observed.Membership.Vip is null && f.Wrapper.Writes == 1 && f.Steps.Count == 2);
     }
 }

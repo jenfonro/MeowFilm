@@ -152,8 +152,15 @@ extension MusicViewModel {
                 try candidate?.fileAuthorization?.check()
                 try candidate?.playbackAuthorization?.check()
                 if rows.contains(where: {
-                    $0.songID == current.track.songId && $0.platform == selection.siteId &&
-                    $0.provider == MusicSourceExclusion.providerID(selection.installationId, platform: selection.siteId)
+                    switch $0.scope {
+                    case .providerPlatform:
+                        return $0.songID == current.track.songId && $0.platform == selection.siteId &&
+                            $0.provider == MusicSourceExclusion.providerID(selection.installationId, platform: selection.siteId)
+                    case .recording(let fingerprint, let duration, let sourceKey):
+                        let recording = MusicRecordingIdentity(current.track)
+                        return sourceKey == selection.sourceKey && recording.fingerprint == fingerprint &&
+                            recording.isCompatible(with: .init(title: "", artist: "", duration: duration), sameNative: true)
+                    }
                 }) {
                     await replaceExcludedSource(intent: .quality(candidate?.delivery?.quality ?? selection.quality),
                                                 resumeControl: control)

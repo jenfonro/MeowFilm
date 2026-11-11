@@ -42,8 +42,6 @@ public sealed partial class MusicLibraryOwner
             return SearchCommand(method, parameters, document);
         if (method.StartsWith("music.lyrics.local.", StringComparison.Ordinal))
             return LocalLyricsCommand(method, parameters, document);
-        if (method.StartsWith("music.lyrics.display.", StringComparison.Ordinal))
-            return LyricDisplayCommand(method, parameters, document);
         if (method == "music.online.song")
         {
             LJ.Fields(parameters, "platform musicInfo title artist album duration", "platform musicInfo title");

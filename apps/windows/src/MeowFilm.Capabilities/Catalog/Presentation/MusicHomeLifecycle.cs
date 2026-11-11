@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
-using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
@@ -46,8 +45,7 @@ public sealed partial class MusicCapability
                 await EnsureCatalogSourceSettingsAsync(request.Token);
                 if (!homeSnapshotRead)
                 {
-                    try { homeSnapshot = await homeSnapshotStore.ReadAsync(request.Token); }
-                    catch (DocumentStoreException) { status = "首页缓存读取失败"; Changed(nameof(Status)); }
+                    homeSnapshot = await homeSnapshotStore.ReadAsync(request.Token);
                     homeSnapshotRead = true;
                 }
             }
@@ -147,11 +145,6 @@ public sealed partial class MusicCapability
         {
             try { await homeSnapshotStore.SaveAsync(saved, lifetime.Token); }
             catch (OperationCanceledException) { }
-            catch (DocumentStoreException)
-            {
-                if (!stopping && ReferenceEquals(homeSnapshot, saved))
-                { status = "首页缓存保存失败"; Changed(nameof(Status)); }
-            }
         }
         async Task Observe()
         {

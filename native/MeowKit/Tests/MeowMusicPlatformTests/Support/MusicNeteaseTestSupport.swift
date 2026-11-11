@@ -238,10 +238,11 @@ struct MusicNeteaseNativeFixture {
     let http: MusicNeteaseTestHTTP
     let accounts: AccountSessionCoordinator
     let service: NativeMusicAccountService
-    init(restored: Bool = true, urlCacheStore: DocumentStore? = nil) throws {
+    init(restored: Bool = true, urlCacheStore: DocumentStore? = nil,
+         feedbackOutboxStoreFactory: (@Sendable () throws -> DocumentStore)? = nil) throws {
         http = MusicNeteaseTestHTTP(clock: clock); accounts = AccountSessionCoordinator(store: store)
         service = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],
-                                            transport: http, urlCacheStore: urlCacheStore, clock: { [clock] in clock.now() })
+                                            transport: http, urlCacheStore: urlCacheStore, feedbackOutboxStoreFactory: feedbackOutboxStoreFactory, clock: { [clock] in clock.now() })
         if restored { try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity) }
     }
     func enable() async throws { _ = try await service.setAccess(available: true, generation: 1) }

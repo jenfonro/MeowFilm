@@ -39,7 +39,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
     : domain === 'source' ? ['cat', 'source'].includes(scope.sourceEngine)
       : domain === 'pan' ? !!(scope.accountProvider || scope.fileProvider)
         : scope.sourceKey === domain || scope.accountProvider === domain || scope.fileProvider === domain;
-  async function invalidate(domain, instances) {
+  async function invalidate(domain, instances, discardCacheError = false) {
     // Both calls revoke their generation synchronously before awaiting drain.
     // Native publication and direct/cache work cannot remain valid while a
     // different owner is already waiting for a slow transport to close.
@@ -47,7 +47,8 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
       data.invalidate(domain), service.invalidate(domain, instances), search.invalidate(domain),
       media.invalidate(scope => sourceMatches(scope, domain)),
     ]);
-    const failure = results.find(result => result.status === 'rejected');
+    const failure = results.find((result, index) => result.status === 'rejected' &&
+      !(discardCacheError && index === 0 && result.reason?.code === 'STORAGE_ERROR'));
     if (failure) throw failure.reason;
   }
   const operations = {
@@ -151,7 +152,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
         }
       } else if (['tmdb', 'douban'].includes(moduleId)) {
         const after = await providerState(moduleId);
-        if (after?.revision !== before?.revision || succeeded && after?.revision === undefined) await invalidate(moduleId);
+        if (after?.revision !== before?.revision || succeeded && after?.revision === undefined) await invalidate(moduleId, undefined, true);
       }
     },
     close() {

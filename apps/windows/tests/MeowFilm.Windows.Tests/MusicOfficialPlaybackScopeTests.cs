@@ -504,8 +504,8 @@ public static partial class MusicOfficialPlaybackScopeTests
         private Scene(bool files)
         {
             Files.Clock.Now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            App = new(new MusicNativeApplication(Files.Store, new NoNode(), new NoHttp()), Files);
-            Module = new(App, Files.Store, Output, files ? Files.Cache : null, new Dialogs());
+            App = new(new MusicNativeApplication(Files.Store, new NoNode(), Files.CacheStore, new NoHttp()), Files);
+            Module = new(App, Files.Store, Output, files ? Files.Cache : null, new Dialogs(), cacheStore: Files.CacheStore);
         }
         internal static async Task<Scene> Create(bool files = false)
         {
@@ -563,7 +563,7 @@ public static partial class MusicOfficialPlaybackScopeTests
     {
         internal readonly List<JsonElement> Plans = [], Resolutions = [], Completions = [];
         internal readonly Dictionary<string, string> Failures = [];
-        internal readonly MusicSourceCache Urls = new(files.Store, files.Clock);
+        internal readonly MusicSourceCache Urls = new(files.CacheStore, files.Clock);
         internal readonly TaskCompletionSource DiscoveryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource DiscoveryRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource ResolutionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);

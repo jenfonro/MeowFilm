@@ -1180,26 +1180,86 @@ test('E34/E41: progressive prefetch merges callers and full playback reads cache
   assert.equal(upstream.requests[1].headers.cookie, credentials.Cookie);
 });
 
-test('E34/E41: playback arriving during a prefetch waits for the shared bytes instead of downloading a second prefix', async t => {
-  const entered = deferred(), complete = deferred(), data = bytes.subarray(0, 1024);
-  const upstream = await source(t, (request, response) => {
-    const match = /^bytes=0-(\d+)$/.exec(request.headers.range ?? '');
-    assert.ok(match);
-    response.writeHead(206, { 'Content-Type': 'video/mp4', 'Content-Range': `bytes 0-${data.length - 1}/${data.length}`,
-      'Content-Length': data.length });
-    response.write(data.subarray(0, 32)); entered.resolve();
-    complete.promise.then(() => response.end(data.subarray(32)));
+test('E34/E41: playback uses completed bytes only and does not wait for slow or failing prefetch', { timeout: 10000 }, async t => {
+  for (const fail of [false, true]) await t.test(fail ? 'failed prefetch' : 'slow successful prefetch', async t => {
+    const entered = deferred(), complete = deferred(), data = bytes.subarray(0, 1024);
+    let pending = true, first = true;
+    const upstream = await source(t, (request, response) => {
+      if (!first) { binary(request, response, data); return; }
+      first = false;
+      assert.equal(request.headers.range, 'bytes=0-1048575');
+      response.writeHead(206, { 'Content-Type': 'video/mp4', 'Content-Range': `bytes 0-${data.length - 1}/${data.length}`,
+        'Content-Length': data.length });
+      response.write(data.subarray(0, 32)); entered.resolve();
+      complete.promise.then(() => fail ? response.destroy() : response.end(data.subarray(32)));
+    });
+    const media = service(t), receipt = await media.prepare({
+      url: `${upstream.url}/clip.mp4`, headers: credentials,
+    }, { cache: true });
+    t.after(() => complete.resolve());
+    const buffering = media.prefetch(receipt.id).finally(() => { pending = false; });
+    const rejected = fail ? assert.rejects(buffering, { code: 'MEDIA_UPSTREAM_ERROR' }) : undefined;
+    await entered.promise;
+    const playback = await read(receipt.url);
+    assert.equal(playback.status, 200);
+    assert.deepEqual(playback.body, data);
+    const seek = await read(receipt.url, { headers: { Range: 'bytes=32-63' } });
+    assert.equal(seek.status, 206);
+    assert.deepEqual(seek.body, data.subarray(32, 64));
+    assert.equal((await read(receipt.url, { method: 'HEAD' })).status, 200);
+    assert.equal(pending, true, 'GET, Range and HEAD must finish before prefetch settles');
+    assert.equal(upstream.requests.length, 4, 'incomplete bytes are not cache hits');
+    assert.ok(upstream.requests.every(request => request.headers.authorization === credentials.Authorization));
+    complete.resolve();
+    if (fail) await rejected;
+    else assert.equal((await buffering).bytes, data.length);
+    assert.deepEqual((await read(receipt.url)).body, data);
+    assert.equal(upstream.requests.length, fail ? 5 : 4, 'only a completed prefetch may serve the next request');
   });
-  const media = service(t), receipt = await media.prepare({ url: `${upstream.url}/clip.mp4` }, { cache: true });
-  const buffering = media.prefetch(receipt.id);
-  await entered.promise;
-  const playback = read(receipt.url);
-  await delay(20);
-  assert.equal(upstream.requests.length, 1);
-  complete.resolve();
-  assert.equal((await buffering).bytes, data.length);
-  assert.deepEqual((await playback).body, data);
-  assert.equal(upstream.requests.length, 1);
+});
+
+test('E34/E41/E43: prefetch leaves a playback slot within the unchanged total request budget', { timeout: 10000 }, async t => {
+  const saturated = deferred(), playing = deferred(), finishPlayback = deferred(), prefetchStopped = deferred();
+  let pendingPrefetch = 0, closedPrefetch = 0;
+  const upstream = await source(t, (request, response) => {
+    if (request.headers.range) {
+      response.once('close', () => {
+        if (++closedPrefetch === 63) prefetchStopped.resolve();
+      });
+      response.writeHead(206, { 'Content-Type': 'video/mp4', 'Content-Range': 'bytes 0-1023/1024', 'Content-Length': 1024 });
+      response.write(bytes.subarray(0, 32));
+      if (++pendingPrefetch === 63) saturated.resolve();
+    } else {
+      response.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': bytes.length });
+      response.write(bytes.subarray(0, 32));
+      playing.resolve();
+      finishPlayback.promise.then(() => response.end(bytes.subarray(32)));
+    }
+  });
+  const media = service(t), receipts = [], cancelled = [];
+  t.after(() => finishPlayback.resolve());
+  for (let index = 0; index < 63; index++) {
+    const receipt = await media.prepare({ url: `${upstream.url}/${index}.mp4`, headers: credentials }, { cache: true });
+    receipts.push(receipt);
+    cancelled.push(assert.rejects(media.prefetch(receipt.id), { code: 'MEDIA_CANCELLED' }));
+  }
+  await saturated.promise;
+  const extra = await media.prepare({ url: `${upstream.url}/extra.mp4` }, { cache: true });
+  await assert.rejects(media.prefetch(extra.id), { code: 'MEDIA_BUSY' });
+  assert.equal(upstream.requests.length, 63, 'denied prefetch must not open another upstream request');
+  const playback = read(receipts[0].url);
+  await playing.promise;
+  assert.equal(upstream.requests.length, 64, 'playback must reach upstream while 63 prefetches remain pending');
+  const busy = await read(extra.url);
+  assert.equal(busy.status, 503);
+  assert.equal(busy.text, 'MEDIA_BUSY', 'foreground admission must still enforce the total resource boundary');
+  assert.equal(upstream.requests.length, 64);
+  await Promise.all(receipts.map(receipt => media.cancelPrefetch(receipt.id)));
+  await Promise.all(cancelled);
+  await prefetchStopped.promise;
+  finishPlayback.resolve();
+  assert.deepEqual((await playback).body, bytes, 'cancelling prefetch must not cancel the admitted playback');
+  assert.equal((await read(extra.url)).status, 200, 'drained slots must be reusable');
 });
 
 test('E34/E39/E42: HLS prefetch fetches required key, init, one video and default audio; cached graph and seek do not refetch', async t => {

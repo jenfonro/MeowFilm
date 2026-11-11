@@ -160,9 +160,10 @@ public static partial class MusicNativeLibraryTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly Store Store = new();
+        internal readonly LyricCacheStore Cache = new();
         private readonly List<MusicLibraryOwner> owners = [];
         internal MusicLibraryOwner Owner(IDocumentStore? store = null, string scope = "local")
-        { var owner = new MusicLibraryOwner(store ?? Store, scope); owners.Add(owner); return owner; }
+        { var owner = new MusicLibraryOwner(store ?? Store, scope, Cache); owners.Add(owner); return owner; }
         public async ValueTask DisposeAsync() { foreach (var o in owners) await o.AbortAsync(); await Store.DisposeAsync(); }
     }
     private static Task Contract()

@@ -7,6 +7,7 @@ using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 using static MeowFilm.Windows.Tests.MusicOfficialAudioTests;
 
 namespace MeowFilm.Windows.Tests;
@@ -68,14 +69,16 @@ public static class MusicSongFactsTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly MemoryStore Store = new();
+        internal readonly CacheDocumentStore CacheStore;
         internal readonly Clock Clock = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicSongMatcher Facts;
         internal int Searches;
         internal Fixture()
         {
+            CacheStore = new(Store);
             Library = new(Store);
-            Facts = new(Library, new(Store), (request, _) =>
+            Facts = new(Library, new(CacheStore), (request, _) =>
             { Searches++; return Task.FromResult(Page(request, Song(request.Platform, "matched-" + request.Platform))); }, Clock);
             Library.SongsObserved = Facts.ObserveSongs;
             Library.SongFactsProjection = Facts.ProjectKnownFacts;
@@ -85,7 +88,11 @@ public static class MusicSongFactsTests
             Facts.MatchAsync(song, platform, Context(platform), default);
         internal Task Favorite(params JsonObject[] songs) => Ok(Library, "music.library.addSongs",
             new { id = "favorites", ifRevision = 0, songs });
-        public async ValueTask DisposeAsync() { await Facts.DrainAsync(); await Library.DisposeAsync(); }
+        public async ValueTask DisposeAsync()
+        {
+            try { await Facts.DrainAsync(); await Library.DisposeAsync(); }
+            finally { await CacheStore.DisposeAsync(); await Store.DisposeAsync(); }
+        }
     }
 
     private static async Task Bidirectional()
@@ -134,6 +141,7 @@ public static class MusicSongFactsTests
             .OfType<JsonObject>().Single(source => LJ.S(source["source"]) == "tx"))["size"]) == "4096",
             "catalog, library and queue snapshots cannot replace metadata from the real search");
         await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
         Check(LJ.I(Saved(f.Store).Single()!["platforms"]!["tx"]!["checkedAt"]) == checkedAt &&
             LJ.I(Saved(f.Store).Single()!["platforms"]!["tx"]!["matchedAt"]) == checkedAt && f.Searches == 1,
             "metadata acquisition and queue reads cannot renew search or match age");
@@ -176,6 +184,7 @@ public static class MusicSongFactsTests
         {
             var known = await f.Facts.KnownAsync(original, default);
             await f.Facts.PersistAsync(default);
+            await f.CacheStore.DrainAsync();
             var state = Saved(f.Store).Single()!["platforms"]!["tx"]!;
             Check(Size(known) == "4096" && LJ.I(state["checkedAt"]) == checkedAt &&
                 LJ.I(state["matchedAt"]) == checkedAt && searches == 2 && f.Searches == 0,
@@ -255,6 +264,7 @@ public static class MusicSongFactsTests
             await pending.WaitAsync(TimeSpan.FromSeconds(3));
             var known = await f.Facts.KnownAsync(original, default);
             await f.Facts.PersistAsync(default);
+            await f.CacheStore.DrainAsync();
             var state = Saved(f.Store).Single()!["platforms"]!["tx"]!;
             Check(LJ.S(NativeMusicSong.SourceData(known["sources"]!.AsArray().OfType<JsonObject>()
                 .Single(source => LJ.S(source["source"]) == "tx"))["size"]) == "4096" &&
@@ -287,8 +297,10 @@ public static class MusicSongFactsTests
         await using var f = new Fixture();
         var original = Song();
         await f.Favorite(original); await f.Match(original, "tx"); await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
+        await using var restartedCache = new CacheDocumentStore(f.Store);
         await using var restartedLibrary = new MusicLibraryOwner(f.Store);
-        var restartedFacts = new MusicSongMatcher(restartedLibrary, new(f.Store), (_, _) =>
+        var restartedFacts = new MusicSongMatcher(restartedLibrary, new(restartedCache), (_, _) =>
             throw new InvalidOperationException("first library read cannot search"), f.Clock);
         restartedLibrary.SongsObserved = restartedFacts.ObserveSongs;
         restartedLibrary.SongFactsProjection = restartedFacts.ProjectKnownFacts;
@@ -327,13 +339,16 @@ public static class MusicSongFactsTests
         await Ok(f.Library, "music.library.create", new { name = "Other collection", songs = new[] { b } });
         await f.Match(a, "tx"); await f.Match(b, "kw");
         await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
         Check(Saved(f.Store).Count == 1 && Has(Saved(f.Store)[0]!["song"]!.AsObject(), "tx") &&
             Has(Saved(f.Store)[0]!["song"]!.AsObject(), "kw"), "membership aliases cannot create duplicate mutable rows");
         await Ok(f.Library, "music.library.removeSong", new { id = "favorites", ifRevision = 1, songId = LJ.S(a["songId"]) });
         await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
         Check(Saved(f.Store).Count == 1, "another collection keeps the same owner eligible");
         await Ok(f.Library, "music.library.remove", new { id = "playlist:1", ifRevision = 1 });
         await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
         Check(Saved(f.Store).Count == 0, "no local membership means no persisted matching fact");
     }
     private static async Task EmptySearch()
@@ -367,6 +382,7 @@ public static class MusicSongFactsTests
         });
         f.Facts.ObserveSearch(snapshot, Context);
         await f.Match(song, "tx"); await f.Favorite(song); await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
         Check(f.Searches == 0 && LJ.I(Saved(f.Store).Single()!["platforms"]!["tx"]!["checkedAt"]) == emptyAt,
             "a platform which returned empty before discovery still contributes its original focused check");
         f.Clock.Now = emptyAt + MusicSongMatcher.NotFoundRetry;
@@ -380,6 +396,7 @@ public static class MusicSongFactsTests
         var request = new MusicSearchRequest("tx", "Artist");
         f.Facts.ObservePage(request, Page(request), "", Context("tx"), f.Facts.BeginSearch("tx"));
         await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
         Check(Saved(f.Store).Single()!["platforms"]!["tx"] is null,
             "a broad page must not label an omitted recording notFound");
         await f.Match(a, "tx");
@@ -404,6 +421,7 @@ public static class MusicSongFactsTests
             } } });
         f.Facts.ObserveSearch(cached, Context);
         await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
         var known = await f.Facts.KnownAsync(original, default);
         Check(LJ.I(Saved(f.Store).Single()!["platforms"]!["tx"]!["checkedAt"]) == checkedAt &&
             LJ.S(NativeMusicSong.SourceData(known["sources"]!.AsArray().OfType<JsonObject>()
@@ -434,9 +452,11 @@ public static class MusicSongFactsTests
     {
         await using var f = new Fixture();
         await f.Favorite(Song()); await f.Match(Song(), "tx"); await f.Facts.PersistAsync(default);
+        await f.CacheStore.DrainAsync();
+        await using var restartedCache = new CacheDocumentStore(f.Store);
         var catalog = new Catalog();
         await using var owner = new MusicNativeCatalogOwner(catalog, f.Library);
-        var restarted = new MusicSongMatcher(f.Library, new(f.Store), (_, _) =>
+        var restarted = new MusicSongMatcher(f.Library, new(restartedCache), (_, _) =>
             throw new InvalidOperationException("catalog projection cannot supplement"), f.Clock);
         owner.PrepareSongFacts = restarted.InitializeAsync; owner.SongFactsProjection = restarted.ProjectFacts;
         var result = await owner.ExecuteAsync("music.catalog.song", new { platform = "wy", id = "original" });
