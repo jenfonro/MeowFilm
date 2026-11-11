@@ -122,7 +122,7 @@ for (const file of ['unlisted-helper.mjs', 'modules/metadata/unlisted-helper.mjs
 test('Windows scope ignores other-platform sources and generated-runtime templates', t => {
   const f = fixture(t);
   f.write('scripts/ios-node-preflight/probe.mjs', "import './app/bootstrap.mjs';");
-  f.write('scripts/package-ios-runtime.mjs', "import './missing-ios-input.mjs';");
+  f.write('scripts/ios/package-runtime.mjs', "import './missing-ios-input.mjs';");
   f.write('apps/ios/runtime/bootstrap.mjs', "import './missing-platform-input.mjs';");
   const result = verifyAppStructure(f.source);
   assert.equal(result.relativeImports, 4);
@@ -139,12 +139,31 @@ test('Windows tools and their shared dependencies remain checked', t => {
   assert.throws(() => verifyAppStructure(f.source), /missing\/linked relative import/);
 });
 
+test('new shared Node tools and their dependencies are collected without registration', t => {
+  const f = fixture(t);
+  f.write('scripts/windows/tool.mjs', "import '../fresh-helper.mjs';");
+  f.write('scripts/fresh-helper.mjs', "export { value } from './another-helper.mjs';");
+  f.write('scripts/another-helper.mjs', 'export const value = 1;');
+  const result = verifyAppStructure(f.source);
+  assert.ok(result.sourceFiles.includes('scripts/fresh-helper.mjs'));
+  assert.ok(result.sourceFiles.includes('scripts/another-helper.mjs'));
+  assert.equal(result.relativeImports, 6);
+  f.write('scripts/another-helper.mjs', "import './missing.mjs';");
+  assert.throws(() => verifyAppStructure(f.source), /missing\/linked relative import/);
+});
+
+test('standalone shared Node tools are checked without an importing entry', t => {
+  const f = fixture(t);
+  f.write('scripts/fresh-tool.mjs', "import './missing.mjs';");
+  assert.throws(() => verifyAppStructure(f.source), /missing\/linked relative import/);
+});
+
 for (const owner of ['scripts/windows/tool.mjs', 'scripts/package-runtime.mjs', 'packages/example/index.js']) {
   test(owner + ' cannot depend on an iOS-only tool', t => {
     const f = fixture(t);
-    f.write('scripts/package-ios-runtime.mjs', 'export {};');
-    const specifier = owner.startsWith('scripts/windows/') ? '../package-ios-runtime.mjs'
-      : owner.startsWith('packages/') ? '../../scripts/package-ios-runtime.mjs' : './package-ios-runtime.mjs';
+    f.write('scripts/ios/package-runtime.mjs', 'export {};');
+    const specifier = owner.startsWith('scripts/windows/') ? '../ios/package-runtime.mjs'
+      : owner.startsWith('packages/') ? '../../scripts/ios/package-runtime.mjs' : './ios/package-runtime.mjs';
     f.write(owner, `import '${specifier}';`);
     assert.throws(() => verifyAppStructure(f.source), /Windows source dependency outside its scope/);
   });
@@ -285,4 +304,11 @@ test('native build intermediates are excluded while authored native inputs stay 
   const result = verifyAppStructure(f.source);
   assert.ok(result.sourceFiles.includes('packages/script-host/native/fixture.cc'));
   assert.ok(!result.sourceFiles.some(path => path.startsWith('packages/script-host/build/')));
+});
+
+test('generated files cannot become authored dependencies through a relative import', t => {
+  const f = fixture(t);
+  f.write('packages/script-host/build/Release/source-sdk.js', 'export {};');
+  f.write('scripts/fresh-helper.mjs', "import '../packages/script-host/build/Release/source-sdk.js';");
+  assert.throws(() => verifyAppStructure(f.source), /Windows source dependency outside its scope/);
 });

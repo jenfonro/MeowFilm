@@ -39,12 +39,33 @@ test('Windows input inventory covers shared packaging, locked configuration and 
     'apps/windows/src/MeowFilm.Media/IMPLEMENTATION.md',
     'apps/ios/MeowFilm/App.swift', '.local/test-results/native.log',
     'native/MeowKit/Package.swift', 'scripts/generate-ios-project.py',
-    'scripts/package-ios-runtime.mjs', 'scripts/prepare-ios-runtime.py',
+    'scripts/ios/package-runtime.mjs', 'scripts/prepare-ios-runtime.py',
     'scripts/ios-node-preflight/probe.mjs', 'scripts/ios-node-mobile.json',
     'scripts/tests/test_source_scope.py', 'tests/ios-runtime.test.mjs', 'tests/ios-runtime-support.mjs',
     'LICENSES/nodejs-mobile-LICENSE.txt',
-    'build/meowfilm.exe', 'tmp/test-results/native.log', 'tmp/working/项目工作记录.md'
+    'build/meowfilm.exe', 'tmp/test-results/native.log', 'tmp/working/项目工作记录.md',
+    'apps/windows/app/bin/Release/meowfilm.exe', 'apps/windows/app/obj/generated.cs',
+    'packages/script-host/build/Release/source-sdk.js', 'packages/script-host/node_modules/example/index.js'
   ]) assert.equal(isWindowsBuildInput(path), false, path);
+});
+
+test('new shared Node helpers participate in the fingerprint without registration', () => {
+  mkdirSync(temporaryRoot, { recursive: true });
+  const root = mkdtempSync(join(temporaryRoot, 'meowfilm-inputs-'));
+  try {
+    const entry = 'scripts/windows/tool.mjs', helper = 'scripts/fresh-helper.mjs';
+    mkdirSync(dirname(join(root, entry)), { recursive: true });
+    writeFileSync(join(root, entry), "import '../fresh-helper.mjs';");
+    const before = fingerprintInputs(root, [entry]);
+    writeFileSync(join(root, helper), 'export const value = 1;');
+    const included = fingerprintInputs(root, [entry, helper]);
+    assert.notEqual(included, before);
+    writeFileSync(join(root, helper), 'export const value = 2;');
+    assert.notEqual(fingerprintInputs(root, [entry, helper]), included);
+  } finally {
+    assertOwnedPath(temporaryRoot, root);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('Windows fingerprint binds bytes and paths; inventory order and duplicates are irrelevant', () => {

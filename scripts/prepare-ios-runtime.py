@@ -186,7 +186,7 @@ def payload(node, selected):
     if staging.exists() or previous.exists() or runtime.is_symlink():
         raise ValueError("Unfinished or linked iOS runtime preparation")
     try:
-        subprocess.run([node, str(ROOT / "scripts/package-ios-runtime.mjs"), "--product", "aggregate",
+        subprocess.run([node, str(ROOT / "scripts/ios/package-runtime.mjs"), "--product", "aggregate",
                         "--sdk", selected["sdk"], "--arch", selected["arch"], "--output", str(staging)], check=True, cwd=ROOT)
         manifest = json.loads((staging / "runtime-manifest.json").read_text(encoding="utf-8"))
         if (manifest.get("status") != "complete" or manifest.get("platform") != "ios"

@@ -5,8 +5,8 @@ import {
 import { createHash } from 'node:crypto';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { packageRuntime } from './package-runtime.mjs';
-import { iosTarget } from './quickjs/ios-target.mjs';
+import { packageRuntime } from '../package-runtime.mjs';
+import { iosTarget } from '../quickjs/ios-target.mjs';
 
 const MANIFEST = 'runtime-manifest.json';
 const TRANSPORT = 'runtime.http.v1';
@@ -93,7 +93,7 @@ function relocate(source, imports) {
  * the result as a code-signed resource; Node Mobile is not part of this payload.
  */
 export async function packageIOSRuntime({
-  root = fileURLToPath(new URL('../', import.meta.url)), product, output, sdk, arch,
+  root = fileURLToPath(new URL('../../', import.meta.url)), product, output, sdk, arch,
 } = {}) {
   const target = iosTarget(sdk, arch);
   const manifest = await packageRuntime({ root, product, output, profile: 'common-native', target });
@@ -265,7 +265,7 @@ async function main(args) {
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
     check(['--product', '--output', '--sdk', '--arch'].includes(args[i]) && args[i + 1] && !Object.hasOwn(options, args[i].slice(2)),
-      'CLI_USAGE', 'Usage: node scripts/package-ios-runtime.mjs --product aggregate --sdk <sdk> --arch <arch> --output <new absolute directory>');
+      'CLI_USAGE', 'Usage: node scripts/ios/package-runtime.mjs --product aggregate --sdk <sdk> --arch <arch> --output <new absolute directory>');
     options[args[i].slice(2)] = args[i + 1];
   }
   check(options.product && options.output, 'CLI_USAGE', 'Both --product and --output are required');

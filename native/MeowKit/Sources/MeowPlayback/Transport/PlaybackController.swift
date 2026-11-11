@@ -660,6 +660,8 @@ public final class PlaybackController: ObservableObject {
         publish()
     }
 
+    /// Returns whether the current attempt accepted the pause intent, including
+    /// a failed attempt whose replacement must not start automatically.
     @discardableResult
     public func pause(attempt: PlayAttempt) -> Bool {
         guard isCurrent(attempt), state.isPlayable || state.snapshot.phase == .failed else { return false }
