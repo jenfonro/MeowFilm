@@ -87,6 +87,10 @@ public final class PageHeaderView: UIView {
             setNeedsLayout()
         }
     }
+    public var titleFont: UIFont {
+        get { titleLabel.font }
+        set { titleLabel.font = newValue }
+    }
     public var hasExplicitLeading: Bool { leading != nil }
     public var trailingCount: Int { trailing.count }
     /// Tests and page chrome use the same row geometry without reaching into

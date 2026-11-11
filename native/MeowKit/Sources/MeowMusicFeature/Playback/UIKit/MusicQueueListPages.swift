@@ -6,7 +6,7 @@ import MeowUI
 final class MusicQueueCurrentPage: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private let layout = MusicQueueListLayout()
     lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: layout)
-    let mode = UIButton(type: .system), continuePlaying = UIButton(type: .system)
+    let mode = UIButton(type: .system)
     let retry = UIButton(type: .system), returnToQueue = UIButton(type: .system)
     let recommendations = UITableView(frame: .zero, style: .plain)
     private let recommendationStatus = UILabel()
@@ -29,7 +29,7 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDataSource, UITa
         collection.accessibilityIdentifier = "music.queue.current"
         controls.distribution = .fillEqually
         controls.spacing = 8
-        for (button, id) in [(mode, "mode"), (continuePlaying, "continue"), (retry, "retry"), (returnToQueue, "return")] {
+        for (button, id) in [(mode, "mode"), (retry, "retry"), (returnToQueue, "return")] {
             controls.addArrangedSubview(button)
             button.accessibilityIdentifier = "music.queue." + id
         }
@@ -58,16 +58,15 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDataSource, UITa
         loadViewIfNeeded()
         self.theme = theme
         let active = snapshot?.active == true
-        controls.isHidden = !active && recommendations == nil && fm == nil && !returning
+        let needsReadback = snapshot?.error == .commitUnconfirmed ||
+            recommendations?.error == .commitUnconfirmed || fm?.error == .commitUnconfirmed
+        controls.isHidden = snapshot == nil && recommendations == nil && fm == nil && !returning
         mode.isHidden = returning && !active
-        continuePlaying.isHidden = active ? snapshot?.supportsContinuation != true : recommendations == nil && fm == nil
-        retry.isHidden = !(active ? snapshot?.canRetry == true : recommendations?.canRetry == true)
+        retry.isHidden = !needsReadback && snapshot?.canRetry != true && recommendations?.canRetry != true
+        retry.setTitle(needsReadback ? "核对结果" : "重试", for: .normal)
         returnToQueue.isHidden = snapshot?.canRestoreQueue != true
         mode.setTitle(modeTitle, for: .normal)
-        let enabled = fm?.continueEnabled ?? (active ? snapshot?.continueEnabled == true : recommendations?.continueEnabled == true)
-        continuePlaying.setTitle(enabled ? "续播已开启" : "续播已关闭", for: .normal)
-        continuePlaying.accessibilityValue = enabled ? "开启" : "关闭"
-        for button in [mode, continuePlaying, retry, returnToQueue] {
+        for button in [mode, retry, returnToQueue] {
             button.tintColor = UIColor(theme.ink)
             button.backgroundColor = UIColor(theme.chip)
             button.layer.cornerRadius = 12

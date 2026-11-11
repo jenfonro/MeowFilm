@@ -80,19 +80,27 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
         if case .heartbeat(let last, let fromHome, let supplied) = value {
             let liked = try await heartbeatLikes(account, own: own, authorize: authorize)
             memberCount = liked.ids.count
-            let songID: String
-            if let last {
-                guard fromHome || liked.validIDs.contains(last) else { throw MusicServiceError.sourceUnavailable }
-                songID = last
+            if let supplied {
+                guard supplied.playlistID == liked.playlistID,
+                      fromHome || liked.validIDs.contains(supplied.seedID) else {
+                    throw MusicServiceError.targetChanged
+                }
+                guard let last else { throw MusicServiceError.invalidRequest }
+                resolved = .heartbeat(lastID: last, fromHome: fromHome, context: supplied)
             } else {
-                guard fromHome else { throw MusicServiceError.invalidRequest }
-                songID = chooseLikedSong(liked.validIDs)
-                guard liked.validIDs.contains(songID) else { throw MusicServiceError.invalidRequest }
+                let songID: String
+                if let last {
+                    guard fromHome || liked.validIDs.contains(last) else { throw MusicServiceError.sourceUnavailable }
+                    songID = last
+                } else {
+                    guard fromHome else { throw MusicServiceError.invalidRequest }
+                    songID = chooseLikedSong(liked.validIDs)
+                    guard liked.validIDs.contains(songID) else { throw MusicServiceError.invalidRequest }
+                }
+                let context = MusicSimilarHeartbeatContext(playlistID: liked.playlistID, seedID: songID)
+                heartbeatSeed = liked.songs[songID]
+                resolved = .heartbeat(lastID: songID, fromHome: fromHome, context: context)
             }
-            let context = MusicSimilarHeartbeatContext(playlistID: liked.playlistID, seedID: songID)
-            guard supplied == nil || supplied == context else { throw MusicServiceError.targetChanged }
-            heartbeatSeed = liked.songs[songID]
-            resolved = .heartbeat(lastID: songID, fromHome: fromHome, context: context)
         }
         guard let spec = try MusicNeteaseSimilarModeRequest.specification(resolved, heartbeatCount: memberCount) else {
             throw MusicServiceError.invalidRequest
@@ -152,7 +160,7 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             else if requested.insert(id).inserted { missing.append(id) }
         }
         missing.removeAll { metadata[$0] != nil }
-        if case .heartbeat(let selected?, _, _) = resolved, heartbeatSeed == nil,
+        if case .heartbeat(_, _, nil) = value, case .heartbeat(let selected?, _, _) = resolved, heartbeatSeed == nil,
            metadata[selected] == nil, requested.insert(selected).inserted { missing.append(selected) }
         for offset in stride(from: 0, to: missing.count, by: 100) {
             try await authorize(); try check(own)
@@ -188,7 +196,7 @@ extension NeteaseMusicAccountAdapter: MusicAccountSimilarModeProvider {
             guard bytes <= 4 * 1024 * 1024 else { throw MusicServiceError.limit }
             return .init(platform: "wy", data: data)
         }
-        if case .heartbeat(let selected, _, _) = resolved, let selected {
+        if case .heartbeat(_, _, nil) = value, case .heartbeat(let selected, _, _) = resolved, let selected {
             if let index = ordered.firstIndex(where: { $0.id == selected }) {
                 let first = items.remove(at: index); items.insert(first, at: 0)
             } else {

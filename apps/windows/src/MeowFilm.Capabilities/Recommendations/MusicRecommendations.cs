@@ -53,10 +53,14 @@ public sealed partial class MusicCapability
         ? RecText(recommendationSnapshot!.Value, "id") + ":" + PlaybackSourceActionKey +
             ":" + PlaybackFmMode + ":" + PlaybackFmScene + ":" + PlaybackFmRuleId + ":" + PlaybackFmTabTagId
         : "";
-    public string PlaybackSessionIcon => !stopping && HasActiveRecommendation ? "fm" : "fm-off";
-    public string PlaybackModeText => ModeText;
-    public string PlaybackModeIcon => Mode switch { 1 => "repeat", 2 => "shuffle", _ => "single" };
-    public string PlaybackModeActionKey => accountEpoch + ":" + PlaybackPresentationKey;
+    public string PlaybackSpecialModeText => HasPlaybackHeartbeat ? "心动模式" : HasPlaybackFm ? "私人漫游" :
+        recommendationSnapshot is { } value && RecText(value, "kind") == "similar" ? "相似模式" : "推荐模式";
+    public string PlaybackSpecialModeIcon => HasPlaybackHeartbeat ? "heartbeat" :
+        HasPlaybackFm || recommendationSnapshot is { } value && RecText(value, "kind") == "similar" ? "fm" : "sparkles";
+    public string PlaybackModeText => HasActiveRecommendation && RecommendationContinue ? PlaybackSpecialModeText : ModeText;
+    public string PlaybackModeIcon => HasActiveRecommendation && RecommendationContinue ? PlaybackSpecialModeIcon :
+        Mode switch { 1 => "repeat", 2 => "shuffle", _ => "single" };
+    public string PlaybackModeActionKey => PlaybackSourceActionKey + ":" + Mode + ":" + RecommendationContinue;
     public string PlaybackFmTitle => PlaybackFmRuleId.Length > 0 || PlaybackFmTabTagId.Length > 0
         ? "频道漫游" : PlaybackFmMode == "scene"
             ? CatalogFmScenes.First(choice => choice.Key == PlaybackFmScene).Name
@@ -94,7 +98,8 @@ public sealed partial class MusicCapability
     }
     public bool RecommendationContinue => recommendationSnapshot is { } value && RecBool(value, "continue");
     public bool CanChangeRecommendationContinue => !stopping && HasActiveRecommendation && !RecommendationLoading &&
-        RecText(recommendationSnapshot!.Value, "kind") != "heartbeat" && !CanReconcileRecommendation;
+        !CanReconcileRecommendation;
+    public bool HasRecommendationPanel => HasQueueRecommendations || CanRetryRecommendation || CanReconcileRecommendation;
     public bool CanRetryRecommendation => !stopping && recommendationSnapshot is { } value && RecBool(value, "canRetry");
     public bool CanReturnRecommendation => !stopping && recommendationSnapshot is { } value && RecBool(value, "canReturn");
     public bool CanCancelRecommendation => !stopping && HasRecommendationSession && (HasActiveRecommendation || RecommendationLoading);
@@ -120,12 +125,12 @@ public sealed partial class MusicCapability
             nameof(CanChooseRecommendation), nameof(RecommendationCandidates), nameof(HasPlaybackFm),
             nameof(PlaybackFmMode), nameof(PlaybackFmScene), nameof(PlaybackFmRuleId), nameof(PlaybackFmTabTagId),
             nameof(PlaybackFmActionKey), nameof(PlaybackModeText), nameof(PlaybackModeIcon), nameof(CanChangePlaybackMode),
-            nameof(HasPlaybackHeartbeat), nameof(PlaybackSessionIcon), nameof(PlaybackModeActionKey), nameof(PlaybackFmTitle),
+            nameof(HasPlaybackHeartbeat), nameof(PlaybackSpecialModeText), nameof(PlaybackSpecialModeIcon), nameof(PlaybackModeActionKey), nameof(PlaybackFmTitle),
             nameof(CanHeartbeatCurrent), nameof(CanRecommendCurrent), nameof(HasCurrentRecommendationIdentity),
             nameof(PlaybackQueueSourceText), nameof(PlaybackSourceActionKey), nameof(HasActiveRecommendation),
             nameof(RecommendationTitle), nameof(RecommendationLoading), nameof(RecommendationContinue),
             nameof(CanChangeRecommendationContinue), nameof(CanRetryRecommendation), nameof(CanReturnRecommendation),
-            nameof(CanCancelRecommendation), nameof(CanReconcileRecommendation) })
+            nameof(CanCancelRecommendation), nameof(CanReconcileRecommendation), nameof(HasRecommendationPanel) })
             Changed(name);
     }
     private void RecommendationChanged(JsonElement snapshot)

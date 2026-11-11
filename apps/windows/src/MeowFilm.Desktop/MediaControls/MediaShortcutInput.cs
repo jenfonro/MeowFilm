@@ -51,7 +51,7 @@ internal static class MediaShortcutInput
     }
 
     private static bool Protected(DependencyObject node) =>
-        node is TextBoxBase or PasswordBox or ComboBox { IsEditable: true } or MenuBase or MenuItem or Popup;
+        node is PlayerDialogHost or TextBoxBase or PasswordBox or ComboBox { IsEditable: true } or MenuBase or MenuItem or Popup;
 
     private static DependencyObject? Parent(DependencyObject node) => node switch
     {

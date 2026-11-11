@@ -1,22 +1,27 @@
 #if os(iOS)
 import UIKit
 
-/// An independent opaque page enters from below and always returns downward.
+/// An independent opaque page enters from, and returns to, its chosen edge.
 /// A horizontal edge gesture only supplies progress; it does not change axis.
 @MainActor
-public final class BottomPageTransition: NSObject, UIViewControllerTransitioningDelegate,
+public final class VerticalPageTransition: NSObject, UIViewControllerTransitioningDelegate,
     UIGestureRecognizerDelegate
 {
+    public enum Edge { case top, bottom }
     public let edgeGesture = UIScreenEdgePanGestureRecognizer()
     public var onTransitionEnded: ((_ presenting: Bool, _ completed: Bool) -> Void)?
     public var isTransitioning: Bool { animation != nil || interaction != nil }
     private weak var controller: UIViewController?
-    private var animation: BottomPageAnimator?
+    private let edge: Edge
+    private var animation: VerticalPageAnimator?
     private var interaction: UIPercentDrivenInteractiveTransition?
     private var interactionEnding = false
     private var foregroundObserver: NSObjectProtocol?
 
-    public override init() { super.init() }
+    public init(edge: Edge) {
+        self.edge = edge
+        super.init()
+    }
 
     public func installEdgeDismissal(on controller: UIViewController) {
         self.controller = controller
@@ -60,11 +65,12 @@ public final class BottomPageTransition: NSObject, UIViewControllerTransitioning
     public func presentationController(forPresented presented: UIViewController,
                                        presenting: UIViewController?, source: UIViewController)
         -> UIPresentationController? {
-        BottomPagePresentationController(presentedViewController: presented, presenting: presenting)
+        VerticalPagePresentationController(presentedViewController: presented, presenting: presenting)
     }
 
-    private func makeAnimator(presenting: Bool) -> BottomPageAnimator {
-        let value = BottomPageAnimator(presenting: presenting, edgeDismissal: !presenting && interaction != nil) {
+    private func makeAnimator(presenting: Bool) -> VerticalPageAnimator {
+        let value = VerticalPageAnimator(presenting: presenting, edge: edge,
+                                        edgeDismissal: !presenting && interaction != nil) {
             [weak self] completed in
             self?.animation = nil
             self?.interaction = nil
@@ -108,14 +114,17 @@ public final class BottomPageTransition: NSObject, UIViewControllerTransitioning
 }
 
 @MainActor
-private final class BottomPageAnimator: NSObject, UIViewControllerAnimatedTransitioning {
+private final class VerticalPageAnimator: NSObject, UIViewControllerAnimatedTransitioning {
     private let presenting: Bool
+    private let edge: VerticalPageTransition.Edge
     private let edgeDismissal: Bool
     private let completion: (Bool) -> Void
     private var animator: UIViewPropertyAnimator?
 
-    init(presenting: Bool, edgeDismissal: Bool, completion: @escaping (Bool) -> Void) {
+    init(presenting: Bool, edge: VerticalPageTransition.Edge,
+         edgeDismissal: Bool, completion: @escaping (Bool) -> Void) {
         self.presenting = presenting
+        self.edge = edge
         self.edgeDismissal = edgeDismissal
         self.completion = completion
         super.init()
@@ -139,19 +148,20 @@ private final class BottomPageAnimator: NSObject, UIViewControllerAnimatedTransi
             return failed
         }
         let container = context.containerView
+        let offset = container.bounds.height * (edge == .top ? -1 : 1)
         let frame = presenting ? context.finalFrame(for: controller) : context.initialFrame(for: controller)
         root.transform = .identity
         root.frame = frame
         if presenting {
             container.addSubview(root)
             root.layoutIfNeeded()
-            root.transform = CGAffineTransform(translationX: 0, y: container.bounds.height)
+            root.transform = CGAffineTransform(translationX: 0, y: offset)
         }
         let value = UIViewPropertyAnimator(duration: transitionDuration(using: context),
                                           curve: edgeDismissal ? .linear : .easeInOut)
         value.addAnimations { [presenting] in
             root.transform = presenting ? .identity : CGAffineTransform(
-                translationX: 0, y: container.bounds.height)
+                translationX: 0, y: offset)
         }
         value.addCompletion { [weak self, presenting, completion] _ in
             let completed = !context.transitionWasCancelled
@@ -168,7 +178,7 @@ private final class BottomPageAnimator: NSObject, UIViewControllerAnimatedTransi
 }
 
 @MainActor
-private final class BottomPagePresentationController: UIPresentationController {
+private final class VerticalPagePresentationController: UIPresentationController {
     override var shouldPresentInFullscreen: Bool { true }
     override var shouldRemovePresentersView: Bool { false }
     override var frameOfPresentedViewInContainerView: CGRect { containerView?.bounds ?? .zero }

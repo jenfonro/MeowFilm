@@ -93,6 +93,7 @@ public sealed partial class ShellWindow : Window
         _closePreferences = closePreferences;
         _trayIconFactory = trayIconFactory;
         InitializeComponent();
+        ChannelDialogHost.Attach(this);
         InitializeGeneralSettings(appearance, closePreferences);
         CloseDialog.ChoiceRequested += OnCloseChoiceRequested;
         CloseDialog.CancelRequested += CancelCloseChoice;
@@ -623,6 +624,14 @@ public sealed partial class ShellWindow : Window
     {
         if (CloseDialog.IsOpen || ResetDialog.IsOpen) return; // The active dialog owns keyboard navigation and Escape.
         if (_isClosing) return;
+        if (ChannelDialogHost.IsOpen)
+        {
+            if (!ChannelDialogHost.HandleEscape(e)) ProtectChannelKeyboard(e);
+            if (e.Key == Key.F && e.KeyboardDevice.Modifiers == ModifierKeys.Control ||
+                (e.Key == Key.Left || e.SystemKey == Key.Left) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
+                e.Handled = true;
+            return;
+        }
         // Let a native range editor cancel its own gesture before Escape closes
         // the full player. The shell must not depend on a music-specific type.
         if (e.Key == Key.Escape && (Mouse.Captured is Slider || Keyboard.FocusedElement is Slider)) return;
@@ -649,6 +658,30 @@ public sealed partial class ShellWindow : Window
             e.Handled = true;
             RunUiAction(GoBackAsync);
         }
+    }
+
+    private void ProtectChannelKeyboard(KeyEventArgs e)
+    {
+        // Only controls within the active channel keep their own keyboard input.
+        if (e.OriginalSource is not DependencyObject target ||
+            !ChannelDialogHost.IsAncestorOf(target)) e.Handled = true;
+    }
+
+    private void OnPreviewKeyUp(object sender, KeyEventArgs e)
+    {
+        if (!CloseDialog.IsOpen && !ResetDialog.IsOpen && ChannelDialogHost.IsOpen)
+            ProtectChannelKeyboard(e);
+    }
+
+    private void OnChannelHeaderPointer(object sender, MouseButtonEventArgs e)
+    {
+        if (CloseDialog.IsOpen || ResetDialog.IsOpen || !ChannelDialogHost.IsOpen) return;
+        bool In(FrameworkElement control) => e.OriginalSource is DependencyObject target &&
+            (ReferenceEquals(target, control) || control.IsAncestorOf(target));
+        if (ChannelDialogHost.HasOutsidePress || In(SearchChrome) || In(SettingsButton) || In(PlayerDetailBackButton) ||
+            In(PageHeaderHost) && e.OriginalSource is IInputElement node &&
+            System.Windows.Shell.WindowChrome.GetIsHitTestVisibleInChrome(node))
+            ChannelDialogHost.HandleOutsidePointer(e, RootLayout);
     }
 
     private async Task RunRequestAsync(RequestPlan plan, CancellationToken cancellationToken = default, bool reportOutcome = false)

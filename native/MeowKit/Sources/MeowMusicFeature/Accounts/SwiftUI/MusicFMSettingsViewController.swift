@@ -7,7 +7,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
     private let owner: MusicViewModel
     private let model: MusicFMSettingsViewModel
     private let account: UUID
-    private let transition = BottomPageTransition()
+    private let transition = VerticalPageTransition(edge: .top)
     private var closeQueued = false
     private var icons: [String: UIImage] = [:]
     private var rendered: (MusicFMSettingsState, PageTheme)?
@@ -26,7 +26,8 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
             themeProvider: appearance,
             content: MusicFMSettingsContent(theme: PageTheme(palette: appearance.pageColorway))
         )
-        pageTitle = "私人漫游"
+        pageTitle = MusicFMModeChoice.title(for: model.activeHomeFM)
+        overrideUserInterfaceStyle = .light
         modalPresentationStyle = .custom
         transitioningDelegate = transition
         transition.onTransitionEnded = { [weak self] presenting, completed in
@@ -34,9 +35,15 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
         }
     }
 
+    public override func loadView() {
+        view = MusicPlayerBackgroundView(style: .full, palette: themeProvider.pageColorway)
+    }
+
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.accessibilityIdentifier = "music.fm.settings"
+        pageHeader.titleFont = .systemFont(ofSize: 15, weight: .medium)
+        pageHeader.background.isHidden = true
         transition.installEdgeDismissal(on: self)
         icons = Dictionary(uniqueKeysWithValues: MusicFMModeChoice.scenes.map {
             ($0.submode, MusicFMSceneIcon.image(code: $0.submode))
@@ -70,6 +77,9 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
 
     public override func applyTheme() {
         super.applyTheme()
+        (viewIfLoaded as? MusicPlayerBackgroundView)?.apply(
+            palette: themeProvider.pageColorway, animated: themeProvider.animatesPageColorway
+        )
         render()
     }
 
@@ -94,6 +104,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
             available: model.hasAccess && owner.isFMActive,
             pendingChoice: model.hasAccess ? model.pendingChoice : nil
         )
+        pageTitle = MusicFMModeChoice.title(for: owner.activeHomeFM)
         if rendered?.0 != state || rendered?.1 != theme {
             rendered = (state, theme)
             setContent(MusicFMSettingsContent(

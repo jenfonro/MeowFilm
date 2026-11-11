@@ -134,11 +134,10 @@ import MeowMusicFeature
         XCTAssertEqual(records.filter { $0.request.url.path == detailPath }.count, 2)
     }
 
-    func testSuppliedContextCannotBypassOwnListOrFirstValidSeed() async throws {
+    func testContinuationContextCannotBypassOwnListOrOriginalSeedMembership() async throws {
         for context in [
             MusicSimilarHeartbeatContext(playlistID: "999", seedID: "101"),
-            MusicSimilarHeartbeatContext(playlistID: "501", seedID: "999"),
-            MusicSimilarHeartbeatContext(playlistID: "501", seedID: "102")
+            MusicSimilarHeartbeatContext(playlistID: "501", seedID: "999")
         ] {
             let f = try MusicNeteaseNativeFixture(); try await f.enable()
             let lease = try await f.service.beginAccountQueue(platform: .netease)
@@ -150,6 +149,76 @@ import MeowMusicFeature
             XCTAssertEqual(records.filter { $0.request.url.path == directoryPath }.count, 1)
             XCTAssertEqual(records.filter { $0.request.url.path == detailPath }.count, 1)
             XCTAssertFalse(records.contains { $0.request.url.path == heartbeatPath })
+            _ = await f.service.close()
+        }
+    }
+
+    func testContinuationKeepsOriginalSeedAndAcceptsRecommendedTailOutsideLikes() async throws {
+        for fromHome in [false, true] {
+            let f = try MusicNeteaseNativeFixture(); try await f.enable()
+            await f.http.replies(heartbeatPath, try [999, 1000].map { id in
+                try MusicNeteaseFixture.response(["code": 200, "data": [
+                    ["songInfo": MusicNeteaseFixture.song(id)]
+                ]])
+            })
+            let lease = try await f.service.beginAccountQueue(platform: .netease)
+            let first = try await f.service.similarModeBatch(lease,
+                request: .heartbeat(lastID: "102", fromHome: fromHome, context: nil))
+            let context = try XCTUnwrap(first.heartbeatContext)
+            let next = try await f.service.similarModeBatch(lease,
+                request: .heartbeat(lastID: "999", fromHome: fromHome, context: context))
+            XCTAssertEqual(next.heartbeatContext, context)
+            let songs = try next.items.map { try MusicQQWire.decode($0.data) }
+            XCTAssertEqual(songs.compactMap { $0["songmid"] as? String }, ["1000"],
+                "continuation neither inserts its tail as a new seed nor repeats the original seed")
+            let records = await f.http.recorded()
+            let payloads = try records.filter { $0.request.url.path == heartbeatPath }.map {
+                try MusicQQWire.decode(XCTUnwrap($0.payload))
+            }
+            XCTAssertEqual(payloads.compactMap { $0["playlistId"] as? String }, ["501", "501"])
+            XCTAssertEqual(payloads.compactMap { $0["startMusicId"] as? String }, ["102", "102"])
+            XCTAssertEqual(payloads.compactMap { $0["songId"] as? String }, ["102", "999"])
+            XCTAssertEqual(payloads.compactMap { $0["type"] as? String },
+                Array(repeating: fromHome ? "fromPlayAll" : "fromPlayOne", count: 2))
+            XCTAssertEqual(records.filter { $0.request.url.path == directoryPath }.count, 2)
+            XCTAssertEqual(records.filter { $0.request.url.path == detailPath }.count, 2)
+            XCTAssertFalse(records.contains { $0.request.url.path == metadataPath })
+            _ = await f.service.close()
+        }
+    }
+
+    func testContinuationRejectsChangedFavoriteOwnershipAndMissingTailBeforeIntelligence() async throws {
+        for change in ["owner", "playlist", "seed", "tail"] {
+            let f = try MusicNeteaseNativeFixture(); try await f.enable()
+            await f.http.replies(heartbeatPath, [try MusicNeteaseFixture.response([
+                "code": 200, "data": [["songInfo": MusicNeteaseFixture.song(999)]]
+            ])])
+            let lease = try await f.service.beginAccountQueue(platform: .netease)
+            let first = try await f.service.similarModeBatch(lease,
+                request: .heartbeat(lastID: "101", fromHome: false, context: nil))
+            let context = try XCTUnwrap(first.heartbeatContext)
+            if change == "owner" {
+                await f.http.replies(directoryPath, [try MusicNeteaseFixture.response([
+                    "code": 200, "more": false, "playlist": [MusicNeteaseFixture.collection(owner: 99)]
+                ])])
+            } else if change == "playlist" {
+                await f.http.replies(directoryPath, [try MusicNeteaseFixture.response([
+                    "code": 200, "more": false, "playlist": [MusicNeteaseFixture.collection(502)]
+                ])])
+                var detail = try MusicQQWire.object(MusicNeteaseFixture.detail()["playlist"])
+                detail["id"] = 502
+                await f.http.replies(detailPath, [try MusicNeteaseFixture.response(["code": 200, "playlist": detail])])
+            } else if change == "seed" {
+                await f.http.replies(detailPath, [try MusicNeteaseFixture.response(MusicNeteaseFixture.detail([102]))])
+            }
+            do {
+                _ = try await f.service.similarModeBatch(lease,
+                    request: .heartbeat(lastID: change == "tail" ? nil : "999",
+                        fromHome: false, context: context))
+                XCTFail(change)
+            } catch { XCTAssertEqual(error as? MusicServiceError, change == "tail" ? .invalidRequest : .targetChanged, change) }
+            let records = await f.http.recorded()
+            XCTAssertEqual(records.filter { $0.request.url.path == heartbeatPath }.count, 1, change)
             _ = await f.service.close()
         }
     }

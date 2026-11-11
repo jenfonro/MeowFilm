@@ -26,7 +26,7 @@ extension NativeMusicService: MusicQueueRecommendationServing {
         }
         let state = try appendQueueRecommendations(item, selectedIndex: index)
         invalidatePlayback(reason: .ui)
-        similarMode.playing = nil; similarMode.playbackEvent = nil; similarMode.eventOccurrence = nil
+        similarMode.playing = nil
         emitSimilar()
         return .init(state: state, action: .playCurrent)
     }
@@ -36,6 +36,9 @@ extension NativeMusicService: MusicQueueRecommendationServing {
         guard let item = similarMode.queue, item.id == snapshotID,
               queueRecommendationsAreCurrent(item, try read()) else { throw MusicServiceError.targetChanged }
         try item.lease?.authorization.check()
+        if enabled {
+            try similarQueueTransaction(["playback"]) { selectContinuationMode(&$0) }
+        }
         item.continueEnabled = enabled
         emitSimilar()
         if enabled { try queueRecommendationBoundary() }
@@ -164,13 +167,15 @@ extension NativeMusicService {
             try check(own); try lease.authorization.check()
             guard similarMode.queue === item, item.id == token, item.pendingID == requestID,
                   queueRecommendationsAreCurrent(item, try read()) else { return }
-            let unique = MusicNativeSimilarData.unique(songs, excluding: try read().queue["entries"].array.map { $0["song"] })
+            let current = try read()
+            let unique = MusicNativeSimilarData.unique(songs, excluding: current.queue["entries"].array.map { $0["song"] })
             guard let offset = response.offset, response.hasMore != nil else { throw MusicServiceError.invalidResponse }
             item.offset = offset; item.candidateID = UUID()
             item.songs = unique; item.recommendations = recommendations
             item.exhausted = response.hasMore == false || item.songs.isEmpty
             item.status = item.songs.isEmpty ? .empty : .ready
-            if item.active, item.pendingTail != nil, item.continueEnabled, !item.songs.isEmpty {
+            if item.continueEnabled, !item.songs.isEmpty,
+               item.pendingTail != nil || continuationIsDue(current) {
                 _ = try appendQueueRecommendations(item)
             }
         } catch {
@@ -187,20 +192,20 @@ extension NativeMusicService {
     }
 
     func queueRecommendationBoundary() throws {
-        guard let item = similarMode.queue, item.continueEnabled, item.pending == nil,
+        guard let item = similarMode.queue, item.pending == nil,
               !item.exhausted || !item.songs.isEmpty else { return }
         let d = try read()
         if !item.active {
-            guard item.songs.isEmpty, !item.attempted.contains("initial"), hasCurrentPlayback(d),
-                  d.queue["currentId"] == d.queue["source"]["seedEntryId"] else { return }
-            item.attempted.insert("initial")
-            try beginQueueRecommendationBatch(item, append: false)
-            return
+            if item.songs.isEmpty, !item.attempted.contains("initial"), hasCurrentPlayback(d),
+               d.queue["currentId"] == d.queue["source"]["seedEntryId"] {
+                item.attempted.insert("initial")
+                try beginQueueRecommendationBatch(item, append: item.continueEnabled && continuationIsDue(d))
+                return
+            }
         }
-        let event = d.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue ? similarMode.playbackEvent ?? "" :
-            d.queue["currentId"].string + ":" + String(item.offset)
-        guard continuationIsDue(d) else { return }
-        if item.active, !item.songs.isEmpty {
+        let event = d.queue["currentId"].string + ":" + String(item.offset)
+        guard item.continueEnabled, continuationIsDue(d) else { return }
+        if !item.songs.isEmpty {
             _ = try appendQueueRecommendations(item); emitSimilar(); return
         }
         guard item.songs.isEmpty, !item.attempted.contains(event) else { return }
@@ -243,7 +248,7 @@ extension NativeMusicService {
         retainQueueFeedbackOrigins(live, authorization: lease.authorization,
                                    seedIDs: MusicNativeSimilarData.nativeID(item.seed).map { [$0] } ?? [])
         item.revision = state.revision; item.currentEntryID = state.currentId ?? ""
-        if selectedIndex != nil { item.active = true }
+        item.active = true
         item.songs = []; item.recommendations = [:]; item.candidateID = UUID()
         item.status = .ready; item.error = nil; item.errorID = nil
         return state

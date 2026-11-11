@@ -77,13 +77,11 @@ struct MusicNativeSimilarRuntime {
     var preview: MusicNativeSimilarPreview?
     var queue: MusicNativeQueueRecommendations?
     var navigation = UUID()
+    var modeSelection = UUID()
     var restored = false
     var restoring: UUID?
     var restorationCompletion: MusicNativeOperation<Void>?
     var playing: (attempt: String, occurrence: String)?
-    var playbackEvent: String?
-    var eventOccurrence: String?
-    var randomFetch = false
     var watchers: [UUID: Task<Void, Never>] = [:]
     var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     var timedOut = Set<UUID>()
@@ -100,7 +98,7 @@ final class MusicNativeQueueRecommendations {
     var candidateID = UUID()
     var revision: Int
     var currentEntryID: String
-    var continueEnabled = true
+    var continueEnabled = false
     var lease: MusicAccountQueueLease?
     var songs: [MJ] = []
     var recommendations: [String: MJ] = [:]
@@ -115,7 +113,7 @@ final class MusicNativeQueueRecommendations {
     var pendingTail: String?
     init(revision: Int, currentEntryID: String, seed: MJ) {
         self.revision = revision; self.currentEntryID = currentEntryID
-        self.seed = seed; self.continueEnabled = true
+        self.seed = seed
     }
 }
 

@@ -23,21 +23,21 @@ final class MusicQueueUIKitTests: XCTestCase {
         await wait("full player visible") { full.isPageVisible && !full.isBeingPresented }
         defer { release(full, root: root, window: window) }
         let source = try XCTUnwrap(descendants(full.view).compactMap { $0 as? UIButton }.first {
-            $0.accessibilityIdentifier == "music.player.playbackSource"
+            $0.accessibilityIdentifier == "music.player.mode"
         })
         let initialActions = try XCTUnwrap(source.menu).children.compactMap { $0 as? UIAction }
-        XCTAssertTrue(initialActions.contains { $0.title == "当前歌曲心动" })
-        XCTAssertFalse(initialActions.contains { $0.title == "退出心动" || $0.title == "退出推荐" })
+        XCTAssertTrue(initialActions.contains { $0.title == "心动模式" })
+        XCTAssertFalse(initialActions.contains { $0.title == "退出心动模式" || $0.title == "退出推荐模式" })
         let original = model.queue.map(\.id), displayed = content.fence
         content.startCurrentHeartbeat(expected: displayed)
         await wait("current heartbeat committed") { model.similarMode?.active == true && !model.isChangingSimilarMode }
         let starts = await service.heartbeatStarts()
         XCTAssertEqual(starts, [.currentHeartbeat(occurrenceID: "entry-1", expectedRevision: 7)])
         let snapshot = try XCTUnwrap(model.similarMode)
-        XCTAssertFalse(snapshot.continueEnabled)
+        XCTAssertTrue(snapshot.continueEnabled)
         let activeActions = try XCTUnwrap(source.menu).children.compactMap { $0 as? UIAction }
-        XCTAssertTrue(source.image(for: .normal) === MusicPlaybackModeIcon.image(.fm))
-        XCTAssertEqual(activeActions.map(\.title), ["退出心动"])
+        XCTAssertTrue(source.image(for: .normal) === MusicPlaybackModeIcon.image(.heartbeat))
+        XCTAssertEqual(activeActions.map(\.title), ["退出心动模式", "心动模式", "列表循环", "单曲循环", "随机播放"])
         content.returnFromRecommendations(snapshot: snapshot.id, expected: content.fence)
         await wait("explicit Return finished") { model.similarMode == nil && !model.isChangingSimilarMode }
         XCTAssertEqual(model.queue.map(\.id), original)
@@ -51,10 +51,11 @@ final class MusicQueueUIKitTests: XCTestCase {
         await model.close()
     }
 
-    func testOrdinaryCandidatesAndContinuationUseIndependentQueueProtocol() async throws {
+    func testOrdinaryCandidatesRemainExplicitWithoutIndependentContinuationControl() async throws {
         let service = QueueUIKitService()
         await service.enableRecommendations()
         let model = await makeModel(service)
+        await model.loadSimilarMode()
         let original = model.queue.map(\.id)
         let (queue, root, window) = await mount(model)
         defer { release(queue, root: root, window: window) }
@@ -62,18 +63,14 @@ final class MusicQueueUIKitTests: XCTestCase {
         let pager = try XCTUnwrap(queue.children.first as? MusicQueuePagerViewController)
         let page = try XCTUnwrap(pager.children.compactMap { $0 as? MusicQueueCurrentPage }.first)
         await wait("ordinary controls rendered") {
-            page.continuePlaying.title(for: .normal) == "续播已关闭" && page.recommendations.numberOfRows(inSection: 0) == 2
+            page.recommendations.numberOfRows(inSection: 0) == 2
         }
-        XCTAssertFalse(page.continuePlaying.isHidden)
         XCTAssertTrue(page.returnToQueue.isHidden)
         XCTAssertEqual(model.queue.map(\.id), original)
         XCTAssertEqual(model.current?.id, "entry-1")
         let untouched = await service.statistics()
         XCTAssertEqual(untouched.previewReads, 0, "Ordinary previews cannot call previewSimilarMode")
-        page.continuePlaying.sendActions(for: .touchUpInside)
-        await wait("ordinary continuation enabled") { model.queueRecommendations?.continueEnabled == true }
-        page.continuePlaying.sendActions(for: .touchUpInside)
-        await wait("ordinary continuation disabled") { model.queueRecommendations?.continueEnabled == false }
+        XCTAssertEqual(model.queueRecommendations?.continueEnabled, false)
         let token = try XCTUnwrap(model.queueRecommendations).id
         page.tableView(page.recommendations, didSelectRowAt: IndexPath(row: 1, section: 0))
         await wait("whole candidate batch appended") { model.queue.count == original.count + 2 }
@@ -82,7 +79,7 @@ final class MusicQueueUIKitTests: XCTestCase {
         let actions = await service.recommendationActions()
         XCTAssertEqual(actions.tokens, [token])
         XCTAssertEqual(actions.choices, ["candidate-b"])
-        XCTAssertEqual(actions.switches, [true, false])
+        XCTAssertTrue(actions.switches.isEmpty, "Selecting real candidates does not enable continuation")
         XCTAssertEqual(actions.similarCalls, 0)
         XCTAssertNil(model.similarMode)
         await model.close()
@@ -92,6 +89,7 @@ final class MusicQueueUIKitTests: XCTestCase {
         let service = QueueUIKitService()
         await service.enableRecommendations(failed: true)
         let model = await makeModel(service)
+        await model.loadSimilarMode()
         let (queue, root, window) = await mount(model)
         defer { release(queue, root: root, window: window) }
         await wait("ordinary failed snapshot") { model.queueRecommendations?.canRetry == true }
@@ -517,7 +515,7 @@ private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicQue
         guard heartbeatEnabled else { throw MusicServiceError.authRequired }
         heartbeatRequests.append(start)
         heartbeatSnapshot = .init(id: UUID(), active: true, status: .ready, seed: .init(title: "当前歌曲"),
-            seedEntryID: currentID, continueEnabled: false, candidates: [], batches: [], sourceIDs: [],
+            seedEntryID: currentID, continueEnabled: true, candidates: [], batches: [], sourceIDs: [],
             fromHome: false, provider: .heartbeat, error: nil, canRetry: false)
         return .init(state: state(), action: .keepCurrent)
     }

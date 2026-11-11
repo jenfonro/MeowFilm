@@ -49,6 +49,12 @@ public sealed class PlayerSurfaceInput : IDisposable
     private nint Message(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
         if (!surface.IsVisible) return 0;
+        if ((message is 0x201 or 0x203) && sources.Values.FirstOrDefault(value => value.Handle == hwnd) is { RootVisual: Visual root } source)
+        {
+            var point = new Point((short)(lParam.ToInt64() & 0xffff), (short)((lParam.ToInt64() >> 16) & 0xffff));
+            var logical = source.CompositionTarget.TransformFromDevice.Transform(point);
+            PlayerMenuInput.For(window).NativeDown(root.PointToScreen(logical));
+        }
         gesture.Message(message, wParam, lParam, window.IsActive, layersOpen() || GetQueueOpen(surface));
         if (message is 0x201 or 0x203) nativeDown = true;
         else if (message == 0x1f || message == 0x6 && (wParam.ToInt64() & 0xffff) == 0) nativeDown = false;
@@ -57,6 +63,12 @@ public sealed class PlayerSurfaceInput : IDisposable
     private void BeforeInput(object sender, PreProcessInputEventArgs e)
     {
         if (disposed || !surface.IsVisible) return;
+        if (e.StagingItem.Input is MouseButtonEventArgs menuMouse &&
+            (PlayerMenuInput.For(window).HasPendingGesture ||
+            (menuMouse.Source as Visual ?? menuMouse.MouseDevice.DirectlyOver as Visual) is { } visual &&
+            PresentationSource.FromVisual(visual) is HwndSource inputSource &&
+            (sources.Values.Contains(inputSource) || ReferenceEquals(inputSource, PresentationSource.FromVisual(surface)))))
+            PlayerMenuInput.For(window).Preview(menuMouse);
         if (e.StagingItem.Input is MouseButtonEventArgs mouse && mouse.ChangedButton == MouseButton.Left &&
             mouse.RoutedEvent == Mouse.PreviewMouseDownEvent)
         {

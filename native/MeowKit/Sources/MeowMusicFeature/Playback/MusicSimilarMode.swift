@@ -9,6 +9,8 @@ public struct MusicSimilarHeartbeatContext: Sendable, Equatable, Codable {
 /// Typed requests, never an arbitrary HTTP/credential bridge. All reads use
 /// the existing exact-account queue lease and must not refresh/rebind it.
 public enum MusicNativeSimilarModeRequest: Sendable, Equatable {
+    /// nil context validates an entrance seed. A continuation keeps context's
+    /// playlist/seed and uses lastID only as its current queue position.
     case heartbeat(lastID: String?, fromHome: Bool, context: MusicSimilarHeartbeatContext?)
     case songRoaming(sourceIDs: [String])
     case artistRoaming(sourceIDs: [String])
@@ -31,7 +33,7 @@ public protocol MusicNativeSimilarModeProviding: MusicNativeAccountQueueProvidin
     /// lease before/after suspended work; it must match the scope of its owner.
     func similarModeScope(_ lease: MusicAccountQueueLease) async throws -> String
     /// Requests remain bound to their original seed and exact account lease.
-    /// Heartbeat generates one list; it has no automatic continuation request.
+    /// Heartbeat keeps its original context while lastID advances with the queue.
     func similarModeBatch(_ lease: MusicAccountQueueLease,
                           request: MusicNativeSimilarModeRequest) async throws -> MusicNativeSimilarModeBatch
 }
@@ -131,6 +133,7 @@ public protocol MusicSimilarModeServing: Sendable {
     func startSimilarMode(_ start: MusicSimilarModeStart) async throws -> MusicSimilarModeResult
     func exitSimilarMode() async throws -> MusicSimilarModeResult
     func playSimilarCandidate(snapshotID: UUID, candidateID: String) async throws -> MusicSimilarModeResult
+    /// Selecting the source mode enables continuation and queue order together.
     func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) async throws
     func retrySimilarMode(snapshotID: UUID) async throws -> MusicSimilarModeResult
     func cancelSimilarMode() async throws
@@ -144,7 +147,6 @@ public protocol MusicSimilarModeServing: Sendable {
 
 public extension MusicSimilarModeSnapshot {
     var canRestoreQueue: Bool { active && (provider == .heartbeat || provider == .queueRecommendations) }
-    var supportsContinuation: Bool { provider != .heartbeat }
     var sourceTitle: String {
         switch provider {
         case .heartbeat: return "心动"

@@ -79,8 +79,8 @@ public sealed class MusicPlaybackIcon : Control
     private static IReadOnlyDictionary<string, Icon> CreateIcons()
     {
         // Ordinary modes follow the supplied screenshots, including solid arrowheads and the crossing gap.
-        var repeat = Stroke("M 22 13 C 22 17.42 17.52 21 12 21 C 6.48 21 2 17.42 2 13 C 2 8.58 6.48 5 12 5 L 20 5", 1.6);
-        var repeatArrow = Fill("F1 M 18.8 1.9 L 22.5 5 L 18.8 8.1 Z");
+        var repeat = Stroke("M 21 13 C 21 17.97 16.97 22 12 22 C 7.03 22 3 17.97 3 13 C 3 8.03 7.03 4 12 4 L 20 4", 1.8);
+        var repeatArrow = Fill("F1 M 18.8 1 L 22.4 4 L 18.8 7 Q 18.2 7.5 18.2 6.7 L 18.2 1.3 Q 18.2 .5 18.8 1 Z");
         var fm = Stroke("M 12 12 C 9 7 7 7 5 8 C 1 10 1 14 5 16 C 7 17 9 17 12 12 C 15 7 17 7 19 8 C 23 10 23 14 19 16 C 17 17 15 17 12 12 Z", 1.8, round: false);
         return new Dictionary<string, Icon>(StringComparer.Ordinal)
         {
@@ -93,7 +93,9 @@ public sealed class MusicPlaybackIcon : Control
             ["heartbeat"] = new(24, [
                 Stroke("M 21 5 A 5.5 5.5 0 0 0 13 4 L 12 5 L 11 4 A 5.5 5.5 0 0 0 3 12 L 12 21 L 21 12 A 5.5 5.5 0 0 0 21 5 Z M 2 12 L 7 12 L 9 8 L 13 16 L 15 12 L 22 12", 1.65)]),
             ["fm"] = new(24, [fm]),
-            ["fm-off"] = new(24, [fm, Stroke("M 4 21 L 20 3", 1.8)]),
+            ["sparkles"] = new(24, [
+                Fill("F1 M 12 3 Q 13.4 9.6 20 11 Q 13.4 12.4 12 19 Q 10.6 12.4 4 11 Q 10.6 9.6 12 3 Z M 20 1 Q 20.5 3.5 23 4 Q 20.5 4.5 20 7 Q 19.5 4.5 17 4 Q 19.5 3.5 20 1 Z M 4 17 Q 4.7 20.3 8 21 Q 4.7 21.7 4 24 Q 3.3 21.7 0 21 Q 3.3 20.3 4 17 Z")]),
+            ["return"] = new(24, [Stroke("M 8 4 L 3 9 L 8 14 M 3 9 L 15 9 A 6 6 0 0 1 15 21 L 11 21", 1.8)]),
             // iWebPlus fm-icons.js: all 42 source scenes, preserving official key spellings.
             ["NIGHT_EMO"] = new(32, [
                 Fill("F1 M 25 6 A 3 3 0 1 0 19 6 A 3 3 0 1 0 25 6 Z"),

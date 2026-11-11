@@ -17,8 +17,16 @@ public static partial class MusicRecommendationTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("Recommendation per-occurrence source facts preserve all similar seeds and FM scene", SourceFacts);
-        yield return new("Recommendation random non-tail independent take branch once per playback", () => RandomTrigger(true, false));
-        yield return new("Recommendation random tail independent skip branch without tail fallback", () => RandomTrigger(false, true));
+        foreach (string kind in new[] { "fm", "similar", "heartbeat", "queue" }) foreach (int mode in new[] { 1, 2, 3 })
+        {
+            string source = kind; int choice = mode;
+            yield return new("Recommendation ordinary mode closes continuation and special resumes " + kind + ":" + mode,
+                () => OrdinaryMode(source, choice));
+            yield return new("Recommendation ordinary mode fences late batch " + kind + ":" + mode,
+                () => OrdinaryModeDuringRead(source, choice));
+        }
+        yield return new("Recommendation ordinary preview and explicit choice never arm continuation", OrdinaryPreview);
+        yield return new("Recommendation reenable waiting for queue lane cannot override later ordinary mode", EnableModeRace);
         foreach (bool active in new[] { false, true }) foreach (bool next in new[] { false, true })
         {
             bool started = active, priority = next;
@@ -36,11 +44,7 @@ public static partial class MusicRecommendationTests
             yield return new("Recommendation shuffled candidate append activates only on a recommendation selection=" + enter,
                 () => QueueSelectionActivation(selected));
         }
-        foreach (int mode in new[] { 1, 3 })
-        {
-            int loop = mode;
-            yield return new("Recommendation tail trigger is immediate and nonblocking in global mode " + mode, () => LoopTail(loop));
-        }
+        yield return new("Recommendation special sequential tail trigger is immediate and nonblocking", LoopTail);
         yield return new("Recommendation source replacement failure preserves the committed source and account retirement stops it", StagedSourceFailure);
         yield return new("Recommendation active queue cursor follows response offsets while seed never changes", FixedSeedPages);
         yield return new("Recommendation FM first batch replaces only after success", First);
@@ -56,9 +60,18 @@ public static partial class MusicRecommendationTests
         yield return new("Recommendation failure has no busy retry and manual retry remains", Backoff);
         yield return new("Recommendation similar source type replaces queue with continuation and no checkpoint", Similar);
         yield return new("Recommendation similar continuation retains artist seed and excludes the actual admitted queue", SimilarContinuation);
-        yield return new("Recommendation heartbeat has no invented continuation and loop remains independent", Heartbeat);
+        yield return new("Recommendation heartbeat advances its actual tail and retains the original return checkpoint", Heartbeat);
+        foreach (string outcome in new[] { "empty", "duplicate", "failure", "cancel", "account", "identity" })
+        {
+            string result = outcome;
+            yield return new("Recommendation heartbeat continuation " + outcome + " retains queue and checkpoint safely",
+                () => HeartbeatContinuationOutcome(result));
+        }
+        yield return new("Recommendation ordinary mode cancels pending special entry without losing the committed source", () => OrdinaryDuringEntry(true));
+        yield return new("Recommendation explicit continuation closure cancels pending entry and closes the committed source", () => OrdinaryDuringEntry(false));
+        yield return new("Recommendation ordinary mode after special entry CAS admission retains committed queue without late playback", OrdinaryDuringInitialCommit);
         yield return new("Recommendation heartbeat over one hundred retains real seed and original checkpoint", HeartbeatComplete);
-        yield return new("Recommendation heartbeat favorites uses resolved context and defaults continuation off", HeartbeatFavorites);
+        yield return new("Recommendation heartbeat favorites uses resolved context and sequential continuation", HeartbeatFavorites);
         yield return new("Recommendation heartbeat current rejects stale recording before provider read", HeartbeatStale);
         yield return new("Recommendation heartbeat current preserves actual repeated recording occurrence", HeartbeatOccurrence);
         yield return new("Recommendation heartbeat returns ABC from B as ABEC without a media selection", () => HeartbeatReturn(true));
@@ -81,20 +94,27 @@ public static partial class MusicRecommendationTests
         }
         yield return new("Recommendation queue preview preserves complete queue source and current occurrence", QueuePreview);
         yield return new("Recommendation queue keeps duplicate occurrences while all pages use the fixed seed", QueueRepeatedOccurrences);
-        yield return new("Recommendation queue final preview is consumed once by continuation without media restart", QueueFinalPreview);
+        yield return new("Recommendation queue special mode immediately appends final preview at the playing seed without media restart", QueueFinalPreview);
+        foreach (string boundary in new[] { "non-tail", "unobserved", "paused", "not-started", "not-ready" })
+        {
+            string pending = boundary;
+            yield return new("Recommendation queue special preview waits for actual playing tail from " + boundary,
+                () => QueueSpecialPreviewBoundary(pending));
+        }
+        yield return new("Recommendation queue unchosen preview never refetches after its admitted songs are removed", QueueUnchosenPreviewNoRefetch);
         yield return new("Recommendation queue final preview cancellation before CAS keeps batch available", QueueFinalPreviewCancel);
         yield return new("Recommendation queue disabling admitted final preview CAS retains songs without media restart", QueueFinalPreviewDisableCommit);
         yield return new("Recommendation queue play-next retains preview and has priority over recommendations", QueueFinalPreviewCas);
         yield return new("Recommendation queue choose appends complete batch and selects requested candidate once", QueueChoose);
         yield return new("Recommendation queue candidate tokens retire on retry but survive valid queue navigation", QueueCandidates);
         yield return new("Recommendation queue candidate commit checks actual queue version", QueueCandidateCas);
-        yield return new("Recommendation queue actual tail fetches immediately in single loop without late selection", QueueTail);
+        yield return new("Recommendation queue actual tail fetches immediately in special mode without late selection", QueueTail);
         yield return new("Recommendation queue next during preview does not await HTTP", () => QueueInitialNext(false));
         yield return new("Recommendation queue real Ended during preview continues existing loop", () => QueueInitialNext(true));
         yield return new("Recommendation queue paused preview completion never autoplays", () => QueueInitialNext(true, pause: true));
         yield return new("Recommendation queue disabling retains uncommitted candidates and appended songs", QueueDisable);
-        yield return new("Recommendation queue rapid off on retains one tail flight without blocking next", QueueResumeNext);
-        yield return new("Recommendation queue off on and play-next keep valid flight and explicit priority", QueueResumePendingNext);
+        yield return new("Recommendation queue rapid off on retains late candidates without automatic admission or blocking next", QueueResumeNext);
+        yield return new("Recommendation queue off on and play-next keep late candidates and explicit priority", QueueResumePendingNext);
         yield return new("Recommendation queue disabling after CAS admission preserves committed facts without autoplay", QueueDisableCommit);
         foreach (string terminal in new[] { "empty", "duplicate", "has-more-false" })
         {
@@ -144,25 +164,115 @@ public static partial class MusicRecommendationTests
         yield return new("Recommendation FM selection during channel read fences late playback but retains valid batch", FmSwitchEdit);
         yield return new("Recommendation Dispose admission cannot be reversed by Resume", DisposalAdmission);
     }
-    private static async Task RandomTrigger(bool take, bool tail)
+    private static async Task<JsonElement> StartSource(Fixture f, string kind)
     {
-        int decisions = 0;
-        await using var f = new Fixture(randomFetch: () => { decisions++; return take; });
-        f.Catalog.Reply("fm", "10", "11", "12"); await f.Start("fm");
-        await f.Port.ExecuteAsync("music.queue.mode", new { mode = 2 });
-        var q = await f.Q(); string selected = tail ? S(q.GetProperty("entries")[2], "id") : Current(q);
-        await f.Select(selected); f.Catalog.Reply("fm", "13");
-        await f.Rec.OnPlaybackAsync(new(selected, true, true, true, PlaybackEvent: 1));
-        await f.Rec.OnPlaybackAsync(new(selected, false, true, true, PlaybackEvent: 1));
-        await f.Rec.OnPlaybackAsync(new(selected, true, true, true, PlaybackEvent: 1));
-        Check(decisions == 1 && f.Catalog.Calls.Count == (take ? 2 : 1) && Current(await f.Q()) == selected);
-        Check(!await f.Rec.TryAdvanceAsync(selected, true, true));
-        var next = await f.Port.ExecuteAsync("music.queue.next", new { reason = "ended" });
-        Check(next.GetProperty("targetId").ValueKind == JsonValueKind.String);
-        await f.Wait(x => S(x, "currentId") == S(next, "targetId"));
-        f.Catalog.Reply("fm", "14");
-        await f.Rec.OnPlaybackAsync(new(S(next, "targetId"), true, true, true, PlaybackEvent: 2));
-        Check(decisions == 2);
+        if (kind is "heartbeat" or "queue") await f.Replace("1", "2");
+        f.Catalog.Reply(kind == "queue" ? "queue-recommendations" : kind, "10", "11");
+        return kind == "heartbeat" ? await f.Heartbeat() : kind == "queue"
+            ? await f.Rec.ExecuteAsync("music.recommendations.start", new { kind, platform = "wy", seedEntryId = Current(await f.Q()), restore = true })
+            : await f.Start(kind);
+    }
+    private static async Task OrdinaryMode(string kind, int mode)
+    {
+        await using var f = new Fixture(); var start = await StartSource(f, kind);
+        string id = S(start, "id"); var before = await f.Q(); int reads = f.Catalog.Calls.Count;
+        await f.Port.ExecuteAsync("music.queue.mode", new { mode });
+        var state = await f.State();
+        Check(state.GetProperty("active").GetBoolean() && !state.GetProperty("continue").GetBoolean());
+        Check(S(state, "id") == id && state.GetProperty("canReturn").GetBoolean() == start.GetProperty("canReturn").GetBoolean());
+        Check((await f.Q()).GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText());
+        var tail = S(before.GetProperty("entries").EnumerateArray().Last(), "id");
+        await f.Select(tail); await f.Rec.OnPlaybackAsync(new(tail, true, true, true));
+        Check(f.Catalog.Calls.Count == reads && !await f.Rec.TryAdvanceAsync(tail, true, true));
+        // Queue shuffle remains an actual selection among existing occurrences.
+        if (mode == 2)
+        {
+            var next = await f.Port.ExecuteAsync("music.queue.next");
+            Check(next.GetProperty("targetId").ValueKind == JsonValueKind.String);
+            await f.Wait(x => S(x, "currentId") == S(next, "targetId"));
+        }
+        await f.Select(Current(before)); await f.Rec.OnPlaybackAsync(new(Current(before), false, true, true));
+        var enabled = await f.Rec.ExecuteAsync("music.recommendations.continue", new { id, enabled = true });
+        Check(enabled.GetProperty("continue").GetBoolean() && N(await f.Q(), "mode") == 1 && f.Catalog.Calls.Count == reads);
+        await f.Port.ExecuteAsync("music.queue.mode", new { mode = 1 });
+        Check(!(await f.State()).GetProperty("continue").GetBoolean(), "same-value list mode is an ordinary mode selection");
+    }
+    private static async Task OrdinaryModeDuringRead(string kind, int mode)
+    {
+        await using var f = new Fixture(); var start = await StartSource(f, kind); var before = await f.Q();
+        string tail = S(before.GetProperty("entries").EnumerateArray().Last(), "id"); await f.Select(tail);
+        var hold = new Hold(); f.Catalog.Handle = hold.Read;
+        var fetch = f.Rec.OnPlaybackAsync(new(tail, true, true, true)); await hold.Entered.Task;
+        await f.Port.ExecuteAsync("music.queue.mode", new { mode });
+        hold.Complete(kind == "heartbeat" ? HeartbeatPage(false, "11", "12") :
+            kind == "queue" ? QueuePage(30, true, "12") : Batch(kind, "12"));
+        await fetch;
+        var actual = await f.Q(); var state = await f.State();
+        Check(N(actual, "total") == N(before, "total") && Current(actual) == tail &&
+            !state.GetProperty("continue").GetBoolean() && state.GetProperty("active").GetBoolean());
+        Check(state.GetProperty("canReturn").GetBoolean() == start.GetProperty("canReturn").GetBoolean());
+        if (kind == "queue") Check(state.GetProperty("candidates").GetArrayLength() == 1);
+    }
+    private static async Task OrdinaryPreview()
+    {
+        await using var f = new Fixture(); await f.Replace("1");
+        await f.Port.ExecuteAsync("music.queue.mode", new { mode = 3 });
+        f.Catalog.Reply("queue-recommendations", "2", "3");
+        var preview = await f.Rec.ExecuteAsync("music.recommendations.start",
+            new { kind = "queue", platform = "wy", seedEntryId = Current(await f.Q()), restore = false, @continue = true });
+        string id = S(preview, "id"), current = Current(await f.Q());
+        Check(!preview.GetProperty("continue").GetBoolean() && N(await f.Q(), "mode") == 3);
+        await f.Rec.OnPlaybackAsync(new(current, true, true, true));
+        Check(!await f.Rec.TryAdvanceAsync(current, false, true) && N(await f.Q(), "total") == 1);
+        var chosen = await f.Rec.ExecuteAsync("music.recommendations.choose", new { id,
+            candidateId = S(preview.GetProperty("candidates")[1], "id") });
+        Check(N(await f.Q(), "total") == 3 && N(await f.Q(), "mode") == 3 && !chosen.GetProperty("continue").GetBoolean());
+        await f.Rec.OnPlaybackAsync(new(Current(await f.Q()), true, true, true));
+        Check(f.Catalog.Calls.Count == 1 && f.Selections.Count == 1);
+    }
+    private static async Task EnableModeRace()
+    {
+        await using var f = new Fixture(); var state = await StartSource(f, "fm");
+        await f.Port.ExecuteAsync("music.queue.mode", new { mode = 3 });
+        var entered = NewSignal(); var release = NewSignal();
+        var lane = f.Port.InLaneAsync(async (_, _) => { entered.TrySetResult(); await release.Task; return true; }, CancellationToken.None);
+        await entered.Task;
+        var enable = f.Rec.ExecuteAsync("music.recommendations.continue", new { id = S(state, "id"), enabled = true });
+        var ordinary = f.Port.ExecuteAsync("music.queue.mode", new { mode = 2 });
+        release.TrySetResult(); await lane; var result = await enable; await ordinary;
+        Check(!result.GetProperty("ok").GetBoolean() && S(result, "code") == "STALE_SESSION" &&
+            !(await f.State()).GetProperty("continue").GetBoolean() && N(await f.Q(), "mode") == 2);
+    }
+    private static async Task OrdinaryDuringEntry(bool ordinary)
+    {
+        await using var f = new Fixture(); var original = await StartSource(f, "heartbeat");
+        var before = await f.Q(); var hold = new Hold(); f.Catalog.Handle = hold.Read;
+        var switching = f.Start("fm"); await hold.Entered.Task;
+        if (ordinary) await f.Port.ExecuteAsync("music.queue.mode", new { mode = 1 });
+        else await f.Rec.ExecuteAsync("music.recommendations.continue", new { id = S(await f.State(), "id"), enabled = false });
+        await hold.Cancelled.Task;
+        hold.Complete("fm", "99"); await switching;
+        var state = await f.State();
+        Check(S(state, "id") == S(original, "id") && S(state, "kind") == "heartbeat" &&
+            state.GetProperty("active").GetBoolean() && !state.GetProperty("continue").GetBoolean() &&
+            state.GetProperty("canReturn").GetBoolean());
+        Check((await f.Q()).GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText());
+        await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(original, "id") });
+        Check(SongId((await f.Q()).GetProperty("current").GetProperty("song")) == "1");
+    }
+    private static async Task OrdinaryDuringInitialCommit()
+    {
+        await using var f = new Fixture(); await f.Replace("1", "2");
+        f.Catalog.Reply("fm", "10", "11");
+        f.Store.Entered = NewSignal(); f.Store.Release = NewSignal();
+        var entering = f.Start("fm"); await f.Store.Entered.Task;
+        var ordinary = f.Port.ExecuteAsync("music.queue.mode", new { mode = 2 });
+        f.Store.Release.TrySetResult(); await entering; await ordinary;
+        var actual = await f.Q(); var state = await f.State();
+        Check(state.GetProperty("active").GetBoolean() && !state.GetProperty("continue").GetBoolean() &&
+            S(state, "kind") == "fm" && N(actual, "mode") == 2 && f.Selections.IsEmpty);
+        Check(actual.GetProperty("entries").EnumerateArray().Select(e => SongId(e.GetProperty("song"))).SequenceEqual(["10", "11"]) &&
+            S(actual.GetProperty("source"), "id") == S(state, "id"));
     }
     private static async Task SearchAppendBoundary(bool active, bool next)
     {
@@ -174,7 +284,7 @@ public static partial class MusicRecommendationTests
     }
     private static async Task QueueSelectionActivation(bool enter)
     {
-        await using var f = new Fixture(randomFetch: () => false);
+        await using var f = new Fixture();
         await Ok(f.Library, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0,
             context = new { sourceType = "search", searchKeyword = "原搜索", queueSource =
                 new { id = "search", title = "原搜索", kind = "search", platform = "wy" } } });
@@ -187,8 +297,8 @@ public static partial class MusicRecommendationTests
         var next = await f.Port.ExecuteAsync("music.queue.next");
         Check(S(next, "targetId") == inserted);
         await f.Wait(state => S(state, "currentId") == inserted);
-        await f.Port.ExecuteAsync("music.queue.mode", new { mode = 2 });
         Check(!await f.Rec.TryAdvanceAsync(inserted, true, true));
+        await f.Port.ExecuteAsync("music.queue.mode", new { mode = 2 });
         var queued = await f.Q();
         Check(N(queued, "total") == 4 && Current(queued) == inserted && f.Selections.IsEmpty);
         Check(!(await f.State()).GetProperty("started").GetBoolean() &&
@@ -226,7 +336,7 @@ public static partial class MusicRecommendationTests
     {
         await using var f = new Fixture(); await f.Replace("1");
         var hold = new Hold(); f.Catalog.Handle = hold.Read;
-        var start = f.Start("queue"); await hold.Entered.Task;
+        var start = f.Start("queue", special: false); await hold.Entered.Task;
         var appended = await f.Port.ExecuteAsync("music.queue.append", new { songs = new[] { Song("9") }, next });
         string inserted = appended.GetProperty("entryIds")[0].GetString()!;
         if (!next) await hold.Cancelled.Task;
@@ -243,14 +353,16 @@ public static partial class MusicRecommendationTests
         if (next)
         {
             Check(Current(q) == inserted && !await f.Rec.TryAdvanceAsync(inserted, false, true));
-            Check(N(await f.Q(), "total") == 4 && Current(await f.Q()) == inserted &&
+            Check(N(await f.Q(), "total") == 2 && !state.GetProperty("continue").GetBoolean());
+            await f.Rec.ExecuteAsync("music.recommendations.choose", new { id = S(state, "id"),
+                candidateId = S(state.GetProperty("candidates")[0], "id") });
+            Check(N(await f.Q(), "total") == 4 && SongId((await f.Q()).GetProperty("current").GetProperty("song")) == "2" &&
                 f.Catalog.Calls.Single().QueueRecommendations is { SeedSongId: "1", Offset: 0 });
         }
     }
-    private static async Task LoopTail(int mode)
+    private static async Task LoopTail()
     {
         await using var f = new Fixture(); f.Catalog.Reply("fm", "10", "11", "12"); await f.Start("fm");
-        await f.Port.ExecuteAsync("music.queue.mode", new { mode });
         var q = await f.Q(); string first = Current(q), tail = S(q.GetProperty("entries")[2], "id");
         await f.Select(first); await f.Rec.OnPlaybackAsync(new(first, true, true, true, PlaybackEvent: 1));
         Check(f.Catalog.Calls.Count == 1);
@@ -260,7 +372,7 @@ public static partial class MusicRecommendationTests
         hold.Complete("fm", "13", "14"); await pending;
         Check(N(await f.Q(), "total") == 5 && Current(await f.Q()) == tail && f.Selections.Count == 1);
         await f.Rec.OnPlaybackAsync(new(tail, true, true, true, PlaybackEvent: 3));
-        Check(f.Catalog.Calls.Count == 2 && N(await f.Q(), "mode") == mode);
+        Check(f.Catalog.Calls.Count == 2 && N(await f.Q(), "mode") == 1);
     }
     private static async Task SearchInitialRetry()
     {
@@ -456,12 +568,12 @@ public static partial class MusicRecommendationTests
         f.Catalog.Reply("similar", "10", "11", "12");
         var state = await f.Start("similar");
         Check(N(state, "count") == 3 && state.GetProperty("continue").GetBoolean() && !state.GetProperty("canReturn").GetBoolean());
-        Check(N(await f.Q(), "mode") == 3 && SongId((await f.Q()).GetProperty("current").GetProperty("song")) == "10");
+        Check(N(await f.Q(), "mode") == 1 && SongId((await f.Q()).GetProperty("current").GetProperty("song")) == "10");
         Check(f.Catalog.Calls.Single().Similar is { SourceType: "song" });
         f.Catalog.Reply("similar", "20", "21");
         var artist = await f.Rec.ExecuteAsync("music.recommendations.start",
             new { kind = "similar", platform = "wy", sourceIds = new[] { "2" }, sourceType = "artist" });
-        Check(N(await f.Q(), "total") == 2 && S(artist, "sourceType") == "artist" && N(await f.Q(), "mode") == 3);
+        Check(N(await f.Q(), "total") == 2 && S(artist, "sourceType") == "artist" && N(await f.Q(), "mode") == 1);
         Check(f.Catalog.Calls.Last().Similar is { SourceType: "artist" } && f.Selections.Count == 2);
         var back = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(artist, "id") });
         Check(S(back, "code") == "CHECKPOINT_NOT_FOUND");
@@ -486,18 +598,28 @@ public static partial class MusicRecommendationTests
     private static async Task Heartbeat()
     {
         await using var f = new Fixture(); await f.Replace("1", "2");
+        var before = await f.Q();
         f.Catalog.Reply("heartbeat", "1", "10", "11", "12", "13", "14");
         var state = await f.Heartbeat();
-        Check(N(await f.Q(), "total") == 6 && f.Selections.IsEmpty && !state.GetProperty("continue").GetBoolean());
+        Check(N(await f.Q(), "total") == 6 && f.Selections.IsEmpty && state.GetProperty("continue").GetBoolean());
         Check(f.Catalog.Calls.Single().Heartbeat is { Entry: MusicHeartbeatEntry.CurrentSong, SongId: "1", PlaylistId: "100" });
         string tail = S((await f.Q()).GetProperty("entries")[5], "id");
         await f.Port.ExecuteAsync("music.queue.select", new { id = tail }); await f.Wait(x => S(x, "currentId") == tail);
+        f.Catalog.Handle = (_, _) => Task.FromResult(HeartbeatPage(false, "14", "15", "16"));
         await f.Rec.OnPlaybackAsync(new(tail, true, true, true));
-        var unsupported = await f.Rec.ExecuteAsync("music.recommendations.continue", new { id = S(state, "id"), enabled = true });
-        Check(S(unsupported, "code") == "UNSUPPORTED" && f.Catalog.Calls.Count == 1);
+        Check(f.Catalog.Calls.Last().Heartbeat is { Entry: MusicHeartbeatEntry.CurrentSong, SongId: "14", PlaylistId: "100",
+            Continuation: { StartMusicId: "1", PlaylistId: "100", AccountId: "123", Count: 120 } });
+        Check(f.Catalog.Calls.Count == 2 && N(await f.Q(), "total") == 8 && Current(await f.Q()) == tail && f.Selections.IsEmpty);
         await f.Port.ExecuteAsync("music.queue.mode", new { mode = 2 });
-        Check((await f.State()).GetProperty("active").GetBoolean() && N(await f.Q(), "mode") == 2);
+        Check((await f.State()).GetProperty("active").GetBoolean() &&
+            !(await f.State()).GetProperty("continue").GetBoolean() && N(await f.Q(), "mode") == 2);
         Check(!await f.Rec.TryAdvanceAsync(tail, true, true));
+        await f.Rec.OnPlaybackAsync(new(tail, false, true, true));
+        var returned = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
+        var restored = await f.Q();
+        Check(S(returned, "status") == "returned" && Current(restored) == tail && !returned.GetProperty("play").GetBoolean());
+        Check(restored.GetProperty("entries").EnumerateArray().Select(e => SongId(e.GetProperty("song"))).SequenceEqual(["1", "14", "2"]) &&
+            restored.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText() && f.Selections.IsEmpty);
     }
     private static async Task HeartbeatComplete()
     {
@@ -513,13 +635,63 @@ public static partial class MusicRecommendationTests
         Check((await f.Q()).GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText() &&
             Current(await f.Q()) == seed);
     }
+    private static async Task HeartbeatContinuationOutcome(string outcome)
+    {
+        await using var f = new Fixture(); await f.Replace("1", "2");
+        f.Catalog.Reply("heartbeat", "10", "11"); var start = await f.Heartbeat();
+        string id = S(start, "id"), tail = S((await f.Q()).GetProperty("entries")[2], "id"); await f.Select(tail);
+        var before = await f.Q(); int writes = f.Store.Writes;
+        if (outcome is "cancel" or "account")
+        {
+            var hold = new Hold(); f.Catalog.Handle = hold.Read;
+            var fetch = f.Rec.OnPlaybackAsync(new(tail, true, true, true)); await hold.Entered.Task;
+            Task? cancel = null;
+            if (outcome == "cancel") cancel = f.Rec.ExecuteAsync("music.recommendations.cancel", new { id });
+            else f.Rec.Invalidate("wy");
+            await hold.Cancelled.Task;
+            hold.Complete(HeartbeatPage(false, "11", "12")); await fetch;
+            if (cancel is not null) await cancel;
+            await f.Rec.PrepareCloseAsync();
+            Check(!(await f.State()).GetProperty("active").GetBoolean() &&
+                N(await f.Q(), "total") == N(before, "total") && f.Store.Writes == writes);
+            Check(outcome != "account" || f.Selections.Any(x => x.Action == MusicRecommendationPlaybackAction.Stop && x.EntryId == tail));
+            return;
+        }
+        f.Catalog.Handle = (_, _) => outcome == "failure" ? throw new MusicPlatformException("NETWORK") :
+            Task.FromResult(outcome == "identity" ? J(EditHeartbeatIdentity()) :
+                HeartbeatPage(false, "11", outcome == "duplicate" ? ["10"] : []));
+        JsonObject EditHeartbeatIdentity()
+        {
+            var value = JsonNode.Parse(HeartbeatPage(false, "11", "12").GetRawText())!.AsObject();
+            value["context"]!["startMusicId"] = "99";
+            return value;
+        }
+        await f.Rec.OnPlaybackAsync(new(tail, true, true, true));
+        var state = await f.State();
+        Check(f.Store.Writes == writes && N(await f.Q(), "total") == N(before, "total") && Current(await f.Q()) == tail &&
+            f.Selections.IsEmpty && state.GetProperty("canReturn").GetBoolean());
+        if (outcome is "empty" or "duplicate") Check(state.GetProperty("exhausted").GetBoolean() && S(state, "error") == "");
+        else Check(S(state, "error") == (outcome == "failure" ? "NETWORK" : "IDENTITY_MISMATCH") && state.GetProperty("canRetry").GetBoolean());
+        await f.Rec.OnPlaybackAsync(new(tail, true, true, true, PlaybackEvent: 2));
+        Check(f.Catalog.Calls.Count == 2);
+        if (outcome == "failure")
+        {
+            f.Catalog.Handle = (_, _) => Task.FromResult(HeartbeatPage(false, "11", "12"));
+            await f.Rec.ExecuteAsync("music.recommendations.retry", new { id });
+            Check(N(await f.Q(), "total") == 4 && Current(await f.Q()) == tail && f.Selections.IsEmpty);
+        }
+        await f.Rec.OnPlaybackAsync(new(tail, false, true, true));
+        await f.Rec.ExecuteAsync("music.recommendations.return", new { id });
+        Check((await f.Q()).GetProperty("entries").EnumerateArray().Select(e => SongId(e.GetProperty("song"))).SequenceEqual(["1", "11", "2"]) &&
+            Current(await f.Q()) == tail && f.Selections.IsEmpty);
+    }
     private static async Task HeartbeatFavorites()
     {
         await using var f = new Fixture(); await f.Replace("1", "2"); var before = await f.Q();
         f.Catalog.Handle = (_, _) => Task.FromResult(HeartbeatBatch(true, "10", "11", "12", "13"));
         var state = await f.Rec.ExecuteAsync("music.recommendations.start", new { kind = "heartbeat", platform = "wy", entry = "favorites" });
         Check(f.Catalog.Calls.Single().Heartbeat is { Entry: MusicHeartbeatEntry.Favorites, SongId: null });
-        Check(N(await f.Q(), "total") == 4 && Current(await f.Q()) != Current(before) && !state.GetProperty("continue").GetBoolean());
+        Check(N(await f.Q(), "total") == 4 && Current(await f.Q()) != Current(before) && state.GetProperty("continue").GetBoolean());
         Check(f.Rec.GetFeedback(Current(await f.Q())) is
             { FromHome: true, FeedbackSource: "", SourceId: "100", Algorithm: "alg-10" });
         var recommendation = await f.Q(); int selections = f.Selections.Count;
@@ -569,7 +741,7 @@ public static partial class MusicRecommendationTests
         Check(S(state, "status") == "ready" && S(state, "error") == "" &&
             f.Catalog.Calls.Single().Heartbeat is { Entry: MusicHeartbeatEntry.Favorites, SongId: "10" });
         Check(N(after, "total") == 4 && SongId(after.GetProperty("current").GetProperty("song")) == "10" &&
-            Current(after) != Current(before) && !state.GetProperty("continue").GetBoolean());
+            Current(after) != Current(before) && state.GetProperty("continue").GetBoolean());
         Check(f.Selections.Single() is { Play: true, Automatic: false } selection && selection.EntryId == Current(after) &&
             f.Rec.GetFeedback(Current(after)) is { FromHome: true, FeedbackSource: "", SourceId: "100" });
         var returned = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(state, "id") });
@@ -617,7 +789,7 @@ public static partial class MusicRecommendationTests
         await using var f = new Fixture();
         await Ok(f.Library, "music.queue.replace", new { songs = new[] { Song("2"), Song("1"), Song("3") }, index = 1 });
         var before = await f.Q();
-        f.Catalog.Reply("heartbeat", "10", "11", "12"); var state = await f.Heartbeat(true);
+        f.Catalog.Reply("heartbeat", "10", "11", "12"); var state = await f.Heartbeat();
         string current = S((await f.Q()).GetProperty("entries")[2], "id");
         await f.Port.ExecuteAsync("music.queue.select", new { id = current });
         await f.Wait(s => S(s, "currentId") == current);
@@ -694,11 +866,11 @@ public static partial class MusicRecommendationTests
                 queueSource = new { id = "original", title = "Original search", kind = "search", platform = "wy" } }), N(await f.Q(), "version"));
         Check(replaced.GetProperty("ok").GetBoolean());
         var before = await f.Q(); int writes = f.Store.Writes; f.Catalog.Reply("queue-recommendations", "1", "1002", "1003", "1004", "1005");
-        var state = await f.Start("queue"); var after = await f.Q();
+        var state = await f.Start("queue", special: false); var after = await f.Q();
         Check(f.Store.Writes == writes && f.Selections.IsEmpty && N(after, "version") == N(before, "version"));
         Check(Current(after) == Current(before) && after.GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText());
         Check(after.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText());
-        Check(state.GetProperty("candidates").GetArrayLength() == 4 && state.GetProperty("continue").GetBoolean() &&
+        Check(state.GetProperty("candidates").GetArrayLength() == 4 && !state.GetProperty("continue").GetBoolean() &&
             !state.GetProperty("canReturn").GetBoolean() && !state.GetProperty("exhausted").GetBoolean());
         Check(S(state, "mode") == "" && f.Rec.GetFeedback(Current(after)) is null);
         var request = f.Catalog.Calls.Single().QueueRecommendations!;
@@ -743,20 +915,73 @@ public static partial class MusicRecommendationTests
     }
     private static async Task QueueFinalPreview()
     {
-        await using var f = new Fixture(); await f.Replace("1"); var before = await f.Q();
+        await using var f = new Fixture();
+        await Ok(f.Library, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0,
+            context = new { queueSource = new { id = "search", title = "Original search", kind = "search", platform = "wy" } } });
+        var before = await f.Q();
         f.Catalog.Handle = (_, _) => Task.FromResult(QueueBatch(false, "2", "3"));
-        var preview = await f.Start("queue"); string current = Current(before);
-        Check(preview.GetProperty("continue").GetBoolean() && preview.GetProperty("candidates").GetArrayLength() == 2);
+        var preview = await f.Start("queue", special: false); string current = Current(before);
+        Check(!preview.GetProperty("continue").GetBoolean() && preview.GetProperty("candidates").GetArrayLength() == 2);
         await f.Rec.OnPlaybackAsync(new(current, true, true, true));
         Check(N(await f.Q(), "total") == 1 && f.Catalog.Calls.Count == 1);
-        Check(!await f.Rec.TryAdvanceAsync(current, false, true));
+        var enabled = await f.Rec.ExecuteAsync("music.recommendations.continue", new { id = S(preview, "id"), enabled = true });
         var after = await f.Q();
-        Check(N(after, "total") == 3 && Current(after) == current && f.Selections.IsEmpty &&
+        Check(enabled.GetProperty("continue").GetBoolean() && N(after, "mode") == 1 &&
+            N(after, "total") == 3 && Current(after) == current && f.Selections.IsEmpty &&
             after.GetProperty("entries")[0].GetRawText() == before.GetProperty("entries")[0].GetRawText());
-        Check((await f.State()).GetProperty("exhausted").GetBoolean());
+        Check(enabled.GetProperty("candidates").GetArrayLength() == 0 && enabled.GetProperty("exhausted").GetBoolean() &&
+            !enabled.GetProperty("started").GetBoolean() && N(enabled, "offset") == 15 && f.Catalog.Calls.Count == 1 &&
+            after.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText() && f.Rec.GetFeedback(current) is null);
+        Check(!await f.Rec.TryAdvanceAsync(current, false, true));
         await f.Select(S(after.GetProperty("entries")[2], "id"));
         await f.Rec.OnPlaybackAsync(new(Current(await f.Q()), true, true, true));
-        Check(f.Catalog.Calls.Count == 1 && !await f.Rec.TryAdvanceAsync(Current(await f.Q()), true, true));
+        Check((await f.State()).GetProperty("started").GetBoolean() &&
+            S((await f.Q()).GetProperty("source"), "id") == S(preview, "id") &&
+            f.Catalog.Calls.Count == 1 && f.Selections.IsEmpty && !await f.Rec.TryAdvanceAsync(Current(await f.Q()), true, true));
+    }
+    private static async Task QueueSpecialPreviewBoundary(string boundary)
+    {
+        await using var f = new Fixture(); await f.Replace(boundary == "non-tail" ? ["1", "9"] : ["1"]);
+        var before = await f.Q(); string current = Current(before);
+        f.Catalog.Reply("queue-recommendations", "2", "3");
+        var preview = await f.Start("queue", special: false);
+        if (boundary != "unobserved")
+            await f.Rec.OnPlaybackAsync(new(current, boundary != "paused", boundary != "not-started", boundary != "not-ready"));
+        var enabled = await f.Rec.ExecuteAsync("music.recommendations.continue", new { id = S(preview, "id"), enabled = true });
+        Check(enabled.GetProperty("continue").GetBoolean() && enabled.GetProperty("candidates").GetArrayLength() == 2 &&
+            !enabled.GetProperty("started").GetBoolean() && N(await f.Q(), "total") == N(before, "total") &&
+            Current(await f.Q()) == current && f.Catalog.Calls.Count == 1 && f.Selections.IsEmpty);
+        string tail = S(before.GetProperty("entries").EnumerateArray().Last(), "id");
+        if (tail != current) await f.Select(tail);
+        await f.Rec.OnPlaybackAsync(new(tail, true, true, true));
+        var after = await f.Q(); var state = await f.State();
+        Check(N(after, "total") == N(before, "total") + 2 && Current(after) == tail &&
+            state.GetProperty("candidates").GetArrayLength() == 0 && !state.GetProperty("started").GetBoolean() &&
+            N(state, "offset") == 15 && after.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText() &&
+            f.Catalog.Calls.Count == 1 && f.Selections.IsEmpty);
+    }
+    private static async Task QueueUnchosenPreviewNoRefetch()
+    {
+        await using var f = new Fixture(); await f.Replace("1"); f.Catalog.Reply("queue-recommendations", "2", "3");
+        var preview = await f.Start("queue", special: false); string current = Current(await f.Q()), id = S(preview, "id");
+        await f.Rec.OnPlaybackAsync(new(current, true, true, true));
+        await f.Rec.ExecuteAsync("music.recommendations.continue", new { id, enabled = true });
+        var admitted = await f.Q();
+        Check(N(admitted, "total") == 3 && !(await f.State()).GetProperty("started").GetBoolean());
+        foreach (var entry in admitted.GetProperty("entries").EnumerateArray().Skip(1))
+            await f.Port.ExecuteAsync("music.queue.remove", new { id = S(entry, "id") });
+        await f.Wait(snapshot => N(snapshot, "count") == 1);
+        foreach (int playback in new[] { 2, 3 })
+        {
+            await f.Rec.OnPlaybackAsync(new(current, true, true, true, PlaybackEvent: playback));
+            await f.Rec.ExecuteAsync("music.recommendations.continue", new { id, enabled = true });
+        }
+        var actual = await f.Q(); var state = await f.State();
+        Check(state.GetProperty("continue").GetBoolean() && !state.GetProperty("started").GetBoolean() &&
+            !state.GetProperty("exhausted").GetBoolean() && state.GetProperty("candidates").GetArrayLength() == 0 &&
+            N(state, "offset") == 15 && N(actual, "total") == 1 && Current(actual) == current &&
+            actual.GetProperty("source").GetRawText() == admitted.GetProperty("source").GetRawText() &&
+            f.Catalog.Calls.Count == 1 && f.Selections.IsEmpty);
     }
     private static async Task QueueFinalPreviewCancel()
     {
@@ -774,11 +999,20 @@ public static partial class MusicRecommendationTests
         var preview = await f.Start("queue"); string current = Current(await f.Q());
         var next = await f.Port.ExecuteAsync("music.queue.append", new { songs = new[] { Song("9") }, next = true });
         string inserted = next.GetProperty("entryIds")[0].GetString()!;
+        await f.Port.ExecuteAsync("music.queue.reorder", new { ids = new[] { inserted, current } });
+        await f.Wait(state => S(state, "anchorId") == current);
+        await f.Rec.OnPlaybackAsync(new(current, true, true, true));
+        Check((await f.Q()).GetProperty("hasPriority").GetBoolean() && N(await f.Q(), "total") == 2 &&
+            (await f.State()).GetProperty("candidates").GetArrayLength() == 2 && f.Selections.IsEmpty);
         Check(!await f.Rec.TryAdvanceAsync(current, false, true));
         var ordinary = await f.Port.ExecuteAsync("music.queue.next");
         Check(S(ordinary, "targetId") == inserted && N(await f.Q(), "total") == 2);
         await f.Wait(x => S(x, "currentId") == inserted);
         Check((await f.State()).GetProperty("candidates").GetArrayLength() == 2);
+        await f.Port.ExecuteAsync("music.queue.reorder", new { ids = new[] { current, inserted } });
+        await f.Wait(state => S(state, "anchorId") == inserted);
+        await f.Rec.OnPlaybackAsync(new(inserted, true, true, true));
+        Check(N(await f.Q(), "total") == 4 && f.Selections.IsEmpty && !(await f.State()).GetProperty("started").GetBoolean());
         Check(!await f.Rec.TryAdvanceAsync(inserted, false, true));
         Check(N(await f.Q(), "total") == 4 && Current(await f.Q()) == inserted && f.Catalog.Calls.Count == 1);
     }
@@ -822,7 +1056,6 @@ public static partial class MusicRecommendationTests
     {
         await using var f = new Fixture(); await f.Replace("1"); f.Catalog.Reply("queue-recommendations", "2");
         var state = await f.ActivateQueue(); string tail = Current(await f.Q());
-        await f.Port.ExecuteAsync("music.queue.mode", new { mode = 3 });
         await f.Select(tail);
         var hold = new Hold(); f.Catalog.Handle = hold.Read;
         var observe = f.Rec.OnPlaybackAsync(new(tail, true, true, true)); await hold.Entered.Task;
@@ -845,19 +1078,20 @@ public static partial class MusicRecommendationTests
         Check(f.Store.Writes == writes && N(await f.Q(), "total") == 2 && Current(await f.Q()) == tail);
         Check((await f.State()).GetProperty("candidates").GetArrayLength() == 1);
         await f.Rec.ExecuteAsync("music.recommendations.continue", new { id, enabled = true });
+        await f.Wait(x => !x.GetProperty("loading").GetBoolean());
         Check(N(await f.Q(), "total") == 3 && f.Catalog.Calls.Count == 2 && f.Selections.Count == 1);
     }
     private static async Task QueueInitialNext(bool ended, bool pause = false)
     {
         await using var f = new Fixture(); await f.Replace("1");
-        var hold = new Hold(); f.Catalog.Handle = hold.Read; var start = f.Start("queue"); await hold.Entered.Task;
+        var hold = new Hold(); f.Catalog.Handle = hold.Read; var start = f.Start("queue", special: false); await hold.Entered.Task;
         string tail = Current(await f.Q());
         await f.Rec.OnPlaybackAsync(new(tail, true, true, true));
         if (pause) await f.Rec.OnPlaybackAsync(new(tail, false, true, true));
         Check(!await f.Rec.TryAdvanceAsync(tail, ended, true), "initial preview must not hold existing queue navigation");
         hold.Complete(QueueBatch(false, "2", "3")); var state = await start;
         Check(N(await f.Q(), "total") == 1 && Current(await f.Q()) == tail && f.Selections.IsEmpty &&
-            state.GetProperty("candidates").GetArrayLength() == 2);
+            state.GetProperty("candidates").GetArrayLength() == 2 && !state.GetProperty("continue").GetBoolean());
     }
     private static async Task QueueResumeNext()
     {
@@ -869,7 +1103,12 @@ public static partial class MusicRecommendationTests
         await f.Rec.ExecuteAsync("music.recommendations.continue", new { id, enabled = true });
         Check(!await f.Rec.TryAdvanceAsync(tail, false, true) && f.Catalog.Calls.Count == 2 && !hold.Cancelled.Task.IsCompleted);
         hold.Complete("queue-recommendations", "3"); await fetch;
-        Check(N(await f.Q(), "total") == 3 && Current(await f.Q()) == tail && f.Selections.Count == 1 && f.Catalog.MaxActive == 1);
+        var late = await f.State();
+        Check(N(await f.Q(), "total") == 2 && late.GetProperty("candidates").GetArrayLength() == 1);
+        await f.Rec.OnPlaybackAsync(new(tail, true, true, true, PlaybackEvent: 2));
+        Check(N(await f.Q(), "total") == 2, "a late result cannot cross an off/on boundary automatically");
+        await f.Rec.ExecuteAsync("music.recommendations.choose", new { id, candidateId = S(late.GetProperty("candidates")[0], "id") });
+        Check(N(await f.Q(), "total") == 3 && f.Selections.Count == 2 && f.Catalog.MaxActive == 1);
     }
     private static async Task QueueDisableCommit()
     {
@@ -899,7 +1138,8 @@ public static partial class MusicRecommendationTests
         string selected = S(next, "targetId"); await f.Wait(x => S(x, "currentId") == selected);
         Check(selected == inserted.GetProperty("entryIds")[0].GetString());
         hold.Complete("queue-recommendations", "3"); await fetch;
-        Check(Current(await f.Q()) == selected && N(await f.Q(), "total") == 4 && f.Catalog.Calls.Count == 2 && f.Selections.Count == 1);
+        Check(Current(await f.Q()) == selected && N(await f.Q(), "total") == 3 && f.Catalog.Calls.Count == 2 && f.Selections.Count == 1 &&
+            (await f.State()).GetProperty("candidates").GetArrayLength() == 1);
     }
     private static async Task QueueTerminal(string terminal)
     {
@@ -1397,8 +1637,15 @@ internal static class RecommendationTest
     {
         var value = JsonNode.Parse(Batch("heartbeat", ids).GetRawText())!.AsObject();
         value["context"] = JsonSerializer.SerializeToNode(new
-            { playlistId = "100", startMusicId = fromHome ? "10" : "1", songId = fromHome ? "10" : "1", fromHome, count = 120 });
+            { playlistId = "100", startMusicId = fromHome ? "10" : "1", songId = fromHome ? "10" : "1", fromHome, count = 120, accountId = "123" });
         value["entrySong"] = JsonNode.Parse(Song(fromHome ? "10" : "1").GetRawText());
+        return J(value);
+    }
+    internal static JsonElement HeartbeatPage(bool fromHome, string songId, params string[] ids)
+    {
+        var value = JsonNode.Parse(HeartbeatBatch(fromHome, ids).GetRawText())!.AsObject();
+        value["context"]!["songId"] = songId;
+        value.Remove("entrySong");
         return J(value);
     }
     internal static JsonElement QueueBatch(bool hasMore, params string[] ids) => QueuePage(15, hasMore, ids);
@@ -1471,14 +1718,14 @@ internal static class RecommendationTest
         internal readonly ConcurrentQueue<MusicRecommendationSelection> Selections = new();
         internal Action<MusicRecommendationSelection>? OnSelection;
         internal Fixture(IMusicPlatformCatalog? actual = null,
-            Func<MusicRecommendationSelection, CancellationToken, Task<bool>>? selectionAsync = null, Func<bool>? randomFetch = null)
+            Func<MusicRecommendationSelection, CancellationToken, Task<bool>>? selectionAsync = null)
         {
             Library = new(Store); Port = new(Library);
             Rec = new(actual ?? Catalog, Port, selectionAsync ?? ((value, _) =>
             { if (value.IsCurrent()) { Selections.Enqueue(value); OnSelection?.Invoke(value); } return Task.FromResult(value.IsCurrent()); }), Clock,
-                actual is null ? Catalog.Read : null, randomFetch);
+                actual is null ? Catalog.Read : null);
         }
-        internal async Task<JsonElement> Start(string kind)
+        internal async Task<JsonElement> Start(string kind, bool special = true)
         {
             object input = kind switch
             {
@@ -1486,9 +1733,12 @@ internal static class RecommendationTest
                 "similar" => new { kind, platform = "wy", sourceIds = new[] { "1" }, sourceType = "song" },
                 _ => new { kind, platform = "wy" }
             };
-            return await Rec.ExecuteAsync("music.recommendations.start", input);
+            var state = await Rec.ExecuteAsync("music.recommendations.start", input);
+            // These callers explicitly select the special mode after creating its preview.
+            return kind == "queue" && special && state.GetProperty("ok").GetBoolean() && state.GetProperty("active").GetBoolean()
+                ? await Rec.ExecuteAsync("music.recommendations.continue", new { id = S(state, "id"), enabled = true }) : state;
         }
-        internal Task<JsonElement> Heartbeat(bool continuation = false) => Rec.ExecuteAsync("music.recommendations.start",
+        internal Task<JsonElement> Heartbeat() => Rec.ExecuteAsync("music.recommendations.start",
             new { kind = "heartbeat", platform = "wy", entry = "current", songId = "1", playlistId = "100" });
         internal async Task Select(string id)
         {

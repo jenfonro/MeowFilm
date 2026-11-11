@@ -54,5 +54,6 @@ public struct MusicFMPlaybackSnapshot: Sendable {
 public protocol MusicFMPlaybackServing: Sendable {
     func rememberedFM() async throws -> MusicHomeAction
     func fmPlaybackSnapshot() async throws -> MusicFMPlaybackSnapshot?
+    /// true selects FM playback with queue order and continuation together.
     func setFMContinue(_ enabled: Bool, sessionID: UUID) async throws
 }

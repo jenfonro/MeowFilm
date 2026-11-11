@@ -121,8 +121,8 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(action is "enter" or "append" or "select" or "restore", "INVALID_REQUEST");
         LJ.Fields(p, action switch
         {
-            "enter" => "nonce expectedVersion checkpoint seedEntryId songs context capture",
-            "append" => "nonce expectedVersion songs context selectIndex",
+            "enter" => "nonce expectedVersion checkpoint seedEntryId songs context capture sequential",
+            "append" => "nonce expectedVersion songs context selectIndex sequential",
             "select" => "nonce expectedVersion id",
             _ => "nonce expectedVersion checkpoint retainCurrent"
         }, action is "enter" or "append" ? "nonce expectedVersion songs" :
@@ -135,6 +135,7 @@ public sealed partial class MusicLibraryOwner
         string checkpoint = p["checkpoint"] is null ? "" : LJ.Text(p["checkpoint"], 36);
         RecommendationCheckpoint? captured = null;
         var beforeHistory = shuffleHistory.ToArray(); var beforeFailed = failedEntries.ToArray();
+        if (p.ContainsKey("sequential")) LJ.Require(LJ.IsBool(p["sequential"]));
         JsonObject response;
         if (action == "select")
         {
@@ -213,6 +214,11 @@ public sealed partial class MusicLibraryOwner
             queueVersion++;
             response = RecommendationResult(LJ.Merge(Position(restored, doc),
                 LJ.Obj(("checkpoint", checkpoint), ("restored", true))), operation);
+        }
+        if (LJ.B(p["sequential"]))
+        {
+            QueueCommand("music.queue.mode", LJ.Obj(("mode", 1)), doc, false);
+            response["mode"] = 1;
         }
         recommendationStage = new(operation, signature, checkpoint, captured, action == "restore", response,
             beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
