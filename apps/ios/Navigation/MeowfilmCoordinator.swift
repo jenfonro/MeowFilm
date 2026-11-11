@@ -144,6 +144,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
 
     func showPublicBrowse(_ request: MusicPublicBrowseRequest, title: String) {
         guard let model = assembly.music else { return }
+        if request.dailyPlatform != nil, let browser = model.publicBrowser {
+            navigation.pushViewController(MusicCollectionViewController(
+                model: model, recommendation: request, browser: browser,
+                appearance: assembly.appearance, router: self
+            ), animated: true)
+            return
+        }
         navigation.pushViewController(MusicBrowseViewController(
             title: title, model: model, browser: model.publicBrowser, request: request,
             appearance: assembly.appearance, router: self

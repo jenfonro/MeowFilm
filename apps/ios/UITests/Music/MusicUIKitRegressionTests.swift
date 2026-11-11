@@ -3638,7 +3638,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             $0.accessibilityIdentifier == "music.collection.cover"
         })
         let card = try XCTUnwrap(descendants(header).first {
-            $0.accessibilityIdentifier == "music.collection.infoCard"
+            $0.accessibilityIdentifier == "music.collection.information"
         })
         let coverFrame = cover.convert(cover.bounds, to: header)
         XCTAssertEqual(header.heroHeight(for: 390), 149, accuracy: 0.5)
@@ -3646,8 +3646,11 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertEqual(card.frame.minX, 12, accuracy: 0.5)
         XCTAssertEqual(card.frame.minY, 10, accuracy: 0.5)
         XCTAssertEqual(card.frame.width, 366, accuracy: 0.5)
-        XCTAssertEqual(card.layer.cornerRadius, 18, accuracy: 0.5)
-        XCTAssertEqual(card.layer.borderWidth, 1, accuracy: 0.1)
+        XCTAssertEqual(card.layer.cornerRadius, 0, accuracy: 0.5)
+        XCTAssertEqual(card.layer.borderWidth, 0, accuracy: 0.1)
+        XCTAssertEqual(card.layer.shadowOpacity, 0)
+        XCTAssertNil(card.backgroundColor)
+        XCTAssertFalse(descendants(card).contains { $0 is UIVisualEffectView })
         XCTAssertEqual(coverFrame.minX, 24, accuracy: 0.5)
         XCTAssertEqual(coverFrame.minY, 22, accuracy: 0.5)
         XCTAssertEqual(coverFrame.width, 102.6, accuracy: 0.5)
@@ -3935,6 +3938,19 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testCollectionDetailSearchFiltersRowsAndKeepsInlineActions() async throws {
+        // This test changes traits and captures a mounted UIKit page in the runner.
+        // Use a real foreground runner, rather than a synthetic active notification.
+        let runnerIdentifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        await withCheckedContinuation { continuation in
+            RunLoop.main.perform {
+                MainActor.assumeIsolated { XCUIApplication(bundleIdentifier: runnerIdentifier).activate() }
+                continuation.resume()
+            }
+        }
+        let active = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            UIApplication.shared.applicationState == .active
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [active], timeout: 4)
         let tracks = [
             MusicRemoteTrack(ref: .init(kind: .library, id: "rain"), songId: "rain",
                              title: "Rain", artist: "秦凡淇", album: "羽毛剑"),
@@ -3998,6 +4014,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertTrue(bar.superview === controller.view)
         XCTAssertEqual(bar.frame.height, 62, accuracy: 0.5)
         XCTAssertEqual(bar.frame.minY, table.frame.minY + hero, accuracy: 0.5)
+        attachPlaybackView(navigation.view, name: "playlist-information-light-static")
         let top = -table.adjustedContentInset.top
         table.contentInset.bottom = 1000
         table.setContentOffset(CGPoint(x: 0, y: top + hero + 20), animated: false)
@@ -4005,6 +4022,26 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertEqual(header.collapseProgress, 1, accuracy: 0.01)
         XCTAssertEqual(controller.pageHeader.title, "歌单")
         XCTAssertEqual(bar.frame.minY, table.frame.minY, accuracy: 0.5)
+        attachPlaybackView(navigation.view, name: "playlist-information-light-pinned")
+        window.overrideUserInterfaceStyle = .dark
+        let darkReady = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            navigation.view.layoutIfNeeded()
+            return controller.theme.dark && header.traitCollection.userInterfaceStyle == .dark &&
+                bar.searchField.textColor == UIColor(controller.theme.ink)
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [darkReady], timeout: 4)
+        XCTAssertTrue(controller.theme.dark)
+        guard controller.theme.dark, header.traitCollection.userInterfaceStyle == .dark,
+              bar.searchField.textColor == UIColor(controller.theme.ink) else { return }
+        XCTAssertEqual(bar.frame.minY, table.frame.minY, accuracy: 0.5)
+        attachPlaybackView(navigation.view, name: "playlist-information-dark-pinned")
+        window.overrideUserInterfaceStyle = .light
+        let lightReady = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            navigation.view.layoutIfNeeded()
+            return !controller.theme.dark && header.traitCollection.userInterfaceStyle == .light &&
+                bar.searchField.textColor == UIColor(controller.theme.ink)
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [lightReady], timeout: 4)
         table.setContentOffset(CGPoint(x: 0, y: top), animated: false)
         table.layoutIfNeeded()
         XCTAssertEqual(header.collapseProgress, 0, accuracy: 0.01)

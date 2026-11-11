@@ -34,9 +34,14 @@ public sealed partial class MusicPlatformHttp : IDisposable
         uri.UserInfo.Length == 0 && uri.Fragment.Length == 0 && (platform switch {
             "wy" => uri.Host is "music.163.com" or "interfacepc.music.163.com" ||
                 uri.Host == "interface.music.163.com" && uri.AbsolutePath == "/api/bsr/sk/get" ||
-                uri.Host == "interface3.music.163.com" && uri.AbsolutePath is "/xeapi/v3/discovery/recommend/songs" or "/xeapi/homepage/category/daily/song/list" or "/xeapi/song/enhance/player/url/v1",
+                uri.Host == "interface3.music.163.com" &&
+                (uri.AbsolutePath is "/xeapi/v3/discovery/recommend/songs" or "/xeapi/homepage/category/daily/song/list" or "/xeapi/song/enhance/player/url/v1" ||
+                 uri.Query.Length == 0 && IsDailyStylePreferencePath(uri.AbsolutePath)),
             "tx" => uri.Host == "u.y.qq.com", "kg" => uri.Host == "gateway.kugou.com" ||
                 uri.Host == "lyrics.kugou.com" && uri.AbsolutePath is "/v1/search" or "/download", _ => false });
+    private static bool IsDailyStylePreferencePath(string path) =>
+        path is "/xeapi/homepage/daily/song/config/get" or "/xeapi/homepage/daily/song/tag/save";
+
     private static int HeaderBytes(HttpHeaders headers)
     {
         var count = 0;
@@ -361,6 +366,9 @@ public sealed partial class MusicPlatformHttp : IDisposable
                     ? platform.Length > 0 && platform == AccountPlatform(step) && AccountOrigin(step, request)
                     : IsAllowedOrigin(platform, request.RequestUri)), "ORIGIN_DENIED");
             PJ.Require(request.Method == HttpMethod.Post || request.Method == HttpMethod.Get);
+            if (platform == "wy" && request.RequestUri!.Host == "interface3.music.163.com" &&
+                IsDailyStylePreferencePath(request.RequestUri.AbsolutePath))
+                PJ.Require(request.Method == HttpMethod.Post, "ORIGIN_DENIED");
             PJ.Require(request.Content is null || request.Content.Headers.ContentLength is >= 0 and <= 65536, "LIMIT");
             PJ.Require(HeaderBytes(request.Headers) +
                 (nativePolicy is not null && request.Content is not null ? HeaderBytes(request.Content.Headers) : 0) <= 32768, "LIMIT");

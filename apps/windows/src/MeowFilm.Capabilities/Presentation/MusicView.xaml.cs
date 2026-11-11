@@ -320,6 +320,28 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         Grid.SetRowSpan(bar, Grid.GetRowSpan(content));
         Panel.SetZIndex(bar, Panel.GetZIndex(content) + 1);
     }
+    private void DailyMore_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button) return;
+        var menu = new ContextMenu { PlacementTarget = button };
+        menu.SetResourceReference(StyleProperty, "MeowFilm.ContextMenu");
+        var save = new MenuItem { Header = "保存到本地歌单", IsEnabled = module.CanCatalogAction };
+        save.Click += async (_, _) => await module.SaveCatalogPlaylistAsync();
+        var refresh = new MenuItem { Header = "重新读取", IsEnabled = module.CanCatalogBrowse };
+        refresh.Click += async (_, _) => await module.RefreshCatalogAsync();
+        menu.Items.Add(save); menu.Items.Add(refresh); button.ContextMenu = menu; menu.IsOpen = true;
+    }
+    private void DailyStylePopup_Opened(object sender, EventArgs e) => DailyStylePanel.Focus();
+    private void DailyStylePopup_Closed(object sender, EventArgs e) => module.CancelDailyStyleEditor();
+    private void DailyStylePanel_KeyDown(object sender, KeyEventArgs e)
+    { if (e.Key == Key.Escape) { module.CancelDailyStyleEditor(); DailyStylePopup.SetCurrentValue(Popup.IsOpenProperty, false); e.Handled = true; } }
+    private async void DailyBranch_Click(object sender, RoutedEventArgs e)
+    { if (sender is Button { Tag: string branch }) await module.SwitchDailyBranchAsync(branch); }
+    private async void DailyStyleOpen_Click(object sender, RoutedEventArgs e) => await module.OpenDailyStyleEditorAsync();
+    private void DailyStyleTag_Click(object sender, RoutedEventArgs e)
+    { if (sender is Button { Tag: MusicCatalogTag tag }) module.ToggleDailyStyleTag(tag); }
+    private void DailyStyleCancel_Click(object sender, RoutedEventArgs e) => module.CancelDailyStyleEditor();
+    private async void DailyStyleConfirm_Click(object sender, RoutedEventArgs e) => await module.ConfirmDailyStyleAsync();
     private async void PlayContentDetail_Click(object sender, RoutedEventArgs e) => await module.PlayContentDetailAsync();
     private async void HistoryDate_Changed(object sender, SelectionChangedEventArgs e)
     {

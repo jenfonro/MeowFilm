@@ -54,7 +54,6 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         let request: MusicPublicBrowseRequest
         let hasError: Bool
         let canSave: Bool
-        let hasDailyStyle: Bool
         let canPrevious: Bool
         let nextTitle: String?
         let filters: [MusicPublicBrowseFilter]
@@ -634,7 +633,6 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         let key = BrowseActionsKey(
             pageID: page.actionPageID, request: page.request,
             hasError: hasError, canSave: page.canSaveCollection,
-            hasDailyStyle: page.dailyStyle != nil && page.remoteSource != nil,
             canPrevious: page.canPrevious, nextTitle: nextTitle,
             filters: page.filters, selectedFilter: page.selectedFilter
         )
@@ -669,12 +667,6 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 self?.saveCollection()
             })
         }
-        if page.dailyStyle != nil, page.remoteSource != nil {
-            actions.append(UIAction(title: "选择推荐风格") { [weak self] _ in
-                guard page.actionPageID == key.pageID else { return }
-                self?.openDailyStyle()
-            })
-        }
         if page.canPrevious {
             actions.append(UIAction(title: "上一页") { [weak self] _ in
                 self?.runMenuAction(pageID: key.pageID) { await page.previous() }
@@ -683,14 +675,6 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         if page.nextCursor != nil {
             actions.append(UIAction(title: page.usesPageNavigation ? "下一页" : "继续加载") { [weak self] _ in
                 self?.runMenuAction(pageID: key.pageID) { await page.appendNext() }
-            })
-        }
-        if case .homeAction(.daily, _) = page.request {
-            actions.append(UIAction(title: "每日推荐") { [weak self] _ in
-                self?.runMenuAction(pageID: key.pageID) { await page.selectDailyBranch(.default) }
-            })
-            actions.append(UIAction(title: "风格推荐") { [weak self] _ in
-                self?.runMenuAction(pageID: key.pageID) { await page.selectDailyBranch(.style) }
             })
         }
         if !page.filters.isEmpty {
@@ -944,16 +928,6 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             loadFMPreview(item, action: action)
             return
         }
-    }
-
-    private func openDailyStyle() {
-        guard canPresentPageAlert, let page, let source = page.remoteSource else { return }
-        let editor = MusicDailyStyleViewController(page: page, source: source, appearance: appearance)
-        let wrapper = PageNavigationController(themeProvider: appearance)
-        wrapper.setViewControllers([editor], animated: false)
-        wrapper.modalPresentationStyle = .pageSheet
-        wrapper.sheetPresentationController?.detents = [.medium(), .large()]
-        present(wrapper, animated: true)
     }
 
     private func makeLayout() -> UICollectionViewLayout {

@@ -7,6 +7,21 @@ public enum MusicPublicBrowseRequest: Sendable, Hashable {
     case discovery(MusicPublicBrowseDestination)
     case homeAction(MusicHomeAction, title: String)
     case accountRecommendation(MusicAccountPlatform, kind: String, title: String)
+
+    public var dailyPlatform: MusicAccountPlatform? {
+        switch self {
+        case .discovery(.daily(let platform)): return platform
+        case .homeAction(.daily, _): return .netease
+        case .accountRecommendation(let platform, let kind, _) where kind == "daily": return platform
+        default: return nil
+        }
+    }
+
+    public var dailyBranch: MusicHomeAction.DailyBranch? {
+        guard dailyPlatform != nil else { return nil }
+        if case .homeAction(.daily(let branch), _) = self { return branch }
+        return .default
+    }
 }
 public struct MusicPublicBrowseActionIntent: Sendable {
     fileprivate let id: UUID
@@ -367,12 +382,14 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         }
     }
     public func selectDailyBranch(_ branch: MusicHomeAction.DailyBranch) async {
+        guard available, visible, !isActing, request.dailyPlatform == .netease,
+              request.dailyBranch != branch else { return }
         let title = branch == .style ? "风格推荐" : "每日推荐"
-        switch request {
-        case .homeAction(.daily, _), .discovery(.daily(.netease)): break
-        default: return
-        }
         request = .homeAction(.daily(branch: branch), title: title)
+        sections = []
+        dailyStyle = nil
+        total = nil
+        loaded = false
         await refresh()
     }
     public func saveDailyStyle(_ selection: MusicDailyStyleSelection) async throws -> MusicDailyStyleSave {

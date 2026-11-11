@@ -11,7 +11,7 @@ namespace MeowFilm.Capabilities;
 /// Complete playlist staging never crosses a script process or writes half a
 /// remote playlist to the local queue. Favorites persist only a remote reference.
 /// </summary>
-public sealed class MusicNativeCatalogOwner : IAsyncDisposable
+public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStylePreferences
 {
     private const long MaximumStageBytes = 32 * 1024 * 1024;
     private readonly IMusicPlatformCatalog catalog;
@@ -43,6 +43,40 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     public MusicNativeCatalogOwner(IMusicPlatformCatalog catalog, MusicLibraryOwner library, TimeProvider? clock = null)
         => (this.catalog, this.library, this.clock) = (catalog ?? throw new ArgumentNullException(nameof(catalog)),
             library ?? throw new ArgumentNullException(nameof(library)), clock ?? TimeProvider.System);
+
+    public Task<MusicDailyStyleEditor> OpenDailyStyleEditorAsync(CancellationToken cancellationToken = default) =>
+        DailyStyleOperation((port, token) => port.OpenDailyStyleEditorAsync(token), cancellationToken);
+
+    public Task<MusicDailyStyleSaveResult> SaveDailyStyleAsync(MusicDailyStyleEditor editor,
+        MusicDailyStyleSelection selection, CancellationToken cancellationToken = default) =>
+        DailyStyleOperation((port, token) => port.SaveDailyStyleAsync(editor, selection, token), cancellationToken);
+
+    private async Task<T> DailyStyleOperation<T>(Func<IMusicDailyStylePreferences, CancellationToken, Task<T>> action, CancellationToken token)
+    {
+        long captured;
+        CancellationTokenSource request;
+        lock (gate)
+        {
+            if (closed) throw new MusicPlatformException("CLOSED");
+            captured = epoch;
+            request = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token, session.Token);
+            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        try
+        {
+            Guard(request.Token, captured);
+            if (catalog is not IMusicDailyStylePreferences preferences) throw new MusicPlatformException("UNSUPPORTED");
+            var result = await action(preferences, request.Token).ConfigureAwait(false);
+            Guard(CancellationToken.None, captured);
+            return result;
+        }
+        catch (CatalogFailure error) { throw new MusicPlatformException(error.Code); }
+        finally
+        {
+            request.Dispose();
+            lock (gate) { if (--pending == 0) drained.TrySetResult(); }
+        }
+    }
 
     public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
         CancellationToken cancellationToken = default)

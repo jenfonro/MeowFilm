@@ -8,7 +8,7 @@ public sealed partial class MusicCapability
 {
     // These are in-process route arguments, never credentials or a generic RPC/URL.
     private sealed record CatalogTarget(string Operation, string Platform, string Title, JsonElement Parameters,
-        bool ManagedPlaylist = false)
+        bool ManagedPlaylist = false, string Artwork = "", string Subtitle = "", int? Count = null)
     {
         public bool Private => Operation is "personalPlaylists" or "daily" or "fm" or "similar" or
             "heartbeat" || Parameters.TryGetProperty("personal", out _);
@@ -24,7 +24,6 @@ public sealed partial class MusicCapability
     public MusicCatalogChoice[] CatalogPersonalKinds => SelectedCatalogPlatform.Key == "tx"
         ? [new("all", "全部歌单"), new("created", "创建的歌单"), new("subscribed", "收藏的歌单")]
         : [new("all", "全部歌单")];
-    public MusicCatalogChoice[] CatalogDailyBranches { get; } = [new("default", "每日推荐"), new("style", "风格推荐")];
     public MusicCatalogChoice[] CatalogFmModes { get; } =
         [new("default", "私人 FM"), new("familiar", "熟悉"), new("explore", "探索"), new("puzzle", "拼图"), new("scene", "场景")];
     public MusicCatalogChoice[] CatalogFmScenes { get; } =
@@ -44,7 +43,7 @@ public sealed partial class MusicCapability
     public string CatalogFmMode { get; set; } = "default";
     public string CatalogFmScene { get; set; } = "FOCUS";
     public bool IsCatalogPersonal => catalogLoadedTarget?.Operation == "personalPlaylists" && IsCatalogPage;
-    public bool IsCatalogDaily => catalogLoadedTarget?.Operation == "daily" && IsCatalogPage;
+    public bool IsCatalogDaily => IsCatalogPage && (location.Route == "catalog-daily" || location.Route.StartsWith("catalog-daily/", StringComparison.Ordinal));
     public bool IsCatalogFm => catalogLoadedTarget?.Operation == "fm" && IsCatalogPage;
     public bool IsCatalogFmScene => IsCatalogFm && CatalogFmMode == "scene";
     public bool IsCatalogBatch => IsCatalogPage && catalogLoadedTarget?.Operation is
@@ -198,7 +197,7 @@ public sealed partial class MusicCapability
         var action = card.Action ?? JsonSerializer.SerializeToElement(new { type = card.Kind });
         if (card.Kind == "playlist" && card.Locator is { } locator)
             return OpenCatalogTargetAsync(Target("playlist", card.Platform, card.Title,
-                new { id = card.ActionId, personal = locator }) with { ManagedPlaylist = card.IsManagedPlaylist }, card.ActionId);
+                new { id = card.ActionId, personal = locator }) with { ManagedPlaylist = card.IsManagedPlaylist, Artwork = card.Cover, Subtitle = card.Subtitle, Count = card.Count }, card.ActionId);
         if (card.Kind == "chart")
             return OpenCatalogTargetAsync(Target("chart", card.Platform, card.Title,
                 new { kind = card.ActionId, period = "daily" }), card.ActionId);
@@ -207,7 +206,8 @@ public sealed partial class MusicCapability
         if (card.Kind == "daily")
         {
             var branch = MusicCatalogDto.Text(action, "branch"); if (branch.Length == 0) branch = "default";
-            return OpenCatalogTargetAsync(Target("daily", card.Platform, card.Title, new { branch }), branch);
+            return OpenCatalogTargetAsync(Target("daily", card.Platform, card.Title, new { branch })
+                with { Artwork = card.Cover, Subtitle = card.Subtitle, Count = card.Count }, branch);
         }
         if (card.Kind == "similar")
         {

@@ -19,6 +19,7 @@ public static partial class MusicNativePlatformTests
     private const string KgHash = "ABCDEF0123456789ABCDEF0123456789";
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in DailyStyleCases()) yield return test;
         foreach (var test in ChartCases()) yield return test;
         foreach (var test in ChannelDirectoryCases()) yield return test;
         foreach (var test in HomeHeartbeatCases()) yield return test;

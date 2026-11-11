@@ -8,9 +8,9 @@ namespace MeowFilm.Desktop;
 public static class AppearanceColors
 {
     public const string DefaultColor = "#E6F3FB";
-    private static readonly string[] Stops = ["#E6F3FB", "#EAF3F7", "#F7F7F3", "#E9ECEF", "#DBE3EA", "#D3DDE6"];
-    private static readonly double[] Offsets = [0, .18, .38, .60, .80, 1];
-    private static readonly double[] Tint = [.18, .12, .025, .10, .17, .22];
+    private static readonly string[] Stops = ["#E4F2FC", "#EBF5FC", "#F5F8FB", "#F7F9FC"];
+    private static readonly double[] Offsets = [0, .24, .58, 1];
+    private static readonly double[] Tint = [.18, .12, .06, .025];
     public static Brush DefaultBackground { get; } = Background(DefaultColor);
     // Theme.xaml is merged by independent views and detached popup roots. Sharing these
     // brushes keeps the application's appearance consistent across those dictionaries.

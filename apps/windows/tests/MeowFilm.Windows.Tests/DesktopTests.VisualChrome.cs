@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -7,6 +8,8 @@ using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
 using System.Windows.Shell;
 using MeowFilm.Desktop;
 
@@ -16,6 +19,93 @@ public static partial class DesktopTests
 {
     private static IEnumerable<TestCase> VisualChromeCases()
     {
+        yield return Case("sidebar blurs only the window background at window coordinates across resizing", async () =>
+        {
+            await using var f = new Fixture([new ProbeModule("backdrop")]); await f.LoadAsync();
+            var root = DetachChrome(f.Shell);
+            var source = f.Element<Border>("ApplicationBackground");
+            var material = f.Element<SidebarBackdrop>("SidebarMaterial");
+            var sidebar = f.Element<Border>("SidebarBackground");
+            Same(source, material.Source, "the only sampled visual is the dedicated background sibling");
+            False(source.IsAncestorOf(material), "background source excludes the sidebar and its foreground");
+            True(material.Effect is BlurEffect { Radius: 12 }, "actual material applies a light background blur");
+            True(sidebar.Background is null && !sidebar.IsHitTestVisible && sidebar.ClipToBounds,
+                "material has no independent tint or pointer target and clips only its background");
+            var previewRoot = TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot,
+                Path.Combine(TestWorkspace.ResultsRoot, "playlist-pages-shell"));
+            Directory.CreateDirectory(previewRoot);
+            foreach (var size in new[] { new Size(1110, 800), new Size(860, 600) })
+            {
+                root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout(); await DrainAsync();
+                var bitmap = new RenderTargetBitmap((int)size.Width, (int)size.Height, 96, 96, PixelFormats.Pbgra32);
+                bitmap.Render(root);
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(bitmap));
+                using var file = File.Create(Path.Combine(previewRoot,
+                    $"sidebar-application-gradient-{(int)size.Width}x{(int)size.Height}.png"));
+                encoder.Save(file);
+            }
+            foreach (var size in new[] { new Size(1110, 800), new Size(900, 640) })
+            {
+                var controlled = new LinearGradientBrush
+                {
+                    StartPoint = new(0, 0), EndPoint = new(0, 1),
+                    GradientStops = new()
+                    {
+                        new(Colors.Black, 0), new(Colors.Black, .5),
+                        new(Colors.White, .5), new(Colors.White, 1)
+                    }
+                };
+                root.Background = controlled;
+                root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout(); await DrainAsync();
+                Same(controlled, source.Background, "source follows the live window brush without a color copy");
+                Equal(size, source.RenderSize, "source keeps complete window dimensions including the player row");
+                foreach (var dpi in new[] { 96d, 144d })
+                {
+                    double scale = dpi / 96;
+                    var bitmap = new RenderTargetBitmap((int)(size.Width * scale), (int)(size.Height * scale),
+                        dpi, dpi, PixelFormats.Pbgra32);
+                    bitmap.Render(root);
+                    Color Pixel(int x, int y)
+                    {
+                        var bytes = new byte[4];
+                        bitmap.CopyPixels(new Int32Rect((int)(x * scale), (int)(y * scale), 1, 1), bytes, 4, 0);
+                        return Color.FromArgb(bytes[3], bytes[2], bytes[1], bytes[0]);
+                    }
+                    int boundary = (int)size.Height / 2;
+                    True(Pixel(190, boundary - 2).R is > 20 and < 235 &&
+                        Pixel(190, boundary + 2).R is > 20 and < 235,
+                        "the controlled sharp background edge is truly blurred at the full-window midpoint");
+                    True(Pixel(190, boundary - 24).R < 5 && Pixel(190, boundary + 24).R > 250,
+                        "blur stays local rather than stretching the background into the shorter sidebar");
+                    True(Pixel(350, boundary - 2).R < 5 && Pixel(350, boundary + 2).R > 250,
+                        "the content background retains the sharp source edge");
+
+                    var foreground = new Border
+                    {
+                        Background = Brushes.Red, Width = 12, Height = 40,
+                        HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+                        Margin = new Thickness(180, boundary - 20, 0, 0), IsHitTestVisible = false
+                    };
+                    var layout = f.Element<Grid>("RootLayout");
+                    Grid.SetRowSpan(foreground, 3); Grid.SetColumnSpan(foreground, 2);
+                    layout.Children.Add(foreground); root.UpdateLayout();
+                    bitmap.Clear(); bitmap.Render(root);
+                    Equal(Colors.Red, Pixel(180, boundary), "foreground starts at its exact pixel edge without blur");
+                    True(Pixel(178, boundary).G > 20, "foreground does not bleed into the sampled background");
+                    layout.Children.Remove(foreground); root.UpdateLayout();
+                }
+            }
+            DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
+            Equal(Visibility.Collapsed, material.Visibility, "high contrast removes the blurred layer");
+            True(material.Effect is null, "high contrast retires the blur");
+            Equal(SystemColors.WindowBrush, sidebar.Background, "system backdrop remains opaque");
+            Equal(SystemColors.WindowTextBrush, sidebar.BorderBrush, "system boundary remains legible");
+            True(sidebar.BorderThickness.Right > 0, "high contrast keeps the navigation boundary");
+            DesktopTheme.SetIsHighContrast(root, false); root.UpdateLayout(); await DrainAsync();
+            Equal(Visibility.Visible, material.Visibility, "ordinary theme restores the same retained material");
+            Same(source, material.Source, "accessibility changes preserve the application source");
+        });
         yield return Case("shell text follows system typography and search and navigation retain accessible focus", async () =>
         {
             await using var f = new Fixture([new ProbeModule("typography")]); await f.LoadAsync();
@@ -199,6 +289,9 @@ public static partial class DesktopTests
             Rect Bounds(FrameworkElement element) => new(element.TranslatePoint(new Point(), root), element.RenderSize);
             Layout();
             var ordinaryPlayer = f.Element<ContentControl>("PlayerHost").Content;
+            var ordinaryBackdrop = f.Element<SidebarBackdrop>("SidebarMaterial");
+            Same(f.Element<Border>("ApplicationBackground"), ordinaryBackdrop.Source,
+                "the ordinary sidebar samples the dedicated application background");
             True(f.Element<Border>("SidebarBackground").Background is null && f.Element<Border>("PlayerFrame").Background is null,
                 "window background is the only ordinary page backdrop");
             var ordinaryPlayerBounds = Bounds(f.Element<Border>("PlayerFrame"));
@@ -219,6 +312,8 @@ public static partial class DesktopTests
             Equal(Visibility.Visible, f.Element<Button>("PlayerDetailBackButton").Visibility, "collapse available");
             Equal(203d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "underlying layout unchanged");
             True(f.Element<Grid>("RootLayout").Background is null, "overlay does not repaint the shell");
+            Same(ordinaryBackdrop, f.Element<SidebarBackdrop>("SidebarMaterial"),
+                "player expansion retains the background material rather than rebuilding the shell");
             Same(module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail),
                 f.Element<ContentControl>("PlayerDetailHost").Content, "detail is one retained opaque surface");
             var escape = RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);

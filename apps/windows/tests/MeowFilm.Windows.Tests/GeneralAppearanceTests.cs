@@ -17,18 +17,21 @@ public static class GeneralAppearanceTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("General appearance: server gradient and strict opaque colors", () =>
+        yield return new("General appearance: pale blue to near white gradient and strict opaque colors", () =>
         {
             var background = (LinearGradientBrush)AppearanceColors.DefaultBackground;
             Check(background.StartPoint == new Point(0, 0) && background.EndPoint == new Point(0, 1));
             Check(background.GradientStops.Select(stop => AppearanceColors.Hex(stop.Color)).SequenceEqual(
-                new[] { "#E6F3FB", "#EAF3F7", "#F7F7F3", "#E9ECEF", "#DBE3EA", "#D3DDE6" }));
-            Check(background.GradientStops.Select(stop => stop.Offset).SequenceEqual(new[] { 0d, .18, .38, .60, .80, 1 }));
+                new[] { "#E4F2FC", "#EBF5FC", "#F5F8FB", "#F7F9FC" }));
+            Check(background.GradientStops.Select(stop => stop.Offset).SequenceEqual(new[] { 0d, .24, .58, 1 }));
+            Check(background.GradientStops.Zip(background.GradientStops.Skip(1),
+                (first, next) => next.Color.R >= first.Color.R && next.Color.G >= first.Color.G &&
+                    next.Color.B >= 251).All(value => value), "the lower canvas never returns to dark gray blue");
             Check(AppearanceColors.TryParse("#12abCD", out var parsed) && AppearanceColors.Hex(parsed) == "#12ABCD");
             foreach (var value in new[] { "red", "#123", "#ff112233", "#GG1122", " 123456", "#12345 " })
                 Check(!AppearanceColors.TryParse(value, out _), "reject " + value);
             var custom = (LinearGradientBrush)AppearanceColors.Background("#FF0000");
-            Check(custom.GradientStops.Select(stop => stop.Color).Distinct().Count() == 6);
+            Check(custom.GradientStops.Select(stop => stop.Color).Distinct().Count() == 4);
             Check(custom.GradientStops.All(stop => Contrast(stop.Color, Color.FromRgb(55, 65, 81)) >= 4.5),
                 "custom hue remains a light layered canvas, not a saturated fill");
             return Task.CompletedTask;
