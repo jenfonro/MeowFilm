@@ -119,6 +119,9 @@ public final class NativeMusicClientService: MusicNativeClientContextProviding, 
         guard let value = try snapshot(platform, create: true) else { throw MusicServiceError.storageFailed }
         return value
     }
+    func existingDevice(_ platform: MusicAccountPlatform) throws -> MusicNativeClientDevice? {
+        try snapshot(platform, create: false)
+    }
     /// A credential imported from another client keeps its exact bound device.
     /// Matching is identity-based, not account-name or platform-wide guessing.
     func matchingDevice(_ platform: MusicAccountPlatform, identity: String) throws -> MusicNativeClientDevice? {

@@ -165,6 +165,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private var operations: [UUID: (platform: MusicAccountPlatform, cancel: @Sendable () -> Void)] = [:]
     var pendingOperationCount: Int { operations.count }
     private var accessTransitions = 0
+    private var transferBatches: [UUID: MusicAccountImportBatch] = [:]
+    private var runningTransfers = Set<UUID>()
     private var pendingWrites = 0
     private var dailyStyleWrite: UUID?
     private var credentialUpdates: [MusicAccountPlatform: AccountCredentialUpdateLease] = [:]
@@ -386,6 +388,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         return MusicServiceError.sanitized(error)
     }
     private func rotate(_ platform: MusicAccountPlatform, preservingCurrentRequest: Bool = false) {
+        revokeAccountImports(platform)
         if platform == .netease { playbackFeedbackOutbox.suspend(preserving: false) }
         sessionReads.cancel(excludingCurrent: preservingCurrentRequest) { $0.platform == platform }
         revokeLocalCacheScopes(platform, event: .accountChanged, preservingCurrentRequest: preservingCurrentRequest)
@@ -492,6 +495,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             for platform in scopes.keys { notifyAccountSession(platform) }
         }
         if accessGeneration > 0 || !value { cancelPendingPlaybackFeedback(platform: nil) }
+        revokeAccountImports()
         accessGeneration = generation; available = value; epoch = UUID()
         audioRequests.cancel()
         capabilityRequests.cancel()
@@ -519,6 +523,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     }
     public func close() async -> MusicAccountCloseReport {
         if !closed {
+            revokeAccountImports()
+            transferBatches.removeAll()
             preparePlaybackFeedbackForClose()
             closed = true; available = false; epoch = UUID(); pages.removeAll(); grants.removeAll(); validated.removeAll(); profiles.removeAll()
             audioRequests.cancel()
@@ -552,7 +558,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         }
         await drainCacheLifecycle()
         let inFlight = operations.count + restoring.count + localCacheRestoring.count +
-            transitions.count + localCacheReads.waiterCount + sessionReads.waiterCount +
+            transitions.count + runningTransfers.count + localCacheReads.waiterCount + sessionReads.waiterCount +
             playbackFeedbackLeases.values.reduce(0) { $0 + $1.authorization.inFlight } + (feedbackDrain == nil ? 0 : 1)
         return .init(cleanupComplete: inFlight == 0 && pendingWrites == 0,
                      inFlight: inFlight, pendingCredentialWrites: pendingWrites)
@@ -2977,5 +2983,171 @@ extension NativeMusicAccountService: MusicNativeSimilarModeProviding {
             }
             throw failure
         }
+    }
+}
+
+extension NativeMusicAccountService: MusicAccountTransferring {
+    private func revokeAccountImports(_ platform: MusicAccountPlatform? = nil) {
+        for batch in transferBatches.values {
+            for item in batch.items where platform == nil || item.entry.platform == platform {
+                item.baseline?.revoke()
+            }
+        }
+    }
+
+    public func exportAccountFile() async throws -> MusicAccountFilePayload {
+        do { return try await makeAccountFile() }
+        catch let error as MusicAccountTransferError { throw error }
+        catch { throw safe(error) }
+    }
+
+    private func makeAccountFile() async throws -> MusicAccountFilePayload {
+        try check()
+        let own = epoch
+        let bindings = accountEpochs
+        var entries: [MusicAccountTransferEntry] = []
+        var leases: [AccountReplacementLease] = []
+        defer { for lease in leases { lease.revoke() } }
+        for platform in MusicAccountPlatform.allCases where scopes[platform] != nil {
+            let binding = accountEpochs[platform]
+            let lease: AccountReplacementLease
+            do { lease = try await accounts.prepareReplacement(for: configured(platform)) }
+            catch AccountSessionError.invalidState { continue }
+            leases.append(lease)
+            try check(own)
+            guard binding == accountEpochs[platform], !transitions.contains(platform) else { throw MusicServiceError.staleResult }
+            guard let credential = lease.credential else { continue }
+            let fileCredential = try await providers[platform]!.fileCredential(credential)
+            try check(own)
+            guard binding == accountEpochs[platform], !transitions.contains(platform) else { throw MusicServiceError.staleResult }
+            // Re-read the exact baseline after crossing the provider actor. Never export revoked bytes.
+            guard try await accounts.replacementIsCurrent(lease) else { throw MusicServiceError.staleResult }
+            try check(own)
+            entries.append(try MusicAccountTransferCodec.entry(fileCredential, platform: platform))
+        }
+        guard try await accounts.replacementsAreCurrent(leases) else { throw MusicServiceError.staleResult }
+        try check(own)
+        guard bindings == accountEpochs else { throw MusicServiceError.staleResult }
+        guard !entries.isEmpty else { throw MusicAccountTransferError.noAccounts }
+        return try MusicAccountTransferCodec.encode(entries)
+    }
+
+    public func prepareAccountImport(_ payload: MusicAccountFilePayload) async throws -> MusicAccountImportPlan {
+        let entries = try MusicAccountTransferCodec.decode(payload)
+        try check()
+        let own = epoch
+        var items: [MusicAccountImportBatch.Item] = []
+        do {
+            for entry in entries {
+                let binding = accountEpochs[entry.platform]
+                let lease: AccountReplacementLease?
+                do { lease = try await accounts.prepareReplacement(for: configured(entry.platform)) }
+                catch { lease = nil }
+                items.append(.init(entry: entry, baseline: lease, epoch: binding))
+                try check(own)
+                guard binding == accountEpochs[entry.platform] else { throw MusicServiceError.staleResult }
+            }
+            let batch = MusicAccountImportBatch(epoch: own, items: items)
+            let plan = MusicAccountImportPlan(conflicts: items.compactMap {
+                $0.baseline?.hasCredential == true ? $0.entry.platform : nil
+            }, cancel: { [weak self] id in
+                for item in batch.items { item.baseline?.revoke() }
+                Task { await self?.releaseCancelledAccountImport(id) }
+            })
+            transferBatches[plan.id] = batch
+            return plan
+        } catch {
+            for item in items { item.baseline?.revoke() }
+            throw safe(error)
+        }
+    }
+
+    public func discardAccountImport(_ plan: MusicAccountImportPlan) {
+        plan.cancel()
+        transferBatches.removeValue(forKey: plan.id)
+    }
+
+    private func releaseCancelledAccountImport(_ id: UUID) {
+        if !runningTransfers.contains(id) { transferBatches.removeValue(forKey: id) }
+    }
+
+    public func importAccounts(_ plan: MusicAccountImportPlan, policy: MusicAccountImportPolicy) async -> MusicAccountImportSummary {
+        guard let batch = transferBatches[plan.id], runningTransfers.insert(plan.id).inserted else { return .init() }
+        return await withTaskCancellationHandler {
+            await executeAccountImport(plan, policy: policy, batch: batch)
+        } onCancel: { plan.cancel() }
+    }
+
+    private func executeAccountImport(_ plan: MusicAccountImportPlan, policy: MusicAccountImportPolicy,
+                                      batch: MusicAccountImportBatch) async -> MusicAccountImportSummary {
+        // Keep registered during execution so access/ownership changes synchronously revoke admission.
+        defer { plan.cancel(); transferBatches.removeValue(forKey: plan.id); runningTransfers.remove(plan.id) }
+        var summary = MusicAccountImportSummary()
+        for item in batch.items {
+            let platform = item.entry.platform
+            if Task.isCancelled || closed || !available || epoch != batch.epoch || plan.isCancelled {
+                summary.cancelled.append(platform); continue
+            }
+            if policy == .skip, item.baseline?.hasCredential == true {
+                summary.skipped.append(platform); continue
+            }
+            guard let lease = item.baseline, !transitions.contains(platform),
+                  !restoring.contains(platform), !localCacheRestoring.contains(platform),
+                  login?.platform != platform, item.epoch == accountEpochs[platform],
+                  let provider = providers[platform] else { summary.failed.append(platform); continue }
+            do {
+                guard try await accounts.replacementIsCurrent(lease) else { throw MusicServiceError.staleResult }
+                try check(batch.epoch)
+                let candidate = try MusicAccountTransferCodec.credential(item.entry)
+                let value = try await run(platform) {
+                    guard try await provider.nativeID(candidate) == item.entry.userID else { throw MusicServiceError.targetChanged }
+                    let verified = try await provider.verifyForImport(candidate)
+                    guard verified.nativeID == item.entry.userID,
+                          try await provider.nativeID(verified.credential) == item.entry.userID else { throw MusicServiceError.targetChanged }
+                    return verified
+                }
+                try check(batch.epoch)
+                guard !plan.isCancelled, item.epoch == accountEpochs[platform], !transitions.contains(platform),
+                      !restoring.contains(platform), !localCacheRestoring.contains(platform),
+                      login?.platform != platform else { throw MusicServiceError.staleResult }
+                // No await between final owner checks and dispatching this token-bound, cancellable commit.
+                transitions.insert(platform)
+                pendingWrites += 1
+                let token: AccountSessionToken
+                do { token = try await accounts.replaceVerified(lease, credential: value.credential) }
+                catch {
+                    pendingWrites -= 1; transitions.remove(platform)
+                    throw error
+                }
+                pendingWrites -= 1
+                // Durable success settles even if UI cancellation/protection won just after admission.
+                rotate(platform)
+                tokens[platform] = token; inspected.insert(platform)
+                requiresExplicitRestore.remove(platform); restoreNativeIDs.removeValue(forKey: platform)
+                if !closed, available, epoch == batch.epoch {
+                    validated.insert(platform); profiles[platform] = value.nickname
+                }
+                transitions.remove(platform)
+                summary.imported.append(platform)
+                notifyAccountSession(platform, committedRecord: true)
+                notifyNativeHome(platform)
+                await drainCacheLifecycle()
+                if platform == .netease, validated.contains(platform) { schedulePendingPlaybackFeedback() }
+            } catch {
+                // A failed/unknown backend write may have revoked the coordinator's old permits.
+                // Reconcile that failure without deleting or retrying the actual stored record.
+                if let identity = scopes[platform] {
+                    let state = await accounts.snapshot(for: identity)
+                    if state.phase == .invalidated, item.epoch == accountEpochs[platform], epoch == batch.epoch {
+                        rotate(platform); tokens.removeValue(forKey: platform)
+                        requiresExplicitRestore.insert(platform)
+                        notifyAccountSession(platform); notifyNativeHome(platform)
+                    }
+                }
+                if Task.isCancelled || closed || epoch != batch.epoch || plan.isCancelled { summary.cancelled.append(platform) }
+                else { summary.failed.append(platform) }
+            }
+        }
+        return summary
     }
 }

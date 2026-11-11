@@ -528,6 +528,7 @@ internal sealed class KgAccountHandler : HttpMessageHandler
 {
     internal const string Dfid = "SYNTHETIC_DFID", QrKey = "SYNTHETIC_QR_KEY";
     internal string Fault = "", HoldAt = "";
+    internal JsonNode T1 = JsonValue.Create("SYNTHETIC_T1")!;
     internal string? Seed, Mid, DurableSeed;
     internal JsonObject? RegistrationPlain;
     internal bool EmptyDevice, HoldAllKeys;
@@ -636,7 +637,7 @@ internal sealed class KgAccountHandler : HttpMessageHandler
             if (Fault == "poll-auth") return Json(new { status = 0, error_code = 20018 });
             return Json(new { status = 1, data = new { status = Fault == "poll-status" ? 3 : Status,
                 userid = Fault == "poll-user" ? "0" : "42", token = Fault == "poll-token" ? "bad;token=bad" : "SYNTHETIC_KG_TOKEN",
-                t1 = Fault == "poll-t1" ? "bad value" : "SYNTHETIC_T1", vip = 1 } });
+                t1 = Fault == "poll-t1" ? JsonValue.Create("bad value") : T1, vip = 1 } });
         }
         Profiles++;
         MusicNativeKgAccountTests.Check(uri.Host == "gateway.kugou.com" && request.Method == HttpMethod.Post &&

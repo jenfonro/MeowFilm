@@ -18,7 +18,7 @@ internal static class AccountRules
         "CANCELLED", "TIMEOUT", "CLOSED", "LIMIT", "STORAGE", "STORAGE_CONFLICT", "STORAGE_UNAVAILABLE",
         "CORRUPT_STORAGE", "COMMIT_UNKNOWN", "STALE_SESSION", "IDENTITY_MISMATCH", "ORIGIN_DENIED",
         "SESSION_CHANGED", "SUPERSEDED", "BUSY", "QR_EXPIRED", "HANDOFF_REJECTED", "HANDOFF_UNCONFIRMED",
-        "ACCOUNT_FAILED", "DEVICE_LIMIT", "INVALID_CODE", "SMS_SEND_UNCONFIRMED"
+        "ACCOUNT_FAILED", "DEVICE_LIMIT", "INVALID_CODE", "SMS_SEND_UNCONFIRMED", "TRANSFER_FILE", "TRANSFER_FORMAT"
     };
     internal static string SafeCode(string? code) => code is not null && Codes.Contains(code) ? code : "ACCOUNT_FAILED";
     internal static string Error(Exception error) => error switch
@@ -68,6 +68,13 @@ internal static class AccountRules
     }
     internal static string Id(string? value, string code = "INVALID_RESPONSE")
     { Require(value is not null && Match(value, "^[1-9][0-9]{0,19}$"), code); return value!; }
+    internal static string QqNumber(string value, string code)
+    {
+        Require(Match(value, "^(0|[1-9][0-9]{0,15})$") &&
+            long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var number) &&
+            number <= MaxInteger, code);
+        return value;
+    }
     internal static void Fields(JsonElement value, string[] allowed, string[] required, string code = "INVALID_REQUEST")
     {
         Require(value.ValueKind == JsonValueKind.Object, code);
@@ -98,7 +105,7 @@ internal static class AccountRules
             Require(Match(key, "^[A-Za-z0-9_-]{1,80}$") &&
                 key is not ("__proto__" or "prototype" or "constructor") &&
                 key.ToLowerInvariant() is not ("domain" or "path" or "expires" or "max-age" or "secure" or "httponly" or "samesite" or "priority") &&
-                !value.Any(c => char.IsWhiteSpace(c) || c is ',' or '"' or '\\') && result.TryAdd(key, value), "INVALID_CREDENTIALS");
+                !value.Any(c => char.IsWhiteSpace(c) || c is '"' or '\\' || c == ',' && key != "_ntes_nnid") && result.TryAdd(key, value), "INVALID_CREDENTIALS");
         }
         return result;
     }
@@ -120,7 +127,9 @@ internal static class AccountRules
             foreach (var (key, secret) in Cookies(cookie))
             {
                 if (key is "musicid" or "str_musicid" or "userid" or "login_type" or "loginType" or
-                    "os" or "appver" or "versioncode" or "__remember_me" || secret is "" or "-") continue;
+                    "os" or "appver" or "versioncode" or "__remember_me" or "vip_type" or
+                    "expired_at" or "expiredAt" or "musickey_create_time" or "musickeyCreateTime" or
+                    "key_expires_in" or "keyExpiresIn" || secret is "" or "-") continue;
                 Require(!published.Any(value => value.Contains(secret, StringComparison.Ordinal) ||
                     value.Contains(Uri.EscapeDataString(secret), StringComparison.Ordinal)), "INVALID_RESPONSE");
             }

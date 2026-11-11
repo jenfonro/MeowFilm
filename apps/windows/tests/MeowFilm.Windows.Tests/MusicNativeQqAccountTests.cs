@@ -374,6 +374,8 @@ internal sealed class QqAccountFixtureHandler : HttpMessageHandler
 {
     internal string Fault = "", HoldAt = "";
     internal bool HoldEveryImage, ParentCookieDomains;
+    internal bool IncludeOptionalCredentials;
+    internal string? InvalidNumericCredential;
     internal Action<string>? OnStep;
     internal int Calls, Disposals, Status, Polls;
     internal TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously),
@@ -467,10 +469,19 @@ internal sealed class QqAccountFixtureHandler : HttpMessageHandler
                 payload["req_0"]!["param"]!["code"]!.GetValue<string>() == "SYNTHETIC_CODE" && payload["comm"]!["authst"] is null);
             int code = Fault switch { "login-auth" => 1000, "login-device" => 20279, "login-verification" => 20276,
                 "login-invalid-code" => 20271, "login-restricted" => 20277, "login-rate" => 104604, _ => 0 };
-            return Json(new { code = 0, req_0 = new { code = 0, data = new { code, musicid = 42,
+            var response = JsonSerializer.SerializeToNode(new { code = 0, req_0 = new { code = 0, data = new { code, musicid = 42,
                 str_musicid = Fault == "credential-identity" ? "43" : "42",
                 musickey = Fault == "credential-inferred-type" ? "W_X_SYNTHETIC_KEY" : "SYNTHETIC_MUSICKEY",
-                encryptUin = "SYNTHETIC_EUIN", loginType = Fault == "credential-inferred-type" ? (int?)null : Fault == "credential-type" ? 1 : 2 } } });
+                encryptUin = "SYNTHETIC_EUIN", loginType = Fault == "credential-inferred-type" ? (int?)null : Fault == "credential-type" ? 1 : 2 } } })!;
+            if (IncludeOptionalCredentials)
+            {
+                var data = response["req_0"]!["data"]!;
+                data["openid"] = ""; data["refresh_token"] = ""; data["access_token"] = "";
+                data["unionid"] = ""; data["refresh_key"] = "";
+                data["expired_at"] = 1800000000; data["musickey_create_time"] = 1700000000; data["key_expires_in"] = 3600;
+                if (InvalidNumericCredential is { } invalid) data["musickey_create_time"] = invalid;
+            }
+            return Json(response);
         }
         if (step == "GetLoginUserInfo") return Json(new { code = 0, req_0 = new { code = 0, data = new { code = 0 } } });
         if (step == "GetHomepageHeader") return Json(new { code = 0, req_0 = new { code = 0, data = new { Info = new { BaseInfo = new {

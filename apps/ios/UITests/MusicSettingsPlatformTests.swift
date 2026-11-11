@@ -378,6 +378,230 @@ final class MusicSettingsPlatformTests: XCTestCase {
         }
     }
 
+    func testAccountPageKeepsNavigationAndBottomFileActionsWithoutRepeatedSectionTitle() throws {
+        let service = makeService()
+        let owner = makeOwner(service: service, accounts: service)
+        let appearance = MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let loaded = expectation(description: "account page service available")
+        Task { await owner.load(); loaded.fulfill() }
+        wait(for: [loaded], timeout: 3)
+        let page = MusicAccountsViewController(model: owner, appearance: appearance, router: MusicSettingsRouterFixture())
+        try withMountedAccountPage(page) { runner in
+            let importing = runner.buttons["music.accounts.import"]
+            let exporting = runner.buttons["music.accounts.export"]
+            let lastAccount = runner.buttons["music.accounts.kg"]
+            XCTAssertTrue(importing.waitForExistence(timeout: 3))
+            XCTAssertTrue(exporting.exists); XCTAssertTrue(lastAccount.exists)
+            XCTAssertEqual(importing.label, "导入账号")
+            XCTAssertEqual(exporting.label, "导出账号")
+            XCTAssertTrue(importing.isHittable); XCTAssertTrue(exporting.isHittable)
+            XCTAssertGreaterThan(importing.frame.minY, lastAccount.frame.minY)
+            XCTAssertGreaterThan(exporting.frame.minY, importing.frame.minY)
+            XCTAssertEqual(page.pageTitle, "平台账号")
+            XCTAssertTrue(runner.staticTexts["平台账号"].exists)
+            XCTAssertFalse(runner.staticTexts["音乐平台"].exists)
+        }
+        let closed = expectation(description: "account page closed")
+        Task { await owner.close(); closed.fulfill() }
+        wait(for: [closed], timeout: 3)
+    }
+
+    func testAccountImportUsesSingleSystemOpenPickerAndCancelReleasesBusyState() throws {
+        let service = makeService(), appearance = MusicAppearancePreferencesStore(defaults: .standard)
+        let owner = makeOwner(service: service, accounts: service)
+        let loaded = expectation(description: "account service available")
+        Task { await owner.load(); loaded.fulfill() }
+        wait(for: [loaded], timeout: 3)
+        let page = MusicAccountsViewController(model: owner, appearance: appearance, router: MusicSettingsRouterFixture())
+        try withMountedAccountPage(page) { runner in
+            let button = runner.buttons["music.accounts.import"]
+            XCTAssertTrue(button.waitForExistence(timeout: 3))
+            XCTAssertTrue(button.isHittable)
+            performAccountPageAction { button.tap() }
+            let shown = expectation(for: NSPredicate { _, _ in
+                MainActor.assumeIsolated {
+                    guard let picker = page.presentedViewController as? UIDocumentPickerViewController else { return false }
+                    return picker.viewIfLoaded?.window != nil && !picker.isBeingPresented
+                }
+            }, evaluatedWith: nil)
+            wait(for: [shown], timeout: 10)
+            let picker = try XCTUnwrap(page.presentedViewController as? UIDocumentPickerViewController)
+            XCTAssertFalse(picker.allowsMultipleSelection)
+            XCTAssertEqual(picker.documentPickerMode, .open)
+            XCTAssertTrue(page.transfer.busy)
+            page.documentPickerWasCancelled(picker)
+            XCTAssertFalse(page.transfer.busy)
+        }
+        let closed = expectation(description: "file picker owner closed")
+        Task { await owner.close(); closed.fulfill() }
+        wait(for: [closed], timeout: 3)
+    }
+
+    func testAccountFileStatePresentsConflictOncePerBatchAndPublishesSingleFinalSummary() async throws {
+        let service = makeService()
+        // Explicit transfer-capable account fixture; no platform network or Keychain.
+        let accountService = makeService()
+        let model = makeOwner(service: service, accounts: accountService)
+        await model.load()
+        let state = MusicAccountTransferState(owner: model); state.start()
+        var confirmations = 0, reports: [String] = []
+        state.confirm = { _ in confirmations += 1 }
+        state.result = { reports.append($0) }
+        let input = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        try Data("synthetic file boundary".utf8).write(to: input)
+        defer { try? FileManager.default.removeItem(at: input) }
+        XCTAssertTrue(state.beginSelection()); state.importFile(input)
+        await state.pendingOperation?.value
+        XCTAssertEqual(confirmations, 1); XCTAssertTrue(reports.isEmpty)
+        state.commit(.skip); await state.pendingOperation?.value
+        XCTAssertEqual(reports.count, 1)
+        XCTAssertTrue(state.beginSelection()); state.importFile(input)
+        await state.pendingOperation?.value
+        XCTAssertEqual(confirmations, 2)
+        state.selectionCancelled()
+        let counts = await accountService.transferCounts()
+        XCTAssertEqual(counts.prepares, 2); XCTAssertEqual(counts.commits, 1)
+        XCTAssertEqual(reports.count, 1)
+        state.close(); await model.close()
+    }
+
+    func testAccountExportUsesSystemDestinationPickerAndCancelRemovesStaging() throws {
+        let service = makeService(), appearance = MusicAppearancePreferencesStore(defaults: .standard)
+        let owner = makeOwner(service: service, accounts: service)
+        let loaded = expectation(description: "export service available")
+        Task { await owner.load(); loaded.fulfill() }
+        wait(for: [loaded], timeout: 3)
+        let page = MusicAccountsViewController(model: owner, appearance: appearance, router: MusicSettingsRouterFixture())
+        try withMountedAccountPage(page) { runner in
+            let button = runner.buttons["music.accounts.export"]
+            XCTAssertTrue(button.waitForExistence(timeout: 3))
+            XCTAssertTrue(button.isHittable)
+            performAccountPageAction { button.tap() }
+            let ready = expectation(for: NSPredicate { _, _ in
+                MainActor.assumeIsolated {
+                    guard let picker = page.presentedViewController as? UIDocumentPickerViewController else { return false }
+                    return picker.viewIfLoaded?.window != nil && !picker.isBeingPresented
+                }
+            }, evaluatedWith: nil)
+            wait(for: [ready], timeout: 10)
+            let picker = try XCTUnwrap(page.presentedViewController as? UIDocumentPickerViewController)
+            XCTAssertEqual(picker.documentPickerMode, .exportToService)
+            let staging = try XCTUnwrap(page.transfer.temporaryDirectory)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: staging.path))
+            page.documentPickerWasCancelled(picker)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path))
+            XCTAssertFalse(page.transfer.busy)
+        }
+        let closed = expectation(description: "export owner closed")
+        Task { await owner.close(); closed.fulfill() }
+        wait(for: [closed], timeout: 3)
+    }
+
+    func testAccountExportCleansOnlyOwnedStagingForCompletionCancellationAndPageClose() async throws {
+        let accountService = makeService()
+        let model = makeOwner(service: makeService(), accounts: accountService)
+        await model.load()
+        let state = MusicAccountTransferState(owner: model); state.start()
+        var source: URL?
+        state.exported = { source = $0 }
+        state.exportFile(); await state.pendingOperation?.value
+        let staged = try XCTUnwrap(source), directory = try XCTUnwrap(state.temporaryDirectory)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged.path))
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        try FileManager.default.copyItem(at: staged, to: destination)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        state.exportFinished()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+        source = nil; state.exportFile(); await state.pendingOperation?.value
+        let cancelled = try XCTUnwrap(state.temporaryDirectory)
+        state.selectionCancelled()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cancelled.path))
+        source = nil; state.exportFile(); await state.pendingOperation?.value
+        let leaving = try XCTUnwrap(state.temporaryDirectory)
+        state.close()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: leaving.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+        await model.close()
+    }
+
+    func testAccountFileReadFailureAndPageCancellationCannotPublishLateSummary() async throws {
+        let service = makeService()
+        let model = makeOwner(service: service, accounts: service); await model.load()
+        let state = MusicAccountTransferState(owner: model); state.start()
+        var reports: [String] = []
+        state.result = { reports.append($0) }
+        XCTAssertTrue(state.beginSelection())
+        state.importFile(FileManager.default.temporaryDirectory.appendingPathComponent("private-missing-" + UUID().uuidString))
+        await state.pendingOperation?.value
+        XCTAssertEqual(reports.count, 1)
+        XCTAssertFalse(reports[0].contains("private-missing"))
+        let input = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data([1]).write(to: input); defer { try? FileManager.default.removeItem(at: input) }
+        let gate = MusicSettingsTransferGate(); await service.holdTransfer(gate)
+        state.confirm = { [weak state] _ in state?.commit(.overwrite) }
+        XCTAssertTrue(state.beginSelection()); state.importFile(input)
+        await state.pendingOperation?.value
+        await gate.started()
+        let pending = state.pendingOperation
+        state.close(); await gate.release(); await pending?.value
+        XCTAssertEqual(reports.count, 1); XCTAssertNil(state.summary)
+        await model.close()
+    }
+
+    private func withMountedAccountPage(
+        _ page: MusicAccountsViewController, body: (XCUIApplication) throws -> Void
+    ) throws {
+        let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
+        performAccountPageAction { runner.activate() }
+        let foreground = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                UIApplication.shared.applicationState == .active &&
+                    UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+            }
+        }, evaluatedWith: nil)
+        wait(for: [foreground], timeout: 3)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let navigation = PageNavigationController(themeProvider: page.themeProvider)
+        navigation.setViewControllers([page], animated: false)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        window.rootViewController = navigation
+        window.makeKeyAndVisible(); window.layoutIfNeeded()
+        defer {
+            if navigation.presentedViewController != nil || page.presentedViewController != nil {
+                let dismissed = expectation(description: "account page modal dismissed")
+                navigation.dismiss(animated: false) { dismissed.fulfill() }
+                wait(for: [dismissed], timeout: 3)
+            }
+            PageViewController.invalidatePages(in: navigation)
+            window.isHidden = true; window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        let visible = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                page.view.layoutIfNeeded()
+                return page.isPageActive && page.canPresentPageAlert && page.transfer.available
+            }
+        }, evaluatedWith: nil)
+        wait(for: [visible], timeout: 3)
+        XCTAssertTrue(page.isPageActive); XCTAssertTrue(page.isPageVisible)
+        XCTAssertTrue(page.transfer.available); XCTAssertTrue(page.canPresentPageAlert)
+        try body(runner)
+    }
+
+    private func performAccountPageAction(_ action: @escaping @MainActor () -> Void) {
+        let performed = expectation(description: "runner action delivered")
+        RunLoop.main.perform {
+            MainActor.assumeIsolated { action() }
+            performed.fulfill()
+        }
+        wait(for: [performed], timeout: 5)
+    }
+
     private func makeService() -> MusicSettingsServiceFixture {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).pngData { context in
             UIColor.black.setFill()
@@ -430,7 +654,23 @@ final class MusicSettingsPlatformTests: XCTestCase {
     }
 }
 
-private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing {
+private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing, MusicAccountTransferring {
+    private var transferPrepares = 0, transferCommits = 0
+    private var transferGate: MusicSettingsTransferGate?
+    func holdTransfer(_ gate: MusicSettingsTransferGate) { transferGate = gate }
+    func transferCounts() -> (prepares: Int, commits: Int) { (transferPrepares, transferCommits) }
+    func exportAccountFile() throws -> MusicAccountFilePayload { try .init(fileData: Data("synthetic-export".utf8)) }
+    func prepareAccountImport(_ payload: MusicAccountFilePayload) -> MusicAccountImportPlan {
+        transferPrepares += 1; return MusicAccountImportPlan(conflicts: [.netease, .qq], cancel: { _ in })
+    }
+    func importAccounts(_ plan: MusicAccountImportPlan, policy: MusicAccountImportPolicy) async -> MusicAccountImportSummary {
+        transferCommits += 1
+        if let transferGate { await transferGate.wait() }
+        var report = MusicAccountImportSummary()
+        if policy == .skip { report.skipped = plan.conflicts } else { report.imported = plan.conflicts }
+        return report
+    }
+    func discardAccountImport(_ plan: MusicAccountImportPlan) { plan.cancel() }
     private let image: Data
     private var rows = MusicAccountPlatform.allCases.map {
         MusicAccountStatus(platform: $0, phase: .signedOut, canLogin: true)
@@ -593,5 +833,19 @@ private final class MusicSettingsRouterFixture: MusicUIRouting {
     func showLocalCollection(_ collection: MusicCollection) { XCTFail("Unexpected navigation") }
     func showPlayer(_ destination: MusicPlaybackDestination) { XCTFail("Unexpected navigation") }
     func selectChannel(_ channel: MusicPublicBrowseChannel) { XCTFail("Unexpected navigation") }
+}
+#endif
+
+#if os(iOS)
+private actor MusicSettingsTransferGate {
+    private var entered = false, released = false
+    private var waiting: CheckedContinuation<Void, Never>?
+    private var starting: CheckedContinuation<Void, Never>?
+    func wait() async {
+        entered = true; starting?.resume(); starting = nil
+        if !released { await withCheckedContinuation { waiting = $0 } }
+    }
+    func started() async { if !entered { await withCheckedContinuation { starting = $0 } } }
+    func release() { released = true; waiting?.resume(); waiting = nil }
 }
 #endif

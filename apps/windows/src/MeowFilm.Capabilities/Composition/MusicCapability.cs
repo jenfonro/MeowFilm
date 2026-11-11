@@ -1001,7 +1001,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         onlineCancellation?.Cancel(); RetireLyrics(); CancelMusicPreload();
         RefreshBindings();
         Exception? settingsFailure = null;
-        try { await DeactivateSettingsAsync(); }
+        try { await RetireAccountTransferAsync(); await DeactivateSettingsAsync(); }
         catch (Exception error) { settingsFailure = error; }
         try { await DeactivateCatalogSourceSettingsAsync(); }
         catch (Exception error) { settingsFailure ??= error; }
