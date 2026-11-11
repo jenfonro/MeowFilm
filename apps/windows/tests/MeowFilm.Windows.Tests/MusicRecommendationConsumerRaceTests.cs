@@ -142,7 +142,9 @@ public static partial class MusicUiTests
         f.App.PublishConfiguration(queue, "scene", "HOT_SONG");
         await Drain();
         Equal("热歌", f.Module.PlaybackFmTitle);
-        Equal("列表循环", f.Module.PlaybackModeText);
+        True(f.Module.RecommendationContinue, "committed FM keeps its selected special mode");
+        Equal("私人漫游", f.Module.PlaybackModeText);
+        Equal("fm", f.Module.PlaybackModeIcon);
         f.App.Emit(old);
         await Drain();
         Equal("HOT_SONG", f.Module.PlaybackFmScene);

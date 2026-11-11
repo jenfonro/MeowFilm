@@ -119,6 +119,7 @@ public sealed partial class ShellWindow
         _queueSource = source;
         _queueSession = session;
         _queueOpen = true;
+        PlayerMenuInput.For(this).QueueOpened(() => RunUiAction(CloseQueueAsync));
         PlayerSurfaceInput.SetQueueOpen(this, true);
         var generation = ++_queueGeneration;
         QueueDismissSurface.Visibility = Visibility.Visible;
@@ -142,6 +143,7 @@ public sealed partial class ShellWindow
     {
         if (!_queueOpen && QueueSurface.Visibility != Visibility.Visible) return Task.CompletedTask;
         _queueOpen = false;
+        PlayerMenuInput.For(this).QueueClosed();
         PlayerSurfaceInput.SetQueueOpen(this, false);
         ++_queueGeneration;
         RetireActivation(ref _queueActivation);
@@ -274,6 +276,7 @@ public sealed partial class ShellWindow
     {
         _playerDetailOpen = false;
         _queueOpen = false;
+        PlayerMenuInput.For(this).QueueClosed();
         PlayerSurfaceInput.SetQueueOpen(this, false);
         RetireActivation(ref _playerDetailActivation);
         RetireActivation(ref _queueActivation);

@@ -22,34 +22,17 @@ public sealed partial class MusicRecommendationCoordinator
     }
     private Task? MaybeBeginLocked(Session s, CancellationToken caller = default)
     {
-        if (s.Queue is { } actual && s.Playback is { HasStarted: true, MediaReady: true } observed &&
-            observed.EntryId == actual.CurrentId)
-        {
-            string playback = observed.EntryId + ":" + observed.PlaybackEvent;
-            if (s.LastPlayback != playback)
-            {
-                s.LastPlayback = playback;
-                s.RandomFetch = actual.Mode == 2 && fetchOnRandomPlayback();
-            }
-        }
         if (!CurrentLocked(s) || s.Loading || s.Returning || s.Pending is not null || !s.Continue ||
-            s.InitialPending || s.Exhausted || s.Config.Kind == "heartbeat" || s.Queue is not { } q ||
+            s.InitialPending || s.Exhausted || s.Queue is not { Mode: 1 } q ||
             s.Playback is not { IsPlaying: true, HasStarted: true, MediaReady: true, IsLocal: true } state ||
             state.EntryId != q.CurrentId) return null;
-        // Preview candidates remain visible until an actual selection/advance admits them.
+        if (q.CurrentId != q.Tail) return null;
+        if (s.Candidates is { } batch) return !q.HasPriority && batch.ModeIntent == s.ModeIntent
+            ? BeginCandidatesLocked(s, batch, null, caller, automatic: true) : null;
+        // Special mode may admit the preview at the playing tail, but another
+        // provider page still requires an actual recommendation selection.
         if (s.Config.Kind == "queue" && !s.RecommendationStarted) return null;
-        string attempt;
-        if (q.Mode == 2)
-        {
-            if (!s.RandomFetch) return null;
-            attempt = "play:" + s.LastPlayback;
-        }
-        else
-        {
-            if (q.CurrentId != q.Tail) return null;
-            attempt = "tail:" + s.Batch + ":" + s.Offset + ":" + q.Tail;
-        }
-        if (s.Candidates is { } batch) return BeginCandidatesLocked(s, batch, null, caller, automatic: true);
+        string attempt = "tail:" + s.Batch + ":" + s.Offset + ":" + q.Tail;
         if (!s.Attempted.Add(attempt)) return null;
         return BeginBatchLocked(s, false, true, caller);
     }
@@ -70,8 +53,8 @@ public sealed partial class MusicRecommendationCoordinator
             if (s.Play != play) { s.Play = play; s.MediaIntent++; }
             if (s.Config.Kind == "queue" && s.Candidates is { } batch && !s.Loading &&
                 !snapshot.HasPriority && snapshot.CurrentId == snapshot.Tail &&
-                (!naturalEnd || s.Continue && snapshot.Mode != 3))
-                commit = BeginCandidatesLocked(s, batch, null, cancellationToken, automatic: naturalEnd);
+                s.Continue && snapshot.Mode == 1 && batch.ModeIntent == s.ModeIntent)
+                commit = BeginCandidatesLocked(s, batch, null, cancellationToken, automatic: true);
         }
         if (commit is not null) await commit.ConfigureAwait(false);
         // The sole queue owner applies the global loop/shuffle strategy, including explicit play-next priority.

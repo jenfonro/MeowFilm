@@ -60,9 +60,23 @@ public struct MusicFMSettingsContent: View {
             }
             .frame(maxWidth: .infinity, minHeight: scene ? 84 : 64)
             .background(selected ? Color(uiColor: UIColor(theme.accent)).opacity(0.16) :
-                scene ? Color.clear : Color(uiColor: UIColor(theme.panel)))
-            .clipShape(RoundedRectangle(cornerRadius: 9))
-            .contentShape(Rectangle())
+                Color(uiColor: UIColor(theme.buttonSurface)))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color(uiColor: UIColor(selected ? theme.accent : theme.border)),
+                                  lineWidth: selected ? 1.5 : 1)
+            }
+            .overlay(alignment: .topTrailing) {
+                if selected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.accent)))
+                        .padding(7)
+                        .accessibilityHidden(true)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!state.available || state.pendingChoice != nil)

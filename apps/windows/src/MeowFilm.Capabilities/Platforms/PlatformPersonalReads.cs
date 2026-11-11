@@ -154,25 +154,35 @@ public sealed partial class MusicPlatformCatalog
         if (p.SongId is not null) PJ.IdInput(p.SongId);
         if (p.Entry == MusicHeartbeatEntry.CurrentSong) PJ.IdInput(p.SongId!);
         if (p.PlaylistId is not null) PJ.IdInput(p.PlaylistId);
+        if (p.Continuation is { } continuation)
+        {
+            PJ.IdInput(continuation.PlaylistId); PJ.IdInput(continuation.StartMusicId);
+            PJ.IdInput(continuation.AccountId); PJ.IdInput(p.SongId!);
+            PJ.Require(continuation.Count > 0 && p.PlaylistId == continuation.PlaylistId);
+        }
         return RunAsync(p.Platform, "heartbeat", p, false, async c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
-            var favorites = await HeartbeatFavorites(c);
+            var original = p.Continuation;
+            PJ.Require(original is null || original.AccountId == c.Session!.UserId, "STALE_SESSION");
+            var favorites = original is null ? await HeartbeatFavorites(c) :
+                (PlaylistId: original.PlaylistId, Ids: Array.Empty<string>(), Songs: new Dictionary<string, JsonObject>(StringComparer.Ordinal));
             var usable = favorites.Ids.Where(id => PlatformSongs.HasWyDisplayTitle(favorites.Songs[id])).ToArray();
-            PJ.Require(usable.Length > 0, "NOT_FOUND");
+            PJ.Require(original is not null || usable.Length > 0, "NOT_FOUND");
             var fromHome = p.Entry == MusicHeartbeatEntry.Favorites;
             PJ.Require(p.PlaylistId is null || p.PlaylistId == favorites.PlaylistId, "UNSUPPORTED");
             var songId = p.SongId ?? usable[0];
-            if (!fromHome) PJ.Require(favorites.Ids.Contains(songId, StringComparer.Ordinal), "UNSUPPORTED");
-            var startMusicId = songId;
+            if (original is null && !fromHome) PJ.Require(favorites.Ids.Contains(songId, StringComparer.Ordinal), "UNSUPPORTED");
+            var startMusicId = original?.StartMusicId ?? songId;
+            long count = original?.Count ?? favorites.Ids.Length;
             var rows = await c.Wy("/api/playmode/intelligence/list",
                 PJ.Obj(("playlistId", favorites.PlaylistId), ("startMusicId", startMusicId),
-                    ("songId", songId), ("type", fromHome ? "fromPlayAll" : "fromPlayOne"), ("count", favorites.Ids.Length)), data =>
+                    ("songId", songId), ("type", fromHome ? "fromPlayAll" : "fromPlayOne"), ("count", count)), data =>
                 PJ.RowsAll(data["data"]));
             var missing = rows.Where(row => row["songInfo"] is null)
                 .Select(row => PJ.Id(row["id"], "^[1-9][0-9]{0,19}$"))
                 .Where(id => !favorites.Songs.ContainsKey(id)).ToHashSet(StringComparer.Ordinal);
-            if (!favorites.Songs.ContainsKey(songId) &&
+            if (original is null && !favorites.Songs.ContainsKey(songId) &&
                 !rows.Any(row => PJ.Scalar(PJ.At(row, "songInfo", "id")) == songId))
                 missing.Add(songId);
             foreach (var ids in missing.Chunk(100))
@@ -201,7 +211,7 @@ public sealed partial class MusicPlatformCatalog
                 PJ.Require(PJ.Id(PJ.At(row, "songInfo", "id")) == id, "IDENTITY_MISMATCH");
             }
             var result = Batch(c, "heartbeat", rows, PJ.Obj(("playlistId", favorites.PlaylistId), ("startMusicId", startMusicId),
-                ("songId", songId), ("fromHome", fromHome), ("count", favorites.Ids.Length)));
+                ("songId", songId), ("fromHome", fromHome), ("count", count), ("accountId", c.Session!.UserId)));
             if (favorites.Songs.TryGetValue(songId, out var entrySong)) result["entrySong"] = PlatformSongs.Wy(entrySong);
             else if (rows.FirstOrDefault(row => PJ.Id(PJ.At(row, "songInfo", "id")) == songId) is { } returned)
                 result["entrySong"] = PlatformSongs.Wy(returned);

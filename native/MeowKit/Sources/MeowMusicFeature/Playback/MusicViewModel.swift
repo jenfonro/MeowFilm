@@ -490,6 +490,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             _ = try await requireService().updateSettings(change)
             try await reconcilePlaybackFeedbackSettings(accessGeneration: epoch)
             try check(epoch)
+            if change.mode != nil { await loadRecommendationState() }
             if !state.lyricsEnabled {
                 lyricTask?.cancel()
                 beginPlaybackMetadata(); metadataState.lyricLines = []; metadataState.lyricState = "disabled"

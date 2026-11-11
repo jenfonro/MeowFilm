@@ -43,6 +43,11 @@ extension NativeMusicService: MusicFMPlaybackServing {
         try check()
         guard let session = fmPlayback, session.source.id == sessionID else { throw MusicServiceError.targetChanged }
         try session.source.authorization.check()
+        if enabled {
+            try session.source.authorization.perform {
+                try similarQueueTransaction(["playback"]) { selectContinuationMode(&$0) }
+            }
+        }
         session.continueEnabled = enabled
         emitSimilar()
         if enabled { try fmBoundary() }
@@ -63,8 +68,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
         guard let session = fmPlayback, session.continueEnabled, session.pending == nil, !session.exhausted,
               continuationIsDue(try read()) else { return }
         let d = try read()
-        let event = d.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue ? similarMode.playbackEvent ?? "" :
-            d.queue["entries"].array.last?["id"].string ?? ""
+        let event = d.queue["entries"].array.last?["id"].string ?? ""
         guard !session.buffered.isEmpty || !session.attempted.contains(event) else { return }
         try session.source.authorization.check()
         session.attempted.insert(event); session.error = nil; session.errorID = nil

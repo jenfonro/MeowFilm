@@ -103,6 +103,39 @@ public static partial class MusicNativePlatformTests
             await Error("UNSUPPORTED", () => f.Catalog.HeartbeatAsync(new("wy", MusicHeartbeatEntry.CurrentSong, "999")));
             Equal(1, requests);
         });
+        yield return Case("heartbeat continuation preserves entry seed playlist account and count while nonmember tail advances", async () =>
+        {
+            foreach (var entry in new[] { MusicHeartbeatEntry.CurrentSong, MusicHeartbeatEntry.Favorites })
+            {
+                int members = 0, batches = 0;
+                using var f = new Fixture(request =>
+                {
+                    if (request.RequestUri!.AbsolutePath == "/weapi/user/playlist")
+                    { members++; return HeartbeatDirectory(); }
+                    var (path, body) = Eapi(request);
+                    if (path == "/api/v6/playlist/detail") return HeartbeatPlaylist(["1", "2"], [Wy("1"), Wy("2")]);
+                    Equal("/api/playmode/intelligence/list", path);
+                    Equal("500", S(body["playlistId"])); Equal("2", S(body["startMusicId"]));
+                    Equal(batches == 0 ? "2" : "99", S(body["songId"])); Equal("2", S(body["count"]));
+                    Equal(entry == MusicHeartbeatEntry.Favorites ? "fromPlayAll" : "fromPlayOne", S(body["type"]));
+                    batches++;
+                    return Json(J(new { code = 200, data = new[] { new { songInfo = Wy(batches == 1 ? "99" : "100") } } }));
+                }, Session("wy"));
+                var initial = await f.Catalog.HeartbeatAsync(new("wy", entry, "2"));
+                var context = initial.GetProperty("context");
+                var continuation = new MusicHeartbeatContinuation(context.GetProperty("playlistId").GetString()!,
+                    context.GetProperty("startMusicId").GetString()!, context.GetProperty("accountId").GetString()!,
+                    context.GetProperty("count").GetInt64());
+                var next = await f.Catalog.HeartbeatAsync(new("wy", entry, "99", "500", continuation));
+                Song(next.GetProperty("items")[0], "wy", "100");
+                Equal("99", next.GetProperty("context").GetProperty("songId").GetString());
+                Equal(Huge, next.GetProperty("context").GetProperty("accountId").GetString());
+                Equal(1, members); Equal(2, batches); Equal(4, f.Calls);
+                await Error("STALE_SESSION", () => f.Catalog.HeartbeatAsync(
+                    new("wy", entry, "100", "500", continuation with { AccountId = "42" })));
+                Equal(4, f.Calls);
+            }
+        });
         yield return Case("home heartbeat retains a snapshot seed across repeat entry and reads account context without library sync", async () =>
         {
             string displayed = "2";

@@ -131,19 +131,17 @@
    </DataTemplate></ListBox.ItemTemplate>
   </ListBox>
   <Grid Grid.Row="2" Margin="0,16,12,0"
-        Visibility="{Binding HasQueueRecommendations,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+        Visibility="{Binding HasRecommendationPanel,Converter={StaticResource MeowFilm.BoolToVisibility}}">
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <DockPanel Margin="0,0,0,8">
-    <CheckBox DockPanel.Dock="Right" Content="续播" IsChecked="{Binding RecommendationContinue,Mode=OneWay}"
-              IsEnabled="{Binding CanChangeRecommendationContinue}" Click="Continue_Click"
-              VerticalAlignment="Center" Margin="12,0,0,0" AutomationProperties.Name="推荐续播"/>
-    <Button DockPanel.Dock="Right" Content="重试推荐" Click="RetryRecommendation_Click"
+    <Button x:Name="RetryRecommendationButton" DockPanel.Dock="Right" Content="重试推荐" Click="RetryRecommendation_Click"
+            Visibility="{Binding CanRetryRecommendation,Converter={StaticResource MeowFilm.BoolToVisibility}}"
             IsEnabled="{Binding CanRetryRecommendation}" Style="{StaticResource MeowFilm.QuietButton}"
             Padding="6,4" Margin="8,0,0,0"/>
     <Button DockPanel.Dock="Right" Content="核对保存结果" Click="ReconcileRecommendation_Click"
             Visibility="{Binding CanReconcileRecommendation,Converter={StaticResource MeowFilm.BoolToVisibility}}"
             Style="{StaticResource MeowFilm.QuietButton}" Padding="6,4"/>
-    <TextBlock Text="为你推荐" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+    <TextBlock Text="{Binding RecommendationTitle}" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
    </DockPanel>
    <ListBox x:Name="RecommendationList" Grid.Row="1" ItemsSource="{Binding RecommendationCandidates}"
             MaxHeight="232" BorderThickness="0" Background="Transparent"

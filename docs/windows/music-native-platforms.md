@@ -68,9 +68,9 @@ Invalidate
 
 - FM：`POST EAPI /api/v1/radio/get`，普通 `mode=DEFAULT|FAMILIAR|EXPLORE|PUZZLE_MODE_RCMD`，场景 `SCENE_RCMD` + `subMode`（含 `GAMES/ELECTRONIC`）；`limit="3"/openAidj="false"/aidjReqTimes="0"/unplaySongIds`。预览 limit 为 1；规则 `ruleId/tabTagId` 使用原 `tag/tab/fm` 配方、每批 5 首。43 个场景保留官方 `FRANCH/PUNK/HOT_SONG` 等键。首页不带 mode 的私人 FM 由本机账号选择存储恢复，不改动卡片的动作身份。
 - 相似：同一路径的 WEAPI，`mode=SIMILAR/sourceType=artist|song/sourceIds/limit="3"/unplaySonIds`。这里的 `unplaySonIds` 少一个 g，与普通 FM 不混用。
-- 心动：`MusicHeartbeatRequest(Platform, Entry, SongId, PlaylistId)`；首页 `entry=favorites` 保留卡片 `songId`，current 带实际 `songId/playlistId`。同一个账号 lease 解析 `specialType=5` 且归属当前账号的真实喜欢歌单，不按标题或本地收藏猜测，也不接受普通远端歌单替代此上下文。
-- 喜欢成员完整读取，唯一成员数接受 `trackCount` 或 `trackCount+cloudTrackCount` 的已有口径；缺详情按 ID 每请求至多 100 首补齐，不按累计数量截断。`startMusicId` 与实际入口种子 `songId` 相同，使用首页展示曲或当前曲，不替换成喜欢列表首曲；current 核对其确为该歌单成员。
-- `/api/playmode/intelligence/list` 使用真实 `playlistId/songId/startMusicId/type/count`，type 为 `fromPlayAll/fromPlayOne`，count 为完整成员长度，不作为结果硬容量。完整消费返回结果；`songInfo=null` 时用顶层 id 从已读元数据或 `/api/v3/song/detail` 补齐，身份／标题不一致明确失败。响应 context 为 `playlistId/startMusicId/songId/fromHome/count`，顶层 count 是结果长度。没有经过验证的心动后续读取能力。
+- 心动：`MusicHeartbeatRequest`；首页 `entry=favorites` 保留卡片 `songId`，current 带实际 `songId/playlistId`。同一个账号 lease 解析 `specialType=5` 且归属当前账号的真实喜欢歌单，不按标题或本地收藏猜测，也不接受普通远端歌单替代此上下文。
+- 喜欢成员完整读取，唯一成员数接受 `trackCount` 或 `trackCount+cloudTrackCount` 的已有口径；缺详情按 ID 每请求至多 100 首补齐，不按累计数量截断。首批 `startMusicId` 与实际入口种子 `songId` 相同，使用首页展示曲或当前曲，不替换成喜欢列表首曲；current 核对其确为该歌单成员。
+- `/api/playmode/intelligence/list` 使用真实 `playlistId/songId/startMusicId/type/count`，type 为 `fromPlayAll/fromPlayOne`，count 为完整成员长度，不作为结果硬容量。完整消费返回结果；`songInfo=null` 时用顶层 id 从已读元数据或 `/api/v3/song/detail` 补齐，身份／标题不一致明确失败。响应 context 为 `playlistId/startMusicId/songId/fromHome/count/accountId`，顶层 count 是结果长度。续批保留原账号、playlistId、startMusicId 与入口类型，songId 为实际尾曲；入口种子仍校验成员，推荐尾曲不按喜欢成员拦截。协议参数由合成测试验证，不冒充实网算法效果验收。
 - 单曲推荐：`MusicQueueRecommendationsRequest(Platform, SeedSongId, Offset)` → `POST EAPI /api/homepage/scene/more/rcmd/song`。参数固定为 `currentPlaySongId="<seed>"/songIds="[<seed数值>]"/songCount="1"/offset="<游标>"/source="curlist_more_rcmd"/extJson="{}"`。首次 offset 0，后续只使用响应 offset，seed 两字段不随插歌／当前推荐曲变化；没有旧路由 fallback 或伪造搜索上下文。
 - scene 响应读取 `data.songList/algMap/sourceMap/offset/hasMore`；offset 必须为非负整数，hasMore 必须为布尔值，仍有更多时游标必须前移。完整解码 songList，algMap／sourceMap 接受对象或 JSON 对象字符串，算法映射优先于曲内 alg。明确缺游标／耗尽字段时失败，不猜测分页。
 - `recommendations[].source` 表示 provider；独立 feedbackSource 在心动为 aiMode，单曲推荐使用逐曲 sourceMap、缺失为 moreRcmd。读取候选本身不入队或发送反馈。

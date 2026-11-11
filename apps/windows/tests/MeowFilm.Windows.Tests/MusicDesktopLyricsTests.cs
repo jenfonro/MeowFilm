@@ -281,7 +281,7 @@ public static partial class MusicUiTests
                 Equal("打开桌面歌词", AutomationProperties.GetName(button));
             }));
 
-        yield return Case("desktop lyrics footer keeps infinity quality and desktop controls inside both widths", () =>
+        yield return Case("desktop lyrics footer keeps unified mode quality and desktop controls inside both widths", () =>
             WithDesktopLyrics((f, _) =>
             {
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
@@ -290,18 +290,17 @@ public static partial class MusicUiTests
                 {
                     FrameworkElement surface = ReferenceEquals(player, detailFooter) ? detail : player;
                     // Render owns this viewport; the shown anchor Window must not re-layout the surface.
-                    var session = (Button)player.FindName("PlaybackSessionButton");
+                    var mode = (Button)player.FindName("ModeButton");
                     var transport = (StackPanel)player.FindName("TransportPanel");
-                    Equal(0, transport.Children.IndexOf(session));
-                    Equal(1, transport.Children.IndexOf((Button)player.FindName("ModeButton")));
+                    Equal(0, transport.Children.IndexOf(mode));
                     // Exercise the widest right-hand chrome without requiring an online account.
                     ((Button)player.FindName("QualityButton")).Visibility = Visibility.Visible;
                     foreach (int width in new[] { 1110, 860 })
                     {
                         Render(surface, width, ReferenceEquals(player, detailFooter) ? 600 : 80);
                         True(Math.Abs(player.ActualWidth - width) < .5, "the actual footer spans the requested viewport");
-                        True(session.Visibility == Visibility.Visible && session.IsEnabled,
-                            "the common infinity entry remains available in the detached render fixture");
+                        True(mode.Visibility == Visibility.Visible && mode.IsEnabled,
+                            "the unified mode entry remains available in the detached render fixture");
                         AssertPlayerBounds(player, width);
                         var transportRight = transport.TranslatePoint(new(transport.ActualWidth, 0), player).X;
                         var progress = (FrameworkElement)player.FindName("Progress");
@@ -312,7 +311,7 @@ public static partial class MusicUiTests
                             .Select(control => new Rect(control.TranslatePoint(new(), player), control.RenderSize)).ToArray();
                         foreach (var rect in options)
                             True(rect.Left >= transportRight - .5, "right controls do not overlap the centered transport");
-                        var bounds = new[] { new Rect(session.TranslatePoint(new(), player), session.RenderSize) }
+                        var bounds = new[] { new Rect(mode.TranslatePoint(new(), player), mode.RenderSize) }
                             .Concat(options).ToArray();
                         foreach (var rect in bounds)
                         {

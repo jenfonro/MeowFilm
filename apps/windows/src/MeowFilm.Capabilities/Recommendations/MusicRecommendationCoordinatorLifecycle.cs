@@ -85,6 +85,8 @@ public sealed partial class MusicRecommendationCoordinator
         lock (gate)
         {
             if (session is not { } s || !CurrentLocked(s)) return;
+            if (change == MusicRecommendationQueueChange.Mode)
+                DisableContinuationLocked(s);
             if (s.Returning || change is MusicRecommendationQueueChange.Replace or MusicRecommendationQueueChange.Clear or
                 MusicRecommendationQueueChange.Restore or MusicRecommendationQueueChange.Reset ||
                 s.Config.Kind == "queue" && !s.RecommendationStarted && change == MusicRecommendationQueueChange.Append)
@@ -93,6 +95,62 @@ public sealed partial class MusicRecommendationCoordinator
             if (change == MusicRecommendationQueueChange.Selection) s.Playback = null;
             PublishLocked();
         }
+    }
+    private void DisableContinuationLocked(Session s)
+    {
+        if (s.PreviousSession is { } committed) DisableContinuationLocked(committed);
+        s.ModeIntent++;
+        s.Continue = false;
+        if (s.InitialPending) s.Navigation++;
+        // A pending source entry cannot replace an ordinary queue after closure.
+        // Provider continuations may finish as preview candidates, never as an
+        // automatic admission for an earlier mode intent.
+        if (s.Loading && s.InitialPending && !s.CommittingInitial && s.Pending is null &&
+            !(s.Config.Kind == "queue" && !s.Config.Restore))
+        {
+            s.Generation++;
+            CancelLocked(s.Cancellation);
+            if (s.PreviousSession is { } previous)
+            {
+                s.PreviousSession = null;
+                if (s.Checkpoint == previous.Checkpoint) s.Checkpoint = "";
+                RetireLocked(s, "mode-changed");
+                session = previous;
+            }
+            else
+                RetireLocked(s, "mode-changed");
+        }
+        PublishLocked();
+    }
+    private async Task EnableContinuationAsync(Session s, int intent, CancellationToken token)
+    {
+        await queue.InLaneAsync(async (owner, ct) =>
+        {
+            lock (gate) Require(CurrentLocked(s) && !s.Returning && s.ModeIntent == intent, "STALE_SESSION");
+            var before = await ReadAsync(owner, ct).ConfigureAwait(false);
+            if (before.Mode != 1)
+            {
+                Task<JsonElement> admission;
+                lock (gate)
+                {
+                    Require(CurrentLocked(s) && !s.Returning && s.ModeIntent == intent, "STALE_SESSION");
+                    admission = owner.ExecuteAsync("music.queue.mode", new { mode = 1 }, ct);
+                }
+                Okay(await admission.ConfigureAwait(false));
+                before = await ReadAsync(owner, ct).ConfigureAwait(false);
+            }
+            lock (gate)
+            {
+                Require(CurrentLocked(s) && !s.Returning && s.ModeIntent == intent, "STALE_SESSION");
+                s.Queue = before; s.QueueEpoch = queue.Epoch;
+                if (s.Candidates is { } batch) s.Candidates = batch with { ModeIntent = intent };
+                s.Continue = true; s.Attempted.Clear(); PublishLocked();
+            }
+            return true;
+        }, token).ConfigureAwait(false);
+        Task? next;
+        lock (gate) next = CurrentLocked(s) && s.ModeIntent == intent ? MaybeBeginLocked(s, token) : null;
+        if (next is not null) await next.ConfigureAwait(false);
     }
     private void QueueChanged(MusicRecommendationQueueChange change)
     {
@@ -104,23 +162,27 @@ public sealed partial class MusicRecommendationCoordinator
             {
                 try
                 {
-                    var snapshot = await queue.InLaneAsync(ReadAsync, CancellationToken.None).ConfigureAwait(false);
-                    lock (gate)
+                    await queue.InLaneAsync(async (owner, token) =>
                     {
-                        if (!CurrentLocked(s) || queue.Epoch != epoch) return;
-                        s.Queue = snapshot; s.QueueEpoch = epoch;
-                        if (s.PreviousSession is { } previous) previous.Queue = snapshot;
-                        if (s.Config.Kind == "queue" && !s.RecommendationStarted &&
-                            !snapshot.Entries.Any(e => e.Id == s.Config.Seed))
-                        { RetireLocked(s, "queue-replaced"); return; }
-                        var ids = snapshot.Entries.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
-                        foreach (string old in s.Feedback.Keys.Where(id => !ids.Contains(id)).ToArray()) s.Feedback.Remove(old);
-                        if (s.Config.Kind == "queue" && s.Feedback.ContainsKey(snapshot.CurrentId))
-                            s.RecommendationStarted = true;
-                        s.Anchor = snapshot.Tail;
-                        if (snapshot.Entries.Length == 0) RetireLocked(s, "queue-empty");
-                        else { PublishLocked(); MaybeBeginLocked(s); }
-                    }
+                        var snapshot = await ReadAsync(owner, token).ConfigureAwait(false);
+                        lock (gate)
+                        {
+                            if (!CurrentLocked(s) || queue.Epoch != epoch) return false;
+                            s.Queue = snapshot; s.QueueEpoch = epoch;
+                            if (s.PreviousSession is { } previous) previous.Queue = snapshot;
+                            if (s.Config.Kind == "queue" && !s.RecommendationStarted &&
+                                !snapshot.Entries.Any(e => e.Id == s.Config.Seed))
+                            { RetireLocked(s, "queue-replaced"); return false; }
+                            var ids = snapshot.Entries.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
+                            foreach (string old in s.Feedback.Keys.Where(id => !ids.Contains(id)).ToArray()) s.Feedback.Remove(old);
+                            if (s.Config.Kind == "queue" && s.Feedback.ContainsKey(snapshot.CurrentId))
+                                s.RecommendationStarted = true;
+                            s.Anchor = snapshot.Tail;
+                            if (snapshot.Entries.Length == 0) RetireLocked(s, "queue-empty");
+                            else { PublishLocked(); MaybeBeginLocked(s); }
+                        }
+                        return true;
+                    }, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception error)
                 {

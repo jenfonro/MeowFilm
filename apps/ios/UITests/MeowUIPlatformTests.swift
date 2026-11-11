@@ -196,40 +196,44 @@ final class MeowUIPlatformTests: XCTestCase {
         full.loadViewIfNeeded()
         let fullPlay = UIButton(type: .system)
         full.view.addSubview(fullPlay)
-        let transition = BottomPageTransition()
-        transition.installEdgeDismissal(on: full)
-        XCTAssertEqual(transition.edgeGesture.edges, .left)
-        XCTAssertTrue(full.view.isOpaque)
+        for edge in [VerticalPageTransition.Edge.bottom, .top] {
+            let transition = VerticalPageTransition(edge: edge)
+            transition.installEdgeDismissal(on: full)
+            XCTAssertEqual(transition.edgeGesture.edges, .left)
+            XCTAssertTrue(full.view.isOpaque)
 
-        for (presenting, cancelled) in [(true, true), (true, false), (false, true), (false, false)] {
-            let delegate = try XCTUnwrap(presenting
-                ? transition.animationController(forPresented: full, presenting: root, source: root)
-                : transition.animationController(forDismissed: full))
-            let context = SurfaceContext(container: root.view, from: presenting ? root : full,
-                                         to: presenting ? full : root, frame: root.view.bounds)
-            let completed = expectation(description: "independent page transition completion")
-            context.completed = { completed.fulfill() }
-            let animator = try XCTUnwrap(delegate.interruptibleAnimator?(using: context) as? UIViewPropertyAnimator)
-            XCTAssertTrue(delegate.interruptibleAnimator?(using: context) === animator)
-            XCTAssertTrue(transition.isTransitioning)
-            animator.startAnimation(afterDelay: 1)
-            animator.pauseAnimation()
-            XCTAssertEqual(full.view.transform.tx, 0, accuracy: 0.5)
-            XCTAssertEqual(full.view.transform.ty, presenting ? 0 : root.view.bounds.height, accuracy: 0.5)
-            context.transitionWasCancelled = cancelled
-            animator.stopAnimation(false)
-            animator.finishAnimation(at: cancelled ? .start : .end)
-            await fulfillment(of: [completed], timeout: 3)
-            XCTAssertEqual(context.result, !cancelled)
-            XCTAssertFalse(transition.isTransitioning)
-            XCTAssertTrue(dock.superview === root.view)
-            XCTAssertTrue(dockPlay.superview === dock)
-            XCTAssertTrue(fullPlay.superview === full.view)
-            XCTAssertFalse(dockPlay === fullPlay)
-            XCTAssertEqual(root.view.transform, .identity)
-            XCTAssertEqual(full.view.transform, .identity)
-            if presenting == cancelled { XCTAssertNil(full.view.superview) }
-            else { XCTAssertTrue(full.view.superview === root.view) }
+            for (presenting, cancelled) in [(true, true), (true, false), (false, true), (false, false)] {
+                let delegate = try XCTUnwrap(presenting
+                    ? transition.animationController(forPresented: full, presenting: root, source: root)
+                    : transition.animationController(forDismissed: full))
+                let context = SurfaceContext(container: root.view, from: presenting ? root : full,
+                                             to: presenting ? full : root, frame: root.view.bounds)
+                let completed = expectation(description: "independent page transition completion")
+                context.completed = { completed.fulfill() }
+                let animator = try XCTUnwrap(delegate.interruptibleAnimator?(using: context) as? UIViewPropertyAnimator)
+                XCTAssertTrue(delegate.interruptibleAnimator?(using: context) === animator)
+                XCTAssertTrue(transition.isTransitioning)
+                let offset = root.view.bounds.height * (edge == .top ? -1 : 1)
+                XCTAssertEqual(full.view.transform.ty, presenting ? offset : 0, accuracy: 0.5)
+                animator.startAnimation(afterDelay: 1)
+                animator.pauseAnimation()
+                XCTAssertEqual(full.view.transform.tx, 0, accuracy: 0.5)
+                XCTAssertEqual(full.view.transform.ty, presenting ? 0 : offset, accuracy: 0.5)
+                context.transitionWasCancelled = cancelled
+                animator.stopAnimation(false)
+                animator.finishAnimation(at: cancelled ? .start : .end)
+                await fulfillment(of: [completed], timeout: 3)
+                XCTAssertEqual(context.result, !cancelled)
+                XCTAssertFalse(transition.isTransitioning)
+                XCTAssertTrue(dock.superview === root.view)
+                XCTAssertTrue(dockPlay.superview === dock)
+                XCTAssertTrue(fullPlay.superview === full.view)
+                XCTAssertFalse(dockPlay === fullPlay)
+                XCTAssertEqual(root.view.transform, .identity)
+                XCTAssertEqual(full.view.transform, .identity)
+                if presenting == cancelled { XCTAssertNil(full.view.superview) }
+                else { XCTAssertTrue(full.view.superview === root.view) }
+            }
         }
     }
 

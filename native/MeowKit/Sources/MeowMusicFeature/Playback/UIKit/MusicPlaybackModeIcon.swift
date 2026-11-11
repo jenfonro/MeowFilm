@@ -6,7 +6,7 @@ import UIKit
 @MainActor
 enum MusicPlaybackModeIcon {
     enum Kind: CaseIterable {
-        case loop, single, shuffle, heartbeat, fm, fmOff
+        case loop, single, shuffle, heartbeat, fm, recommendations
     }
 
     static func image(_ kind: Kind) -> UIImage {
@@ -16,7 +16,7 @@ enum MusicPlaybackModeIcon {
         case .shuffle: images.shuffle
         case .heartbeat: images.heartbeat
         case .fm: images.fm
-        case .fmOff: images.fmOff
+        case .recommendations: images.recommendations
         }
     }
 
@@ -26,7 +26,7 @@ enum MusicPlaybackModeIcon {
         shuffle: render(.shuffle),
         heartbeat: render(.heartbeat),
         fm: render(.fm),
-        fmOff: render(.fmOff)
+        recommendations: render(.recommendations)
     )
 
     private static func render(_ kind: Kind) -> UIImage {
@@ -45,19 +45,23 @@ enum MusicPlaybackModeIcon {
     private static func draw(_ kind: Kind, in context: CGContext) {
         switch kind {
         case .loop, .single:
-            context.move(to: .init(x: 22, y: 13))
-            context.addCurve(to: .init(x: 12, y: 21),
-                             control1: .init(x: 22, y: 17.42), control2: .init(x: 17.52, y: 21))
-            context.addCurve(to: .init(x: 2, y: 13),
-                             control1: .init(x: 6.48, y: 21), control2: .init(x: 2, y: 17.42))
-            context.addCurve(to: .init(x: 12, y: 5),
-                             control1: .init(x: 2, y: 8.58), control2: .init(x: 6.48, y: 5))
-            context.addLine(to: .init(x: 20, y: 5))
+            context.setLineWidth(1.8)
+            context.move(to: .init(x: 21, y: 13))
+            context.addCurve(to: .init(x: 12, y: 22),
+                             control1: .init(x: 21, y: 17.97), control2: .init(x: 16.97, y: 22))
+            context.addCurve(to: .init(x: 3, y: 13),
+                             control1: .init(x: 7.03, y: 22), control2: .init(x: 3, y: 17.97))
+            context.addCurve(to: .init(x: 12, y: 4),
+                             control1: .init(x: 3, y: 8.03), control2: .init(x: 7.03, y: 4))
+            context.addLine(to: .init(x: 20, y: 4))
             context.strokePath()
 
-            context.move(to: .init(x: 18.8, y: 1.9))
-            context.addLine(to: .init(x: 22.5, y: 5))
-            context.addLine(to: .init(x: 18.8, y: 8.1))
+            context.move(to: .init(x: 18.8, y: 1))
+            context.addLine(to: .init(x: 22.4, y: 4))
+            context.addLine(to: .init(x: 18.8, y: 7))
+            context.addQuadCurve(to: .init(x: 18.2, y: 6.7), control: .init(x: 18.2, y: 7.5))
+            context.addLine(to: .init(x: 18.2, y: 1.3))
+            context.addQuadCurve(to: .init(x: 18.8, y: 1), control: .init(x: 18.2, y: 0.5))
             context.closePath()
             context.fillPath()
 
@@ -124,7 +128,10 @@ enum MusicPlaybackModeIcon {
             context.addLine(to: .init(x: 22, y: 12))
             context.strokePath()
 
-        case .fm, .fmOff:
+        case .recommendations:
+            UIImage(systemName: "sparkles")?.draw(in: CGRect(x: 0, y: 0, width: 24, height: 24))
+
+        case .fm:
             context.setLineWidth(1.8)
             context.setLineCap(.butt)
             context.setLineJoin(.miter)
@@ -144,12 +151,6 @@ enum MusicPlaybackModeIcon {
                              control1: .init(x: 17, y: 17), control2: .init(x: 15, y: 17))
             context.closePath()
             context.strokePath()
-            if kind == .fmOff {
-                context.setLineCap(.round)
-                context.move(to: .init(x: 4, y: 4))
-                context.addLine(to: .init(x: 20, y: 20))
-                context.strokePath()
-            }
         }
     }
 }
