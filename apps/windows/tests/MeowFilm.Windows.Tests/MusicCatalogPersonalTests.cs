@@ -45,12 +45,13 @@ public static partial class MusicCatalogPersonalTests
             yield return Case("personal directory explicit account and complete cursor " + platform, () => DirectoryPages(platform));
         yield return Case("directory filters nullable totals empty intermediate page and failed refresh", DirectoryFilters);
         yield return Case("KG locator 30-page membership selection survives global sorting", KgMembers);
-        yield return Case("QQ favorites complete save never stores only visible page", TxSave);
+        yield return Case("owned QQ favorites cannot be saved as a network playlist", QqOwnedFavoritesCannotSaveNetworkReference);
+        yield return Case("public QQ playlist saves only a network reference after its first page", QqPublicPlaylistSavesNetworkReference);
         yield return Case("KG UI navigates past one hundred pages by platform total", LongKg);
         yield return Case("updated private locator cannot restore an old cached revision", LocatorRefresh);
         yield return Case("private tail failure preserves display and durable queue", TailFailure);
         yield return Case("duplicate member and changed snapshot cannot publish second page", PageDefects);
-        yield return Case("empty complete playlist may save but not play", EmptyPlaylist);
+        yield return Case("empty remote playlist saves a network reference and cannot play", EmptyRemotePlaylistReference);
         yield return Case("daily style full batch saves and replaces only on explicit actions", DailyActions);
         yield return Case("daily entry initialization shares each branch and never changes playback", DailyEntrySummaries);
         yield return Case("channel daily entries initialize songs without hover", ChannelDailySummaries);
@@ -98,7 +99,7 @@ public static partial class MusicCatalogPersonalTests
         yield return Case("private account observation preserves the authoritative read error", AccountReadFailure);
         yield return Case("account read detects external generation replacement", AccountRead);
         yield return Case("rapid FM changes ignore an old receipt and retain newest options", RapidOptions);
-        yield return Case("cancelling private preparation discards intent without commit", CancelPreparation);
+        yield return Case("cancelling private playlist playback preparation preserves the queue without commit", CancelPrivatePlaylistPlaybackPreparation);
         yield return Case("queue CAS conflict cannot autoplay or replay consumed stage", CasConflict);
         yield return Case("unknown batch save retains actual persistence without automatic retry", UnknownSave);
         yield return Case("unsupported routes leave content status and requests untouched", UnsupportedRoutes);
@@ -723,18 +724,42 @@ public static partial class MusicCatalogPersonalTests
         Check(f.Platform.Requests.OfType<MusicPlaylistRequest>().All(r => r.Limit == 30 && r.Personal?.ListId == "42"), "every page keeps locator");
         Equal(1, f.Output.Opens);
     }
-    private static async Task TxSave()
+    private static async Task QqOwnedFavoritesCannotSaveNetworkReference()
     {
         await using var f = await Fixture.Create(); f.Select("tx"); f.Platform.Total = 235;
         await f.OpenPersonalPlaylist(); Equal(100, f.Module.Songs.Count);
+        var page = f.Platform.Last<MusicPlaylistRequest>();
+        Equal("favorites", page.Id); Equal("201", page.Personal!.ListId);
+        Check(!f.Module.ShowsNetworkPlaylistAction && !f.Module.CanSaveNetworkPlaylist,
+            "owned QQ favorites cannot be collected as a network playlist");
+        int requests = f.Platform.Requests.Count;
         await f.Module.SaveCatalogPlaylistAsync();
-        var detail = await f.Detail(); Equal(235L, N(detail, "total"));
-        var all = detail.GetProperty("songs").EnumerateArray().ToList();
-        foreach (int offset in new[] { 100, 200 }) all.AddRange((await f.Detail(offset)).GetProperty("songs").EnumerateArray());
-        Equal(235, all.Count); Equal("MID235", MusicSongFixture.NativeId(all[^1]));
-        var prepare = f.App.Last("music.catalog.playlist.prepare");
-        Equal("favorites", S(prepare, "id")); Equal("201", S(prepare.GetProperty("personal"), "listId"));
-        Equal(1, f.Store.LibraryWrites); Check(f.Platform.Requests.OfType<MusicPlaylistRequest>().Count(r => r.Refresh) == 6, "QQ full reread");
+        Equal(requests, f.Platform.Requests.Count); Equal(0, Calls(f, "music.catalog.playlist.save"));
+        Equal(0, Calls(f, "music.catalog.playlist.prepare")); Equal(0, Calls(f, "music.catalog.playlist.commit"));
+        var snapshot = await f.App.Library.ReadLibrarySyncAsync();
+        Equal(0, snapshot.Library.GetProperty("networkPlaylists").GetArrayLength());
+        Equal(0, snapshot.Library.GetProperty("collections").EnumerateArray().Count(c => S(c, "kind") == "playlist"));
+        Equal(0, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
+        Equal(0, f.Store.LibraryWrites);
+    }
+    private static async Task QqPublicPlaylistSavesNetworkReference()
+    {
+        await using var f = await Fixture.Create(); f.Platform.Total = 235;
+        await f.Module.NavigateAsync("catalog-playlist/tx/201", default);
+        Equal(100, f.Module.Songs.Count); Check(f.Module.CanCatalogNext && f.Module.CanSaveNetworkPlaylist);
+        var page = f.Platform.Last<MusicPlaylistRequest>();
+        Equal("tx", page.Platform); Equal("201", page.Id); Check(page.Personal is null);
+        int requests = f.Platform.Requests.Count, reads = Calls(f, "music.catalog.playlist");
+        await f.Module.SaveCatalogPlaylistAsync();
+        var reference = f.Module.NetworkPlaylists.Single();
+        Equal("network", reference.Kind); Equal("tx", reference.Platform); Equal("201", reference.RemoteId);
+        Equal(235, reference.Count); Check(f.Module.NetworkPlaylistSaved);
+        Equal("已收藏歌单", f.Module.Status); Equal(1, f.Store.LibraryWrites);
+        Equal(requests, f.Platform.Requests.Count); Equal(reads, Calls(f, "music.catalog.playlist"));
+        Equal(0, Calls(f, "music.catalog.playlist.prepare")); Equal(0, Calls(f, "music.catalog.playlist.commit"));
+        var snapshot = await f.App.Library.ReadLibrarySyncAsync();
+        Equal(0, snapshot.Library.GetProperty("collections").EnumerateArray().Count(c => S(c, "kind") == "playlist"));
+        Equal(0, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
     }
     private static async Task LongKg()
     {
@@ -782,12 +807,19 @@ public static partial class MusicCatalogPersonalTests
             Check(f.Module.Status.Length > 0); Equal(0, f.Store.LibraryWrites);
         }
     }
-    private static async Task EmptyPlaylist()
+    private static async Task EmptyRemotePlaylistReference()
     {
         await using var f = await Fixture.Create(); f.Platform.Total = 0;
         await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
-        Check(f.Module.CanCatalogAction && !f.Module.CanPlayCatalogPlaylist);
-        await f.Module.SaveCatalogPlaylistAsync(); Equal(0L, N(await f.Detail(), "total"));
+        Check(f.Module.CanCatalogAction && f.Module.CanSaveNetworkPlaylist && !f.Module.CanPlayCatalogPlaylist);
+        await f.Module.SaveCatalogPlaylistAsync();
+        var reference = f.Module.NetworkPlaylists.Single();
+        Equal("network", reference.Kind); Equal("wy", reference.Platform); Equal("500", reference.RemoteId);
+        Equal(0, reference.Count); Equal(0, f.Module.Playlists.Count(p => p.Kind == "playlist"));
+        Check(f.Module.NetworkPlaylistSaved && !f.Module.CanPlayCatalogPlaylist);
+        Equal("已收藏歌单", f.Module.Status); Equal(1, f.Store.LibraryWrites);
+        Equal(0, Calls(f, "music.catalog.playlist.prepare")); Equal(0, Calls(f, "music.catalog.playlist.commit"));
+        Equal(0, f.Output.Opens);
     }
     private static async Task DailyActions()
     {
@@ -1798,13 +1830,18 @@ public static partial class MusicCatalogPersonalTests
         var displayed = f.Module.Songs[0]; held.Release(); await old;
         Equal("familiar", f.Module.CatalogFmMode); Check(ReferenceEquals(displayed, f.Module.Songs[0]));
     }
-    private static async Task CancelPreparation()
+    private static async Task CancelPrivatePlaylistPlaybackPreparation()
     {
         await using var f = await Fixture.Create(); f.Select("kg"); await f.OpenPersonalPlaylist();
+        await f.App.Library.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("kg", 90), Song("kg", 91) }, index = 1 });
+        var before = await f.Queue(); Equal(2L, N(before, "total"));
+        int writes = f.Store.LibraryWrites;
         var held = f.App.HoldNext("music.catalog.playlist.prepare", before: true);
-        var save = f.Module.SaveCatalogPlaylistAsync(); await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        f.Module.CancelCatalog(); held.Release(); await save;
-        Check(!f.App.Log.Any(c => c.Method == "music.catalog.playlist.commit")); Equal(0, f.Store.LibraryWrites);
+        var play = f.Module.PlayCatalogPlaylistAsync(); await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        f.Module.CancelCatalog(); await held.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        held.Release(); await play;
+        Equal(0, Calls(f, "music.catalog.playlist.commit")); Equal(writes, f.Store.LibraryWrites);
+        Equal(0, f.Output.Opens); Equal(before.GetRawText(), (await f.Queue()).GetRawText());
     }
     private static async Task CasConflict()
     {
@@ -2463,11 +2500,11 @@ public static partial class MusicCatalogPersonalTests
             Check(Module.IsCatalogPlaylist && Module.Status.Length == 0, "private playlist did not publish: " + Module.Status);
         }
         public Task<JsonElement> Queue() => App.Library.ExecuteAsync("music.queue.get", new { offset = 0, limit = 100 });
-        public async Task<JsonElement> Detail(int offset = 0)
+        public async Task<JsonElement> Detail()
         {
             var list = await App.Library.ExecuteAsync("music.library.list", new { offset = 0, limit = 100 });
             var id = list.GetProperty("items").EnumerateArray().First(p => S(p, "kind") == "playlist").GetProperty("id").GetString();
-            return await App.Library.ExecuteAsync("music.library.detail", new { id, offset, limit = 100 });
+            return await App.Library.ExecuteAsync("music.library.detail", new { id, offset = 0, limit = 100 });
         }
         public async ValueTask DisposeAsync() { App.ReleaseAll(); Platform.ReleaseAll(); await Module.DisposeAsync(); await Store.DisposeAsync(); }
     }
