@@ -29,6 +29,80 @@ public actor AccountSessionCoordinator {
         self.store = store
     }
 
+    /// Passive local read. A revoked/removal-pending record is never exportable.
+    /// Captures both in-memory ownership and exact persisted bytes for a later conditional replacement.
+    public func prepareReplacement(for identity: AccountIdentity) throws -> AccountReplacementLease {
+        let state = snapshot(for: identity)
+        guard state.phase != .signingIn, state.phase != .removalPending else {
+            throw AccountSessionError.invalidState
+        }
+        let record: CredentialRecord?
+        do { record = try store.read(for: identity) }
+        catch { throw AccountSessionError.storage(.sanitized(error)) }
+        if state.phase == .invalidated || state.phase == .failed {
+            guard record == nil else { throw AccountSessionError.invalidState }
+        }
+        if let entry = entries[identity], entry.phase != .signedOut,
+           record?.revision != entry.credentialRevision {
+            throw AccountSessionError.credentialsUnavailable
+        }
+        return AccountReplacementLease(snapshot: state, record: record)
+    }
+
+    /// One platform, no suspension between baseline checks, write and state publication.
+    /// Candidate validation belongs to the native adapter and happens before this call.
+    public func replaceVerified(_ lease: AccountReplacementLease,
+                                credential: AccountCredential) throws -> AccountSessionToken {
+        try lease.consume {
+            let identity = lease.snapshot.identity
+            guard snapshot(for: identity) == lease.snapshot else { throw AccountSessionError.staleSession }
+            do {
+                guard try store.read(for: identity) == lease.record else {
+                    throw AccountSessionError.staleSession
+                }
+            } catch let error as AccountSessionError { throw error }
+            catch { throw AccountSessionError.storage(.sanitized(error)) }
+            let replacement = CredentialRecord(credential: credential)
+            do {
+                try store.write(replacement, for: identity)
+                guard try store.read(for: identity) == replacement else { throw CredentialStoreError.conflict }
+            } catch {
+                let failure = CredentialStoreError.sanitized(error)
+                // A backend may write before throwing. Restore only our exact replacement,
+                // never overwrite an independently changed record or replay an unknown commit.
+                do {
+                    let actual = try store.read(for: identity)
+                    if actual == replacement {
+                        if let original = lease.record { try store.write(original, for: identity) }
+                        else { try store.remove(for: identity) }
+                    }
+                    guard try store.read(for: identity) == lease.record else {
+                        throw CredentialStoreError.conflict
+                    }
+                } catch {
+                    revokeAccess(identity, failure: .storage(failure))
+                }
+                throw AccountSessionError.storage(failure)
+            }
+            let generation = UUID()
+            entries[identity] = Entry(generation: generation, phase: .signedIn,
+                                      failure: nil, credentialRevision: replacement.revision)
+            publish(identity)
+            return AccountSessionToken(identity: identity, generation: generation)
+        }
+    }
+
+    public func replacementIsCurrent(_ lease: AccountReplacementLease) throws -> Bool {
+        try lease.check {
+            guard snapshot(for: lease.snapshot.identity) == lease.snapshot else { return false }
+            do { return try store.read(for: lease.snapshot.identity) == lease.record }
+            catch { throw AccountSessionError.storage(.sanitized(error)) }
+        }
+    }
+    public func replacementsAreCurrent(_ leases: [AccountReplacementLease]) throws -> Bool {
+        try leases.allSatisfy { try replacementIsCurrent($0) }
+    }
+
     public func snapshot(for identity: AccountIdentity) -> AccountSnapshot {
         guard let entry = entries[identity] else {
             return AccountSnapshot(identity: identity, generation: nil, phase: .signedOut)

@@ -1,0 +1,50 @@
+{
+  "format": "meowfilm.music-accounts",
+  "version": 1,
+  "accounts": [
+    {
+      "platform": "wy",
+      "userId": "71001",
+      "credentials": {
+        "MUSIC_U": "SYNTHETIC_NETEASE_SESSION",
+        "__csrf": "SYNTHETIC_CSRF",
+        "deviceId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "_ntes_nuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "_ntes_nnid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,1700000000000",
+        "WNMCID": "abcdef.1700000000000.01.0",
+        "NMTID": "SYNTHETIC_NMTID"
+      }
+    },
+    {
+      "platform": "tx",
+      "userId": "72002",
+      "credentials": {
+        "musicid": "72002",
+        "str_musicid": "72002",
+        "musickey": "SYNTHETIC_QQ_SESSION",
+        "openid": "SYNTHETIC_OPENID",
+        "refresh_token": "SYNTHETIC_REFRESH",
+        "access_token": "SYNTHETIC_ACCESS",
+        "unionid": "SYNTHETIC_UNION",
+        "refresh_key": "SYNTHETIC_REFRESH_KEY",
+        "login_type": "2",
+        "encrypt_uin": "SYNTHETIC_EUIN",
+        "expired_at": "1800000000"
+      }
+    },
+    {
+      "platform": "kg",
+      "userId": "73003",
+      "credentials": {
+        "userid": "73003",
+        "token": "SYNTHETIC_KUGOU_SESSION",
+        "t1": "SYNTHETIC_T1_OPAQUE",
+        "KUGOU_API_GUID": "0123456789abcdef0123456789abcdef",
+        "KUGOU_API_MID": "176905054734845483393488264506404844848",
+        "KUGOU_API_DEV": "0123456789",
+        "KUGOU_API_MAC": "02:00:00:00:00:00",
+        "dfid": "SYNTHETIC_DFID"
+      }
+    }
+  ]
+}

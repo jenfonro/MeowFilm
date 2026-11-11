@@ -93,3 +93,9 @@ WY 新标识采用现有原生规则：52 位大写 hex deviceId、64 位小写 
 - `MusicFeedbackProtocolTests`、`MusicOfficialStandardTests`、`MusicSyncClientContextTests`：业务校验后更新、错误结果保留基线，以及合法委托更新的明确交接。
 
 实际通过结果写入任务验证记录；上述实现说明和测试入口不等于已完成编译、UI 或实网验证。跨端核对使用[逐端自查](../common/music/self-check.md)。
+
+## 账号文件的设备关联
+
+文件边界遵循[共同账号文件契约](../common/music/account-transfer.md)。账号文件导入不替换本机安装文档：候选的网易响应 Cookie 不提交至客户端 owner；外来 deviceId 保留关联设备字段，包含 `_ntes_nnid` 的原始逗号。同一本地 deviceId 继续消费客户端 owner 当前快照及正常受信更新；导出与实际请求使用相同的组合规则。
+
+酷狗同 MID 继续优先消费客户端 owner 最新本地 dfid，外来 MID 使用账号携带的 dfid，不把文件快照固定为同一真实设备的永久旧状态。导入核对 GUID 与 MID 的真实派生关系。导出使用与实际请求相同的组合规则；仅在请求实际使用当前本机 MID 时补齐已知本机 seed，无法证明关联的历史 seed 不从当前安装推造。

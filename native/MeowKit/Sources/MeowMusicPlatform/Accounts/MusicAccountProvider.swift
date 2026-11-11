@@ -12,6 +12,9 @@ protocol MusicAccountProvider: Sendable {
     func revoke() async
     func nativeID(_ credential: AccountCredential) async throws -> String
     func verify(_ credential: AccountCredential) async throws -> MusicQQVerified
+    func verifyForImport(_ credential: AccountCredential) async throws -> MusicQQVerified
+    /// Passive file export, resolving only already-associated local device material.
+    func fileCredential(_ credential: AccountCredential) async throws -> AccountCredential
     func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified
     func recommendations(kind: String, page: Int, credential: AccountCredential) async throws -> MusicQQRecommendation
     func collectionRows(credential: AccountCredential) async throws -> [JSONValue]
@@ -31,6 +34,8 @@ struct MusicAccountTrackRead: Sendable {
     }
 }
 extension MusicAccountProvider {
+    func verifyForImport(_ credential: AccountCredential) async throws -> MusicQQVerified { try await verify(credential) }
+    func fileCredential(_ credential: AccountCredential) async throws -> AccountCredential { credential }
     func collectionTrackRead(collectionID: String, credential: AccountCredential) async throws -> MusicAccountTrackRead {
         .init(rows: try await tracks(collectionID: collectionID, credential: credential))
     }

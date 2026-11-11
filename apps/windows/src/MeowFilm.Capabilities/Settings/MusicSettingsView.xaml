@@ -67,7 +67,17 @@
    <StackPanel x:Name="SectionsStack" MaxWidth="1248" Margin="0,0,12,0" HorizontalAlignment="Left">
     <Border x:Name="AccountsSection" Style="{StaticResource Settings.Section}">
      <StackPanel>
-      <TextBlock Text="账号" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,8"/>
+      <Grid Margin="0,0,0,8">
+       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <TextBlock Text="账号" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
+       <Button x:Name="AccountTransferButton" Grid.Column="1" Content="导入导出" Style="{StaticResource Settings.QuietButton}"
+               IsEnabled="{Binding CanTransferAccounts}" Click="AccountTransfer_Click" AutomationProperties.Name="导入导出">
+        <Button.ContextMenu><ContextMenu>
+         <MenuItem Header="导入账号" Click="AccountImport_Click" AutomationProperties.Name="导入账号"/>
+         <MenuItem Header="导出账号" Click="AccountExport_Click" AutomationProperties.Name="导出账号"/>
+        </ContextMenu></Button.ContextMenu>
+       </Button>
+      </Grid>
       <local:MusicAccountsView x:Name="AccountsPanel"/>
      </StackPanel>
     </Border>

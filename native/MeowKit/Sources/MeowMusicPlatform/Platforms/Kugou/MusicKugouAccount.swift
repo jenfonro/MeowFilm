@@ -7,6 +7,27 @@ import MeowAccounts
 import MeowMusicFeature
 
 extension KugouMusicAccountAdapter {
+    func verifyForImport(_ credential: AccountCredential) async throws -> MusicQQVerified {
+        let candidate = KugouMusicAccountAdapter(transport: transport, now: now)
+        let own = epoch
+        let before = try MusicKugouDevice(saved: MusicQQWire.object(MusicQQWire.decode(credential.dataRepresentation())["device"]))
+        let client = try clientContexts?.matchingDevice(.kugou, identity: before.seed)
+        let verified = try await candidate.verified(credential, requireIdentity: true)
+        try Task.checkCancellation()
+        guard own == epoch else { throw MusicServiceError.staleResult }
+        let after = try MusicKugouDevice(saved: MusicQQWire.object(MusicQQWire.decode(verified.credential.dataRepresentation())["device"]))
+        if let client, let clientContexts, before.dfid != after.dfid, let dfid = after.dfid {
+            _ = try clientContexts.update(client, fields: ["dfid": dfid])
+        }
+        return verified
+    }
+    func fileCredential(_ credential: AccountCredential) async throws -> AccountCredential {
+        let device = try MusicQQWire.object(MusicQQWire.decode(credential.dataRepresentation())["device"])
+        guard ["seed", "KUGOU_API_MID", "KUGOU_API_DEV", "KUGOU_API_MAC"].allSatisfy({ device[$0] != nil }) else {
+            throw MusicServiceError.verificationRequired
+        }
+        return try self.credential(context(credential))
+    }
     func newContext(qrID: UUID? = nil, qrNonce: UUID? = nil) throws -> MusicKugouContext {
         if let clientContexts {
             let client = try clientContexts.installationDevice(.kugou)
@@ -44,7 +65,7 @@ extension KugouMusicAccountAdapter {
     func profile(_ context: MusicKugouContext) async throws -> String {
         try await displayProfile(context).nickname
     }
-    func displayProfile(_ context: MusicKugouContext) async throws -> MusicAccountProfile {
+    func displayProfile(_ context: MusicKugouContext, requireIdentity: Bool = false) async throws -> MusicAccountProfile {
         try check(context)
         guard let auth = context.auth else { throw MusicServiceError.authRequired }
         let seconds = Int(now().timeIntervalSince1970)
@@ -54,9 +75,11 @@ extension KugouMusicAccountAdapter {
                                             "userid": Int(auth.uid)!])
         try check(context)
         let data = try MusicQQWire.object(root["data"])
-        // b900c259 /user/detail legitimately omits userid. This authenticated
-        // request is already pinned to auth.uid; a returned different UID is
-        // never accepted, and the nickname is never used as an identity.
+        // Existing-session profile reads may omit userid. Candidate imports must
+        // instead establish identity from this response, never the request UID.
+        if requireIdentity, data["userid"] == nil || data["userid"] is NSNull {
+            throw MusicServiceError.verificationRequired
+        }
         if let uid = data["userid"], !(uid is NSNull),
            try MusicKugouWire.id(uid) != auth.uid { throw MusicServiceError.targetChanged }
         return .init(nickname: try MusicKugouWire.publicText(MusicKugouWire.text(data["nickname"], maximum: 512, empty: true), auth: auth),
@@ -76,8 +99,11 @@ extension KugouMusicAccountAdapter {
         return context
     }
     func verify(_ credential: AccountCredential) async throws -> MusicQQVerified {
+        try await verified(credential, requireIdentity: false)
+    }
+    private func verified(_ credential: AccountCredential, requireIdentity: Bool) async throws -> MusicQQVerified {
         let context = try await prepared(credential)
-        let nickname = try await profile(context)
+        let nickname = try await displayProfile(context, requireIdentity: requireIdentity).nickname
         try check(context)
         return .init(credential: try self.credential(context), nickname: nickname, nativeID: context.auth!.uid)
     }

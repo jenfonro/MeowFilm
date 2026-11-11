@@ -26,11 +26,19 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         sections = [AccountsSection, SearchSection, QualitySection, MetadataSection];
         Loaded += View_Loaded;
         Unloaded += View_Unloaded;
+        AccountTransferButton.IsVisibleChanged += async (_, e) =>
+        {
+            if (e.NewValue is false)
+            {
+                AccountTransferButton.ContextMenu.IsOpen = false;
+                await module.RetireAccountTransferAsync();
+            }
+        };
         ExclusionAddButton.IsVisibleChanged += (_, e) => { if (e.NewValue is false) RetireExclusionPopup(); };
         ExclusionAddButton.Unloaded += (_, _) => RetireExclusionPopup();
         IsVisibleChanged += async (_, _) =>
         {
-            if (!IsVisible) { AccountsPanel.CloseTransientPopups(); SearchAdvancedPopup.IsOpen = false; }
+            if (!IsVisible) { AccountTransferButton.ContextMenu.IsOpen = false; AccountsPanel.CloseTransientPopups(); SearchAdvancedPopup.IsOpen = false; }
             if (IsLoaded) await UpdateActivation();
         };
     }
@@ -45,12 +53,20 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private async void View_Unloaded(object sender, RoutedEventArgs e)
     {
+        AccountTransferButton.ContextMenu.IsOpen = false;
         AccountsPanel.CloseTransientPopups();
         SearchAdvancedPopup.IsOpen = false;
         await module.DeactivateSettingsAsync();
     }
     private Task UpdateActivation() => IsLoaded && IsVisible
         ? module.ActivateSettingsAsync() : module.DeactivateSettingsAsync();
+    private void AccountTransfer_Click(object sender, RoutedEventArgs e)
+    {
+        AccountTransferButton.ContextMenu.PlacementTarget = AccountTransferButton;
+        AccountTransferButton.ContextMenu.IsOpen = true;
+    }
+    private async void AccountImport_Click(object sender, RoutedEventArgs e) => await module.ImportAccountsFileAsync();
+    private async void AccountExport_Click(object sender, RoutedEventArgs e) => await module.ExportAccountsFileAsync();
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         UpdateLayoutMetrics();

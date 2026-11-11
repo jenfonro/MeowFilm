@@ -12,12 +12,13 @@ namespace MeowFilm.Capabilities.Accounts;
 /// background polling, automatic retry or verification bypass. KG registration
 /// requires the native owner's durably acknowledged device handoff.
 /// </summary>
-public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
+public sealed partial class MusicAccountProtocol : IMusicAccountProtocol, IMusicAccountTransferProtocol
 {
     private readonly MusicPlatformHttp transport;
     private readonly MusicPlatformClientContextOwner clients;
     internal MusicPlatformClientProtocol ClientProtocol { get; }
     private readonly bool leaveOpen;
+    private bool transferCandidate;
     private readonly TimeSpan timeout;
     private readonly TimeProvider clock;
     private readonly object gate = new();
@@ -99,6 +100,15 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         }
         internal async Task AcceptWyCookies(IReadOnlyList<string> cookies, string? accountCookie = null)
         {
+            if (owner.transferCandidate)
+            {
+                // Validate response shape, but imported device fields never update installation state.
+                var fields = MusicWyRequestContext.ResponseFields(cookies, owner.clock.GetUtcNow());
+                var sent = MusicWyRequestContext.Cookies(WyClient, accountCookie);
+                AccountRules.Require(!fields.TryGetValue("deviceId", out var device) || device is null ||
+                    device == sent["deviceId"], "IDENTITY_MISMATCH");
+                Guard(); return;
+            }
             Client = await owner.clients.AcceptWyAsync(WyClient, accountCookie, cookies, Guard, Token).ConfigureAwait(false);
             Guard();
         }
@@ -236,6 +246,14 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
+    async Task<MusicAccountDetailsObservation> IMusicAccountTransferProtocol.ValidateTransferAsync(
+        string platform, string cookie, CancellationToken token)
+    {
+        // Separate transient protocol state: Run/Cancel cannot supersede an existing account read or login.
+        await using var candidate = new MusicAccountProtocol(transport, clients, leaveOpen: true,
+            timeout: timeout, clock: clock, clientProtocol: ClientProtocol) { transferCandidate = true };
+        return await candidate.ValidateAsync(platform, cookie, token).ConfigureAwait(false);
+    }
     public Task<MusicAccountDetailsObservation> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
     {
         AccountRules.Platform(platform);
@@ -246,7 +264,7 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             {
                 "wy" => await ValidateWy(ctx, cookie, parts).ConfigureAwait(false),
                 "tx" => await ValidateTx(ctx, cookie, parts).ConfigureAwait(false),
-                "kg" => await ValidateKg(ctx, cookie, parts).ConfigureAwait(false),
+                "kg" => await ValidateKg(ctx, cookie, parts, requireIdentity: transferCandidate).ConfigureAwait(false),
                 _ => throw new MusicAccountException("INVALID_REQUEST")
             };
             return await ObserveAccountDetails(ctx, profile, cookie).ConfigureAwait(false);

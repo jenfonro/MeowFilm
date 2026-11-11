@@ -96,6 +96,7 @@ public sealed partial class MusicCapability
         Exception? failure = null;
         foreach (var retire in new Func<Task>[]
         {
+            RetireAccountTransferAsync,
             () => DeactivateSearchHistoryAsync(SearchHistorySurface.Settings),
             DeactivateQualityAsync,
             () => LibrarySync.DeactivateAsync(),

@@ -14,6 +14,21 @@ struct MusicQQLoginResult: Sendable {
     let verified: MusicQQVerified?
 }
 extension QQMusicAccountAdapter {
+    func fileCredential(_ credential: AccountCredential) async throws -> AccountCredential {
+        let normalized = try auth(credential)
+        let original = try MusicQQWire.object(MusicQQWire.decode(credential.dataRepresentation())["auth"])
+        if let alias = original["str_musicid"] {
+            guard try MusicQQWire.id(alias) == MusicQQWire.id(normalized["musicid"]) else {
+                throw MusicServiceError.targetChanged
+            }
+        }
+        let aliases = ["musickeyCreateTime": "musickey_create_time", "keyExpiresIn": "key_expires_in",
+                       "loginType": "login_type", "encryptUin": "encrypt_uin"]
+        let present = Set(original.keys.map { aliases[$0] ?? $0 })
+        return try AccountCredential(data: MusicQQWire.json([
+            "version": 1, "platform": "tx", "auth": normalized.filter { present.contains($0.key) }
+        ]))
+    }
     func auth(_ credential: AccountCredential) throws -> [String: Any] {
         let value = try MusicQQWire.decode(credential.dataRepresentation())
         guard try MusicQQWire.integer(value["version"]) == 1, value["platform"] as? String == "tx",
@@ -51,7 +66,9 @@ extension QQMusicAccountAdapter {
         let uid = try MusicQQWire.id(auth["musicid"])
         let check = try await rpc("music.UserInfo.userInfoServer", "GetLoginUserInfo", auth: auth)
         for row in [check, check["userInfo"] as? [String: Any] ?? [:], check["data"] as? [String: Any] ?? [:]] {
-            if let value = row["musicid"], try MusicQQWire.id(value) != uid { throw MusicServiceError.targetChanged }
+            for key in ["musicid", "str_musicid"] {
+                if let value = row[key], try MusicQQWire.id(value) != uid { throw MusicServiceError.targetChanged }
+            }
         }
         let nickname: String
         if let euin = auth["encrypt_uin"] as? String {

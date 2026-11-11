@@ -130,6 +130,13 @@ public sealed partial class MusicAccountProtocol
         AccountRules.Require(AccountRules.Match(euin, "^[A-Za-z0-9=_-]{1,256}$"), "INVALID_CREDENTIALS");
         var auth = await QqRead(ctx, cookie, "music.UserInfo.userInfoServer", "GetLoginUserInfo", new()).ConfigureAwait(false);
         if (auth["code"] is { } authCode) QqStatus(authCode);
+        foreach (var row in new[] { auth, auth["userInfo"] as JsonObject, auth["data"] as JsonObject })
+            if (row is not null)
+                foreach (string field in new[] { "musicid", "str_musicid" })
+                    if (row[field] is { } returnedId)
+                    {
+                        AccountRules.Require(Id(returnedId) == userId, "IDENTITY_MISMATCH");
+                    }
         var home = await QqRead(ctx, cookie, "music.UnifiedHomepage.UnifiedHomepageSrv", "GetHomepageHeader",
             new() { ["uin"] = euin, ["IsQueryTabDetail"] = 1 }).ConfigureAwait(false);
         AccountRules.Require(home["Info"] is JsonObject info && info["BaseInfo"] is JsonObject, "INVALID_RESPONSE");

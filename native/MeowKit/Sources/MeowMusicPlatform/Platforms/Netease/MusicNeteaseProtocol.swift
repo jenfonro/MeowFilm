@@ -7,7 +7,7 @@ import MeowMusicFeature
 
 enum MusicNeteaseWire {
     static let deviceKeys: Set<String> = ["deviceId", "_ntes_nuid", "_ntes_nnid", "WNMCID", "NMTID"]
-    static let credentialKeys: Set<String> = ["MUSIC_U", "__csrf", "JSESSIONID"]
+    static let credentialKeys: Set<String> = ["MUSIC_U", "__csrf", "JSESSIONID", "MUSIC_A"]
     static func id(_ value: Any?) throws -> String { try MusicQQWire.songID(value) }
     static func code(_ value: Any?) throws -> Int {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),

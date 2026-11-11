@@ -600,6 +600,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             if (!closed)
             {
                 closed = true;
+                try { transferLifetime.Cancel(); } catch { /* Still fence every platform and drain physical work. */ }
                 foreach (var platform in AccountRules.Platforms)
                 {
                     // Even a broken protocol must not prevent fencing other platforms.
@@ -623,6 +624,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         await PrepareCloseAsync().ConfigureAwait(false);
         if (ownsDetailsCacheStore) await detailsCacheStore.DisposeAsync().ConfigureAwait(false);
         await protocol.DisposeAsync().ConfigureAwait(false);
+        transferLifetime.Dispose();
         clients.ContextChanged -= ClientContextChanged;
         qqContextSerial.Dispose();
         // The App owns the shared DPAPI store and disposes it only after every owner drained.

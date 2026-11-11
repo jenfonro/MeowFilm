@@ -8,6 +8,40 @@ import MeowAccounts
 import MeowMusicFeature
 
 extension NeteaseMusicAccountAdapter {
+    /// Failed candidates cannot patch the installation. Only a successful identity
+    /// check may apply response device changes through the existing client owner.
+    func verifyForImport(_ credential: AccountCredential) async throws -> MusicQQVerified {
+        let candidate = NeteaseMusicAccountAdapter(transport: transport, now: now)
+        let own = epoch, before = try context(credential).device
+        let client = try before["deviceId"].flatMap { try clientContexts?.matchingDevice(.netease, identity: $0) }
+        let verified = try await candidate.verify(credential)
+        try check(own)
+        let after = try context(verified.credential).device
+        if let client, let clientContexts, before["deviceId"] == after["deviceId"] {
+            let patch = after.filter { before[$0.key] != $0.value }
+            let removals = Set(before.keys).subtracting(after.keys)
+            if !patch.isEmpty || !removals.isEmpty {
+                _ = try clientContexts.update(client, fields: patch, removing: removals)
+            }
+        }
+        return verified
+    }
+    func fileCredential(_ credential: AccountCredential) async throws -> AccountCredential {
+        let context = try context(credential)
+        if let clientContexts {
+            if context.device.isEmpty {
+                guard let existing = try clientContexts.existingDevice(.netease) else {
+                    throw MusicServiceError.verificationRequired
+                }
+                context.device = existing.fields
+            } else if let id = context.device["deviceId"],
+                      let existing = try clientContexts.matchingDevice(.netease, identity: id) {
+                context.device = existing.fields
+            }
+        }
+        guard context.device["deviceId"]?.isEmpty == false else { throw MusicServiceError.verificationRequired }
+        return try self.credential(context)
+    }
     func context(_ credential: AccountCredential) throws -> MusicNeteaseContext {
         let bytes = credential.dataRepresentation()
         guard bytes.count <= 32_768 else { throw MusicServiceError.limit }
@@ -155,6 +189,9 @@ extension NeteaseMusicAccountAdapter {
             if let account = root["account"], !(account is NSNull),
                let value = try MusicQQWire.object(account)["id"],
                try MusicNeteaseWire.id(value) != context.accountID { throw MusicServiceError.targetChanged }
+            // The QR bootstrap visitor is anonymous installation material. Existing
+            // account MUSIC_A restored/imported through context() remains preserved.
+            context.cookies.removeValue(forKey: "MUSIC_A")
             let verified = MusicQQVerified(credential: try credential(context), nickname: nickname, nativeID: context.accountID)
             qr.removeValue(forKey: id)
             return .init(progress: .confirmed, verified: verified)

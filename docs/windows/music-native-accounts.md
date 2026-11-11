@@ -118,3 +118,17 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 - 平台 HTTP 使用固定 origin、方法、路径、操作截止、实际响应缓冲及重定向策略，不再附加总并发或步骤计数限额；不自动刷新凭据、不跨平台切换、不注册未要求的设备，也不执行远端注销。
 - 对外错误只暴露有限 code 与可选冷却时间。上游 message、URI、header、body 和 cause 不透传。
 - 账号详情、播放上报、收藏同步和歌单同步共享同一账号 owner，但各自保留独立的请求、取消和权限边界。
+
+## 账号文件传输
+
+文件与批次行为以[共同账号文件契约](../common/music/account-transfer.md)为准。Windows 使用独立的 `IMusicAccountTransferSource` 原生接口，不新增 JSON／Node 命令；`MusicAccountTransferFile` 持有显式用户文件的有界字节，`MusicAccountTransferPlan` 持有 owner 捕获的完整账号值 fingerprint 与授权 epoch，普通序列化和调试字符串不包含凭据。界面只能取得平台冲突摘要及最终逐平台结果。
+
+- 准备先完整检查文件结构，再在账号磁盘队列中捕获各平台基线。跳过平台不调用网络、不写账号；计划只能消费一次，策略不跨批次保存。
+- 候选使用独立的短期 `MusicAccountProtocol` 执行状态，借用现有受限 HTTP 与客户端 owner。失败候选不会调用当前账号的 `Start`／`Fence`，也不会 replace/cancel 既有登录、资料读取或已签发 lease；网易响应设备 Cookie 检查格式与 deviceId 关联，不写安装文档。
+- 候选身份与现有登录资料／权益读取完成后，仍由 `MusicAccountOwner` 在同一个物理队列中核对准备值和 epoch、执行文档 CAS 并读回。只有成功读回才推进账号资格，复用 `SessionChanged` 的目录、搜索、歌词、曲库同步、反馈、Chorus 和播放失效链。新账号得到本机生成的新 generation／scope。
+- 文件传输由 `MusicNativeApplication` 的同一 pending/lifetime 关闭边界管理；逐项未知回执会登记 `accountReceiptUnknown`，正常关闭失败，只有显式账号读取可以核对，不自动重试。已准入写入不传页面取消 token，等待真实写入与读回；取消停止后续平台。
+- 明文导出只读取已保存且未撤销的账号，不联网。正常账号文档继续使用 DPAPI。目的文件直接由用户选择，不建立应用自有凭据临时文件。
+
+Windows 仍以 Cookie 字符串承载协议凭据：合法网易 `_ntes_nnid` 逗号原样保留；QQ 可选空字符串和规范 snake_case 字段保留；酷狗文件 t1 按原始字符串处理，原生登录响应中的数字 t1 则无浮点损失地转为十进制字符串。包含 Cookie 分隔符、控制字符或非 ASCII 等现有通道无法安全表达的值作为该平台 `INVALID_CREDENTIALS` 失败，不进行 URL 编码、截断或替换。历史账号缺失且无法证明关联的酷狗 seed 不从无关安装补造，导出保留实际已知材料，导入按材料完整性逐项失败。
+
+QQ 的可选授权 token 可以保留空字符串，数值协议字段则不能：`expired_at`、`musickey_create_time`、`key_expires_in`、`login_type` 必须是无多余前导零的非负十进制整数，且不超过 `2^53-1`。登录交接、文件导入及旧存储导出均校验此契约；无效数值使该项导入失败或阻止导出成功，不补零、不丢弃字段。
