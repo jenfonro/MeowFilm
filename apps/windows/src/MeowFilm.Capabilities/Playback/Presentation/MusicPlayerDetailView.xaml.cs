@@ -140,7 +140,7 @@ public partial class MusicPlayerDetailView : UserControl
         for (var node = originalSource as DependencyObject; node is not null;
             node = node is FrameworkContentElement content ? content.Parent : VisualTreeHelper.GetParent(node))
         {
-            if (node is TextBoxBase or PasswordBox or ComboBox { IsEditable: true } or MenuBase or Popup) return false;
+            if (node is MeowFilm.Desktop.PlayerDialogHost or TextBoxBase or PasswordBox or ComboBox { IsEditable: true } or MenuBase or Popup) return false;
             if (ReferenceEquals(node, this)) return true;
         }
         return false;

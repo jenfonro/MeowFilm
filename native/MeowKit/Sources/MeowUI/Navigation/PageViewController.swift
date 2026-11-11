@@ -176,7 +176,7 @@ open class PageViewController: UIViewController {
     open func pageDidFinishAppearing() {}
 
     public var theme: PageTheme {
-        PageTheme(palette: themeProvider.pageColorway,
+        PageTheme(colors: themeProvider.pagePalette,
                   dark: traitCollection.userInterfaceStyle == .dark)
     }
 

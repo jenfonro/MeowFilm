@@ -13,7 +13,6 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
     private readonly Func<MusicRecommendationRequest, CancellationToken, Task<JsonElement>> readAsync;
     private readonly Func<MusicRecommendationSelection, CancellationToken, Task<bool>> selectAsync;
     private readonly TimeProvider clock;
-    private readonly Func<bool> fetchOnRandomPlayback;
     private readonly SemaphoreSlim physical = new(1, 1);
     private readonly HashSet<Task> work = [];
     private readonly HashSet<Session> unresolved = [];
@@ -32,12 +31,11 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         internal Session? PreviousSession;
         internal readonly Dictionary<string, MusicRecommendationFeedback> Feedback = [];
         internal readonly HashSet<string> Attempted = [];
-        internal bool Active = true, Loading, Continue = config.Kind != "heartbeat" && config.Continue,
-            Play = config.Play, InitialAppend, InitialPending = true, Returning, Exhausted, RecommendationStarted;
-        internal string Status = "idle", Error = "", Checkpoint = "", Anchor = "", FixedSeed = "", LastPlayback = "";
-        internal bool RandomFetch;
+        internal bool Active = true, Loading, Continue = config.Continue,
+            Play = config.Play, InitialAppend, InitialPending = true, CommittingInitial, Returning, Exhausted, RecommendationStarted;
+        internal string Status = "idle", Error = "", Checkpoint = "", Anchor = "", FixedSeed = "";
         internal int Offset;
-        internal int Batch, Generation, Navigation, MediaIntent, Failures;
+        internal int Batch, Generation, Navigation, MediaIntent, Failures, ModeIntent;
         internal long QueueEpoch;
         internal QueueSnapshot? Queue;
         internal MusicRecommendationPlaybackState? Playback;
@@ -50,25 +48,24 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
     }
     private sealed record Song(JsonElement Value, string NativeId, string Algorithm, string FeedbackSource,
         JsonElement? Context, JsonElement Metadata);
-    private sealed record HeartbeatContext(string PlaylistId, string StartMusicId, string SongId, bool FromHome, long Count);
+    private sealed record HeartbeatContext(string PlaylistId, string StartMusicId, string SongId, bool FromHome, long Count, string AccountId);
     private sealed record Candidate(string Id, Song Song);
     private sealed record CandidateBatch(long Epoch, MusicRecommendationRequest Request,
-        Candidate[] Items, bool HasMore, int Offset);
+        Candidate[] Items, bool HasMore, int Offset, int ModeIntent);
     private sealed record PendingOperation(string Nonce, string Action, Song[] Songs,
         MusicRecommendationRequest? Request, string Seed, bool Select, bool Automatic, long QueueEpoch,
-        int? SelectIndex = null, bool HasMore = true, HeartbeatContext? Heartbeat = null, int Offset = 0, int? Navigation = null);
+        int? SelectIndex = null, bool HasMore = true, HeartbeatContext? Heartbeat = null, int Offset = 0, int? Navigation = null,
+        int? ModeIntent = null);
 
     public MusicRecommendationCoordinator(IMusicPlatformCatalog catalog, MusicRecommendationQueuePort queue,
         Func<MusicRecommendationSelection, CancellationToken, Task<bool>> selectAsync,
         TimeProvider? timeProvider = null,
-        Func<MusicRecommendationRequest, CancellationToken, Task<JsonElement>>? readAsync = null,
-        Func<bool>? fetchOnRandomPlayback = null)
+        Func<MusicRecommendationRequest, CancellationToken, Task<JsonElement>>? readAsync = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         this.queue = queue ?? throw new ArgumentNullException(nameof(queue));
         this.selectAsync = selectAsync ?? throw new ArgumentNullException(nameof(selectAsync));
         clock = timeProvider ?? TimeProvider.System;
-        this.fetchOnRandomPlayback = fetchOnRandomPlayback ?? (() => Random.Shared.Next(2) == 0);
         this.readAsync = readAsync ?? ((request, ct) =>
         {
             ct.ThrowIfCancellationRequested();
@@ -147,19 +144,17 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                         break;
                     case "music.recommendations.continue":
                         GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
-                        Require(target.Config.Kind != "heartbeat", "UNSUPPORTED");
                         bool enabled = Bool(p, "enabled");
-                        if (target.Continue != enabled)
+                        if (enabled)
                         {
-                            target.Continue = enabled;
-                            PublishLocked();
+                            int intent = ++target.ModeIntent;
+                            pending = LaunchLocked(() => EnableContinuationAsync(target, intent, cancellationToken));
                         }
-                        pending = enabled ? MaybeBeginLocked(target) : null;
+                        else DisableContinuationLocked(target);
                         break;
                     case "music.recommendations.retry":
                         GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
                         Require(target.Pending is null, "COMMIT_UNKNOWN");
-                        Require(target.Config.Kind != "heartbeat" || target.InitialPending, "UNSUPPORTED");
                         pending = BeginBatchLocked(target, target.InitialPending,
                             target.RecommendationStarted, cancellationToken);
                         break;
@@ -222,7 +217,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         else Fields(p, "kind platform seedEntryId restore continue play local", "kind platform seedEntryId");
         return new(kind, platform, fm, ids, Text(p, "sourceType", "song"), heartbeat, Text(p, "seedEntryId", "", 80),
             kind == "heartbeat" || kind == "queue" && Bool(p, "restore"),
-            kind != "heartbeat" && Bool(p, "continue", true), Bool(p, "play", true));
+            (kind != "queue" || Bool(p, "restore")) && Bool(p, "continue", true), Bool(p, "play", true));
     }
     private static bool SameConfiguration(Configuration left, Configuration right) =>
         left.Kind == right.Kind &&
@@ -269,7 +264,10 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
             if (old is { Active: true, Returning: false } && SameConfiguration(old.Config, config))
             {
                 next = old;
-                flight = old.Flight;
+                int intent = old.ModeIntent;
+                if (config.Continue && !old.Continue && !old.InitialPending) intent = ++old.ModeIntent;
+                flight = config.Continue && !old.Continue && !old.InitialPending
+                    ? LaunchLocked(() => EnableContinuationAsync(old, intent, token)) : old.Flight;
             }
             else
             {
@@ -333,8 +331,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
             active = s is not null && CurrentLocked(s) && source is { Active: true }, status = s?.Status ?? "idle",
             loading = s?.Loading ?? false, @continue = source?.Continue ?? false,
             play = s?.Play ?? false, error = s?.Error ?? "", batch = source?.Batch ?? 0,
-            canRetry = s is not null && CurrentLocked(s) && !s.Loading && !s.Returning && s.Pending is null && unresolved.Count == 0 &&
-                (s.Config.Kind != "heartbeat" || s.InitialPending),
+            canRetry = s is not null && CurrentLocked(s) && !s.Loading && !s.Returning && s.Pending is null && unresolved.Count == 0,
             canReturn = s is not null && CurrentLocked(s) && !s.Loading && s.Checkpoint.Length > 0 && s.Config.Restore && s.Pending is null && unresolved.Count == 0,
             requiresReconcile = s is not null && (s.Pending is not null || unresolved.Any(x => x.Id == s.Id)),
             reconcileIds = unresolved.Select(x => x.Id).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),

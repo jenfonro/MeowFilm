@@ -35,11 +35,45 @@ public actor FilmRuleService {
         return saved
     }
 
-    /// Saves all four groups, including other sections' pending edits.
+    /// Whole-document API retained for existing non-page consumers.
     public func save(_ draft: FilmRuleSet) async throws -> FilmRuleSet {
         try await run { service in
             try await service.commit("rules.set", fields: ["rules": try Self.value(draft)])
         }
+    }
+
+    /// Node merges this group into its latest committed document atomically.
+    public func save(_ group: FilmRuleGroup, rules: [FilmMatchRule]) async throws -> FilmRuleSet {
+        try await run { service in
+            try await service.commit("rules.group.set", fields: Self.groupFields(group, rules: rules))
+        }
+    }
+
+    /// Defaults are a draft value; requesting them never writes the document.
+    public func defaults(_ group: FilmRuleGroup) async throws -> [FilmMatchRule] {
+        try await run { service in
+            let response = try await service.request("rules.group.defaults", .object(["group": .string(group.rawValue)]))
+            try Task.checkCancellation()
+            if group.isClean {
+                let rows: [String] = try Self.decode(response)
+                return rows.map { .init(pattern: $0) }
+            }
+            return try Self.decode(response)
+        }
+    }
+
+    public func process(_ request: FilmRuleRequest, group: FilmRuleGroup,
+                        rules: [FilmMatchRule]) async throws -> FilmRuleResult {
+        try await run { service in
+            var fields = try Self.groupFields(group, rules: rules)
+            fields["request"] = try Self.value(request)
+            return try await service.invoke("rules.group.preview", fields: fields)
+        }
+    }
+
+    private static func groupFields(_ group: FilmRuleGroup, rules: [FilmMatchRule]) throws -> RuntimeObject {
+        ["group": .string(group.rawValue),
+         "rules": group.isClean ? try value(rules.map(\.pattern)) : try value(rules)]
     }
 
     public func restoreDefaults(_ section: FilmRuleSection, draft: FilmRuleSet? = nil) async throws -> FilmRuleSet {

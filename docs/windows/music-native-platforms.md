@@ -68,9 +68,9 @@ Invalidate
 
 - FM：`POST EAPI /api/v1/radio/get`，普通 `mode=DEFAULT|FAMILIAR|EXPLORE|PUZZLE_MODE_RCMD`，场景 `SCENE_RCMD` + `subMode`（含 `GAMES/ELECTRONIC`）；`limit="3"/openAidj="false"/aidjReqTimes="0"/unplaySongIds`。预览 limit 为 1；规则 `ruleId/tabTagId` 使用原 `tag/tab/fm` 配方、每批 5 首。43 个场景保留官方 `FRANCH/PUNK/HOT_SONG` 等键。首页不带 mode 的私人 FM 由本机账号选择存储恢复，不改动卡片的动作身份。
 - 相似：同一路径的 WEAPI，`mode=SIMILAR/sourceType=artist|song/sourceIds/limit="3"/unplaySonIds`。这里的 `unplaySonIds` 少一个 g，与普通 FM 不混用。
-- 心动：`MusicHeartbeatRequest(Platform, Entry, SongId, PlaylistId)`；首页 `entry=favorites` 保留卡片 `songId`，current 带实际 `songId/playlistId`。同一个账号 lease 解析 `specialType=5` 且归属当前账号的真实喜欢歌单，不按标题或本地收藏猜测，也不接受普通远端歌单替代此上下文。
-- 喜欢成员完整读取，唯一成员数接受 `trackCount` 或 `trackCount+cloudTrackCount` 的已有口径；缺详情按 ID 每请求至多 100 首补齐，不按累计数量截断。`startMusicId` 与实际入口种子 `songId` 相同，使用首页展示曲或当前曲，不替换成喜欢列表首曲；current 核对其确为该歌单成员。
-- `/api/playmode/intelligence/list` 使用真实 `playlistId/songId/startMusicId/type/count`，type 为 `fromPlayAll/fromPlayOne`，count 为完整成员长度，不作为结果硬容量。完整消费返回结果；`songInfo=null` 时用顶层 id 从已读元数据或 `/api/v3/song/detail` 补齐，身份／标题不一致明确失败。响应 context 为 `playlistId/startMusicId/songId/fromHome/count`，顶层 count 是结果长度。没有经过验证的心动后续读取能力。
+- 心动：`MusicHeartbeatRequest`；首页 `entry=favorites` 保留卡片 `songId`，current 带实际 `songId/playlistId`。同一个账号 lease 解析 `specialType=5` 且归属当前账号的真实喜欢歌单，不按标题或本地收藏猜测，也不接受普通远端歌单替代此上下文。
+- 喜欢成员完整读取，唯一成员数接受 `trackCount` 或 `trackCount+cloudTrackCount` 的已有口径；缺详情按 ID 每请求至多 100 首补齐，不按累计数量截断。首批 `startMusicId` 与实际入口种子 `songId` 相同，使用首页展示曲或当前曲，不替换成喜欢列表首曲；current 核对其确为该歌单成员。
+- `/api/playmode/intelligence/list` 使用真实 `playlistId/songId/startMusicId/type/count`，type 为 `fromPlayAll/fromPlayOne`，count 为完整成员长度，不作为结果硬容量。完整消费返回结果；`songInfo=null` 时用顶层 id 从已读元数据或 `/api/v3/song/detail` 补齐，身份／标题不一致明确失败。响应 context 为 `playlistId/startMusicId/songId/fromHome/count/accountId`，顶层 count 是结果长度。续批保留原账号、playlistId、startMusicId 与入口类型，songId 为实际尾曲；入口种子仍校验成员，推荐尾曲不按喜欢成员拦截。协议参数由合成测试验证，不冒充实网算法效果验收。
 - 单曲推荐：`MusicQueueRecommendationsRequest(Platform, SeedSongId, Offset)` → `POST EAPI /api/homepage/scene/more/rcmd/song`。参数固定为 `currentPlaySongId="<seed>"/songIds="[<seed数值>]"/songCount="1"/offset="<游标>"/source="curlist_more_rcmd"/extJson="{}"`。首次 offset 0，后续只使用响应 offset，seed 两字段不随插歌／当前推荐曲变化；没有旧路由 fallback 或伪造搜索上下文。
 - scene 响应读取 `data.songList/algMap/sourceMap/offset/hasMore`；offset 必须为非负整数，hasMore 必须为布尔值，仍有更多时游标必须前移。完整解码 songList，algMap／sourceMap 接受对象或 JSON 对象字符串，算法映射优先于曲内 alg。明确缺游标／耗尽字段时失败，不猜测分页。
 - `recommendations[].source` 表示 provider；独立 feedbackSource 在心动为 aiMode，单曲推荐使用逐曲 sourceMap、缺失为 moreRcmd。读取候选本身不入队或发送反馈。
@@ -152,7 +152,7 @@ Invalidate
 - 默认调用截止时间为 25 秒；装配方可指定操作截止时间，HTTP 不再追加统一的 25／60 秒硬上限。
 - 网络层与 Catalog 不做任何并发限流：不设全局、每平台或每服务器连接上限，也不因请求量返回 `RATE_LIMITED`。请求量只由业务逻辑控制（例如搜索按“类型 × 平台”的并发、缓存与分页）；上游真实返回的限流仍报告 `RATE_LIMITED`。
 - 所有 `SendAsync`／`SendXeapiAsync` 都在请求、响应及流实际收尾后结算；取消或失效不提前释放不合作传输，关闭流程等待其排空。
-- Catalog 为单个原始响应指定 4 MiB 缓冲上限；HTTP 使用调用方的真实缓冲上限，不再施加重复的全局 4 MiB 限制。JSON 保留严格 UTF-8、重复键和嵌套校验，不再遍历附加节点／数组／字符串总额度。规范元数据仍按字段、身份和单曲模型校验；内存中的派生目录结果与累计 continuation 不套用 512 KiB 截断。
+- Catalog 为单个原始响应指定 4 MiB 缓冲上限；HTTP 使用调用方的真实缓冲上限，不再施加重复的全局 4 MiB 限制。JSON 保留严格 UTF-8、语法和嵌套校验，重复属性按最后值消费，不再遍历附加节点／数组／字符串总额度。规范元数据仍按字段、身份和单曲模型校验；内存中的派生目录结果与累计 continuation 不套用 512 KiB 截断。
 - Catalog 不直接写持久文档；客户端受信响应更新交给客户端唯一 writer。目录内存缓存最多 64 项、2 MiB，key 包含平台、账号 scope／generation／userId、操作、完整输入及实际使用的客户端身份／代次；成功响应推进客户端后按最终代次保存缓存。单个结果超过缓存容量时直接返回且不缓存，不拒绝本次读取。
 - Catalog 不缓存搜索；搜索结果只由搜索 owner 缓存一次（见[原生搜索契约](music-search.md)）。单曲／歌单最长一小时，其他普通目录最长十分钟；每日推荐使用平台返回的到期时间。显式 refresh 成功后替换同一当前 key。
 - 鉴权、权限或会话失效会清除对应平台缓存。缓存命中不绕过当前会话复核，也不授予播放、下载或离线许可。

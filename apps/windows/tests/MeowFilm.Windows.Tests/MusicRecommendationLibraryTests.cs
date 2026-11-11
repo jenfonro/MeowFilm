@@ -21,6 +21,7 @@ public static class MusicRecommendationLibraryTests
         yield return new("Recommendation owner heartbeat empty checkpoint retains only the current occurrence", () => RestoreCurrent("empty"));
         yield return new("Recommendation owner heartbeat restore removes retained current from saved next priority", RestoreCurrentPriority);
         yield return new("Recommendation owner enter preserves current seed and one envelope CAS", Seed);
+        yield return new("Recommendation owner special entry changes queue and sequential mode in one CAS", SequentialEntry);
         yield return new("Recommendation owner nonce receipt replay does not write again", Replay);
         yield return new("Recommendation owner unrelated reads preserve a reconciled receipt", UnacceptedReceipt);
         yield return new("Recommendation owner receipt is replaced by the next capture", ReceiptLifetime);
@@ -141,6 +142,22 @@ public static class MusicRecommendationLibraryTests
         Check(entered.GetProperty("entryIds").GetArrayLength() == 1);
         await Command(owner, "restore", new { nonce = Nonce(), expectedVersion = N(q, "version"), checkpoint = S(entered, "checkpoint") });
         Check((await Queue(owner)).GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText());
+    }
+    private static async Task SequentialEntry()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 0 });
+        await Ok(owner, "music.queue.mode", new { mode = 3 });
+        var before = await Queue(owner); int writes = store.Writes;
+        var entered = await Command(owner, "enter", new { nonce = Nonce(), expectedVersion = N(before, "version"),
+            songs = new[] { Song("3") }, seedEntryId = Current(before), sequential = true });
+        var after = await Queue(owner);
+        Check(store.Writes == writes + 1 && N(after, "mode") == 1 && N(entered, "mode") == 1 &&
+            Current(after) == Current(before) && N(after, "total") == 2);
+        await Command(owner, "restore", new { nonce = Nonce(), expectedVersion = N(after, "version"),
+            checkpoint = S(entered, "checkpoint"), retainCurrent = true });
+        Check(N(await Queue(owner), "mode") == 1 &&
+            (await Queue(owner)).GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText());
     }
     private static async Task Replay()
     {

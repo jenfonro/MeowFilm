@@ -88,7 +88,7 @@ public final class MusicPlayerContentModel {
     var isAvailable: Bool { model.isAvailable && !model.isClosed }
     var dockExpanded: Bool { mini.expanded }
     var artwork: UIImage? { artworkIdentity?.url.flatMap { images[$0] } }
-    var controlTheme: PageTheme { .init(palette: appearance.preferences.colorPalette, dark: false) }
+    var controlTheme: PageTheme { .init(colors: appearance.preferences.colorPalette, dark: false) }
     var fence: MusicReferencePlayerFence {
         .init(occurrence: model.current?.id, attempt: model.activeNativeAttemptID,
               access: model.searchAccessGeneration, queueRevision: model.state.revision,
@@ -268,10 +268,13 @@ public final class MusicPlayerContentModel {
         guard expected.admits(fence, permitted: isAvailable) else { return }
         let id = UUID(), model = model, account = model.searchAccessGeneration
         let command = model.recommendationCommandID
+        let similarID = model.similarMode?.id, recommendationID = model.queueRecommendations?.id, fmID = model.fmPlayback?.id
         modeTasks[id] = Task { [weak self] in
             defer { self?.modeTasks[id] = nil }
             guard !Task.isCancelled, self?.fence == expected, self?.isAvailable == true,
-                  model.searchAccessGeneration == account, model.recommendationCommandID == command else { return }
+                  model.searchAccessGeneration == account, model.recommendationCommandID == command,
+                  model.similarMode?.id == similarID, model.queueRecommendations?.id == recommendationID,
+                  model.fmPlayback?.id == fmID else { return }
             await operation(model)
         }
     }

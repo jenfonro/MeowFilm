@@ -85,8 +85,9 @@ public sealed record MusicFmRequest(string Platform = "wy", MusicFmMode Mode = M
     IReadOnlyList<string>? UnplaySongIds = null);
 public sealed record MusicSimilarRequest(string Platform, IReadOnlyList<string> SourceIds,
     string SourceType = "song", IReadOnlyList<string>? UnplaySongIds = null);
+public sealed record MusicHeartbeatContinuation(string PlaylistId, string StartMusicId, string AccountId, long Count);
 public sealed record MusicHeartbeatRequest(string Platform, MusicHeartbeatEntry Entry, string? SongId = null,
-    string? PlaylistId = null);
+    string? PlaylistId = null, MusicHeartbeatContinuation? Continuation = null);
 public sealed record MusicQueueRecommendationsRequest(string Platform,
     string SeedSongId, int Offset = 0);
 public sealed record MusicAlbumRequest(string Platform, string Id, bool Refresh = false);

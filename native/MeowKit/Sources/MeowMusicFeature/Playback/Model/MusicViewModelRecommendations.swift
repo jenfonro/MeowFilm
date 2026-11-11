@@ -120,7 +120,8 @@ extension MusicViewModel {
             try admitted()
             let next = try await service.state(), rows = try await service.queue()
             try admitted()
-            guard before.revision == next.revision, before.currentId == next.currentId,
+            guard before.revision == next.revision, before.settingsRevision == next.settingsRevision,
+                  before.currentId == next.currentId,
                   next.revision == rows.revision, next.currentId == rows.currentId,
                   next.revision >= state.revision, next.settingsRevision >= state.settingsRevision else { return }
             if refreshQueue {

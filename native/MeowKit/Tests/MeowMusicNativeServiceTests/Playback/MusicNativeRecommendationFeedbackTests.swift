@@ -67,7 +67,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
             resourceId: audio.resourceId, kind: .playing, position: 0))
         let previewValue = try await service.previewQueueRecommendations()
         let preview = try XCTUnwrap(previewValue)
-        XCTAssertTrue(preview.continueEnabled)
+        XCTAssertFalse(preview.continueEnabled)
         let previewDocument = try MusicDocument(store.snapshot().0, runID: "preview")
         XCTAssertEqual(previewDocument.queue, before.queue)
         let original = try XCTUnwrap(before.queue["entries"].array.first)

@@ -29,6 +29,8 @@ public protocol MusicQueueRecommendationServing: Sendable {
     func queueRecommendationSnapshot() async throws -> MusicQueueRecommendationSnapshot?
     func previewQueueRecommendations() async throws -> MusicQueueRecommendationSnapshot?
     func playQueueRecommendation(snapshotID: UUID, candidateID: String) async throws -> MusicSimilarModeResult
+    /// true selects recommendation playback with queue order and continuation.
+    /// Explicit candidate selection alone preserves the current playback mode.
     func setQueueRecommendationContinue(_ enabled: Bool, snapshotID: UUID) async throws
     func retryQueueRecommendations(snapshotID: UUID) async throws -> MusicSimilarModeResult
     func cancelQueueRecommendationPreview() async

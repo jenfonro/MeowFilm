@@ -12,8 +12,9 @@
    <Setter Property="FontSize" Value="16"/><Setter Property="Margin" Value="0,0,0,10"/>
    <Setter Property="MinHeight" Value="64"/><Setter Property="Padding" Value="12"/>
    <Setter Property="HorizontalContentAlignment" Value="Center"/>
-   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-   <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/>
+   <Setter Property="BorderBrush" Value="#24FFFFFF"/><Setter Property="BorderThickness" Value="1"/>
+   <Setter Property="Foreground" Value="#EBEAED"/>
+   <Setter Property="Background" Value="#12FFFFFF"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
     <Border Background="{TemplateBinding Background}" CornerRadius="9" Padding="{TemplateBinding Padding}"
             BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
@@ -23,14 +24,24 @@
    </ControlTemplate></Setter.Value></Setter>
    <Style.Triggers>
     <Trigger Property="AutomationProperties.ItemStatus" Value="已选中">
-     <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/>
-     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+     <Setter Property="BorderBrush" Value="#C0FFFFFF"/>
+     <Setter Property="Background" Value="#32FFFFFF"/>
+     <Setter Property="Foreground" Value="#EBEAED"/>
     </Trigger>
+    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#40FFFFFF"/></Trigger>
+    <Trigger Property="IsPressed" Value="True"><Setter Property="Background" Value="#55FFFFFF"/></Trigger>
+    <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="#E0FFFFFF"/></Trigger>
     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
     </Trigger>
+    <MultiTrigger><MultiTrigger.Conditions>
+     <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
+     <Condition Property="IsKeyboardFocused" Value="True"/>
+    </MultiTrigger.Conditions>
+     <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    </MultiTrigger>
     <MultiTrigger><MultiTrigger.Conditions>
      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
      <Condition Property="AutomationProperties.ItemStatus" Value="已选中"/>
@@ -43,11 +54,27 @@
   <Style x:Key="Player.FmScene" TargetType="Button" BasedOn="{StaticResource Player.FmChoice}">
    <Setter Property="FontSize" Value="12"/><Setter Property="Margin" Value="2"/>
    <Setter Property="MinHeight" Value="84"/><Setter Property="Padding" Value="2,10"/>
-   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-   <Setter Property="Background" Value="Transparent"/>
+   <Setter Property="Foreground" Value="#C5C3C8"/>
+   <Setter Property="Background" Value="#0CFFFFFF"/>
   </Style>
   <Style x:Key="Player.FmCaption" TargetType="TextBlock">
-   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
+   <Setter Property="Foreground" Value="#C5C3C8"/>
+   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </Trigger></Style.Triggers>
+  </Style>
+  <Style x:Key="Player.FmSurface" TargetType="Border">
+   <Setter Property="Background" Value="{Binding PlayerBackground}"/><Setter Property="BorderBrush" Value="#60FFFFFF"/>
+   <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="14"/>
+   <Setter Property="TextElement.Foreground" Value="#EBEAED"/>
+   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    <Setter Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </Trigger></Style.Triggers>
+  </Style>
+  <Style x:Key="Player.FmClose" TargetType="Button" BasedOn="{StaticResource Settings.PopupClose}">
+   <Setter Property="Foreground" Value="#EBEAED"/>
    <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
    </Trigger></Style.Triggers>
@@ -81,8 +108,8 @@
       </Style.Triggers>
      </Style>
     </Grid.Resources>
-    <!-- Transport: five 36 + 8 buttons and one 40 + 16 play button = 276. -->
-    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="276"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <!-- Transport: four 36 + 8 buttons and one 40 + 16 play button = 232. -->
+    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="232"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
     <Grid x:Name="MetadataPanel" Margin="30,0,0,0" HorizontalAlignment="Left">
       <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <Button x:Name="ArtworkButton" Click="Lyrics_Click" Width="60" Height="60" Padding="0" Margin="0,0,12,0" BorderThickness="0" AutomationProperties.Name="打开歌曲与歌词">
@@ -134,15 +161,6 @@
       </Button>
     </Grid>
     <StackPanel x:Name="TransportPanel" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-     <Button x:Name="PlaybackSessionButton" Click="PlaybackSession_Click" ContextMenuOpening="PlaybackSession_ContextMenuOpening"
-             AutomationProperties.Name="推荐与续播" AutomationProperties.ItemStatus="{Binding PlaybackQueueSourceText}" ToolTip="推荐与续播">
-      <Button.ContextMenu>
-       <ContextMenu x:Name="PlaybackSessionMenu" Placement="Top" Style="{StaticResource MeowFilm.ContextMenu}"
-                    Closed="PlaybackSessionMenu_Closed"/>
-      </Button.ContextMenu>
-      <local:MusicPlaybackIcon Key="{Binding PlaybackSessionIcon}" Width="20" Height="20"
-                              Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-     </Button>
      <Button x:Name="ModeButton" Click="Mode_Click" ContextMenuOpening="Mode_ContextMenuOpening"
              IsEnabled="{Binding CanChangePlaybackMode}"
              AutomationProperties.Name="{Binding PlaybackModeText}">
@@ -164,7 +182,7 @@
       </ControlTemplate></Button.Template>
      </Button>
      <local:SkipButton x:Name="NextButton" Style="{StaticResource {x:Type Button}}" Click="Next_Click" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="下一首"/>
-     <Button Click="Queue_Click" AutomationProperties.Name="播放队列"><Path Data="M0,1 L4,3 0,5 Z M7,3 L18,3 M0,10 L18,10 M0,17 L18,17" Width="19" Height="19" StrokeThickness="1.3" Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" Stretch="Uniform"/></Button>
+     <Button x:Name="QueueButton" Click="Queue_Click" AutomationProperties.Name="播放队列"><Path Data="M0,1 L4,3 0,5 Z M7,3 L18,3 M0,10 L18,10 M0,17 L18,17" Width="19" Height="19" StrokeThickness="1.3" Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}" Stretch="Uniform"/></Button>
     </StackPanel>
     <StackPanel x:Name="OptionsPanel" Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,22,0">
      <Button x:Name="QualityButton" Width="80" Click="Quality_Click" ContextMenuOpening="Quality_ContextMenuOpening" AutomationProperties.Name="{Binding CurrentQualityLabel,StringFormat='音质：{0}'}">
@@ -196,16 +214,16 @@
      <Button x:Name="MoreButton" Content="&#xE712;" Click="More_Click" AutomationProperties.Name="更多"/>
     </StackPanel>
    </Grid>
-   <Popup x:Name="FmPopup" PlacementTarget="{Binding ElementName=PlaybackSessionButton}" desktop:DialogPlacement.Centered="True"
-          StaysOpen="False" AllowsTransparency="True" Opened="FmPopup_Opened" Closed="FmPopup_Closed" PopupAnimation="None">
-    <Border x:Name="FmPanel" Style="{StaticResource Settings.PopupSurface}" Width="368" Padding="14"
-            FocusManager.IsFocusScope="True" KeyboardNavigation.TabNavigation="Cycle" PreviewKeyDown="FmPopup_KeyDown">
+   <ContentControl x:Name="FmContent" Visibility="Collapsed">
+    <Border x:Name="FmPanel" Style="{StaticResource Player.FmSurface}" Width="368" Padding="14"
+            FocusManager.IsFocusScope="True" KeyboardNavigation.TabNavigation="Cycle">
+     <Border.Resources><SolidColorBrush x:Key="MeowFilm.Brush.Border" Color="#70FFFFFF"/></Border.Resources>
      <Grid>
-      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
       <Grid Margin="0,0,0,12">
         <TextBlock Text="{Binding PlaybackFmTitle}" FontSize="14" FontWeight="Medium" VerticalAlignment="Center"
                    Style="{StaticResource Player.FmCaption}" TextAlignment="Center"/>
-        <Button x:Name="CloseFmButton" Style="{StaticResource Settings.PopupClose}" HorizontalAlignment="Right"
+        <Button x:Name="CloseFmButton" Style="{StaticResource Player.FmClose}" HorizontalAlignment="Right"
                 Content="&#xE711;" Click="CloseFm_Click" AutomationProperties.Name="关闭频道选择"/>
       </Grid>
       <ScrollViewer x:Name="FmScroll" Grid.Row="1" MaxHeight="520" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
@@ -215,7 +233,7 @@
        <TextBlock Text="场景模式" FontSize="13" Style="{StaticResource Player.FmCaption}" Margin="0,12,0,12"/>
        <Border CornerRadius="12" Padding="6">
         <Border.Style><Style TargetType="Border">
-         <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/>
+         <Setter Property="Background" Value="#12FFFFFF"/>
          <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
           <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
          </Trigger></Style.Triggers>
@@ -226,7 +244,7 @@
       </ScrollViewer>
      </Grid>
     </Border>
-   </Popup>
+   </ContentControl>
    <Popup x:Name="VolumePopup" PlacementTarget="{Binding ElementName=VolumeButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True"><Border Style="{StaticResource MeowFilm.FloatingSurface}" Margin="8" Padding="16"><Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="100" Value="{Binding Volume}" PreviewMouseLeftButtonUp="VolumeCommit_MouseUp" PreviewKeyUp="VolumeCommit_KeyUp" AutomationProperties.Name="音量"/></Border></Popup>
    <Popup x:Name="PlaylistPopup" PlacementTarget="{Binding ElementName=PlaylistButton}" Placement="Top" StaysOpen="False" AllowsTransparency="True"><Border Style="{StaticResource MeowFilm.FloatingSurface}" Margin="8" Padding="12"><ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto"><ItemsControl ItemsSource="{Binding Playlists}"><ItemsControl.ItemTemplate><DataTemplate><Button Content="{Binding Name}" Tag="{Binding Id}" Click="AddCurrent_Click" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" HorizontalContentAlignment="Left" MinWidth="180"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer></Border></Popup>
    <Popup x:Name="SourcePopup" PlacementTarget="{Binding ElementName=Root}" desktop:DialogPlacement.Centered="True"

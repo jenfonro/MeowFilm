@@ -75,7 +75,7 @@ final class MusicNativeFMPreviewTests: XCTestCase {
         let remembered = try await service.rememberedFM()
         XCTAssertEqual(remembered, fm.fmConfiguration)
         let snapshot = try await service.fmPlaybackSnapshot()
-        XCTAssertTrue(try XCTUnwrap(snapshot).continueEnabled)
+        XCTAssertFalse(try XCTUnwrap(snapshot).continueEnabled)
         let sameMode = try await service.state(); XCTAssertEqual(sameMode.mode, .single)
         await source.close(); await service.close()
         let cold = try await NativeMusicFixture.service(store, accounts: owner)

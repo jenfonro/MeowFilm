@@ -25,20 +25,20 @@ public enum MusicPlayerAppearance: String, Codable, CaseIterable, Sendable {
 
 public enum MusicColorMode: String, Codable, CaseIterable, Sendable {
     case song, fixed
-    public var title: String { self == .song ? "跟随歌曲" : "固定配色" }
+    public var title: String { self == .song ? "灵动模式" : "固定颜色" }
 }
 
 public struct MusicAppearancePreferences: Codable, Equatable, Sendable {
     public var playlistView: MusicPlaylistAppearance
     public var playerTheme: MusicPlayerAppearance
     public var colorMode: MusicColorMode
-    public var colorPalette: PageColorway
+    public var colorPalette: PagePalette
     public var lockLyric: Bool
     public var lyricTranslation: Bool
     public var lyricBackground: Bool
 
     public init(playlistView: MusicPlaylistAppearance = .grid, playerTheme: MusicPlayerAppearance = .starlight,
-                colorMode: MusicColorMode = .song, colorPalette: PageColorway = .lilac,
+                colorMode: MusicColorMode = .song, colorPalette: PagePalette = .preset(.lilac),
                 lockLyric: Bool = true, lyricTranslation: Bool = true, lyricBackground: Bool = true) {
         self.playlistView = playlistView; self.playerTheme = playerTheme
         self.colorMode = colorMode; self.colorPalette = colorPalette; self.lockLyric = lockLyric
@@ -53,7 +53,7 @@ public struct MusicAppearancePreferences: Codable, Equatable, Sendable {
         playlistView = (try? values.decode(MusicPlaylistAppearance.self, forKey: .playlistView)) ?? .grid
         playerTheme = (try? values.decode(MusicPlayerAppearance.self, forKey: .playerTheme)) ?? .starlight
         colorMode = (try? values.decode(MusicColorMode.self, forKey: .colorMode)) ?? .song
-        colorPalette = (try? values.decode(PageColorway.self, forKey: .colorPalette)) ?? .lilac
+        colorPalette = (try? values.decode(PagePalette.self, forKey: .colorPalette)) ?? .preset(.lilac)
         lockLyric = (try? values.decode(Bool.self, forKey: .lockLyric)) ?? true
         lyricTranslation = (try? values.decode(Bool.self, forKey: .lyricTranslation)) ?? true
         lyricBackground = (try? values.decode(Bool.self, forKey: .lyricBackground)) ?? true
@@ -168,7 +168,7 @@ import Combine
     public static let preferencesKey = "music.ui.appearance.v1"
     public static let songColorsKey = "music.ui.songColors.v1"
     @Published public private(set) var preferences = MusicAppearancePreferences()
-    @Published public private(set) var effectivePalette: PageColorway = .lilac
+    @Published public private(set) var effectivePalette: PagePalette = .preset(.lilac)
     @Published public private(set) var persistenceError: String?
     // A mode round-trip can end on the same value before SwiftUI renders.
     // This revision still invalidates/re-samples the already displayed cover.
@@ -181,7 +181,7 @@ import Combine
     private var systemArtworkTarget: (songKey: String, artworkID: String)?
     /// Only song/cover changes fade. Preference and system scheme changes sync.
     public private(set) var animatesPaletteChanges = false
-    public var pageColorway: PageColorway { effectivePalette }
+    public var pagePalette: PagePalette { effectivePalette }
     public var animatesPageColorway: Bool { animatesPaletteChanges }
     public var pageThemeChanges: AnyPublisher<Void, Never> {
         $effectivePalette.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher()
@@ -191,6 +191,7 @@ import Combine
     private var songKey = ""
     private var generation = UUID()
     private var artworkID: String?
+    private var previewPalette: PagePalette?
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -230,12 +231,22 @@ import Combine
         return save(next)
     }
 
-    @discardableResult public func selectFixedPalette(_ palette: PageColorway) -> Bool {
+    @discardableResult public func selectFixedPalette(_ palette: PagePalette) -> Bool {
         reload()
         guard persistenceError == nil else { return false }
         var next = preferences
         next.colorMode = .fixed; next.colorPalette = palette
         return save(next)
+    }
+
+    public func previewFixedColor(_ rgb: UInt32) {
+        previewPalette = .custom(rgb)
+        publishPalette(animated: false)
+    }
+
+    public func endColorPreview() {
+        previewPalette = nil
+        publishPalette(animated: false)
     }
 
     /// Explicit recovery only; never removes the original export or library.
@@ -373,7 +384,7 @@ import Combine
     }
     private func publishPalette(animated: Bool) {
         animatesPaletteChanges = animated
-        let next = preferences.colorMode == .fixed ? preferences.colorPalette : cache.last
+        let next = previewPalette ?? (preferences.colorMode == .fixed ? preferences.colorPalette : .preset(cache.last))
         if effectivePalette != next { effectivePalette = next }
     }
     private func persistColors() {

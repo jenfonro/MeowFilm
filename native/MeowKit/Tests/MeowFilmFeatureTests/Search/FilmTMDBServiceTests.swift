@@ -156,6 +156,58 @@ final class FilmTMDBServiceTests: XCTestCase {
         XCTAssertNil(service.imageURL(path: "/v1/douban/images/../secret"))
     }
 
+    func testDoubanSettingsAdapterUsesOnlyRuntimeSettingsAndRetainsEveryNonSecretField() async throws {
+        let client = try client()
+        addTeardownBlock { await client.close() }
+        let response: RuntimeObject = [
+            "apiBase": .string("https://data.example.invalid/prefix"),
+            "searchBase": .string("https://search.example.invalid/prefix"),
+            "imageBase": .string("https://images.example.invalid/prefix"),
+            "apiProxy": .string("https://relay.example.invalid/?target={encodedUrl}"),
+            "imageProxy": .string("https://pictures.example.invalid/{url}"), "cookieConfigured": .bool(true),
+        ]
+        let patch: RuntimeObject = ["cookie": .string(""), "apiProxy": response["apiProxy"]!]
+        let received = expectation(description: "Exactly one settings read and one settings write")
+        received.expectedFulfillmentCount = 2
+        TMDBAdapterProtocol.set { transport in
+            XCTAssertEqual(transport.request.httpMethod, "POST")
+            let path = transport.request.url?.path ?? ""
+            XCTAssertTrue(["/v1/douban/settings.get", "/v1/douban/settings.update"].contains(path))
+            XCTAssertEqual(try? RuntimeJSON.decode(transport.body()),
+                .object(path == "/v1/douban/settings.update" ? patch : [:]))
+            received.fulfill()
+            transport.reply(.object(["ok": .bool(true), "contract": .string("douban.data.v1"), "value": .object(response)]))
+        }
+        let service = FilmDoubanSettingsService(connection: { client })
+        let first = try await service.settings()
+        let updated = try await service.updateSettings(patch)
+        XCTAssertEqual(first, updated)
+        XCTAssertEqual(first.apiBase, "https://data.example.invalid/prefix")
+        XCTAssertEqual(first.searchBase, "https://search.example.invalid/prefix")
+        XCTAssertEqual(first.imageBase, "https://images.example.invalid/prefix")
+        XCTAssertEqual(first.apiProxy, "https://relay.example.invalid/?target={encodedUrl}")
+        XCTAssertEqual(first.imageProxy, "https://pictures.example.invalid/{url}")
+        XCTAssertTrue(first.cookieConfigured)
+        await fulfillment(of: [received], timeout: 3)
+    }
+
+    func testDoubanSettingsAdapterRejectsIncompleteResponsesAndPropagatesOwnerFailure() async throws {
+        let client = try client()
+        addTeardownBlock { await client.close() }
+        let service = FilmDoubanSettingsService(connection: { client })
+        TMDBAdapterProtocol.set { transport in
+            transport.reply(.object(["ok": .bool(true), "contract": .string("douban.data.v1"),
+                "value": .object(["cookieConfigured": .bool(true)])]))
+        }
+        do { _ = try await service.settings(); XCTFail("All nonsecret fields are required") }
+        catch { XCTAssertEqual(error as? FilmSearchError, .invalidResponse) }
+        TMDBAdapterProtocol.set { transport in
+            transport.reply(.object(["ok": .bool(false), "contract": .string("douban.data.v1"), "code": .string("STORAGE_ERROR")]))
+        }
+        do { _ = try await service.updateSettings(["cookie": .string("")]); XCTFail("Owner failure must propagate") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("STORAGE_ERROR")) }
+    }
+
     private func client() throws -> RuntimeHTTPClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TMDBAdapterProtocol.self]

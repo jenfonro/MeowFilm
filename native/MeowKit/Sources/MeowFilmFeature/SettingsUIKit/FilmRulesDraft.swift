@@ -5,8 +5,10 @@ import Combine
 @MainActor
 public final class FilmRulesDraft: ObservableObject {
     public let service: FilmRuleService
+    /// Presentation drafts survive navigation. Each write submits one group only.
     @Published public private(set) var draft: FilmRuleSet?
     @Published public private(set) var busy = false
+    private var saveWork: Task<Void, Error>?
     public init(service: FilmRuleService) { self.service = service }
 
     func load() async throws {
@@ -26,82 +28,39 @@ public final class FilmRulesDraft: ObservableObject {
         }
         draft = value
     }
-    func save() async throws {
-        guard let draft, !busy else { return }
-        busy = true; defer { busy = false }
-        self.draft = try await service.save(draft)
+    func save(_ group: FilmRuleGroup) async throws {
+        guard let value = draft, !busy else { return }
+        try Task.checkCancellation()
+        busy = true
+        // Handoff belongs to the stable draft owner. Cancelling a page's waiter
+        // must not cancel the write or discard its actual normalization receipt.
+        let work = Task { [self] in
+            defer { busy = false; saveWork = nil }
+            let saved = try await service.save(group, rules: value.rules(in: group))
+            draft?.replace(group, with: saved.rules(in: group))
+        }
+        saveWork = work
+        try await work.value
     }
-    func add(_ group: FilmRuleGroup, rule: FilmMatchRule) async throws {
+    func add(_ group: FilmRuleGroup) {
         guard var value = draft, !busy else { return }
-        busy = true; defer { busy = false }
-        if group.isClean {
-            let pattern = try await service.normalizeNewCleanRule(rule.pattern)
-            if group == .episodeClean { value.episodeCleanRegexRules.append(pattern) }
-            else { value.aggregateRegexRules.append(pattern) }
-        } else {
-            guard var normalized = try await service.normalizeNewMatchRule(rule.pattern, replace: rule.replace) else { return }
-            if !rule.flags.isEmpty { normalized.flags = rule.flags }
-            if group == .episode { value.episodeRules.append(normalized) }
-            else { value.movieRules.append(normalized) }
-        }
-        // An unsuccessful write leaves the same complete draft available for retry.
-        draft = value
-        draft = try await service.save(value)
+        var rows = value.rules(in: group)
+        rows.append(.init(pattern: ""))
+        value.replace(group, with: rows); draft = value
     }
-    func delete(_ group: FilmRuleGroup, index: Int) async throws {
+    func delete(_ group: FilmRuleGroup, index: Int) {
         guard var value = draft, !busy else { return }
-        switch group {
-        case .episodeClean: value.episodeCleanRegexRules.remove(at: index)
-        case .episode: value.episodeRules.remove(at: index)
-        case .movie: value.movieRules.remove(at: index)
-        case .search: value.aggregateRegexRules.remove(at: index)
-        }
-        draft = value
-        try await save()
+        var rows = value.rules(in: group)
+        rows.remove(at: index)
+        value.replace(group, with: rows); draft = value
     }
-    func restore(_ section: FilmRuleSection) async throws {
-        guard let draft, !busy else { return }
+    func restore(_ group: FilmRuleGroup) async throws {
+        guard draft != nil, !busy else { return }
         busy = true; defer { busy = false }
-        self.draft = try await service.restoreDefaults(section, draft: draft)
+        let rows = try await service.defaults(group)
+        try Task.checkCancellation()
+        draft?.replace(group, with: rows)
     }
-    func rules(_ group: FilmRuleGroup) -> [FilmMatchRule] {
-        guard let draft else { return [] }
-        switch group {
-        case .episodeClean: return draft.episodeCleanRegexRules.map { .init(pattern: $0) }
-        case .episode: return draft.episodeRules
-        case .movie: return draft.movieRules
-        case .search: return draft.aggregateRegexRules.map { .init(pattern: $0) }
-        }
-    }
-}
-
-enum FilmRuleGroup: String, CaseIterable {
-    case episodeClean, episode, movie, search
-    var title: String {
-        switch self {
-        case .episodeClean: return "剧集净化"
-        case .episode: return "集数匹配"
-        case .movie: return "电影匹配"
-        case .search: return "搜索列表净化"
-        }
-    }
-    var isClean: Bool { self == .episodeClean || self == .search }
-}
-
-extension FilmRuleSection {
-    var settingsTitle: String {
-        switch self {
-        case .episode: return "列表净化"
-        case .movie: return "电影匹配"
-        case .search: return "搜索列表净化"
-        }
-    }
-    var settingsGroups: [FilmRuleGroup] {
-        switch self {
-        case .episode: return [.episodeClean, .episode]
-        case .movie: return [.movie]
-        case .search: return [.search]
-        }
-    }
+    func rules(_ group: FilmRuleGroup) -> [FilmMatchRule] { draft?.rules(in: group) ?? [] }
 }
 #endif

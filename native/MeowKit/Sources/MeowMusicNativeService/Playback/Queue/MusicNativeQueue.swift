@@ -244,13 +244,16 @@ extension NativeMusicService {
         return result
     }
     public func updateSettings(_ change: MusicSettingsChange) async throws -> MusicPlaybackState {
-        let result = try transaction(["playback"]) { d in
+        let update = { (d: inout MusicDocument) throws -> MusicPlaybackState in
             try musicRequire(d.playback["revision"].int == change.ifRevision, .staleRevision)
             if let quality = change.requestQuality {
                 try musicRequire(MusicSourceQualityPolicy.qualities.contains(quality))
                 d.playback["requestQuality"] = .string(quality)
             }
-            if let mode = change.mode { d.playback["mode"] = .n(mode.rawValue) }
+            if let mode = change.mode {
+                d.playback["mode"] = .n(mode.rawValue)
+                if d.queue["similar"] != .null { d.queue["similar"]["continue"] = .bool(false) }
+            }
             var settings = d.playback["qualitySettings"]
             for (key, values, allowed) in [
                 ("qualityEnabled", change.qualityEnabled, MusicModel.qualityOrder), ("qualityOrder", change.qualityOrder, MusicModel.qualityOrder),
@@ -270,11 +273,27 @@ extension NativeMusicService {
             }
             if let value = change.lyricsEnabled { d.playback["lyricsEnabled"] = .bool(value) }
             if let value = change.showTranslation { d.playback["showTranslation"] = .bool(value) }
-            d.playback["revision"] = .n(change.ifRevision + 1); return stateDTO(d)
+            d.playback["revision"] = .n(change.ifRevision + 1); return self.stateDTO(d)
         }
-        if change.mode != nil { try? similarBoundary(); try? queueRecommendationBoundary(); try? fmBoundary() }
+        let result: MusicPlaybackState
+        if change.mode == nil { result = try transaction(["playback"], update) }
+        else { result = try similarQueueTransaction(["playback", "queue"], update) }
+        if change.mode != nil {
+            similarMode.modeSelection = UUID()
+            similarMode.preview?.enterAfter = false
+            similarMode.active?.continueEnabled = false
+            similarMode.queue?.continueEnabled = false
+            fmPlayback?.continueEnabled = false
+            emitSimilar()
+        }
         if change.lyricsEnabled == false { lyricEpoch = UUID(); cancelWork("lyrics") }
         return result
+    }
+    func selectContinuationMode(_ d: inout MusicDocument) {
+        if d.playback["mode"].int != MusicPlaybackMode.loop.rawValue {
+            d.playback["mode"] = .n(MusicPlaybackMode.loop.rawValue)
+            d.playback["revision"] = .n(d.playback["revision"].int + 1)
+        }
     }
     public func playedSongs() async throws -> [MusicPlayedSong] {
         let d = try read()

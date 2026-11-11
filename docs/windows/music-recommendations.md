@@ -31,7 +31,7 @@ music.recommendations.start / get / choose / continue / retry / return / cancel 
 | --- | --- |
 | `fm` | `mode=default|familiar|explore|puzzle|scene`、`submode`，或 `ruleId/tabTagId`；同一 FM lineage 的频道切换使用 append + selectIndex |
 | `similar` | `sourceType=artist|song`、`sourceIds`（协议最多 20 个 ID）；始终独立 enter，不捕获 checkpoint |
-| `heartbeat` | `entry=favorites|current`，首页保留 `songId`；current 必须带真实网易 `songId`，播放器另带 `seedEntryId`。本地融合收藏不传本地歌单 ID，由平台读取当前账号真实喜欢歌单并核实成员；已有 `playlistId` 时仍校验其与实际喜欢歌单一致。捕获 checkpoint，不提供 continue |
+| `heartbeat` | `entry=favorites|current`，首页保留 `songId`；current 必须带真实网易 `songId`，播放器另带 `seedEntryId`。本地融合收藏不传本地歌单 ID，由平台读取当前账号真实喜欢歌单并核实成员；已有 `playlistId` 时仍校验其与实际喜欢歌单一致。捕获 checkpoint；续批固定原 startMusicId／playlistId／账号和入口类型，以实际尾曲推进 songId |
 | `queue` | 必须带当前 occurrence 的 `seedEntryId`；`restore=false` 为只读候选，`restore=true` 为主动 enter 并捕获 checkpoint；只要求种子可解析成网易 ID，不要求整队网易身份 |
 
 当前只接 `platform=wy`、本地播放；其他平台返回 `UNSUPPORTED`，`local=false` 返回 `REMOTE_NOT_SUPPORTED`。已有共享资料中的网易 ID 由 `MusicFeedbackIdentity.Resolve` 解析，不为菜单补搜。
@@ -46,28 +46,28 @@ candidates:[{id,song}] exhausted seedSongId started offset
 sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 ```
 
-`Session.Config` 是来源配置，队列 `playback-settings.mode` 是唯一全局循环值（1 列表／2 随机／3 单曲），checkpoint 不包含该设置。待进入来源暂存 `PreviousSession`；取得可用批次并经唯一队列 owner 提交后才转移来源所有权，失败保留原来源与媒体。
+`Session.Config` 是来源配置，队列 `playback-settings.mode` 是唯一全局循环值（1 列表／2 随机／3 单曲），checkpoint 不包含该设置。普通 mode 命令同时关闭续播；进入或选回特殊方式由协调器经同一队列 lane 一致设为列表顺序和续播开启。待进入来源暂存 `PreviousSession`；取得可用批次并经唯一队列 owner 提交后才转移来源所有权，失败保留原来源与媒体。
 
 `MusicQueueRecommendationsRequest(Platform, SeedSongId, Offset)` 的 seed 在会话中固定，分页仅前移服务端 offset；[平台配方](music-native-platforms.md#网易云漫游与推荐)不携带当前整队或搜索上下文。
 
 ## 播放器呈现
 
-- 底部与全屏播放器复用 `MusicPlayerView`：横向 ∞ 入口常显，位于独立的全局循环按钮之前。普通来源显示带斜线的 ∞；活跃推荐、私人 FM、相似歌曲／艺人或心动会话显示无斜线 ∞。斜线表示会话归属，不表示续播开关。
-- ∞ 的原生扁平菜单保留当前来源及加载状态。普通来源的合资格当前歌曲可进入“推荐模式”；推荐、FM、相似或心动会话中不再提供重复推荐入口，心动入口仍按歌曲来源资格显示。只有实际可恢复原队列时才显示“退出推荐”或“退出心动”。可续播来源使用“开启续播／关闭续播”动作；心动不提供续播。搜索候选、FM 与相似来源没有 checkpoint，不显示退出恢复操作。
-- “重试取歌”与未知提交的“核对保存结果”继续使用现有资格。每次菜单打开有独立代次；动作同时核对推荐命令／快照、当前播放及队列、Catalog action 和网易账号代次，关闭、重开或状态失效后的旧 `MenuItem` 不能提交。
-- 只有活跃私人 FM 的菜单提供同级“频道切换”，不保留独立频道按钮。现有模式与场景选择通过 `DialogPlacement.Centered` 相对当前应用窗口内容居中，随窗口移动／尺寸变化重新定位。关闭按钮、Escape、外部点击、隐藏、卸载及窗口关闭结束面板；正常关闭将焦点归还 ∞，卸载或关闭窗口时不重新聚焦失效控件。选择按钮和焦点随面板关闭释放，旧按钮不能操作新面板或账号。
-- FM 面板使用首页相同的 `Capability.OverlayScrollViewer`。播放器既有 `SettingsTheme.xaml` 已通过 `CapabilityTheme.xaml → Presentation/Controls/OverlayScrollChrome.xaml → MeowFilm.Desktop/OverlayScrollChrome.xaml` 引入实际模板与滚动交互，不复制滚动条样式。主题、系统字体、原生 ∞／场景矢量及 iWebPlus 许可沿用原实现。
+- 底部与全屏播放器复用 `MusicPlayerView`，只保留统一播放模式按钮，不再有独立 ∞。图标和选中项表达实际方式，推荐采用与 iOS 一致的 sparkles 元素；条目顺序与返回资格遵循共同契约。
+- 模式菜单不显示来源标题、独立续播或“重试取歌”；候选区仍有实际错误重试和未知提交核对。菜单每次打开有独立代次，动作核对推荐命令／快照、当前播放及队列、Catalog action 和网易账号代次，旧 `MenuItem` 不能提交。
+- 只有漫游提供“切换频道”。频道由桌面外壳在应用内容内承载，外侧完整点击只关闭并消费，不触发底层按钮或进度；点击其他 App 不关闭，不使用全局鼠标监听。标题栏系统操作保持正常，Escape 只关闭最上层，Space 不误控播放器；关闭、账号失效和卸载释放旧按钮及焦点关系。
+- 普通底部按钮菜单采用同按钮关闭、异按钮切换，队列遵循相同规则；频道浮层打开时点击任何下层区域都只关闭频道。音质异步加载失效后不能重开菜单；普通菜单不扩大为跨 App 保留。
+- FM 面板复用 `Capability.OverlayScrollViewer` 和现有场景矢量；颜色跟随播放器调色，背景覆盖完整面板，卡片边框、hover／pressed／selected 和键盘焦点清晰，保留系统高对比。
 
 ## 候选与续取实现
 
 - 候选 token 属于当前 epoch 和候选批；推荐候选提交时重读实际队列、剔除已入队录音，再一次 append CAS。有效 PlayNext、模式变化和导航不废弃原 seed／候选；队列替换与账号失效有独立 fence。
-- `OnPlaybackAsync` 消费真实 `MusicRecommendationPlaybackState`。`PlaybackEvent` 来自首次有效 Started；暂停／恢复、seek 和重复 Started 不增加事件号。随机取歌判定使用独立 `Random.Shared.Next(2)`，与队列随机选歌不共享抽签。
+- `OnPlaybackAsync` 消费真实 `MusicRecommendationPlaybackState`。`PlaybackEvent` 来自首次有效 Started；暂停／恢复、seek 和重复 Started 不增加事件号。只有特殊方式自动续取，队列随机选歌不再参与网络请求决策。
 - `MaybeBeginLocked` 按共同契约决定何时取歌；同一 `Flight`／generation 防止并发读取，`Attempted` 避免同尾项／游标失败后忙重试。没有计时冷却、队列长度阈值或随机轮次限制。
 - `TryAdvanceAsync` 只在已有候选需要并入时等待本地 CAS，不等待 provider HTTP；随后由唯一队列 owner 执行实际循环与插队优先级。普通续批不带 selectIndex，不抢当前媒体。
-- 搜索候选仅追加时 `started` 仍为 false，队列 source 保持搜索；全局随机可继续选旧 seed／插曲。唯一队列 writer 真正选择活会话推荐 occurrence 时，在该次选择 CAS 中切换 source，成功回执同步激活推荐，再允许后续普通追加保留会话。显式 choose／主动 enter 同样以实际提交的选择为准，不从持久条目 context 重建活会话。
+- 搜索候选仅追加时 `started` 仍为 false，队列 source 保持搜索；普通方式不会自动追加候选。唯一队列 writer 真正选择活会话推荐 occurrence 时，在该次选择 CAS 中切换 source，成功回执同步激活推荐，再允许后续普通追加保留会话。显式 choose／主动 enter 同样以实际提交的选择为准，不从持久条目 context 重建活会话。
 - FM 显式换频道的首批相对旧队列不去重，创建新 occurrence 并选择新批真实首项；全部与旧批重复也能进入。正常后续取歌仍按已有录音去重。
 - 关闭 continue 保留候选及 seed；在途读取可完成为候选，但不自动并入。已准入 CAS 等待实际结算，不回滚已提交内容。最后候选消费后才按 hasMore 结束；空批／全部重复同样停止自动链。
-- 心动与主动推荐共用 retainCurrent restore；相似、FM 和搜索候选没有返回 checkpoint。完整心动结果及缺失详情由平台 owner 解析，不虚构更多心动接口。
+- 心动与主动推荐共用 retainCurrent restore；相似、FM 和搜索候选没有返回 checkpoint。完整心动结果及缺失详情由平台 owner 解析；续批调用同一心动接口并保持原进入上下文。
 
 ## 本机 FM 记忆
 
@@ -86,7 +86,7 @@ music.history.restorePlaylist
 music.catalog.playlist.commit action=play|next
 ```
 
-catalog 的 `action=save` 不替换队列，但仍与同一个 library owner 串行，防止交叉 CAS。
+网络歌单收藏使用 `music.catalog.playlist.save`，由同一个 library owner 保存远端引用，不先 prepare／读取成员，也不替换队列或退休当前推荐。
 
 `music.queue.recommendation.*` 是协调器与 library owner 的私有事务协议；普通 application 调用必须返回 `CAPABILITY_UNAVAILABLE`。私有协议只处理当前推荐批次的 capture、enter、append、select、restore、discard 和 reconcile，不暴露给页面。
 

@@ -3,6 +3,36 @@ import XCTest
 @testable import MeowUI
 
 final class PageThemeTests: XCTestCase {
+    func testCustomBaseColorsProduceReadableLightAndDarkThemes() {
+        let colors: [UInt32] = [0, 0xffffff, 0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x35a4cd]
+        for rgb in colors {
+            for dark in [false, true] {
+                let theme = PageTheme(colors: .custom(rgb), dark: dark)
+                XCTAssertGreaterThanOrEqual(theme.ink.contrastRatio(with: theme.top), 7)
+                XCTAssertGreaterThanOrEqual(theme.ink.contrastRatio(with: theme.bottom), 7)
+                XCTAssertGreaterThanOrEqual(theme.accent.contrastRatio(with: theme.bottom), 4.5)
+                XCTAssertGreaterThanOrEqual(theme.onAccent.contrastRatio(with: theme.accent), 4.5)
+                XCTAssertEqual(theme.top.alpha, 255)
+                XCTAssertEqual(theme.bottom.alpha, 255)
+            }
+        }
+        XCTAssertNotEqual(PageTheme(colors: .custom(0xff0000)).top, PageTheme(colors: .custom(0x0000ff)).top)
+        let neutral = PageTheme(colors: .custom(0x808080))
+        for color in [neutral.top, neutral.accent, neutral.headerDark] {
+            XCTAssertEqual(color.red, color.green)
+            XCTAssertEqual(color.green, color.blue)
+        }
+    }
+
+    func testPresetStorageRemainsANameAndCustomColorRoundTripsExactly() throws {
+        let encoder = JSONEncoder(), decoder = JSONDecoder()
+        XCTAssertEqual(try encoder.encode(PagePalette.preset(.mint)), Data(#""mint""#.utf8))
+        XCTAssertEqual(try decoder.decode(PagePalette.self, from: Data(#""mint""#.utf8)), .preset(.mint))
+        let value = PagePalette.custom(0x40ab93)
+        XCTAssertEqual(try decoder.decode(PagePalette.self, from: encoder.encode(value)), value)
+        XCTAssertThrowsError(try decoder.decode(PagePalette.self, from: Data("\"#oops\"".utf8)))
+    }
+
     func testRuntimeGradientUsesEightStopsAndExactTopSafeBand() {
         let tokens = PageTheme()
         let stops = tokens.gradientStops(safeTopFraction: 0.06)

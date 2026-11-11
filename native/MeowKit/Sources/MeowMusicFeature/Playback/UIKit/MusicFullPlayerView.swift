@@ -694,7 +694,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         }
         records.synchronize(current: content.model.current, previous: content.model.recordPreview(.previous),
                             next: content.model.recordPreview(.next))
-        let theme = PageTheme(palette: content.appearance.effectivePalette, dark: false)
+        let theme = PageTheme(colors: content.appearance.effectivePalette, dark: false)
         tonearm.configure(theme: theme)
         for slot in records.slots {
             discs[slot.id].configure(theme: theme, image: content.artwork(for: slot.entry))

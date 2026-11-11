@@ -64,8 +64,11 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(80, declared.Count);
+            BridgeTests.Equal(83, declared.Count);
             BridgeTests.Equal(true, declared.Contains("netease.token.get"));
+            BridgeTests.Equal(true, declared.Contains("film.rules.group.set"));
+            BridgeTests.Equal(true, declared.Contains("film.rules.group.defaults"));
+            BridgeTests.Equal(true, declared.Contains("film.rules.group.preview"));
             var close = client.ShutdownAsync();
             await using (var exchange = await server.AcceptAsync())
             {
@@ -469,7 +472,8 @@ public static class RuntimeHttpClientTests
                 "film.library.get", "film.library.remove", "film.manual.update",
                 "film.data.catalog", "film.data.search", "film.data.detail", "film.data.metadata",
                 "film.data.metadata.entry", "film.data.cache.entry", "film.data.invalidate",
-                "film.rules.get", "film.rules.set", "film.rules.restore", "film.rules.preview", "film.rules.normalize", "film.rules.clear",
+                "film.rules.get", "film.rules.set", "film.rules.group.set", "film.rules.group.defaults", "film.rules.group.preview",
+                "film.rules.restore", "film.rules.preview", "film.rules.normalize", "film.rules.clear",
                 "film.search.open", "film.search.snapshot", "film.search.command", "film.search.release", "film.search.handoff"
             } },
             new { id = "netease", version = "0.1.0", contract = "netease.token.v1", methods = new[]

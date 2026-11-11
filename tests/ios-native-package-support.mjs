@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { iosArtifacts, iosTarget } from '../scripts/quickjs/ios-target.mjs';
-import { packageIOSRuntime } from '../scripts/package-ios-runtime.mjs';
+import { packageIOSRuntime } from '../scripts/ios/package-runtime.mjs';
 
 export const repository = fileURLToPath(new URL('../', import.meta.url));
 export const hash = bytes => createHash('sha256').update(bytes).digest('hex');

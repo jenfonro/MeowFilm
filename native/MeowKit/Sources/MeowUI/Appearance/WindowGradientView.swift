@@ -41,7 +41,7 @@ open class WindowGradientView: UIView {
     required public init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public var theme: PageTheme {
-        PageTheme(palette: themeProvider.pageColorway,
+        PageTheme(colors: themeProvider.pagePalette,
                   dark: traitCollection.userInterfaceStyle == .dark)
     }
 

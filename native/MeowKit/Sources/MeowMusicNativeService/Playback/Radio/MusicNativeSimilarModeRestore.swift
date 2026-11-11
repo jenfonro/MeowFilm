@@ -56,12 +56,14 @@ extension NativeMusicService {
                 seedEntryID: saved["seedEntryId"].isString ? saved["seedEntryId"].string : nil,
                 returnQueue: saved["returnQueue"], fromHome: saved["fromHome"].bool, provider: provider,
                 sourceIDs: sourceIDs, context: context, scope: scope, lease: lease)
-            session.continueEnabled = provider != .heartbeat && saved["continue"].bool
+            session.continueEnabled = saved["continue"].bool &&
+                current.playback["mode"].int == MusicPlaybackMode.loop.rawValue
             session.offset = saved["offset"].int; session.exhausted = saved["exhausted"].bool
             session.batches = saved["batches"].array; session.attempted = Set(saved["attempted"].strings)
             session.status = [.error, .empty].contains(MusicSimilarModeSnapshot.Status(rawValue: saved["status"].string) ?? .ready) ?
                 MusicSimilarModeSnapshot.Status(rawValue: saved["status"].string)! : .ready
             if session.status == .error { session.error = .upstreamFailed }
+            if saved["continue"].bool && !session.continueEnabled { try persistSimilarSession(session) }
             similarMode.active = session; similarMode.restored = true
             watchSimilarLease(lease); acquired = nil; emitSimilar()
         } catch {

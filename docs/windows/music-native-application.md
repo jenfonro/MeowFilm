@@ -79,7 +79,7 @@ public interface IMusicApplication : IAsyncDisposable
 - 普通队列选择、追加、删除、排序、替换、清空和模式变更。
 - 历史歌单恢复。
 - catalog 歌单 `action=play` 的真实队列替换。
-- catalog 歌单 `action=save` 只保存歌单，但仍与同一个 library owner 串行，避免交叉 CAS。
+- 网络歌单收藏使用 `music.catalog.playlist.save`，由同一个 library owner 保存远端引用，不先 prepare／读取成员，也不替换队列或退休当前推荐。
 
 外部调用不能进入 `music.queue.recommendation.*` 私有命令。推荐协调器是该私有事务的唯一调用者。
 
