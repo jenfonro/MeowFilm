@@ -1,6 +1,6 @@
 # iOS 影视设置
 
-设置首页依次提供音乐设置、影视设置、偏好设置，底部独立分组为清空本机数据。影视下提供搜索净化设置、智能匹配设置、猫源、视频源、刮削设置、播放偏好、自动准备、人工匹配和片源屏蔽。智能匹配下为剧集列表净化规则、集数匹配规则、电影匹配规则、站点净化设置；后者仍编辑站点名关键词，不是正则。历史继续由 Node 记录，但不在设置显示入口。播放设置及资料遵循[统一播放契约](../runtime/film-playback.md)。
+设置首页提供音乐设置、影视设置，以及通用分组的偏好设置、缓存管理；底部独立分组为清空本机数据。影视下提供搜索净化设置、智能匹配设置、猫源、视频源、数据源和智能播放设置。智能播放设置收纳偏好、自动准备、Manual 匹配源管理和匹配禁用管理。智能匹配下为剧集列表净化规则、集数匹配规则、电影匹配规则、站点净化设置；后者仍编辑站点名关键词，不是正则。历史继续由 Node 记录，但不在设置显示入口。播放设置及资料遵循[统一播放契约](../runtime/film-playback.md)。
 
 手机一般三级，智能匹配规则和来源详情可到第四级；编辑、测试不另开第五级。当前标题放 App 自有页头，内容只保留实际分组。分组采用淡渐变外轮廓、动态字体与至少 44 pt 点击区。返回保持位置；规则草稿由 App 持有的 `FilmSettingsModel.rules` 保留，不随页面销毁。
 
@@ -40,11 +40,13 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 ## 生命周期与验证边界
 
-### 刮削设置
+### 数据源与智能播放设置
 
-`FilmScrapingSettingsViewController` 在同页切换 TMDB／豆瓣，字段采用上方标签、下方全宽输入。TMDB 仍编辑 API 基址、图片基址、API Key、Access Token；豆瓣编辑 Cookie，并独立选择数据代理和图片代理，提供直连、适用预设与自定义，自定义才展开基址及显式代理模板。原生不提供服务器版的“服务器代理”。设置和存储契约见[元数据运行器](../runtime/metadata-data.md#设置与凭据)：本端不新增持久文件、启动回灌、默认代理或认证信息；文件沿用运行器应用私有目录机制，不声称 Keychain 加密。
+`FilmDataSourceSettingsViewController` 同页切换 TMDB／豆瓣，字段采用上方标签、下方全宽输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。失败保留输入与 saved 状态，已提交保存不因离页丢回执，无原生持久文件或启动回灌。
 
-凭据字段仅用于输入，不从 get 回填原值；界面显示 configured 状态。空字段保存省略、保留旧凭据；明确清除才提交空字符串，重新输入非空值则替换。成功保存清空输入框，失败保留整份输入和原 saved 状态；错误与重试使用既有浮层。已提交保存取得真实回执，不因离开页面误报取消。豆瓣数据代理与图片代理独立，Cookie 不进入图片请求。
+偏好关键词和站点净化词用单行逗号分隔，键入不重建正在编辑的行，恢复默认只改选定组。人工匹配按目标分组，分享链接／提取码直接编辑。设置不展示或删除历史／收藏；原业务 owner 不变。
+
+通用设置的缓存管理提供豆瓣、TMDB、两者三个动作，由 `FilmPlaybackSettingsModel` 调用运行器 `data.invalidate`，不直接清文件、不重启或清用户资料；两项都结算后才解除 busy，部分失败仍报告失败。它不触发配置保存或自动搜索。
 
 两供应商只有成功回执才调用 `FilmSearchService.metadataSettingsChanged()`，撤销旧会话和共享详情缓存的复用资格，取消并跟踪旧工作到物理结算；不自动搜索。实际旧详情继续持有原快照，下一次显式同词使用新会话。相对图片缓存身份不因设置或运行器端口改变；接线见[影视搜索](film-search.md)。
 
@@ -97,10 +99,10 @@ xcodebuild test-without-building \
   -resultBundlePath "$IOS_TMDB_COLD_RESULT"
 ```
 
-每次调用现场生成全新 UUID；不要复用旧 UUID 或配置自动失败重试。首轮仍只接受默认基址且无凭据的目录，成功保存两供应商合成设置后才在 `Library/Application Support/TMDBColdStartTests/<UUID>.json` 记录 prepare。第二轮读取同一记录，先验证 runID、App 身份、不同 PID、相同数据容器和 App bundle 路径，写入 restoring 防止重复进入，再完整执行原 restore 的恢复／不回显／无原生写回断言。restore 的 teardown 清除合成凭据、恢复运行器默认基址之后，且本轮没有失败，才记录 restore 完成。无效 UUID、损坏记录、身份或路径不符、同进程重入、restoring／已完成记录都失败；失败不靠删除标记伪造完成。记录按 UUID 保留，旧未清夹具仍受原默认设置 guard 拦截；不读取真实秘密。
+每次调用现场生成全新 UUID；不要复用旧 UUID 或配置自动失败重试。首轮仍只接受默认基址且无凭据的目录，成功保存两供应商合成设置后才在 `Library/Application Support/TMDBColdStartTests/<UUID>.json` 记录 prepare。第二轮读取同一记录，先验证 runID、App 身份、不同 PID、相同数据容器和 App bundle 路径，写入 restoring 防止重复进入，再完整执行原 restore 的恢复／明文读回／无原生写回断言。restore 的 teardown 清除合成凭据、恢复运行器默认基址之后，且本轮没有失败，才记录 restore 完成。无效 UUID、损坏记录、身份或路径不符、同进程重入、restoring／已完成记录都失败；失败不靠删除标记伪造完成。记录按 UUID 保留，旧未清夹具仍受原默认设置 guard 拦截；不读取真实秘密。
 
 每轮保留 `tmdb-cold-<UUID>-<phase>.json` XCTest 附件，字段为 `runID`、`phase`、`processID`、`dataContainerPath`、`appBundlePath`、`appBundleIdentifier`、`succeeded`，不包含设置值或凭据。用 `xcrun xcresulttool get test-results summary --path "$IOS_TMDB_COLD_RESULT"`、`get test-results tests --path "$IOS_TMDB_COLD_RESULT"` 及 `xcrun xcresulttool export attachments --path "$IOS_TMDB_COLD_RESULT" --output-path "$IOS_TMDB_COLD_ATTACHMENTS"` 核对本次真实结果：所选方法恰好执行两轮、均通过且无 skip，附件恰好为同一 runID 的 prepare、restore 各一次且 `succeeded=true`，PID 不同、数据容器及 App bundle 身份／路径一致，并核对日志中阶段间没有安装／重装或清数据。单轮通过、第二轮仍是 prepare、缺少附件、清理失败或任何条件不符均不能算冷启动验收通过，源码编排本身不证明免重装。
 
-原手动入口仍可独立使用：`-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartPrepareTests/testSaveSyntheticSettingsForNextAppProcess` 配合 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=prepare`；`-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartRestoreTests/testNextAppProcessRestoresSettingsWithoutEchoingSecretsOrNativeWriteback` 配合 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=restore`。后者可在完整合成设置 guard 通过后执行原断言及凭据清理，包括重复入口失败后遗留的夹具；不跳过 guard、不仅删除阶段文件，部分写入或 guard 不符时须报告而非冒充清理成功。普通两次 `xcodebuild` 不能称为免重装验证。新入口未设 UUID、旧入口未设对应 phase 均显式跳过，跳过不算通过。真实设置 UI 的保存、保留／替换／清除、失败与截图见 `MeowfilmTMDBHostTests`。
+原手动入口仍可独立使用：`-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartPrepareTests/testSaveSyntheticSettingsForNextAppProcess` 配合 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=prepare`；`-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartRestoreTests/testNextAppProcessRestoresPlainSettingsWithoutNativeWriteback` 配合 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=restore`。后者可在完整合成设置 guard 通过后执行原断言及凭据清理，包括重复入口失败后遗留的夹具；不跳过 guard、不仅删除阶段文件，部分写入或 guard 不符时须报告而非冒充清理成功。普通两次 `xcodebuild` 不能称为免重装验证。新入口未设 UUID、旧入口未设对应 phase 均显式跳过，跳过不算通过。真实设置 UI 的保存、保留／替换／清除、失败与截图见 `MeowfilmTMDBHostTests`。
 
 设置不承载首页／搜索业务策略；搜索通过既有 owner 消费其快照。仍不提供任意第三方脚本兼容保证，不以模拟器结果宣称真机后台或实际媒体播放已验证。

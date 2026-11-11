@@ -28,14 +28,9 @@
      <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="魔法匹配"/>
      <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="猫源管理"/>
      <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="视频源管理"/>
-     <RadioButton Content="TMDB" Tag="tmdb" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="TMDB 设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+     <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="数据源设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
      <StackPanel x:Name="BusinessNavigation" Orientation="Horizontal" Visibility="Collapsed">
-      <RadioButton Content="播放偏好" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
-      <RadioButton Content="站点净化" Tag="clean" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
-      <RadioButton Content="观看历史" Tag="history" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
-      <RadioButton Content="人工匹配" Tag="manual" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
-      <RadioButton Content="片源屏蔽" Tag="blocks" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
-      <RadioButton Content="收藏" Tag="favorites" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
+      <RadioButton Content="智能播放设置" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
      </StackPanel>
     </StackPanel>
    </ScrollViewer>
@@ -43,36 +38,50 @@
   <Grid x:Name="MetadataPage" Grid.Row="1" Visibility="Collapsed">
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-    <TextBlock Text="正在处理 TMDB 设置…" VerticalAlignment="Center" Visibility="{Binding MetadataBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
-    <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding MetadataFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding MetadataIdle}" AutomationProperties.Name="重新读取 TMDB 设置"/>
+    <TextBlock Text="正在处理数据源设置…" VerticalAlignment="Center" Visibility="{Binding MetadataBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
+    <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding MetadataFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding MetadataIdle}" AutomationProperties.Name="重新读取数据源设置"/>
    </StackPanel>
-   <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="TMDB 配置">
-    <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding CanEditMetadata}" Visibility="{Binding MetadataLoaded,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-     <StackPanel>
-      <TextBlock Text="TMDB" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
-      <TextBlock Text="API 基址" Margin="0,0,0,8"/>
-      <TextBox x:Name="MetadataApiBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB API 基址"/>
-      <TextBlock Text="图片基址" Margin="0,12,0,8"/>
-      <TextBox x:Name="MetadataImageBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 图片基址"/>
-      <DockPanel Margin="0,12,0,8">
-       <TextBlock DockPanel.Dock="Right" Text="{Binding ApiKeyState}" Foreground="{DynamicResource MeowFilm.Brush.Muted}" AutomationProperties.Name="API key 配置状态"/>
-       <TextBlock Text="API key"/>
-      </DockPanel>
-      <DockPanel>
-       <Button DockPanel.Dock="Right" Content="清除" Tag="apiKey" Click="MetadataClear_Click" Style="{StaticResource Settings.DangerButton}" Margin="12,0,0,0" AutomationProperties.Name="清除 TMDB API key"/>
-       <PasswordBox x:Name="MetadataApiKey" PasswordChanged="MetadataCredential_Changed" Style="{StaticResource FilmSettings.Password}" AutomationProperties.Name="TMDB API key"/>
-      </DockPanel>
-      <DockPanel Margin="0,12,0,8">
-       <TextBlock DockPanel.Dock="Right" Text="{Binding AccessTokenState}" Foreground="{DynamicResource MeowFilm.Brush.Muted}" AutomationProperties.Name="Access Token 配置状态"/>
-       <TextBlock Text="Access Token"/>
-      </DockPanel>
-      <DockPanel>
-       <Button DockPanel.Dock="Right" Content="清除" Tag="accessToken" Click="MetadataClear_Click" Style="{StaticResource Settings.DangerButton}" Margin="12,0,0,0" AutomationProperties.Name="清除 TMDB Access Token"/>
-       <PasswordBox x:Name="MetadataAccessToken" PasswordChanged="MetadataCredential_Changed" Style="{StaticResource FilmSettings.Password}" AutomationProperties.Name="TMDB Access Token"/>
-      </DockPanel>
-      <Button x:Name="MetadataSave" Content="保存" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" HorizontalAlignment="Right" Margin="0,16,0,0" AutomationProperties.Name="保存 TMDB 设置"/>
-     </StackPanel>
-    </Border>
+   <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="数据源配置">
+    <StackPanel IsEnabled="{Binding CanEditMetadata}" Visibility="{Binding MetadataLoaded,Converter={StaticResource MeowFilm.BoolToVisibility}}" Margin="0,0,12,0">
+     <Border Style="{StaticResource Settings.Section}"><StackPanel>
+      <TextBlock Text="豆瓣配置" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
+      <TextBlock Text="豆瓣数据代理" Margin="0,0,0,8"/>
+      <ComboBox x:Name="DoubanDataProxy" ItemsSource="{Binding DoubanDataRoutes}" DisplayMemberPath="Label" SelectedValuePath="Id" SelectionChanged="DoubanRoute_Changed" Style="{StaticResource Settings.ComboBox}" AutomationProperties.Name="豆瓣数据代理"/>
+      <StackPanel x:Name="DoubanDataAddressField" Visibility="Collapsed">
+       <TextBlock Text="豆瓣代理地址" Margin="0,12,0,8"/>
+       <TextBox x:Name="DoubanDataAddress" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣代理地址"/>
+      </StackPanel>
+      <TextBlock Text="豆瓣图片代理" Margin="0,12,0,8"/>
+      <ComboBox x:Name="DoubanImageProxy" ItemsSource="{Binding DoubanImageRoutes}" DisplayMemberPath="Label" SelectedValuePath="Id" SelectionChanged="DoubanRoute_Changed" Style="{StaticResource Settings.ComboBox}" AutomationProperties.Name="豆瓣图片代理"/>
+      <StackPanel x:Name="DoubanImageAddressField" Visibility="Collapsed">
+       <TextBlock Text="豆瓣图片代理地址" Margin="0,12,0,8"/>
+       <TextBox x:Name="DoubanImageAddress" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣图片代理地址"/>
+      </StackPanel>
+      <TextBlock Text="豆瓣搜索 Cookie" Margin="0,12,0,8"/>
+      <TextBox x:Name="DoubanCookie" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣搜索 Cookie"/>
+      <Button Content="保存" Tag="douban" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" HorizontalAlignment="Right" Margin="0,16,0,0" AutomationProperties.Name="保存豆瓣设置"/>
+     </StackPanel></Border>
+     <Border Style="{StaticResource Settings.Section}"><StackPanel>
+      <TextBlock Text="TMDB 设置" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
+      <TextBlock Text="TMDB API TOKEN" Margin="0,0,0,8"/>
+      <TextBox x:Name="MetadataApiToken" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB API TOKEN"/>
+      <TextBlock Text="TMDB 数据代理地址" Margin="0,12,0,8"/>
+      <TextBox x:Name="MetadataApiBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 数据代理地址"/>
+      <TextBlock Text="TMDB 图片代理地址" Margin="0,12,0,8"/>
+      <TextBox x:Name="MetadataImageBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 图片代理地址"/>
+      <Grid Margin="0,12,0,0" local:SettingsLayout.Mode="Pair">
+       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
+       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+       <StackPanel><TextBlock Text="语言" Margin="0,0,0,8"/><TextBox x:Name="MetadataLanguage" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 语言"/></StackPanel>
+       <StackPanel Style="{StaticResource Settings.PairRight}"><TextBlock Text="地区" Margin="0,0,0,8"/><TextBox x:Name="MetadataRegion" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 地区"/></StackPanel>
+      </Grid>
+      <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+       <TextBlock Text="包含成人内容" VerticalAlignment="Center" Margin="0,0,12,0"/>
+       <CheckBox x:Name="MetadataIncludeAdult" Style="{StaticResource Settings.Switch}" AutomationProperties.Name="包含成人内容"/>
+      </StackPanel>
+      <Button x:Name="MetadataSave" Content="保存" Tag="tmdb" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" HorizontalAlignment="Right" Margin="0,16,0,0" AutomationProperties.Name="保存 TMDB 设置"/>
+     </StackPanel></Border>
+    </StackPanel>
    </ScrollViewer>
   </Grid>
   <Grid x:Name="BusinessPage" Grid.Row="1" Visibility="Collapsed"/>
@@ -92,6 +101,7 @@
    </StackPanel>
    <ScrollViewer x:Name="RulesScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                  Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="魔法匹配设置">
+    <StackPanel>
     <StackPanel x:Name="RuleSections" Margin="0,0,12,0" IsEnabled="{Binding CanEditRules}" Visibility="{Binding RulesLoaded,Converter={StaticResource MeowFilm.BoolToVisibility}}">
      <Border Style="{StaticResource Settings.Section}">
       <StackPanel>
@@ -141,6 +151,8 @@
        <StackPanel x:Name="SearchResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="搜索列表净化测试结果"/>
       </StackPanel>
      </Border>
+    </StackPanel>
+     <ContentControl x:Name="SiteCleanHost"/>
     </StackPanel>
    </ScrollViewer>
   </Grid>

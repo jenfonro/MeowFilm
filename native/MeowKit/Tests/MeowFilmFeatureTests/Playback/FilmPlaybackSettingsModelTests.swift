@@ -96,11 +96,53 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         let model = FilmPlaybackSettingsModel(transport: server.transport)
         try await model.removeBlock(block)
         try await model.removeBlock()
-        try await model.removeHistory()
         let calls = await server.calls()
+        XCTAssertEqual(calls.count, 2)
         XCTAssertEqual(calls[0].1.filmObject?["block"], .object(block.value))
         XCTAssertEqual(calls[1].1, .object(["kind": .string("blocks")]))
-        XCTAssertEqual(calls[2].1, .object(["kind": .string("history")]))
+    }
+
+    func testMetadataCacheScopesOnlyInvalidateTheSelectedProvidersAndKeepSettingsAndLibrary() async throws {
+        for (scope, providers) in [(FilmMetadataCacheScope.douban, ["douban"]), (.tmdb, ["tmdb"]), (.both, ["douban", "tmdb"])] {
+            let server = FilmPlaybackWireServer(handler: { operation, _ in
+                if operation == "settings.get" { return FilmPlaybackPreferences.defaults.value }
+                if operation == "library.get" { return FilmPlaybackFixture.library() }
+                return .null
+            })
+            let model = FilmPlaybackSettingsModel(transport: server.transport)
+            try await model.loadPreferences(); try await model.loadLibrary()
+            let library = model.library
+            try await model.clearMetadataCache(scope)
+            let calls = await server.calls()
+            XCTAssertEqual(calls.prefix(2).map(\.0), ["settings.get", "library.get"])
+            XCTAssertEqual(calls.dropFirst(2).map(\.0), Array(repeating: "data.invalidate", count: providers.count))
+            XCTAssertEqual(Set(calls.dropFirst(2).compactMap { $0.1.filmObject?["domain"]?.filmText }), Set(providers))
+            XCTAssertTrue(calls.dropFirst(2).allSatisfy { $0.1.filmObject?.count == 1 })
+            XCTAssertEqual(model.preferences, .defaults)
+            XCTAssertEqual(model.library, library)
+            XCTAssertFalse(model.busy)
+        }
+    }
+
+    func testFailedCombinedCacheClearStillDrainsTheOtherProviderBeforeEndingBusy() async throws {
+        let gate = FilmPlaybackGate()
+        let server = FilmPlaybackWireServer(handler: { _, value in
+            if value.filmObject?["domain"] == .string("douban") { throw FilmPlaybackError(code: "STORAGE_ERROR") }
+            await gate.wait()
+            return .null
+        })
+        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let clear = Task { try await model.clearMetadataCache(.both) }
+        await server.awaitCalls(2)
+        XCTAssertTrue(model.busy)
+        do { try await model.clearMetadataCache(.tmdb); XCTFail("No duplicate operation while clearing") }
+        catch { XCTAssertEqual(error as? FilmPlaybackError, .init(code: "BUSY")) }
+        await gate.release()
+        do { try await clear.value; XCTFail("Partial failure must remain a failure") }
+        catch { XCTAssertEqual(error as? FilmPlaybackError, .init(code: "STORAGE_ERROR")) }
+        XCTAssertFalse(model.busy)
+        let calls = await server.calls()
+        XCTAssertEqual(calls.count, 2)
     }
 
     func testBusySaveIsNotReportedAsSuccessOrSentTwice() async throws {

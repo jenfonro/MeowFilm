@@ -26,6 +26,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         }
         MusicHost.Visibility = film ? Visibility.Collapsed : Visibility.Visible;
         FilmBody.Visibility = film ? Visibility.Visible : Visibility.Collapsed;
+        FilmTools.Visibility = FilmBody.Visibility;
         HeaderChanged?.Invoke(this, EventArgs.Empty);
     }
     internal void ReleaseMusic()

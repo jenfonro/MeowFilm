@@ -1,0 +1,19 @@
+<UserControl x:Class="MeowFilm.Capabilities.FilmMetadataCacheSettingsView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop">
+ <UserControl.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries>
+  <ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/>
+ </ResourceDictionary.MergedDictionaries></ResourceDictionary></UserControl.Resources>
+ <Border Style="{StaticResource Settings.Section}">
+  <StackPanel>
+   <TextBlock Text="影视数据缓存" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
+   <WrapPanel x:Name="Actions">
+    <Button Content="清空豆瓣缓存" Tag="douban" Click="Clear_Click" Style="{StaticResource Settings.Button}" Margin="0,0,12,8"/>
+    <Button Content="清空 TMDB 缓存" Tag="tmdb" Click="Clear_Click" Style="{StaticResource Settings.Button}" Margin="0,0,12,8"/>
+    <Button Content="清空豆瓣与 TMDB 缓存" Tag="both" Click="Clear_Click" Style="{StaticResource Settings.Button}" Margin="0,0,0,8"/>
+   </WrapPanel>
+   <desktop:NoticeOutlet x:Name="Notices"/>
+  </StackPanel>
+ </Border>
+</UserControl>

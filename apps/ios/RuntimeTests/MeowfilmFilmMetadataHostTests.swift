@@ -367,8 +367,8 @@ private final class FilmMetadataHostFixture {
         let douban = try await client.call(module: .douban, operation: "settings.get")
         try await resources.filmSourceSettings.refresh()
         let catalog = await resources.filmSourceSettings.snapshot
-        guard tmdb.catField("apiKeyConfigured") == .bool(false), tmdb.catField("accessTokenConfigured") == .bool(false),
-              douban.catField("cookieConfigured") == .bool(false), catalog.cats.isEmpty,
+        guard tmdb.catField("apiKey") == .string(""), tmdb.catField("accessToken") == .string(""),
+              douban.catField("cookie") == .string(""), catalog.cats.isEmpty,
               assembly.filmPlayback?.isReleased != false else { throw FilmMetadataHostFailure.dedicatedSimulatorRequired }
         originalTMDB = ["apiBase": try XCTUnwrap(tmdb.catField("apiBase")), "imageBase": try XCTUnwrap(tmdb.catField("imageBase")),
                         "apiKey": .string(""), "accessToken": .string("")]

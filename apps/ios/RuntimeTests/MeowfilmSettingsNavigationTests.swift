@@ -18,22 +18,22 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         super.tearDown()
     }
 
-    func testRootCategoriesPreferencesAndResetAreIndependentOfMusicAvailability() throws {
+    func testRootCategoriesPreferencesCacheAndResetAreIndependentOfMusicAvailability() throws {
         let page = MeowfilmSettingsViewController(themeProvider: MusicAppearancePreferencesStore(), resetUserData: {})
         _ = try host(page)
         let table = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UITableView }.first)
         XCTAssertEqual(page.pageTitle, "设置")
         XCTAssertEqual(table.numberOfSections, 3)
-        XCTAssertEqual((0..<3).map { table.numberOfRows(inSection: $0) }, [2, 1, 1])
+        XCTAssertEqual((0..<3).map { table.numberOfRows(inSection: $0) }, [2, 2, 1])
         let paths = [IndexPath(row: 0, section: 0), IndexPath(row: 1, section: 0),
-                     IndexPath(row: 0, section: 1), IndexPath(row: 0, section: 2)]
+                     IndexPath(row: 0, section: 1), IndexPath(row: 1, section: 1), IndexPath(row: 0, section: 2)]
         XCTAssertEqual(paths.map { page.tableView(table, cellForRowAt: $0).accessibilityLabel },
-                       ["音乐设置", "影视设置", "偏好设置", "清空本机数据"])
+                       ["音乐设置", "影视设置", "偏好设置", "缓存管理", "清空本机数据"])
         var selected: [String] = []
         page.openMusic = { selected.append("music") }; page.openFilm = { selected.append("film") }
-        page.openPreferences = { selected.append("preferences") }
+        page.openPreferences = { selected.append("preferences") }; page.openCache = { selected.append("cache") }
         for path in paths.dropLast() { page.tableView(table, didSelectRowAt: path) }
-        XCTAssertEqual(selected, ["music", "film", "preferences"])
+        XCTAssertEqual(selected, ["music", "film", "preferences", "cache"])
         attach(page, "settings-root-phone")
     }
 

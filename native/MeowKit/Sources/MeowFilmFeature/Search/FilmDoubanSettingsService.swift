@@ -7,7 +7,7 @@ public struct FilmDoubanSettings: Equatable, Sendable {
     public let imageBase: String
     public let apiProxy: String
     public let imageProxy: String
-    public let cookieConfigured: Bool
+    public let cookie: String
 
     init(_ value: RuntimeValue) throws {
         guard let apiBase = value.catField("apiBase")?.catText,
@@ -15,9 +15,9 @@ public struct FilmDoubanSettings: Equatable, Sendable {
               let imageBase = value.catField("imageBase")?.catText,
               let apiProxy = value.catField("apiProxy")?.catText,
               let imageProxy = value.catField("imageProxy")?.catText,
-              case .bool(let cookie)? = value.catField("cookieConfigured") else { throw FilmSearchError.invalidResponse }
+              let cookie = value.catField("cookie")?.catText else { throw FilmSearchError.invalidResponse }
         self.apiBase = apiBase; self.searchBase = searchBase; self.imageBase = imageBase
-        self.apiProxy = apiProxy; self.imageProxy = imageProxy; cookieConfigured = cookie
+        self.apiProxy = apiProxy; self.imageProxy = imageProxy; self.cookie = cookie
     }
 }
 

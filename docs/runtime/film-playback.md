@@ -164,10 +164,10 @@ full。一个 32 MiB 有界内存缓存拥有数据、完整度、过期时间�
 旧在途不能回写内存或持久文件。
 
 搜索与播放均使用 `film.data.search/metadata`。TMDB 搜索请求为
-`/3/search/multi`、`{query,page:1,language:'zh-CN'}`、`imageSize:'w500'`；
+`/3/search/multi`、`{query,page:1}`、`imageSize:'w500'`；
 完整详情为 `/3/{movie|tv}/{id}`、
-`{language:'zh-CN',append_to_response:'credits,similar,images'}`、
-`imageSize:'original'`。查询字段和图片尺寸属于缓存身份，不从展示快照伪造完整记录。
+`{append_to_response:'credits,similar,images'}`、
+`imageSize:'original'`。运行器按当前设置补充语言、地区和成人选项；有效查询字段和图片尺寸属于缓存身份，不从展示快照伪造完整记录。
 原生不再拥有独立的成功详情缓存或跨请求合并；当前页面仍可持有展示快照。
 
 来源结果、完成页与来源缓存的交接还须证明来自同一个运行器 owner；Cat 的

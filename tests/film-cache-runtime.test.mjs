@@ -104,3 +104,46 @@ test('cache HTTP runtime recreation reuses durable metadata but never the previo
   assert.equal(okay(await next.rpc('data.catalog', home)).list[0].vod_id, 2);
   assert.deepEqual(next.calls.map(row => row.operation), ['home']);
 });
+
+test('cache management clears providers independently or together without removing settings or playback records', async t => {
+  const { createTMDBDataModule, createDoubanDataModule } = await import('../apps/runtime/modules/metadata-data.mjs');
+  const root = directory(t), calls = { tmdb: 0, douban: 0 };
+  const modules = ['tmdb', 'douban'].map(provider => (provider === 'tmdb' ? createTMDBDataModule : createDoubanDataModule)({
+    dataRoot: root,
+    request: async () => {
+      calls[provider]++;
+      return { status: 200, headers: { 'content-type': 'application/json' },
+        body: Buffer.from(JSON.stringify(provider === 'tmdb' ? { results: [] } : { items: [] })) };
+    },
+  }));
+  connectFilmPlayback(modules, { dataRoot: root });
+  const app = createAppRuntime({ sessionId: randomUUID(), modules });
+  await app.start();
+  const client = createRuntimeClient({ baseUrl: app.baseUrl });
+  t.after(async () => { await client.close(); await app.close(); });
+  const rpc = async (operation, input = {}) => okay(await client.call(operation, input));
+  const tmdb = await rpc('tmdb.data.settings.update', { apiKey: 'synthetic-key', language: 'en-US' });
+  const douban = await rpc('douban.data.settings.update', { cookie: 'synthetic=cookie' });
+  const preferences = await rpc('film.settings.get');
+  await rpc('film.manual.update', { action: 'save', item: {
+    id: 'manual-fixture', targetId: 'tmdb:movie:1', kind: 'site', sourceKey: 'site-fixture', detailId: 0,
+    title: 'Film', enabled: true, autoDisable: false, failureCount: 0,
+  } });
+  const library = await rpc('film.library.get');
+  const inputs = {
+    tmdb: { provider: 'tmdb', path: '/3/search/multi', query: { query: 'Film' } },
+    douban: { provider: 'douban', path: '/rexxar/api/v2/subject/recent_hot/movie', query: {} },
+  };
+  const read = () => Promise.all(Object.values(inputs).map(input => rpc('film.data.metadata', input)));
+  await read(); await read(); assert.deepEqual(calls, { tmdb: 1, douban: 1 });
+  await rpc('film.data.invalidate', { domain: 'tmdb' });
+  await read(); assert.deepEqual(calls, { tmdb: 2, douban: 1 });
+  await rpc('film.data.invalidate', { domain: 'douban' });
+  await read(); assert.deepEqual(calls, { tmdb: 2, douban: 2 });
+  await Promise.all(['tmdb', 'douban'].map(domain => rpc('film.data.invalidate', { domain })));
+  await read(); assert.deepEqual(calls, { tmdb: 3, douban: 3 });
+  assert.deepEqual(await rpc('tmdb.data.settings.get'), tmdb);
+  assert.deepEqual(await rpc('douban.data.settings.get'), douban);
+  assert.deepEqual(await rpc('film.settings.get'), preferences);
+  assert.deepEqual(await rpc('film.library.get'), library);
+});

@@ -6,38 +6,63 @@ namespace MeowFilm.Capabilities;
 public partial class FilmSettingsView
 {
     private CancellationTokenSource? metadataOperation;
-    private bool metadataLoaded, metadataBusy, metadataFailed, replacingMetadata, clearApiKey, clearAccessToken;
+    private bool metadataLoaded, metadataBusy, metadataFailed;
     public bool HasMetadataSettings => metadata is not null;
     public bool MetadataLoaded => metadataLoaded;
     public bool MetadataBusy => metadataBusy;
     public bool MetadataIdle => !metadataBusy;
     public bool MetadataFailed => metadataFailed;
     public bool CanEditMetadata => metadataLoaded && !metadataBusy;
-    public string ApiKeyState => clearApiKey ? "保存后清除" : metadata?.Settings?.ApiKeyConfigured == true ? "已配置" : "未配置";
-    public string AccessTokenState => clearAccessToken ? "保存后清除" : metadata?.Settings?.AccessTokenConfigured == true ? "已配置" : "未配置";
-
+    public sealed record MetadataRoute(string Id, string Label, string Base, string Proxy = "");
+    public IReadOnlyList<MetadataRoute> DoubanDataRoutes { get; } =
+    [
+        new("direct", "无", "https://m.douban.com"),
+        new("cors", "Cors Proxy By Zwei", "https://m.douban.com", "https://ciao-cors.is-an.org/"),
+        new("cdn-tx", "豆瓣 CDN By CMLiussss（腾讯云）", "https://m.douban.cmliussss.net"),
+        new("cdn-ali", "豆瓣 CDN By CMLiussss（阿里云）", "https://m.douban.cmliussss.com"),
+        new("custom", "自定义代理", "https://m.douban.com")
+    ];
+    public IReadOnlyList<MetadataRoute> DoubanImageRoutes { get; } =
+    [
+        new("direct", "无", "https://img3.doubanio.com"),
+        new("cdn-tx", "豆瓣 CDN By CMLiussss（腾讯云）", "https://img.doubanio.cmliussss.net"),
+        new("cdn-ali", "豆瓣 CDN By CMLiussss（阿里云）", "https://img.doubanio.cmliussss.com"),
+        new("custom", "自定义代理", "https://img3.doubanio.com")
+    ];
     private void MetadataStateChanged()
     {
         foreach (string name in new[] { nameof(MetadataLoaded), nameof(MetadataBusy), nameof(MetadataIdle),
-            nameof(MetadataFailed), nameof(CanEditMetadata), nameof(ApiKeyState), nameof(AccessTokenState) }) Changed(name);
+            nameof(MetadataFailed), nameof(CanEditMetadata) }) Changed(name);
     }
     private void ReplaceMetadata(FilmMetadataSettings value)
     {
-        replacingMetadata = true;
-        try
-        {
-            MetadataApiBase.Text = value.ApiBase;
-            MetadataImageBase.Text = value.ImageBase;
-            MetadataApiKey.Clear(); MetadataAccessToken.Clear();
-            clearApiKey = clearAccessToken = false;
-            metadataLoaded = true;
-        }
-        finally { replacingMetadata = false; }
+        MetadataApiBase.Text = value.ApiBase == "https://api.themoviedb.org/3" ? "" : value.ApiBase;
+        MetadataImageBase.Text = value.ImageBase == "https://image.tmdb.org" ? "" : value.ImageBase;
+        MetadataApiToken.Text = value.ApiToken;
+        MetadataLanguage.Text = value.Language;
+        MetadataRegion.Text = value.Region;
+        MetadataIncludeAdult.IsChecked = value.IncludeAdult;
     }
-    private Task LoadMetadataAsync() => RunMetadataAsync(saving: false);
-    private async Task RunMetadataAsync(bool saving)
+    private void ReplaceDouban(FilmDoubanSettings value)
     {
-        if (!Active || metadata is null || MetadataBusy || saving && !CanEditMetadata) return;
+        DoubanDataProxy.SelectedValue = DoubanDataRoutes.FirstOrDefault(route => route.Id != "custom" &&
+            route.Base == value.ApiBase && route.Proxy == value.ApiProxy)?.Id ?? "custom";
+        DoubanImageProxy.SelectedValue = DoubanImageRoutes.FirstOrDefault(route => route.Id != "custom" &&
+            route.Base == value.ImageBase && route.Proxy == value.ImageProxy)?.Id ?? "custom";
+        DoubanDataAddress.Text = value.ApiProxy;
+        DoubanImageAddress.Text = value.ImageProxy;
+        DoubanCookie.Text = value.Cookie;
+    }
+    private void DoubanRoute_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (DoubanDataAddressField is null || DoubanImageAddressField is null) return;
+        DoubanDataAddressField.Visibility = Equals(DoubanDataProxy.SelectedValue, "custom") ? Visibility.Visible : Visibility.Collapsed;
+        DoubanImageAddressField.Visibility = Equals(DoubanImageProxy.SelectedValue, "custom") ? Visibility.Visible : Visibility.Collapsed;
+    }
+    private Task LoadMetadataAsync() => RunMetadataAsync(null);
+    private async Task RunMetadataAsync(string? provider)
+    {
+        if (!Active || metadata is null || MetadataBusy || provider is not null && !CanEditMetadata) return;
         using var operation = new CancellationTokenSource();
         metadataOperation = operation;
         long ticket = activation;
@@ -45,31 +70,47 @@ public partial class FilmSettingsView
         MetadataStateChanged();
         try
         {
-            FilmMetadataSettings result;
-            if (saving)
+            if (provider == "tmdb")
             {
                 var patch = new Dictionary<string, object?>
                 {
-                    ["apiBase"] = MetadataApiBase.Text,
-                    ["imageBase"] = MetadataImageBase.Text
+                    ["apiBase"] = MetadataApiBase.Text.Trim(), ["imageBase"] = MetadataImageBase.Text.Trim(),
+                    ["apiKey"] = MetadataApiToken.Text, ["accessToken"] = "",
+                    ["language"] = MetadataLanguage.Text, ["region"] = MetadataRegion.Text,
+                    ["includeAdult"] = MetadataIncludeAdult.IsChecked == true
                 };
-                string key = MetadataApiKey.Password;
-                string accessToken = MetadataAccessToken.Password;
-                if (clearApiKey) patch["apiKey"] = "";
-                else if (!string.IsNullOrWhiteSpace(key)) patch["apiKey"] = key;
-                if (clearAccessToken) patch["accessToken"] = "";
-                else if (!string.IsNullOrWhiteSpace(accessToken)) patch["accessToken"] = accessToken;
-                try { result = await metadata.SaveSettingsAsync(patch, operation.Token); }
-                finally { patch.Clear(); }
-                // The runtime acknowledged this write even if its initiating view has since left.
-                ReplaceMetadata(result);
+                var saved = await metadata.SaveSettingsAsync(patch, operation.Token);
+                if (Active && ticket == activation) ReplaceMetadata(saved);
+                else metadataLoaded = false;
+            }
+            else if (provider == "douban")
+            {
+                var data = (MetadataRoute)DoubanDataProxy.SelectedItem;
+                var image = (MetadataRoute)DoubanImageProxy.SelectedItem;
+                var patch = new Dictionary<string, object?>
+                {
+                    ["apiBase"] = data.Base, ["searchBase"] = "https://search.douban.com",
+                    ["apiProxy"] = data.Id == "custom" ? DoubanDataAddress.Text.Trim() : data.Proxy,
+                    ["imageBase"] = image.Base,
+                    ["imageProxy"] = image.Id == "custom" ? DoubanImageAddress.Text.Trim() : image.Proxy,
+                    ["cookie"] = DoubanCookie.Text
+                };
+                var saved = await metadata.SaveDoubanSettingsAsync(patch, operation.Token);
+                if (Active && ticket == activation) ReplaceDouban(saved);
+                else metadataLoaded = false;
             }
             else
             {
-                result = await metadata.GetSettingsAsync(operation.Token);
-                if (Active && ticket == activation) ReplaceMetadata(result);
+                var tmdbRead = metadata.GetSettingsAsync(operation.Token);
+                var doubanRead = metadata.GetDoubanSettingsAsync(operation.Token);
+                await Task.WhenAll(tmdbRead, doubanRead);
+                if (Active && ticket == activation)
+                {
+                    ReplaceMetadata(await tmdbRead); ReplaceDouban(await doubanRead);
+                    metadataLoaded = true;
+                }
             }
-            if (Active && ticket == activation && saving) Notify("TMDB 设置已保存");
+            if (Active && ticket == activation && provider is not null) Notify("设置已保存");
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested) { }
         catch
@@ -77,7 +118,7 @@ public partial class FilmSettingsView
             if (Active && ticket == activation)
             {
                 metadataFailed = !metadataLoaded;
-                Notify("TMDB 操作失败");
+                Notify("数据源设置操作失败");
             }
         }
         finally
@@ -86,24 +127,7 @@ public partial class FilmSettingsView
         }
         if (Active && ticket != activation) await ActivateCurrentAsync();
     }
-    private async void MetadataSave_Click(object sender, RoutedEventArgs e) => await RunMetadataAsync(saving: true);
+    private async void MetadataSave_Click(object sender, RoutedEventArgs e)
+    { if (sender is Button { Tag: string provider }) await RunMetadataAsync(provider); }
     private async void MetadataRetry_Click(object sender, RoutedEventArgs e) => await LoadMetadataAsync();
-    private void MetadataCredential_Changed(object sender, RoutedEventArgs e)
-    {
-        if (replacingMetadata) return;
-        if (ReferenceEquals(sender, MetadataApiKey)) clearApiKey = false; else clearAccessToken = false;
-        MetadataStateChanged();
-    }
-    private void MetadataClear_Click(object sender, RoutedEventArgs e)
-    {
-        if (!CanEditMetadata || sender is not Button { Tag: string key }) return;
-        replacingMetadata = true;
-        try
-        {
-            if (key == "apiKey") { MetadataApiKey.Clear(); clearApiKey = true; }
-            else { MetadataAccessToken.Clear(); clearAccessToken = true; }
-        }
-        finally { replacingMetadata = false; }
-        MetadataStateChanged();
-    }
 }

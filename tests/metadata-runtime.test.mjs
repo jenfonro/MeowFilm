@@ -134,8 +134,8 @@ test('metadata and opt-in pan modules share one HTTP lifecycle session without g
   t.after(async () => { await client.close(); await app.close(); });
   assert.deepEqual(value(await client.describe()).modules.map(module => module.id), ['pan', 'tmdb', 'douban']);
   assert.equal(value(await client.call('pan.providers')).providers.length, 7);
-  assert.equal(value(await client.call('tmdb.data.settings.get')).apiKeyConfigured, false);
-  assert.equal(value(await client.call('douban.data.settings.get')).cookieConfigured, false);
+  assert.equal(value(await client.call('tmdb.data.settings.get')).apiKey, '');
+  assert.equal(value(await client.call('douban.data.settings.get')).cookie, '');
   for (const id of ['pan', 'tmdb', 'douban']) {
     await assert.rejects(client.upload(id, 'unused', 1, Buffer.from('no')), { code: 'METHOD_NOT_FOUND' });
   }
@@ -159,8 +159,8 @@ test('coassembled pan failures retain the pan contract without disrupting metada
   for (const method of ['pan.providers', 'pan.settings.get']) {
     assert.deepEqual(await client.call(method), { ok: false, contract: 'pan.runtime.v1', code: 'PAN_FAILURE' });
   }
-  assert.equal(value(await client.call('tmdb.data.settings.get')).apiKeyConfigured, false);
-  assert.equal(value(await client.call('douban.data.settings.get')).cookieConfigured, false);
+  assert.equal(value(await client.call('tmdb.data.settings.get')).apiKey, '');
+  assert.equal(value(await client.call('douban.data.settings.get')).cookie, '');
 });
 
 test('metadata modules expose read-only operations without script upload or changing source data', async t => {
@@ -185,7 +185,7 @@ test('metadata modules expose read-only operations without script upload or chan
     'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
   ]);
   await assert.rejects(owner.client.upload('tmdb', 'unused', 1, Buffer.from('no')), { code: 'METHOD_NOT_FOUND' });
-  value(await owner.client.call('tmdb.data.settings.update', { apiBase: base + '/tmdb', apiKey: 'test-api-key' }));
+  value(await owner.client.call('tmdb.data.settings.update', { apiBase: base + '/tmdb/3', apiKey: 'test-api-key' }));
   const tmdb = value(await owner.client.call('tmdb.data.request', {
     path: '/3/search/multi', query: { query: '示例', page: 1 }, imageSize: 'w500',
   }));
@@ -202,30 +202,29 @@ test('metadata modules expose read-only operations without script upload or chan
   assert.equal(JSON.stringify([tmdb, douban]).includes('test_cookie'), false);
 });
 
-test('runtime persists settings and credentials independently, redacts reads, preserves then clears secrets', async t => {
+test('runtime persists readable settings and credentials, preserves omitted fields and clears empty text', async t => {
   const dataRoot = area(t), seen = [];
   const base = await upstream(t, (request, response) => { seen.push(request.headers); json(response, { id: 42 }); });
   const first = await runtime(t, dataRoot);
   const saved = value(await first.client.call('tmdb.data.settings.update', {
     apiBase: base, accessToken: 'test-access-token',
   }));
-  assert.equal(saved.accessTokenConfigured, true);
-  assert.equal(Object.hasOwn(saved, 'accessToken'), false);
+  assert.equal(saved.accessToken, 'test-access-token');
   value(await first.client.call('tmdb.data.settings.update', { imageBase: base + '/images' }));
   value(await first.client.call('douban.data.settings.update', { apiBase: base, cookie: 'test_persistent_cookie=ok' }));
   await first.close();
   const next = await runtime(t, dataRoot);
-  assert.equal(value(await next.client.call('tmdb.data.settings.get')).accessTokenConfigured, true);
+  assert.equal(value(await next.client.call('tmdb.data.settings.get')).accessToken, 'test-access-token');
   value(await next.client.call('tmdb.data.request', { path: '/3/movie/42' }));
   assert.equal(seen[0].authorization, 'Bearer test-access-token');
   value(await next.client.call('douban.data.request', { path: '/rexxar/api/v2/movie/42' }));
   assert.equal(seen[1].cookie, 'test_persistent_cookie=ok');
-  assert.equal(value(await next.client.call('douban.data.settings.get')).cookieConfigured, true);
+  assert.equal(value(await next.client.call('douban.data.settings.get')).cookie, 'test_persistent_cookie=ok');
   const bytes = readFileSync(join(dataRoot, 'tmdb/settings.json'), 'utf8');
   assert.equal(JSON.parse(bytes).settings.accessToken, 'test-access-token');
   if (process.platform !== 'win32') assert.equal(statSync(join(dataRoot, 'tmdb/settings.json')).mode & 0o777, 0o600);
   value(await next.client.call('tmdb.data.settings.update', { accessToken: '' }));
-  assert.equal(value(await next.client.call('tmdb.data.settings.get')).accessTokenConfigured, false);
+  assert.equal(value(await next.client.call('tmdb.data.settings.get')).accessToken, '');
   assert.equal(JSON.parse(readFileSync(join(dataRoot, 'tmdb/settings.json'), 'utf8')).settings.accessToken, '');
 });
 
@@ -241,9 +240,8 @@ test('metadata settings expose a restart-stable configuration identity only for 
   assert.equal(settings.update({ accessToken: ' first-token ' }).revision, first.revision);
   const next = settings.update({ accessToken: 'next-token' });
   assert.notEqual(next.revision, first.revision);
-  assert.equal(next.accessTokenConfigured, true);
-  assert.equal(first.accessTokenConfigured, true);
-  assert.equal(Object.hasOwn(next, 'accessToken'), false);
+  assert.equal(next.accessToken, 'next-token');
+  assert.equal(first.accessToken, 'first-token');
   assert.throws(() => settings.update({ accessToken: 'bad\nvalue' }), { code: 'INVALID_REQUEST' });
   assert.equal(settings.get().revision, next.revision);
   const persisted = JSON.parse(readFileSync(join(root, 'tmdb/settings.json'), 'utf8'));
@@ -286,7 +284,7 @@ test('invalid settings and damaged documents fail without rewriting previous per
   const path = join(root, 'douban/settings.json'), original = readFileSync(path);
   for (const patch of [
     { unexpected: true }, { cookie: 'secret\r\nInjected: yes' }, { apiBase: 'file:///tmp' },
-    { apiProxy: 'https://{url}/' }, { imageProxy: 'https://relay.invalid/no-placeholder' },
+    { apiProxy: 'https://{url}/' }, { imageProxy: 'https://relay.invalid/{unknown}' },
     { apiBase: 'https://example.invalid/?api_key=secret' },
     { apiBase: 'https://example.invalid/?' }, { imageBase: 'https://example.invalid/#' },
     { apiProxy: 'https://relay.invalid/?url={encodedUrl}#' },
@@ -310,7 +308,7 @@ test('metadata settings restart preserves valid UTF-8 and BOM but rejects malfor
       writeFileSync(path, bytes);
       const restarted = createMetadataSettings(root, id);
       assert.equal(restarted.read()[secret], '合成🎬\ufffd');
-      assert.equal(restarted.get()[secret + 'Configured'], true);
+      assert.equal(restarted.get()[secret], '合成🎬\ufffd');
       assert.deepEqual(readFileSync(path), bytes, 'Reading must not rewrite valid persisted bytes');
     }
     const document = JSON.parse(original);
@@ -351,8 +349,8 @@ test('both sources retain stable image identity across proxy change and runtime 
   assert.equal(binary.headers.location, undefined);
   assert.deepEqual(binary.body, Buffer.from([0xff, 0xd8, 1, 0xff, 0xd9]));
   assert.equal((await image(next, doubanPath).result).status, 200);
-  assert.deepEqual(seen.map(item => item.url), ['/old/w500/sample.jpg',
-    '/db-old/view/photo/s_ratio_poster/public/p123.jpg', '/new/w500/sample.jpg',
+  assert.deepEqual(seen.map(item => item.url), ['/old/t/p/w500/sample.jpg',
+    '/db-old/view/photo/s_ratio_poster/public/p123.jpg', '/new/t/p/w500/sample.jpg',
     '/db-new/view/photo/s_ratio_poster/public/p123.jpg']);
   for (const item of seen) {
     assert.equal(item.headers.authorization, undefined);
@@ -414,23 +412,24 @@ test('metadata persists HTTP URL userinfo and the real transport sends its Basic
   assert.deepEqual(received, ['Basic ' + Buffer.from('fixture-user:fixture-password').toString('base64')]);
 });
 
-test('TMDB keeps independent multi-level API and GoProxy image prefixes through restart', async t => {
+test('TMDB keeps server-compatible multi-level API and image prefixes through restart', async t => {
   const seen = [], bytes = Buffer.from([0xff, 0xd8, 1, 0xff, 0xd9]);
   const base = await upstream(t, (request, response) => {
-    seen.push(request.url);
-    if (request.url === '/mount/pan/tmdb/3/configuration') json(response, {
+    const path = new URL(request.url, 'http://localhost').pathname;
+    seen.push(path);
+    if (path === '/mount/pan/tmdb/3/configuration') json(response, {
       images: { base_url: 'http://image.tmdb.org/t/p/', secure_base_url: 'https://image.tmdb.org/t/p/',
         poster_sizes: ['w342', 'original'] },
     });
-    else if (request.url === '/mount/pan/tmdb/3/movie/42') json(response, { id: 42, poster_path: '/sample.jpg' });
+    else if (path === '/mount/pan/tmdb/3/movie/42') json(response, { id: 42, poster_path: '/sample.jpg' });
     else if (['/mount/pan/tmdb-img/t/p/w342/sample.jpg', '/next/proxy/tmdb-img/t/p/w342/sample.jpg']
-      .includes(request.url)) {
+      .includes(path)) {
       response.writeHead(200, { 'content-type': 'image/jpeg' }); response.end(bytes);
     } else { response.writeHead(404); response.end(); }
   });
   const root = area(t), first = await runtime(t, root);
   value(await first.client.call('tmdb.data.settings.update', {
-    apiBase: base + '/mount/pan/tmdb/', imageBase: base + '/mount/pan/tmdb-img/t/p/',
+    apiBase: base + '/mount/pan/tmdb/3/', imageBase: base + '/mount/pan/tmdb-img/',
   }));
   const configuration = value(await first.client.call('tmdb.data.request', { path: '/3/configuration' }));
   assert.deepEqual(configuration.images, { base_url: '/v1/tmdb/images/', secure_base_url: '/v1/tmdb/images/',
@@ -599,7 +598,7 @@ for (const [id, factory, path] of [
   const work = module.methods[id + '.data.request']({ path });
   value(await module.methods[id + '.data.settings.update']({ apiBase: 'http://metadata.invalid/next' }));
   const { url, signal } = await entered;
-  assert.equal(url, 'http://metadata.invalid/initial' + path);
+  assert.equal(url, 'http://metadata.invalid/initial' + (id === 'tmdb' ? '/movie/42?language=zh-CN' : path));
   let closed = false;
   const closing = module.close().then(() => { closed = true; });
   await new Promise(done => setImmediate(done));
@@ -634,4 +633,24 @@ test('a stream cleanup failure cannot later be reported as cleanupComplete by ru
   assert.deepEqual(await client.shutdown(), { ok: false, contract: 'runtime.http.v1', code: 'INVALID_RESPONSE' });
   await assert.rejects(app.close(), { code: 'INVALID_RESPONSE' });
   assert.equal(app.state.active, 0);
+});
+test('metadata settings persist effective TMDB options and accept plain Douban proxy prefixes', t => {
+  const root = area(t), tmdb = createMetadataSettings(root, 'tmdb');
+  const first = tmdb.get();
+  const saved = tmdb.update({ apiBase: '', imageBase: '', language: 'en-US', region: 'US', includeAdult: true, apiKey: 'fixture.jwt.token' });
+  assert.equal(saved.apiBase, 'https://api.themoviedb.org/3');
+  assert.equal(saved.imageBase, 'https://image.tmdb.org');
+  assert.notEqual(saved.revision, first.revision);
+  assert.deepEqual(createMetadataSettings(root, 'tmdb').get(), saved);
+  assert.equal(tmdb.update({ apiKey: '' }).apiKey, '');
+  for (const patch of [{ includeAdult: 'false' }, { language: null }, { region: 3 }])
+    assert.throws(() => tmdb.update(patch), { code: 'INVALID_REQUEST' });
+  const douban = createMetadataSettings(root, 'douban');
+  assert.equal(douban.get().apiProxy, ''); assert.equal(douban.get().imageProxy, '');
+  for (const prefix of ['https://relay.test/mount/proxy', 'https://relay.test/mount/proxy?url=']) {
+    const stored = douban.update({ apiProxy: prefix, imageProxy: prefix, cookie: 'synthetic=ok' });
+    assert.equal(stored.apiProxy, prefix); assert.equal(stored.imageProxy, prefix);
+    assert.deepEqual(createMetadataSettings(root, 'douban').get(), stored);
+  }
+  assert.equal(douban.update({ cookie: '' }).cookie, '');
 });

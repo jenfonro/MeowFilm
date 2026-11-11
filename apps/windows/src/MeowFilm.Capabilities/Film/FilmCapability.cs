@@ -13,7 +13,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention
+public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopGeneralSettingsSource
 {
     internal const string HomeRoute = "film-home";
     internal const string DataRoute = "film-data";
@@ -88,6 +88,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         this.sources = sources;
         this.search = search;
         this.metadata = metadata;
+        CacheSettingsView = metadata is null ? null : new FilmMetadataCacheSettingsView(metadata);
         if (metadata is not null) metadata.Saved += MetadataSaved;
         filmPlayback = playback;
         this.library = library;
@@ -109,7 +110,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         ];
         view = new(this);
         settings = rules is not null && sources is not null
-            ? new FilmSettingsView(rules, sources, business, library, () => Playback?.ActiveTarget, metadata)
+            ? new FilmSettingsView(rules, sources, business, () => Playback?.ActiveTarget, metadata)
             : new Grid { Background = Brushes.Transparent }; // Home-only test composition.
     }
 
@@ -119,6 +120,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     public ObservableCollection<NavigationItem> Navigation { get; }
     public FrameworkElement View => view;
     public FrameworkElement SettingsView => settings;
+    public FrameworkElement? CacheSettingsView { get; }
     public FrameworkElement? PlayerView => null;
     public IReadOnlyList<FilmHomeSection> Sections { get; }
     public IReadOnlyList<FilmDataSection> DataSections { get; }

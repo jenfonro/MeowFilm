@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -96,20 +97,31 @@ public static partial class MusicUiTests
         using var source = SearchRenderSource(f.Shell, out var root);
         SearchLayout(root, 860, 800); await Drain();
         var view = (SearchResultsView)f.Page.View;
+        var tools = (FrameworkElement)view.FindName("FilmTools");
+        var tabs = (ScrollViewer)view.FindName("TabScroll");
+        var toggle = (CheckBox)view.FindName("RawListToggle");
+        var toolsRect = new Rect(tools.TranslatePoint(new Point(), view), tools.RenderSize);
+        var tabsRect = new Rect(tabs.TranslatePoint(new Point(), view), tabs.RenderSize);
+        True(toolsRect.Left >= tabsRect.Right - 1 && toolsRect.Right <= view.ActualWidth &&
+            Math.Abs(toolsRect.Top - tabsRect.Top) < 1 && toolsRect.Bottom > tabsRect.Top,
+            "TMDB status and the raw switch share the tabs row at its right edge without overlapping tabs");
+        True(Visuals(tools).OfType<TextBlock>().First().Text == f.Page.MetadataStatus,
+            "metadata status is immediately before the original-list control");
         var scroll = (ScrollViewer)view.FindName("FilmScroll");
         scroll.ScrollToVerticalOffset(400); await Drain();
         double offset = scroll.VerticalOffset;
         True(offset > 0, "real search scroll has a restorable position");
         var first = f.Page.Cards.Select(card => card.SearchContext!.DisplayKey).ToArray();
-        f.Page.RawListMode = true; await Drain(); SearchLayout(root, 860, 800);
+        toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, true); await Drain(); SearchLayout(root, 860, 800);
+        True(f.Page.RawListMode, "the actual switch changes the existing presentation");
         var rawKeys = f.Page.Cards.Select(card => card.SearchContext!.DisplayKey).ToArray();
         True(rawKeys.All(key => key.StartsWith("site:", StringComparison.Ordinal)), "raw mode retains exact source identities");
         await f.Page.LoadMoreAsync(); await Drain(); SearchLayout(root, 860, 800);
         True(rawKeys.SequenceEqual(f.Page.Cards.Take(rawKeys.Length).Select(card => card.SearchContext!.DisplayKey)), "raw older round remains in place");
-        f.Page.RawListMode = false; await Drain();
+        toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, false); await Drain();
         True(first.SequenceEqual(f.Page.Cards.Take(first.Length).Select(card => card.SearchContext!.DisplayKey)) &&
             Math.Abs(scroll.VerticalOffset - offset) < 1, "aggregate order and independent scroll return unchanged");
-        f.Page.RawListMode = true; await Drain();
+        toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, true); await Drain();
         Equal(1, f.Runtime.SearchOpens); Equal(1, f.Runtime.Calls.Count(call => call.Method == "film.search.command" && FilmJson.Text(call.Input, "action") == "more")); Equal(48, f.Page.Cards.Count);
         source.RootVisual = null;
     }

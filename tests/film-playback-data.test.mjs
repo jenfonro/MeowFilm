@@ -81,14 +81,14 @@ function fixture(t, { maximumBytes, dataRoot } = {}) {
         headers: { Referer: 'https://example.invalid/' }, mode, file }),
     },
     tmdb: {
-      'settings.get': () => success({ revision: revisions.tmdb, apiKeyConfigured: true }),
+      'settings.get': () => success({ revision: revisions.tmdb, apiKey: 'fixture-key' }),
       request: ({ path }) => success(path.startsWith('/3/search/') ? { page: 1, total_pages: 1, results: [] }
         : path.includes('/season/') ? { season_number: Number(path.split('/').at(-1)),
           episodes: [{ episode_number: 1, air_date: '2024-01-01' }] }
           : path.startsWith('/3/tv/') ? tvValue(Number(path.split('/').at(-1))) : movieValue(Number(path.split('/').at(-1)))),
     },
     douban: {
-      'settings.get': () => success({ revision: revisions.douban, cookieConfigured: true }),
+      'settings.get': () => success({ revision: revisions.douban, cookie: 'fixture=cookie' }),
       search: () => success({ subjects: { items: [] } }),
       request: ({ path }) => success(doubanValue(path.split('/').at(-1))),
     },
@@ -196,7 +196,7 @@ test('E49 K1 formal full detail and search requests share the actual data cache 
   assert.deepEqual(f.calls('tmdb', 'request')[0].params, { path: request.path, query, imageSize: 'original' });
   assert.deepEqual(await f.data.handoff([entry]), { accepted: 0, ignored: 1 });
   assert.deepEqual(await f.data.cachedEntry(request), entry);
-  const searchQuery = { query: '真实电影', page: 1, language: 'zh-CN' };
+  const searchQuery = { query: '真实电影', page: 1, language: 'zh-CN', region: 'CN', include_adult: false };
   await f.data.metadata('tmdb', '/3/search/multi', searchQuery, { imageSize: 'w500' });
   const search = await f.data.cachedEntry({ kind: 'metadata', provider: 'tmdb',
     path: '/3/search/multi', query: searchQuery, imageSize: 'w500' });
@@ -1644,4 +1644,27 @@ test('F6 source/group target metadata entry/raw reads return null without metada
     assert.equal(await f.data.seasonMetadata(target, 1), null);
   }
   assert.equal(f.observed.length, 0);
+});
+
+test('configured TMDB query is shared by reads and handoff keys without exporting credentials', async t => {
+  const f = fixture(t);
+  const configuration = { revision: 'preferences-a', language: 'en-US', region: 'US', includeAdult: true,
+    apiKey: 'synthetic-private-key', accessToken: '' };
+  f.handlers.tmdb['settings.get'] = () => success(configuration);
+  const path = '/3/search/multi', query = { query: 'Film', page: 1 };
+  const result = await f.data.metadata('tmdb', path, query);
+  const entry = await f.data.cachedEntry({ kind: 'metadata', provider: 'tmdb', path, query });
+  assert.deepEqual(entry.query, { ...query, language: 'en-US', region: 'US', include_adult: true });
+  assert.deepEqual(entry.settings, { revision: 'preferences-a' });
+  assert.equal(JSON.stringify(entry).includes('synthetic-private-key'), false);
+  assert.deepEqual(await f.data.metadata('tmdb', path, entry.query), result);
+  assert.equal(f.calls('tmdb', 'request').length, 1);
+  assert.deepEqual(f.calls('tmdb', 'request')[0].params.query, entry.query);
+  configuration.language = 'ja-JP'; configuration.region = 'JP'; configuration.includeAdult = false;
+  configuration.revision = 'preferences-b';
+  await f.data.metadata('tmdb', path, query);
+  assert.equal(f.calls('tmdb', 'request').length, 2);
+  assert.deepEqual(f.calls('tmdb', 'request')[1].params.query,
+    { ...query, language: 'ja-JP', region: 'JP', include_adult: false });
+  assert.equal(await f.data.seed(entry), undefined, 'the earlier settings receipt cannot seed the new preference identity');
 });

@@ -4,15 +4,22 @@ import MeowRuntime
 public struct FilmTMDBSettings: Equatable, Sendable {
     public let apiBase: String
     public let imageBase: String
-    public let apiKeyConfigured: Bool
-    public let accessTokenConfigured: Bool
+    public let apiKey: String
+    public let accessToken: String
+    public let language: String
+    public let region: String
+    public let includeAdult: Bool
+    public var apiToken: String { accessToken.isEmpty ? apiKey : accessToken }
     init(_ value: RuntimeValue) throws {
         guard let apiBase = value.catField("apiBase")?.catText,
               let imageBase = value.catField("imageBase")?.catText,
-              case .bool(let key)? = value.catField("apiKeyConfigured"),
-              case .bool(let token)? = value.catField("accessTokenConfigured") else { throw FilmSearchError.invalidResponse }
+              let key = value.catField("apiKey")?.catText,
+              let token = value.catField("accessToken")?.catText,
+              let language = value.catField("language")?.catText,
+              let region = value.catField("region")?.catText,
+              case .bool(let includeAdult)? = value.catField("includeAdult") else { throw FilmSearchError.invalidResponse }
         self.apiBase = apiBase; self.imageBase = imageBase
-        apiKeyConfigured = key; accessTokenConfigured = token
+        apiKey = key; accessToken = token; self.language = language; self.region = region; self.includeAdult = includeAdult
     }
 }
 
@@ -36,7 +43,6 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
             query: ["append_to_response": .string("credits,similar,images")], imageSize: "original")
     }
     private func request(path: String, query: [String: RuntimeValue], imageSize: String) async throws -> FilmSearchRead {
-        var query = query; query["language"] = .string("zh-CN")
         let client = try await connection()
         var input: RuntimeObject = [
             "provider": .string("tmdb"), "path": .string(path),

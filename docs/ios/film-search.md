@@ -11,11 +11,13 @@
 - `MeowfilmSearchComposition` 在应用层协调两个业务，将影视 `FilmSearchResultsContent` 注入既有 `MusicSearchViewController`／结果分页容器。`MeowUI.SearchTargetOption`、`SearchResultCategory`、`SearchResultContent` 只定义中性输入和内容生命周期；音乐算法不导入影视。页头、历史和四分类沿用既有搜索页。影视结果只是无页头的内容控制器，复用 `FilmPosterCell`，搜索补文本角标和来源／聚合／类型标签；首页默认配置和评分语义不变。
 - 实际 `MeowfilmCoordinator.showFilmSearchResult` 将 `FilmSearchContext` 交给真实 `FilmPlaybackModel` 和 `FilmDetailViewController`，正式播放进入 `FilmPlayerViewController`，不旁路到裸 URL 播放器。`selectedCard` 保留原 opaque 选择身份；准确 target、可靠 TMDB 关联、全体聚合成员、原始单源及 typed `detailId` 均由 `search.handoff` 返回，不从显示标题重建。回执携带 `searchReference:{sessionId,selectionId}`，`session.open` 通过 reference 重读同一 Node owner 的事实和规则快照；晚到 `search.update` 也只传 reference／revision／当前来源。跨 runtime 的交接明确失败，不给旧事实补证明。仅明确重进的 `retargeted` 请求附 `resumeTarget`，完整保留运行器已确认的 metadata、season／episode／globalEpisode、source／line／candidate（包括数字 0）；普通初进不携带该字段，以跟随 Node 最新 handoff。正在播放时迟到资料不能重启或换集。触发与媒体生命周期见[影视会话](../runtime/film-playback.md)。
 
+原始列表为工具行右侧开关，TMDB 加载／失败／不可用状态在其左边；手机沿现有窄屏工具行布局，不把所有音乐分页标签挤到一行。切换只改同一 session 的展示模式和独立滚动位置；TMDB 失败可用“重试”继续原会话。
+
 ## 真实 TMDB 接线
 
 HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata-data.md)，本端不复制其上游路由规则。`apps/ios/runtime/entries/aggregate.mjs` 保留现有 dataRoot 和 Cat 目录布局，显式装配 music／cat／source／pan／tmdb／douban／film／netease 八模块。`RuntimePayload` 和 App launcher 按序精确校验同一清单，精确版本／contract 见[运行底座](runtime-preflight.md)；通用 runtime 默认三模块不变。
 
-`FilmTMDBService.search` 请求 `/3/search/multi`，使用真实原查询、page=1、zh-CN 和 w500；`detail` 按 movie／tv 与数字 ID 请求，使用 original 和 `append_to_response=credits,similar,images`，与智能播放完整详情同键，不请求 configuration。必要查询回退仍由原搜索会话决定。空凭据允许代理端认证，错误按运行器回执保留。设置仍调用 `tmdb.data.settings.*`；只有成功保存使旧查询及 Node 详情缓存失效，下次显式同词创建新会话，旧详情保留原查询／已得展示数据。
+`FilmTMDBService.search` 请求 `/3/search/multi`，使用真实原查询、page=1 和 w500；语言／地区／成人选项由 Node 从配置补全；`detail` 按 movie／tv 与数字 ID 请求，使用 original 和 `append_to_response=credits,similar,images`，与智能播放完整详情同键，不请求 configuration。必要查询回退仍由原搜索会话决定。空凭据允许代理端认证，错误按运行器回执保留。设置仍调用 `tmdb.data.settings.*`；只有成功保存使旧查询及 Node 详情缓存失效，下次显式同词创建新会话，旧详情保留原查询／已得展示数据。
 
 `RuntimeHTTPClient.metadataImageURL` 保留合法 `/v1/tmdb/images/...` 或 `/v1/douban/images/...` 相对 URL；`MeowfilmAssembly.filmImages` 以该 URL 作为既有 `ArtworkImages` 的唯一缓存键，读时才通过 `readMetadataImage` 加入当前 endpoint／独立 request ID，不需要会话访问凭据，并按准确 provider 核对回执。逐块执行 4MiB 编码数据预算，完整结束后再交给 ImageIO 生成最长边不超过 1024 的缩略图；这不等同于独立的原图像素或解码峰值内存上限。解码后容器和指定图片状态都必须完整，部分可解码图也不缓存。相对图片引用协议拒绝绝对、网络路径、穿越及 redirect，不限制运行器 endpoint 的域名或地址。502 模块错误、断流、错 ID、取消／关闭不能返回成功图片；取消仅撤销真实 URLSession task，完成以物理 didComplete 为准，owner 关闭等待 session 排空。普通外部图片仍由 `FilmHTTP.readArtwork` 的独立通道读取，上游 metadata API 凭据不会进入该通道。
 
@@ -66,12 +68,12 @@ scheme `MeowfilmAcceptance` 的新增精确 `only-testing`：
 
 这些用例在实际 App TEST_HOST 中借用唯一 NodeMobile owner；`NWListener` 仅充当本机合成上游，不替换 runtime 模块、Film adapter 或 Artwork：
 
-1. 从真实影视设置菜单进入 TMDB 页，实际字段／保存动作完成配置；以合成 token／key 验证保留、替换、显式清除、失败不丢输入且不撤销有效会话、修正后重试。实际搜索／电影与剧集详情确认完整 JSON、zh-CN／page1、没有 configuration，FilmPosterCell 的 ArtworkView 通过实际 `assembly.filmImages` 解码图片；换图片基址不改 warm cache key，无凭据也可由代理正常返回。
+1. 从真实影视设置菜单进入 TMDB 页，实际字段／保存动作完成配置；以单个明文输入中的合成 token／key 验证回显、替换、空值清除、失败不丢输入且不撤销有效会话、修正后重试。实际搜索／电影与剧集详情确认完整 JSON、zh-CN／page1、没有 configuration，FilmPosterCell 的 ArtworkView 通过实际 `assembly.filmImages` 解码图片；换图片基址不改 warm cache key，无凭据也可由代理正常返回。
 2. 旧 query 的实际上游 detail 挂起，设置保存成功后观察该连接真实断开；不自动搜索，下次同词取得新详情，旧 FilmDetailViewController 保留已得搜索简介／原查询，不接收新会话结果。不能用该真实取消测试代替“故意忽略取消、返回 late-old”的原生 gate 回归。
 3. 普通详情读者取消后，上游仍可完成，后续相同完整请求复用在途／缓存，实际只读上游一次；返回 seed 的原时间、revision、完整度及完整请求身份不变。与第 2 项配置撤权时真实断开分别验证。
 4. 实际 ArtworkView／ArtworkImages 经真实运行器处理上游错误、HTTP 断流、HTTP 200 且 Content-Length 准确但 PNG 缺少 IEND、无法解码和最后消费者取消，失败时图片和缓存均为空；同一相对引用随后显式重取完整 PNG 成功。缺少 IEND 的夹具只移除完整 PNG 最后 12 字节，不以 HTTP 断流或无效短数据代替容器不完整。断开以网络回执观察，不用 sleep。API 凭据不发图片，上游不接收 runtime session／request ID。
 
-本类只接受无凭据的专用模拟器；清理恢复本次读取的非敏感基址并清除合成密码。截图附件 `tmdb-settings-saved-no-password-echo`、`tmdb-settings-failed-save-retains-input` 由前台实际窗口生成，裁切并 JPEG 压缩、断言 <700KB。两进程设置恢复 selector 和环境见[影视设置](film-settings.md#既有-owner-与专用验证)。
+本类只接受无凭据的专用模拟器；清理恢复本次读取的非敏感基址并清除合成密码。截图附件 `tmdb-settings-saved-plain-token`、`tmdb-settings-failed-save-retains-input` 由前台实际窗口生成，裁切并 JPEG 压缩、断言 <700KB。两进程设置恢复 selector 和环境见[影视设置](film-settings.md#既有-owner-与专用验证)。
 
 实际图片 owner 关闭另起进程执行 `-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBShutdownHostTests/testAppShutdownDrainsPendingActualArtwork`，环境 `TEST_RUNNER_MEOWFILM_TMDB_SHUTDOWN=1`；不能与复用 App 的其他业务用例同次运行。用真实上游挂起图片，先恢复合成设置，再关闭 App；观察上游断开、共享 runtime 关闭及 Artwork 无成功缓存。未设环境会跳过，不算关闭通过。
 

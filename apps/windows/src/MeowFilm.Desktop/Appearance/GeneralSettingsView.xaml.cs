@@ -39,9 +39,9 @@ public partial class GeneralSettingsView : UserControl
         else Areas.Children.Remove(ShortcutsArea);
         foreach (var source in sources)
         {
-            AppearanceContributions.Children.Add(source.AppearanceSettingsView);
-            HomeSourceContributions.Children.Add(source.HomeSourceSettingsView);
-            CacheContributions.Children.Add(source.CacheSettingsView);
+            if (source.AppearanceSettingsView is { } appearanceView) AppearanceContributions.Children.Add(appearanceView);
+            if (source.HomeSourceSettingsView is { } homeView) HomeSourceContributions.Children.Add(homeView);
+            if (source.CacheSettingsView is { } cacheView) CacheContributions.Children.Add(cacheView);
         }
     }
     private void Area_Checked(object sender, RoutedEventArgs e)
