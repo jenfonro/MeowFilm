@@ -1011,6 +1011,58 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await model.close()
     }
 
+    func testRestoredHomeSameItemRefreshKeepsCellAndUsesReplacementAction() async throws {
+        let cached = MusicPublicBrowseCollection(platform: .kugou, nativeID: "cached", title: "缓存歌单")
+        let fresh = MusicPublicBrowseCollection(platform: .kugou, nativeID: "fresh", title: "新歌单")
+        func page(_ destination: MusicPublicBrowseCollection) -> MusicPublicBrowsePage {
+            .init(sections: [.init(id: "home", title: "", items: [
+                .init(id: "stable-slot", title: destination.title, content: .collection(destination)),
+            ], layout: .playlistRail)])
+        }
+        let service = MusicUIKitRegressionService(browse: page(fresh), restoredHome: page(cached))
+        let refreshing = expectation(description: "cached home waits for refresh")
+        let gate = MusicUIKitSearchGate { refreshing.fulfill() }
+        await service.holdHome(gate)
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        addTeardownBlock { await gate.release(); await model.close() }
+        let router = MusicUIKitRegressionRouter()
+        var opened: [MusicPublicBrowseCollection] = []
+        router.onCollection = { opened.append($0) }
+        let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: MusicAppearancePreferencesStore(), router: router, embedded: true)
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        let path = IndexPath(item: 0, section: 0)
+        await fulfillment(of: [refreshing], timeout: 3)
+        await waitForResult {
+            collection.layoutIfNeeded()
+            guard let cell = collection.cellForItem(at: path) else { return false }
+            return self.descendants(cell).compactMap { $0 as? UILabel }.contains { $0.text == cached.title }
+        }
+        let cell = try XCTUnwrap(collection.cellForItem(at: path))
+        let offset = collection.contentOffset
+        XCTAssertNil(collection.backgroundView, "A pending refresh cannot cover cached rows with loading UI")
+        controller.collectionView(collection, didSelectItemAt: path)
+        XCTAssertEqual(opened, [cached])
+
+        await gate.release()
+        await waitForHomeSubscription(service)
+        await waitForResult {
+            self.descendants(cell).compactMap { $0 as? UILabel }.contains { $0.text == fresh.title }
+        }
+        XCTAssertTrue(collection.cellForItem(at: path) === cell, "Same item identity must retain its visible cell")
+        XCTAssertEqual(collection.numberOfItems(inSection: 0), 1)
+        XCTAssertEqual(collection.contentOffset, offset)
+        XCTAssertNil(collection.backgroundView)
+        XCTAssertTrue(collection.isUserInteractionEnabled)
+        controller.collectionView(collection, didSelectItemAt: path)
+        XCTAssertEqual(opened, [cached, fresh], "A retained cell must open the refreshed resource")
+        let reads = await service.counts()
+        XCTAssertEqual(reads.browse, 1)
+        await model.close()
+    }
+
     func testRestoredHomeAuthenticationRefreshFailureShowsAlertAndRetainsRows() async throws {
         for failure in [MusicServiceError.authRequired, .sessionExpired] {
             let cached = card("retained-card", previews: [])
@@ -4641,6 +4693,12 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertFalse(surface.isPlayerBody(play.imageView))
         XCTAssertFalse(surface.isPlayerBody(queue))
         XCTAssertFalse(surface.isPlayerBody(cover))
+        let swipes = surface.gestureRecognizers?.compactMap { $0 as? UISwipeGestureRecognizer } ?? []
+        XCTAssertEqual(swipes.count, 2)
+        XCTAssertEqual(Set(swipes.map { $0.direction.rawValue }),
+                       Set([UISwipeGestureRecognizer.Direction.left.rawValue,
+                            UISwipeGestureRecognizer.Direction.right.rawValue]))
+        XCTAssertTrue(swipes.allSatisfy { $0.delegate === surface && $0.numberOfTouchesRequired == 1 })
         for width in [CGFloat(292), CGFloat(408)] {
             surface.frame.size.width = width
             surface.setNeedsLayout(); surface.layoutIfNeeded()
@@ -4657,6 +4715,54 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertEqual(destinations, [.queue, .player, .player])
         XCTAssertFalse(content.dockExpanded)
         attachDock(surface, name: "capsule-player")
+        await content.model.close()
+    }
+
+    func testCapsuleSwipesIssueOneDirectionalCommandAndNeverPresentPlayer() async throws {
+        let service = MusicUIKitRegressionService()
+        let (content, surface) = try makeDock(service: service)
+        addTeardownBlock { await content.model.close() }
+        let second = MusicQueueEntry(id: "second", track: .init(ref: .init(kind: .queue, id: "second"),
+                                                               songId: "second", title: "Second"))
+        await service.configureNavigation(content.model.queue + [second])
+        content.model.playbackState.state = await service.state()
+        content.model.playbackState.queue = await service.queue().entries
+        var destinations: [MusicPlaybackDestination] = []
+        surface.onPresent = { destinations.append($0) }
+        let input = MusicPlayerSwipeFixture()
+        input.direction = .left
+        for state in [UIGestureRecognizer.State.possible, .cancelled, .failed] {
+            input.sampleState = state
+            surface.swipeTrack(input)
+        }
+        XCTAssertFalse(content.model.isNavigating)
+        let untouched = await service.navigationDirections
+        XCTAssertTrue(untouched.isEmpty)
+
+        for (index, direction) in [UISwipeGestureRecognizer.Direction.left, .right].enumerated() {
+            input.direction = direction
+            input.sampleState = .ended
+            surface.swipeTrack(input)
+            XCTAssertTrue(content.model.isNavigating)
+            input.sampleState = .possible
+            surface.swipeTrack(input)
+            let completed = expectation(for: NSPredicate { _, _ in
+                MainActor.assumeIsolated { !content.model.isNavigating }
+            }, evaluatedWith: nil)
+            await fulfillment(of: [completed], timeout: 3)
+            let commands = await service.navigationDirections
+            XCTAssertEqual(commands, Array([MusicDirection.next, .previous].prefix(index + 1)))
+            XCTAssertEqual(content.model.current?.id, index == 0 ? "second" : "dock")
+            XCTAssertTrue(destinations.isEmpty)
+        }
+
+        content.model.playbackState.state = .init(currentId: "dock", total: 1)
+        input.sampleState = .ended
+        surface.swipeTrack(input)
+        XCTAssertFalse(content.model.isNavigating)
+        let unavailable = await service.navigationDirections
+        XCTAssertEqual(unavailable, [.next, .previous], "Swipes use the same navigation eligibility as buttons")
+        XCTAssertTrue(destinations.isEmpty)
         await content.model.close()
     }
 
@@ -5039,9 +5145,10 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertEqual(slider.value, held)
     }
 
-    private func makeDock() throws -> (MusicPlayerContentModel, MusicPlayerSurface) {
+    private func makeDock(service: MusicUIKitRegressionService = MusicUIKitRegressionService())
+        throws -> (MusicPlayerContentModel, MusicPlayerSurface) {
         let playback = PlaybackController()
-        let model = MusicViewModel(service: MusicUIKitRegressionService(), playback: playback)
+        let model = MusicViewModel(service: service, playback: playback)
         try select("dock", model: model, playback: playback)
         model.playbackState.queue = [.init(id: "dock", track: .init(ref: .init(kind: .queue, id: "dock"),
             songId: "dock", title: "Goodbye", artist: "Ramsey"))]
@@ -5140,6 +5247,15 @@ final class MusicPlayerContentModelTests: XCTestCase {
 }
 
 @MainActor
+private final class MusicPlayerSwipeFixture: UISwipeGestureRecognizer {
+    var sampleState: UIGestureRecognizer.State = .possible
+    override var state: UIGestureRecognizer.State {
+        get { sampleState }
+        set { sampleState = newValue }
+    }
+}
+
+@MainActor
 private final class MusicPlaybackModeEdgePan: UIScreenEdgePanGestureRecognizer {
     var sampleState: UIGestureRecognizer.State = .possible
     var sampleTranslation = CGPoint.zero
@@ -5201,6 +5317,9 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var discoveryCalls = 0, browseCalls = 0, trackCalls = 0
     private var requestedDiscovery: [Set<MusicSearchDiscoveryFailure.Component>] = []
     private var requestedDetails: [String] = []
+    private(set) var navigationDirections: [MusicDirection] = []
+    private var navigationEntries: [MusicQueueEntry] = []
+    private var navigationIndex = 0, navigationRevision = 0
     private(set) var discoveryRequests: [MusicPublicBrowseDestination] = []
     private var chorusCalls: [String] = [], chorusActive = 0, chorusPeak = 0
     private var chorusGate: MusicUIKitChorusGate?
@@ -5242,6 +5361,9 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     }
     func sourceCommands() -> [SourceCommand] { playbackSourceCommands }
     func sourceSnapshotReads() -> Int { playbackSnapshotReads }
+    func configureNavigation(_ entries: [MusicQueueEntry]) {
+        navigationEntries = entries
+    }
     func configurePlaybackModes(_ entry: MusicQueueEntry) {
         playbackModeEntry = entry
         heartbeatEnabled = true
@@ -5550,6 +5672,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func accountCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
     func accountTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
     func state() -> MusicPlaybackState {
+        if !navigationEntries.isEmpty {
+            return .init(revision: navigationRevision, currentId: navigationEntries[navigationIndex].id,
+                         total: navigationEntries.count, canNext: true, canPrevious: true)
+        }
         if let entry = playbackModeEntry {
             return .init(settingsRevision: playbackModeRevision, mode: playbackMode, currentId: entry.id, total: 1)
         }
@@ -5596,6 +5722,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     }
     func removePlaylist(_ collection: MusicCollection) throws { throw MusicServiceError.unsupported }
     func queue() -> MusicQueueSnapshot {
+        if !navigationEntries.isEmpty {
+            return .init(revision: navigationRevision, currentId: navigationEntries[navigationIndex].id,
+                         entries: navigationEntries)
+        }
         if let entry = playbackModeEntry { return .init(revision: 0, currentId: entry.id, entries: [entry]) }
         if let sourceSelection {
             return .init(revision: 0, currentId: sourceSelection.entry.id, entries: [sourceSelection.entry])
@@ -5609,7 +5739,14 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         guard songResultPages != nil else { throw MusicServiceError.unsupported }
         return .init()
     }
-    func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) throws -> MusicAdvanceResult { throw MusicServiceError.unsupported }
+    func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) throws -> MusicAdvanceResult {
+        guard !navigationEntries.isEmpty else { throw MusicServiceError.unsupported }
+        guard expectedRevision == navigationRevision else { throw MusicServiceError.staleRevision }
+        navigationDirections.append(direction)
+        navigationIndex = (navigationIndex + (direction == .next ? 1 : navigationEntries.count - 1)) % navigationEntries.count
+        navigationRevision += 1
+        return .init(state: state(), selectedId: navigationEntries[navigationIndex].id)
+    }
     func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState {
         guard playbackModeEntry != nil, let mode = change.mode else { throw MusicServiceError.unsupported }
         guard change.ifRevision == playbackModeRevision else { throw MusicServiceError.staleRevision }

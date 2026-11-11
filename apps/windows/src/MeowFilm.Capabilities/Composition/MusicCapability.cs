@@ -767,6 +767,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             state = state with { Current = current };
         var changedCurrent = !ReferenceEquals(current, state.Current);
         current = state.Current; queueSource = state.Source; mode = state.Mode; queueSaved = state.Saved;
+        RefreshCurrentArtwork();
         currentFeedbackContext = state.FeedbackContext; UpdateFeedbackSelection();
         UpdateRecordingCandidates(); UpdateLyricSources(); RefreshQueueSurfaceCurrent(); RefreshBindings();
         if (changedCurrent) { PublishFavorite(false); _ = RefreshCurrentFavoriteAsync(); }

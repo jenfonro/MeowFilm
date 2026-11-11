@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -34,6 +36,9 @@ public static partial class MusicCatalogPersonalTests
             yield return Case("home first page replaces old tail and retains successful continuation" + (failTail ? " after failure" : " through completion"),
                 () => HomeRefreshPages(failTail));
         yield return Case("home network failure preserves display durable snapshot and account", HomeNetworkFailure);
+        foreach (bool cached in new[] { false, true })
+            yield return Case("home replacement fades existing content and releases its visual snapshot cached=" + cached,
+                () => HomeRefreshTransition(cached));
         foreach (bool settings in new[] { false, true })
             yield return Case("home cards survive " + (settings ? "settings activation and return" : "first explicit account read without blocking play"),
                 () => HomeAfterAccountSettings(settings));
@@ -440,6 +445,40 @@ public static partial class MusicCatalogPersonalTests
         Equal(1, Calls(f, "music.catalog.home"));
         Equal(1, Calls(f, "music.accounts.list"));
         AssertNoHomeCommit(f);
+    }
+
+    private static async Task HomeRefreshTransition(bool cached)
+    {
+        await using var f = await Fixture.Create(store: cached ? await SavedHome(HomePage("801")) : null);
+        f.App.TransformNext("music.catalog.home", _ => HomePage("901"));
+        var first = f.App.HoldNext("music.catalog.home");
+        var navigation = f.Module.NavigateAsync("catalog-home", default);
+        await first.Arrived.Task.WaitAsync(HomeGuard);
+        using var mount = new HomeNoticeMount(f.Module.View);
+        await Drain();
+        Layout(f.Module.View);
+        var view = Visuals<MusicCatalogView>(f.Module.View).Single();
+        var overlay = (Image)view.FindName("HomeRefreshOverlay");
+        var scroll = (ScrollViewer)view.FindName("HomeScroll");
+        Check(overlay.Source is null && scroll.Opacity == 1,
+            "initial presentation and a pending background read do not fade or clear existing content");
+        bool observedPublication = false;
+        f.Module.HomeSections.CollectionChanged += (_, _) =>
+        {
+            observedPublication = true;
+            bool animate = cached && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast;
+            Check((overlay.Source is BitmapSource) == animate,
+                "successful replacement retains the previous visible frame only when animation is appropriate");
+            Check(!overlay.IsHitTestVisible, "the transition does not intercept the newly published cards");
+        };
+        first.Release();
+        await navigation.WaitAsync(HomeGuard);
+        await f.Module.HomeRefresh.WaitAsync(HomeGuard);
+        Check(observedPublication && HomeTitles(f) == "歌单 901");
+        await Until(() => overlay.Source is null && scroll.Opacity == 1);
+        Check(overlay.Visibility == Visibility.Collapsed, "completed transitions release the temporary bitmap");
+        f.Module.View.Visibility = Visibility.Collapsed;
+        Check(overlay.Source is null && scroll.Opacity == 1);
     }
 
     private static async Task HomeAfterAccountSettings(bool settings)

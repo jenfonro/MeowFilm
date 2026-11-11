@@ -37,6 +37,7 @@ public partial class MusicPlayerDetailView : UserControl
         // The footer's own theme supplies the ordinary-page defaults; this page's backdrop palette wins.
         footer.Resources.MergedDictionaries.Add((ResourceDictionary)Resources["Player.FooterPalette"]);
         DetailPlayerHost.Content = footer;
+        DetailRecord.ArtworkLoadCompleted += (_, e) => module.ArtworkLoadCompleted(e.Address, e.Succeeded);
         DetailRecord.PaletteUpdated += (_, _) => module.RefreshPlayerAppearance(DetailRecord.PaletteBrush, animate: IsVisible);
         lyricResumeTimer.Tick += (_, _) =>
         {

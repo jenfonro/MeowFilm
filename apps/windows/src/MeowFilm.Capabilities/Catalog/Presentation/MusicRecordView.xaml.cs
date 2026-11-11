@@ -42,10 +42,12 @@ public partial class MusicRecordView : UserControl
     internal bool IsSwiping { get; private set; }
     internal double SwipeOffset => SwipeTranslation.X;
     public event EventHandler<MusicRecordSwipeEventArgs>? SwipeCommitted;
+    public event EventHandler<ArtworkLoadEventArgs>? ArtworkLoadCompleted;
 
     public MusicRecordView()
     {
         InitializeComponent();
+        Cover.LoadCompleted += (_, e) => ArtworkLoadCompleted?.Invoke(this, e);
         UpdateGrooves();
         SetBinding(PaletteBrushProperty, new Binding(nameof(ArtworkImage.PaletteBrush)) { Source = Cover, Mode = BindingMode.OneWay });
         Focusable = true;

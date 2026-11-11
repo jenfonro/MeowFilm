@@ -2,6 +2,7 @@
 import XCTest
 import UIKit
 import MediaPlayer
+import Combine
 import MeowContracts
 import MeowPlayback
 @testable import MeowMusicFeature
@@ -10,6 +11,48 @@ import MeowPlayback
 /// writer, using synthetic HTTPS artwork and a silent local media file.
 @MainActor
 final class MusicSystemMediaMetadataTests: XCTestCase {
+    func testWarmEntryCoverStaysVisibleAcrossMetadataDiscoveryAndPlaybackPreparation() async throws {
+        let cover = SystemMetadataArtworkFixture(data: png(.red))
+        let alternate = SystemMetadataArtworkFixture(data: png(.blue))
+        defer { cover.close(); alternate.close() }
+        let images = images()
+        let warmed = try await images.read(cover.url).0
+        let service = SystemMusicMetadataService()
+        let fixture = try SystemMusicMetadataFixture(images: images, service: service)
+        defer { fixture.dispose() }
+        let original = MusicNativeSource(sourceKey: "tx:cover", platform: "tx", nativeId: "cover")
+        let discovered = MusicNativeSource(sourceKey: "wy:cover", platform: "wy", nativeId: "cover")
+        func song(_ sources: [MusicNativeSource]) -> MusicRemoteTrack {
+            .init(ref: .init(kind: .queue, id: "same"), songId: "same", title: "Same",
+                  sources: sources, artwork: cover.url)
+        }
+        let first = song([original])
+        await service.setMetadata(first, candidates: [.init(source: original, artwork: cover.url)])
+        try fixture.select(first)
+        await wait("Warm artwork appears") { fixture.content.artwork === warmed }
+        var published: [UIImage?] = []
+        let observation = fixture.content.artworkChanges.sink { published.append(fixture.content.artwork) }
+        fixture.model.beginPlaybackMetadata()
+        await fixture.model.playbackMetadata.flush()
+        await updates()
+        XCTAssertTrue(fixture.content.artwork === warmed)
+
+        let enriched = song([discovered, original])
+        await service.setMetadata(enriched, candidates: [
+            .init(source: discovered, artwork: alternate.url), .init(source: original, artwork: cover.url)])
+        fixture.model.playbackState.queue = [.init(id: "same", track: enriched)]
+        fixture.model.beginPlaybackMetadata()
+        await fixture.model.playbackMetadata.flush()
+        await fixture.content.flushArtwork()
+        await updates()
+        XCTAssertTrue(fixture.content.artwork === warmed)
+        XCTAssertTrue(published.allSatisfy { $0 === warmed }, "Both player surfaces must retain the decoded entry image")
+        XCTAssertEqual(cover.requestCount, 1)
+        XCTAssertEqual(alternate.requestCount, 0, "Discovering another platform cannot fetch a replacement cover")
+        withExtendedLifetime(observation) {}
+        await fixture.model.close()
+    }
+
     func testBackgroundFirstArtworkReachesSystemAndLyricsReuseTheSameImage() async throws {
         let started = expectation(description: "Current artwork requested")
         let cover = SystemMetadataArtworkFixture(data: png(.red), held: true, started: { started.fulfill() })
@@ -394,6 +437,7 @@ private final class SystemMusicMetadataFixture {
 }
 
 private actor SystemMusicMetadataService: MusicServing, MusicSourceExclusionServing {
+    private var metadata: MusicMetadataCandidates?
     private var nextExclusionRead: (@Sendable () -> Void)?
     private var pendingExclusionRead: CheckedContinuation<[MusicSourceExclusion], Never>?
     private(set) var exclusionReadCount = 0
@@ -429,7 +473,15 @@ private actor SystemMusicMetadataService: MusicServing, MusicSourceExclusionServ
     func sourceAvailability(for ref: MusicReference) -> MusicSourceAvailability { .init(options: [], scriptState: .notConfigured) }
     func metadataPreferences() throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
     func updateMetadataPreferences(_ change: MusicMetadataPreferencesChange) throws -> MusicMetadataPreferences { throw MusicServiceError.unsupported }
-    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates { throw MusicServiceError.unsupported }
+    func setMetadata(_ track: MusicRemoteTrack, candidates: [MusicMetadataCandidate]) {
+        metadata = .init(occurrenceID: track.ref.id, queueRevision: 0,
+            preferences: .init(revision: 0, platforms: [.netease, .qq], enabledPlatforms: [.netease, .qq]),
+            track: track, contentRevision: nil, contentFingerprint: track.songId, candidates: candidates)
+    }
+    func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates {
+        guard let metadata, metadata.occurrenceID == occurrenceID else { throw MusicServiceError.unsupported }
+        return metadata
+    }
     func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) throws -> MusicPlaybackCandidate { throw MusicServiceError.unsupported }
     func cancel(attemptId: String?) {}
     func record(_ fact: MusicPlaybackFact) -> Bool { false }

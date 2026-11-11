@@ -148,6 +148,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     public override func pageDidBecomeActive() { activatePage() }
 
     public override func pageDidBecomeInactive() {
+        collection.layer.removeAnimation(forKey: "music.home.refresh")
         loadingSkeleton.setDisplayVisible(false)
         observationNeedsRestart = true
         observation?.cancel()
@@ -170,6 +171,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     public override func pageDidBecomeHidden() {
+        collection.layer.removeAnimation(forKey: "music.home.refresh")
         loadingSkeleton.setDisplayVisible(false)
         automaticPaginationHeld = true
         tags.collapse()
@@ -439,6 +441,33 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             snapshot.appendItems(ids, toSection: section.id)
         }
         let previous = dataSource.snapshot()
+        let changedItems = Set(rows.keys.filter { id in
+            guard let old = previousRows[id], let row = rows[id] else { return true }
+            return old.section.layout != row.section.layout ||
+                (id.item == nil ? !sameItems(old.section.items, row.section.items) : !sameItem(old.item, row.item))
+        })
+        let oldSections = Dictionary(uniqueKeysWithValues: previousSections.map { ($0.id, $0) })
+        let changedHeaders = Set(sections.filter { section in
+            guard let old = oldSections[section.id] else { return true }
+            return !sameHeader(old, section)
+        }.map(\.id))
+        // Fade only replacement of displayed home content. Appending a page
+        // or publishing loading state must not animate the retained feed.
+        let animate = page?.request == .discovery(.home) && !previousRows.isEmpty && !rows.isEmpty &&
+            isPageVisible && collection.window != nil && !UIAccessibility.isReduceMotionEnabled &&
+            (previous.itemIdentifiers != snapshot.itemIdentifiers.filter { previousRows[$0] != nil } ||
+             previous.sectionIdentifiers != snapshot.sectionIdentifiers.filter { oldSections[$0] != nil } ||
+             changedItems.contains { previousRows[$0] != nil } ||
+             changedHeaders.contains { oldSections[$0] != nil })
+        if animate {
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = 0.25
+            transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            collection.layer.add(transition, forKey: "music.home.refresh")
+        } else if rows.isEmpty || UIAccessibility.isReduceMotionEnabled {
+            collection.layer.removeAnimation(forKey: "music.home.refresh")
+        }
         if previous.sectionIdentifiers != snapshot.sectionIdentifiers ||
             previous.itemIdentifiers != snapshot.itemIdentifiers {
             dataSource.apply(snapshot, animatingDifferences: false)
@@ -451,19 +480,10 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             }) {
             collection.collectionViewLayout.invalidateLayout()
         }
-        let changedItems = Set(rows.keys.filter { id in
-            guard let old = previousRows[id], let row = rows[id] else { return true }
-            return old.section.layout != row.section.layout ||
-                (id.item == nil ? !sameItems(old.section.items, row.section.items) : !sameItem(old.item, row.item))
-        })
-        let oldSections = Dictionary(uniqueKeysWithValues: previousSections.map { ($0.id, $0) })
-        let changedHeaders = Set(sections.filter { section in
-            guard let old = oldSections[section.id] else { return true }
-            return !sameHeader(old, section)
-        }.map(\.id))
         updateVisibleCells(items: changedItems)
         updateVisibleHeaders(sections: changedHeaders)
         renderState()
+        if animate { collection.layoutIfNeeded() }
     }
 
     private func renderState() {

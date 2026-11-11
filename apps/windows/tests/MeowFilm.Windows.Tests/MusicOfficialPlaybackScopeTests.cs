@@ -464,6 +464,7 @@ public static partial class MusicOfficialPlaybackScopeTests
                 f.App.Completions.Count == 0);
         });
         foreach (var item in SourcePresentationCases()) yield return item;
+        foreach (var item in ArtworkCases()) yield return item;
     }
 
     private static TestCase Case(string name, Func<Task> run) =>
@@ -569,6 +570,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         internal readonly TaskCompletionSource ResolutionRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool HoldDiscovery, HoldResolution, HideKnown, EnabledScript;
         internal string MediaQuality = "flac";
+        internal string DiscoveryArtwork = "";
         internal bool VerifiedQuality = true;
         internal int MediaLookups, Authorizations, DiscoveryReturns;
         internal CancellationToken DiscoveryToken, ResolutionToken;
@@ -628,7 +630,7 @@ public static partial class MusicOfficialPlaybackScopeTests
                 var raw = JsonNode.Parse(input.GetProperty("song").GetRawText())!.AsObject();
                 if (!raw["sources"]!.AsArray().OfType<JsonObject>().Any(row => LJ.S(row["source"]) == "tx"))
                     raw["sources"]!.AsArray().Add(MusicSongFixture.Online("tx", "Discovered", LJ.S(raw["title"]),
-                        LJ.S(raw["artist"]), LJ.S(raw["album"]), LJ.N(raw["duration"]))["sources"]![0]!.DeepClone());
+                        LJ.S(raw["artist"]), LJ.S(raw["album"]), LJ.N(raw["duration"]), DiscoveryArtwork)["sources"]![0]!.DeepClone());
                 DiscoveryReturns++;
                 return Element(new { ok = true, song = NativeMusicSong.Normalize(raw) });
             }
