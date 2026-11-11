@@ -37,10 +37,10 @@ await runtime.start();
 
 两模块均提供：
 
-- `settings.get {}`：读取非敏感设置、凭据是否已配置和不透明配置代次 `revision`。
-- `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的脱敏设置。
+- `settings.get {}`：读取完整设置（包括明文凭据）和不透明配置代次 `revision`。
+- `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的完整设置。
 
-`revision` 是设置 owner 从完整有效配置生成的不透明稳定身份；包括凭据在内的有效配置改变才换代，无变化更新和冷启动保持不变。调用方只比较是否相等，不解析其内容。影视业务缓存以此隔离配置，不能仅凭 `…Configured` 布尔值判断账号是否相同。身份不另写第二套持久配置，也不包含明文凭据；业务元数据的持久化、组件完整度和定向刷新由 [film data owner](film-playback.md)统一处理。
+`revision` 是设置 owner 从完整有效配置生成的不透明稳定身份；包括凭据在内的有效配置改变才换代，无变化更新和冷启动保持不变。调用方只比较是否相等，不解析其内容。影视业务缓存以此隔离配置，不复制或用明文凭据充当缓存身份。身份不另写第二套持久配置，也不包含明文凭据；业务元数据的持久化、组件完整度和定向刷新由 [film data owner](film-playback.md)统一处理。
 
 运行器独占 `<dataRoot>/tmdb/settings.json` 和 `<dataRoot>/douban/settings.json`，文档格式为 `{version:1,settings:{…}}`。首次访问恢复配置，之后使用内存快照；更新通过运行器完成，不支持绕过运行器并发外部编辑。首次未配置读取默认值，不写空文件。损坏文件明确失败，不当成缺失、不静默重置。
 
@@ -54,34 +54,28 @@ await runtime.start();
 
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
-| `apiBase` | `https://api.themoviedb.org` | `/3/...` 之前的完整基址 |
-| `imageBase` | `https://image.tmdb.org/t/p` | 图片 size 之前的完整基址 |
-| `apiKey` | 空 | API key，仅发 API 请求 |
-| `accessToken` | 空 | Bearer token，仅发 API 请求；两者均有时优先 token |
+| `apiBase` | `https://api.themoviedb.org/3` | TMDB 数据代理地址，含 API 版本的完整基址 |
+| `imageBase` | `https://image.tmdb.org` | TMDB 图片代理地址；缺少 `/t/p` 时按来源协议追加 |
+| `apiKey` | 空 | 单一 API TOKEN 表单写入的 v3 key 或 v4 token，仅发 API 请求 |
+| `accessToken` | 空 | 运行器直接调用方可显式提供 Bearer；表单保存时清空此字段，避免旧值遮盖新输入 |
+| `language` | `zh-CN` | 元数据请求默认语言 |
+| `region` | `CN` | search/discover 默认地区 |
+| `includeAdult` | `false` | search/discover 的 `include_adult` 默认值 |
 
-get 不包含 `apiKey`／`accessToken` 原值，改为 `apiKeyConfigured`／`accessTokenConfigured` 布尔值。地址只能使用 HTTP(S)，不允许 URL userinfo、query 或 fragment；不猜测站点是哪种代理项目，不自动添加或剥离代理前缀。
+get 直接返回上述值。双端只有一个明文“TMDB API TOKEN”输入项；支持 v3 key、v4 JWT 和 `Bearer ` 前缀。保存空 TOKEN 即清除，不提供额外的清除按钮。数据／图片代理留空保存使用官方端点。地址使用 HTTP(S)，不允许混入控制字符、query 或 fragment；没有域名名单、Origin 检查或自动探测代理。
 
-例如使用 Vercel API 与 GoProxy 图片：
-
-```json
-{
-  "apiBase": "https://metadata.example.invalid",
-  "imageBase": "https://images.example.invalid/tmdb-img/t/p"
-}
-```
-
-API 请求将到 `https://metadata.example.invalid/3/movie/42`；图片到 `https://images.example.invalid/tmdb-img/t/p/w500/example.jpg`。GoProxy 的图片路由透传到 `image.tmdb.org` 根，因此必须保留 `/t/p`，不是只填 `/tmdb-img`。
-
-支持二级及多级部署目录。例如 GoProxy 挂载在 `/pan` 时：
+例如与服务器同样使用多级部署地址：
 
 ```json
 {
-  "apiBase": "https://proxy.example.invalid/pan/tmdb",
-  "imageBase": "https://proxy.example.invalid/pan/tmdb-img/t/p"
+  "apiBase": "https://proxy.example.invalid/pan/tmdb/3",
+  "imageBase": "https://proxy.example.invalid/pan/tmdb-img"
 }
 ```
 
-对应请求为 `/pan/tmdb/3/movie/42` 和 `/pan/tmdb-img/t/p/w500/example.jpg`；再嵌套一层目录也按完整前缀拼接，不会回到站点根。`apiBase` 不包含 `/3`，因为 `request.path` 已包含它。运行器不按代理项目名自动增删目录，也不会从 API 地址推导图片地址；更换这些前缀不改变客户端持有的 `/v1/tmdb/images/...`。
+`request.path=/3/movie/42` 到 `/pan/tmdb/3/movie/42`，不会叠成 `/3/3`；图片到 `/pan/tmdb-img/t/p/w500/example.jpg`，已经填写 `/t/p` 时不会重复追加。API 基址带目录但未标版本时按服务器的完整 v3 基址语义拼接资源：`/custom/tmdb` 加 `/3/movie/42` 得 `/custom/tmdb/movie/42`；纯站点根基址保留请求中的版本。显式 raw `/4/...` 请求使用版本化基址的同一部署前缀，不变成 `/3/4/...`。不按代理项目名猜目录，也不从 API 地址推导图片地址；更换代理不改变客户端持有的 `/v1/tmdb/images/...`。
+
+有效查询在 `film.data` 和原始 TMDB 适配中使用同一轻量归一化函数：省略的语言、地区、成人选项读取当前配置，显式 query 可覆盖。缓存键、导出和 handoff 都使用有效查询，并按配置 revision 隔离；客户端不再硬编码语言覆盖用户选择。
 
 ### 豆瓣
 
@@ -90,15 +84,17 @@ API 请求将到 `https://metadata.example.invalid/3/movie/42`；图片到 `http
 | `apiBase` | `https://m.douban.com` | `/rexxar/api/v2/...` 之前的基址 |
 | `searchBase` | `https://search.douban.com` | `/movie/subject_search` 之前的基址 |
 | `imageBase` | `https://img3.doubanio.com` | `/view/...` 等来源图片路径之前的基址 |
-| `apiProxy` | 空 | 可选 URL 包装型数据中转模板 |
-| `imageProxy` | 空 | 可选 URL 包装型图片中转模板 |
+| `apiProxy` | 空 | 可选 URL 包装型数据中转前缀或模板 |
+| `imageProxy` | 空 | 可选 URL 包装型图片中转前缀或模板 |
 | `cookie` | 空 | 豆瓣请求凭据，不发给图片源 |
 
-get 用 `cookieConfigured` 替代原值。域名替换／路径前缀型代理直接配置 base；URL 包装型代理必须显式配置包含**一个** `{url}` 或 `{encodedUrl}` 的 HTTP(S) 模板。例如 `https://relay.example.invalid/?url={encodedUrl}`。`apiProxy` 用于数据与搜索，`imageProxy` 用于图片；模板不参与稳定图片身份。将凭据发送到显式配置的数据代理意味着信任该代理，运行器不会替第三方代理保证保密。
+get 返回 Cookie 原值。域名替换／路径前缀型代理直接配置 base；URL 包装型代理可配置普通 HTTP(S) 前缀，或包含**一个** `{url}`／`{encodedUrl}` 的模板，例如 `https://relay.example.invalid/?url={encodedUrl}`。`apiProxy` 用于数据与搜索，`imageProxy` 用于图片；代理不参与稳定图片身份。将凭据发送到显式配置的数据代理意味着信任该代理，运行器不会替第三方代理保证保密。
 
-iOS 的“刮削设置”在同一页面切换 TMDB／豆瓣，由 `FilmTMDBSettingsModel` 和 `FilmDoubanSettingsModel` 经 App 唯一 runtime 连接提交设置。豆瓣数据代理与图片代理独立选择，默认直连，不提供服务器代理；仅自定义路线展开完整 base 和显式代理模板。未知的已有地址／模板组合按自定义加载，原样保留。数据代理提供 CORS 预设 `https://ciao-cors.is-an.org/{encodedUrl}` 和 cors-anywhere 预设 `https://cors-anywhere.com/{url}`，两者经同一 `apiProxy` 包装官方 API／搜索 base。参考实现的 `m.douban.cmliussss.net`／`.com` 只给出 API 基址映射，没有网页搜索 CDN 映射，因此不作为原生数据代理预设；已有此类 API 地址仍按自定义保留，不猜测搜索代理主机。图片 CDN 预设独立使用 `https://img.doubanio.cmliussss.net` 或 `https://img.doubanio.cmliussss.com`，不配置图片包装模板。预设只在显式保存时生效，不自动探测、回退或改写未知配置。
+双端“数据源”设置独立编辑 TMDB／豆瓣；iOS 保留同页 provider 切换。豆瓣数据代理、图片代理默认“无”，不提供服务器代理。数据选择包括 CORS 前缀 `https://ciao-cors.is-an.org/`、CMLiussss 腾讯云／阿里云 API CDN 和自定义包装前缀；API CDN 不伪造网页搜索 CDN，`searchBase` 仍为官方搜索地址。图片选择独立使用官方 `img3.doubanio.com` 直连（“无”）、CMLiussss 腾讯云／阿里云或自定义包装前缀。普通前缀按服务器语义接 `encodeURIComponent(targetURL)`；已有 `{url}`／`{encodedUrl}` 占位形式仍是原始运行器接口能力，不要求表单使用模板。
 
-原生凭据输入框不回显已保存值，仅显示配置状态；空输入保存省略凭据，显式清除才提交空字符串，保存失败保留草稿与清除意图。两供应商保存成功后均调用 `FilmSearchService.metadataSettingsChanged()` 撤销旧元数据会话复用，后续请求使用 runtime 新配置，不自动搜索或创建第二份原生存储。Cookie 只提交给豆瓣设置 owner，图片继续使用 runtime 图片通道，不从表单附加 Cookie。
+Cookie 和 API TOKEN 明文读写，保存失败保留输入和原 saved 快照，成功后回显实际保存值。界面不再维护 configured 占位或“清除意图”，留空保存就是清空。客户端不复制持久化，不在启动时回灌；预设只在保存时生效。Cookie 只参与豆瓣数据／搜索请求，图片不从表单附加 Cookie 或 TMDB token。
+
+通用设置的“缓存管理”调用 `film.data.invalidate`，`domain` 分别为 `douban`、`tmdb`；“清空豆瓣与 TMDB 缓存”等待两次失效均结算，任一失败则报告失败。运行器处理内存／持久缓存失效与旧在途排空，客户端不直接删文件、不重启、不清配置／账号／历史／人工匹配／屏蔽／收藏，也不把清缓存冒充配置保存或自动重搜。
 
 ## 数据请求
 
@@ -112,7 +108,7 @@ iOS 的“刮削设置”在同一页面切换 TMDB／豆瓣，由 `FilmTMDBSett
 }
 ```
 
-接口使用上游 GET，不设业务路径或 query 字段许可表。`path` 是追加到已配置 API base 的路径，不是完整 URL；query、fragment 不混入 path，参数单独放 query。URL 按标准规则解析与规范化。配置 accessToken 时发送 Bearer，否则配置 apiKey 覆盖 query 中同名 `api_key`；其它 query 值按原文编码。`imageSize` 缺省为 `original`，支持 TMDB 的 `original`／`w<正整数>`／`h<正整数>` 格式；具体尺寸是否由上游支持仍由来源决定，configuration 返回的尺寸数组可供选择。
+接口使用上游 GET，不设业务路径或 query 字段许可表。`path` 是追加到已配置 API base 的路径，不是完整 URL；query、fragment 不混入 path，参数单独放 query。URL 按标准规则解析与规范化。认证优先使用显式 accessToken，否则从 apiKey 中识别 v4 JWT／Bearer 或 v3 key；v4 发送 Authorization，v3 覆盖 query 中同名 `api_key`。其它 query 值按原文编码。`imageSize` 缺省为 `original`，支持 TMDB 的 `original`／`w<正整数>`／`h<正整数>` 格式；具体尺寸是否由上游支持仍由来源决定，configuration 返回的尺寸数组可供选择。
 
 覆盖电影／剧集／人物／综合搜索、discover、trending、genre、configuration、电影与剧集列表／详情、季集、人物与合集详情及关联资源。未列出的 GET 路径同样交给已配置来源处理，是否支持由上游响应决定；没有新增任意目标 URL 或写入方法接口。
 

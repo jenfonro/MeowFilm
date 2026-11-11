@@ -39,14 +39,14 @@ export async function verifyTMDBAssembly(t, { client, baseUrl }) {
     return reply.value;
   };
   const initial = okay(await client.call('tmdb.data.settings.get'));
-  assert.equal(initial.apiKeyConfigured, false);
-  assert.equal(initial.accessTokenConfigured, false);
+  assert.equal(initial.apiKey, '');
+  assert.equal(initial.accessToken, '');
   const settings = okay(await client.call('tmdb.data.settings.update', {
-    apiBase: origin + '/metadata', imageBase: origin + '/posters/t/p',
+    apiBase: origin + '/metadata/3', imageBase: origin + '/posters/t/p',
   }));
   assert.deepEqual(settings, {
-    apiBase: origin + '/metadata', imageBase: origin + '/posters/t/p',
-    apiKeyConfigured: false, accessTokenConfigured: false, revision: settings.revision,
+    apiBase: origin + '/metadata/3', imageBase: origin + '/posters/t/p',
+    apiKey: '', accessToken: '', language: 'zh-CN', region: 'CN', includeAdult: false, revision: settings.revision,
   });
   assert.equal(typeof settings.revision, 'string');
   assert.notEqual(settings.revision, '');
@@ -89,7 +89,7 @@ export async function verifyTMDBAssembly(t, { client, baseUrl }) {
     '/metadata/3/search/multi', '/metadata/3/movie/42', '/metadata/3/tv/73',
     '/metadata/3/movie/99', '/posters/t/p/w500/fixture.png',
   ]);
-  assert.deepEqual(Object.fromEntries(observed[0].query), { query: '示例', page: '1', language: 'zh-CN' });
+  assert.deepEqual(Object.fromEntries(observed[0].query), { query: '示例', page: '1', language: 'zh-CN', region: 'CN', include_adult: 'false' });
   assert.deepEqual(observed.slice(1, 3).map(item => Object.fromEntries(item.query)),
     [{ language: 'zh-CN' }, { language: 'zh-CN' }]);
   for (const item of observed) {
@@ -107,7 +107,7 @@ export async function verifyPanAndDoubanAssembly(client) {
   assert.equal(douban.contract, 'douban.data.v1');
   assert.equal(typeof douban.value.revision, 'string');
   assert.notEqual(douban.value.revision, '');
-  assert.equal(douban.value.cookieConfigured, false);
+  assert.equal(douban.value.cookie, '');
   const pan = await client.call('pan.providers');
   assert.equal(pan.ok, true);
   assert.equal(pan.contract, 'pan.runtime.v1');

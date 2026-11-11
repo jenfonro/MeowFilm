@@ -9,6 +9,7 @@
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries>
    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
+   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/>
   </ResourceDictionary.MergedDictionaries>
   <Style x:Key="Search.Tab" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
    <Setter Property="Margin" Value="0,0,24,0"/><Setter Property="Padding" Value="0,4,0,8"/>
@@ -24,25 +25,28 @@
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
   <StackPanel Margin="0,0,0,24">
    <TextBlock Text="{Binding Query}" FontSize="23" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-   <ItemsControl ItemsSource="{Binding Tabs}" Margin="0,14,0,0">
-    <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-    <ItemsControl.ItemTemplate><DataTemplate>
-     <Button Content="{Binding Label}" Tag="{Binding Id}" Style="{StaticResource Search.Tab}"
-             Click="Tab_Click" AutomationProperties.Name="{Binding Label,StringFormat={}{0}搜索结果}"/>
-    </DataTemplate></ItemsControl.ItemTemplate>
-   </ItemsControl>
+   <DockPanel Margin="0,14,0,0">
+    <StackPanel x:Name="FilmTools" DockPanel.Dock="Right" Orientation="Horizontal" Visibility="Collapsed" Margin="16,0,0,0">
+     <TextBlock Text="{Binding MetadataStatus}" Margin="0,0,16,0" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
+     <TextBlock Text="原始列表" VerticalAlignment="Center" Margin="0,0,8,0"/>
+     <CheckBox x:Name="RawListToggle" IsChecked="{Binding RawListMode}" Style="{StaticResource Settings.Switch}" VerticalAlignment="Center" AutomationProperties.Name="原始列表"/>
+    </StackPanel>
+    <ScrollViewer x:Name="TabScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+     <ItemsControl ItemsSource="{Binding Tabs}">
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl.ItemTemplate><DataTemplate>
+      <Button Content="{Binding Label}" Tag="{Binding Id}" Style="{StaticResource Search.Tab}" Click="Tab_Click" AutomationProperties.Name="{Binding Label,StringFormat={}{0}搜索结果}"/>
+     </DataTemplate></ItemsControl.ItemTemplate>
+     </ItemsControl>
+    </ScrollViewer>
+   </DockPanel>
    <desktop:NoticeOutlet Message="{Binding Error}"/>
   </StackPanel>
   <ContentControl x:Name="MusicHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
   <ScrollViewer x:Name="NovelScroll" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"
                 HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" AutomationProperties.Name="小说搜索结果"/>
   <Grid x:Name="FilmBody" Grid.Row="1" Visibility="Collapsed">
-   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-   <DockPanel Margin="0,0,0,16">
-    <CheckBox Content="原始列表" IsChecked="{Binding RawListMode}" VerticalAlignment="Center"/>
-    <TextBlock Text="{Binding MetadataStatus}" Margin="20,0,0,0" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center"/>
-   </DockPanel>
-   <ScrollViewer x:Name="FilmScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+   <ScrollViewer x:Name="FilmScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                  Style="{StaticResource MeowFilm.OverlayScrollViewer}">
     <StackPanel>
      <ItemsControl ItemsSource="{Binding Cards}" AutomationProperties.Name="影视搜索结果">

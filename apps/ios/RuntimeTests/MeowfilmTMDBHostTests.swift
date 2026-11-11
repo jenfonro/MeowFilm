@@ -13,7 +13,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
     func testActualDoubanFormPreservesIndependentProxiesCookieAndFailedDraftWithoutImageCredentialLeak() async throws {
         let resources = try await hostResources(), assembly = try assembly()
         let original = try await resources.filmDoubanSettings.settings()
-        guard !original.cookieConfigured else { throw TMDBHostFailure.dedicatedSimulatorRequired }
+        guard original.cookie.isEmpty else { throw TMDBHostFailure.dedicatedSimulatorRequired }
         let settings = try XCTUnwrap(assembly.filmSettings)
         let search = try XCTUnwrap(assembly.filmSearch)
         let image = png()
@@ -27,11 +27,11 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             try await Self.restoreDoubanSettings(settings.douban, service: resources.filmDoubanSettings,
                 original: original, search: search)
         }
-        let page = FilmScrapingSettingsViewController(tmdb: settings.tmdb, douban: settings.douban,
+        let page = FilmDataSourceSettingsViewController(tmdb: settings.tmdb, douban: settings.douban,
             themeProvider: assembly.appearance)
         let (window, previous) = try await mount(page)
         defer { unmount(window, previous: previous) }
-        let form = try XCTUnwrap(page.children.compactMap { $0 as? FilmScrapingFormController }.first)
+        let form = try XCTUnwrap(page.children.compactMap { $0 as? FilmDataSourceFormController }.first)
         let provider = try XCTUnwrap(form.sections.first?.rows.first?.content as? UISegmentedControl)
         provider.selectedSegmentIndex = 1; provider.sendActions(for: .valueChanged)
         await waitFor { settings.douban.saved != nil && !settings.douban.busy && form.canPresentPageAlert }
@@ -52,43 +52,39 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             await fulfillment(of: [dismissed], timeout: 5)
             await waitFor { form.canPresentPageAlert }
         }
-        try edit("apiBase", "https://data.example.invalid/nested")
-        try edit("searchBase", "https://search.example.invalid/nested")
-        try edit("imageBase", "https://pictures.example.invalid/nested")
-        try edit("apiProxy", upstream.base + "/data?target={encodedUrl}")
-        try edit("imageProxy", upstream.base + "/pictures?target={encodedUrl}")
+        try edit("apiProxy", upstream.base + "/data?target=")
+        try edit("imageProxy", upstream.base + "/pictures?target=")
         try edit("cookie", "synthetic_cookie=initial")
-        XCTAssertTrue(try field("cookie").isSecureTextEntry)
+        XCTAssertFalse(try field("cookie").isSecureTextEntry)
         try await save()
         XCTAssertTrue(upstream.requests.isEmpty, "A save cannot start metadata requests")
-        XCTAssertEqual(try field("cookie").text, "")
-        XCTAssertTrue(settings.douban.saved?.cookieConfigured == true)
+        XCTAssertEqual(try field("cookie").text, "synthetic_cookie=initial")
+        XCTAssertEqual(settings.douban.saved?.cookie, "synthetic_cookie=initial")
         let connection = try await resources.scriptSession.connection()
-        let redacted = try await connection.call(module: .douban, operation: "settings.get")
-        XCTAssertNil(redacted.catField("cookie"))
+        let persistedSettings = try await connection.call(module: .douban, operation: "settings.get")
+        XCTAssertEqual(persistedSettings.catField("cookie"), .string("synthetic_cookie=initial"))
         _ = try await connection.call(module: .douban, operation: "request", parameters: .object([
             "path": .string("/rexxar/api/v2/movie/123"),
         ]))
-        XCTAssertEqual(upstream.requests.last?.query["target"], "https://data.example.invalid/nested/rexxar/api/v2/movie/123")
+        XCTAssertEqual(upstream.requests.last?.query["target"], "https://m.douban.com/rexxar/api/v2/movie/123")
         XCTAssertEqual(upstream.requests.last?.headers["cookie"], "synthetic_cookie=initial")
         let relative = try XCTUnwrap(resources.filmMetadata.imageURL(path: "/v1/douban/images/view/photo/public/synthetic.png"))
         let bytes = try await resources.filmMetadata.readImage(relative)
         XCTAssertEqual(bytes, image)
-        XCTAssertEqual(upstream.requests.last?.query["target"], "https://pictures.example.invalid/nested/view/photo/public/synthetic.png")
+        XCTAssertEqual(upstream.requests.last?.query["target"], "https://img3.doubanio.com/view/photo/public/synthetic.png")
         XCTAssertNil(upstream.requests.last?.headers["cookie"])
         XCTAssertNil(upstream.requests.last?.headers["authorization"])
         assertNoRuntimeAuthentication(upstream.requests)
-        attach(window, name: "douban-independent-custom-proxies-redacted-cookie")
+        attach(window, name: "douban-independent-custom-proxies-plain-cookie")
 
-        try edit("cookie", " ")
         try await save()
-        XCTAssertTrue(settings.douban.saved?.cookieConfigured == true)
+        XCTAssertEqual(settings.douban.saved?.cookie, "synthetic_cookie=initial")
         _ = try await connection.call(module: .douban, operation: "request", parameters: .object([
             "path": .string("/rexxar/api/v2/movie/123"),
         ]))
         XCTAssertEqual(upstream.requests.last?.headers["cookie"], "synthetic_cookie=initial")
         let saved = settings.douban.saved
-        try edit("apiProxy", "https://invalid.example.invalid/missing-template")
+        try edit("apiProxy", "not a valid proxy URL")
         try edit("cookie", "synthetic_cookie=replacement")
         try select(form, "film.douban.save")
         await waitFor { !settings.douban.busy && (form.presentedViewController as? UIAlertController)?.title == "错误" }
@@ -98,15 +94,15 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(persisted, saved)
         form.selectAlertChoice("取消")
         await waitFor { form.canPresentPageAlert }
-        try edit("apiProxy", upstream.base + "/data?target={encodedUrl}")
+        try edit("apiProxy", upstream.base + "/data?target=")
         try await save()
         _ = try await connection.call(module: .douban, operation: "request", parameters: .object([
             "path": .string("/rexxar/api/v2/movie/123"),
         ]))
         XCTAssertEqual(upstream.requests.last?.headers["cookie"], "synthetic_cookie=replacement")
-        try select(form, "film.douban.clearCookie")
+        try edit("cookie", "")
         try await save()
-        XCTAssertFalse(settings.douban.saved?.cookieConfigured == true)
+        XCTAssertEqual(settings.douban.saved?.cookie, "")
         _ = try await connection.call(module: .douban, operation: "request", parameters: .object([
             "path": .string("/rexxar/api/v2/movie/123"),
         ]))
@@ -143,30 +139,26 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         root.loadViewIfNeeded()
         await waitFor { root.canPresentPageAlert }
         let menu = try XCTUnwrap(root.children.compactMap { $0 as? FilmSettingsListController }.first)
-        let scraping = try XCTUnwrap(menu.sections.flatMap(\.rows).first { $0.title == "刮削设置" })
+        let scraping = try XCTUnwrap(menu.sections.flatMap(\.rows).first { $0.title == "数据源" })
         try select(menu, scraping.id)
-        await waitFor { navigation.topViewController is FilmScrapingSettingsViewController }
-        let scrapingPage = try XCTUnwrap(navigation.topViewController as? FilmScrapingSettingsViewController)
+        await waitFor { navigation.topViewController is FilmDataSourceSettingsViewController }
+        let scrapingPage = try XCTUnwrap(navigation.topViewController as? FilmDataSourceSettingsViewController)
         scrapingPage.loadViewIfNeeded()
-        let page = try XCTUnwrap(scrapingPage.children.compactMap { $0 as? FilmScrapingFormController }.first)
-        XCTAssertEqual(scrapingPage.pageTitle, "刮削设置")
+        let page = try XCTUnwrap(scrapingPage.children.compactMap { $0 as? FilmDataSourceFormController }.first)
+        XCTAssertEqual(scrapingPage.pageTitle, "数据源")
         await waitFor { settings.tmdb.saved != nil && !settings.tmdb.busy && page.canPresentPageAlert }
-        XCTAssertEqual(try field(page, "apiKey").text, "")
-        XCTAssertEqual(try field(page, "accessToken").text, "")
-        XCTAssertTrue(try field(page, "apiKey").isSecureTextEntry)
-        XCTAssertTrue(try field(page, "accessToken").isSecureTextEntry)
-        edit(page, "apiBase", upstream.base + "/api")
+        XCTAssertEqual(try field(page, "apiToken").text, "")
+        XCTAssertFalse(try field(page, "apiToken").isSecureTextEntry)
+        edit(page, "apiBase", upstream.base + "/api/3")
         edit(page, "imageBase", upstream.base + "/images")
-        edit(page, "apiKey", "synthetic-key")
-        edit(page, "accessToken", "synthetic-token")
+        edit(page, "apiToken", "synthetic.v4.token")
         try await save(page, model: settings.tmdb)
-        XCTAssertEqual(settings.tmdb.saved?.apiBase, upstream.base + "/api")
-        XCTAssertTrue(settings.tmdb.saved?.apiKeyConfigured == true)
-        XCTAssertTrue(settings.tmdb.saved?.accessTokenConfigured == true)
-        XCTAssertEqual(try field(page, "apiKey").text, "")
-        XCTAssertEqual(try field(page, "accessToken").text, "")
+        XCTAssertEqual(settings.tmdb.saved?.apiBase, upstream.base + "/api/3")
+        XCTAssertEqual(settings.tmdb.saved?.apiKey, "synthetic.v4.token")
+        XCTAssertEqual(settings.tmdb.saved?.accessToken, "")
+        XCTAssertEqual(try field(page, "apiToken").text, "synthetic.v4.token")
         XCTAssertTrue(upstream.requests.isEmpty, "Saving never starts a search or a configuration request")
-        attach(window, name: "tmdb-settings-saved-no-password-echo")
+        attach(window, name: "tmdb-settings-saved-plain-token")
 
         let query = "原词 2 & 中文"
         let session = try search.session(for: query)
@@ -196,14 +188,14 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(apiReads.count, 3)
         let searchRequest = try XCTUnwrap(apiReads.first { $0.path.hasSuffix("/search/multi") })
         XCTAssertEqual(searchRequest.method, "GET")
-        XCTAssertEqual(searchRequest.query, ["query": query, "page": "1", "language": "zh-CN"])
+        XCTAssertEqual(searchRequest.query, ["query": query, "page": "1", "language": "zh-CN", "region": "CN", "include_adult": "false"])
         XCTAssertEqual(Set(apiReads.map(\.path)), ["/api/3/search/multi", "/api/3/tv/7", "/api/3/movie/42"])
-        XCTAssertTrue(apiReads.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-token" })
+        XCTAssertTrue(apiReads.allSatisfy { $0.headers["authorization"] == "Bearer synthetic.v4.token" })
         XCTAssertTrue(apiReads.filter { !$0.path.hasSuffix("/multi") }.allSatisfy {
             $0.query == ["language": "zh-CN", "append_to_response": "credits,similar,images"]
         })
         assertNoRuntimeAuthentication(upstream.requests)
-        let imageReads = upstream.requests.filter { $0.path == "/images/original/tv.png" }
+        let imageReads = upstream.requests.filter { $0.path == "/images/t/p/original/tv.png" }
         XCTAssertEqual(imageReads.count, 1)
         XCTAssertNil(imageReads.first?.headers["authorization"])
         XCTAssertEqual(imageReads.first?.query, [:])
@@ -212,15 +204,13 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(upstream.requests.last?.query["query"], punctuationQuery,
             "The real query preserves spaces, literal plus signs, ampersands and Unicode")
 
-        // Blank secure fields preserve both credentials; changing the proxy
-        // keeps the relative cache identity and does not automatically search.
+        // Editing only a proxy keeps the visible token and stable image identity,
+        // and saving never starts an automatic search.
         let requestCount = upstream.requests.count
         edit(page, "imageBase", upstream.base + "/images/changed")
-        edit(page, "apiKey", " ")
-        edit(page, "accessToken", " ")
         try await save(page, model: settings.tmdb)
-        XCTAssertTrue(settings.tmdb.saved?.apiKeyConfigured == true)
-        XCTAssertTrue(settings.tmdb.saved?.accessTokenConfigured == true)
+        XCTAssertEqual(settings.tmdb.saved?.apiToken, "synthetic.v4.token")
+        XCTAssertEqual(settings.tmdb.saved?.accessToken, "")
         XCTAssertEqual(upstream.requests.count, requestCount)
         let warm = try await assembly.filmImages.read(poster)
         XCTAssertTrue(warm.0 === artwork.image)
@@ -232,20 +222,19 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         await waitFor { !next.snapshot.loading }
         XCTAssertEqual(upstream.requests.filter { $0.path.hasSuffix("/3/tv/7") }.count, 2, "A saved configuration revokes detail reuse")
 
-        edit(page, "apiKey", "synthetic-key-replaced")
-        edit(page, "accessToken", "synthetic-token-replaced")
+        edit(page, "apiToken", "synthetic.replaced.token")
         try await save(page, model: settings.tmdb)
         _ = try await resources.filmMetadata.detail(type: "tv", id: 7)
-        XCTAssertEqual(upstream.requests.last?.headers["authorization"], "Bearer synthetic-token-replaced")
-        try select(page, "film.tmdb.clearToken")
+        XCTAssertEqual(upstream.requests.last?.headers["authorization"], "Bearer synthetic.replaced.token")
+        edit(page, "apiToken", "synthetic-key-replaced")
         try await save(page, model: settings.tmdb)
         _ = try await resources.filmMetadata.detail(type: "movie", id: 42)
         XCTAssertNil(upstream.requests.last?.headers["authorization"])
-        XCTAssertEqual(upstream.requests.last?.query["api_key"], "synthetic-key-replaced", "Unedited key was preserved")
-        try select(page, "film.tmdb.clearKey")
+        XCTAssertEqual(upstream.requests.last?.query["api_key"], "synthetic-key-replaced", "The same input now selects v3 api_key authentication")
+        edit(page, "apiToken", "")
         try await save(page, model: settings.tmdb)
-        XCTAssertFalse(settings.tmdb.saved?.apiKeyConfigured == true)
-        XCTAssertFalse(settings.tmdb.saved?.accessTokenConfigured == true)
+        XCTAssertEqual(settings.tmdb.saved?.apiKey, "")
+        XCTAssertEqual(settings.tmdb.saved?.accessToken, "")
         let active = try search.session(for: query)
         await waitFor { !active.snapshot.loading }
         XCTAssertEqual(active.snapshot.metadataState, .completed, "A proxy can authenticate without native credentials")
@@ -254,12 +243,12 @@ final class MeowfilmTMDBHostTests: XCTestCase {
 
         let saved = settings.tmdb.saved
         edit(page, "apiBase", "not a valid endpoint")
-        edit(page, "apiKey", "synthetic-unsaved-key")
+        edit(page, "apiToken", "synthetic-unsaved-key")
         try select(page, "film.tmdb.save")
         await waitFor { !settings.tmdb.busy && (page.presentedViewController as? UIAlertController)?.title == "错误" }
         XCTAssertEqual(settings.tmdb.saved, saved)
         XCTAssertEqual(settings.tmdb.apiBase, "not a valid endpoint")
-        XCTAssertEqual(try field(page, "apiKey").text, "synthetic-unsaved-key")
+        XCTAssertEqual(try field(page, "apiToken").text, "synthetic-unsaved-key")
         let stillSaved = try await resources.filmMetadata.settings()
         XCTAssertEqual(stillSaved, saved)
         XCTAssertTrue(try search.session(for: query, reusing: active) === active, "A failed save must not revoke the valid session")
@@ -268,10 +257,10 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         attach(window, name: "tmdb-settings-failed-save-retains-input")
         page.selectAlertChoice("取消")
         await waitFor { page.canPresentPageAlert }
-        edit(page, "apiBase", upstream.base + "/api")
+        edit(page, "apiBase", upstream.base + "/api/3")
         try await save(page, model: settings.tmdb)
-        XCTAssertTrue(settings.tmdb.saved?.apiKeyConfigured == true, "The retained input remains available for a corrected save")
-        XCTAssertEqual(try field(page, "apiKey").text, "")
+        XCTAssertEqual(settings.tmdb.saved?.apiToken, "synthetic-unsaved-key", "The retained input remains available for a corrected save")
+        XCTAssertEqual(try field(page, "apiToken").text, "synthetic-unsaved-key")
         let corrected = try search.session(for: query, reusing: active)
         XCTAssertFalse(corrected === active)
         await waitFor { !corrected.snapshot.loading }
@@ -309,7 +298,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         }
         let model = FilmTMDBSettingsModel(service: resources.filmMetadata) { search.metadataSettingsChanged() }
         try await model.load()
-        model.apiBase = upstream.base + "/old"; model.imageBase = upstream.base + "/images"
+        model.apiBase = upstream.base + "/old/3"; model.imageBase = upstream.base + "/images"
         try await model.save()
         let old = try search.session(for: "同词")
         await fulfillment(of: [entered], timeout: 10)
@@ -319,13 +308,13 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         let detail = FilmDetailViewController(searchContext: context, library: assembly.filmLibrary,
             images: assembly.filmImages, themeProvider: assembly.appearance)
         XCTAssertEqual(detail.detail.summary, "搜索已得简介")
-        let scrapingPage = FilmScrapingSettingsViewController(tmdb: model,
+        let scrapingPage = FilmDataSourceSettingsViewController(tmdb: model,
             douban: try XCTUnwrap(assembly.filmSettings).douban, themeProvider: assembly.appearance)
         let (window, previous) = try await mount(scrapingPage)
-        let page = try XCTUnwrap(scrapingPage.children.compactMap { $0 as? FilmScrapingFormController }.first)
+        let page = try XCTUnwrap(scrapingPage.children.compactMap { $0 as? FilmDataSourceFormController }.first)
         defer { unmount(window, previous: previous) }
         await waitFor { page.canPresentPageAlert }
-        edit(page, "apiBase", upstream.base + "/new")
+        edit(page, "apiBase", upstream.base + "/new/3")
         try await save(page, model: model)
         await fulfillment(of: [disconnected], timeout: 10)
         await old.drain()
@@ -363,7 +352,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             await MainActor.run { search.metadataSettingsChanged() }
         }
         _ = try await resources.filmMetadata.updateSettings([
-            "apiBase": .string(upstream.base + "/api"), "imageBase": .string(upstream.base + "/images")
+            "apiBase": .string(upstream.base + "/api/3"), "imageBase": .string(upstream.base + "/images")
         ])
         search.metadataSettingsChanged()
         let connection = try await resources.scriptSession.connection()
@@ -418,7 +407,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             await MainActor.run { assembly.filmSearch?.metadataSettingsChanged() }
         }
         _ = try await resources.filmMetadata.updateSettings([
-            "apiBase": .string(upstream.base + "/api"), "imageBase": .string(upstream.base + "/images"),
+            "apiBase": .string(upstream.base + "/api/3"), "imageBase": .string(upstream.base + "/images"),
             "apiKey": .string("synthetic-image-api-key"), "accessToken": .string("synthetic-image-api-token")
         ])
         assembly.filmSearch?.metadataSettingsChanged()
@@ -459,7 +448,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         try XCTUnwrap((UIApplication.shared.delegate as? MeowfilmAppDelegate)?.readyAssembly())
     }
     private func requireEmptyCredentials(_ settings: FilmTMDBSettings) throws {
-        guard !settings.apiKeyConfigured && !settings.accessTokenConfigured else {
+        guard settings.apiKey.isEmpty && settings.accessToken.isEmpty else {
             throw TMDBHostFailure.dedicatedSimulatorRequired
         }
     }
@@ -467,7 +456,8 @@ final class MeowfilmTMDBHostTests: XCTestCase {
                                         original: FilmTMDBSettings, search: FilmSearchService) async throws {
         if model.saved != nil {
             model.apiBase = original.apiBase; model.imageBase = original.imageBase
-            model.clearKey(); model.clearToken()
+            model.apiToken = original.apiToken
+            model.language = original.language; model.region = original.region; model.includeAdult = original.includeAdult
             try await model.save()
         } else {
             _ = try await service.updateSettings([
@@ -480,10 +470,12 @@ final class MeowfilmTMDBHostTests: XCTestCase {
     private static func restoreDoubanSettings(_ model: FilmDoubanSettingsModel, service: FilmDoubanSettingsService,
                                               original: FilmDoubanSettings, search: FilmSearchService) async throws {
         if model.saved != nil {
-            model.dataRoute = .custom; model.imageRoute = .custom
-            model.apiBase = original.apiBase; model.searchBase = original.searchBase; model.imageBase = original.imageBase
+            model.dataRoute = FilmDoubanDataRoute.allCases.first { route in
+                route.addresses?.api == original.apiBase && route.addresses?.proxy == original.apiProxy
+            } ?? .custom
+            model.imageRoute = FilmDoubanImageRoute.allCases.first { $0.base == original.imageBase && original.imageProxy.isEmpty } ?? .custom
             model.apiProxy = original.apiProxy; model.imageProxy = original.imageProxy
-            model.clearCredential()
+            model.cookie = original.cookie
             try await model.save()
         } else {
             _ = try await service.updateSettings([
@@ -497,7 +489,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
     private func assertNoRuntimeAuthentication(_ requests: [TMDBTestUpstream.Request]) {
         XCTAssertTrue(requests.allSatisfy { $0.headers["x-meow-session"] == nil && $0.headers["x-meow-request-id"] == nil })
     }
-    private func field(_ page: FilmScrapingFormController, _ suffix: String) throws -> UITextField {
+    private func field(_ page: FilmDataSourceFormController, _ suffix: String) throws -> UITextField {
         try XCTUnwrap(page.sections.flatMap(\.rows).compactMap(\.content).flatMap(fields)
             .first { $0.accessibilityIdentifier == "film.tmdb." + suffix })
     }
@@ -505,7 +497,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         if let field = view as? UITextField { return [field] }
         return view.subviews.flatMap(fields)
     }
-    private func edit(_ page: FilmScrapingFormController, _ suffix: String, _ text: String) {
+    private func edit(_ page: FilmDataSourceFormController, _ suffix: String, _ text: String) {
         do { let field = try field(page, suffix); field.text = text; field.sendActions(for: .editingChanged) }
         catch { XCTFail("Missing TMDB field \(suffix)") }
     }
@@ -520,7 +512,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTFail("Missing TMDB action \(id)")
         throw TMDBHostFailure.missingAction
     }
-    private func save(_ page: FilmScrapingFormController, model: FilmTMDBSettingsModel) async throws {
+    private func save(_ page: FilmDataSourceFormController, model: FilmTMDBSettingsModel) async throws {
         try select(page, "film.tmdb.save")
         await waitFor { !model.busy && (page.presentedViewController as? UIAlertController)?.title == "已保存" }
         let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
@@ -579,7 +571,7 @@ final class MeowfilmTMDBShutdownHostTests: XCTestCase {
         let app = try XCTUnwrap(UIApplication.shared.delegate as? MeowfilmAppDelegate)
         let assembly = try XCTUnwrap(app.readyAssembly())
         let original = try await resources.filmMetadata.settings()
-        guard !original.apiKeyConfigured && !original.accessTokenConfigured else { throw TMDBHostFailure.dedicatedSimulatorRequired }
+        guard original.apiKey.isEmpty && original.accessToken.isEmpty else { throw TMDBHostFailure.dedicatedSimulatorRequired }
         let entered = expectation(description: "Image physically entered upstream")
         let disconnected = expectation(description: "App close disconnects actual image upstream")
         let upstream = try TMDBTestUpstream { _ in
@@ -634,7 +626,7 @@ final class MeowfilmTMDBColdStartPrepareTests: XCTestCase {
 
 @MainActor
 final class MeowfilmTMDBColdStartRestoreTests: XCTestCase {
-    func testNextAppProcessRestoresSettingsWithoutEchoingSecretsOrNativeWriteback() async throws {
+    func testNextAppProcessRestoresPlainSettingsWithoutNativeWriteback() async throws {
         guard ProcessInfo.processInfo.environment["MEOWFILM_TMDB_COLD_PHASE"] == "restore" else {
             throw XCTSkip("Requires the preceding prepare process on this dedicated test simulator")
         }
@@ -724,10 +716,10 @@ private extension XCTestCase {
         let service = resources.filmMetadata
         let before = try await service.settings()
         let douban = try await resources.filmDoubanSettings.settings()
-        guard !before.apiKeyConfigured && !before.accessTokenConfigured,
-              before.apiBase == "https://api.themoviedb.org",
-              before.imageBase == "https://image.tmdb.org/t/p",
-              !douban.cookieConfigured, douban.apiBase == "https://m.douban.com",
+        guard before.apiKey.isEmpty && before.accessToken.isEmpty,
+              before.apiBase == "https://api.themoviedb.org/3",
+              before.imageBase == "https://image.tmdb.org",
+              douban.cookie.isEmpty, douban.apiBase == "https://m.douban.com",
               douban.searchBase == "https://search.douban.com", douban.imageBase == "https://img3.doubanio.com",
               douban.apiProxy.isEmpty && douban.imageProxy.isEmpty else { throw TMDBHostFailure.dedicatedSimulatorRequired }
         _ = try await service.updateSettings([
@@ -752,16 +744,16 @@ private extension XCTestCase {
         let douban = try await resources.filmDoubanSettings.settings()
         guard settings.apiBase == "https://tmdb-cold.example.invalid/api",
               settings.imageBase == "https://tmdb-cold.example.invalid/images",
-              settings.apiKeyConfigured && settings.accessTokenConfigured,
+              settings.apiKey == "synthetic-cold-key" && settings.accessToken == "synthetic-cold-token",
               douban.apiBase == "https://douban-cold.example.invalid/data",
               douban.searchBase == "https://douban-cold.example.invalid/search",
               douban.imageBase == "https://douban-cold.example.invalid/images",
               douban.apiProxy == "https://data-cold.example.invalid/?url={encodedUrl}",
               douban.imageProxy == "https://images-cold.example.invalid/{url}",
-              douban.cookieConfigured else { throw TMDBHostFailure.dedicatedSimulatorRequired }
+              douban.cookie == "synthetic_cold_cookie=value" else { throw TMDBHostFailure.dedicatedSimulatorRequired }
         addTeardownBlock {
             _ = try await service.updateSettings([
-                "apiBase": .string("https://api.themoviedb.org"), "imageBase": .string("https://image.tmdb.org/t/p"),
+                "apiBase": .string("https://api.themoviedb.org/3"), "imageBase": .string("https://image.tmdb.org"),
                 "apiKey": .string(""), "accessToken": .string("")
             ])
             _ = try await resources.filmDoubanSettings.updateSettings([
@@ -773,17 +765,17 @@ private extension XCTestCase {
         let client = try await hostResources().scriptSession.connection()
         let value = try await client.call(module: .tmdb, operation: "settings.get")
         let doubanValue = try await client.call(module: .douban, operation: "settings.get")
-        XCTAssertNil(value.catField("apiKey")); XCTAssertNil(value.catField("accessToken"))
-        XCTAssertNil(doubanValue.catField("cookie"))
+        XCTAssertEqual(value.catField("apiKey"), .string("synthetic-cold-key")); XCTAssertEqual(value.catField("accessToken"), .string("synthetic-cold-token"))
+        XCTAssertEqual(doubanValue.catField("cookie"), .string("synthetic_cold_cookie=value"))
         XCTAssertEqual(settings.apiBase, "https://tmdb-cold.example.invalid/api")
         XCTAssertEqual(settings.imageBase, "https://tmdb-cold.example.invalid/images")
-        XCTAssertTrue(settings.apiKeyConfigured); XCTAssertTrue(settings.accessTokenConfigured)
+        XCTAssertEqual(settings.apiKey, "synthetic-cold-key"); XCTAssertEqual(settings.accessToken, "synthetic-cold-token")
         let model = FilmDoubanSettingsModel(service: resources.filmDoubanSettings, didSave: {
             XCTFail("Cold-start restoration cannot publish a native write")
         })
         try await model.load()
         XCTAssertEqual(model.saved, douban)
-        XCTAssertEqual(model.cookie, "")
+        XCTAssertEqual(model.cookie, "synthetic_cold_cookie=value")
         XCTAssertEqual(model.dataRoute, .custom); XCTAssertEqual(model.imageRoute, .custom)
         XCTAssertEqual(model.apiProxy, "https://data-cold.example.invalid/?url={encodedUrl}")
         XCTAssertEqual(model.imageProxy, "https://images-cold.example.invalid/{url}")

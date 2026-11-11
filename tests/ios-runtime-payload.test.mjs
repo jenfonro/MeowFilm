@@ -84,8 +84,8 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
       const settings = await client.call('tmdb.data.settings.get');
       assert.equal(settings.ok, true);
       assert.equal(settings.contract, 'tmdb.data.v1');
-      assert.equal(settings.value.apiKeyConfigured, false);
-      assert.equal(settings.value.accessTokenConfigured, false);
+      assert.equal(settings.value.apiKey, '');
+      assert.equal(settings.value.accessToken, '');
       assert.equal((await client.shutdown()).ok, true);
     } finally { await app.close(); await client?.close(); }
     console.log('IOS_JS_CLOSURE_OK');

@@ -6,9 +6,9 @@ import MeowUI
 @testable import MeowFilmFeature
 
 @MainActor
-final class FilmScrapingSettingsTests: XCTestCase {
-    func testDoubanDefaultsAndEveryPresetMapToExplicitRuntimeBasesAndTemplates() async throws {
-        let wire = ScrapingSettingsWire(), client = try client(wire)
+final class FilmDataSourceSettingsTests: XCTestCase {
+    func testDoubanDefaultsAndEveryPresetUseServerProxyAddresses() async throws {
+        let wire = DataSourceSettingsWire(), client = try client(wire)
         addTeardownBlock { await client.close() }
         var saved = 0
         let model = FilmDoubanSettingsModel(service: .init(connection: { client })) { saved += 1 }
@@ -17,8 +17,9 @@ final class FilmScrapingSettingsTests: XCTestCase {
         XCTAssertEqual(wire.writes.count, 0, "Loading settings must not write defaults")
         let expectedData: [(FilmDoubanDataRoute, String, String)] = [
             (.direct, "https://m.douban.com", ""),
-            (.cors, "https://m.douban.com", "https://ciao-cors.is-an.org/{encodedUrl}"),
-            (.corsAnywhere, "https://m.douban.com", "https://cors-anywhere.com/{url}"),
+            (.cors, "https://m.douban.com", "https://ciao-cors.is-an.org/"),
+            (.cdnTX, "https://m.douban.cmliussss.net", ""),
+            (.cdnAli, "https://m.douban.cmliussss.com", ""),
         ]
         for (route, base, proxy) in expectedData {
             model.dataRoute = route
@@ -27,13 +28,9 @@ final class FilmScrapingSettingsTests: XCTestCase {
             XCTAssertEqual(patch["apiBase"], .string(base))
             XCTAssertEqual(patch["searchBase"], .string("https://search.douban.com"))
             XCTAssertEqual(patch["apiProxy"], .string(proxy))
-            if route != .direct {
-                XCTAssertFalse(patch["apiProxy"]?.catText?.isEmpty ?? true,
-                    "A data proxy preset must wrap both the API and HTML search bases")
-            }
             XCTAssertEqual(patch["imageBase"], .string("https://img3.doubanio.com"))
             XCTAssertEqual(patch["imageProxy"], .string(""))
-            XCTAssertNil(patch["cookie"])
+            XCTAssertEqual(patch["cookie"], .string(""))
             XCTAssertEqual(model.dataRoute, route)
         }
         let expectedImages: [(FilmDoubanImageRoute, String)] = [
@@ -46,182 +43,182 @@ final class FilmScrapingSettingsTests: XCTestCase {
             try await model.save()
             XCTAssertEqual(wire.writes.last?["imageBase"], .string(base))
             XCTAssertEqual(wire.writes.last?["imageProxy"], .string(""))
-            XCTAssertEqual(wire.writes.last?["apiProxy"], .string("https://cors-anywhere.com/{url}"))
+            XCTAssertEqual(wire.writes.last?["apiBase"], .string("https://m.douban.cmliussss.com"))
+            XCTAssertEqual(wire.writes.last?["apiProxy"], .string(""))
             XCTAssertEqual(model.imageRoute, route)
         }
-        XCTAssertEqual(saved, 6)
+        XCTAssertEqual(saved, 7)
     }
 
-    func testAPICDNAddressesLoadAsCustomAndPreserveTheIndependentSearchConfiguration() async throws {
-        for base in ["https://m.douban.cmliussss.net", "https://m.douban.cmliussss.com"] {
+    func testAPICDNPresetsKeepTheIndependentHTMLSearchEndpoint() async throws {
+        for (base, route) in [("https://m.douban.cmliussss.net", FilmDoubanDataRoute.cdnTX),
+                              ("https://m.douban.cmliussss.com", .cdnAli)] {
             let initial: RuntimeObject = [
                 "apiBase": .string(base), "searchBase": .string("https://search.douban.com"),
                 "apiProxy": .string(""), "imageBase": .string("https://img3.doubanio.com"),
-                "imageProxy": .string(""), "cookieConfigured": .bool(false),
+                "imageProxy": .string(""), "cookie": .string(""),
             ]
-            let wire = ScrapingSettingsWire(douban: initial), client = try client(wire)
+            let wire = DataSourceSettingsWire(douban: initial), client = try client(wire)
             addTeardownBlock { await client.close() }
             let model = FilmDoubanSettingsModel(service: .init(connection: { client }), didSave: {})
             try await model.load()
-            XCTAssertEqual(model.dataRoute, .custom, "An API-only CDN cannot represent a data-and-search proxy preset")
+            XCTAssertEqual(model.dataRoute, route)
             XCTAssertEqual(model.imageRoute, .direct)
             XCTAssertEqual(wire.writes.count, 0)
             try await model.save()
-            XCTAssertEqual(wire.writes.last, [
-                "apiBase": .string(base), "searchBase": .string("https://search.douban.com"),
-                "apiProxy": .string(""), "imageBase": .string("https://img3.doubanio.com"), "imageProxy": .string(""),
-            ])
+            XCTAssertEqual(wire.writes.last, initial)
             await client.close()
         }
     }
 
-    func testUnknownCustomConfigurationAndIndependentRoutesSurviveLoadAndSave() async throws {
+    func testCustomProxyPrefixesAndIndependentRoutesSurviveLoadAndSave() async throws {
         let initial = doubanCustomSettings
-        let wire = ScrapingSettingsWire(douban: initial), client = try client(wire)
+        let wire = DataSourceSettingsWire(douban: initial), client = try client(wire)
         addTeardownBlock { await client.close() }
         let model = FilmDoubanSettingsModel(service: .init(connection: { client }), didSave: {})
         try await model.load()
         XCTAssertEqual(model.dataRoute, .custom); XCTAssertEqual(model.imageRoute, .custom)
-        XCTAssertEqual(model.cookie, ""); XCTAssertTrue(model.saved?.cookieConfigured == true)
+        XCTAssertEqual(model.cookie, "synthetic_cookie=initial")
         try await model.save()
-        XCTAssertEqual(wire.writes.last, [
-            "apiBase": initial["apiBase"]!, "searchBase": initial["searchBase"]!, "apiProxy": initial["apiProxy"]!,
-            "imageBase": initial["imageBase"]!, "imageProxy": initial["imageProxy"]!,
-        ])
+        XCTAssertEqual(wire.writes.last, initial)
         model.dataRoute = .direct
         try await model.save()
         XCTAssertEqual(wire.writes.last?["imageBase"], initial["imageBase"])
         XCTAssertEqual(wire.writes.last?["imageProxy"], initial["imageProxy"])
+        XCTAssertEqual(wire.writes.last?["cookie"], initial["cookie"])
         model.imageRoute = .cdnTX
         try await model.save()
         XCTAssertEqual(wire.writes.last?["apiBase"], .string("https://m.douban.com"))
         XCTAssertEqual(wire.writes.last?["apiProxy"], .string(""))
     }
 
-    func testDoubanCredentialsPreserveReplaceClearAndFailuresKeepDraftWithoutNotifying() async throws {
-        let wire = ScrapingSettingsWire(douban: doubanCustomSettings), client = try client(wire)
+    func testDoubanCookieEchoReplaceAndEmptySaveWithFailuresKeepingTheDraft() async throws {
+        let wire = DataSourceSettingsWire(douban: doubanCustomSettings), client = try client(wire)
         addTeardownBlock { await client.close() }
         var notifications = 0
         let model = FilmDoubanSettingsModel(service: .init(connection: { client })) { notifications += 1 }
         try await model.load()
-        model.cookie = "   "
         try await model.save()
-        XCTAssertNil(wire.writes.last?["cookie"])
-        XCTAssertTrue(model.saved?.cookieConfigured == true); XCTAssertEqual(model.cookie, "")
-        model.clearCredential()
+        XCTAssertEqual(wire.writes.last?["cookie"], .string("synthetic_cookie=initial"))
+        XCTAssertEqual(model.cookie, "synthetic_cookie=initial")
+        model.cookie = ""
         wire.fail = true
         do { try await model.save(); XCTFail("Storage failure must remain a failure") }
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("STORAGE_ERROR")) }
-        XCTAssertTrue(model.clearCookie); XCTAssertTrue(model.saved?.cookieConfigured == true)
+        XCTAssertEqual(model.cookie, ""); XCTAssertEqual(model.saved?.cookie, "synthetic_cookie=initial")
         XCTAssertFalse(model.busy); XCTAssertEqual(notifications, 1)
         model.cookie = "synthetic_cookie=replacement"
-        model.apiProxy = "https://new.example.invalid/?target={encodedUrl}"
+        model.apiProxy = "https://new.example.invalid/nested/"
         let saved = model.saved
         do { try await model.save(); XCTFail("Failed replacement must preserve input") } catch {}
         XCTAssertEqual(model.saved, saved)
-        XCTAssertEqual(model.cookie, "synthetic_cookie=replacement"); XCTAssertFalse(model.clearCookie)
-        XCTAssertEqual(model.apiProxy, "https://new.example.invalid/?target={encodedUrl}")
+        XCTAssertEqual(model.cookie, "synthetic_cookie=replacement")
+        XCTAssertEqual(model.apiProxy, "https://new.example.invalid/nested/")
         XCTAssertEqual(notifications, 1)
         wire.fail = false
         try await model.save()
         XCTAssertEqual(wire.writes.last?["cookie"], .string("synthetic_cookie=replacement"))
-        XCTAssertEqual(model.cookie, ""); XCTAssertEqual(notifications, 2)
-        model.clearCredential()
+        XCTAssertEqual(model.cookie, "synthetic_cookie=replacement"); XCTAssertEqual(notifications, 2)
+        model.cookie = ""
         try await model.save()
         XCTAssertEqual(wire.writes.last?["cookie"], .string(""))
-        XCTAssertFalse(model.saved?.cookieConfigured == true); XCTAssertFalse(model.clearCookie)
+        XCTAssertEqual(model.saved?.cookie, ""); XCTAssertEqual(model.cookie, "")
         XCTAssertEqual(notifications, 3)
     }
 
-    func testTMDBCredentialsPreserveClearAndFailedInputWithoutEcho() async throws {
-        let wire = ScrapingSettingsWire(), client = try client(wire)
+    func testTMDBSingleTokenEchoClearAndFailedDraftPreserveAllOptions() async throws {
+        let wire = DataSourceSettingsWire(), client = try client(wire)
         addTeardownBlock { await client.close() }
         var notifications = 0
         let model = FilmTMDBSettingsModel(service: .init(connection: { client })) { notifications += 1 }
         try await model.load()
-        XCTAssertEqual(model.apiKey, ""); XCTAssertEqual(model.accessToken, "")
-        model.apiKey = " "; model.accessToken = " "
+        XCTAssertEqual(model.apiToken, "Bearer synthetic.old.token")
+        XCTAssertEqual(model.apiBase, ""); XCTAssertEqual(model.imageBase, "")
         try await model.save()
-        XCTAssertNil(wire.writes.last?["apiKey"]); XCTAssertNil(wire.writes.last?["accessToken"])
-        model.clearKey(); model.clearToken()
+        XCTAssertEqual(wire.writes.last?["apiKey"], .string("Bearer synthetic.old.token"))
+        XCTAssertEqual(wire.writes.last?["accessToken"], .string(""))
+        model.apiToken = ""
         wire.fail = true
-        do { try await model.save(); XCTFail("Failure must keep explicit clear intents") } catch {}
-        XCTAssertTrue(model.clearAPIKey); XCTAssertTrue(model.clearAccessToken)
+        do { try await model.save(); XCTFail("Failure must keep the empty draft") } catch {}
+        XCTAssertEqual(model.apiToken, ""); XCTAssertEqual(model.saved?.apiToken, "Bearer synthetic.old.token")
         XCTAssertEqual(notifications, 1)
-        model.apiKey = "synthetic-new-key"; model.accessToken = "synthetic-new-token"
-        model.apiBase = "https://custom.example.invalid/nested/tmdb"
-        do { try await model.save(); XCTFail("Failure must retain credential replacement") } catch {}
-        XCTAssertEqual(model.apiKey, "synthetic-new-key"); XCTAssertEqual(model.accessToken, "synthetic-new-token")
-        XCTAssertEqual(model.apiBase, "https://custom.example.invalid/nested/tmdb")
+        model.apiToken = "synthetic-new-v3-key"
+        model.apiBase = "https://custom.example.invalid/nested/tmdb/3"
+        model.language = "en-US"; model.region = "US"; model.includeAdult = true
+        do { try await model.save(); XCTFail("Failure must retain replacement and options") } catch {}
+        XCTAssertEqual(model.apiToken, "synthetic-new-v3-key")
+        XCTAssertEqual(model.apiBase, "https://custom.example.invalid/nested/tmdb/3")
         wire.fail = false
         try await model.save()
-        XCTAssertEqual(model.apiKey, ""); XCTAssertEqual(model.accessToken, "")
-        XCTAssertTrue(model.saved?.apiKeyConfigured == true); XCTAssertTrue(model.saved?.accessTokenConfigured == true)
-        model.clearKey(); model.clearToken()
+        XCTAssertEqual(model.apiToken, "synthetic-new-v3-key")
+        XCTAssertEqual(model.saved?.accessToken, "")
+        XCTAssertEqual(model.saved?.language, "en-US"); XCTAssertEqual(model.saved?.region, "US")
+        XCTAssertEqual(model.saved?.includeAdult, true)
+        model.apiToken = ""
         try await model.save()
         XCTAssertEqual(wire.writes.last?["apiKey"], .string("")); XCTAssertEqual(wire.writes.last?["accessToken"], .string(""))
-        XCTAssertFalse(model.saved?.apiKeyConfigured == true); XCTAssertFalse(model.saved?.accessTokenConfigured == true)
+        XCTAssertEqual(model.saved?.apiToken, "")
         XCTAssertEqual(notifications, 3)
     }
 
-    func testScrapingFormStacksFullWidthFieldsAndKeepsProviderDraftsAndCustomExpansionIndependent() async throws {
-        let wire = ScrapingSettingsWire(), client = try client(wire)
+    func testDataSourceFormStacksFullWidthFieldsAndKeepsProviderDraftsAndCustomExpansionIndependent() async throws {
+        let wire = DataSourceSettingsWire(), client = try client(wire)
         addTeardownBlock { await client.close() }
         let tmdb = FilmTMDBSettingsModel(service: .init(connection: { client }), didSave: {})
         let douban = FilmDoubanSettingsModel(service: .init(connection: { client }), didSave: {})
         try await tmdb.load(); try await douban.load()
-        let page = FilmScrapingSettingsViewController(tmdb: tmdb, douban: douban, themeProvider: ScrapingSettingsTheme())
+        let page = FilmDataSourceSettingsViewController(tmdb: tmdb, douban: douban, themeProvider: DataSourceSettingsTheme())
         page.loadViewIfNeeded()
         defer { PageViewController.invalidatePages(in: page) }
-        XCTAssertEqual(page.pageTitle, "刮削设置")
-        let form = try XCTUnwrap(page.children.compactMap { $0 as? FilmScrapingFormController }.first)
+        XCTAssertEqual(page.pageTitle, "数据源")
+        let form = try XCTUnwrap(page.children.compactMap { $0 as? FilmDataSourceFormController }.first)
         let provider = try XCTUnwrap(form.sections.first?.rows.first?.content as? UISegmentedControl)
         XCTAssertEqual(provider.numberOfSegments, 2)
         XCTAssertEqual(provider.titleForSegment(at: 0), "TMDB"); XCTAssertEqual(provider.titleForSegment(at: 1), "豆瓣")
         let api = try field(form, "film.tmdb.apiBase")
-        let key = try field(form, "film.tmdb.apiKey")
-        XCTAssertEqual(api.keyboardType, .URL); XCTAssertTrue(key.isSecureTextEntry)
+        let key = try field(form, "film.tmdb.apiToken")
+        XCTAssertEqual(api.keyboardType, .URL); XCTAssertFalse(key.isSecureTextEntry)
         XCTAssertTrue(api.adjustsFontForContentSizeCategory)
         let stack = try XCTUnwrap(api.superview as? UIStackView)
         XCTAssertEqual(stack.axis, .vertical); XCTAssertEqual(stack.alignment, .fill)
-        XCTAssertEqual((stack.arrangedSubviews.first as? UILabel)?.text, "API 基址")
+        XCTAssertEqual((stack.arrangedSubviews.first as? UILabel)?.text, "TMDB 数据代理地址")
         XCTAssertTrue(api.constraints.contains { $0.firstAttribute == .height && $0.constant >= 44 })
         api.text = "https://draft.example.invalid/nested"; api.sendActions(for: .editingChanged)
         key.text = "synthetic-unsaved-key"; key.sendActions(for: .editingChanged)
         provider.selectedSegmentIndex = 1; provider.sendActions(for: .valueChanged)
         XCTAssertEqual(try field(form, "film.douban.cookie").text, "")
-        XCTAssertTrue(try field(form, "film.douban.cookie").isSecureTextEntry)
+        XCTAssertFalse(try field(form, "film.douban.cookie").isSecureTextEntry)
         XCTAssertFalse(form.sections.flatMap(\.rows).contains { $0.id == "film.douban.apiBase.row" })
         try select(form, "film.douban.data.custom")
-        XCTAssertNotNil(try field(form, "film.douban.apiBase"))
+        XCTAssertNotNil(try field(form, "film.douban.apiProxy"))
         XCTAssertFalse(form.sections.flatMap(\.rows).contains { $0.id == "film.douban.imageBase.row" })
         try select(form, "film.douban.image.custom")
-        XCTAssertNotNil(try field(form, "film.douban.imageBase"))
+        XCTAssertNotNil(try field(form, "film.douban.imageProxy"))
         let cookie = try field(form, "film.douban.cookie")
         cookie.text = "synthetic_cookie=draft"; cookie.sendActions(for: .editingChanged)
         provider.selectedSegmentIndex = 0; provider.sendActions(for: .valueChanged)
         XCTAssertEqual(try field(form, "film.tmdb.apiBase").text, "https://draft.example.invalid/nested")
-        XCTAssertEqual(try field(form, "film.tmdb.apiKey").text, "synthetic-unsaved-key")
+        XCTAssertEqual(try field(form, "film.tmdb.apiToken").text, "synthetic-unsaved-key")
         provider.selectedSegmentIndex = 1; provider.sendActions(for: .valueChanged)
         XCTAssertEqual(try field(form, "film.douban.cookie").text, "synthetic_cookie=draft")
         XCTAssertEqual(douban.dataRoute, .custom); XCTAssertEqual(douban.imageRoute, .custom)
         XCTAssertEqual(wire.writes.count, 0)
     }
 
-    private func client(_ wire: ScrapingSettingsWire) throws -> RuntimeHTTPClient {
-        ScrapingSettingsProtocol.set { wire.receive($0) }
+    private func client(_ wire: DataSourceSettingsWire) throws -> RuntimeHTTPClient {
+        DataSourceSettingsProtocol.set { wire.receive($0) }
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [ScrapingSettingsProtocol.self]
+        configuration.protocolClasses = [DataSourceSettingsProtocol.self]
         return try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43111")!, configuration: configuration)
     }
-    private func field(_ form: FilmScrapingFormController, _ id: String) throws -> UITextField {
+    private func field(_ form: FilmDataSourceFormController, _ id: String) throws -> UITextField {
         func fields(_ view: UIView) -> [UITextField] {
             if let field = view as? UITextField { return [field] }
             return view.subviews.flatMap(fields)
         }
         return try XCTUnwrap(form.sections.flatMap(\.rows).compactMap(\.content).flatMap(fields).first { $0.accessibilityIdentifier == id })
     }
-    private func select(_ form: FilmScrapingFormController, _ id: String) throws {
+    private func select(_ form: FilmDataSourceFormController, _ id: String) throws {
         let row = try XCTUnwrap(form.sections.flatMap(\.rows).first { $0.id == id })
         XCTAssertTrue(row.enabled)
         try XCTUnwrap(row.action)()
@@ -229,21 +226,21 @@ final class FilmScrapingSettingsTests: XCTestCase {
 }
 
 @MainActor
-private final class ScrapingSettingsTheme: PageThemeProviding {
+private final class DataSourceSettingsTheme: PageThemeProviding {
     var pagePalette: PagePalette { .preset(.lilac) }
     let animatesPageColorway = false
     let pageThemeChanges = Empty<Void, Never>().eraseToAnyPublisher()
 }
 
 private let doubanCustomSettings: RuntimeObject = [
-    "apiBase": .string("https://custom.example.invalid/pan/douban"),
-    "searchBase": .string("https://search.example.invalid/nested"),
-    "imageBase": .string("https://images.example.invalid/pan/douban-img"),
-    "apiProxy": .string("https://relay.example.invalid/?target={encodedUrl}"),
-    "imageProxy": .string("https://pictures.example.invalid/{url}"), "cookieConfigured": .bool(true),
+    "apiBase": .string("https://m.douban.com"),
+    "searchBase": .string("https://search.douban.com"),
+    "imageBase": .string("https://img3.doubanio.com"),
+    "apiProxy": .string("https://relay.example.invalid/nested/"),
+    "imageProxy": .string("https://pictures.example.invalid/nested/"), "cookie": .string("synthetic_cookie=initial"),
 ]
 
-private final class ScrapingSettingsWire: @unchecked Sendable {
+private final class DataSourceSettingsWire: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: RuntimeObject]
     private var recorded: [RuntimeObject] = []
@@ -256,14 +253,15 @@ private final class ScrapingSettingsWire: @unchecked Sendable {
     init(douban: RuntimeObject = [
         "apiBase": .string("https://m.douban.com"), "searchBase": .string("https://search.douban.com"),
         "imageBase": .string("https://img3.doubanio.com"), "apiProxy": .string(""), "imageProxy": .string(""),
-        "cookieConfigured": .bool(false),
+        "cookie": .string(""),
     ]) {
         values = ["douban": douban, "tmdb": [
-            "apiBase": .string("https://api.themoviedb.org"), "imageBase": .string("https://image.tmdb.org/t/p"),
-            "apiKeyConfigured": .bool(true), "accessTokenConfigured": .bool(true),
+            "apiBase": .string("https://api.themoviedb.org/3"), "imageBase": .string("https://image.tmdb.org"),
+            "apiKey": .string("synthetic-old-key"), "accessToken": .string("Bearer synthetic.old.token"),
+            "language": .string("zh-CN"), "region": .string("CN"), "includeAdult": .bool(false),
         ]]
     }
-    func receive(_ transport: ScrapingSettingsProtocol) {
+    func receive(_ transport: DataSourceSettingsProtocol) {
         lock.lock(); defer { lock.unlock() }
         let path = transport.request.url!.path.components(separatedBy: "/")
         XCTAssertEqual(transport.request.httpMethod, "POST")
@@ -280,8 +278,11 @@ private final class ScrapingSettingsWire: @unchecked Sendable {
                 return
             }
             for (key, item) in patch {
-                if ["cookie", "apiKey", "accessToken"].contains(key) { value[key + "Configured"] = .bool(!(item.catText ?? "").isEmpty) }
-                else { value[key] = item }
+                if path[2] == "tmdb", item == .string(""), key == "apiBase" {
+                    value[key] = .string("https://api.themoviedb.org/3")
+                } else if path[2] == "tmdb", item == .string(""), key == "imageBase" {
+                    value[key] = .string("https://image.tmdb.org")
+                } else { value[key] = item }
             }
             values[path[2]] = value
         } else { XCTAssertEqual(path[3], "settings.get") }
@@ -289,10 +290,10 @@ private final class ScrapingSettingsWire: @unchecked Sendable {
     }
 }
 
-private final class ScrapingSettingsProtocol: URLProtocol, @unchecked Sendable {
+private final class DataSourceSettingsProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
-    private static var handler: (@Sendable (ScrapingSettingsProtocol) -> Void)?
-    static func set(_ value: @escaping @Sendable (ScrapingSettingsProtocol) -> Void) {
+    private static var handler: (@Sendable (DataSourceSettingsProtocol) -> Void)?
+    static func set(_ value: @escaping @Sendable (DataSourceSettingsProtocol) -> Void) {
         lock.lock(); handler = value; lock.unlock()
     }
     override class func canInit(with request: URLRequest) -> Bool { true }

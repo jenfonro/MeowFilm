@@ -132,7 +132,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testSettingsMenuKeepsRulesAndScrapingIndependentWhenPlaybackIsUnavailable() async throws {
+    func testSettingsMenuKeepsRulesAndDataSourcesIndependentWhenPlaybackIsUnavailable() async throws {
         let fixture = try await makeFixture()
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {})
         let douban = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(connection: { throw FilmSearchError.unavailable }), didSave: {})
@@ -147,8 +147,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let rows = try XCTUnwrap(menu.sections.first).rows
         XCTAssertEqual(rows.map(\.id), [
             "film.settings.search", "film.settings.matching", "film.settings.cats", "film.settings.videos",
-            "film.settings.scraping", "film.settings.preferences", "film.settings.autoPrepare",
-            "film.settings.manual", "film.settings.blocks",
+            "film.settings.dataSources", "film.settings.preferences",
         ])
         XCTAssertTrue(rows.prefix(5).allSatisfy(\.enabled))
         XCTAssertTrue(rows.dropFirst(5).allSatisfy { !$0.enabled })
@@ -165,13 +164,13 @@ final class FilmSettingsPlatformTests: XCTestCase {
         XCTAssertTrue(matching.sections.flatMap(\.rows).prefix(3).allSatisfy(\.enabled))
         XCTAssertFalse(try row(matching, "film.matching.siteClean").enabled)
         navigation.setViewControllers([page], animated: false)
-        try selectRow(menu, "film.settings.scraping")
-        XCTAssertTrue(navigation.topViewController is FilmScrapingSettingsViewController)
-        XCTAssertEqual((navigation.topViewController as? PageViewController)?.pageTitle, "刮削设置")
+        try selectRow(menu, "film.settings.dataSources")
+        XCTAssertTrue(navigation.topViewController is FilmDataSourceSettingsViewController)
+        XCTAssertEqual((navigation.topViewController as? PageViewController)?.pageTitle, "数据源")
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testSettingsMenuRoutesSearchAndMatchingGroupsAlongsidePlaybackAndScraping() async throws {
+    func testSettingsMenuRoutesSearchAndMatchingGroupsAlongsidePlaybackAndDataSources() async throws {
         let fixture = try await makeFixture()
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {})
         let douban = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(connection: { throw FilmSearchError.unavailable }), didSave: {})
@@ -185,11 +184,11 @@ final class FilmSettingsPlatformTests: XCTestCase {
         page.loadViewIfNeeded()
         let menu = try XCTUnwrap(page.children.compactMap { $0 as? FilmSettingsListController }.first)
         menu.loadViewIfNeeded()
-        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 9)
+        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 6)
         XCTAssertTrue(menu.sections.flatMap(\.rows).allSatisfy(\.enabled))
         for (id, title) in [
-            ("search", "搜索净化设置"), ("matching", "智能匹配设置"), ("scraping", "刮削设置"),
-            ("preferences", "播放偏好"), ("autoPrepare", "自动准备"), ("manual", "人工匹配"), ("blocks", "片源屏蔽"),
+            ("search", "搜索净化设置"), ("matching", "智能匹配设置"), ("dataSources", "数据源"),
+            ("preferences", "智能播放设置"),
         ] {
             navigation.setViewControllers([page], animated: false)
             try selectRow(menu, "film.settings.\(id)")
@@ -200,10 +199,25 @@ final class FilmSettingsPlatformTests: XCTestCase {
             case "search":
                 XCTAssertEqual((destination as? FilmRulePageViewController)?.group, .search)
             case "matching": XCTAssertTrue(destination is FilmSmartMatchingViewController)
-            case "scraping": XCTAssertTrue(destination is FilmScrapingSettingsViewController)
-            case "preferences", "autoPrepare": XCTAssertTrue(destination is FilmPlaybackPreferencesController)
-            default: XCTAssertTrue(destination is FilmPlaybackLibraryController)
+            case "dataSources": XCTAssertTrue(destination is FilmDataSourceSettingsViewController)
+            default: XCTAssertTrue(destination is FilmSmartPlaybackSettingsController)
             }
+        }
+        navigation.setViewControllers([page], animated: false)
+        try selectRow(menu, "film.settings.preferences")
+        let smart = try XCTUnwrap(navigation.topViewController as? FilmSmartPlaybackSettingsController)
+        smart.loadViewIfNeeded()
+        XCTAssertEqual(smart.sections.flatMap(\.rows).map(\.title),
+                       ["偏好设置", "自动准备", "Manual 匹配源管理", "匹配禁用管理"])
+        for (id, title) in [("preferences", "偏好设置"), ("autoPrepare", "自动准备"),
+                            ("manual", "Manual 匹配源管理"), ("blocks", "匹配禁用管理")] {
+            navigation.setViewControllers([page, smart], animated: false)
+            try selectRow(smart, "film.smartPlayback.\(id)")
+            let destination = try XCTUnwrap(navigation.topViewController as? PageViewController)
+            XCTAssertEqual(destination.pageTitle, title)
+            if id == "preferences" || id == "autoPrepare" {
+                XCTAssertTrue(destination is FilmPlaybackPreferencesController)
+            } else { XCTAssertTrue(destination is FilmPlaybackLibraryController) }
         }
         navigation.setViewControllers([page], animated: false)
         try selectRow(menu, "film.settings.matching")

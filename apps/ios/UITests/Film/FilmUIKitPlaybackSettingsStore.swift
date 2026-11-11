@@ -34,6 +34,7 @@ actor FilmUIKitPlaybackSettingsStore {
             preferences = input
             return preferences
         case "library.get": return library
+        case "data.invalidate": return .null
         case "manual.update":
             let fields = try input.filmRequiredObject()
             if fields["action"] == .string("save") {

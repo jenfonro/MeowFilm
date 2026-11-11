@@ -6,19 +6,7 @@
   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/>
  </ResourceDictionary.MergedDictionaries>
  <Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}"/>
- <Style x:Key="FilmSettings.Password" TargetType="PasswordBox">
-  <Setter Property="Height" Value="40"/><Setter Property="Padding" Value="12,6"/>
-  <Setter Property="FontSize" Value="14"/>
-  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
-  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-  <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
-  <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
-  <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-   <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-   <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-   <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-  </Trigger></Style.Triggers>
- </Style>
+
  <Style x:Key="FilmSettings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}">
   <Setter Property="Height" Value="44"/><Setter Property="Margin" Value="0,0,28,0"/>
   <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>

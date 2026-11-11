@@ -25,7 +25,7 @@ const SHARED_FILES = ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs
 const SHARED_IMPORTS = new Set([
   'node:buffer', 'node:crypto', 'node:http', 'node:https', 'node:stream',
   '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
-  '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/netease-token',
+  '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/film-playback/metadata-query', '@meowfilm/netease-token',
   '@meowfilm/novel-rules', '@meowfilm/script-host/native-json',
 ]);
 const NATIVE_POLICY = 'scripts/script-host-native.json';

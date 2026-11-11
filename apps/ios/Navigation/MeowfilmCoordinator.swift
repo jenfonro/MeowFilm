@@ -151,6 +151,15 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             guard let self else { return }
             navigation.pushViewController(MusicAppearanceSettingsViewController(store: assembly.appearance), animated: true)
         }
+        page.openCache = { [weak self, weak page] in
+            guard let self else { return }
+            guard let owner = assembly.filmSettings?.playback else {
+                page?.showError("缓存管理暂不可用")
+                return
+            }
+            navigation.pushViewController(FilmMetadataCacheSettingsViewController(
+                owner: owner, themeProvider: assembly.appearance), animated: true)
+        }
         page.openNovel = { [weak self, weak page] in
             guard let self else { return }
             guard let novel = assembly.novel else { page?.showError("小说设置暂不可用"); return }

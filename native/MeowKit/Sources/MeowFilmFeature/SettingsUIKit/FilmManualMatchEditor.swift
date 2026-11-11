@@ -36,8 +36,6 @@ final class FilmManualMatchEditor: FilmSettingsListController {
         provider = item?.value["provider"]?.filmText.flatMap(FilmPanProvider.init(rawValue:))
         super.init(themeProvider: themeProvider)
         pageTitle = item == nil ? "添加人工匹配" : "编辑人工匹配"
-        // Share URL/password are intentionally private; no clipboard/log export.
-        share.isSecureTextEntry = true; password.isSecureTextEntry = true
         share.textContentType = .none; password.textContentType = .none
         season.keyboardType = .numberPad
     }

@@ -178,8 +178,8 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         XCTAssertEqual(laterModel.snapshot?.sources.count, 4)
         try await navigate(root.navigation, to: { $0 === results }) { root.navigation.popViewController(animated: false) }
         await laterModel.close()
-        let modes = try XCTUnwrap(find("film.search.mode", in: content.view) as? UISegmentedControl)
-        modes.selectedSegmentIndex = 1; modes.sendActions(for: .valueChanged)
+        let modes = try XCTUnwrap(find("film.search.mode", in: content.view) as? UISwitch)
+        modes.isOn = true; modes.sendActions(for: .valueChanged)
         try await waitFor { grid.numberOfItems(inSection: 0) == 4 }
         let rawIndex = try XCTUnwrap(session.snapshot.rawCards.firstIndex {
             $0.detailID == .number(0) && $0.text("siteKey") == sites.first { $0.source.key.siteKey == "first" }?.key
@@ -315,7 +315,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
     /// bases and the empty credential state after all local search owners drain.
     private func controlledMetadata(_ resources: MeowfilmResources) async throws {
         let metadata = resources.filmMetadata, original = try await metadata.settings()
-        guard !original.apiKeyConfigured, !original.accessTokenConfigured else {
+        guard original.apiKey.isEmpty, original.accessToken.isEmpty else {
             throw XCTSkip("A dedicated simulator with no TMDB credentials is required")
         }
         let upstream = try TMDBTestUpstream { _ in .json(.object(["results": .array([])])) }

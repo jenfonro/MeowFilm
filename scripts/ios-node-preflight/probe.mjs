@@ -257,10 +257,10 @@ await check('ios-eight-module-http-and-tmdb', async () => {
       ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
     ]);
     const settings = okay(await client.call('tmdb.data.settings.update', {
-      apiBase: `http://127.0.0.1:${upstream.address().port}/proxy`,
+      apiBase: `http://127.0.0.1:${upstream.address().port}/proxy/3`,
     }));
-    assert.equal(settings.apiKeyConfigured, false);
-    assert.equal(settings.accessTokenConfigured, false);
+    assert.equal(settings.apiKey, '');
+    assert.equal(settings.accessToken, '');
     assert.deepEqual(okay(await client.call('tmdb.data.request', {
       path: '/3/movie/42', query: { language: 'zh-CN' }, imageSize: 'w500',
     })), { id: 42, title: '预检', poster_path: '/v1/tmdb/images/w500/preflight.jpg' });

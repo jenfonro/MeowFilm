@@ -4,6 +4,8 @@
 [`film-rules`](../../packages/film-rules/README.md)、
 [`film-search`](../../packages/film-search/README.md)。本文件只记录 Windows 消费者、装配和验证边界，不另定义算法。
 
+原始列表开关置于综合／单曲等分类同行最右侧，TMDB 状态在开关左边；分类区域不足时独立横向滚动，状态和开关不覆盖标签。切换复用同一 Node 会话，不重新搜索。
+
 ## 类型与装配
 
 - App 只装配一个 `SearchResultsPage`，复用既有音乐视图与影视卡片。综合、单曲、歌单、影视分类及手动音乐／影视目标保持现行交互；普通数据刷新不覆盖手动目标。

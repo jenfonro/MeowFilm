@@ -286,7 +286,7 @@ for (const platform of ['ios', 'windows']) {
       metadataProvider: 'douban', metadataId: '51' };
     const modules = new Map([
       ['douban', { methods: {
-        'douban.data.settings.get': async () => result({ revision: 'douban-a', cookieConfigured: true }),
+        'douban.data.settings.get': async () => result({ revision: 'douban-a', cookie: 'fixture=cookie' }),
         'douban.data.request': async () => {
           calls.push('primary');
           return result({ id: '51', title: 'Series 第1季', episodes_count: 2, intro: '', genres: [] });
@@ -294,7 +294,7 @@ for (const platform of ['ios', 'windows']) {
         'douban.data.search': async () => { calls.push('association'); return { ok: false, code: 'UPSTREAM_HTTP' }; },
       } }],
       ['tmdb', { methods: {
-        'tmdb.data.settings.get': async () => result({ revision: 'tmdb-a', apiKeyConfigured: true }),
+        'tmdb.data.settings.get': async () => result({ revision: 'tmdb-a', apiKey: 'fixture-key' }),
         'tmdb.data.request': async () => { throw error('NOT_CONFIGURED'); },
       } }],
       ['cat', { authorizeMedia: async () => false, methods: {
@@ -2152,7 +2152,7 @@ function runtimeDataFixture(invoke, metadataRequest = () => ({ ...tmdbAppended, 
   const calls = [], metadataCalls = [], result = value => ({ ok: true, value });
   const modules = new Map([
     ['tmdb', { methods: {
-      'tmdb.data.settings.get': async () => result({ revision: 'metadata-current', apiKeyConfigured: true }),
+      'tmdb.data.settings.get': async () => result({ revision: 'metadata-current', apiKey: 'fixture-key' }),
       'tmdb.data.request': async value => {
         metadataCalls.push(structuredClone(value)); return result(await metadataRequest(value));
       },

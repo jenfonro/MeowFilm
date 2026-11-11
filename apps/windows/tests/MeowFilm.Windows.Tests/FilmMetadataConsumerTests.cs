@@ -199,7 +199,7 @@ public static partial class MusicUiTests
             }
             return JsonSerializer.SerializeToElement(new { ok = true, contract = "tmdb.data.v1", value = new
             { apiBase = "https://api.fixture.invalid", imageBase = "https://image.fixture.invalid/t/p",
-                apiKeyConfigured = false, accessTokenConfigured = false } });
+                apiKey = "", accessToken = "", language = "zh-CN", region = "CN", includeAdult = false } });
         }
         private async Task<JsonElement> ContentAsync(string method, object? parameters, CancellationToken cancellationToken)
         {
@@ -215,9 +215,9 @@ public static partial class MusicUiTests
             var query = request.GetProperty("query");
             if (path == "/3/search/multi")
             {
-                True(query.EnumerateObject().Count() == 3 && query.GetProperty("query").ValueKind == JsonValueKind.String &&
-                    query.GetProperty("page").GetInt32() == 1 && query.GetProperty("language").GetString() == "zh-CN" &&
-                    request.GetProperty("imageSize").GetString() == "w500", "search uses its original query, first page, language and w500 identity");
+                True(query.EnumerateObject().Count() == 2 && query.GetProperty("query").ValueKind == JsonValueKind.String &&
+                    query.GetProperty("page").GetInt32() == 1 &&
+                    request.GetProperty("imageSize").GetString() == "w500", "search uses its original query, first page and w500 identity; configured language belongs to Node");
                 if (receipt) { Interlocked.Increment(ref CacheReads); return Success(null); }
                 Interlocked.Increment(ref Searches);
                 return Success(new
@@ -229,8 +229,7 @@ public static partial class MusicUiTests
                     }
                 });
             }
-            True(path == "/3/tv/7" && query.EnumerateObject().Count() == 2 &&
-                query.GetProperty("language").GetString() == "zh-CN" &&
+            True(path == "/3/tv/7" && query.EnumerateObject().Count() == 1 &&
                 query.GetProperty("append_to_response").GetString() == "credits,similar,images" &&
                 request.GetProperty("imageSize").GetString() == "original", "full detail uses its exact type/ID, append set and original image identity");
             if (receipt) { Interlocked.Increment(ref CacheReads); return Success(null); }

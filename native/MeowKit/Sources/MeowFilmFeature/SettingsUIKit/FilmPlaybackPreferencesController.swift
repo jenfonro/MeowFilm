@@ -9,12 +9,14 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
     private let area: Area
     private var loading: Task<Void, Never>?
     private var saving: Task<Void, Never>?
+    private let keywords = filmTextField("关键字匹配规则", id: "film.preferences.keywords")
+    override var avoidsKeyboard: Bool { true }
 
     init(owner: FilmPlaybackSettingsModel, area: Area, themeProvider: any PageThemeProviding) {
         self.owner = owner; self.area = area
         super.init(themeProvider: themeProvider)
         switch area {
-        case .preferences: pageTitle = "播放偏好"
+        case .preferences: pageTitle = "偏好设置"
         case .siteClean: pageTitle = "站点净化设置"
         case .autoPrepare: pageTitle = "自动准备"
         }
@@ -24,7 +26,16 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         super.viewDidLoad()
         table.accessibilityIdentifier = "film.preferences.list"
         pageHeader.setTrailing([PageHeaderTextButton(title: "保存") { [weak self] in self?.save() }])
-        observe(owner) { [weak self] in self?.update() }
+        keywords.placeholder = nil
+        keywords.smartDashesType = .no; keywords.smartQuotesType = .no
+        keywords.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            let values = (keywords.text ?? "").split(whereSeparator: { $0 == "," || $0 == "，" })
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            owner.edit { if self.area == .siteClean { $0.siteCleanKeywords = values } else { $0.keywords = values } }
+        }, for: .editingChanged)
+        keywords.addAction(UIAction { [weak self] _ in self?.update() }, for: .editingDidEnd)
+        observe(owner) { [weak self] in if self?.keywords.isFirstResponder != true { self?.update() } }
         load()
     }
 
@@ -45,22 +56,22 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         switch area {
         case .preferences:
             sections = [
-                .init(title: "优先顺序", rows: draft.ruleOrder.enumerated().map { index, dimension in
+                .init(title: "优先片源规则", rows: draft.ruleOrder.enumerated().map { index, dimension in
                     .init(title: dimension.title, detail: "\(index + 1)", id: "film.preferences.dimension.\(dimension.rawValue)",
                           enabled: !owner.busy, disclosure: true, action: { [weak self] in
                               self?.orderMenu(group: .ruleOrder, index: index, title: dimension.title)
                           })
                 } + [restoreRow("恢复默认顺序", group: .ruleOrder)]),
-                .init(title: "网盘顺序", rows: draft.panOrder.enumerated().map { index, provider in
+                .init(title: "网盘匹配规则", rows: draft.panOrder.enumerated().map { index, provider in
                     .init(title: provider.title, detail: "\(index + 1)", id: "film.preferences.pan.\(provider.rawValue)",
                           enabled: !owner.busy, disclosure: true, action: { [weak self] in
                               self?.orderMenu(group: .panOrder, index: index, title: provider.title)
                           })
                 } + [restoreRow("恢复默认网盘", group: .panOrder)]),
-                .init(title: "关键词", rows: keywordRows(draft.keywords, group: .keywords)),
+                .init(title: "关键字匹配规则", rows: keywordRows(draft.keywords, group: .keywords)),
             ]
         case .siteClean:
-            sections = [.init(title: "站点名称关键词", rows: keywordRows(draft.siteCleanKeywords, group: .siteClean))]
+            sections = [.init(title: "关键字匹配规则", rows: keywordRows(draft.siteCleanKeywords, group: .siteClean))]
         case .autoPrepare:
             sections = [.init(title: "", rows: [
                 filmSwitchRow("进入播放页自动准备", id: "film.preferences.auto-prepare",
@@ -75,24 +86,21 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
 
     private func restoreRow(_ title: String, group: FilmPlaybackSettingsModel.Group) -> FilmSettingsRow {
         .init(title: title, id: "film.preferences.restore.\(group)", enabled: !owner.busy,
-              action: { [weak self] in self?.owner.restoreDraft(group) })
+              action: { [weak self] in
+                  self?.view.endEditing(true)
+                  self?.owner.restoreDraft(group)
+              })
     }
 
     private func keywordRows(_ values: [String], group: FilmPlaybackSettingsModel.Group) -> [FilmSettingsRow] {
-        var rows = values.enumerated().map { index, value in
-            FilmSettingsRow(title: value, detail: "\(index + 1)", id: "film.preferences.keyword.\(index)",
-                            enabled: !owner.busy, disclosure: true, action: { [weak self] in
-                self?.keywordMenu(group: group, index: index, value: value)
-            })
-        }
-        if rows.isEmpty { rows.append(.init(title: "无关键词", id: "film.preferences.keywords.empty")) }
-        rows.append(.init(title: "添加关键词", id: "film.preferences.keywords.add", enabled: !owner.busy,
-                          action: { [weak self] in self?.editKeyword(group: group, index: nil, value: "") }))
-        rows.append(restoreRow("恢复默认关键词", group: group))
-        return rows
+        keywords.text = values.joined(separator: ",")
+        keywords.isEnabled = !owner.busy; keywords.textColor = UIColor(theme.ink)
+        return [.init(title: "关键字匹配规则", id: "film.preferences.keywords.row", content: keywords),
+                restoreRow("恢复默认关键词", group: group)]
     }
 
     private func orderMenu(group: FilmPlaybackSettingsModel.Group, index: Int, title: String) {
+        view.endEditing(true)
         let count: Int
         switch group {
         case .ruleOrder: count = owner.draft?.ruleOrder.count ?? 0
@@ -124,51 +132,6 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         }
     }
 
-    private func keywordMenu(group: FilmPlaybackSettingsModel.Group, index: Int, value: String) {
-        let alert = UIAlertController(title: value, message: nil, preferredStyle: .actionSheet)
-        alert.addAction(UIAlertAction(title: "编辑", style: .default) { [weak self, weak alert] _ in
-            alert?.dismiss(animated: true) { [weak self] in
-                self?.editKeyword(group: group, index: index, value: value)
-            }
-        })
-        alert.addAction(UIAlertAction(title: "排序", style: .default) { [weak self, weak alert] _ in
-            alert?.dismiss(animated: true) { [weak self] in
-                self?.orderMenu(group: group, index: index, title: value)
-            }
-        })
-        alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak owner] _ in
-            owner?.edit {
-                if group == .siteClean { $0.siteCleanKeywords.remove(at: index) }
-                else { $0.keywords.remove(at: index) }
-            }
-        })
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        presentSheet(alert)
-    }
-
-    private func editKeyword(group: FilmPlaybackSettingsModel.Group, index: Int?, value: String) {
-        guard canPresentPageAlert else { return }
-        let alert = UIAlertController(title: index == nil ? "添加关键词" : "编辑关键词",
-                                      message: nil, preferredStyle: .alert)
-        alert.addTextField {
-            $0.text = value; $0.accessibilityLabel = "关键词"
-            $0.autocorrectionType = .no; $0.autocapitalizationType = .none
-        }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "确定", style: .default) { [weak owner, weak alert] _ in
-            guard let value = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !value.isEmpty else { return }
-            owner?.edit {
-                if group == .siteClean {
-                    if let index { $0.siteCleanKeywords[index] = value } else { $0.siteCleanKeywords.append(value) }
-                } else {
-                    if let index { $0.keywords[index] = value } else { $0.keywords.append(value) }
-                }
-            }
-        })
-        present(alert, animated: true)
-    }
-
     private func presentSheet(_ alert: UIAlertController) {
         guard canPresentPageAlert else { return }
         alert.popoverPresentationController?.sourceView = table
@@ -178,6 +141,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
 
     private func save() {
         guard saving == nil else { return }
+        view.endEditing(true)
         saving = Task { [weak self] in
             guard let self else { return }
             defer { saving = nil }

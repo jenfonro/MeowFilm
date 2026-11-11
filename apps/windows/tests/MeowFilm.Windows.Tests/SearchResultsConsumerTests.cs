@@ -44,6 +44,9 @@ public static partial class MusicUiTests
         True(f.Page.Targets.Select(t => t.Id).SequenceEqual(new[] { "music", "film", "novel" }) &&
             f.Page.Tabs.Select(t => t.Id).SequenceEqual(new[] { "overview", "songs", "playlists", "film", "novel" }),
             "three domain targets and all five result classes are exposed by the real page");
+        var filmTools = (FrameworkElement)((SearchResultsView)f.Page.View).FindName("FilmTools");
+        // The shell is mounted off-screen, so check layout visibility rather than inherited screen visibility.
+        True(filmTools.Visibility == Visibility.Collapsed, "novel results do not show the film raw-list switch or metadata status");
         Equal(0, f.Runtime.SearchOpens);
         int count = f.Novel.Search.Books.Count;
         await f.Page.OpenNovelAsync(f.Novel.Search.Books.Single());
@@ -53,7 +56,9 @@ public static partial class MusicUiTests
         await SearchFixture.Until(() => f.SearchHost is not null && f.Page.SelectedTarget == "novel");
         Equal("合成小说", f.Page.Query); Equal(count, f.Novel.Search.Books.Count);
         await f.Page.OpenTabAsync("film"); Equal("film", f.Page.SelectedTarget);
+        True(filmTools.Visibility == Visibility.Visible, "film results retain their own metadata status and raw-list switch");
         await f.Page.OpenTabAsync("songs"); Equal("music", f.Page.SelectedTarget);
+        True(filmTools.Visibility == Visibility.Collapsed, "music results do not inherit film-only tools");
     }
     private static async Task UnifiedNovelPreparation()
     {

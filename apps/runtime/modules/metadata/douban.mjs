@@ -43,6 +43,11 @@ function proxyTemplate(value) {
   requireValue(typeof value === 'string');
   if (value === '') return null;
   const tokens = [...value.matchAll(/\{(?:encodedUrl|url)\}/g)];
+  if (!tokens.length) {
+    httpURL(value, 'INVALID_REQUEST');
+    requireValue(!/[{}]/.test(value));
+    return { before: value + (/[/?&=]$/.test(value) ? '' : '/'), after: '', encoded: true };
+  }
   requireValue(tokens.length === 1);
   const token = tokens[0][0], offset = tokens[0].index;
   const before = value.slice(0, offset), after = value.slice(offset + token.length);

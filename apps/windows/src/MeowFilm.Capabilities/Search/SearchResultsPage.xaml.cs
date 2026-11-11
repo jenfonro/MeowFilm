@@ -27,6 +27,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         }
         MusicHost.Visibility = film || novel ? Visibility.Collapsed : Visibility.Visible;
         FilmBody.Visibility = film ? Visibility.Visible : Visibility.Collapsed;
+        FilmTools.Visibility = FilmBody.Visibility;
         NovelScroll.Visibility = novel ? Visibility.Visible : Visibility.Collapsed;
         if (novel && page.Novel is { } module) { module.SearchWebOwner = this; PublishNovel(); }
         HeaderChanged?.Invoke(this, EventArgs.Empty);

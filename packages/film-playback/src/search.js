@@ -10,10 +10,10 @@ const require = createRequire(import.meta.url);
 const itemIdentity = item => JSON.stringify([item.siteKey, item.detailId]);
 const metadataIdentity = item => `${item.tmdbType}:${item.tmdbId}`;
 const metadataSearchRequest = query => ({ kind: 'metadata', provider: 'tmdb',
-  path: '/3/search/multi', query: { query, page: 1, language: 'zh-CN' }, imageSize: 'w500' });
+  path: '/3/search/multi', query: { query, page: 1 }, imageSize: 'w500' });
 const metadataDetailRequest = item => ({ kind: 'metadata', provider: 'tmdb',
   path: `/3/${item.tmdbType}/${item.tmdbId}`,
-  query: { language: 'zh-CN', append_to_response: 'credits,similar,images' }, imageSize: 'original' });
+  query: { append_to_response: 'credits,similar,images' }, imageSize: 'original' });
 const members = card => card.aggregateItems?.length ? card.aggregateItems
   : card.sourceKind === 'site' ? [card] : [];
 const rawSelection = card => card.sourceKind === 'site' && card.displayKey.startsWith('site:');

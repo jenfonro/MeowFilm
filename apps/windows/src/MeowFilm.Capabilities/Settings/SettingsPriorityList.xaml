@@ -26,7 +26,7 @@
        <DataTemplate>
         <Grid Height="50">
          <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="48"/><ColumnDefinition Width="36"/>
+          <ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="36"/>
          </Grid.ColumnDefinitions>
          <Thumb Grid.Column="3" Style="{StaticResource Settings.Grip}" DragStarted="Grip_Started" DragDelta="Grip_Delta" DragCompleted="Grip_Completed"
                 PreviewKeyDown="Grip_KeyDown" AutomationProperties.Name="{Binding Label,StringFormat={}{0}排序}">
@@ -45,9 +45,16 @@
            </DataTrigger></Style.Triggers>
           </Style></TextBlock.Style>
          </TextBlock>
-         <CheckBox Grid.Column="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsChecked="{Binding Enabled,Mode=OneWay}"
-                   Style="{StaticResource Settings.Switch}" Tag="{Binding}" Click="Enabled_Click"
-                   AutomationProperties.Name="{Binding Label,StringFormat={}{0}启用}"/>
+         <CheckBox Grid.Column="2" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="8,0"
+                   Tag="{Binding}" Click="Enabled_Click" AutomationProperties.Name="{Binding Label,StringFormat={}{0}启用}">
+          <CheckBox.Style><Style TargetType="CheckBox" BasedOn="{StaticResource Settings.Switch}">
+           <Setter Property="Visibility" Value="Collapsed"/>
+           <Style.Triggers><DataTrigger Binding="{Binding ShowToggle,ElementName=Root}" Value="True">
+            <Setter Property="Visibility" Value="Visible"/>
+            <Setter Property="IsChecked" Value="{Binding Enabled,Mode=OneWay}"/>
+           </DataTrigger></Style.Triggers>
+          </Style></CheckBox.Style>
+         </CheckBox>
         </Grid>
        </DataTemplate>
       </ListBox.ItemTemplate>

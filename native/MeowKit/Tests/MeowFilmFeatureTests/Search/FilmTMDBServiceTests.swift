@@ -14,11 +14,11 @@ final class FilmTMDBServiceTests: XCTestCase {
         ])
         let requests: [RuntimeValue] = [
             .object(["provider": .string("tmdb"), "path": .string("/3/search/multi"), "imageSize": .string("w500"),
-                "query": .object(["query": .string("原词 2 & 中文"), "page": .number(1), "language": .string("zh-CN")])]),
+                "query": .object(["query": .string("原词 2 & 中文"), "page": .number(1)])]),
             .object(["provider": .string("tmdb"), "path": .string("/3/movie/42"), "imageSize": .string("original"),
-                "query": .object(["language": .string("zh-CN"), "append_to_response": .string("credits,similar,images")])]),
+                "query": .object(["append_to_response": .string("credits,similar,images")])]),
             .object(["provider": .string("tmdb"), "path": .string("/3/tv/7"), "imageSize": .string("original"),
-                "query": .object(["language": .string("zh-CN"), "append_to_response": .string("credits,similar,images")])])
+                "query": .object(["append_to_response": .string("credits,similar,images")])])
         ]
         let expected = requests.flatMap { request -> [(String, RuntimeValue)] in
             guard case .object(var key) = request else { preconditionFailure() }
@@ -156,7 +156,7 @@ final class FilmTMDBServiceTests: XCTestCase {
         XCTAssertNil(service.imageURL(path: "/v1/douban/images/../secret"))
     }
 
-    func testDoubanSettingsAdapterUsesOnlyRuntimeSettingsAndRetainsEveryNonSecretField() async throws {
+    func testDoubanSettingsAdapterUsesOnlyRuntimeSettingsAndRetainsEveryFieldIncludingPlainCookie() async throws {
         let client = try client()
         addTeardownBlock { await client.close() }
         let response: RuntimeObject = [
@@ -164,7 +164,7 @@ final class FilmTMDBServiceTests: XCTestCase {
             "searchBase": .string("https://search.example.invalid/prefix"),
             "imageBase": .string("https://images.example.invalid/prefix"),
             "apiProxy": .string("https://relay.example.invalid/?target={encodedUrl}"),
-            "imageProxy": .string("https://pictures.example.invalid/{url}"), "cookieConfigured": .bool(true),
+            "imageProxy": .string("https://pictures.example.invalid/{url}"), "cookie": .string("synthetic_cookie=value"),
         ]
         let patch: RuntimeObject = ["cookie": .string(""), "apiProxy": response["apiProxy"]!]
         let received = expectation(description: "Exactly one settings read and one settings write")
@@ -187,7 +187,7 @@ final class FilmTMDBServiceTests: XCTestCase {
         XCTAssertEqual(first.imageBase, "https://images.example.invalid/prefix")
         XCTAssertEqual(first.apiProxy, "https://relay.example.invalid/?target={encodedUrl}")
         XCTAssertEqual(first.imageProxy, "https://pictures.example.invalid/{url}")
-        XCTAssertTrue(first.cookieConfigured)
+        XCTAssertEqual(first.cookie, "synthetic_cookie=value")
         await fulfillment(of: [received], timeout: 3)
     }
 
@@ -197,9 +197,9 @@ final class FilmTMDBServiceTests: XCTestCase {
         let service = FilmDoubanSettingsService(connection: { client })
         TMDBAdapterProtocol.set { transport in
             transport.reply(.object(["ok": .bool(true), "contract": .string("douban.data.v1"),
-                "value": .object(["cookieConfigured": .bool(true)])]))
+                "value": .object(["cookie": .string("synthetic_cookie=value")])]))
         }
-        do { _ = try await service.settings(); XCTFail("All nonsecret fields are required") }
+        do { _ = try await service.settings(); XCTFail("All settings fields are required") }
         catch { XCTAssertEqual(error as? FilmSearchError, .invalidResponse) }
         TMDBAdapterProtocol.set { transport in
             transport.reply(.object(["ok": .bool(false), "contract": .string("douban.data.v1"), "code": .string("STORAGE_ERROR")]))

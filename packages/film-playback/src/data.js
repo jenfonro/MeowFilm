@@ -4,6 +4,7 @@ import { normalizeDetail, stableFileIdentity } from './recognition.js';
 import { createRecognitionRules, providerFamily } from './rules.js';
 import { createMetadataCache } from './metadata-cache.js';
 import { metadataTTL } from './metadata-policy.js';
+import { tmdbQuery } from './metadata-query.js';
 import { checkSource, clone, fail, identity, isIdentifier, object, parseSourceValue, requireValue,
   sourceRevision, text } from './identity.js';
 
@@ -379,14 +380,19 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   async function settings(provider, signal, checkSchedule) {
     const value = await call(provider, 'settings.get', {}, signal, [{ domain: provider }], checkSchedule);
     requireValue(object(value) && text(value.revision), 'UPSTREAM_FORMAT');
-    return { revision: value.revision };
+    return value;
+  }
+  function configuredMetadataRequest(request, configuration) {
+    return { ...request,
+      query: request.provider === 'tmdb' ? tmdbQuery(request.path, request.query, configuration) : request.query,
+      settings: { revision: configuration.revision } };
   }
   async function getMetadata(request, { signal, completeness = 'complete', checkSchedule, refresh = false, requestedEpisode } = {}) {
     requireValue(['partial', 'complete'].includes(completeness));
     requireValue(typeof refresh === 'boolean' && (requestedEpisode === undefined ||
       Number.isSafeInteger(requestedEpisode) && requestedEpisode > 0));
     const configuration = await settings(request.provider, signal, checkSchedule);
-    const keyed = { ...request, settings: configuration };
+    const keyed = configuredMetadataRequest(request, configuration);
     const deps = [{ kind: 'metadata', domain: request.provider, revision: configuration.revision }];
     checkSchedule?.();
     return metadataCache.get(keyed, async (selected, producerSignal) => {
@@ -416,7 +422,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     requireValue(['movie', 'tv'].includes(target.kind) && /^[1-9]\d*$/.test(String(target.metadataId)));
     return metadataRequest(target.metadataProvider, target.metadataProvider === 'tmdb'
       ? `/3/${target.kind}/${target.metadataId}` : `/rexxar/api/v2/${target.kind}/${target.metadataId}`,
-    target.metadataProvider === 'tmdb' ? { language: 'zh-CN', append_to_response: 'credits,similar,images' } : {});
+    target.metadataProvider === 'tmdb' ? { append_to_response: 'credits,similar,images' } : {});
   }
   async function targetMetadataEntry(target, { signal, canSchedule, rules, refresh = false } = {}) {
     if (!target.metadataProvider || ['source', 'group'].includes(target.kind)) { open(signal); return null; }
@@ -466,7 +472,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       const seen = new Set();
       do {
         const response = rawMetadata(await getMetadata(metadataRequest('tmdb', `/3/search/${target.kind}`,
-          { query, language: 'zh-CN', page }), { signal, checkSchedule }));
+          { query, page }), { signal, checkSchedule }));
         pages = Number(response.total_pages ?? 1);
         requireValue(Number.isSafeInteger(pages) && pages >= 0, 'UPSTREAM_FORMAT');
         const key = identity(response.results);
@@ -570,7 +576,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     requireValue(target.kind === 'tv' && Number.isSafeInteger(season) && season >= 0);
     return execute([{ domain: target.metadataProvider }, { domain: 'douban' }], { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
       if (target.metadataProvider === 'tmdb') return getMetadata(metadataRequest('tmdb',
-        `/3/tv/${target.metadataId}/season/${season}`, { language: 'zh-CN' }),
+        `/3/tv/${target.metadataId}/season/${season}`, {}),
       { signal: ownedSignal, checkSchedule, refresh, requestedEpisode });
       requireValue(target.metadataProvider === 'douban');
       const entry = await getMetadata(targetRequest(target), { signal: ownedSignal, checkSchedule, refresh, requestedEpisode });
@@ -723,7 +729,8 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     requireValue(object(input) && ['search', 'detail', 'metadata'].includes(input.kind));
     if (input.kind === 'metadata') {
       const request = metadataRequest(input.provider, input.path, input.query ?? {}, input.imageSize);
-      return { request: { ...request, settings: await settings(input.provider, signal, checkSchedule) }, dependencies: [{ domain: input.provider }] };
+      return { request: configuredMetadataRequest(request, await settings(input.provider, signal, checkSchedule)),
+        dependencies: [{ domain: input.provider }] };
     }
     const source = checkSource(input.source);
     await liveSource(source, signal, checkSchedule);

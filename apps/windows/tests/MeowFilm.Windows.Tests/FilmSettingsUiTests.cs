@@ -38,6 +38,9 @@ public static class FilmSettingsUiTests
         yield return Case("failed source operations restore switches and notify with retry", SourceFailure);
         yield return Case("native keyboard scrolling high contrast and screenshots cover both window sizes", Layout);
         yield return Case("empty source pages keep their actions and columns", Empty);
+        yield return Case("data sources echo one token and cookie and save server proxy options independently", DataSources);
+        yield return Case("site clean lives under matching and playback uses half-width shared order lists", PlaybackLayout);
+        yield return Case("cache controls invalidate exact domains and drain both providers on failure", MetadataCache);
     }
 
     private static TestCase Case(string name, Func<Task> body) =>
@@ -526,6 +529,114 @@ public static class FilmSettingsUiTests
         }
     }
 
+    private static async Task DataSources()
+    {
+        await using var scene = await Scene.Create(dataSettings: true);
+        var data = scene.Data!;
+        await scene.Select("metadata");
+        await Until(() => scene.View.CanEditMetadata);
+        Check(scene.Box("MetadataApiToken").Text == "synthetic.v4.token" &&
+            scene.Box("DoubanCookie").Text == "synthetic_cookie=initial", "settings echo their actual plain values");
+        Check(!Visuals(scene.View).OfType<PasswordBox>().Any(), "no secret-mask controls or second token editor");
+        scene.Box("MetadataApiToken").Text = "synthetic-v3-key";
+        scene.Box("MetadataApiBase").Text = "https://fixture.invalid/pan/tmdb/3";
+        scene.Box("MetadataImageBase").Text = "https://fixture.invalid/pan/tmdb-img";
+        scene.Box("MetadataLanguage").Text = "en-US"; scene.Box("MetadataRegion").Text = "US";
+        scene.Element<CheckBox>("MetadataIncludeAdult").IsChecked = true;
+        Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "tmdb")));
+        await Until(() => !scene.View.MetadataBusy);
+        var saved = data.Calls.Last(call => call.Method == "tmdb.data.settings.update").Input;
+        Check(saved.GetProperty("apiKey").GetString() == "synthetic-v3-key" && saved.GetProperty("accessToken").GetString() == "" &&
+            saved.GetProperty("language").GetString() == "en-US" && saved.GetProperty("region").GetString() == "US" &&
+            saved.GetProperty("includeAdult").GetBoolean(), "single token replaces prior auth and all query options reach the runtime");
+        Check(scene.Box("MetadataApiToken").Text == "synthetic-v3-key", "successful save stays editable without a configured placeholder");
+        scene.Element<ComboBox>("DoubanDataProxy").SelectedValue = "custom";
+        scene.Element<ComboBox>("DoubanImageProxy").SelectedValue = "cdn-tx";
+        scene.Box("DoubanDataAddress").Text = "https://fixture.invalid/nested/";
+        scene.Box("DoubanCookie").Text = "";
+        Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "douban")));
+        await Until(() => !scene.View.MetadataBusy);
+        saved = data.Calls.Last(call => call.Method == "douban.data.settings.update").Input;
+        Check(saved.GetProperty("apiProxy").GetString() == "https://fixture.invalid/nested/" &&
+            saved.GetProperty("searchBase").GetString() == "https://search.douban.com" &&
+            saved.GetProperty("imageBase").GetString() == "https://img.doubanio.cmliussss.net" &&
+            saved.GetProperty("cookie").GetString() == "", "independent proxy choices and empty-cookie clear use the same save");
+        data.FailWrite = true;
+        scene.Box("MetadataApiToken").Text = "unsaved";
+        Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "tmdb")));
+        await Until(() => !scene.View.MetadataBusy);
+        Check(scene.Box("MetadataApiToken").Text == "unsaved" &&
+            data.Tmdb["apiKey"]?.ToString() == "synthetic-v3-key" && scene.Notices.Contains("数据源设置操作失败"),
+            "a failed save keeps the draft and the prior runtime receipt");
+        foreach (var width in new[] { 1248, 620 })
+        {
+            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            Check(scene.Box("MetadataApiToken").ActualWidth > 200, "single-line fields remain usable in both window widths");
+            Capture(scene.View, $"film-settings-data-sources-{width}.png");
+        }
+    }
+
+    private static async Task PlaybackLayout()
+    {
+        await using var scene = await Scene.Create(dataSettings: true);
+        var cleanHost = scene.Element<ContentControl>("SiteCleanHost");
+        var playback = (FilmPlaybackSettingsView)cleanHost.Content;
+        await Until(() => playback.Idle && ((TextBox)playback.FindName("CleanKeywords")).Text == "直播,预告");
+        Check(((Border)playback.FindName("CleanForm")).IsVisible, "matching includes its site-clean editor");
+        ((TextBox)playback.FindName("CleanKeywords")).Text = " 广告,，直播, ";
+        Click(Button(playback, "保存站点净化")); await Until(() => playback.Idle);
+        Check(FilmPreferences.Read(scene.Data!.Preferences).SiteCleanKeywords.SequenceEqual(["广告", "直播"]),
+            "the single line preserves order and ignores only empty comma-separated entries");
+        await scene.Select("preferences"); await Until(() => playback.Idle && playback.ManualGroups.Count == 1);
+        var navigation = scene.Element<StackPanel>("BusinessNavigation").Children.OfType<RadioButton>().ToArray();
+        Check(navigation.Length == 1 && Equals(navigation[0].Content, "智能播放设置"), "history and favorites are not settings destinations");
+        Check(cleanHost.Content is null && scene.Element<Grid>("BusinessPage").Children.Contains(playback),
+            "only one settings consumer is reparented to the current area");
+        var order = (SettingsPriorityList)playback.FindName("RuleOrder");
+        playback.UpdateLayout();
+        Check(!order.ShowToggle && !Visuals(order).OfType<CheckBox>().Any(box => box.IsVisible) &&
+            order.ActualWidth > 150 && order.ActualWidth < playback.ActualWidth * .6,
+            "film reuses the music order control without an enable flag or a full-width list");
+        Check(playback.ManualGroups.Single().Rows.Single().DetailId == "0" &&
+            playback.BlockGroups.Single().Rows.Single().Pan == "0", "both management lists retain typed source identity");
+        Capture(scene.View, "film-settings-smart-playback.png");
+        await scene.Select("rules"); await Until(() => playback.Idle && ((Border)playback.FindName("CleanForm")).IsVisible);
+        Check(ReferenceEquals(cleanHost.Content, playback) && scene.Element<Grid>("BusinessPage").Children.Count == 0,
+            "returning to matching cannot leave a second copy or a stale management form");
+    }
+
+    private static async Task MetadataCache()
+    {
+        await using var scene = await Scene.Create(dataSettings: true);
+        var data = scene.Data!;
+        var cache = new FilmMetadataCacheSettingsView(scene.Metadata!);
+        scene.Window.Content = cache; await Drain();
+        foreach (var (tag, domains) in new[] { ("douban", new[] { "douban" }), ("tmdb", new[] { "tmdb" }), ("both", new[] { "douban", "tmdb" }) })
+        {
+            int before = data.Calls.Count;
+            Click(Visuals(cache).OfType<Button>().Single(button => Equals(button.Tag, tag)));
+            await Until(() => ((WrapPanel)cache.FindName("Actions")).IsEnabled);
+            var calls = data.Calls.Skip(before).ToArray();
+            Check(calls.Select(call => call.Method).All(method => method == "film.data.invalidate") &&
+                calls.Select(call => call.Input.GetProperty("domain").GetString()).SequenceEqual(domains),
+                "cache buttons issue only the exact provider invalidations");
+        }
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        data.HeldInvalidation = gate.Task; data.FailDomain = "douban";
+        try
+        {
+            Click(Visuals(cache).OfType<Button>().Single(button => Equals(button.Tag, "both")));
+            var drain = scene.Metadata!.PrepareShutdownAsync();
+            Check(!drain.IsCompleted && !((WrapPanel)cache.FindName("Actions")).IsEnabled &&
+                !data.InvalidationToken.IsCancellationRequested, "the second admitted invalidation drains even after the first failed");
+            gate.SetResult(); await drain; await Drain();
+            Check(scene.Notices.Contains("缓存清理失败") && data.Tmdb["apiKey"]?.ToString() == "synthetic-key" &&
+                FilmPreferences.Read(data.Preferences).SiteCleanKeywords.SequenceEqual(["直播", "预告"]),
+                "partial failure is not success and does not clear settings or preferences");
+        }
+        finally { gate.TrySetResult(); }
+    }
+
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly MemoryStore Store = new();
@@ -536,11 +647,18 @@ public static class FilmSettingsUiTests
         internal readonly FilmSettingsView View;
         internal readonly Window Window;
         internal readonly List<string> Notices = [];
-        private Scene(int cats)
+        internal readonly DataSettingsRuntime? Data;
+        internal readonly FilmMetadataService? Metadata;
+        private Scene(int cats, bool dataSettings)
         {
             Runtime = new(cats);
             Rules = new(RulesRuntime); Sources = new(Runtime, Store);
-            View = new(Rules, Sources);
+            if (dataSettings)
+            {
+                Data = new(); Metadata = new(Data);
+                View = new(Rules, Sources, new FilmPlaybackSettings(Data), () => null, Metadata);
+            }
+            else View = new(Rules, Sources);
             Window = new() { Content = View, Width = 1248, Height = 820, Left = -10000, Top = -10000,
                 WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false };
             Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
@@ -548,9 +666,9 @@ public static class FilmSettingsUiTests
                 if (args.Message.Length > 0) Notices.Add(args.Message);
             }));
         }
-        internal static async Task<Scene> Create(int cats = 2)
+        internal static async Task<Scene> Create(int cats = 2, bool dataSettings = false)
         {
-            var scene = new Scene(cats);
+            var scene = new Scene(cats, dataSettings);
             try
             {
                 await scene.Sources.RefreshAsync();
@@ -566,7 +684,8 @@ public static class FilmSettingsUiTests
         internal TextBox Box(string name) => Element<TextBox>(name);
         internal async Task Select(string page)
         {
-            var nav = Element<StackPanel>("SettingsNavigation").Children.OfType<RadioButton>().Single(button => Equals(button.Tag, page));
+            var nav = Element<StackPanel>("SettingsNavigation").Children.OfType<RadioButton>()
+                .Concat(Element<StackPanel>("BusinessNavigation").Children.OfType<RadioButton>()).Single(button => Equals(button.Tag, page));
             nav.IsChecked = true;
             await Until(() => !View.SourcesBusy && (page != "rules" || !View.RulesBusy));
             View.UpdateLayout(); await Drain();
@@ -582,9 +701,64 @@ public static class FilmSettingsUiTests
         public async ValueTask DisposeAsync()
         {
             RulesRuntime.HoldProcess?.TrySetResult();
+            await View.PreparePlaybackSettingsShutdownAsync();
+            if (Metadata is not null) await Metadata.DisposeAsync();
             Window.Content = null; Window.Close(); await Drain();
             await Rules.DisposeAsync(); await Sources.DisposeAsync(); await Store.DisposeAsync();
         }
+    }
+
+    private sealed class DataSettingsRuntime : IRuntimeClient
+    {
+        internal readonly List<(string Method, JsonElement Input)> Calls = [];
+        internal Dictionary<string, object?> Tmdb = new()
+        {
+            ["apiBase"] = "https://api.themoviedb.org/3", ["imageBase"] = "https://image.tmdb.org",
+            ["apiKey"] = "synthetic-key", ["accessToken"] = "synthetic.v4.token",
+            ["language"] = "zh-CN", ["region"] = "CN", ["includeAdult"] = false
+        };
+        private Dictionary<string, object?> douban = new()
+        {
+            ["apiBase"] = "https://m.douban.com", ["searchBase"] = "https://search.douban.com",
+            ["imageBase"] = "https://img3.doubanio.com", ["apiProxy"] = "", ["imageProxy"] = "", ["cookie"] = "synthetic_cookie=initial"
+        };
+        internal JsonElement Preferences = FilmJson.Encode(FilmPreferences.Defaults with { SiteCleanKeywords = ["直播", "预告"] });
+        internal bool FailWrite;
+        internal string? FailDomain;
+        internal Task? HeldInvalidation;
+        internal CancellationToken InvalidationToken;
+        public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var input = FilmJson.Encode(parameters ?? new { }); Calls.Add((method, input));
+            if (method == "film.data.invalidate")
+            {
+                InvalidationToken = cancellationToken;
+                if (FilmJson.Text(input, "domain") == FailDomain) return FilmRuntimeProbe.Failure("STORAGE_ERROR");
+                if (HeldInvalidation is not null) await HeldInvalidation;
+                return FilmRuntimeProbe.Ok(FilmJson.Encode(new { }));
+            }
+            if (method == "film.settings.get") return FilmRuntimeProbe.Ok(Preferences);
+            if (method == "film.settings.set") { Preferences = input.Clone(); return FilmRuntimeProbe.Ok(Preferences); }
+            if (method == "film.library.get") return FilmRuntimeProbe.Ok(FilmJson.Encode(new
+            {
+                manual = new[] { new { id = "manual", targetId = "tmdb:tv:7", title = "管理样例", sourceKey = "source", detailId = 0, enabled = true } },
+                blocks = new[] { new { targetId = "tmdb:tv:7", sourceKey = "source", detailId = 0, lineId = 0 } }
+            }));
+            bool tmdb = method.StartsWith("tmdb.", StringComparison.Ordinal);
+            var values = tmdb ? Tmdb : douban;
+            Check(method.EndsWith(".settings.get", StringComparison.Ordinal) || method.EndsWith(".settings.update", StringComparison.Ordinal),
+                "settings must not fetch data or restart a runtime");
+            if (method.EndsWith(".update", StringComparison.Ordinal))
+            {
+                if (FailWrite) return FilmRuntimeProbe.Failure("STORAGE_ERROR");
+                foreach (var item in input.EnumerateObject()) values[item.Name] = item.Value.Clone();
+            }
+            return FilmRuntimeProbe.Ok(FilmJson.Encode(values));
+        }
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Settings do not upload scripts.");
     }
 
     // Wire receipts test UI/service wiring. Actual rule semantics belong to the shared runtime suite.

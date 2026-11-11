@@ -29,17 +29,11 @@ public final class FilmSettingsViewController: PageViewController {
                 page = FilmCatSourcesViewController(service: model.sources, themeProvider: themeProvider)
             case .videos:
                 page = FilmVideoSourcesViewController(service: model.sources, themeProvider: themeProvider)
-            case .scraping:
-                page = FilmScrapingSettingsViewController(tmdb: model.tmdb, douban: model.douban, themeProvider: themeProvider)
-            default:
+            case .dataSources:
+                page = FilmDataSourceSettingsViewController(tmdb: model.tmdb, douban: model.douban, themeProvider: themeProvider)
+            case .preferences:
                 guard let playback = model.playback else { showError("播放设置暂不可用"); return }
-                switch destination {
-                case .preferences: page = FilmPlaybackPreferencesController(owner: playback, area: .preferences, themeProvider: themeProvider)
-                case .autoPrepare: page = FilmPlaybackPreferencesController(owner: playback, area: .autoPrepare, themeProvider: themeProvider)
-                case .manual: page = FilmPlaybackLibraryController(owner: playback, area: .manual, themeProvider: themeProvider)
-                case .blocks: page = FilmPlaybackLibraryController(owner: playback, area: .blocks, themeProvider: themeProvider)
-                default: return
-                }
+                page = FilmSmartPlaybackSettingsController(owner: playback, themeProvider: themeProvider)
             }
             navigationController?.pushViewController(page, animated: true)
         }
@@ -69,23 +63,20 @@ public final class FilmSettingsViewController: PageViewController {
 }
 
 private enum FilmSettingsDestination: String, CaseIterable {
-    case search, matching, cats, videos, scraping, preferences, autoPrepare, manual, blocks
+    case search, matching, cats, videos, dataSources, preferences
     var title: String {
         switch self {
         case .search: return "搜索净化设置"
         case .matching: return "智能匹配设置"
         case .cats: return "猫源"
         case .videos: return "视频源"
-        case .scraping: return "刮削设置"
-        case .preferences: return "播放偏好"
-        case .autoPrepare: return "自动准备"
-        case .manual: return "人工匹配"
-        case .blocks: return "片源屏蔽"
+        case .dataSources: return "数据源"
+        case .preferences: return "智能播放设置"
         }
     }
     var needsPlayback: Bool {
         switch self {
-        case .preferences, .autoPrepare, .manual, .blocks: return true
+        case .preferences: return true
         default: return false
         }
     }
@@ -138,6 +129,41 @@ final class FilmSmartMatchingViewController: FilmSettingsListController {
                     owner: playback, area: .siteClean, themeProvider: themeProvider), animated: true)
             }))
         sections = [.init(title: "", rows: rows)]
+        render()
+    }
+}
+@MainActor
+final class FilmSmartPlaybackSettingsController: FilmSettingsListController {
+    private let owner: FilmPlaybackSettingsModel
+    init(owner: FilmPlaybackSettingsModel, themeProvider: any PageThemeProviding) {
+        self.owner = owner
+        super.init(themeProvider: themeProvider)
+        pageTitle = "智能播放设置"
+    }
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        sections = [.init(title: "", rows: [
+            .init(title: "偏好设置", id: "film.smartPlayback.preferences", disclosure: true, action: { [weak self] in
+                guard let self else { return }
+                navigationController?.pushViewController(FilmPlaybackPreferencesController(owner: owner, area: .preferences,
+                    themeProvider: themeProvider), animated: true)
+            }),
+            .init(title: "自动准备", id: "film.smartPlayback.autoPrepare", disclosure: true, action: { [weak self] in
+                guard let self else { return }
+                navigationController?.pushViewController(FilmPlaybackPreferencesController(owner: owner, area: .autoPrepare,
+                    themeProvider: themeProvider), animated: true)
+            }),
+            .init(title: "Manual 匹配源管理", id: "film.smartPlayback.manual", disclosure: true, action: { [weak self] in
+                guard let self else { return }
+                navigationController?.pushViewController(FilmPlaybackLibraryController(owner: owner, area: .manual,
+                    themeProvider: themeProvider), animated: true)
+            }),
+            .init(title: "匹配禁用管理", id: "film.smartPlayback.blocks", disclosure: true, action: { [weak self] in
+                guard let self else { return }
+                navigationController?.pushViewController(FilmPlaybackLibraryController(owner: owner, area: .blocks,
+                    themeProvider: themeProvider), animated: true)
+            }),
+        ])]
         render()
     }
 }

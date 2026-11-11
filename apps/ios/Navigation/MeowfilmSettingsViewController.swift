@@ -9,6 +9,7 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
     var openFilm: (() -> Void)?
     var openNovel: (() -> Void)?
     var openPreferences: (() -> Void)?
+    var openCache: (() -> Void)?
     private let resetUserData: (@MainActor () async throws -> Void)?
     private var requestingReset = false
     private let table = UITableView(frame: .zero, style: .insetGrouped)
@@ -33,7 +34,7 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
     }
     override func applyTheme() { super.applyTheme(); if isViewLoaded { table.reloadData() } }
     func numberOfSections(in tableView: UITableView) -> Int { resetUserData == nil ? 2 : 3 }
-    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 0 ? 3 : 1 }
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 0 ? 3 : section == 1 ? 2 : 1 }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         let label: String, identifier: String
@@ -41,7 +42,8 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
         case (0, 0): label = "音乐设置"; identifier = "settings.category.music"
         case (0, 1): label = "影视设置"; identifier = "settings.category.film"
         case (0, _): label = "小说设置"; identifier = "settings.category.novel"
-        case (1, _): label = "偏好设置"; identifier = "settings.preferences"
+        case (1, 0): label = "偏好设置"; identifier = "settings.preferences"
+        case (1, _): label = "缓存管理"; identifier = "settings.cache"
         default: label = requestingReset ? "正在记录清除请求…" : "清空本机数据"; identifier = "settings.clearUserData"
         }
         var content = cell.defaultContentConfiguration()
@@ -66,7 +68,8 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
         case (0, 0): openMusic?()
         case (0, 1): openFilm?()
         case (0, _): openNovel?()
-        case (1, _): openPreferences?()
+        case (1, 0): openPreferences?()
+        case (1, _): openCache?()
         default: confirmUserDataReset()
         }
     }

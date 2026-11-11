@@ -822,7 +822,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(calls.map(\.operation), ["settings.get", "settings.set", "settings.set"])
     }
 
-    func testManualEditorPreservesTypedZeroAndPrivateShareFieldsAndSupportsRemoval() async throws {
+    func testManualEditorPreservesTypedZeroAndPlainShareFieldsAndSupportsRemoval() async throws {
         var item = FilmManualMatch(targetID: "fixture-target", title: "人工线路")
         item.value["id"] = .string("manual-fixture")
         item.value["sourceKey"] = .string("source-key"); item.value["detailId"] = .number(0)
@@ -857,8 +857,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         editor.table.layoutIfNeeded()
         editor.table.scrollToRow(at: IndexPath(row: 4, section: 0), at: .top, animated: false)
         editor.table.layoutIfNeeded()
-        XCTAssertTrue(try XCTUnwrap(view("film.manual.share", editor.view) as? UITextField).isSecureTextEntry)
-        XCTAssertTrue(try XCTUnwrap(view("film.manual.password", editor.view) as? UITextField).isSecureTextEntry)
+        XCTAssertFalse(try XCTUnwrap(view("film.manual.share", editor.view) as? UITextField).isSecureTextEntry)
+        XCTAssertFalse(try XCTUnwrap(view("film.manual.password", editor.view) as? UITextField).isSecureTextEntry)
     }
 
     func testPreferenceUIReordersAllDimensionsAndOnlyRestoresTheSelectedGroup() async throws {
@@ -884,15 +884,14 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await waitFor("preference.panOrder") {
             owner.draft?.panOrder == [.yidong, .quark, .tianyi, .uc, .baidu] && page.presentedViewController == nil
         }
-        try select("film.preferences.keyword.1", page)
-        let keywordMenu = try await presentedAlert(page, title: "H.265", style: .actionSheet, after: panMenu)
-        try await runnerAction { $0.sheets.buttons["排序"].tap() }
-        let keywordOrder = try await presentedAlert(page, title: "H.265", style: .actionSheet, after: keywordMenu)
-        try await waitFor {
-            (page.presentedViewController as? UIAlertController)?.actions.contains { $0.title == "上移" } == true
-        }
-        try await runnerAction { $0.sheets.buttons["上移"].tap() }
-        try await waitFor { owner.draft?.keywords == ["H.265", "DDP"] && page.presentedViewController == nil }
+        _ = try await visibleCell("film.preferences.keywords.row", page)
+        let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? UITextField)
+        XCTAssertTrue(keywords.becomeFirstResponder())
+        keywords.text = " H.265,，DDP, "
+        keywords.sendActions(for: .editingChanged)
+        await settle()
+        XCTAssertTrue(keywords.isFirstResponder, "Typing must not rebuild the row and lose the keyboard")
+        XCTAssertEqual(owner.draft?.keywords, ["H.265", "DDP"])
         try select("film.preferences.restore.panOrder", page)
         await settle()
         XCTAssertEqual(owner.draft?.panOrder, FilmPlaybackPreferences.defaults.panOrder)
@@ -905,7 +904,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let writes = await store.calls().filter { $0.operation == "settings.set" }
         XCTAssertEqual(writes.count, 1)
         XCTAssertEqual(writes[0].input, owner.draft?.value)
-        _ = try await presentedAlert(page, title: "已保存", style: .alert, after: keywordOrder)
+        _ = try await presentedAlert(page, title: "已保存", style: .alert, after: panMenu)
     }
 
     func testSiteCleanUICanRemoveAddSaveAndRestoreKeywordsWithoutChangingPlaybackOrder() async throws {
@@ -918,23 +917,19 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(page)
         try await waitFor { owner.draft != nil && !owner.busy }
         await settle()
-        try select("film.preferences.keyword.0", page)
-        let deletion = try await presentedAlert(page, title: "直播", style: .actionSheet)
-        try await runnerAction { $0.sheets.buttons["删除"].tap() }
-        try await waitFor("siteClean.firstDelete") {
-            owner.draft?.siteCleanKeywords.contains("直播") == false && page.presentedViewController == nil
-        }
-        _ = try await visibleCell("film.preferences.keywords.add", page)
-        try select("film.preferences.keywords.add", page)
-        let alert = try await presentedAlert(page, title: "添加关键词", style: .alert, textFields: 1, after: deletion)
-        let keyword = try XCTUnwrap(alert.textFields?.first)
-        keyword.text = "预告"
-        try await runnerAction { $0.alerts.buttons["确定"].tap() }
-        try await waitFor { owner.draft?.siteCleanKeywords.last == "预告" && page.presentedViewController == nil }
+        _ = try await visibleCell("film.preferences.keywords.row", page)
+        let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? UITextField)
+        XCTAssertTrue(keywords.becomeFirstResponder())
+        keywords.text = " 广告,，预告, "
+        keywords.sendActions(for: .editingChanged)
+        await settle()
+        XCTAssertTrue(keywords.isFirstResponder)
+        XCTAssertEqual(owner.draft?.siteCleanKeywords, ["广告", "预告"])
+        XCTAssertFalse(owner.draft?.siteCleanKeywords.contains("直播") == true)
         let draft = try XCTUnwrap(owner.draft)
         try headerSave(page).sendActions(for: .touchUpInside)
         try await waitFor { owner.preferences == draft && !owner.busy }
-        _ = try await presentedAlert(page, title: "已保存", style: .alert, after: alert)
+        _ = try await presentedAlert(page, title: "已保存", style: .alert)
         try await runnerAction { $0.alerts.buttons["确定"].tap() }
         try await waitFor("The saved notice was acknowledged through its UI action") {
             page.presentedViewController == nil && page.canPresentPageAlert
@@ -947,16 +942,19 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(owner.preferences, draft, "Restoring the draft alone must not save")
     }
 
-    func testHistoryAndBlocksRequireConfirmationAndUseExactOrBulkRemovalReceipts() async throws {
+    func testBlocksRequireConfirmationAndUseExactOrBulkReceiptsWithoutChangingHistory() async throws {
         let history: RuntimeValue = .object(["targetId": .string("history-target"), "title": .string("观看记录"),
             "position": .number(95), "duration": .number(600), "updatedAt": .number(1_700_000_000_000)])
         let block: RuntimeValue = .object(["targetId": .string("blocked-target"), "sourceKey": .string("source-key"),
             "detailId": .number(0), "lineId": .number(0)])
-        let store = FilmUIKitPlaybackSettingsStore(history: [history], blocks: [block])
+        let otherBlock: RuntimeValue = .object(["targetId": .string("other-target"), "sourceKey": .string("source-key"),
+            "detailId": .number(1), "lineId": .number(0)])
+        let store = FilmUIKitPlaybackSettingsStore(history: [history], blocks: [block, otherBlock])
         let owner = FilmPlaybackSettingsModel(transport: store.transport)
         let blocks = FilmPlaybackLibraryController(owner: owner, area: .blocks,
                                                    themeProvider: FilmPlaybackUIKitTheme())
         let blockWindow = try mount(blocks)
+        defer { unmount(blocks, blockWindow) }
         try await visible(blocks)
         try await waitFor { owner.library != nil && !owner.busy }
         try select("film.blocks.0", blocks)
@@ -965,27 +963,44 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(writes.isEmpty)
         blocks.selectAlertChoice("取消")
         try await waitFor { blocks.presentedViewController == nil && blocks.canPresentPageAlert }
-        XCTAssertEqual(owner.library?.blocks.count, 1)
+        XCTAssertEqual(owner.library?.blocks.count, 2)
         try select("film.blocks.0", blocks)
         try await waitFor { blocks.presentedViewController is UIAlertController }
         blocks.selectAlertChoice("确认")
-        try await waitFor { owner.library?.blocks.isEmpty == true && !owner.busy }
+        try await waitFor { owner.library?.blocks.count == 1 && !owner.busy }
         writes = await store.calls().filter { $0.operation == "library.remove" }
         XCTAssertEqual(writes.first?.input.filmObject?["block"], block)
-        unmount(blocks, blockWindow)
-        let page = FilmPlaybackLibraryController(owner: owner, area: .history,
-                                                 themeProvider: FilmPlaybackUIKitTheme())
-        let window = try mount(page)
-        defer { unmount(page, window) }
-        try await visible(page)
+        let page = blocks
         try await waitFor { page.sections.first?.rows.contains { $0.id == "film.playback-library.clear" } == true && !owner.busy }
         try select("film.playback-library.clear", page)
         try await waitFor { page.presentedViewController is UIAlertController }
         page.selectAlertChoice("确认")
-        try await waitFor { owner.library?.history.isEmpty == true && !owner.busy }
+        try await waitFor { owner.library?.blocks.isEmpty == true && !owner.busy }
         writes = await store.calls().filter { $0.operation == "library.remove" }
-        XCTAssertEqual(writes.last?.input, .object(["kind": .string("history")]))
+        XCTAssertEqual(writes.last?.input, .object(["kind": .string("blocks")]))
+        XCTAssertEqual(owner.library?.history.count, 1, "Settings do not remove playback history")
         XCTAssertEqual(page.sections.first?.rows.map(\.title), ["暂无记录"])
+    }
+
+    func testMetadataCacheRowsSendOnlyTheChosenInvalidations() async throws {
+        let store = FilmUIKitPlaybackSettingsStore()
+        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let page = FilmMetadataCacheSettingsViewController(owner: owner, themeProvider: FilmPlaybackUIKitTheme())
+        let window = try mount(page)
+        defer { unmount(page, window) }
+        try await visible(page)
+        let form = try XCTUnwrap(page.children.compactMap { $0 as? FilmMetadataCacheFormController }.first)
+        XCTAssertEqual(page.pageTitle, "缓存管理")
+        for (scope, expected) in [("douban", ["douban"]), ("tmdb", ["tmdb"]), ("both", ["douban", "tmdb"])] {
+            let before = await store.calls().count
+            try select("settings.cache." + scope, form)
+            _ = try await presentedAlert(form, title: "缓存已清空", style: .alert)
+            let calls = await store.calls().dropFirst(before)
+            XCTAssertEqual(calls.map(\.operation), Array(repeating: "data.invalidate", count: expected.count))
+            XCTAssertEqual(Set(calls.compactMap { $0.input.filmObject?["domain"]?.filmText }), Set(expected))
+            try await runnerAction { $0.alerts.buttons["确定"].tap() }
+            try await waitFor { form.presentedViewController == nil && form.canPresentPageAlert }
+        }
     }
 
     private func blockSnapshot(_ id: String, current: Bool, sequence: Int = 1) throws -> RuntimeValue {

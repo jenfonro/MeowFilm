@@ -38,6 +38,5 @@ internal sealed class FilmPlaybackSettings(IRuntimeClient runtime)
     internal Task<JsonElement> ReadLibraryAsync(CancellationToken token) => client.CallAsync("library.get", new { }, token);
     internal Task<JsonElement> SaveManualAsync(JsonElement item) => client.CallAsync("manual.update", new { action = "save", item });
     internal Task<JsonElement> RemoveManualAsync(string id) => client.CallAsync("manual.update", new { action = "remove", id });
-    internal Task<JsonElement> RemoveHistoryAsync(string? id) => client.CallAsync("library.remove", new { kind = "history", id });
     internal Task<JsonElement> RemoveBlockAsync(JsonElement? block) => client.CallAsync("library.remove", new { kind = "blocks", block });
 }

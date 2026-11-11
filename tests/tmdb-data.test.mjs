@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { requestTMDB, tmdbImageTarget } from '../apps/runtime/modules/metadata/tmdb.mjs';
 
 const defaults = Object.freeze({
-  apiBase: 'https://api.themoviedb.org',
+  apiBase: 'https://api.themoviedb.org/3',
   imageBase: 'https://image.tmdb.org/t/p',
   apiKey: '',
   accessToken: '',
@@ -45,10 +45,11 @@ test('TMDB preserves API prefixes, query scalars and the direct business respons
   for (const [apiBase, expected] of [
     [defaults.apiBase, 'https://api.themoviedb.org/3/search/multi'],
     ['https://api-proxy.invalid/', 'https://api-proxy.invalid/3/search/multi'],
-    ['https://api-proxy.invalid/tmdb', 'https://api-proxy.invalid/tmdb/3/search/multi'],
-    ['https://api-proxy.invalid/prefix/tmdb///', 'https://api-proxy.invalid/prefix/tmdb/3/search/multi'],
-    ['http://127.0.0.1:3456/tmdb', 'http://127.0.0.1:3456/tmdb/3/search/multi'],
-    ['http://fixture-user:fixture-password@192.168.1.25/tmdb', 'http://192.168.1.25/tmdb/3/search/multi'],
+    ['https://api-proxy.invalid/tmdb', 'https://api-proxy.invalid/tmdb/search/multi'],
+    ['https://api-proxy.invalid/prefix/tmdb///', 'https://api-proxy.invalid/prefix/tmdb/search/multi'],
+    ['https://api-proxy.invalid/pan/tmdb/3', 'https://api-proxy.invalid/pan/tmdb/3/search/multi'],
+    ['http://127.0.0.1:3456/tmdb', 'http://127.0.0.1:3456/tmdb/search/multi'],
+    ['http://fixture-user:fixture-password@192.168.1.25/tmdb', 'http://192.168.1.25/tmdb/search/multi'],
   ]) {
     const { context, calls } = fixture(value, { ...defaults, apiBase });
     assert.deepEqual(await requestTMDB({
@@ -58,7 +59,7 @@ test('TMDB preserves API prefixes, query scalars and the direct business respons
     const url = new URL(calls[0].url);
     assert.equal(`${url.origin}${url.pathname}`, expected);
     assert.deepEqual(Object.fromEntries(url.searchParams), {
-      query: '电影 & api_key=untrusted/#?', language: 'zh-CN', page: '4', include_adult: 'false',
+      query: '电影 & api_key=untrusted/#?', language: 'zh-CN', region: 'CN', page: '4', include_adult: 'false',
     });
     assert.equal(calls[0].method, 'GET');
     assert.equal(calls[0].body, undefined);
@@ -73,6 +74,12 @@ test('TMDB preserves API prefixes, query scalars and the direct business respons
 test('TMDB uses a bearer token in preference to an API key and never sends both', async () => {
   for (const [credentials, expectedHeaders, expectedKey] of [
     [{ apiKey: 'fixture-key', accessToken: '' }, { Accept: 'application/json' }, 'fixture-key'],
+    [{ apiKey: 'fixture.jwt.token', accessToken: '' },
+      { Accept: 'application/json', Authorization: 'Bearer fixture.jwt.token' }, null],
+    [{ apiKey: 'Bearer fixture.jwt.token', accessToken: '' },
+      { Accept: 'application/json', Authorization: 'Bearer fixture.jwt.token' }, null],
+    [{ apiKey: 'Bearer fixture-token', accessToken: '' },
+      { Accept: 'application/json', Authorization: 'Bearer fixture-token' }, null],
     [{ apiKey: '', accessToken: 'fixture-token' },
       { Accept: 'application/json', Authorization: 'Bearer fixture-token' }, null],
     [{ apiKey: 'fixture-unused-key', accessToken: 'fixture-token' },
@@ -111,7 +118,7 @@ test('TMDB discover and append parameters preserve source syntax without a resou
     query: { 'vote_average.gte': 7.5, with_genres: '18,35', sort_by: 'popularity.desc', include_video: true },
   }, context);
   assert.deepEqual(Object.fromEntries(new URL(calls[0].url).searchParams), {
-    'vote_average.gte': '7.5', with_genres: '18,35', sort_by: 'popularity.desc', include_video: 'true',
+    language: 'zh-CN', region: 'CN', include_adult: 'false', 'vote_average.gte': '7.5', with_genres: '18,35', sort_by: 'popularity.desc', include_video: 'true',
   });
   await requestTMDB({ path: '/3/movie/42',
     query: { append_to_response: 'credits,images,external_ids,watch/providers' },
@@ -202,7 +209,12 @@ test('TMDB GET paths do not require a registered resource or normalized source I
     '/3/movie/42/../43', '/3/movie/%34%32', '/3/movie/42%2fimages', '/3//movie/42', '/3/movie/42;images',
   ]) {
     assert.deepEqual(await requestTMDB({ path }, context), { id: 42 });
-    assert.equal(calls.at(-1).url, new URL(path, defaults.apiBase).href);
+    const expected = new URL(path, defaults.apiBase);
+    expected.searchParams.set('language', 'zh-CN');
+    if (path.startsWith('/3/search/')) {
+      expected.searchParams.set('region', 'CN'); expected.searchParams.set('include_adult', 'false');
+    }
+    assert.equal(calls.at(-1).url, expected.href);
     assert.equal(calls.at(-1).method, 'GET');
   }
 });
@@ -298,7 +310,7 @@ test('TMDB configuration rewrites both image bases, retains sizes and leaves exp
     images: { ...value.images, base_url: '/v1/tmdb/images/', secure_base_url: '/v1/tmdb/images/' },
   });
   assert.equal(tmdbImageTarget('/v1/tmdb/images/w500/fixture.jpg', settings).url,
-    'https://images-proxy.invalid/images/w500/fixture.jpg');
+    'https://images-proxy.invalid/images/t/p/w500/fixture.jpg');
   assert.equal(settings.imageBase, 'https://images-proxy.invalid/images');
 });
 
@@ -325,7 +337,7 @@ test('TMDB image identity survives independent API and image proxy changes witho
     url: 'https://images-a.invalid/t/p/original/fixture.jpg', headers: { Accept: 'image/*' },
   });
   assert.deepEqual(tmdbImageTarget(one.poster_path, second), {
-    url: 'https://images-b.invalid/assets/original/fixture.jpg', headers: { Accept: 'image/*' },
+    url: 'https://images-b.invalid/assets/t/p/original/fixture.jpg', headers: { Accept: 'image/*' },
   });
   assert.notEqual(tmdbImageTarget('/v1/tmdb/images/w500/fixture.jpg', first).url,
     tmdbImageTarget(one.poster_path, first).url);
@@ -472,4 +484,20 @@ test('TMDB passes cancellation to the request owner and waits for settlement bef
   assert.equal(settled, false);
   finish({ status: 200, headers: {}, body: Buffer.from('{"id":42}'), url: 'https://proxy.invalid' });
   await checked;
+});
+test('TMDB configured language, region and adult search defaults allow explicit query overrides', async () => {
+  const { context, calls } = fixture({ results: [] }, { ...defaults, language: 'en-US', region: 'US', includeAdult: true });
+  await requestTMDB({ path: '/3/search/multi', query: { query: 'film' } }, context);
+  assert.deepEqual(Object.fromEntries(new URL(calls[0].url).searchParams), {
+    query: 'film', language: 'en-US', region: 'US', include_adult: 'true',
+  });
+  await requestTMDB({ path: '/3/search/movie', query: { query: 'film', language: 'ja-JP', region: 'JP', include_adult: false } }, context);
+  assert.deepEqual(Object.fromEntries(new URL(calls[1].url).searchParams), {
+    query: 'film', language: 'ja-JP', region: 'JP', include_adult: 'false',
+  });
+  await requestTMDB({ path: '/3/movie/1' }, context);
+  assert.deepEqual(Object.fromEntries(new URL(calls[2].url).searchParams), { language: 'en-US' });
+  assert.equal(tmdbImageTarget('/v1/tmdb/images/original/poster.jpg', {
+    ...defaults, imageBase: 'https://proxy.invalid/pan/tmdb-img',
+  }).url, 'https://proxy.invalid/pan/tmdb-img/t/p/original/poster.jpg');
 });

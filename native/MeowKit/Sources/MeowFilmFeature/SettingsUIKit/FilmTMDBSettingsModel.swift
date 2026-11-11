@@ -7,10 +7,8 @@ import MeowRuntime
 public final class FilmTMDBSettingsModel: ObservableObject {
     @Published public private(set) var saved: FilmTMDBSettings?
     @Published public private(set) var busy = false
-    public var apiBase = "", imageBase = ""
-    public var apiKey = "" { didSet { if !apiKey.isEmpty { clearAPIKey = false } } }
-    public var accessToken = "" { didSet { if !accessToken.isEmpty { clearAccessToken = false } } }
-    public private(set) var clearAPIKey = false, clearAccessToken = false
+    public var apiBase = "", imageBase = "", apiToken = "", language = "", region = ""
+    public var includeAdult = false
     private let service: FilmTMDBService
     private let didSave: @MainActor () -> Void
     public init(service: FilmTMDBService, didSave: @escaping @MainActor () -> Void) {
@@ -19,26 +17,25 @@ public final class FilmTMDBSettingsModel: ObservableObject {
     public func load() async throws {
         guard saved == nil, !busy else { return }
         busy = true; defer { busy = false }
-        let value = try await service.settings()
-        apiBase = value.apiBase; imageBase = value.imageBase
-        saved = value
+        apply(try await service.settings())
     }
-    public func clearKey() { apiKey = ""; clearAPIKey = true; objectWillChange.send() }
-    public func clearToken() { accessToken = ""; clearAccessToken = true; objectWillChange.send() }
     public func save() async throws {
         guard !busy, saved != nil else { return }
         busy = true; defer { busy = false }
-        var patch: RuntimeObject = ["apiBase": .string(apiBase), "imageBase": .string(imageBase)]
-        // Blank password fields mean preserve. Only an explicit clear submits "".
-        if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { patch["apiKey"] = .string(apiKey) }
-        else if clearAPIKey { patch["apiKey"] = .string("") }
-        if !accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { patch["accessToken"] = .string(accessToken) }
-        else if clearAccessToken { patch["accessToken"] = .string("") }
-        let value = try await service.updateSettings(patch)
-        apiBase = value.apiBase; imageBase = value.imageBase
-        apiKey = ""; accessToken = ""; clearAPIKey = false; clearAccessToken = false
-        saved = value
+        let patch: RuntimeObject = [
+            "apiBase": .string(apiBase.trimmingCharacters(in: .whitespacesAndNewlines)),
+            "imageBase": .string(imageBase.trimmingCharacters(in: .whitespacesAndNewlines)),
+            "apiKey": .string(apiToken), "accessToken": .string(""),
+            "language": .string(language), "region": .string(region), "includeAdult": .bool(includeAdult),
+        ]
+        apply(try await service.updateSettings(patch))
         didSave()
+    }
+    private func apply(_ value: FilmTMDBSettings) {
+        apiBase = value.apiBase == "https://api.themoviedb.org/3" ? "" : value.apiBase
+        imageBase = value.imageBase == "https://image.tmdb.org" ? "" : value.imageBase
+        apiToken = value.apiToken; language = value.language; region = value.region; includeAdult = value.includeAdult
+        saved = value
     }
 }
 #endif

@@ -86,14 +86,14 @@ final class FilmSearchUIKitTests: XCTestCase {
         await session.drain()
         await waitFor { selected.sources.count == 2 && more.isHidden }
         XCTAssertEqual(selected.sources.count, 2, "An in-flight detail consumer keeps the same session after more")
-        let modes = try XCTUnwrap(find("film.search.mode", in: content.view) as? UISegmentedControl)
-        modes.selectedSegmentIndex = 1; modes.sendActions(for: .valueChanged)
+        let modes = try XCTUnwrap(find("film.search.mode", in: content.view) as? UISwitch)
+        modes.isOn = true; modes.sendActions(for: .valueChanged)
         await waitFor { grid.numberOfItems(inSection: 0) == 2 }
         XCTAssertEqual(grid.numberOfItems(inSection: 0), 2)
         content.collectionView(grid, didSelectItemAt: IndexPath(item: 1, section: 0))
         XCTAssertEqual(context?.sources.first?.catField("siteDetail"), .string("e\u{301}"),
                        "Raw selection preserves exact protocol identity, including canonically equivalent IDs")
-        modes.selectedSegmentIndex = 0; modes.sendActions(for: .valueChanged)
+        modes.isOn = false; modes.sendActions(for: .valueChanged)
         await waitFor { grid.numberOfItems(inSection: 0) == 1 }
         XCTAssertEqual(grid.numberOfItems(inSection: 0), 1)
         content.submit("原查询")
@@ -120,8 +120,8 @@ final class FilmSearchUIKitTests: XCTestCase {
         content.loadViewIfNeeded(); content.submit("原查询")
         let session = try XCTUnwrap(content.session)
         await session.drain()
-        let modes = try XCTUnwrap(find("film.search.mode", in: content.view) as? UISegmentedControl)
-        modes.selectedSegmentIndex = 1; modes.sendActions(for: .valueChanged)
+        let modes = try XCTUnwrap(find("film.search.mode", in: content.view) as? UISwitch)
+        modes.isOn = true; modes.sendActions(for: .valueChanged)
         let grid = try XCTUnwrap(find("film.search.grid", in: content.view) as? UICollectionView)
         await waitFor { grid.numberOfItems(inSection: 0) == 2 }
         let library = FilmLibrary(defaults: defaults)
