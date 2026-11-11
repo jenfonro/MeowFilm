@@ -30,6 +30,7 @@ public static class SystemMediaTests
         yield return new("system-media.command-failure-is-sanitized", () => Sta(Failure));
         yield return new("system-media.suspend-detaches-and-disables", () => Sta(Suspend));
         yield return new("system-media.dispose-drains-inflight-once", () => Sta(Drain));
+        yield return new("system-media.dispose-timeout-retry-observes-actual-drain", () => Sta(DrainRetry));
         yield return new("system-media.pending-commands-bounded", () => Sta(Bounded));
         yield return new("system-media.real-hwnd-activation-and-release", () => Sta(RealBackend));
     }
@@ -308,6 +309,39 @@ public static class SystemMediaTests
         for (int i = 0; i < 100; i++) backend.Request(SystemPlaybackCommand.Play);
         await Pump();
         Check(player.Calls.Count == 16);
+    }
+    private static async Task DrainRetry()
+    {
+        var player = new Player(); var backend = new Backend();
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new SystemMediaSession(player, backend,
+            [new("audio", _ => { entered.TrySetResult(); return blocked.Task; })]);
+        try
+        {
+            backend.Request(SystemPlaybackCommand.Next);
+            await entered.Task;
+            try
+            {
+                await session.DisposeAsync();
+                throw new InvalidOperationException("Expected drain timeout");
+            }
+            catch (InvalidOperationException error) when (error.Message == "SYSTEM_MEDIA_DRAIN_FAILED") { }
+            Check(!blocked.Task.IsCompleted && backend.Disposals == 1 &&
+                session.LastErrorCode == "SYSTEM_MEDIA_DRAIN_FAILED");
+            var retry = session.DisposeAsync().AsTask();
+            Check(!retry.IsCompleted && backend.Disposals == 1 &&
+                ReferenceEquals(retry, session.DisposeAsync().AsTask()));
+            session.SetEnabled(true);
+            backend.Request(SystemPlaybackCommand.Play);
+            await Pump();
+            Check(!backend.Enabled && player.Calls.Count == 0);
+            blocked.TrySetException(new InvalidOperationException("synthetic-command-failure"));
+            await retry;
+            await session.DisposeAsync();
+            Check(backend.Disposals == 1);
+        }
+        finally { blocked.TrySetResult(); await session.DisposeAsync(); }
     }
     private static Task RealBackend()
     {

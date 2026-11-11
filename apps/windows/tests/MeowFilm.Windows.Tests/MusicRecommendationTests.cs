@@ -135,6 +135,7 @@ public static partial class MusicRecommendationTests
         yield return new("Recommendation return while seed remains current never restarts media", ReturnSeed);
         yield return new("Recommendation asynchronous selection pause invalidates autoplay admission", LateSelection);
         yield return new("Recommendation pending commit blocks close until explicit reconciliation", UnknownClose);
+        yield return new("Recommendation unknown settled receipt fails ordinary close but permits explicit abort", UnknownAbort);
         yield return new("Recommendation replacement lost ACK remains addressable without an invented similar checkpoint", ReplacementUnknown);
         yield return new("Recommendation FM mode switch keeps live session and prior batch provenance", FmLineage);
         yield return new("Recommendation failed FM mode switch retains committed mode", FmSwitchFailure);
@@ -1227,6 +1228,21 @@ public static partial class MusicRecommendationTests
         var resolved = await f.Rec.ExecuteAsync("music.recommendations.reconcile", new { id = S(start, "id") });
         Check(!resolved.GetProperty("requiresReconcile").GetBoolean());
         await f.Rec.PrepareCloseAsync(); f.Rec.Resume();
+    }
+    private static async Task UnknownAbort()
+    {
+        await using var f = new Fixture(); f.Store.Failure = 2;
+        var state = await f.Start("fm");
+        Check(state.GetProperty("requiresReconcile").GetBoolean());
+        foreach (var close in new Func<Task>[] { () => f.Rec.PrepareCloseAsync(), () => f.Rec.DisposeAsync().AsTask() })
+        {
+            try { await close(); throw new InvalidOperationException("Unknown receipt accepted by ordinary close"); }
+            catch (RecommendationException error) { Check(error.Code == "COMMIT_UNKNOWN"); }
+        }
+        await f.Rec.AbortAsync();
+        await f.Rec.AbortAsync();
+        var rejected = await f.Start("fm");
+        Check(!rejected.GetProperty("ok").GetBoolean() && S(rejected, "code") == "CLOSED");
     }
     private static async Task ReplacementUnknown()
     {

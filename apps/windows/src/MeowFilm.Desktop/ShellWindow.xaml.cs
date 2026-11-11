@@ -58,15 +58,15 @@ public sealed partial class ShellWindow : Window
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
-        IDesktopMediaControlSettings? mediaControls = null)
+        IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
         : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance,
-            closePreferences, mediaControls: mediaControls) { }
+            closePreferences, mediaControls: mediaControls, resetUserData: resetUserData) { }
 
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
         Func<Window, Action, Action, Action, IDesktopTrayIcon>? trayIconFactory = null,
-        IDesktopMediaControlSettings? mediaControls = null)
+        IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
         _timeProvider = timeProvider;
@@ -88,6 +88,7 @@ public sealed partial class ShellWindow : Window
         _forceShutdown = forceShutdown;
         _cancelShutdown = cancelShutdown;
         _shutdown = shutdown;
+        _resetUserData = resetUserData;
         MediaControls = mediaControls;
         _closePreferences = closePreferences;
         _trayIconFactory = trayIconFactory;
@@ -95,6 +96,9 @@ public sealed partial class ShellWindow : Window
         InitializeGeneralSettings(appearance, closePreferences);
         CloseDialog.ChoiceRequested += OnCloseChoiceRequested;
         CloseDialog.CancelRequested += CancelCloseChoice;
+        ResetDialog.ConfirmRequested += OnUserDataResetConfirmed;
+        ResetDialog.CancelRequested += CancelUserDataReset;
+        ResetDialog.ExitRequested += OnUserDataResetExit;
         AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
         {
             Notices.Show(e.Outlet, e.Message);
@@ -617,7 +621,7 @@ public sealed partial class ShellWindow : Window
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (CloseDialog.IsOpen) return; // The close dialog owns keyboard navigation and Escape.
+        if (CloseDialog.IsOpen || ResetDialog.IsOpen) return; // The active dialog owns keyboard navigation and Escape.
         if (_isClosing) return;
         // Let a native range editor cancel its own gesture before Escape closes
         // the full player. The shell must not depend on a music-specific type.
@@ -898,7 +902,7 @@ public sealed partial class ShellWindow : Window
         base.OnClosing(e);
         if (_allowClose || _sessionEnding || e.Cancel) return;
         e.Cancel = true;
-        if (_isClosing) return;
+        if (_isClosing || ResetDialog.IsOpen) return;
         if (_closePreferences is not null)
         {
             QueueCloseChoice();
@@ -909,7 +913,11 @@ public sealed partial class ShellWindow : Window
 
     private void BeginShutdown()
     {
-        if (_isClosing || _isClosed) return;
+        if (_isClosed || (_isClosing && !(_userDataResetStarted && _sessionEnding)) ||
+            (ResetDialog.IsOpen && !_sessionEnding)) return;
+        // OS session ending retains its existing best-effort shutdown path.
+        // Ordinary close/tray exit cannot compete with a confirmed reset.
+        if (_sessionEnding) ResetDialog.Visibility = Visibility.Collapsed;
         DismissCloseChoice(restoreFocus: false);
         _isClosing = true;
         _state.IsInteractive = false;
@@ -1054,8 +1062,10 @@ public sealed partial class ShellWindow : Window
         DisposeGlobalSurfaces();
         _nativeCaption?.Dispose();
         _nativeCaption = null;
-        // Covers forced closure as well; it shares the once-only attempt used by normal Closing.
-        _ = EnsureShutdownAsync();
+        // A confirmed reset is already released by the App's abort/replacement path.
+        // Only ordinary/OS closure shares the once-only normal shutdown attempt.
+        if (!_userDataResetStarted || _sessionEnding) _ = EnsureShutdownAsync();
+        else _shutdownCompletion.TrySetResult();
         base.OnClosed(e);
     }
 }

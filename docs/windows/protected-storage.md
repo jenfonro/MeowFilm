@@ -59,3 +59,14 @@ The readable names identify ordinary data and collections. Namespace/collection 
 ## Current format
 
 Only the current data and wire formats are supported. Existing account/device-session DPAPI files retain their directory and envelope identities. Ordinary documents and v2 source collections use the new plaintext layout; old encrypted ordinary documents and v1 source chunks are not migrated, used as a fallback, or automatically deleted. This is a development format boundary, not a completed data migration. Corrupt/unsupported sensitive documents and inaccessible/unsafe target files are errors, not empty initial state. Cancellation cannot undo an acknowledged atomic commit.
+
+
+## Clear all local user data
+
+The Windows general settings reset deletes the whole application-owned `%LOCALAPPDATA%/meowfilm/aggregate` root, not a list of readable documents. It includes native music/film documents, DPAPI account and device-context files, preferences, granted-file records, `music-playback-cache`, and all `script-runtime` sources, private volumes, account/settings files and caches. Unknown files, interrupted stages and corrupt documents are removed without first decoding or decrypting them. Current Windows composition has no separate WebView2 profile; it does not clear external browser state or Windows DPAPI master keys.
+
+AppHost first records a durable pending request outside the data root, revokes input and releases the old generation's runtime, modules, playback, window attachments, artwork and store. Only an actual successful drain allows deletion. A failure or timeout keeps the old generation unavailable and offers explicit retry/exit; the pending request also gates a later process startup before any business owner is created. Once deletion succeeds, the request is removed and the entire App generation is rebuilt in the same process. New data is not deleted again by a completed request.
+
+`UserDataDirectory` owns a shared usage lease during normal operation and an exclusive lease for reset. Multiple ordinary instances remain allowed; a reset cannot run while another instance uses the same root. Directory deletion additionally checks and excludes existing document-root handles before deleting any child. Pinned, non-reparse ancestors define the boundary; root/nested reparse entries are removed as entries, never traversed to their targets. Missing data is already clean, while access, ownership or sharing failures are not success.
+
+The operation does not invoke cloud logout/deletion, parse granted paths to delete external files, remove the installation/runtime payload, other product data roots or developer caches. User-selected media, source scripts, lyrics and exported images outside this root are preserved. This is filesystem deletion, not a secure-erasure guarantee for the storage device or its backups.

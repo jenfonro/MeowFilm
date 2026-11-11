@@ -23,6 +23,7 @@ public static class AppMediaWindowAttachmentTests
         yield return Case("composition waits for accepted shortcut actions before releasing system media", Drain);
         yield return Case("native release error is retried by host force cleanup", RetryRelease);
         yield return Case("retry retains only resources whose release failed", RetryRemaining);
+        yield return Case("late system command completion allows retry after drain timeout", SystemDrainRetry);
         yield return Case("partial startup ownership is released once", PartialStartup);
         yield return Case("real settings save busy and failure preserve the active registration", SaveNotifications);
         yield return Case("shell asks and hides without stopping; shared save wait seals all commands and cancellation restores", ShellClosePreparation);
@@ -223,6 +224,38 @@ public static class AppMediaWindowAttachmentTests
         await owner.DisposeAsync(); await owner.DisposeAsync();
         keys.Settings.SetAvailable(false); keys.Settings.SetAvailable(true);
         Check(resource.Attempts == 1 && enabled.SequenceEqual([true, false]), "partial startup releases its owned attachment and subscription once");
+    }
+
+    private static async Task SystemDrainRetry()
+    {
+        await using var keys = new ShortcutFixture(ShortcutFixture.Preferences(global: false));
+        await using var owner = new AppMediaWindowAttachment(keys.Window, keys.Settings);
+        var backend = new Backend();
+        var player = new Player();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new SystemMediaSession(player, backend,
+            [new("audio", _ => { entered.TrySetResult(); return finish.Task; })], keys.Window.Dispatcher);
+        var attachment = new SystemMediaWindowAttachment(keys.Window, session);
+        owner.OwnSystemMedia(attachment, attachment.SetEnabled);
+        var shortcuts = new Resource();
+        owner.OwnShortcuts(shortcuts);
+        try
+        {
+            backend.Request(SystemPlaybackCommand.Next);
+            await entered.Task;
+            await Fails(owner.DisposeAsync().AsTask(), "SYSTEM_MEDIA_DRAIN_FAILED");
+            Check(backend.Disposals == 1 && shortcuts.Attempts == 1 && !finish.Task.IsCompleted,
+                "timeout reports failure while the real command still owns playback");
+            keys.Settings.SetAvailable(false); keys.Settings.SetAvailable(true);
+            Check(!backend.Enabled, "settings cannot reopen a timed-out attachment");
+            finish.TrySetResult();
+            await Pump();
+            await owner.DisposeAsync(); await owner.DisposeAsync();
+            Check(backend.Disposals == 1 && shortcuts.Attempts == 1,
+                "late completion permits host retry without repeating released resources");
+        }
+        finally { finish.TrySetResult(); await owner.DisposeAsync(); }
     }
 
     private static async Task SaveNotifications()

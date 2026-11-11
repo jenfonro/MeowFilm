@@ -106,4 +106,5 @@ music.catalog.playlist.commit action=play|next
 2. `PrepareRecommendationsAsync` 取消并排空启动读取、推荐 flight、通知和媒体 callback。
 3. application 再排空其他业务，最后准备 library owner。
 4. 取消关闭创建新 recommendation generation，不恢复旧 session 或旧 callback。
-5. 最终释放时先 dispose 协调器，再释放它借用的 catalog 和 library。
+5. 普通 Prepare／Dispose 仍要求未知提交得到核对，未核对时报告 `COMMIT_UNKNOWN`。
+6. application 最终释放时先调用协调器 `AbortAsync`，等待实际启动读取、flight、写入、通知和媒体 callback 排空，再释放它借用的 catalog 和 library。显式丢弃不因已结束但回执未知的提交受阻，也不重放写入或把未知回执视为回滚；普通 application Dispose 仍保留准备阶段的保存失败。

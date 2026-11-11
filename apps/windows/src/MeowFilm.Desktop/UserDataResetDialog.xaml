@@ -1,0 +1,42 @@
+<UserControl x:Class="MeowFilm.Desktop.UserDataResetDialog" x:ClassModifier="internal"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Desktop"
+ UseLayoutRounding="True" SnapsToDevicePixels="True"
+ KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.ControlTabNavigation="Cycle"
+ PreviewKeyDown="OnPreviewKeyDown" AutomationProperties.Name="清除全部数据">
+ <UserControl.Style>
+  <Style TargetType="UserControl">
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+   <Style.Triggers><Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </Trigger></Style.Triggers>
+  </Style>
+ </UserControl.Style>
+ <Grid Background="Transparent">
+  <Border x:Name="DialogSurface" Style="{DynamicResource MeowFilm.FloatingSurface}" MaxWidth="440"
+          Margin="24" Padding="20" VerticalAlignment="Center" Focusable="True">
+   <StackPanel>
+    <DockPanel Margin="0,0,0,16">
+     <Button x:Name="DismissButton" DockPanel.Dock="Right" Style="{DynamicResource MeowFilm.IconButton}"
+             Content="&#xE711;" Width="30" Height="30" MinHeight="30" Margin="8,0,0,0"
+             Click="OnCancelClick" AutomationProperties.Name="取消清除"/>
+     <TextBlock x:Name="DialogTitle" Text="清除全部数据？" FontSize="18" FontWeight="SemiBold"
+                VerticalAlignment="Center" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+    </DockPanel>
+    <TextBlock x:Name="ConfirmationText" Margin="0,0,0,16" TextWrapping="Wrap"
+               Text="将删除本机登录凭据、设备身份、本地歌单、收藏和历史、导入音源、偏好及缓存，无法撤销。云端数据和 App 外的原始文件不受影响。"/>
+    <local:NoticeStack x:Name="FailureNotice"/>
+    <WrapPanel HorizontalAlignment="Right">
+     <Button x:Name="ConfirmChoice" Content="清除全部数据" Margin="0,0,8,8"
+             Click="OnConfirmClick" AutomationProperties.Name="清除全部数据"/>
+     <Button x:Name="ExitChoice" Content="退出" Margin="0,0,8,8" Visibility="Collapsed"
+             Click="OnExitClick" AutomationProperties.Name="退出"/>
+     <Button x:Name="CancelChoice" Content="取消" Margin="0,0,0,8"
+             Style="{DynamicResource MeowFilm.QuietButton}" Click="OnCancelClick"
+             AutomationProperties.Name="取消"/>
+    </WrapPanel>
+   </StackPanel>
+  </Border>
+ </Grid>
+</UserControl>

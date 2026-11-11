@@ -122,5 +122,81 @@ public static class FilmLibraryTests
             }
             finally { finish.TrySetResult(); await library.DisposeAsync(); }
         });
+        yield return Test("failed favorite refresh drains before abort releases owners", () =>
+            MusicQualityConsumerTests.Sta(() => AbortFavoriteRefresh(false)));
+        yield return Test("abort retries actual source release failure after favorite refresh settles", () =>
+            MusicQualityConsumerTests.Sta(() => AbortFavoriteRefresh(true)));
+    }
+
+    private static async Task AbortFavoriteRefresh(bool failRelease)
+    {
+        var store = new RefreshStore();
+        var library = new FilmLibrary(store);
+        await using var rig = new FilmPlaybackRig();
+        await rig.OpenAsync();
+        var source = new ReleaseSource { Failures = failRelease ? 1 : 0 };
+        var module = new FilmCapability(source, rig.Session, library);
+        var failures = new List<string>();
+        module.OperationFailed += (_, error) => failures.Add(error);
+        try
+        {
+            await library.SetFavoriteAsync(Card(), true);
+            await store.Entered.Task;
+            var abort = module.AbortAsync();
+            Check(!abort.IsCompleted && source.Attempts == 0,
+                "abort waits for the actual registered favorite read");
+            store.Finish.TrySetException(new DocumentStoreException(DocumentStoreError.Storage));
+            if (failRelease)
+            {
+                try { await abort; throw new InvalidOperationException("Expected release failure"); }
+                catch (InvalidOperationException error) when (error.Message == "SYNTHETIC_RELEASE_FAILED") { }
+                Check(source.Attempts == 1, "real release failure remains visible");
+                await module.AbortAsync();
+                Check(source.Attempts == 2, "explicit retry performs the failed release again");
+            }
+            else
+            {
+                await abort;
+                Check(source.Attempts == 1, "business read failure cannot skip resource release");
+            }
+            await module.DisposeAsync();
+            Check(source.Attempts == (failRelease ? 2 : 1) && failures.SequenceEqual(["收藏读取失败"]),
+                "business failure is reported once and successful release is retained");
+            await Error("CLOSED", () => library.ReadAsync());
+            Check(!rig.Session.HasSession, "playback owner is released before abort succeeds");
+        }
+        finally { store.Finish.TrySetResult(); await module.AbortAsync(); }
+    }
+
+    private sealed class RefreshStore : IDocumentStore
+    {
+        private readonly FilmMemoryStore inner = new();
+        internal bool HoldRead;
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Finish = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<DocumentSnapshot> ReadAsync(string key, CancellationToken token = default)
+        {
+            if (HoldRead) { Entered.TrySetResult(); await Finish.Task; }
+            return await inner.ReadAsync(key, token);
+        }
+        public async Task<DocumentFingerprint> WriteAsync(string key, ReadOnlyMemory<byte> data,
+            DocumentFingerprint expected, CancellationToken token = default)
+        {
+            var receipt = await inner.WriteAsync(key, data, expected, token);
+            HoldRead = true;
+            return receipt;
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class ReleaseSource : IFilmHomeSource
+    {
+        internal int Attempts, Failures;
+        public Task<IReadOnlyList<FilmCardItem>> LoadAsync(FilmSectionDefinition section, int start, int limit,
+            CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<FilmCardItem>>([]);
+        public void Dispose()
+        {
+            if (++Attempts <= Failures) throw new InvalidOperationException("SYNTHETIC_RELEASE_FAILED");
+        }
     }
 }

@@ -49,7 +49,16 @@
     <StackPanel x:Name="AppearanceContributions"/>
     </StackPanel>
     <StackPanel x:Name="HomeSourceContributions" Visibility="Collapsed"/>
-    <StackPanel x:Name="CacheContributions" Visibility="Collapsed"/>
+    <StackPanel x:Name="CachePage" Visibility="Collapsed">
+     <StackPanel x:Name="CacheContributions"/>
+     <Border x:Name="UserDataSection" Style="{StaticResource MeowFilm.SettingsSection}" Visibility="Collapsed">
+      <StackPanel>
+       <TextBlock Text="本机数据" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,8"/>
+       <Button x:Name="ClearUserDataButton" Content="清除全部数据" HorizontalAlignment="Left"
+               Click="ClearUserData_Click" AutomationProperties.Name="清除全部数据"/>
+      </StackPanel>
+     </Border>
+    </StackPanel>
     <StackPanel x:Name="WindowBehaviorPage" Visibility="Collapsed">
      <Border Style="{StaticResource MeowFilm.SettingsSection}">
       <StackPanel>
