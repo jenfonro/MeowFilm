@@ -95,6 +95,8 @@ Adapted portions:
   and `static/{player-layout.css,player-theme.js,themes/starlight.css}` with native
   Core Graphics and Core Animation. The theme-colored default record cover follows
   `static/utils.js` (`iwebplus-default-cover`) and `static/app-colors.css`.
+  Capsule title dragging and settlement follow `static/mini-swipe.js` and
+  `static/ui-motion.js`, with native UIKit gesture and animation lifetimes.
   `native/MeowKit/Sources/MeowMusicFeature/Playback/UIKit/MusicPlaybackModeIcon.swift`
   adapts the heart/FM SVGs in `static/index.html` through the confirmed 24-unit
   `MusicPlaybackIcon.cs` paths into native Core Graphics, retaining their

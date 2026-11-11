@@ -27,6 +27,7 @@ final class MusicPlaybackControlsView: UIView {
     var onCollapse: (() -> Void)?
     private let content: MusicPlayerContentModel
     private let title = LoopingTextView()
+    private(set) lazy var titleSwipe = MusicMiniPlayerTitleSwipeView(title: title)
     private let artist = UILabel(), lyricPreview = UILabel()
     private let elapsed = UILabel(), durationLabel = UILabel()
     private let play = UIButton(type: .system), queue = UIButton(type: .system)
@@ -85,11 +86,13 @@ final class MusicPlaybackControlsView: UIView {
         self.content = content
         self.layout = layout
         super.init(frame: .zero)
-        for item in [title, artist, lyricPreview, elapsed, durationLabel, progress,
+        for item in [artist, lyricPreview, elapsed, durationLabel, progress,
                      play, queue, compactPlay, compactQueue, previous, nextButton, favorite, mode,
                      more, quality, collapse, recommendation] {
             addSubview(item)
         }
+        if layout == .full { addSubview(title) }
+        else { addSubview(titleSwipe) }
         for ring in [compactTrack, compactProgress, playOutline] {
             ring.fillColor = UIColor.clear.cgColor
             ring.lineCap = .round
@@ -182,6 +185,14 @@ final class MusicPlaybackControlsView: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func setLayout(_ layout: Layout, compatibleWith traits: UITraitCollection) {
+        if self.layout == .full, layout != .full {
+            titleSwipe.attachTitle()
+            addSubview(titleSwipe)
+        } else if self.layout != .full, layout == .full {
+            titleSwipe.cancel()
+            titleSwipe.removeFromSuperview()
+            addSubview(title)
+        }
         self.layout = layout
         updateFonts(compatibleWith: traits)
         if layout == .compact { scrubFence = nil }
@@ -216,6 +227,23 @@ final class MusicPlaybackControlsView: UIView {
         }
         configureTitle()
         updateClock()
+    }
+
+    func beginTitleSwipe(previous: MusicQueueEntry?, next: MusicQueueEntry?) {
+        configureTitle(suspending: true)
+        titleSwipe.begin(current: swipeText(content.model.displayTrack),
+                         previous: previous.map { swipeText($0.track) },
+                         next: next.map { swipeText($0.track) } ??
+                            (content.model.canNext ? swipeText(nil, fallback: "下一首") : nil))
+    }
+
+    func updateIncomingTitle(_ entry: MusicQueueEntry, direction: MusicDirection) {
+        titleSwipe.updateIncoming(swipeText(entry.track), direction: direction)
+    }
+
+    func endTitleSwipe() {
+        titleSwipe.cancel()
+        configureTitle()
     }
 
     func setFullViewport(viewportHeight: CGFloat, safeHeight: CGFloat) {
@@ -270,10 +298,11 @@ final class MusicPlaybackControlsView: UIView {
         let compact = layout == .compact
         let titleX: CGFloat = compact ? 62 : 112
         let copyWidth = max(0, width - titleX - (compact ? 96 : 16))
-        title.frame = CGRect(x: titleX, y: compact ? (height - titleFont.lineHeight) / 2 : 16,
-                             width: compact ? copyWidth : max(0, copyWidth - 40), height: titleFont.lineHeight)
-        artist.frame = CGRect(x: titleX, y: title.frame.maxY + 6,
-                              width: title.frame.width, height: artist.font.lineHeight)
+        titleSwipe.frame = CGRect(x: titleX, y: compact ? (height - titleFont.lineHeight) / 2 : 16,
+                                  width: compact ? copyWidth : max(0, copyWidth - 40),
+                                  height: titleFont.lineHeight)
+        artist.frame = CGRect(x: titleX, y: titleSwipe.frame.maxY + 6,
+                              width: titleSwipe.frame.width, height: artist.font.lineHeight)
         lyricPreview.frame = CGRect(x: titleX, y: artist.frame.maxY + 8,
                                     width: copyWidth, height: lyricPreview.font.lineHeight + 4)
         collapse.frame = CGRect(x: width - 56, y: 6, width: 44, height: 44)
@@ -499,25 +528,42 @@ final class MusicPlaybackControlsView: UIView {
         updateClock()
     }
 
-    private func configureTitle() {
+    private func configureTitle(suspending: Bool = false) {
+        guard layout == .full || !titleSwipe.isSwiping else { return }
         let track = content.model.displayTrack
         let text = layout == .compact ? MusicMiniPlayerText.compactTitle(track) : track?.title ?? "暂无播放"
         let theme = content.controlTheme
-        var colorRanges: [(NSRange, UIColor)] = []
-        if layout == .compact, let track {
+        let colorRanges = layout == .compact ? compactTitleColors(track, text: text) : []
+        title.configure(text: text,
+                        font: titleFont, color: UIColor(theme.ink),
+                        colorRanges: colorRanges,
+                        allowsMotion: !UIAccessibility.isReduceMotionEnabled,
+                        running: rendering && !suspending,
+                        gap: layout == .full ? 40 : 28, pointsPerSecond: 24, minimumDuration: 0)
+    }
+
+    private func compactTitleColors(_ track: MusicRemoteTrack?, text: String) -> [(NSRange, UIColor)] {
+        if let track {
             let artist = track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
             let suffix = " - " + artist
             if !artist.isEmpty, artist != "未知", artist != "未知歌手", text.hasSuffix(suffix) {
                 let length = (suffix as NSString).length
-                colorRanges.append((NSRange(location: (text as NSString).length - length, length: length),
-                                    UIColor(theme.muted)))
+                return [(NSRange(location: (text as NSString).length - length, length: length),
+                         UIColor(content.controlTheme.muted))]
             }
         }
-        title.configure(text: text,
-                        font: titleFont, color: UIColor(theme.ink),
-                        colorRanges: colorRanges,
-                        allowsMotion: !UIAccessibility.isReduceMotionEnabled, running: rendering,
-                        gap: layout == .full ? 40 : 28, pointsPerSecond: 24, minimumDuration: 0)
+        return []
+    }
+
+    private func swipeText(_ track: MusicRemoteTrack?, fallback: String = "暂无播放") -> NSAttributedString {
+        let text = track.map { MusicMiniPlayerText.compactTitle($0) } ?? fallback
+        let result = NSMutableAttributedString(string: text, attributes: [
+            .font: compactTitleFont, .foregroundColor: UIColor(content.controlTheme.ink)
+        ])
+        for (range, color) in compactTitleColors(track, text: text) {
+            result.addAttribute(.foregroundColor, value: color, range: range)
+        }
+        return result
     }
 
     func updateFonts(compatibleWith traits: UITraitCollection) {
