@@ -841,6 +841,159 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         XCTAssertTrue(buttons.suffix(2).allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled })
     }
 
+    func testCapsuleTitleTracksDragSettlementAndReturnInForegroundScene() async throws {
+        XCTAssertFalse(UIAccessibility.isReduceMotionEnabled, "This case observes animated native frames")
+        XCTAssertTrue(UIView.areAnimationsEnabled)
+        let foreground = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+            }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [foreground], timeout: 5)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let network = MusicStartupNoNetwork()
+        let service = NativeMusicService(document: MusicStartupDocument(failure: nil),
+                                        qq: MusicCapsuleHostCatalog(), transport: network)
+        try await service.setAccess(available: true, generation: 1)
+        let page = try await service.search(platform: "tx", query: "Fixture", page: 1, limit: 3)
+        _ = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
+        let playback = PlaybackController()
+        let model = MusicViewModel(service: service, playback: playback)
+        await model.load()
+        let origin = try XCTUnwrap(model.current?.id)
+        let nextID = try XCTUnwrap(model.recordPreview(.next)?.id)
+        let content = MusicPlayerContentModel(model: model, playback: playback,
+            appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
+            presentation: MusicMiniPlayerPresentation())
+        addTeardownBlock { await model.close(); await service.close() }
+        let surface = MusicPlayerSurface(content: content)
+        let root = PageViewController(themeProvider: content.appearance)
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true; window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        root.view.addSubview(surface)
+        surface.frame = CGRect(x: 14, y: root.view.bounds.height - 86 - surface.dockHeight,
+                               width: root.view.bounds.width - 28, height: surface.dockHeight)
+        root.view.layoutIfNeeded()
+        func descendants(_ view: UIView) -> [UIView] { view.subviews.flatMap { [$0] + descendants($0) } }
+        let views = descendants(surface)
+        let viewport = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "music.miniPlayer.titleSwipe" })
+        let incoming = try XCTUnwrap(views.compactMap { $0 as? UILabel }.first {
+            $0.accessibilityIdentifier == "music.miniPlayer.titleSwipe.next"
+        })
+        let outgoing = try XCTUnwrap(views.compactMap { $0 as? UILabel }.first {
+            $0.accessibilityIdentifier == "music.miniPlayer.titleSwipe.current"
+        })
+        let track = try XCTUnwrap(incoming.superview)
+        let title = try XCTUnwrap(descendants(viewport).compactMap { $0 as? LoopingTextView }.first)
+        let buttons = try ["open", "play", "queue"].map { name in
+            try XCTUnwrap(views.compactMap { $0 as? UIButton }.first {
+                $0.accessibilityIdentifier == "music.miniPlayer." + name
+            })
+        }
+        buttons[0].setImage(UIGraphicsImageRenderer(size: CGSize(width: 42, height: 42)).image { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 42, height: 42))
+            UIColor.white.setFill(); context.fill(CGRect(x: 12, y: 8, width: 6, height: 26))
+        }, for: .normal)
+        let frames = buttons.map { $0.convert($0.bounds, to: window) }
+        func checkFixedControls() throws {
+            for (button, expected) in zip(buttons, frames) {
+                let layer = try XCTUnwrap(button.layer.presentation())
+                let actual = layer.convert(layer.bounds, to: try XCTUnwrap(window.layer.presentation()))
+                XCTAssertEqual(actual.minX, expected.minX, accuracy: 0.5)
+                XCTAssertEqual(actual.minY, expected.minY, accuracy: 0.5)
+                XCTAssertEqual(actual.size.width, expected.width, accuracy: 0.5)
+                XCTAssertEqual(actual.size.height, expected.height, accuracy: 0.5)
+            }
+        }
+        func attachFrame(_ name: String) throws {
+            XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
+            let layer = try XCTUnwrap(window.layer.presentation())
+            let image = UIGraphicsImageRenderer(size: window.bounds.size).image { layer.render(in: $0.cgContext) }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+        }
+        let input = MusicCapsuleHostPan()
+        for (index, dx) in [CGFloat(-64), CGFloat(64)].enumerated() {
+            input.sampleTranslation = CGPoint(x: dx, y: 0)
+            XCTAssertTrue(surface.gestureRecognizerShouldBegin(input))
+            input.sampleState = .began; surface.panTitle(input)
+            input.sampleState = .changed; surface.panTitle(input)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertFalse(title.isHidden, "Dragging pauses the actual title rather than replacing its marquee")
+            let draggingX = try XCTUnwrap(track.layer.presentation()).affineTransform().tx
+            XCTAssertEqual(draggingX, dx, accuracy: 0.5)
+            try checkFixedControls()
+            try attachFrame(index == 0 ? "capsule-drag-next" : "capsule-drag-previous")
+            let oldText = outgoing.text
+            input.sampleState = .ended; surface.panTitle(input)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            let settlingX = abs(try XCTUnwrap(track.layer.presentation()).affineTransform().tx)
+            XCTAssertGreaterThan(settlingX, abs(dx))
+            XCTAssertLessThan(settlingX, viewport.bounds.width + 16)
+            XCTAssertEqual(outgoing.text, oldText, "The outgoing title cannot become the newly selected song")
+            try checkFixedControls()
+            try attachFrame(index == 0 ? "capsule-settling-next" : "capsule-settling-previous")
+            let settled = expectation(for: NSPredicate { _, _ in
+                MainActor.assumeIsolated {
+                    !model.isNavigating && track.transform == .identity && !title.isHidden &&
+                        model.current?.id == (index == 0 ? nextID : origin)
+                }
+            }, evaluatedWith: nil)
+            await fulfillment(of: [settled], timeout: 5)
+            XCTAssertEqual(model.current?.id, index == 0 ? nextID : origin)
+            XCTAssertEqual(title.accessibilityLabel, MusicMiniPlayerText.compactTitle(model.displayTrack))
+            try checkFixedControls()
+        }
+        model.playbackState.state = .init(revision: model.state.revision, currentId: origin, total: 3)
+        input.sampleTranslation = CGPoint(x: -64, y: 0)
+        input.sampleState = .began; surface.panTitle(input)
+        input.sampleState = .ended; surface.panTitle(input)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let returningX = try XCTUnwrap(track.layer.presentation()).affineTransform().tx
+        XCTAssertGreaterThan(returningX, -64)
+        XCTAssertLessThan(returningX, 0)
+        try checkFixedControls()
+        try attachFrame("capsule-return-unavailable")
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(track.transform, .identity)
+        XCTAssertEqual(model.current?.id, origin)
+        XCTAssertFalse(model.isNavigating)
+        try attachFrame("capsule-returned")
+    }
+
+}
+
+@MainActor
+private final class MusicCapsuleHostPan: UIPanGestureRecognizer {
+    var sampleState: UIGestureRecognizer.State = .possible
+    var sampleTranslation = CGPoint.zero
+    override var state: UIGestureRecognizer.State {
+        get { sampleState }
+        set { sampleState = newValue }
+    }
+    override func translation(in view: UIView?) -> CGPoint { sampleTranslation }
+}
+
+private actor MusicCapsuleHostCatalog: MusicPublicQQProviding {
+    func search(query: String, page: Int, limit: Int) throws -> MusicNativeTrackPage {
+        let items = try ["First light", "Evening breeze", "Quiet morning"].enumerated().map { index, title in
+            MusicNativeTrackData(platform: "tx", data: try JSONSerialization.data(withJSONObject: [
+                "songmid": "CapsuleFixture\(index)", "name": title, "singer": "Fixture",
+                "duration": 180, "types": [["type": "128k"]]
+            ]))
+        }
+        return .init(items: items)
+    }
+    func lyrics(mid: String) -> MusicNativeLyrics { .init(text: "") }
 }
 
 /// Exercises the real Assembly shutdown entry with only synthetic local media

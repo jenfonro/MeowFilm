@@ -4693,12 +4693,12 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertFalse(surface.isPlayerBody(play.imageView))
         XCTAssertFalse(surface.isPlayerBody(queue))
         XCTAssertFalse(surface.isPlayerBody(cover))
-        let swipes = surface.gestureRecognizers?.compactMap { $0 as? UISwipeGestureRecognizer } ?? []
-        XCTAssertEqual(swipes.count, 2)
-        XCTAssertEqual(Set(swipes.map { $0.direction.rawValue }),
-                       Set([UISwipeGestureRecognizer.Direction.left.rawValue,
-                            UISwipeGestureRecognizer.Direction.right.rawValue]))
-        XCTAssertTrue(swipes.allSatisfy { $0.delegate === surface && $0.numberOfTouchesRequired == 1 })
+        let pans = surface.gestureRecognizers?.compactMap { $0 as? UIPanGestureRecognizer } ?? []
+        XCTAssertEqual(pans.count, 1)
+        let pan = try XCTUnwrap(pans.first)
+        XCTAssertTrue(pan.delegate === surface)
+        XCTAssertEqual(pan.minimumNumberOfTouches, 1)
+        XCTAssertEqual(pan.maximumNumberOfTouches, 1)
         for width in [CGFloat(292), CGFloat(408)] {
             surface.frame.size.width = width
             surface.setNeedsLayout(); surface.layoutIfNeeded()
@@ -4718,52 +4718,366 @@ final class MusicPlayerContentModelTests: XCTestCase {
         await content.model.close()
     }
 
+    // Direct handler samples verify component state, not native touch recognition or presentation frames.
     func testCapsuleSwipesIssueOneDirectionalCommandAndNeverPresentPlayer() async throws {
+        let animationsEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsEnabled) }
         let service = MusicUIKitRegressionService()
         let (content, surface) = try makeDock(service: service)
         addTeardownBlock { await content.model.close() }
-        let second = MusicQueueEntry(id: "second", track: .init(ref: .init(kind: .queue, id: "second"),
-                                                               songId: "second", title: "Second"))
-        await service.configureNavigation(content.model.queue + [second])
-        content.model.playbackState.state = await service.state()
-        content.model.playbackState.queue = await service.queue().entries
+        let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        await configureCapsuleNavigation(content, service: service)
         var destinations: [MusicPlaybackDestination] = []
         surface.onPresent = { destinations.append($0) }
-        let input = MusicPlayerSwipeFixture()
-        input.direction = .left
+        let input = MusicPlayerPanFixture()
         for state in [UIGestureRecognizer.State.possible, .cancelled, .failed] {
             input.sampleState = state
-            surface.swipeTrack(input)
+            surface.panTitle(input)
         }
         XCTAssertFalse(content.model.isNavigating)
         let untouched = await service.navigationDirections
         XCTAssertTrue(untouched.isEmpty)
 
-        for (index, direction) in [UISwipeGestureRecognizer.Direction.left, .right].enumerated() {
-            input.direction = direction
-            input.sampleState = .ended
-            surface.swipeTrack(input)
+        // 12pt with zero velocity is far below half of this viewport; release still commits.
+        XCTAssertLessThan(CGFloat(12), try capsuleTitleView("", in: surface).bounds.width / 2)
+        XCTAssertEqual(input.sampleVelocity, .zero)
+        for (index, dx) in [CGFloat(-12), CGFloat(12)].enumerated() {
+            input.sampleTranslation = CGPoint(x: dx, y: 0)
+            XCTAssertTrue(surface.gestureRecognizerShouldBegin(input))
+            input.sampleState = .began; surface.panTitle(input)
+            input.sampleState = .changed; surface.panTitle(input)
+            input.sampleState = .ended; surface.panTitle(input)
             XCTAssertTrue(content.model.isNavigating)
-            input.sampleState = .possible
-            surface.swipeTrack(input)
-            let completed = expectation(for: NSPredicate { _, _ in
-                MainActor.assumeIsolated { !content.model.isNavigating }
-            }, evaluatedWith: nil)
-            await fulfillment(of: [completed], timeout: 3)
+            surface.panTitle(input) // A repeated terminal callback must not issue a second command.
+            await waitForCapsuleNavigation(content)
             let commands = await service.navigationDirections
             XCTAssertEqual(commands, Array([MusicDirection.next, .previous].prefix(index + 1)))
             XCTAssertEqual(content.model.current?.id, index == 0 ? "second" : "dock")
             XCTAssertTrue(destinations.isEmpty)
+            try assertCapsuleTitleRestored(index == 0 ? "Second" : "Goodbye - Ramsey", in: surface)
         }
 
         content.model.playbackState.state = .init(currentId: "dock", total: 1)
-        input.sampleState = .ended
-        surface.swipeTrack(input)
+        input.sampleState = .began; surface.panTitle(input)
+        input.sampleState = .changed; surface.panTitle(input)
+        input.sampleState = .ended; surface.panTitle(input)
         XCTAssertFalse(content.model.isNavigating)
         let unavailable = await service.navigationDirections
-        XCTAssertEqual(unavailable, [.next, .previous], "Swipes use the same navigation eligibility as buttons")
+        XCTAssertEqual(unavailable, [.next, .previous], "Pan uses the same navigation eligibility as buttons")
         XCTAssertTrue(destinations.isEmpty)
-        await content.model.close()
+    }
+
+    func testCapsulePanMovesActualNeighborTitlesInsideClippedViewportAndKeepsControlsFixed() async throws {
+        let animationsEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsEnabled) }
+        let service = MusicUIKitRegressionService()
+        let (content, surface) = try makeDock(service: service)
+        addTeardownBlock { await content.model.close() }
+        let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        await configureCapsuleNavigation(content, service: service)
+        let viewport = try capsuleTitleView("", in: surface)
+        let labels = try ["previous", "current", "next"].map { try capsuleTitleLabel($0, in: surface) }
+        let track = try XCTUnwrap(labels[1].superview)
+        XCTAssertTrue(labels.allSatisfy { $0.superview === track && $0.accessibilityElementsHidden })
+        XCTAssertTrue(viewport.clipsToBounds)
+        XCTAssertTrue(track.isDescendant(of: viewport))
+        let fixed = try ["open", "play", "queue"].map { try dockButton($0, in: surface) }
+        let frames = fixed.map { $0.convert($0.bounds, to: surface) }
+        let surfaceFrame = surface.frame
+        let input = MusicPlayerPanFixture()
+        for dx in [CGFloat(-48), CGFloat(48)] {
+            let initial: CGFloat = dx < 0 ? -12 : 12
+            input.sampleTranslation = CGPoint(x: initial, y: 0)
+            input.sampleState = .began; surface.panTitle(input)
+            XCTAssertEqual(labels.map { $0.text ?? "" }, ["Previous", "Goodbye - Ramsey", "Second"])
+            let realTitle = try XCTUnwrap(dockViews(viewport).compactMap { $0 as? LoopingTextView }.first)
+            XCTAssertFalse(realTitle.isHidden, "Dragging preserves the original scrolling title")
+            XCTAssertTrue(labels[1].isHidden, "The frozen outgoing label is only shown after release")
+            let resting = labels.map { $0.convert($0.bounds, to: viewport).offsetBy(dx: -initial, dy: 0) }
+            let step = viewport.bounds.width + 16
+            XCTAssertEqual(resting[0].minX, resting[1].minX - step, accuracy: 0.01)
+            XCTAssertEqual(resting[2].minX, resting[1].minX + step, accuracy: 0.01)
+            XCTAssertLessThanOrEqual(resting[0].maxX, viewport.bounds.minX)
+            XCTAssertGreaterThanOrEqual(resting[2].minX, viewport.bounds.maxX)
+            input.sampleTranslation = CGPoint(x: dx, y: 0)
+            input.sampleState = .changed; surface.panTitle(input)
+            for (label, original) in zip(labels, resting) {
+                XCTAssertEqual(label.convert(label.bounds, to: viewport).minX, original.minX + dx, accuracy: 0.01)
+            }
+            XCTAssertEqual(realTitle.convert(realTitle.bounds, to: viewport).minX,
+                           resting[1].minX + dx, accuracy: 0.01)
+            let incoming = labels[dx < 0 ? 2 : 0].convert(labels[dx < 0 ? 2 : 0].bounds, to: viewport)
+            XCTAssertEqual(incoming.intersection(viewport.bounds).width, 32, accuracy: 0.01)
+            XCTAssertEqual(surface.frame, surfaceFrame)
+            XCTAssertEqual(fixed.map { $0.convert($0.bounds, to: surface) }, frames)
+            XCTAssertEqual(content.model.current?.id, "dock")
+            let commands = await service.navigationDirections
+            XCTAssertTrue(commands.isEmpty, "Preview must never advance playback")
+            input.sampleTranslation = CGPoint(x: dx < 0 ? -step * 2 : step * 2, y: 0)
+            surface.panTitle(input)
+            XCTAssertEqual(track.transform.tx, dx < 0 ? -step : step, accuracy: 0.01)
+            input.sampleState = .cancelled; surface.panTitle(input)
+            XCTAssertEqual(track.transform, .identity)
+            try assertCapsuleTitleRestored("Goodbye - Ramsey", in: surface)
+        }
+    }
+
+    func testCapsulePanRejectsVerticalCardAndCancelledGesturesAndReturnsWhenUnavailable() async throws {
+        let animationsEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsEnabled) }
+        let service = MusicUIKitRegressionService()
+        let (content, surface) = try makeDock(service: service)
+        addTeardownBlock { await content.model.close() }
+        let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        await configureCapsuleNavigation(content, service: service)
+        let input = MusicPlayerPanFixture()
+        for point in [CGPoint(x: 11, y: 10), CGPoint(x: 0, y: 30)] {
+            input.sampleTranslation = point
+            XCTAssertFalse(surface.gestureRecognizerShouldBegin(input))
+            input.sampleState = .began; surface.panTitle(input)
+            input.sampleState = .ended; surface.panTitle(input)
+        }
+        input.sampleTranslation = CGPoint(x: 12, y: 10)
+        XCTAssertTrue(surface.gestureRecognizerShouldBegin(input))
+        input.sampleTranslation = CGPoint(x: -48, y: 0)
+        for terminal in [UIGestureRecognizer.State.cancelled, .failed] {
+            input.sampleState = .began; surface.panTitle(input)
+            input.sampleState = .changed; surface.panTitle(input)
+            input.sampleState = terminal; surface.panTitle(input)
+            input.sampleState = .ended; surface.panTitle(input)
+        }
+        await expandDock(content)
+        XCTAssertFalse(surface.gestureRecognizerShouldBegin(input))
+        input.sampleState = .began; surface.panTitle(input)
+        input.sampleState = .ended; surface.panTitle(input)
+        content.collapseDock(); await deliverUpdates()
+        content.model.playbackState.state = .init(currentId: "dock", total: 1)
+        input.sampleState = .began; surface.panTitle(input)
+        XCTAssertTrue((try capsuleTitleLabel("next", in: surface).text ?? "").isEmpty)
+        input.sampleState = .changed; surface.panTitle(input)
+        input.sampleState = .ended; surface.panTitle(input)
+        let track = try XCTUnwrap(capsuleTitleLabel("current", in: surface).superview)
+        let returned = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { track.transform == .identity }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [returned], timeout: 3)
+        try assertCapsuleTitleRestored("Goodbye - Ramsey", in: surface)
+        XCTAssertEqual(content.model.current?.id, "dock")
+        let commands = await service.navigationDirections
+        XCTAssertTrue(commands.isEmpty)
+    }
+
+    func testCapsuleDragIsAbortedByCardWindowBackgroundAndResizeChanges() async throws {
+        let animationsEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsEnabled) }
+        for interruption in ["card", "full", "window", "background", "width", "height"] {
+            let service = MusicUIKitRegressionService()
+            let (content, surface) = try makeDock(service: service)
+            addTeardownBlock { await content.model.close() }
+            let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
+            defer {
+                NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+                window.isHidden = true; window.rootViewController = nil
+            }
+            await configureCapsuleNavigation(content, service: service)
+            var destinations: [MusicPlaybackDestination] = []
+            surface.onPresent = { destinations.append($0) }
+            let viewport = try XCTUnwrap(capsuleTitleView("", in: surface) as? MusicMiniPlayerTitleSwipeView)
+            let input = MusicPlayerPanFixture()
+            input.sampleTranslation = CGPoint(x: -48, y: 0)
+            input.sampleState = .began; surface.panTitle(input)
+            input.sampleState = .changed; surface.panTitle(input)
+            XCTAssertTrue(viewport.isSwiping, interruption)
+            XCTAssertEqual(viewport.offset, -48, accuracy: 0.01, interruption)
+            switch interruption {
+            case "card": await expandDock(content)
+            case "full": content.presentation.setFullPlayerPresented(true)
+            case "window": surface.removeFromSuperview()
+            case "background":
+                NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+            default:
+                if interruption == "width" { surface.frame.size.width -= 40 }
+                else { surface.frame.size.height += 20 }
+                surface.setNeedsLayout(); surface.layoutIfNeeded()
+            }
+            await deliverUpdates()
+            try assertCapsuleTitleRestored(interruption == "card" ? "Goodbye" : "Goodbye - Ramsey", in: surface)
+            input.sampleState = .changed; surface.panTitle(input)
+            input.sampleState = .ended; surface.panTitle(input)
+            XCTAssertFalse(content.model.isNavigating, interruption)
+            XCTAssertEqual(content.model.current?.id, "dock", interruption)
+            XCTAssertFalse(viewport.isSwiping, interruption)
+            XCTAssertEqual(viewport.offset, 0, accuracy: 0.01, interruption)
+            let commands = await service.navigationDirections
+            XCTAssertTrue(commands.isEmpty, interruption)
+            XCTAssertTrue(destinations.isEmpty, interruption)
+        }
+    }
+
+    func testCapsulePanRejectsDragAfterQueueSettingsOrAccountFenceChanges() async throws {
+        let animationsEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsEnabled) }
+        for change in 0..<3 {
+            let service = MusicUIKitRegressionService()
+            let (content, surface) = try makeDock(service: service)
+            addTeardownBlock { await content.model.close() }
+            let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
+            defer { window.isHidden = true; window.rootViewController = nil }
+            await configureCapsuleNavigation(content, service: service)
+            let input = MusicPlayerPanFixture()
+            input.sampleTranslation = CGPoint(x: -48, y: 0)
+            input.sampleState = .began; surface.panTitle(input)
+            input.sampleState = .changed; surface.panTitle(input)
+            let before = content.fence
+            switch change {
+            case 0:
+                content.model.playbackState.state = .init(revision: 1, currentId: "dock", total: 3,
+                    canNext: true, canPrevious: true, nextPreviewID: "second", previousPreviewID: "previous")
+            case 1:
+                content.model.playbackState.state = .init(settingsRevision: 1, currentId: "dock", total: 3,
+                    canNext: true, canPrevious: true, nextPreviewID: "second", previousPreviewID: "previous")
+            default: content.model.accountSessionsChanged()
+            }
+            XCTAssertNotEqual(content.fence, before)
+            await deliverUpdates()
+            input.sampleState = .ended; surface.panTitle(input)
+            XCTAssertFalse(content.model.isNavigating)
+            let commands = await service.navigationDirections
+            XCTAssertTrue(commands.isEmpty)
+            XCTAssertEqual(content.model.current?.id, "dock")
+            let track = try XCTUnwrap(capsuleTitleLabel("current", in: surface).superview)
+            XCTAssertEqual(track.transform, .identity)
+            try assertCapsuleTitleRestored("Goodbye - Ramsey", in: surface)
+        }
+    }
+
+    func testCapsuleUnknownPreviewUsesActualSelectionAndFailureRestoresCurrentTitle() async throws {
+        let animationsEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsEnabled) }
+        for fail in [false, true] {
+            let service = MusicUIKitRegressionService()
+            let (content, surface) = try makeDock(service: service)
+            addTeardownBlock { await content.model.close() }
+            let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
+            defer { window.isHidden = true; window.rootViewController = nil }
+            await configureCapsuleNavigation(content, service: service)
+            content.model.playbackState.state = .init(currentId: "dock", total: 3, canNext: true,
+                canPrevious: true, nextPreviewID: nil, previousPreviewID: "previous")
+            XCTAssertTrue(content.model.canNext)
+            XCTAssertNil(content.model.recordPreview(.next))
+            let entered = expectation(description: "navigation waits for authoritative selection")
+            let gate = MusicUIKitSearchGate { entered.fulfill() }
+            addTeardownBlock { await gate.release() }
+            await service.holdNavigation(gate, fail: fail)
+            let current = try capsuleTitleLabel("current", in: surface)
+            let next = try capsuleTitleLabel("next", in: surface)
+            let input = MusicPlayerPanFixture()
+            input.sampleTranslation = CGPoint(x: -12, y: 0)
+            input.sampleState = .began; surface.panTitle(input)
+            input.sampleTranslation = CGPoint(x: -48, y: 0)
+            input.sampleState = .changed; surface.panTitle(input)
+            XCTAssertEqual(current.text, "Goodbye - Ramsey")
+            XCTAssertEqual(next.text, "下一首")
+            input.sampleState = .ended; surface.panTitle(input)
+            await fulfillment(of: [entered], timeout: 3)
+            XCTAssertEqual(content.model.current?.id, "dock", "A preview must not select a queue occurrence")
+            XCTAssertEqual(current.text, "Goodbye - Ramsey", "Keep outgoing text frozen while selection is pending")
+            await gate.release()
+            await waitForCapsuleNavigation(content)
+            try assertCapsuleTitleRestored(fail ? "Goodbye - Ramsey" : "Second", in: surface)
+            XCTAssertEqual(content.model.current?.id, fail ? "dock" : "second")
+            let commands = await service.navigationDirections
+            XCTAssertEqual(commands, [.next])
+        }
+    }
+
+    func testCapsuleLateSelectionAfterAccountChangeCannotReplaceRestoredTitle() async throws {
+        let animationsEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsEnabled) }
+        let service = MusicUIKitRegressionService()
+        let (content, surface) = try makeDock(service: service)
+        addTeardownBlock { await content.model.close() }
+        let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        await configureCapsuleNavigation(content, service: service)
+        let entered = expectation(description: "navigation suspended")
+        let gate = MusicUIKitSearchGate { entered.fulfill() }
+        addTeardownBlock { await gate.release() }
+        await service.holdNavigation(gate, fail: false)
+        let input = MusicPlayerPanFixture()
+        input.sampleTranslation = CGPoint(x: -48, y: 0)
+        input.sampleState = .began; surface.panTitle(input)
+        input.sampleState = .ended; surface.panTitle(input)
+        await fulfillment(of: [entered], timeout: 3)
+        let access = content.model.searchAccessGeneration
+        await service.revokeNavigationAccess()
+        content.model.accountSessionsChanged()
+        XCTAssertNotEqual(content.model.searchAccessGeneration, access)
+        await deliverUpdates()
+        try assertCapsuleTitleRestored("Goodbye - Ramsey", in: surface)
+        await gate.release()
+        await waitForCapsuleNavigation(content)
+        XCTAssertEqual(content.model.current?.id, "dock")
+        try assertCapsuleTitleRestored("Goodbye - Ramsey", in: surface)
+        let commands = await service.navigationDirections
+        XCTAssertEqual(commands, [.next])
+    }
+
+    private func assertCapsuleTitleRestored(_ text: String, in surface: UIView,
+                                           file: StaticString = #filePath, line: UInt = #line) throws {
+        let viewport = try XCTUnwrap(capsuleTitleView("", in: surface) as? MusicMiniPlayerTitleSwipeView,
+                                     file: file, line: line)
+        let labels = try ["previous", "current", "next"].map { try capsuleTitleLabel($0, in: surface) }
+        let track = try XCTUnwrap(labels[1].superview, file: file, line: line)
+        XCTAssertFalse(viewport.isSwiping, file: file, line: line)
+        XCTAssertEqual(viewport.offset, 0, accuracy: 0.01, file: file, line: line)
+        XCTAssertEqual(track.transform, .identity, file: file, line: line)
+        XCTAssertTrue(labels.allSatisfy { ($0.text ?? "").isEmpty }, file: file, line: line)
+        let title = try XCTUnwrap(dockViews(viewport).compactMap { $0 as? LoopingTextView }.first,
+                                  file: file, line: line)
+        XCTAssertFalse(title.isHidden, file: file, line: line)
+        XCTAssertEqual(title.accessibilityLabel, text, file: file, line: line)
+        XCTAssertTrue(dockViews(title).compactMap { $0 as? UILabel }.contains { $0.text == text },
+                      file: file, line: line)
+    }
+
+    private func configureCapsuleNavigation(_ content: MusicPlayerContentModel,
+                                             service: MusicUIKitRegressionService) async {
+        let next = MusicQueueEntry(id: "second", track: .init(ref: .init(kind: .queue, id: "second"),
+            songId: "second", title: "Second"))
+        let previous = MusicQueueEntry(id: "previous", track: .init(ref: .init(kind: .queue, id: "previous"),
+            songId: "previous", title: "Previous"))
+        await service.configureNavigation(content.model.queue + [next, previous])
+        content.model.playbackState.state = await service.state()
+        content.model.playbackState.queue = await service.queue().entries
+        await deliverUpdates()
+    }
+
+    private func capsuleTitleView(_ suffix: String, in surface: UIView) throws -> UIView {
+        try XCTUnwrap(dockViews(surface).first {
+            $0.accessibilityIdentifier == "music.miniPlayer.titleSwipe" + (suffix.isEmpty ? "" : "." + suffix)
+        })
+    }
+
+    private func capsuleTitleLabel(_ suffix: String, in surface: UIView) throws -> UILabel {
+        try XCTUnwrap(capsuleTitleView(suffix, in: surface) as? UILabel)
+    }
+
+    private func waitForCapsuleNavigation(_ content: MusicPlayerContentModel) async {
+        let completed = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { !content.model.isNavigating }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [completed], timeout: 3)
     }
 
     func testCardButtonsHaveIndependentStableSlotsAcrossSizesAndText() async throws {
@@ -5347,12 +5661,16 @@ final class MusicPlayerContentModelTests: XCTestCase {
 }
 
 @MainActor
-private final class MusicPlayerSwipeFixture: UISwipeGestureRecognizer {
+private final class MusicPlayerPanFixture: UIPanGestureRecognizer {
     var sampleState: UIGestureRecognizer.State = .possible
+    var sampleTranslation = CGPoint.zero
+    var sampleVelocity = CGPoint.zero
     override var state: UIGestureRecognizer.State {
         get { sampleState }
         set { sampleState = newValue }
     }
+    override func translation(in view: UIView?) -> CGPoint { sampleTranslation }
+    override func velocity(in view: UIView?) -> CGPoint { sampleVelocity }
 }
 
 @MainActor
@@ -5420,6 +5738,13 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private(set) var navigationDirections: [MusicDirection] = []
     private var navigationEntries: [MusicQueueEntry] = []
     private var navigationIndex = 0, navigationRevision = 0
+    private var navigationGate: MusicUIKitSearchGate?
+    private var navigationFailure = false
+    private let navigationAccess = MusicQueueAuthorization()
+    func revokeNavigationAccess() { navigationAccess.revoke() }
+    func holdNavigation(_ gate: MusicUIKitSearchGate, fail: Bool) {
+        navigationGate = gate; navigationFailure = fail
+    }
     private(set) var discoveryRequests: [MusicPublicBrowseDestination] = []
     private var chorusCalls: [String] = [], chorusActive = 0, chorusPeak = 0
     private var chorusGate: MusicUIKitChorusGate?
@@ -5774,7 +6099,9 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func state() -> MusicPlaybackState {
         if !navigationEntries.isEmpty {
             return .init(revision: navigationRevision, currentId: navigationEntries[navigationIndex].id,
-                         total: navigationEntries.count, canNext: true, canPrevious: true)
+                         total: navigationEntries.count, canNext: true, canPrevious: true,
+                         nextPreviewID: navigationEntries[(navigationIndex + 1) % navigationEntries.count].id,
+                         previousPreviewID: navigationEntries[(navigationIndex + navigationEntries.count - 1) % navigationEntries.count].id)
         }
         if let entry = playbackModeEntry {
             return .init(settingsRevision: playbackModeRevision, mode: playbackMode, currentId: entry.id, total: 1)
@@ -5839,10 +6166,16 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         guard songResultPages != nil else { throw MusicServiceError.unsupported }
         return .init()
     }
-    func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) throws -> MusicAdvanceResult {
+    func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) async throws -> MusicAdvanceResult {
         guard !navigationEntries.isEmpty else { throw MusicServiceError.unsupported }
         guard expectedRevision == navigationRevision else { throw MusicServiceError.staleRevision }
         navigationDirections.append(direction)
+        if let gate = navigationGate {
+            navigationGate = nil
+            await gate.wait()
+        }
+        try navigationAccess.check()
+        if navigationFailure { navigationFailure = false; throw MusicServiceError.upstreamFailed }
         navigationIndex = (navigationIndex + (direction == .next ? 1 : navigationEntries.count - 1)) % navigationEntries.count
         navigationRevision += 1
         return .init(state: state(), selectedId: navigationEntries[navigationIndex].id)
