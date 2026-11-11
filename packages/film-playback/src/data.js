@@ -133,7 +133,8 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   const lifetime = new AbortController();
   const pending = new Set();
   const cacheOwner = { domain: 'film-data', owner: randomUUID() };
-  const metadataCache = createMetadataCache({ dataRoot, cache, owner: cacheOwner, now: time, normalizeError: safeError });
+  const metadataCache = createMetadataCache({ dataRoot, cache, owner: cacheOwner, now: time, normalizeError: safeError,
+    decodeValue: metadataValue });
   let closed = false, closing;
 
   function open(signal) {
@@ -808,8 +809,9 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     const selected = [...pending].filter(work => work.dependencies.some(matches));
     for (const work of selected) work.controller.abort();
     const drained = cache.invalidate(entry => entry.dependencies?.some(matches));
-    try { metadataCache.invalidate(matches); }
-    finally { await Promise.allSettled([...selected.map(work => work.done), drained]); }
+    const disk = metadataCache.invalidate(matches);
+    const results = await Promise.allSettled([drained, disk, ...selected.map(work => work.done)]);
+    for (const result of results.slice(0, 2)) if (result.status === 'rejected') throw result.reason;
   }
   function close() {
     if (closing) return closing;
@@ -819,7 +821,8 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     let drained;
     try { drained = cache.invalidate(entry => entry.dependencies?.some(dep => dep.domain === cacheOwner.domain && dep.owner === cacheOwner.owner)); }
     catch (error) { if (error.code !== 'CLOSED') throw error; }
-    closing = Promise.allSettled(selected.map(work => work.done)).then(() => drained);
+    closing = Promise.allSettled([...selected.map(work => work.done), drained])
+      .then(() => metadataCache.close());
     return closing;
   }
   return { catalog, search, detail, expand, metadata, metadataEntry, targetMetadata, targetMetadataEntry,

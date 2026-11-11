@@ -27,7 +27,7 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
         let credentials = NativeFeedbackCredentials(try .init(data: bytes)), peer = NativeFeedbackOfflineHTTP()
         let clock = NativeMusicFixtureClock()
         let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
-            transport: peer, urlCacheStore: outbox, clock: { clock.now() })
+            transport: peer, feedbackOutboxStoreFactory: { outbox }, clock: { clock.now() })
         _ = try await owner.setAccess(available: true, generation: 1)
         let settingsDocument = NativeMusicMemoryDocument()
         let native = try await NativeMusicFixture.service(settingsDocument, accounts: owner, clock: { clock.now() })

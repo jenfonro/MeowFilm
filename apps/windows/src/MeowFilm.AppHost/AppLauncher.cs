@@ -159,9 +159,10 @@ public static class AppLauncher
             }
             try
             {
-                userData ??= new UserDataDirectory(paths.Documents);
+                userData ??= new UserDataDirectory(paths.Documents, paths.Caches);
                 // A durable reset request is completed before any store, runtime
-                // or business owner can read partially-cleared data.
+                // or cache owner can read either partially-cleared root. Normal
+                // admission leaves the optional cache directory unopened.
                 await Task.Run(userData.Open, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(paths.Documents);

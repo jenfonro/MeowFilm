@@ -45,9 +45,9 @@ public static class MusicAccountIntegrationTests
                 var document = await f.Store.ReadAsync("music.accounts.v1");
                 Check(document.Fingerprint.Exists);
                 var accounts = AccountDocument.Decode(document);
-                var details = accounts.GetDetails("wy");
-                Check(details is not null && details.BelongsTo(accounts.Get("wy")) &&
-                    details.Rights.Membership.Vip == false);
+                var details = await f.Application.ReadDetailsAsync("wy");
+                Check(details.Generation == accounts.Get("wy").Generation && details.Profile?.UserId == accounts.Get("wy").Profile?.UserId &&
+                    details.Membership.Vip == false);
                 foreach (var file in Directory.EnumerateFiles(data, "*", SearchOption.AllDirectories))
                     Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_SESSION", StringComparison.Ordinal));
             }
@@ -228,19 +228,31 @@ public static class MusicAccountIntegrationTests
         yield return Case("actual catalog authentication failure revokes original lease and clears anonymous cache", async () =>
         {
             await using var f = await Fixture.Create();
+            // Exercise the native account/catalog chain without an active home page
+            // issuing its own refreshes in response to the same account notifications.
+            await f.Module.NavigateAsync("favorites", default);
             var args = new { platform = "wy" };
-            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean());
-            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean());
-            Check(f.Transport.CatalogRequests == 1);
+            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
+                "initial anonymous catalog request must succeed");
+            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
+                "repeated anonymous catalog request must succeed from cache");
+            Check(f.Transport.CatalogRequests == 1, $"anonymous catalog cache: {f.Transport.CatalogRequests} requests");
             Check((await f.Application.ExecuteAsync("music.accounts.import",
-                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_SESSION" })).GetProperty("ok").GetBoolean());
+                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_SESSION" })).GetProperty("ok").GetBoolean(),
+                "account import must establish the lease under test");
             f.Transport.CatalogStatus = 401;
             var failed = await f.Application.ExecuteAsync("music.catalog.home", args);
-            Check(failed.GetProperty("code").GetString() == "AUTH_REQUIRED");
-            Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == "revoked");
+            string? failureCode = failed.GetProperty("code").GetString();
+            Check(!failed.GetProperty("ok").GetBoolean() && failureCode == "AUTH_REQUIRED",
+                $"catalog authentication failure must remain AUTH_REQUIRED: {failureCode}");
+            Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == "revoked",
+                "catalog authentication failure must revoke the original lease");
+            Check(f.Transport.CatalogRequests == 2, $"authenticated catalog rejection: {f.Transport.CatalogRequests} requests");
             f.Transport.CatalogStatus = 200;
-            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean());
-            Check(f.Transport.CatalogRequests == 3); // No resurrected pre-login guest cache.
+            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
+                "anonymous catalog remains available after account revocation");
+            Check(f.Transport.CatalogRequests == 3,
+                $"revoked lookup must not resurrect pre-login guest cache: {f.Transport.CatalogRequests} requests");
         });
         yield return Case("late catalog authentication error never revokes replacement account generation", async () =>
         {

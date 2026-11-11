@@ -415,6 +415,8 @@ internal sealed class KgAccountFixture : IAsyncDisposable
     internal const string Seed = "0123456789abcdef0123456789abcdef";
     internal readonly string Path;
     internal readonly KgAccountStore Store;
+    internal readonly LocalDocumentStore DetailsBacking;
+    internal readonly CacheDocumentStore DetailsCache;
     internal readonly KgAccountHandler Transport = new();
     internal readonly KgAccountClock Clock = new();
     internal readonly MusicPlatformHttp Http;
@@ -425,9 +427,14 @@ internal sealed class KgAccountFixture : IAsyncDisposable
     {
         Path = path ?? MusicNativeKgAccountTests.DataPath();
         Store = new(new LocalDocumentStore(Path, ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
+        string cacheRoot = System.IO.Path.Combine(Path, "details-cache");
+        Directory.CreateDirectory(cacheRoot);
+        DetailsBacking = new LocalDocumentStore(cacheRoot,
+            [MusicAccountOwner.DetailsCacheNamespace], protectedNamespaces: [MusicAccountOwner.DetailsCacheNamespace]);
+        DetailsCache = new(DetailsBacking);
         Http = MusicPlatformHttp.CreateWithHandler(Transport);
         Clients = new(Http, Store, clock: Clock, registrationEntropy: () => "test01");
-        Protocol = Clients.CreateAccountProtocol(); Owner = Clients.CreateAccountOwner(Store, Protocol);
+        Protocol = Clients.CreateAccountProtocol(); Owner = Clients.CreateAccountOwner(Store, Protocol, detailsCacheStore: DetailsCache);
         Transport.BeforeRegister = async () =>
         {
             var device = await ReadDevice(Store);
@@ -479,7 +486,7 @@ internal sealed class KgAccountFixture : IAsyncDisposable
     {
         Transport.Release.TrySetResult(); Store.Release.TrySetResult();
         try { await Owner.DisposeAsync(); }
-        finally { await Clients.DisposeAsync(); Http.Dispose(); await Store.DisposeAsync(); }
+        finally { await Clients.DisposeAsync(); Http.Dispose(); await DetailsCache.DisposeAsync(); await DetailsBacking.DisposeAsync(); await Store.DisposeAsync(); }
     }
 }
 

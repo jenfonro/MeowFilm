@@ -11,6 +11,8 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     public const string DocumentNamespace = "music.library.v1";
     private readonly IDocumentStore store;
     private readonly string scope;
+    private readonly CacheDocumentStore displayCache;
+    private readonly bool ownsDisplayCache;
     private readonly SemaphoreSlim gate = new(1, 1);
     private JsonObject? document;
     private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
@@ -26,7 +28,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         History,
         Library,
         LocalLyrics,
-        LyricDisplay,
         Metadata,
         OnlineSettings,
         OfficialSources,
@@ -41,12 +42,18 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     private sealed record Pending(JsonObject Candidate, DocumentFingerprint Before, DocumentFingerprint After, string Code,
         PendingOwner Owner, RecommendationCommit? Recommendation = null);
 
-    public MusicLibraryOwner(IDocumentStore store) : this(store, "local") { }
-    public MusicLibraryOwner(IDocumentStore store, string scope)
-    { ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope; }
+    public MusicLibraryOwner(IDocumentStore store, IDocumentStore? cacheStore = null) : this(store, "local", cacheStore) { }
+    public MusicLibraryOwner(IDocumentStore store, string scope, IDocumentStore? cacheStore = null)
+    {
+        ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope;
+        ownsDisplayCache = cacheStore is not CacheDocumentStore;
+        displayCache = cacheStore as CacheDocumentStore ?? (cacheStore is null ? new() : new(cacheStore));
+    }
 
     public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-        method is "music.library.network.save" or "music.library.network.remove"
+        method.StartsWith("music.lyrics.display.", StringComparison.Ordinal)
+            ? ExecuteLyricDisplayAsync(method, parameters, cancellationToken)
+            : method is "music.library.network.save" or "music.library.network.remove"
             ? ExecuteNetworkPlaylistMutationAsync(method, parameters, cancellationToken)
             : ExecuteCoreAsync(method, parameters, cancellationToken, method == "music.queue.recommendation.enter");
     public Task<JsonElement> CreatePlaylistAsync(string name, IReadOnlyList<JsonElement> songs, CancellationToken cancellationToken = default) =>
@@ -104,7 +111,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         if (method is "music.search.settings.save") return PendingOwner.SearchPolicy;
         if (method is "music.search.history.record" or "music.search.history.clear") return PendingOwner.SearchHistory;
         if (method is "music.lyrics.local.save" or "music.lyrics.local.remove") return PendingOwner.LocalLyrics;
-        if (method is "music.lyrics.display.save") return PendingOwner.LyricDisplay;
         throw new MusicLibraryException("INVALID_REQUEST");
     }
     private static bool IsAuthoritativeRead(string method, PendingOwner owner) => owner switch
@@ -251,7 +257,9 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);
         try { closed = true; ClearRecommendations(); InvalidateOfficialSources(); } finally { gate.Release(); }
+        await displayCache.DrainAsync().ConfigureAwait(false);
+        if (ownsDisplayCache) await displayCache.DisposeAsync().ConfigureAwait(false);
     }
     public async ValueTask DisposeAsync()
-    { if (closed) return; await PrepareShutdownAsync().ConfigureAwait(false); await AbortAsync().ConfigureAwait(false); }
+    { if (!closed) await PrepareShutdownAsync().ConfigureAwait(false); await AbortAsync().ConfigureAwait(false); }
 }

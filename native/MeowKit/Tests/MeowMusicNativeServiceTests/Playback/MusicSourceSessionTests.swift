@@ -91,11 +91,11 @@ private actor SourceSessionPublicationScripts: MusicScriptResolving {
         guard installationID == "a" else { throw MusicServiceError.sourceUnavailable }
         if !requests.isEmpty, let document = cancellationDocument {
             cancellationDocument = nil
-            // The first post-resolve declaration has only three reads left:
-            // final inspectionCheck, provider admission, session.check's owner
-            // inspectionCheck. The last read runs in exploreProvider's child,
+            // The post-resolve declaration has five reads left: recording
+            // admission, final inspectionCheck, recording/provider admission,
+            // and session.check's owner inspectionCheck. The last read runs in the child,
             // after the resolve deadline has already returned.
-            document.arm(afterReads: 3)
+            document.arm(afterReads: 5)
         }
         return snapshot()
     }
@@ -364,7 +364,7 @@ final class MusicSourceSessionTests: XCTestCase {
         do { _ = try await first.value; XCTFail("Cancellation before publication must reject the first match") }
         catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
         let injected = document.injectionCounts()
-        XCTAssertEqual(injected.arms, 1); XCTAssertEqual(injected.reads, 3); XCTAssertEqual(injected.cancellations, 1)
+        XCTAssertEqual(injected.arms, 1); XCTAssertEqual(injected.reads, 5); XCTAssertEqual(injected.cancellations, 1)
         let firstCalls = await scripts.calls()
         XCTAssertEqual(firstCalls.count, 1)
         var updates = await session.updates().makeAsyncIterator()
@@ -385,7 +385,7 @@ final class MusicSourceSessionTests: XCTestCase {
         XCTAssertTrue(calls.allSatisfy { $0.installationID == "a" && $0.siteID == "tx" && $0.quality == "flac" })
         XCTAssertEqual(document.injectionCounts().cancellations, 1)
         let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
-        let discovery = await service.sourceDiscoveryState(song)
+        let discovery = try await service.sourceDiscoveryState(song)
         XCTAssertTrue(history.isEmpty); XCTAssertTrue(exclusions.isEmpty)
         XCTAssertEqual(Set(discovery.entries.keys), ["tx"])
         let known = try XCTUnwrap(discovery.entries["tx"])
@@ -418,7 +418,7 @@ final class MusicSourceSessionTests: XCTestCase {
         let injected = document.injectionCounts()
         XCTAssertEqual(injected.arms, 0); XCTAssertEqual(injected.reads, 0); XCTAssertEqual(injected.cancellations, 0)
         let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
-        let discovery = await service.sourceDiscoveryState(song)
+        let discovery = try await service.sourceDiscoveryState(song)
         XCTAssertTrue(history.isEmpty); XCTAssertTrue(exclusions.isEmpty)
         XCTAssertEqual(Set(discovery.entries.keys), ["tx"])
         let known = try XCTUnwrap(discovery.entries["tx"])

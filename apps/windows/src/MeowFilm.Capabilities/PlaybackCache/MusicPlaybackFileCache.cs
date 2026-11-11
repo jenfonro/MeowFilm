@@ -12,7 +12,7 @@ public sealed partial class MusicCapability
         if (audioFileCache is null || !dialogs.Confirm("清空播放缓存？", "播放缓存")) return;
         CancelMusicPreload();
         await audioFileCache.ClearAsync(lifetime.Token);
-        status = "播放缓存已清空"; Changed(nameof(Status));
+        status = "播放缓存文件已清理（当前播放不中断）"; Changed(nameof(Status));
     });
 
     private void ConfirmPlaybackFileCache()
@@ -46,9 +46,9 @@ public sealed partial class MusicCapability
             return;
         }
         if (state.Cached)
-            TrackPlaybackCache(Touch(), state);
+            TrackPlaybackCache(Touch());
         else if (receipt is { } value)
-            TrackPlaybackCache(Store(value), state);
+            TrackPlaybackCache(Store(value));
         async Task Store(JsonElement receipt)
         {
             var accepted = state.Media;
@@ -134,7 +134,7 @@ public sealed partial class MusicCapability
         MusicSourceSession session, ResolvedMusic media, CancellationToken token)
     {
         // Missing/corrupt bytes revoke this representation only. Do not turn an
-        // optional file miss into a provider blacklist or bypass an incompatible index.
+        // optional file miss into a provider blacklist.
         if (audioFileCache is not null && FileIdentity(media) is { } identity)
             await audioFileCache.EraseAsync(identity.Scope, state.Song.Id, token);
         try { return await session.RefreshAsync(media.Target!, token); }
@@ -144,9 +144,8 @@ public sealed partial class MusicCapability
             return null;
         }
     }
-    private void TrackPlaybackCache(Task task, MusicRecovery state)
+    private void TrackPlaybackCache(Task task)
     {
-        long stamp = statusEpoch;
         var observed = Observe();
         eventWrites.Add(observed);
         _ = Remove();
@@ -154,14 +153,8 @@ public sealed partial class MusicCapability
         {
             try { await task; }
             catch (OperationCanceledException) { }
-            catch (Exception error) { PublishPlaybackCacheFailure(error, state, stamp); }
+            catch (Exception error) { System.Diagnostics.Debug.WriteLine($"Optional playback cache: {error.GetType().Name}"); }
         }
         async Task Remove() { await observed; eventWrites.Remove(observed); }
-    }
-    private void PublishPlaybackCacheFailure(Exception error, MusicRecovery state, long stamp)
-    {
-        if (stopping || disposed || stamp != statusEpoch || !ReferenceEquals(musicRecovery, state)) return;
-        status = ErrorText(error);
-        Changed(nameof(Status));
     }
 }

@@ -14,7 +14,7 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         return try .init(baseURL: root, namespace: "synthetic-pending", maximumDocumentBytes: maximum)
     }
     private func ready(_ store: DocumentStore, scope: String = "original-account") throws -> MusicNeteaseFeedbackOutbox {
-        let queue = MusicNeteaseFeedbackOutbox(store: store)
+        let queue = MusicNeteaseFeedbackOutbox(storeFactory: { store })
         try queue.configure(setting, at: now); try queue.activate(scope: scope, at: now)
         return queue
     }
@@ -184,7 +184,7 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         let store = try store()
         let original = Data("not-a-pending-document".utf8)
         try store.write(original, key: MusicNeteaseFeedbackOutbox.key)
-        let corrupted = MusicNeteaseFeedbackOutbox(store: store)
+        let corrupted = MusicNeteaseFeedbackOutbox(storeFactory: { store })
         XCTAssertThrowsError(try corrupted.configure(setting, at: now))
         XCTAssertEqual(try store.read(key: MusicNeteaseFeedbackOutbox.key), original)
         corrupted.stopDispatching()

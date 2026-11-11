@@ -49,7 +49,7 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
         XCTAssertEqual(after.entries[0].displayIdentity, before.entries[0].displayIdentity)
         XCTAssertEqual(Set(after.entries[0].track.sources.map(\.platform)), ["wy", "tx"])
         XCTAssertEqual(document.queue["entries"].array[0]["song"], original)
-        let metadata = await service.sourceDiscoveryState(original), calls = await qq.calls()
+        let metadata = try await service.sourceDiscoveryState(original), calls = await qq.calls()
         XCTAssertEqual(metadata.entries["tx"]?.checkedAt, 0)
         XCTAssertEqual(metadata.entries["tx"]?.observations, [])
         XCTAssertEqual(calls, 0)
@@ -139,7 +139,7 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
                 for try await value in await inspection.updates() where !value.isLoading { return }
                 throw MusicServiceError.closed
             }
-            let metadata = await service.sourceDiscoveryState(original)
+            let metadata = try await service.sourceDiscoveryState(original)
             let observation = try XCTUnwrap(metadata.entries["tx"]?.observations.first)
             XCTAssertEqual(observation.startedAt, NativeMusicFixture.date.timeIntervalSince1970 * 1000)
             XCTAssertEqual(observation.checkedAt, clock.now().timeIntervalSince1970 * 1000)
@@ -149,7 +149,7 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
             XCTAssertEqual(observation.outcome, failure == nil ? .found : .failed)
             clock.advance(60)
             _ = try await service.queue()
-            let reread = await service.sourceDiscoveryState(original)
+            let reread = try await service.sourceDiscoveryState(original)
             XCTAssertEqual(reread.entries["tx"]?.observations.first, observation,
                            "Projection cannot manufacture a newer search check")
             await inspection.close(); await service.close()

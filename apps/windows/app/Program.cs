@@ -6,6 +6,7 @@ using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.SystemMedia;
+using MeowFilm.Platform.Storage;
 using System.IO;
 
 internal static class Program
@@ -25,13 +26,21 @@ internal static class Program
         FilmMetadataService? pendingMetadata = null;
         SearchResultsPage? searchPage = null;
         AppMediaWindowAttachment? pendingMediaAttachment = null;
+        CacheDocumentStore? cacheStore = null;
         AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules,
             AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces),
             (runtime, storage, capabilities) =>
             {
                 playback = new NativePlayback();
+                var cacheRoot = AppDataPaths.Current.Caches;
+                cacheStore = new CacheDocumentStore(() =>
+                {
+                    Directory.CreateDirectory(cacheRoot);
+                    return new LocalDocumentStore(cacheRoot, AppIdentity.CacheNamespaces,
+                        protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
+                });
                 capabilities.Add(new MusicCapability(runtime, storage, playback,
-                    Path.Combine(AppDataPaths.Current.Documents, "music-playback-cache")));
+                    Path.Combine(cacheRoot, "audio"), cacheStore));
                 pendingRules = new FilmRuleService(runtime);
                 pendingSources = new FilmSourceService(runtime, storage);
                 pendingMetadata = new FilmMetadataService(runtime);
@@ -64,10 +73,21 @@ internal static class Program
                 }
                 finally
                 {
-                    if (playback is not null)
+                    try
                     {
-                        await playback.DisposeAsync();
-                        playback = null;
+                        if (cacheStore is not null)
+                        {
+                            await cacheStore.DisposeAsync();
+                            cacheStore = null;
+                        }
+                    }
+                    finally
+                    {
+                        if (playback is not null)
+                        {
+                            await playback.DisposeAsync();
+                            playback = null;
+                        }
                     }
                 }
             },

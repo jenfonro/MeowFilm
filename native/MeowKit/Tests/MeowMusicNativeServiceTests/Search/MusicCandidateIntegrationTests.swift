@@ -312,7 +312,7 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         XCTAssertEqual(player.resources.count, 2); XCTAssertEqual(player.stopped.count, 1)
         XCTAssertEqual(model.state.revision, 2)
         XCTAssertFalse(try XCTUnwrap(model.current).track.sources.contains { $0.sourceKey == rejected })
-        let excluded = await cache.excluded(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        let excluded = try await service.recordingSourceExclusions(song)
         XCTAssertEqual(excluded, [rejected])
         await session.close(); await model.close(); await service.close()
     }

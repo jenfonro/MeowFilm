@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Platform.Storage;
 using static MeowFilm.Windows.Tests.MusicOfficialAudioTests;
 
 namespace MeowFilm.Windows.Tests;
@@ -55,6 +56,7 @@ public static class MusicSongMatcherTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly MemoryStore Store = new();
+        internal readonly CacheDocumentStore CacheStore;
         internal readonly Clock Clock = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicSongMatcher Matcher;
@@ -63,8 +65,9 @@ public static class MusicSongMatcherTests
             (request, _) => Task.FromResult(Page(request, Song(request.Platform, "mapped")));
         internal Fixture()
         {
+            CacheStore = new(Store);
             Library = new(Store);
-            Matcher = new(Library, new(Store), async (request, token) =>
+            Matcher = new(Library, new(CacheStore), async (request, token) =>
             {
                 lock (Requests) Requests.Add(request);
                 return await Reply(request, token);
@@ -81,9 +84,9 @@ public static class MusicSongMatcherTests
         }
         internal Task<JsonElement> Favorite(JsonObject song) => Command("music.library.addSongs",
             new { id = "favorites", ifRevision = 0, songs = new[] { song } });
-        internal JsonArray Saved => Store.Data.TryGetValue(MusicSongMatchStore.Namespace, out var bytes)
+        internal JsonArray Saved => CacheStore.ReadMemory(MusicSongMatchStore.Namespace).Data is { } bytes
             ? JsonNode.Parse(bytes)!["entries"]!.AsArray() : [];
-        public async ValueTask DisposeAsync() { await Matcher.DrainAsync(); await Library.DisposeAsync(); }
+        public async ValueTask DisposeAsync() { await Matcher.DrainAsync(); await CacheStore.DisposeAsync(); await Library.DisposeAsync(); }
     }
     private static async Task Target()
     {
@@ -287,7 +290,9 @@ public static class MusicSongMatcherTests
         await f.Matcher.PersistAsync(default);
         Check(f.Saved.Count == 1 && Has(f.Saved.Single()!["song"]!.AsObject(), "tx"));
         int requests = f.Requests.Count;
-        var restarted = new MusicSongMatcher(f.Library, new(f.Store), (_, _) =>
+        await f.CacheStore.DrainAsync();
+        await using var restartedStore = new CacheDocumentStore(f.Store);
+        var restarted = new MusicSongMatcher(f.Library, new(restartedStore), (_, _) =>
             throw new InvalidOperationException("restart must not search"), f.Clock);
         Check(Has((await restarted.MatchAsync(song, "tx", Context("tx"), default)).Song, "tx"));
         Check(f.Requests.Count == requests && !f.Saved.ToJsonString().Contains("https://media", StringComparison.Ordinal));

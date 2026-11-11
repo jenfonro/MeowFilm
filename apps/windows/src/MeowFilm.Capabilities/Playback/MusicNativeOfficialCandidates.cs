@@ -79,8 +79,6 @@ public sealed partial class MusicNativeApplication
         catch (MusicLibraryException e) { return Failed(e.Code); }
         catch (MusicAccountException e) { return Failed(e.Code); }
         catch (MusicPlatformException e) { return Failed(e.Code); }
-        catch (MusicPlaybackCacheDataException) { return Failed("CACHE_DATA_INCOMPATIBLE"); }
-        catch (MusicPlaybackCacheCommitException) { return Failed("CACHE_COMMIT_UNKNOWN"); }
         catch (JsonException) { return Failed("INVALID_REQUEST"); }
         catch (Exception e) when (e is InvalidOperationException or ArgumentException or FormatException or OverflowException)
         { return Failed("INVALID_RESPONSE"); }

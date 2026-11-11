@@ -2,31 +2,16 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
 
-/// <summary>
-/// The protected document exists but is not the single cache format supported by
-/// this development build. Callers must surface the failure and leave it untouched.
-/// </summary>
+/// <summary>A cache value cannot supply the requested media metadata; handled as a miss.</summary>
 internal sealed class MusicPlaybackCacheDataException(DocumentStoreError error) : Exception(error.ToString())
 {
     internal DocumentStoreError Error { get; } = error;
 
-    internal static bool IsStoredFormatFailure(DocumentStoreException error) =>
-        error.Error is DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion or
-            DocumentStoreError.Limit or DocumentStoreError.Protection;
-
-    internal static bool IsOptionalStoreFailure(DocumentStoreException error) =>
-        error.Error is DocumentStoreError.Unavailable or DocumentStoreError.Conflict or
-            DocumentStoreError.Storage or DocumentStoreError.Closed;
-
-    internal static MusicPlaybackCacheDataException FromStore(DocumentStoreException error) =>
-        new(error.Error);
+    internal static bool IsCacheFailure(Exception error) => error is
+        MusicPlaybackCacheDataException or DocumentStoreException or System.Text.Json.JsonException or
+        Library.MusicLibraryException or InvalidOperationException or FormatException or OverflowException or
+        KeyNotFoundException or ArgumentException or NullReferenceException;
 
     internal static MusicPlaybackCacheDataException Corrupt() => new(DocumentStoreError.Corrupt);
-    internal static MusicPlaybackCacheDataException UnsupportedVersion() => new(DocumentStoreError.UnsupportedVersion);
     internal static MusicPlaybackCacheDataException Limit() => new(DocumentStoreError.Limit);
-}
-
-/// <summary>The store admitted a cache CAS but returned no matching durable receipt.</summary>
-internal sealed class MusicPlaybackCacheCommitException : Exception
-{
 }

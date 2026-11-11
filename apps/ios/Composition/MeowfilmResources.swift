@@ -74,6 +74,8 @@ struct MeowfilmResources: Sendable {
         musicAccountGate = try? MusicAccountAccessGate(
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier,
             urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.account-url-cache.v1")(),
+            feedbackOutboxStoreFactory: Self.documentFactory(
+                base: libraryRoot, namespace: "music.netease-feedback-outbox.v1"),
             audioCache: musicAudioCache, displayCache: musicDisplayCache,
             clientContexts: musicClients, qqClient: musicPublicQQ, neteaseTokenProvider: neteaseToken
         )

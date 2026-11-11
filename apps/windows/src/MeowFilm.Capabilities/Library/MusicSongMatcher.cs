@@ -484,8 +484,7 @@ internal sealed class MusicSongMatcher
             {
                 // Eligibility does not create per-library-key copies or renew a recording's check time.
                 var eligible = local.Where(NativeMusicSong.IsOnline).Select(Related).OfType<Entry>().Distinct().ToArray();
-                snapshot = eligible.OrderBy(entry => entry.Used).Select(entry => entry.Snapshot())
-                    .Where(MusicSongMatchStore.Accepts).ToArray();
+                snapshot = eligible.OrderBy(entry => entry.Used).Select(entry => entry.Snapshot()).ToArray();
                 Trim();
             }
             await store.WriteAsync(snapshot, token).ConfigureAwait(false);
@@ -496,8 +495,7 @@ internal sealed class MusicSongMatcher
     {
         try { await PersistAsync(token).ConfigureAwait(false); }
         catch (MusicLibraryException) { /* Pending user state does not invalidate accepted match evidence. */ }
-        catch (MusicPlaybackCacheCommitException) { }
-        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error)) { }
+        catch (DocumentStoreException) { }
     }
     internal async Task DrainAsync()
     {

@@ -5,8 +5,8 @@ using Microsoft.Win32.SafeHandles;
 namespace MeowFilm.Platform.Storage;
 
 /// <summary>
-/// Lifetime admission and explicit reset of one host-selected, app-owned directory.
-/// Callers must release all business owners before Clear; this class never calls them.
+/// Lifetime admission and one explicit reset of the host-selected business directory
+/// and its optional sibling cache directory. Callers release all owners before Clear.
 /// All operations are synchronous and failures use fixed DocumentStoreException codes.
 /// </summary>
 public sealed class UserDataDirectory : IDisposable
@@ -14,12 +14,13 @@ public sealed class UserDataDirectory : IDisposable
     private enum State { Unopened, Shared, Pending, DataCleared, ResetComplete }
     private readonly object gate = new();
     private readonly string path, usagePath, admissionPath, pendingPath;
+    private readonly string? cachePath;
     private WindowsDocumentFiles.Root? parent;
     private SafeFileHandle? usage;
     private State state;
     private bool disposed;
 
-    public UserDataDirectory(string path)
+    public UserDataDirectory(string path, string? cachePath = null)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
         this.path = WindowsDocumentFiles.ValidateRoot(path);
@@ -28,6 +29,17 @@ public sealed class UserDataDirectory : IDisposable
         usagePath = Path.Combine(directory, name + ".usage.lock");
         admissionPath = Path.Combine(directory, name + ".usage-gate.lock");
         pendingPath = Path.Combine(directory, name + ".reset-pending");
+        if (cachePath is not null)
+        {
+            this.cachePath = WindowsDocumentFiles.ValidateRoot(cachePath);
+            // Both roots share this App's admission and pinned parent, never a
+            // document queue. Normal Open does not touch the cache leaf.
+            var comparer = StringComparer.OrdinalIgnoreCase;
+            if (!comparer.Equals(directory, Path.GetDirectoryName(this.cachePath)) ||
+                comparer.Equals(this.path, this.cachePath) || comparer.Equals(usagePath, this.cachePath) ||
+                comparer.Equals(admissionPath, this.cachePath) || comparer.Equals(pendingPath, this.cachePath))
+                WindowsDocumentFiles.Fail(DocumentStoreError.InvalidRequest);
+        }
     }
 
     /// <summary>
@@ -77,7 +89,7 @@ public sealed class UserDataDirectory : IDisposable
     }
 
     /// <summary>
-    /// After owners actually release, remove the owned root without following links.
+    /// After owners actually release, remove both owned roots without following links.
     /// Failed cleanup retains pending intent/exclusive admission for explicit retry.
     /// Once deletion commits, a lease retry never deletes a later generation's data.
     /// </summary>
@@ -159,7 +171,7 @@ public sealed class UserDataDirectory : IDisposable
         if (state == State.Pending)
         {
             PersistPending();
-            DeleteTree(path);
+            DeleteRoots();
             state = State.DataCleared;
         }
         using var admission = Enter();
@@ -194,11 +206,26 @@ public sealed class UserDataDirectory : IDisposable
         }
     }
 
+    private void DeleteRoots()
+    {
+        // Admit deletion of every root before touching any child. An existing
+        // cache store pin is as authoritative as an existing business store pin.
+        using var business = WindowsDocumentFiles.OpenDeletionEntry(path);
+        using var cache = cachePath is null ? null : WindowsDocumentFiles.OpenDeletionEntry(cachePath);
+        DeleteTree(path, business);
+        if (cachePath is not null) DeleteTree(cachePath, cache);
+    }
+
     private static void DeleteTree(string path)
+    {
+        using var entry = WindowsDocumentFiles.OpenDeletionEntry(path);
+        DeleteTree(path, entry);
+    }
+
+    private static void DeleteTree(string path, SafeFileHandle? entry)
     {
         try
         {
-            using var entry = WindowsDocumentFiles.OpenDeletionEntry(path);
             if (entry is null) return;
             if (WindowsDocumentFiles.IsOrdinaryDirectory(entry))
                 foreach (string child in Directory.EnumerateFileSystemEntries(WindowsDocumentFiles.NativePath(path)))

@@ -93,6 +93,18 @@ struct MusicDocument {
                     !row["provider"].string.isEmpty && MusicModel.sites.contains(row["platform"].string), .corruptDocument)
             }
         }
+        if playback.contains("recordingSourceExclusions") {
+            try musicRequire(playback["recordingSourceExclusions"].isArray, .corruptDocument)
+            for row in playback["recordingSourceExclusions"].array {
+                let fields = ["id", "songID", "title", "artist", "fingerprint", "duration", "platform", "sourceKey"]
+                try row.requireFields(fields, required: fields)
+                try musicRequire(fields.filter { $0 != "duration" }.allSatisfy { row[$0].isString } &&
+                    UUID(uuidString: row["id"].string) != nil && !row["songID"].string.isEmpty &&
+                    !row["fingerprint"].string.isEmpty && !row["sourceKey"].string.isEmpty &&
+                    row["duration"].isNumber && row["duration"].number.isFinite && row["duration"].number >= 0 &&
+                    MusicModel.sites.contains(row["platform"].string), .corruptDocument)
+            }
+        }
         let official = playback["officialSources"]
         try musicRequire(official.isArray && official.array.allSatisfy(\.isString) &&
             Set(official.strings).count == official.array.count &&

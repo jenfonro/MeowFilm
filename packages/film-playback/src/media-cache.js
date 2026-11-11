@@ -60,10 +60,6 @@ export function createMediaCachePool() {
         document(key) {
           return [...records.values()].find(record => record.kind === 'document' && record.documentKey === key);
         },
-        async wait(url) {
-          // A failed prefetch is reported to its caller, but must not disable ordinary playback.
-          await Promise.allSettled([...pending.values()].filter(value => value.url === url).map(value => value.promise));
-        },
         load(key, url, producer) {
           if (revoked) return Promise.reject(failure('MEDIA_CANCELLED'));
           if (records.has(key)) return Promise.resolve(records.get(key));
@@ -100,7 +96,7 @@ export function createMediaCachePool() {
               pending.delete(key);
             }
           });
-          pending.set(key, { url, promise });
+          pending.set(key, { promise });
           return promise;
         },
         get bytes() {

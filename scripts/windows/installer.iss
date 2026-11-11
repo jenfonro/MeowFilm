@@ -241,6 +241,9 @@ begin
     Data := AddBackslash(ExpandConstant('{localappdata}\meowfilm\aggregate'));
     if (Pos(Lowercase(App), Lowercase(Data)) = 1) or (Pos(Lowercase(Data), Lowercase(App)) = 1) then
       RaiseException('Application files and user data must be installed in separate directories.');
+    Data := AddBackslash(ExpandConstant('{localappdata}\meowfilm\aggregate-cache'));
+    if (Pos(Lowercase(App), Lowercase(Data)) = 1) or (Pos(Lowercase(Data), Lowercase(App)) = 1) then
+      RaiseException('Application files and cached data must be installed in separate directories.');
     OrdinaryAncestors(ExpandConstant('{app}'));
     if PreviousFiles <> nil then begin
       PreviousFiles.Free;
@@ -313,18 +316,10 @@ begin
   Result := True;
 end;
 
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+procedure DeleteUserDirectory(Data: String);
 var
-  Choice: Integer;
   Attributes, Error: Cardinal;
-  Data: String;
 begin
-  if (CurUninstallStep <> usUninstall) or UninstallSilent then Exit;
-  Choice := MsgBox(CustomMessage('KeepData'), mbConfirmation, MB_YESNOCANCEL or MB_DEFBUTTON1);
-  if Choice = IDCANCEL then Abort;
-  if Choice = IDYES then Exit;
-  Data := ExpandConstant('{localappdata}\meowfilm\aggregate');
-  OrdinaryAncestors(ExpandConstant('{localappdata}\meowfilm'));
   Attributes := GetFileAttributesW(Data);
   if Attributes = $FFFFFFFF then begin
     Error := DLLGetLastError;
@@ -337,6 +332,19 @@ begin
     Do this before uninstalling files; a failure leaves a retryable uninstall. }
   if not DelTree(Data, True, True, True) then
     RaiseException(CustomMessage('DataDeleteFailed') + ' ' + Data);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Choice: Integer;
+begin
+  if (CurUninstallStep <> usUninstall) or UninstallSilent then Exit;
+  Choice := MsgBox(CustomMessage('KeepData'), mbConfirmation, MB_YESNOCANCEL or MB_DEFBUTTON1);
+  if Choice = IDCANCEL then Abort;
+  if Choice = IDYES then Exit;
+  OrdinaryAncestors(ExpandConstant('{localappdata}\meowfilm'));
+  DeleteUserDirectory(ExpandConstant('{localappdata}\meowfilm\aggregate-cache'));
+  DeleteUserDirectory(ExpandConstant('{localappdata}\meowfilm\aggregate'));
 end;
 
 procedure DeinitializeSetup;

@@ -178,17 +178,18 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     // draining. That producer must not repopulate the cache with the old value.
     if (flight.seeded) return result.value;
     const expiresAt = expiration(ttl, result.value, at);
-    publish?.(result.value);
     const bytes = 256 + flight.key.length * 2 + flight.dependencyBytes + result.bytes;
     // A large result is delivered whole; it simply does not displace retained data.
     if (expiresAt === at && !retainStale || bytes > maximumBytes) {
       remove(flight.key);
+      publish?.(result.value);
       return result.value;
     }
     remove(flight.key);
     while (retainedBytes + bytes > maximumBytes) remove(entries.keys().next().value);
     entries.set(flight.key, { ...flight.info, value: result.value, expiresAt, retainStale, bytes });
     retainedBytes += bytes;
+    publish?.(result.value);
     return result.value;
   }
 
@@ -285,7 +286,6 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     const previous = find(key, 'partial', at, retainStale);
     if (!replace && previous && (completenessRank[previous.completeness] > completenessRank[completeness] ||
         previous.completeness === completeness && previous.expiresAt >= until)) return previous.value;
-    publish?.(result.value);
     for (const flight of pending) {
       if (supersede && flight.key === key && flight.authorized &&
           completenessRank[completeness] >= completenessRank[flight.completeness]) flight.seeded = true;
@@ -295,6 +295,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
       // An accepted but unretained complete result also displaces an older
       // partial entry, so read cannot later pretend that partial is the winner.
       remove(key);
+      publish?.(result.value);
       return result.value;
     }
     remove(key);
@@ -302,6 +303,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     entries.set(key, { key, completeness, dependencies: dependency.value,
       value: result.value, expiresAt: until, retainStale, bytes });
     retainedBytes += bytes;
+    publish?.(result.value);
     return result.value;
   }
 

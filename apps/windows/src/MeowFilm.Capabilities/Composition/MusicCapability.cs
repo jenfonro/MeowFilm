@@ -21,6 +21,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private readonly GrantedMediaFiles files;
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
+    private readonly CacheDocumentStore cacheStore;
+    private readonly bool ownsCacheStore;
     private readonly CancellationTokenSource lifetime = new();
     internal MusicPresentation Presentation { get; }
     private readonly MusicPlaybackPresentation playbackPresentation;
@@ -37,33 +39,37 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
     private string? openedEntry;
 
-    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, NativePlayback playback, string? playbackCacheRoot = null)
-        : this(new MusicNativeApplication(store, runtime), store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot) { }
+    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, NativePlayback playback, string? playbackCacheRoot = null,
+        CacheDocumentStore? cacheStore = null)
+        : this(cacheStore is null ? new MusicNativeApplication(store, runtime) : new MusicNativeApplication(store, runtime, cacheStore),
+            store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot, cacheStore: cacheStore) { }
 
     public MusicCapability(IMusicApplication application, IDocumentStore store, NativePlayback playback,
-        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
-        : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot) { }
+        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)
+        : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot, cacheStore) { }
 
     public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicPlayback playback,
         IMusicDialogs? dialogs = null)
         : this(new MusicNativeApplication(store, runtime), store, playback, dialogs) { }
 
     public MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
-        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
-        : this(application, store, playback,
-            playbackCacheRoot is null ? null : new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, store),
-            dialogs) { }
+        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)
+        : this(application, store, playback, null, dialogs, cacheStore, playbackCacheRoot) { }
 
     internal MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
-        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null)
+        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null,
+        CacheDocumentStore? cacheStore = null, string? playbackCacheRoot = null)
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
         Presentation = new(this);
         playbackPresentation = new(this, property => Changed(property));
-        audioFileCache = playbackCache;
-        persistentChorus = new(store);
-        homeSnapshotStore = new(store);
+        this.cacheStore = cacheStore ?? new CacheDocumentStore();
+        ownsCacheStore = cacheStore is null;
+        audioFileCache = playbackCache ?? (playbackCacheRoot is null ? null :
+            new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, this.cacheStore));
+        persistentChorus = new(this.cacheStore);
+        homeSnapshotStore = new(this.cacheStore);
         files = new(store, "music.files.v1", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Lyrics.CollectionChanged += OnLyricRowsChanged;
         InitializeLibrarySync();
@@ -328,9 +334,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         MusicOperationException { Code: "SCRIPT_INTEGRITY" } => "音源脚本内容已变化",
         MusicOperationException { Code: "ROLLBACK_UNAVAILABLE" } => "没有可回退的音源版本",
         MusicOperationException { Code: "SCRIPT_EXCEPTION" or "SCRIPT_PROTOCOL_ERROR" } => "音源执行失败",
-        PlaybackCache.MusicPlaybackCacheCommitException => "保存结果未确认",
-        MusicOperationException { Code: "CACHE_DATA_INCOMPATIBLE" } or
-            PlaybackCache.MusicPlaybackCacheDataException => "播放缓存数据格式不兼容",
         SelectedLyricSnapshotException { Error: SelectedLyricSnapshotError.InvalidEncoding } => "歌词文本编码无效",
         SelectedLyricSnapshotException { Error: SelectedLyricSnapshotError.TooLarge } => "歌词文件超过大小限制",
         SelectedScriptSnapshotException or SelectedLyricSnapshotException => "所选文件不可用",
@@ -1016,6 +1019,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         catch (Exception error) { failure ??= error; }
         try { await application.PrepareShutdownAsync(); }
         catch (Exception error) { failure ??= error; }
+        await cacheStore.DrainAsync();
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
     public ValueTask DisposeAsync()
@@ -1079,6 +1083,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
         try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await application.AbortAsync(); } catch (Exception error) { failure ??= error; }
+        if (ownsCacheStore) await cacheStore.DisposeAsync();
         UnsubscribeSearch();
         UnsubscribeDiscovery();
         ReleaseRecommendations();
@@ -1110,6 +1115,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             catch (Exception error) { failure ??= error; }
             try { await application.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
+            if (ownsCacheStore) await cacheStore.DisposeAsync();
             // The capability owns its application. Runtime, store and playback remain App-owned.
         }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();

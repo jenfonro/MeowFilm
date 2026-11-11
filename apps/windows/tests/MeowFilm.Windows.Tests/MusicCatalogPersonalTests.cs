@@ -2161,9 +2161,9 @@ public static partial class MusicCatalogPersonalTests
         private readonly List<Held> allHolds = [];
         private readonly Dictionary<string, Func<JsonElement, JsonElement>> transforms = [];
         private readonly Dictionary<string, string> failures = [];
-        public Application(Store store, Platform platform)
+        public Application(Store store, Platform platform, CacheDocumentStore cache)
         {
-            Library = new(store);
+            Library = new(store, cacheStore: cache);
             Catalog = new(platform, Library);
             recommendationQueue = new(Library);
             recommendations = new(platform, recommendationQueue, SelectRecommendationAsync);
@@ -2401,20 +2401,28 @@ public static partial class MusicCatalogPersonalTests
     {
         private readonly object gate = new();
         private readonly Dictionary<string, byte[]> data = [];
+        private Store? cacheBacking;
+        public Store CacheBacking => cacheBacking ??= new();
         public ConcurrentQueue<string> Reads { get; } = new();
         public int LibraryWrites;
         public bool UnknownAfterNextLibraryWrite;
+        public bool FailReads, FailWrites, HoldWrites;
+        public readonly TaskCompletionSource WriteEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseWrite = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Reads.Enqueue(ns);
+            if (FailReads) throw new DocumentStoreException(DocumentStoreError.Storage);
             lock (gate) return Task.FromResult(data.TryGetValue(ns, out var value)
                 ? new DocumentSnapshot(value.ToArray(), DocumentFingerprint.FromBytes(value)) : new(null, DocumentFingerprint.Missing));
         }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value, DocumentFingerprint expected,
+        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value, DocumentFingerprint expected,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (HoldWrites) { WriteEntered.TrySetResult(); await ReleaseWrite.Task; }
+            if (FailWrites) throw new DocumentStoreException(DocumentStoreError.Storage);
             lock (gate)
             {
                 var previous = data.TryGetValue(ns, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
@@ -2425,7 +2433,7 @@ public static partial class MusicCatalogPersonalTests
                     LibraryWrites++;
                     if (UnknownAfterNextLibraryWrite) { UnknownAfterNextLibraryWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
                 }
-                return Task.FromResult(DocumentFingerprint.FromBytes(value.Span));
+                return DocumentFingerprint.FromBytes(value.Span);
             }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -2480,12 +2488,17 @@ public static partial class MusicCatalogPersonalTests
     private sealed class Fixture : IAsyncDisposable
     {
         public Store Store { get; }
+        public CacheDocumentStore Cache { get; }
         public Platform Platform { get; } = new();
         public Output Output { get; } = new();
         public Dialogs Dialogs { get; } = new();
         public Application App { get; }
         public MusicCapability Module { get; }
-        private Fixture(Store? store = null) { Store = store ?? new(); App = new(Store, Platform); Module = new(App, Store, Output, Dialogs); }
+        private Fixture(Store? store = null)
+        {
+            Store = store ?? new(); Cache = new(Store.CacheBacking);
+            App = new(Store, Platform, Cache); Module = new(App, Store, Output, Dialogs, cacheStore: Cache);
+        }
         public static async Task<Fixture> Create(bool initialize = true, Store? store = null)
         {
             var f = new Fixture(store);
@@ -2506,7 +2519,7 @@ public static partial class MusicCatalogPersonalTests
             var id = list.GetProperty("items").EnumerateArray().First(p => S(p, "kind") == "playlist").GetProperty("id").GetString();
             return await App.Library.ExecuteAsync("music.library.detail", new { id, offset = 0, limit = 100 });
         }
-        public async ValueTask DisposeAsync() { App.ReleaseAll(); Platform.ReleaseAll(); await Module.DisposeAsync(); await Store.DisposeAsync(); }
+        public async ValueTask DisposeAsync() { App.ReleaseAll(); Platform.ReleaseAll(); Store.CacheBacking.ReleaseWrite.TrySetResult(); try { await Module.DisposeAsync(); } finally { await Cache.DisposeAsync(); await Store.CacheBacking.DisposeAsync(); await Store.DisposeAsync(); } }
     }
     private static async Task OnSta(Func<Task> action)
     {

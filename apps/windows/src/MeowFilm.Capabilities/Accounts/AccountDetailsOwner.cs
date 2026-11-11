@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Platform.Storage;
 
@@ -8,7 +10,6 @@ namespace MeowFilm.Capabilities.Accounts;
 public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
 {
     private readonly HashSet<DetailsFlight> detailsFlights = [];
-    private readonly HashSet<string> detailsUncertain = new(StringComparer.Ordinal);
     private bool readsStopping;
 
     internal async Task PrepareReadShutdownAsync()
@@ -26,7 +27,6 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         foreach (var task in details.Select(f => (Task)f.Completion.Task)
             .Concat(observations.Select(f => f.Work ?? Task.CompletedTask)))
             try { await task.ConfigureAwait(false); } catch { /* Outcome remains with the owner. */ }
-        lock (gate) AccountRules.Require(detailsUncertain.Count == 0, "COMMIT_UNKNOWN");
     }
     internal void ResumeReads() { lock (gate) { AccountRules.Require(!closed, "CLOSED"); readsStopping = false; } }
     private sealed class DetailsFlight(StoredAccount before, StoredAccountDetails? cache,
@@ -38,7 +38,6 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         internal long Epoch { get; } = epoch;
         internal CancellationTokenSource Deadline { get; } = new(remaining);
         internal TaskCompletionSource<MusicAccountDetails> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal bool Admitted;
         internal string? Revocation;
         internal void Abort(string reason)
         {
@@ -70,7 +69,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             AccountRules.Require(!flight.Deadline.IsCancellationRequested, "TIMEOUT");
         }
     }
-    private async Task<DetailsBaseline> LoadDetails(string platform, CancellationToken token, bool reconcileUnknown)
+    private async Task<DetailsBaseline> LoadDetails(string platform, CancellationToken token)
     {
         long epoch;
         lock (gate) { AccountRules.Require(!closed, "CLOSED"); epoch = states[platform].Epoch; }
@@ -79,7 +78,6 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         {
             var document = await ReadDocument(token).ConfigureAwait(false);
             var account = document.Get(platform);
-            var cache = document.GetDetails(platform);
             token.ThrowIfCancellationRequested();
             lock (gate)
             {
@@ -94,13 +92,19 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
                     FenceDetailsLocked(platform);
                 }
                 state.Current = account;
-                if (reconcileUnknown) detailsUncertain.Remove(platform);
-                return new DetailsBaseline(account, cache, state.Epoch,
-                    state.Revoked || state.Uncertain || detailsUncertain.Contains(platform));
+                return new DetailsBaseline(account, null, state.Epoch, state.Revoked || state.Uncertain);
             }
         }, token).ConfigureAwait(false);
         if (changed) Notify(platform);
-        return result;
+        var cached = await ReadDetailsCache(token).ConfigureAwait(false);
+        StoredAccountDetails? cache = null;
+        try
+        {
+            if (cached[platform] is { } value)
+                cache = AccountDetailsDocument.ReadDetails(JsonSerializer.SerializeToElement(value), platform);
+        }
+        catch { /* A display snapshot that cannot be decoded is a cache miss. */ }
+        return result with { Cache = cache };
     }
     public async Task<MusicAccountDetails> ReadDetailsAsync(string platform, CancellationToken token = default)
     {
@@ -108,9 +112,8 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         Enter();
         try
         {
-            // Physical disk gate, no WaitAsync and no HTTP. An explicit read also
-            // reconciles a prior cache-only unknown CAS after the writer settled.
-            var baseline = await LoadDetails(platform, token, reconcileUnknown: true).ConfigureAwait(false);
+            // Credentials retain their physical disk gate; display cache has no business reconciliation.
+            var baseline = await LoadDetails(platform, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             lock (gate)
             {
@@ -135,14 +138,13 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         DetailsFlight? flight = null;
         try
         {
-            var baseline = await LoadDetails(platform, caller, reconcileUnknown: false).ConfigureAwait(false);
+            var baseline = await LoadDetails(platform, caller).ConfigureAwait(false);
             bool start = false;
             lock (gate)
             {
                 caller.ThrowIfCancellationRequested();
                 AccountRules.Require(!closed && !readsStopping && states[platform].Epoch == baseline.Epoch, "SESSION_CHANGED");
                 AccountRules.Require(baseline.Account.Generation == expectedGeneration, "SESSION_CHANGED");
-                AccountRules.Require(!detailsUncertain.Contains(platform), "COMMIT_UNKNOWN");
                 AccountRules.Require(!baseline.Hidden && baseline.Account.Cookie is not null, "AUTH_REQUIRED");
                 flight = detailsFlights.FirstOrDefault(f => f.Session.Platform == platform && f.Epoch == baseline.Epoch &&
                     f.Before.ValueFingerprint == baseline.Account.ValueFingerprint && !f.Completion.Task.IsCompleted && f.Revocation is null);
@@ -201,7 +203,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             var persistRights = rights.Membership.Vip is null && platform is "wy" or "tx" &&
                 flight.Cache is { } old && old.BelongsTo(flight.Before) && old.Rights.Membership.Vip is not null
                     ? old.Rights : rights;
-            var next = new StoredAccountDetails((flight.Cache?.Revision ?? 0) + 1, flight.Before.Generation,
+            var next = new StoredAccountDetails(flight.Before.Generation,
                 flight.Before.Scope!, flight.Before.ValueFingerprint!, profile.UserId, profile,
                 observed.ProfileFetchedAt, observed.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, persistRights);
             await SaveDetails(flight, next).ConfigureAwait(false);
@@ -215,19 +217,15 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         catch (Exception error)
         {
             string code = error is MusicPlatformException pe ? pe.Code : AccountRules.Error(error);
-            if (flight.Admitted && code != "STORAGE_CONFLICT") code = "COMMIT_UNKNOWN";
-            else
+            lock (gate)
             {
-                lock (gate)
-                {
-                    if (closed) code = "CLOSED";
-                    else if (flight.Revocation is not null) code = flight.Revocation;
-                    else if (!IsCurrent(flight.Session)) code = "SESSION_CHANGED";
-                    else if (flight.Deadline.IsCancellationRequested) code = "TIMEOUT";
-                }
-                if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" or "IDENTITY_MISMATCH" or "VERIFICATION_REQUIRED")
-                    Revoke(flight.Session); // Exact issued snapshot only; a late failure cannot revoke its replacement.
+                if (closed) code = "CLOSED";
+                else if (flight.Revocation is not null) code = flight.Revocation;
+                else if (!IsCurrent(flight.Session)) code = "SESSION_CHANGED";
+                else if (flight.Deadline.IsCancellationRequested) code = "TIMEOUT";
             }
+            if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" or "IDENTITY_MISMATCH" or "VERIFICATION_REQUIRED")
+                Revoke(flight.Session); // Exact issued snapshot only; a late failure cannot revoke its replacement.
             failure = new MusicAccountException(code);
         }
         finally
@@ -238,63 +236,78 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         if (failure is not null) flight.Completion.TrySetException(failure);
         else flight.Completion.TrySetResult(result!);
     }
-    private Task SaveDetails(DetailsFlight flight, StoredAccountDetails next) => DiskAsync(async () =>
+    private async Task SaveDetails(DetailsFlight flight, StoredAccountDetails next)
     {
-        DetailsGuard(flight);
-        var document = await ReadDocument(flight.Deadline.Token).ConfigureAwait(false);
-        DetailsGuard(flight);
-        var actualAccount = document.Get(flight.Session.Platform);
-        if (actualAccount.ValueFingerprint != flight.Before.ValueFingerprint)
+        // Re-observe the authoritative credential before publishing an observation.
+        // Display writes never enter the credential CAS/pending state.
+        await DiskAsync(async () =>
         {
-            lock (gate)
+            DetailsGuard(flight);
+            var document = await ReadDocument(flight.Deadline.Token).ConfigureAwait(false);
+            DetailsGuard(flight);
+            var actualAccount = document.Get(flight.Session.Platform);
+            if (actualAccount.ValueFingerprint != flight.Before.ValueFingerprint)
             {
-                var state = states[flight.Session.Platform];
-                state.Epoch++; state.Current = actualAccount; state.Verified = null;
-                FenceDetailsLocked(flight.Session.Platform);
+                lock (gate)
+                {
+                    var state = states[flight.Session.Platform];
+                    state.Epoch++; state.Current = actualAccount; state.Verified = null;
+                    FenceDetailsLocked(flight.Session.Platform);
+                }
+                Notify(flight.Session.Platform);
+                throw new MusicAccountException("SESSION_CHANGED");
             }
-            Notify(flight.Session.Platform);
-            throw new MusicAccountException("SESSION_CHANGED");
+            return true;
+        }, flight.Deadline.Token).ConfigureAwait(false);
+        DetailsGuard(flight);
+        SaveDetailsCache(flight.Session.Platform, next, () => DetailsGuard(flight));
+        DetailsGuard(flight);
+    }
+    private async Task<JsonObject> ReadDetailsCache(CancellationToken token)
+    {
+        DocumentSnapshot? snapshot = null;
+        try
+        {
+            snapshot = await detailsCacheStore.ReadAsync(DetailsCacheNamespace, token).ConfigureAwait(false);
+            return snapshot.Data is null ? new() : JsonNode.Parse(snapshot.Data)!.AsObject();
         }
-        byte[] bytes = document.ReplaceDetails(flight.Session.Platform, flight.Before, flight.Cache, next);
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch { return new(); }
+        finally { if (snapshot?.Data is { } data) CryptographicOperations.ZeroMemory(data); }
+    }
+    private void SaveDetailsCache(string platform, StoredAccountDetails next, Action guard)
+    {
         try
         {
             lock (gate)
             {
-                DetailsGuard(flight);
-                detailsUncertain.Add(flight.Session.Platform); flight.Admitted = true;
+                guard();
+                var snapshot = detailsCacheStore.ReadMemory(DetailsCacheNamespace);
+                JsonObject root;
+                try
+                {
+                    try { root = snapshot.Data is null ? new() : JsonNode.Parse(snapshot.Data)!.AsObject(); }
+                    catch { root = new(); }
+                }
+                finally { if (snapshot.Data is { } data) CryptographicOperations.ZeroMemory(data); }
+                root[platform] = AccountDetailsDocument.Encode(next);
+                byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root);
+                try { detailsCacheStore.Save(DetailsCacheNamespace, bytes); }
+                finally { CryptographicOperations.ZeroMemory(bytes); }
             }
-            try
-            {
-                var receipt = await store.WriteAsync(DocumentNamespace, bytes, document.Fingerprint, CancellationToken.None).ConfigureAwait(false);
-                AccountRules.Require(receipt == DocumentFingerprint.FromBytes(bytes), "COMMIT_UNKNOWN");
-            }
-            catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
-            {
-                lock (gate) { detailsUncertain.Remove(flight.Session.Platform); flight.Admitted = false; }
-                throw new MusicAccountException("STORAGE_CONFLICT");
-            }
-            catch { throw new MusicAccountException("COMMIT_UNKNOWN"); }
-            lock (gate)
-            {
-                // A real receipt settles persistence even if display authority expired.
-                detailsUncertain.Remove(flight.Session.Platform); flight.Admitted = false;
-                DetailsGuard(flight);
-            }
-            return true;
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
-    }, flight.Deadline.Token);
+        catch { System.Diagnostics.Trace.TraceWarning("Music account details cache write failed."); }
+    }
 
     private MusicAccountDetails DetailsView(string platform, StoredAccount account, StoredAccountDetails? cache,
         bool hidden, MusicAccountEntitlements? observed = null)
     {
         var state = states[platform];
-        hidden |= state.Revoked || state.Uncertain || detailsUncertain.Contains(platform);
+        hidden |= state.Revoked || state.Uncertain;
         string status = hidden ? "revoked" : account.Cookie is null ? "none" :
             state.Verified is { } verified && Same(verified, account) ? "verified" : "saved";
         if (hidden || account.Cookie is null)
-            return new(platform, account.Generation, status, null, 0, 0, new(null, "unknown", null), 0, 0, Array.Empty<string>(),
-                ErrorCode: detailsUncertain.Contains(platform) ? "COMMIT_UNKNOWN" : null);
+            return new(platform, account.Generation, status, null, 0, 0, new(null, "unknown", null), 0, 0, Array.Empty<string>());
         if (cache?.BelongsTo(account) != true) cache = null;
         var profile = cache?.Profile ?? account.Profile;
         long fetched = cache?.ProfileFetchedAt ?? account.ValidatedAt ?? 0;

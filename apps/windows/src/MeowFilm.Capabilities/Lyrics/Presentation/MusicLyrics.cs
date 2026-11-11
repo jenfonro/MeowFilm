@@ -310,8 +310,9 @@ public sealed partial class MusicCapability
                     }
                     catch (Exception error)
                     {
-                        if (CurrentRequest())
-                            lyricStatus = error is OperationCanceledException ? "" : "歌词未保存：" + ErrorText(error);
+                        // The lyric result is already published. An optional
+                        // display snapshot cannot change its successful status.
+                        System.Diagnostics.Trace.TraceWarning("LYRIC_DISPLAY_CACHE_UNAVAILABLE: {0}", error.GetType().Name);
                     }
                 }
             }

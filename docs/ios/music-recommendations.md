@@ -30,6 +30,8 @@
 
 播放反馈的来源值与取曲路由分开：仅普通 FM 在缺少逐曲上游来源时默认 `userfm`，规则频道（`ruleFM`）无上游来源时省略；心动使用真实 `play_scene=heartbeat`，逐曲上游 `source/sourceId/alg` 独立保留；心动收藏歌单 ID 仅描述本地入口，不借作上游反馈来源。推荐 `sourceMap` 缺失、空或 null 时不填 `moreRcmd`，相似模式也不生成猜测标签。反馈协议与有限待发见[音乐能力](music.md#网易协议与有限待发)。
 
+网易反馈 outbox 使用 Application Support 下 `documents/music.netease-feedback-outbox.v1` 的独立业务 `DocumentStore`，由账号服务通过惰性工厂注入，不与 URL／副歌缓存共用存储，也不读取或导入其它存储的数据。普通清缓存不删除待发事实；存储不可用只限制反馈，不阻断账号准备、启动或播放。发送前仍须成功落盘 inflight，ACK、账号身份和未知发送结果不重放规则不变。
+
 ## 固定单曲推荐
 
 搜索自动候选和主动单曲推荐复用同一平台请求：

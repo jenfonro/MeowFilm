@@ -75,7 +75,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
                 currentSourceSession = (occurrenceID, session)
                 return session
             }
-            excluded = await sourceDiscoveryExcluded(song)
+            excluded = try recordingSourceExclusions(song)
             // Re-enter through the owner check: another caller may have published
             // a session while the recording exclusion store was being read.
         }
@@ -90,7 +90,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         while sourceResultOrder.count > 128 { sourceResults[sourceResultOrder.removeFirst()] = nil }
     }
     func cachedSourceAllowed(_ value: MusicNativeResolvedSource, seed: MusicSourceInspectionSeed) async throws -> Bool {
-        let excluded = await sourceDiscoveryExcluded(seed.song)
+        let excluded = try recordingSourceExclusions(seed.song)
         try inspectionCheck(seed)
         return try !excluded.contains(value.option.sourceKey) &&
             !sourceExcluded(seed.song, provider: value.option.installationId, platform: value.option.siteId) &&
@@ -348,7 +348,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
             discovered = true; options = nil
         }
         if let options { return options }
-        let cache = await owner.sourceDiscoveryState(staged)
+        let cache = try await owner.sourceDiscoveryState(staged)
         let merged = await owner.mergeSourceDiscoveryCache(staged, entries: cache.current(window: MusicSourceDiscoveryWindow.playback))
         staged = withoutRejectedRecordings(merged)
         let collector = MusicSourceOptionCollector()
@@ -640,6 +640,21 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         try await check()
         seed = try await owner.inspectionReject(seed, sourceKey: sourceKey, occurrenceID: occurrenceID,
                                                 expectedRevision: expectedQueueRevision)
+        recordingRejected(sourceKey: sourceKey)
+    }
+    func recordingRestored(fingerprint: String, duration: Double, sourceKey: String) {
+        let descriptor = MusicModel.descriptor(seed.song)
+        guard descriptor.fingerprint == fingerprint,
+              descriptor.isCompatible(with: .init(title: "", artist: "", duration: duration), sameNative: true) else { return }
+        rejectedSourceKeys.remove(sourceKey)
+        options = nil
+        attempted = Set(results.map(\.attemptKey)); mediaFailed = []
+        publish()
+    }
+    func recordingExcluded(fingerprint: String, duration: Double, sourceKey: String) {
+        let descriptor = MusicModel.descriptor(seed.song)
+        guard descriptor.fingerprint == fingerprint,
+              descriptor.isCompatible(with: .init(title: "", artist: "", duration: duration), sameNative: true) else { return }
         recordingRejected(sourceKey: sourceKey)
     }
     func recordingRejected(sourceKey: String) {

@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -7,7 +6,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
 
-internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time = null)
+internal sealed class MusicChorusCache(CacheDocumentStore store, TimeProvider? time = null)
 {
     internal const string Namespace = "music.chorus.v1";
     private const int MaximumBytes = 65536, MaximumEntries = 100;
@@ -33,10 +32,11 @@ internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time 
     {
         if (!LowerHex(key, 64) || !double.IsFinite(duration) || duration <= 0)
             throw MusicPlaybackCacheDataException.Corrupt();
-        await gate.WaitAsync(token).ConfigureAwait(false);
+        if (point is not null) await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var saved = await store.ReadAsync(Namespace, token).ConfigureAwait(false);
+            var saved = point is not null ? store.ReadMemory(Namespace) :
+                await store.ReadAsync(Namespace, token).ConfigureAwait(false);
             var entries = Decode(saved);
 
             long now = Now;
@@ -50,7 +50,7 @@ internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time 
                 entries.Remove(key);
                 entries[key] = new(now, value.Start, value.End);
                 while (entries.Count > MaximumEntries) entries.Remove(entries.First().Key);
-                await Write(entries, saved.Fingerprint, token).ConfigureAwait(false);
+                await Write(entries, token).ConfigureAwait(false);
             }
 
             return entries.TryGetValue(key, out var hit) && Fits(hit.Start, hit.End, duration)
@@ -58,32 +58,17 @@ internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time 
                 : null;
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
-        { throw MusicPlaybackCacheDataException.FromStore(error); }
-        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
         { return null; }
-        finally { gate.Release(); }
+        finally { if (point is not null) gate.Release(); }
     }
 
     private static Dictionary<string, Entry> Decode(DocumentSnapshot saved)
     {
-        if (saved.Data is null)
-        {
-            if (saved.Fingerprint != DocumentFingerprint.Missing)
-                throw MusicPlaybackCacheDataException.Corrupt();
-            return new(StringComparer.Ordinal);
-        }
-        if (saved.Data.Length == 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (saved.Data.Length > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
+        if (saved.Data is null || saved.Data.Length > MaximumBytes) return new(StringComparer.Ordinal);
         try
         {
             using var document = JsonDocument.Parse(saved.Data, new JsonDocumentOptions { MaxDepth = 4 });
-            CheckJson(document.RootElement);
-            RequireFields(document.RootElement, "schema", "entries");
-            var schema = document.RootElement.GetProperty("schema");
-            if (schema.ValueKind != JsonValueKind.Number || schema.GetRawText() != "1")
-                throw MusicPlaybackCacheDataException.UnsupportedVersion();
             var rawEntries = document.RootElement.GetProperty("entries");
             if (rawEntries.ValueKind != JsonValueKind.Object)
                 throw MusicPlaybackCacheDataException.Corrupt();
@@ -93,7 +78,6 @@ internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time 
             {
                 if (entries.Count >= MaximumEntries) throw MusicPlaybackCacheDataException.Limit();
                 if (!LowerHex(property.Name, 64)) throw MusicPlaybackCacheDataException.Corrupt();
-                RequireFields(property.Value, "at", "start", "end");
                 long at = CanonicalLong(property.Value.GetProperty("at"));
                 double start = CanonicalDouble(property.Value.GetProperty("start"));
                 double end = CanonicalDouble(property.Value.GetProperty("end"));
@@ -102,13 +86,11 @@ internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time 
             }
             return entries;
         }
-        catch (MusicPlaybackCacheDataException) { throw; }
-        catch (Exception error) when (error is JsonException or InvalidOperationException or
-            FormatException or OverflowException or KeyNotFoundException or ArgumentException)
-        { throw MusicPlaybackCacheDataException.Corrupt(); }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        { return new(StringComparer.Ordinal); }
     }
 
-    private async Task Write(Dictionary<string, Entry> entries, DocumentFingerprint before, CancellationToken token)
+    private Task Write(Dictionary<string, Entry> entries, CancellationToken token)
     {
         var outputEntries = new JsonObject();
         foreach (var pair in entries)
@@ -119,43 +101,20 @@ internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time 
                 ["end"] = pair.Value.End
             };
         byte[] output = JsonSerializer.SerializeToUtf8Bytes(
-            new JsonObject { ["schema"] = 1, ["entries"] = outputEntries });
+            new JsonObject { ["entries"] = outputEntries });
         if (output.Length > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
-        var expected = DocumentFingerprint.FromBytes(output);
-        _ = Decode(new DocumentSnapshot(output, expected));
-        var receipt = await store.WriteAsync(Namespace, output, before, token).ConfigureAwait(false);
-        if (receipt != expected) throw new MusicPlaybackCacheCommitException();
+        token.ThrowIfCancellationRequested();
+        store.Save(Namespace, output);
+        return Task.CompletedTask;
     }
 
-    private static void CheckJson(JsonElement value)
-    {
-        if (value.ValueKind == JsonValueKind.Object)
-        {
-            var names = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var property in value.EnumerateObject())
-            {
-                if (!names.Add(property.Name)) throw MusicPlaybackCacheDataException.Corrupt();
-                CheckJson(property.Value);
-            }
-        }
-        else if (value.ValueKind == JsonValueKind.Array)
-            foreach (var item in value.EnumerateArray()) CheckJson(item);
-    }
 
-    private static void RequireFields(JsonElement value, params string[] fields)
-    {
-        if (value.ValueKind != JsonValueKind.Object) throw MusicPlaybackCacheDataException.Corrupt();
-        var names = value.EnumerateObject().Select(property => property.Name).ToArray();
-        if (names.Length != fields.Length || fields.Any(field => !names.Contains(field, StringComparer.Ordinal)))
-            throw MusicPlaybackCacheDataException.Corrupt();
-    }
+
+
 
     private static long CanonicalLong(JsonElement value)
     {
-        string raw = value.ValueKind == JsonValueKind.Number ? value.GetRawText() : "";
-        if (raw.Length is < 1 or > 19 || raw.Length > 1 && raw[0] == '0' ||
-            raw.Any(character => character is < '0' or > '9') ||
-            !long.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out long result) || result <= 0)
+        if (!value.TryGetInt64(out long result) || result <= 0)
             throw MusicPlaybackCacheDataException.Corrupt();
         return result;
     }
@@ -163,7 +122,7 @@ internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time 
     private static double CanonicalDouble(JsonElement value)
     {
         if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out double result) ||
-            !double.IsFinite(result) || value.GetRawText() != JsonSerializer.Serialize(result))
+            !double.IsFinite(result))
             throw MusicPlaybackCacheDataException.Corrupt();
         return result;
     }

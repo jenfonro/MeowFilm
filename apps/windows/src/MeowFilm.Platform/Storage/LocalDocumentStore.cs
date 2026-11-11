@@ -14,7 +14,7 @@ namespace MeowFilm.Platform.Storage;
 /// <summary>
 /// Local documents and complete collection source files. Only explicitly configured
 /// sensitive namespaces use CurrentUser DPAPI. All cooperating instances use the
-/// existing dedicated root's exclusive lock file; no blind overwrite is supported.
+/// existing dedicated root's exclusive lock file; public business writes require CAS.
 /// </summary>
 public sealed class LocalDocumentStore : IDocumentStore
 {
@@ -55,6 +55,17 @@ public sealed class LocalDocumentStore : IDocumentStore
         return RunAsync(location, null, token => ReadLocked(location, token), cancellationToken);
     }
 
+    internal Task<DocumentSnapshot> ReadCacheAsync(string documentNamespace, CancellationToken cancellationToken)
+    {
+        var location = Locate(documentNamespace);
+        return RunAsync(location, null, operation =>
+        {
+            using var folder = WindowsDocumentFiles.OpenDirectory(location.Directory, true);
+            return folder is null ? new DocumentSnapshot(null, DocumentFingerprint.Missing) :
+                ReadDocument(Path.Combine(location.Directory, location.FileName), location, operation.Cancellation);
+        }, cancellationToken);
+    }
+
     public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
         DocumentFingerprint expected, CancellationToken cancellationToken = default)
     {
@@ -64,6 +75,25 @@ public sealed class LocalDocumentStore : IDocumentStore
             throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         // Take an immediate owned snapshot before waiting for the serial writer.
         return RunAsync(location, data, operation => WriteLocked(location, expected, operation.Data!), cancellationToken);
+    }
+
+    // Only the disposable cache owner can request replacement without a business
+    // CAS. It does not read/decode the previous value, including its DPAPI envelope.
+    internal Task<DocumentFingerprint> ReplaceCacheAsync(string documentNamespace, ReadOnlyMemory<byte> data)
+    {
+        var location = Locate(documentNamespace);
+        if (data.Length > location.MaximumBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+        return RunAsync(location, data, operation =>
+        {
+            using var folder = WindowsDocumentFiles.OpenDirectory(location.Directory, true) ??
+                WindowsDocumentFiles.CreateDirectory(location.Directory);
+            // Retain no-follow/single-link safety without reading old cache bytes.
+            // Delete sharing permits our atomic replacement while this handle is pinned.
+            using var previous = WindowsDocumentFiles.OpenFile(Path.Combine(location.Directory, location.FileName),
+                WindowsDocumentFiles.Read, WindowsDocumentFiles.ShareRead | 4 /* FILE_SHARE_DELETE */,
+                WindowsDocumentFiles.OpenExisting, allowMissing: true);
+            return ReplaceLocked(location, operation.Data!);
+        }, CancellationToken.None);
     }
 
     private sealed record DocumentLocation(string Namespace, string Directory, string FileName,
@@ -241,7 +271,6 @@ public sealed class LocalDocumentStore : IDocumentStore
 
     private DocumentFingerprint WriteLocked(DocumentLocation location, DocumentFingerprint expected, byte[] data)
     {
-        var next = DocumentFingerprint.FromBytes(data);
         string directory = location.Directory;
         using var folder = WindowsDocumentFiles.OpenDirectory(directory, true) ?? WindowsDocumentFiles.CreateDirectory(directory);
         if (location.Protected) CheckInventory(directory);
@@ -252,6 +281,14 @@ public sealed class LocalDocumentStore : IDocumentStore
             if (previous.Fingerprint != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
         }
         finally { if (location.Protected && previous.Data is not null) CryptographicOperations.ZeroMemory(previous.Data); }
+        return ReplaceLocked(location, data);
+    }
+
+    private DocumentFingerprint ReplaceLocked(DocumentLocation location, byte[] data)
+    {
+        var next = DocumentFingerprint.FromBytes(data);
+        string directory = location.Directory;
+        string destination = Path.Combine(directory, location.FileName);
         byte[] contents = location.Protected ? Protect(data, location.Namespace) : data;
         string staging = Path.Combine(directory, "stage-" + Guid.NewGuid().ToString("N") + Path.GetExtension(location.FileName));
         using var stage = WindowsDocumentFiles.OpenFile(staging,

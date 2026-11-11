@@ -68,7 +68,8 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         var confirmed = false
     }
     private let lock = NSLock()
-    private let store: DocumentStore?
+    private let storeFactory: (@Sendable () throws -> DocumentStore)?
+    private var store: DocumentStore?
     private var loaded = false, writable = true, frozen = false, armed = false, configured = false
     private var dispatchStopped = false
     private var entries: [Entry] = []
@@ -77,14 +78,20 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     private var scope: String?
     private var authorization = MusicPlaybackFeedbackAuthorization()
 
-    init(store: DocumentStore?) { self.store = store }
+    init(storeFactory: (@Sendable () throws -> DocumentStore)?) { self.storeFactory = storeFactory }
+    private func resolvedStore() throws -> DocumentStore? {
+        if let store { return store }
+        store = try storeFactory?()
+        return store
+    }
     private func locked<T>(_ action: () throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }; return try action()
     }
     private func save(_ draft: [Entry]) throws {
         // A failed ordinary write must not prevent a later explicit safe unlink.
-        guard (writable || draft.isEmpty), let store else { throw MusicServiceError.storageFailed }
+        guard writable || draft.isEmpty else { throw MusicServiceError.storageFailed }
         do {
+            guard let store = try resolvedStore() else { throw MusicServiceError.storageFailed }
             if draft.isEmpty { try store.remove(key: Self.key) }
             else {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
@@ -101,7 +108,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         guard !loaded else { return }
         loaded = true
         do {
-            if let data = try store?.read(key: Self.key) {
+            if let data = try resolvedStore()?.read(key: Self.key) {
                 let document = try JSONDecoder().decode(Document.self, from: data)
                 guard document.version == 1, document.entries.count <= Self.capacity,
                       Set(document.entries.map(\.id)).count == document.entries.count,

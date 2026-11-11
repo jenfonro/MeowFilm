@@ -60,6 +60,76 @@ final class FilmTMDBServiceTests: XCTestCase {
         }
     }
 
+    func testCacheStorageErrorsKeepSuccessfulMetadataWithoutInventingCacheEntry() async throws {
+        let client = try client()
+        addTeardownBlock { await client.close() }
+        let payload: RuntimeValue = .object(["results": .array([.object(["id": .number(7)])])])
+        let service = FilmTMDBService(connection: { client })
+        for code in ["STORAGE_ERROR", "CORRUPT_STORAGE", "CACHE_LOAD_FAILED"] {
+            TMDBAdapterProtocol.set { transport in
+                if transport.request.url?.path.hasSuffix("data.cache.entry") == true {
+                    transport.reply(.object(["ok": .bool(false), "contract": .string("film.playback.v1"), "code": .string(code)]))
+                } else {
+                    transport.reply(.object(["ok": .bool(true), "contract": .string("film.playback.v1"), "value": payload]))
+                }
+            }
+            for read in [try await service.searchRead(query: "成功"), try await service.detailRead(type: "tv", id: 7)] {
+                XCTAssertEqual(read.value, payload)
+                XCTAssertNil(read.cacheEntry)
+                XCTAssertTrue(read.producer === client)
+            }
+        }
+    }
+
+    func testCacheExportDoesNotHideAuthorizationProtocolOrLifecycleErrors() async throws {
+        let client = try client()
+        addTeardownBlock { await client.close() }
+        let service = FilmTMDBService(connection: { client })
+        for code in ["AUTH_REQUIRED", "AUTH_FAILED", "CANCELLED", "CLOSED", "SCRIPT_PROTOCOL_ERROR", "NETWORK_ERROR"] {
+            TMDBAdapterProtocol.set { transport in
+                if transport.request.url?.path.hasSuffix("data.cache.entry") == true {
+                    transport.reply(.object(["ok": .bool(false), "contract": .string("film.playback.v1"), "code": .string(code)]))
+                } else {
+                    transport.reply(.object(["ok": .bool(true), "contract": .string("film.playback.v1"), "value": .object([:])]))
+                }
+            }
+            do { _ = try await service.searchRead(query: "真实错误"); XCTFail(code) }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote(code)) }
+        }
+        TMDBAdapterProtocol.set { transport in
+            if transport.request.url?.path.hasSuffix("data.cache.entry") == true {
+                transport.reply(.object(["ok": .bool(true), "contract": .string("wrong-contract"), "value": .null]))
+            } else {
+                transport.reply(.object(["ok": .bool(true), "contract": .string("film.playback.v1"), "value": .object([:])]))
+            }
+        }
+        do { _ = try await service.searchRead(query: "协议错误"); XCTFail("Malformed protocol must remain an error") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+    }
+
+    func testCancellationAndCloseDuringCacheExportRemainErrors() async throws {
+        for closing in [false, true] {
+            let client = try client()
+            addTeardownBlock { await client.close() }
+            let entered = expectation(description: "Cache export is pending")
+            TMDBAdapterProtocol.set { transport in
+                if transport.request.url?.path.hasSuffix("data.cache.entry") == true {
+                    entered.fulfill()
+                } else {
+                    transport.reply(.object(["ok": .bool(true), "contract": .string("film.playback.v1"), "value": .object([:])]))
+                }
+            }
+            let task = Task { try await FilmTMDBService(connection: { client }).searchRead(query: "取消") }
+            await fulfillment(of: [entered], timeout: 3)
+            if closing { await client.close() } else { task.cancel() }
+            do { _ = try await task.value; XCTFail("Cancelled cache export cannot publish") }
+            catch {
+                if closing { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
+                else { XCTAssertTrue(error is CancellationError || error as? RuntimeHTTPError == .cancelled) }
+            }
+        }
+    }
+
     func testSearchTransportUsesBusinessOpenInsteadOfRawSearchOrCacheExport() async throws {
         let client = try client()
         addTeardownBlock { await client.close() }

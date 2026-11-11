@@ -189,7 +189,7 @@ final class MusicOfficialSourceSettingsTests: XCTestCase {
         let service = try await NativeMusicFixture.service(store, scripts: scripts, sourceDiscovery: cache)
         let before = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         XCTAssertTrue(before.contains { $0.sourceKey == key })
-        await cache.exclude(fingerprint: MusicModel.fingerprint(song), duration: 180, sourceKey: key)
+        try await service.excludeRecordingSource(song, sourceKey: key)
         let after = (try await service.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))).options
         XCTAssertFalse(after.contains { $0.sourceKey == key })
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)

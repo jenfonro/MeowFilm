@@ -63,6 +63,11 @@ public static class AppCompositionTests
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
         Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
         Check(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { "music.accounts.v1", "music.platform-context.v1" }));
+        Check(AppDataPaths.Current.Caches != AppDataPaths.Current.Documents &&
+            !AppDataPaths.Current.Caches.StartsWith(AppDataPaths.Current.Documents + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase));
+        Check(!AppIdentity.NativeNamespaces.Intersect(AppIdentity.CacheNamespaces, StringComparer.Ordinal).Any());
+        Check(AppIdentity.CacheProtectedNamespaces.Contains("music.account-details.v1"));
         return Task.CompletedTask;
     }
     private static async Task Components()

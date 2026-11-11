@@ -20,6 +20,7 @@ public static partial class MusicUiTests
         yield return Case("native login saves profile and rights before any settings activation", async () =>
         {
             await using var f = await DetailsScene.Create();
+            await f.Module.NavigateAsync("favorites", default);
             await f.Module.ImportAccountAsync("MUSIC_U=SYNTHETIC_LOGIN_CONSUMER; __csrf=SYNTHETIC_CSRF");
             Equal("verified", f.Module.SelectedAccount!.State);
             Equal(2, f.Http.Requests);
@@ -60,7 +61,7 @@ public static partial class MusicUiTests
             await f.Module.DeactivateSettingsAsync(); await f.Module.ActivateSettingsAsync();
             Equal("Fresh native name", row.DisplayName); Equal(2, f.Http.Requests);
             await f.Module.DisposeAsync();
-            await using var cold = new MusicNativeApplication(f.Store, f.Runtime,
+            await using var cold = new MusicNativeApplication(f.Store, f.Runtime, f.Cache,
                 new DetailsConsumerHttp { DenyAll = true });
             var cached = await cold.ReadDetailsAsync("wy");
             Equal("saved", cached.State); Equal("Fresh native name", cached.Profile?.DisplayName);
@@ -109,11 +110,12 @@ public static partial class MusicUiTests
         internal readonly LocalDocumentStore Store = ServiceStore();
         internal readonly NativeMusicScriptTestRuntime Runtime = new();
         internal readonly DetailsConsumerHttp Http = new();
+        internal readonly CacheDocumentStore Cache = new();
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
         private DetailsScene()
         {
-            App = new(Store, Runtime, Http);
+            App = new(Store, Runtime, Cache, Http);
             Module = new(App, Store, new PlaybackProbe(), new Dialogs());
         }
         internal static async Task<DetailsScene> Create()
@@ -145,7 +147,7 @@ public static partial class MusicUiTests
         {
             Http.Release.TrySetResult();
             try { await Module.DisposeAsync(); }
-            finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
+            finally { await Cache.DisposeAsync(); await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
         }
     }
 

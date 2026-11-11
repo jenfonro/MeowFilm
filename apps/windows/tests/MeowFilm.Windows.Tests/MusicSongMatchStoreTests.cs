@@ -14,17 +14,16 @@ public static class MusicSongMatchStoreTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("Music song matches roundtrip canonical recordings all platforms and exact observation states", Roundtrip);
+        yield return new("Music song matches decode consumed facts and ignore unused fields", UnusedFields);
         yield return new("Music song matches empty snapshot removes all observations without changing library", EmptySnapshot);
-        yield return new("Music song matches reject secrets URLs unknown fields and whole candidate pages", RejectTransient);
-        yield return new("Music song matches reject malformed observation records without replacing saved data", InvalidRecords);
-        yield return new("Music song matches unknown damaged duplicate and oversized documents are never overwritten", IncompatibleDocuments);
-        yield return new("Music song matches validate fingerprints and preserve protected format errors", StorageFormats);
-        yield return new("Music song matches unavailable cache reads miss and writes remain best effort", Unavailable);
-        yield return new("Music song matches CAS conflict rereads and preserves the winning document", Conflicts);
-        yield return new("Music song matches ambiguous writes reread receipts without replaying snapshots", AmbiguousWrites);
+        yield return new("Music song matches damaged content misses and fresh snapshots replace it", Damaged);
+        yield return new("Music song matches storage errors are optional and writes retain memory", StorageFailures);
+        yield return new("Music song matches slow initial reads cannot block accepted snapshots", SlowRead);
+        yield return new("Music song matches never persist credentials playback URLs or candidate pages", Secrets);
         yield return new("Music song matches capacity evicts oldest whole entries and retains input order", Capacity);
         yield return new("Music song matches oversized individual entry is evicted whole", OversizedEntry);
-        yield return new("Music song matches gate and cancellation settle an admitted write before reading", Cancellation);
+        yield return new("Music song matches cancelled saves do not change accepted facts", Cancellation);
+        yield return new("Music song matches cancelled cold reads preserve other readers and owner drain", CancelledRead);
         yield return new("Music matching eligibility includes only deduplicated active library members", Eligibility);
         yield return new("Music matching eligibility gate preparation cancellation and closure preserve stable snapshots", EligibilityLifecycle);
         yield return new("Music matching eligibility fences unknown library commits until reconciliation", EligibilityPending);
@@ -54,24 +53,13 @@ public static class MusicSongMatchStoreTests
     };
 
     private static byte[] Document(params JsonObject[] entries) => JsonSerializer.SerializeToUtf8Bytes(
-        new JsonObject { ["version"] = 2, ["entries"] = LJ.Arr(entries) }, LJ.Json);
+        new JsonObject { ["entries"] = LJ.Arr(entries) }, LJ.Json);
     private static JsonArray Excluded(params string[] sources) => new(new JsonObject
     {
         ["key"] = NativeMusicSong.Hash("original-recording"), ["sources"] = LJ.Arr(sources)
     });
     private static string Key(JsonObject entry) => entry["key"]!.GetValue<string>();
     private static JsonObject Observation(JsonObject entry) => entry["platforms"]!["wy"]!.AsObject();
-
-    private static async Task DataError(DocumentStoreError expected, Func<Task> action)
-    {
-        try { await action(); }
-        catch (MusicPlaybackCacheDataException error)
-        {
-            Check(error.Error == expected, $"Expected {expected}, actual {error.Error}");
-            return;
-        }
-        throw new InvalidOperationException("Expected incompatible cache data");
-    }
 
     private static async Task LibraryError(string expected, Func<Task> action)
     {
@@ -97,7 +85,8 @@ public static class MusicSongMatchStoreTests
     private static async Task Roundtrip()
     {
         await using var store = new Store();
-        var cache = new MusicSongMatchStore(store);
+        await using var cacheStore = new CacheDocumentStore(store);
+        var cache = new MusicSongMatchStore(cacheStore);
         Check((await cache.ReadAsync(default)).Count == 0 && store.WriteCalls == 0);
         var song = MusicSongFixture.Online("wy", "roundtrip", "Recording", "Artist");
         foreach (string platform in new[] { "tx", "kw", "kg", "mg" })
@@ -131,16 +120,38 @@ public static class MusicSongMatchStoreTests
             MusicSongFixture.Online("tx", "rejected-recording", "Other recording", "Artist")));
         var expected = entry.DeepClone();
         await cache.WriteAsync([entry], default);
+        await cacheStore.DrainAsync();
         Check(store.WriteCalls == 1 && store.WrittenNamespaces.SequenceEqual(new[] { "music.song-matches.v1" }));
         var root = JsonNode.Parse(store.Bytes(MusicSongMatchStore.Namespace)!)!.AsObject();
-        Check(root.Select(field => field.Key).SequenceEqual(new[] { "version", "entries" }) &&
-            root["version"]!.GetValue<int>() == 2 && root["entries"]!.AsArray().Count == 1);
+        Check(root.Select(field => field.Key).SequenceEqual(new[] { "entries" }) && root["entries"]!.AsArray().Count == 1);
         entry["song"]!["title"] = "Changed caller";
-        var first = (await new MusicSongMatchStore(store).ReadAsync(default)).Single();
+        await using var restarted = new CacheDocumentStore(store);
+        var first = (await new MusicSongMatchStore(restarted).ReadAsync(default)).Single();
         Check(JsonNode.DeepEquals(first, expected) && Key(first).Length == 16);
         first["song"]!["sources"]!.AsArray().Clear();
         Check(JsonNode.DeepEquals((await cache.ReadAsync(default)).Single(), expected));
         Check(store.ReadNamespaces.All(value => value == MusicSongMatchStore.Namespace));
+    }
+
+    private static async Task UnusedFields()
+    {
+        await using var backing = new Store();
+        var entry = Entry("unused");
+        entry["excluded"] = Excluded(NativeMusicSong.SourceKey(
+            MusicSongFixture.Online("tx", "rejected", "Other")));
+        var expected = entry.DeepClone();
+        foreach (var owner in new[]
+        {
+            entry, entry["song"]!.AsObject(), entry["song"]!["sources"]![0]!.AsObject(),
+            entry["song"]!["sources"]![0]!["musicInfo"]!.AsObject(),
+            entry["platforms"]!["wy"]!.AsObject(), entry["excluded"]![0]!.AsObject()
+        })
+            owner["unused"] = new JsonObject { ["nested"] = "https://unused.invalid/not-consumed" };
+        backing.Seed(MusicSongMatchStore.Namespace, Document(entry));
+        await using var store = new CacheDocumentStore(backing);
+        var decoded = (await new MusicSongMatchStore(store).ReadAsync(default)).Single();
+        Check(JsonNode.DeepEquals(decoded, expected),
+            "only consumed normalized recording facts and observations are returned");
     }
 
     private static async Task EmptySnapshot()
@@ -148,259 +159,95 @@ public static class MusicSongMatchStoreTests
         await using var store = new Store();
         byte[] library = "unrelated-library-bytes"u8.ToArray();
         store.Seed(MusicLibraryOwner.DocumentNamespace, library);
-        var cache = new MusicSongMatchStore(store);
+        await using var cacheStore = new CacheDocumentStore(store);
+        var cache = new MusicSongMatchStore(cacheStore);
         await cache.WriteAsync([], default);
-        Check(store.WriteCalls == 0 && store.Bytes(MusicSongMatchStore.Namespace) is null);
+        Check((await cache.ReadAsync(default)).Count == 0);
         var unsearched = Entry("unsearched", MusicSongFixture.Local("library:unsearched"));
         unsearched["platforms"] = new JsonObject();
         await cache.WriteAsync([Entry("one"), unsearched], default);
         Check(JsonNode.DeepEquals((await cache.ReadAsync(default))[1], unsearched));
         await cache.WriteAsync([], default);
-        Check((await cache.ReadAsync(default)).Count == 0 && store.WriteCalls == 2);
+        await cacheStore.DrainAsync();
+        Check((await cache.ReadAsync(default)).Count == 0);
         Check(store.Bytes(MusicLibraryOwner.DocumentNamespace)!.SequenceEqual(library) &&
             store.ReadNamespaces.All(value => value == MusicSongMatchStore.Namespace));
         Check(JsonNode.Parse(store.Bytes(MusicSongMatchStore.Namespace)!)!["entries"]!.AsArray().Count == 0);
     }
 
-    private static async Task RejectTransient()
+    private static async Task Secrets()
     {
-        Action<JsonObject>[] defects =
-        [
-            entry => entry["cookie"] = "synthetic-cookie",
-            entry => entry["song"]!["token"] = "synthetic-token",
-            entry => entry["song"]!["sources"]![0]!["credential"] = "synthetic-credential",
-            entry => MusicSongFixture.Info(entry["song"]!)["headers"] = new JsonObject { ["Authorization"] = "synthetic" },
-            entry => MusicSongFixture.Info(entry["song"]!)["url"] = "https://media.invalid/audio",
-            entry => MusicSongFixture.Info(entry["song"]!)["password"] = "synthetic",
-            entry => MusicSongFixture.Info(entry["song"]!)["_types"] =
-                new JsonObject { ["flac"] = new JsonObject { ["secret"] = "synthetic" } },
-            entry => Observation(entry)["query"] = "https://media.invalid/audio?token=synthetic",
-            entry => Observation(entry)["code"] = "https://media.invalid/audio",
-            entry => entry["results"] = new JsonArray(MusicSongFixture.Online("tx", "candidate")),
-            entry => entry["excluded"] = Excluded("[\"tx\",\"blob:synthetic\",\"\"]"),
-            entry =>
-            {
-                var source = entry["song"]!["sources"]![0]!.AsObject();
-                var info = source["musicInfo"]!.AsObject();
-                info["songmid"] = "https://media.invalid/native-id";
-                source["sourceKey"] = NativeMusicSong.InfoKey(info);
-            }
-        ];
-        foreach (var defect in defects)
+        await using var store = new CacheDocumentStore();
+        var cache = new MusicSongMatchStore(store);
+        var entry = Entry("safe");
+        entry["cookie"] = "secret"; entry["results"] = new JsonArray(Entry("candidate"));
+        entry["platforms"]!["wy"]!["token"] = "secret";
+        await cache.WriteAsync([entry], default);
+        string output = Encoding.UTF8.GetString(store.ReadMemory(MusicSongMatchStore.Namespace).Data!);
+        Check(!output.Contains("secret") && !output.Contains("results") && !output.Contains("candidate"));
+        foreach (string field in new[] { "query", "code" })
         {
-            await using var store = new Store();
-            byte[] before = Document(Entry("durable"));
-            store.Seed(MusicSongMatchStore.Namespace, before);
-            var invalid = Entry("invalid"); defect(invalid);
-            var cache = new MusicSongMatchStore(store);
-            await DataError(DocumentStoreError.Corrupt, () => cache.WriteAsync([invalid], default));
-            Check(store.WriteCalls == 0 && store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(before));
-            store.Seed(MusicSongMatchStore.Namespace, Document(invalid));
-            await DataError(DocumentStoreError.Corrupt, async () => await cache.ReadAsync(default));
+            var unsafeEntry = Entry("unsafe"); unsafeEntry["platforms"]!["wy"]![field] = "https://media.invalid/audio?token=secret";
+            await cache.WriteAsync([unsafeEntry], default);
+            Check(Key((await cache.ReadAsync(default)).Single()) == Key(entry));
         }
+        var credential = Entry("unsafe-song");
+        MusicSongFixture.Info(credential["song"]!)["headers"] = new JsonObject { ["Authorization"] = "secret" };
+        await cache.WriteAsync([credential], default);
+        Check(Key((await cache.ReadAsync(default)).Single()) == Key(entry));
     }
 
-    private static IEnumerable<JsonObject> InvalidEntries()
+    private static async Task Damaged()
     {
-        Action<JsonObject>[] defects =
-        [
-            entry => entry.Remove("key"),
-            entry => entry["key"] = new string('a', 32),
-            entry => entry["key"] = new string('A', 16),
-            entry => entry["key"] = 123,
-            entry => entry["song"]!["sources"]!.AsArray().Add(entry["song"]!["sources"]![0]!.DeepClone()),
-            entry => entry["song"]!["unused"] = true,
-            entry => entry["platforms"]!["local"] = Status("matched"),
-            entry => entry["platforms"]!["wy"] = null,
-            entry => Observation(entry).Remove("query"),
-            entry => Observation(entry)["complete"] = true,
-            entry => Observation(entry)["state"] = "not_found",
-            entry => Observation(entry)["checkedAt"] = -1,
-            entry => Observation(entry)["checkedAt"] = 0.5,
-            entry => Observation(entry)["checkedAt"] = "1",
-            entry => Observation(entry).Remove("matchedAt"),
-            entry => Observation(entry)["matchedAt"] = -1,
-            entry => Observation(entry)["matchedAt"] = 1,
-            entry => Observation(entry)["matchedAt"] = "0",
-            entry => Observation(entry)["page"] = 0,
-            entry => Observation(entry)["pages"] = 0,
-            entry => Observation(entry)["pages"] = 4,
-            entry => Observation(entry)["limit"] = 101,
-            entry => { Observation(entry)["page"] = int.MaxValue; Observation(entry)["pages"] = 2; },
-            entry => Observation(entry)["context"] = new string('a', 32),
-            entry => Observation(entry)["context"] = new string('A', 16),
-            entry => Observation(entry)["query"] = new string('q', 257),
-            entry => Observation(entry)["code"] = new string('c', 81),
-            entry => entry["excluded"] = new JsonArray(123),
-            entry => entry["excluded"] = new JsonArray("not-a-source-key"),
-            entry => entry["excluded"] = Excluded("not-a-source-key"),
-            entry => entry["excluded"] = Excluded("[\"tx\",\"id\",\"unexpected\"]"),
-            entry => entry["excluded"] = Excluded("[\"tx\",\"id\",\"\"]", "[\"tx\",\"id\",\"\"]"),
-            entry => { var scopes = Excluded("[\"tx\",\"id\",\"\"]"); scopes.Add(scopes[0]!.DeepClone()); entry["excluded"] = scopes; },
-            entry => entry["excluded"] = new JsonArray(new JsonObject { ["key"] = "invalid", ["sources"] = new JsonArray() }),
-            entry => entry["excluded"] = new JsonArray(new JsonObject { ["key"] = NativeMusicSong.Hash("scope"), ["sources"] = null })
-        ];
-        foreach (var defect in defects) { var entry = Entry("invalid"); defect(entry); yield return entry; }
-    }
-
-    private static async Task InvalidRecords()
-    {
-        foreach (var invalid in InvalidEntries())
+        foreach (byte[] bytes in new[] { "{"u8.ToArray(), "{\"entries\":null}"u8.ToArray(),
+            "{\"entries\":[{}]}"u8.ToArray() })
         {
-            await using var store = new Store();
-            byte[] before = Document(Entry("durable"));
-            store.Seed(MusicSongMatchStore.Namespace, before);
-            await DataError(DocumentStoreError.Corrupt, () => new MusicSongMatchStore(store).WriteAsync([invalid], default));
-            Check(store.WriteCalls == 0 && store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(before));
-            byte[] damaged = Document(invalid); store.Seed(MusicSongMatchStore.Namespace, damaged);
-            await DataError(DocumentStoreError.Corrupt, async () => await new MusicSongMatchStore(store).ReadAsync(default));
-            await DataError(DocumentStoreError.Corrupt, () => new MusicSongMatchStore(store).WriteAsync([], default));
-            Check(store.WriteCalls == 0 && store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(damaged));
-        }
-        await using var duplicates = new Store();
-        var repeated = Entry("duplicate");
-        await DataError(DocumentStoreError.Corrupt,
-            () => new MusicSongMatchStore(duplicates).WriteAsync([repeated, repeated], default));
-        Check(duplicates.WriteCalls == 0);
-    }
-
-    private static async Task IncompatibleDocuments()
-    {
-        (byte[] Bytes, DocumentStoreError Error)[] documents =
-        [
-            ("{\"version\":3,\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
-            ("{\"version\":1,\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
-            ("{\"version\":\"2\",\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
-            ("{\"version\":2,\"entries\":[],\"unknown\":true}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{\"version\":2,\"version\":2,\"entries\":[]}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{\"version\":2,\"entries\":null}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{\"version\":2,\"entries\":{}}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{\"version\":2,\"entries\":[null]}"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("[]"u8.ToArray(), DocumentStoreError.Corrupt),
-            ("{"u8.ToArray(), DocumentStoreError.Corrupt),
-            ([], DocumentStoreError.Corrupt),
-            (Document(Entry("duplicate"), Entry("duplicate")), DocumentStoreError.Corrupt),
-            (Encoding.UTF8.GetBytes("{\"version\":2,\"entries\":[]}" + new string(' ', MaximumBytes)), DocumentStoreError.Limit)
-        ];
-        foreach (var (bytes, expected) in documents)
-        {
-            await using var store = new Store();
-            store.Seed(MusicSongMatchStore.Namespace, bytes);
-            var cache = new MusicSongMatchStore(store);
-            await DataError(expected, async () => await cache.ReadAsync(default));
-            await DataError(expected, () => cache.WriteAsync([Entry("replacement")], default));
-            await DataError(expected, () => cache.WriteAsync([], default));
-            Check(store.WriteCalls == 0 && store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(bytes));
-        }
-        await using var duplicateFields = new Store();
-        string valid = Encoding.UTF8.GetString(Document(Entry("nested")));
-        byte[] damaged = Encoding.UTF8.GetBytes(valid.Replace("\"checkedAt\":0", "\"checkedAt\":0,\"checkedAt\":0", StringComparison.Ordinal));
-        Check(!damaged.SequenceEqual(Encoding.UTF8.GetBytes(valid)));
-        duplicateFields.Seed(MusicSongMatchStore.Namespace, damaged);
-        await DataError(DocumentStoreError.Corrupt, () => new MusicSongMatchStore(duplicateFields).WriteAsync([], default));
-        Check(duplicateFields.WriteCalls == 0 && duplicateFields.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(damaged));
-    }
-
-    private static async Task StorageFormats()
-    {
-        await using (var store = new Store())
-        {
-            store.ReadFingerprint = DocumentFingerprint.FromBytes("absent-data"u8);
-            var cache = new MusicSongMatchStore(store);
-            await DataError(DocumentStoreError.Corrupt, async () => await cache.ReadAsync(default));
-            await DataError(DocumentStoreError.Corrupt, () => cache.WriteAsync([], default));
-            Check(store.WriteCalls == 0);
-            byte[] before = Document(Entry("stored")); store.Seed(MusicSongMatchStore.Namespace, before);
-            await DataError(DocumentStoreError.Corrupt, () => cache.WriteAsync([Entry("new")], default));
-            Check(store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(before));
-        }
-        foreach (var expected in new[] { DocumentStoreError.Corrupt, DocumentStoreError.UnsupportedVersion,
-                     DocumentStoreError.Limit, DocumentStoreError.Protection })
-        {
-            await using var store = new Store { ReadError = expected };
-            var cache = new MusicSongMatchStore(store);
-            await DataError(expected, async () => await cache.ReadAsync(default));
-            await DataError(expected, () => cache.WriteAsync([], default));
-            Check(store.WriteCalls == 0);
-        }
-    }
-
-    private static async Task Unavailable()
-    {
-        foreach (var failure in new[] { DocumentStoreError.Unavailable, DocumentStoreError.Storage,
-                     DocumentStoreError.Closed, DocumentStoreError.Conflict })
-        {
-            await using var store = new Store { ReadError = failure };
-            byte[] before = Document(Entry("old")); store.Seed(MusicSongMatchStore.Namespace, before);
+            await using var backing = new Store();
+            backing.Seed(MusicSongMatchStore.Namespace, bytes);
+            await using var store = new CacheDocumentStore(backing);
             var cache = new MusicSongMatchStore(store);
             Check((await cache.ReadAsync(default)).Count == 0);
             await cache.WriteAsync([Entry("new")], default);
-            Check(store.WriteCalls == 0 && store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(before));
-            store.ReadError = null; store.WriteError = failure;
-            await cache.WriteAsync([Entry("new")], default);
-            Check(store.WriteCalls == 1 && store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(before));
+            Check(Key((await cache.ReadAsync(default)).Single()) == Key(Entry("new")));
         }
-        await using var unavailableAfterAdmission = new Store
-        {
-            WriteError = DocumentStoreError.Storage, ReadErrorAfterWrite = DocumentStoreError.Unavailable
-        };
-        await new MusicSongMatchStore(unavailableAfterAdmission).WriteAsync([Entry("new")], default);
-        Check(unavailableAfterAdmission.WriteCalls == 1 && unavailableAfterAdmission.ReadCalls == 2 &&
-            unavailableAfterAdmission.Bytes(MusicSongMatchStore.Namespace) is null);
     }
-
-    private static async Task Conflicts()
+    private static async Task StorageFailures()
     {
-        (byte[] Bytes, DocumentStoreError? Error)[] outcomes =
-        [
-            (Document(Entry("winner")), null),
-            ("{\"version\":3,\"entries\":[]}"u8.ToArray(), DocumentStoreError.UnsupportedVersion),
-            ("{"u8.ToArray(), DocumentStoreError.Corrupt)
-        ];
-        foreach (var (winner, error) in outcomes)
+        foreach (var error in new[] { DocumentStoreError.Protection, DocumentStoreError.Storage, DocumentStoreError.Unavailable })
         {
-            await using var store = new Store();
-            store.Seed(MusicSongMatchStore.Namespace, Document(Entry("old")));
-            store.CompetingWrite = winner;
+            await using var backing = new Store { ReadError = error, WriteError = error };
+            await using var store = new CacheDocumentStore(backing);
             var cache = new MusicSongMatchStore(store);
-            if (error is { } incompatible)
-                await DataError(incompatible, () => cache.WriteAsync([Entry("loser")], default));
-            else await cache.WriteAsync([Entry("loser")], default);
-            Check(store.WriteCalls == 1 && store.ReadCalls == 2 &&
-                store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(winner));
+            Check((await cache.ReadAsync(default)).Count == 0);
+            await cache.WriteAsync([Entry("new")], default);
+            Check(Key((await cache.ReadAsync(default)).Single()) == Key(Entry("new")));
+            await store.DrainAsync();
         }
     }
-
-    private static async Task AmbiguousWrites()
+    private static async Task SlowRead()
     {
-        foreach (bool wrongReceipt in new[] { false, true })
-        foreach (bool committed in new[] { false, true })
+        var backing = new SlowStore();
+        await using var store = new CacheDocumentStore(backing);
+        var cache = new MusicSongMatchStore(store);
+        var reading = cache.ReadAsync(default);
+        await backing.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try { await cache.WriteAsync([Entry("new")], default).WaitAsync(TimeSpan.FromSeconds(2)); }
+        finally { backing.Release.TrySetResult(); }
+        Check(Key((await reading).Single()) == Key(Entry("new")));
+        await store.DrainAsync();
+    }
+    private sealed class SlowStore(byte[]? data = null) : IDocumentStore
+    {
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
-            await using var store = new Store
-            {
-                WriteError = wrongReceipt ? null : DocumentStoreError.Storage,
-                CommitBeforeFailure = committed, WrongReceipt = wrongReceipt, SkipCommit = !committed
-            };
-            byte[] before = Document(Entry("old")); store.Seed(MusicSongMatchStore.Namespace, before);
-            var incoming = Entry("new"); var cache = new MusicSongMatchStore(store);
-            bool commitError = false;
-            try { await cache.WriteAsync([incoming], default); }
-            catch (MusicPlaybackCacheCommitException) { commitError = true; }
-            Check(commitError == (wrongReceipt && !committed));
-            Check(store.WriteCalls == 1 && store.ReadCalls == 2 &&
-                store.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(committed ? Document(incoming) : before));
-            store.WriteError = null; store.WrongReceipt = false;
-            Check(Key((await cache.ReadAsync(default)).Single()) == Key(committed ? incoming : Entry("old")));
+            Entered.TrySetResult(); await Release.Task.WaitAsync(token);
+            return new(data, data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data));
         }
-        await using var replaced = new Store
-        {
-            WrongReceipt = true, ReplacementAfterCommit = Document(Entry("other-writer"))
-        };
-        bool rejected = false;
-        try { await new MusicSongMatchStore(replaced).WriteAsync([Entry("candidate")], default); }
-        catch (MusicPlaybackCacheCommitException) { rejected = true; }
-        Check(rejected && replaced.WriteCalls == 1 && replaced.ReadCalls == 2 &&
-            replaced.Bytes(MusicSongMatchStore.Namespace)!.SequenceEqual(Document(Entry("other-writer"))));
+        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default) =>
+            Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static async Task Capacity()
@@ -410,8 +257,11 @@ public static class MusicSongMatchStoreTests
         Check(Document(entries.TakeLast(16).ToArray()).Length <= MaximumBytes &&
             Document(entries.TakeLast(17).ToArray()).Length > MaximumBytes);
         await using var store = new Store();
-        await new MusicSongMatchStore(store).WriteAsync(entries, default);
-        var restored = await new MusicSongMatchStore(store).ReadAsync(default);
+        await using var cacheStore = new CacheDocumentStore(store);
+        var cache = new MusicSongMatchStore(cacheStore);
+        await cache.WriteAsync(entries, default);
+        await cacheStore.DrainAsync();
+        var restored = await cache.ReadAsync(default);
         Check(store.Bytes(MusicSongMatchStore.Namespace)!.Length <= MaximumBytes &&
             restored.Select(Key).SequenceEqual(entries.TakeLast(16).Select(Key)));
         for (int i = 0; i < restored.Count; i++) Check(JsonNode.DeepEquals(restored[i], entries[6 + i]));
@@ -421,8 +271,10 @@ public static class MusicSongMatchStoreTests
     {
         var huge = Entry("oversized", MusicSongFixture.Local("library:oversized", "Large", album: new string('x', MaximumBytes)));
         await using var store = new Store();
-        var cache = new MusicSongMatchStore(store);
+        await using var cacheStore = new CacheDocumentStore(store);
+        var cache = new MusicSongMatchStore(cacheStore);
         await cache.WriteAsync([Entry("old"), huge, Entry("new")], default);
+        await cacheStore.DrainAsync();
         Check(Key((await cache.ReadAsync(default)).Single()) == Key(Entry("new")) &&
             store.Bytes(MusicSongMatchStore.Namespace)!.Length <= MaximumBytes);
         await cache.WriteAsync([huge], default);
@@ -431,36 +283,39 @@ public static class MusicSongMatchStoreTests
 
     private static async Task Cancellation()
     {
-        await using var store = new Store();
+        await using var store = new CacheDocumentStore();
         var cache = new MusicSongMatchStore(store);
-        using (var cancelled = new CancellationTokenSource())
-        {
-            cancelled.Cancel();
-            await Cancelled(async () => await cache.ReadAsync(cancelled.Token));
-            await Cancelled(() => cache.WriteAsync([Entry("cancelled")], cancelled.Token));
-            Check(store.ReadCalls == 0 && store.WriteCalls == 0);
-        }
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        bool admittedWithoutCancellation = false;
-        store.BeforeWrite = async token =>
-        {
-            admittedWithoutCancellation = !token.CanBeCanceled;
-            entered.TrySetResult(); await release.Task;
-        };
-        using var writerCancellation = new CancellationTokenSource();
-        var writing = cache.WriteAsync([Entry("admitted")], writerCancellation.Token);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        using var readCancellation = new CancellationTokenSource();
-        var cancelledRead = cache.ReadAsync(readCancellation.Token);
+        await cache.WriteAsync([Entry("accepted")], default);
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Cancelled(() => cache.WriteAsync([Entry("cancelled")], cancelled.Token));
+        await Cancelled(async () => _ = await cache.ReadAsync(cancelled.Token));
+        Check(Key((await cache.ReadAsync(default)).Single()) == Key(Entry("accepted")));
+    }
+
+    private static async Task CancelledRead()
+    {
+        var backing = new SlowStore(Document(Entry("stored")));
+        await using var store = new CacheDocumentStore(backing);
+        var cache = new MusicSongMatchStore(store);
+        using var cancellation = new CancellationTokenSource();
+        var cancelledRead = cache.ReadAsync(cancellation.Token);
         var stableRead = cache.ReadAsync(default);
-        bool blocked = !cancelledRead.IsCompleted && !stableRead.IsCompleted;
-        readCancellation.Cancel(); writerCancellation.Cancel();
-        release.TrySetResult();
-        await writing;
-        await Cancelled(async () => await cancelledRead);
-        Check(blocked && admittedWithoutCancellation &&
-            Key((await stableRead).Single()) == Key(Entry("admitted")) && store.WriteCalls == 1);
+        try
+        {
+            await backing.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!cancelledRead.IsCompleted && !stableRead.IsCompleted);
+            cancellation.Cancel();
+            await Cancelled(() => cancelledRead.WaitAsync(TimeSpan.FromSeconds(5)));
+            var draining = store.DrainAsync();
+            Check(!stableRead.IsCompleted && !draining.IsCompleted);
+            backing.Release.TrySetResult();
+            Check(Key((await stableRead.WaitAsync(TimeSpan.FromSeconds(5))).Single()) == Key(Entry("stored")));
+            await draining.WaitAsync(TimeSpan.FromSeconds(5));
+            await cache.WriteAsync([Entry("after-cancellation")], default);
+            Check(Key((await cache.ReadAsync(default)).Single()) == Key(Entry("after-cancellation")));
+            await store.DrainAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally { backing.Release.TrySetResult(); }
     }
 
     private static async Task Eligibility()
@@ -590,10 +445,8 @@ public static class MusicSongMatchStoreTests
         private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
         internal readonly List<string> ReadNamespaces = [], WrittenNamespaces = [];
         internal int ReadCalls, WriteCalls;
-        internal DocumentStoreError? ReadError, WriteError, ReadErrorAfterWrite;
-        internal DocumentFingerprint? ReadFingerprint;
-        internal bool CommitBeforeFailure, WrongReceipt, SkipCommit;
-        internal byte[]? CompetingWrite, ReplacementAfterCommit;
+        internal DocumentStoreError? ReadError, WriteError;
+        internal bool CommitBeforeFailure;
         internal Func<CancellationToken, Task>? BeforeWrite;
         internal void Seed(string documentNamespace, byte[] bytes) => documents[documentNamespace] = bytes.ToArray();
         internal byte[]? Bytes(string documentNamespace) =>
@@ -603,11 +456,11 @@ public static class MusicSongMatchStoreTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             ReadCalls++; ReadNamespaces.Add(documentNamespace);
-            if ((WriteCalls > 0 ? ReadErrorAfterWrite ?? ReadError : ReadError) is { } failure)
+            if (ReadError is { } failure)
                 throw new DocumentStoreException(failure);
             byte[]? bytes = Bytes(documentNamespace);
-            return Task.FromResult(new DocumentSnapshot(bytes, ReadFingerprint ??
-                (bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes))));
+            return Task.FromResult(new DocumentSnapshot(bytes,
+                bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
         }
 
         public async Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
@@ -616,15 +469,13 @@ public static class MusicSongMatchStoreTests
             cancellationToken.ThrowIfCancellationRequested();
             WriteCalls++; WrittenNamespaces.Add(documentNamespace);
             if (BeforeWrite is { } before) await before(cancellationToken);
-            if (CompetingWrite is { } competing) { Seed(documentNamespace, competing); CompetingWrite = null; }
             byte[]? previous = Bytes(documentNamespace);
             var actual = previous is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(previous);
             if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
             if (WriteError is { } beforeFailure && !CommitBeforeFailure) throw new DocumentStoreException(beforeFailure);
-            if (!SkipCommit) documents[documentNamespace] = data.ToArray();
-            if (ReplacementAfterCommit is { } replacement) Seed(documentNamespace, replacement);
+            documents[documentNamespace] = data.ToArray();
             if (WriteError is { } afterFailure) throw new DocumentStoreException(afterFailure);
-            return WrongReceipt ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data.Span);
+            return DocumentFingerprint.FromBytes(data.Span);
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

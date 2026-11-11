@@ -24,6 +24,29 @@ final class MusicNativeCandidateDiscoveryLifetime: @unchecked Sendable {
 }
 
 extension NativeMusicService: MusicCandidateDiscoveryServing {
+    /// Current business decisions filter additions, never the owner's existing sources.
+    func filteringRecordingSourceAdditions(_ song: MJ, existing: [MJ], playback: MJ) -> MJ {
+        let descriptor = MusicModel.descriptor(song)
+        let excluded = Set(playback["recordingSourceExclusions"].array.filter {
+            $0["fingerprint"].string == descriptor.fingerprint &&
+                descriptor.isCompatible(with: .init(title: "", artist: "", duration: $0["duration"].number), sameNative: true)
+        }.map { $0["sourceKey"].string })
+        guard !excluded.isEmpty else { return song }
+        let retained = Set(existing.map { $0["sourceKey"].string })
+        var rows = song["sources"].array.filter {
+            retained.contains($0["sourceKey"].string) || !excluded.contains($0["sourceKey"].string)
+        }
+        if let primary = song["sources"].array.first?["sourceKey"],
+           !rows.contains(where: { $0["sourceKey"] == primary }),
+           let original = existing.first?["sourceKey"],
+           let index = rows.firstIndex(where: { $0["sourceKey"] == original }) {
+            rows.insert(rows.remove(at: index), at: 0)
+        }
+        var filtered = song
+        filtered["sources"] = .array(MusicModel.orderedSources(rows))
+        return filtered
+    }
+
     public func beginCandidateDiscovery(occurrenceID: String, expectedQueueRevision: Int) async throws -> any MusicCandidateDiscoverySession {
         try candidateDiscoverySession(occurrenceID: occurrenceID, expectedQueueRevision: expectedQueueRevision)
     }
@@ -86,11 +109,11 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
     func candidateCommit(_ seed: MusicNativeCandidateDiscoverySeed, staged: MJ) throws -> MusicNativeCandidateDiscoverySeed {
         try candidateCheck(seed)
         if staged == seed.song { return seed }
-        let clean = try MusicModel.cleanSong(staged)
-        try MusicModel.rejectSecrets(clean)
-        try musicRequire(clean["songId"] == seed.song["songId"] &&
-            MusicModel.compatible(seed.song, clean), .songIDConflict)
-        _ = try MusicModel.sources(clean)
+        let proposed = try MusicModel.cleanSong(staged)
+        try MusicModel.rejectSecrets(proposed)
+        try musicRequire(proposed["songId"] == seed.song["songId"] &&
+            MusicModel.compatible(seed.song, proposed), .songIDConflict)
+        _ = try MusicModel.sources(proposed)
         let commit = { [self] in try seed.lifetime.perform { try transaction(["queue"]) { d in
             try musicRequire(d.queue["revision"].int == seed.state.revision &&
                 d.playback["revision"].int == seed.state.settingsRevision, .staleRevision)
@@ -99,6 +122,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
                 throw MusicServiceError.targetChanged
             }
             try musicRequire(try MusicModel.cleanSong(d.queue["entries"].array[index]["song"]) == seed.song, .targetChanged)
+            let clean = filteringRecordingSourceAdditions(proposed, existing: seed.song["sources"].array, playback: d.playback)
             // No alias table is invented. Existing library/queue evidence may
             // veto a reused native ID, but discovery never rewrites those owners.
             let knownSongs = d.library["library"]["songs"].fields.map(\.1) + d.queue["entries"].array.map { $0["song"] }
@@ -192,7 +216,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             guard !discovering else { throw MusicServiceError.busy }
             discovering = true
             defer { discovering = false }
-            let cache = await owner.sourceDiscoveryState(seed.song)
+            let cache = try await owner.sourceDiscoveryState(seed.song)
             let cached = cache.current(window: MusicSourceDiscoveryWindow.playback)
             staged = await owner.mergeSourceDiscoveryCache(seed.song, entries: cached)
             try check(); try await owner.candidateCheck(seed); try check()

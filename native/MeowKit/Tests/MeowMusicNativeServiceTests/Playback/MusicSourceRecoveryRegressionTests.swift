@@ -380,7 +380,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         XCTAssertTrue((stillCurrent as AnyObject) === (session as AnyObject), "Withdrawal must not rebuild the session")
         XCTAssertEqual(try MusicDocument(store.read(), runID: "review").history, historyBefore)
         let exclusions = try await service.sourceExclusions()
-        let recordingExclusions = await cache.excluded(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        let recordingExclusions = try await service.recordingSourceExclusions(song)
         let discovery = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
         XCTAssertTrue(exclusions.isEmpty)
         XCTAssertTrue(recordingExclusions.isEmpty)
@@ -411,7 +411,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
             XCTAssertTrue(retried.sources.contains { $0.selection == a.selection })
             for row in originalRows where row.selection != a.selection { XCTAssertTrue(retried.sources.contains(row)) }
             let retrySearches = await qq.calls(), retryExclusions = try await service.sourceExclusions()
-            let retryRecordingExclusions = await cache.excluded(fingerprint: MusicModel.fingerprint(song), duration: 180)
+            let retryRecordingExclusions = try await service.recordingSourceExclusions(song)
             XCTAssertEqual(retrySearches, searchesBefore)
             XCTAssertTrue(retryExclusions.isEmpty)
             XCTAssertTrue(retryRecordingExclusions.isEmpty)

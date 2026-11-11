@@ -147,7 +147,7 @@ extension NativeMusicService {
                         continue
                     }
                     // Sync rechecks an empty platform after 30 days, not every round.
-                    let state = await sourceDiscoveryState(song)
+                    let state = try await sourceDiscoveryState(song)
                     let cache = state.current(window: MusicSourceDiscoveryWindow.librarySync)
                     try await syncCurrent(round)
                     if let cached = cache[platform], !cached.sources.isEmpty {
@@ -183,8 +183,9 @@ extension NativeMusicService {
                         }
                         try await syncCurrent(round)
                         try musicRequire(result.total >= 0 && result.items.allSatisfy({ $0.platform == platform }), .upstreamInvalid)
+                        let excluded = try recordingSourceExclusions(song)
                         let matches = try result.items.map(MusicModel.normalize).filter { candidate in
-                            !state.excluded.contains(candidate["sources"].array.first?["sourceKey"].string ?? "") &&
+                            !excluded.contains(candidate["sources"].array.first?["sourceKey"].string ?? "") &&
                                 MusicModel.compatible(song, candidate) && song["sources"].array.allSatisfy { MusicModel.compatible($0, candidate) }
                         }
                         await recordSourceDiscovery(song, platform: platform, page: result,

@@ -197,37 +197,6 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: recordsFile(root))) as? [String: Any])
         XCTAssertEqual(saved["version"] as? Int, 1)
         XCTAssertEqual((saved["records"] as? [String: Any])?.count, 1)
-        let record = try XCTUnwrap((saved["records"] as? [String: [String: Any]])?.values.first)
-        XCTAssertEqual(record["excluded"] as? [String], [])
-    }
-
-    func testMissingExcludedIsACacheMissWithoutReadTimeRewrite() async throws {
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let document = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        func make() -> MusicNativePersistentSourceDiscoveryCache {
-            .init(storeFactory: { document }, clock: { NativeMusicFixture.date })
-        }
-        let value = try row(), cache = make()
-        await record(cache, song: value.song, sources: [stored(value.source)])
-        await cache.persist(retaining: [recording(value.song)])
-        var envelope = try MJ.parse(XCTUnwrap(document.read(key: "records")))
-        let key = MusicRecordingIdentity.hash(MusicModel.fingerprint(value.song))
-        var old = envelope["records"][key]; old.remove("excluded")
-        envelope["records"][key] = old
-        let bytes = envelope.bytes
-        try document.write(bytes, key: "records")
-        let reopened = make(), miss = await entry(reopened, value.song)
-        let excluded = await reopened.excluded(fingerprint: MusicModel.fingerprint(value.song), duration: 180)
-        XCTAssertTrue(miss.isEmpty); XCTAssertTrue(excluded.isEmpty)
-        XCTAssertEqual(try document.read(key: "records"), bytes)
-        // The existing invalid-cache policy permits a later ordinary persist.
-        await record(reopened, song: value.song, sources: [stored(value.source)])
-        await reopened.persist(retaining: [recording(value.song)])
-        let saved = try MJ.parse(XCTUnwrap(document.read(key: "records")))
-        XCTAssertEqual(saved["records"][key]["excluded"], .array([]))
-        let hit = await entry(make(), value.song)
-        XCTAssertEqual(hit["wy"]?.sources, [stored(value.source)])
     }
 
     func testPersistentLoadedEnvelopeIsReusedAndOnlyChangedRetainedBytesAreWritten() async throws {
@@ -658,23 +627,6 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let removed = await entry(reopened(), seed)
         XCTAssertTrue(removed.isEmpty, "a recording removed from the library is dropped at the next persist")
         await service.close()
-    }
-
-    func testExclusionsBelongToOneRecordingAndArePersistedWithIt() async throws {
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let document = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document }, clock: { NativeMusicFixture.date })
-        let a = try row(), b = try row(id: "2", title: "Another recording"), key = a.source["sourceKey"].string
-        await cache.exclude(fingerprint: MusicModel.fingerprint(a.song), duration: 180, sourceKey: key)
-        await record(cache, song: a.song, sources: [])
-        let excluded = await cache.excluded(fingerprint: MusicModel.fingerprint(a.song), duration: 180)
-        let other = await cache.excluded(fingerprint: MusicModel.fingerprint(b.song), duration: 180)
-        XCTAssertEqual(excluded, [key]); XCTAssertTrue(other.isEmpty, "the target recording is not globally blocked")
-        await cache.persist(retaining: [recording(a.song)])
-        let reopened = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document }, clock: { NativeMusicFixture.date })
-        let durable = await reopened.excluded(fingerprint: MusicModel.fingerprint(a.song), duration: 180)
-        XCTAssertEqual(durable, [key])
     }
 
     func testPersistentReadFailureServesMemoryAndNeverOverwritesTheUnreadDocument() async throws {
