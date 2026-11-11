@@ -46,8 +46,6 @@ public sealed partial class MusicCapability
     public bool CanConfirmLyricPreview => HasLyricPreview && CanSeek;
     public string LyricPreviewText => lyricPreview is { } row ? Clock(row.Time) + " · " + row.Text : "";
     public int LyricDisplayIndex => lyricPreview is null ? ActiveLyricIndex : Lyrics.IndexOf(lyricPreview);
-    public IReadOnlyList<MusicLyricWord> CurrentLyricWords => ActiveLyricIndex is var index && index >= 0 && index < Lyrics.Count
-        ? Lyrics[index].Words ?? [] : [];
     private void OnLyricRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         if (e.Action == NotifyCollectionChangedAction.Reset || e.NewStartingIndex == 0 || e.OldStartingIndex == 0)
@@ -72,7 +70,6 @@ public sealed partial class MusicCapability
         if (!ReferenceEquals(publishedLyric, row))
         {
             publishedLyric = row;
-            Changed(nameof(CurrentLyricWords));
             DesktopLyricBindings();
         }
         int display = lyricPreview is null ? index : Lyrics.IndexOf(lyricPreview);

@@ -19,9 +19,9 @@ final class PlaybackObservationScope {
         for remove in current.reversed() { remove() }
     }
 
-    // Swift 6.2 compiler, including Swift 5 language mode. Explicit cancellation
-    // is the deterministic path; this is a main-actor-safe final safety net.
-    isolated deinit {
-        cancel()
+    // The controller's lifetime holder releases internal scopes on MainActor,
+    // even after a background final release. Keep removal synchronous.
+    nonisolated deinit {
+        MainActor.assumeIsolated { cancel() }
     }
 }

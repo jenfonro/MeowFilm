@@ -57,7 +57,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music word LRC absolute relative tags and trailing markers", LyricsMarkers);
         yield return new("Native music word LRC preserves sub-50ms and zero intervals", LyricsShortMarkers);
         yield return new("Native music word LRC negative offsets retain elapsed word progress", LyricsNegativeMarkers);
-        yield return new("Native music word LRC trailing words use next line and song boundaries", LyricsTrailingWords);
+        yield return new("Native music word LRC uses real next-line boundaries and song length only for rows", LyricsTrailingWords);
         yield return new("Native music word LRC without end boundary keeps timestamps and zero trailing duration", LyricsUnboundedTrailingWords);
         yield return new("Native music QRC XML entity decode never interprets markup", LyricsXml);
         yield return new("Native music translation exact timestamps only no nearest matching", LyricsTranslation);
@@ -792,13 +792,15 @@ public static partial class MusicNativeLibraryTests
             Math.Abs(lines[0].GetProperty("words")[1].GetProperty("duration").GetDouble() - .98) < 1e-12);
         Check(lines[1].GetProperty("text").GetString() == "整句" && lines[1].GetProperty("words").GetArrayLength() == 0 &&
             lines[1].GetProperty("end").GetDouble() == 3);
-        Check(lines[2].GetProperty("end").GetDouble() == 4 && lines[2].GetProperty("words")[0].GetProperty("duration").GetDouble() == 1);
+        Check(lines[2].GetProperty("end").GetDouble() == 4 && lines[2].GetProperty("words")[0].GetProperty("duration").GetDouble() == 0);
         var shifted = MusicLyricTiming.Parse("[offset:-2500]\n[00:01]<00:01.000>A\n[00:02]整句\n[00:03]<00:03.000>C", duration: 4);
         Check(shifted[0].GetProperty("time").GetDouble() == 0 && shifted[0].GetProperty("end").GetDouble() == 0 &&
             shifted[0].GetProperty("words")[0].GetProperty("time").GetDouble() == -1.5 &&
             shifted[0].GetProperty("words")[0].GetProperty("duration").GetDouble() == 1);
         Check(shifted[1].GetProperty("time").GetDouble() == 0 && shifted[1].GetProperty("end").GetDouble() == .5 &&
             shifted[1].GetProperty("words").GetArrayLength() == 0);
+        Check(shifted[2].GetProperty("end").GetDouble() == 4 &&
+            shifted[2].GetProperty("words")[0].GetProperty("duration").GetDouble() == 0);
         return Task.CompletedTask;
     }
     private static Task LyricsUnboundedTrailingWords()
@@ -816,6 +818,10 @@ public static partial class MusicNativeLibraryTests
             Check(words[1].GetProperty("time").GetDouble() == last && words[1].GetProperty("duration").GetDouble() == 0);
             Check(MusicLyricTiming.Progress(last, words[1].GetProperty("duration").GetDouble(), last - .01) == 0 &&
                 MusicLyricTiming.Progress(last, words[1].GetProperty("duration").GetDouble(), last) == 1);
+            var boundedLine = MusicLyricTiming.Parse(text, duration: 180)[0];
+            Check(boundedLine.GetProperty("end").GetDouble() == 180 &&
+                boundedLine.GetProperty("words")[1].GetProperty("duration").GetDouble() == 0);
+            Check(MusicLyricTiming.Progress(last, 0, 179) == 1);
         }
         var single = MusicLyricTiming.Parse("[offset:-1500]\n[00:01]<00:01.000>A")[0];
         Check(single.GetProperty("end").GetDouble() == 0 && single.GetProperty("words")[0].GetProperty("time").GetDouble() == -.5 &&

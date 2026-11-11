@@ -181,7 +181,6 @@ public partial class MusicPlayerDetailView : UserControl
         playbackSpacePressed = false;
         artworkRequest?.Cancel();
         if (!IsVisible) { artworkPresentation?.Dispose(); artworkPresentation = null; }
-        module.CancelLyricPreview();
         StopLyricMotion();
         ((MusicPlayerView)DetailPlayerHost.Content).Deactivate();
     }
@@ -273,7 +272,7 @@ public partial class MusicPlayerDetailView : UserControl
         centeredLyric = centeringLyric = -1;
         lyricResumeTimer.Stop();
         lyricResumeTimer.Start();
-        MusicLyricScroll.Move(scroll, target, manual: true);
+        MusicLyricScroll.MoveManual(scroll, target);
         UpdateLyricPreview(scroll);
     }
 
@@ -299,9 +298,10 @@ public partial class MusicPlayerDetailView : UserControl
 
     private void StopLyricMotion()
     {
+        lyricResumeTimer.Stop();
+        module.CancelLyricPreview();
         centerRequest?.Abort(); centerRequest = null;
         InvalidateLyricCenter();
-        lyricResumeTimer.Stop();
     }
 
     private void QueueCenterLyric()

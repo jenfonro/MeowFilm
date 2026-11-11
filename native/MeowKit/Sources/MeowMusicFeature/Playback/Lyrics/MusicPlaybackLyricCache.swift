@@ -361,9 +361,9 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         guard counter.add(2) else { return nil } // []
         for (index, line) in lines.enumerated() {
             guard (index == 0 || counter.add(1)),
-                  counter.add(#"{"index":,"time":,"end":,"text":,"translation":,"timing":,"words":[]}"#.utf16.count),
+                  counter.add(#"{"index":,"time":,"end":,"text":,"translation":,"words":[]}"#.utf16.count),
                   counter.number(line.index), counter.number(line.time), counter.number(line.end),
-                  counter.string(line.text), counter.string(line.translation), counter.string(line.timing) else { return nil }
+                  counter.string(line.text), counter.string(line.translation) else { return nil }
             for (wordIndex, word) in line.words.enumerated() {
                 guard (wordIndex == 0 || counter.add(1)),
                       counter.add(#"{"time":,"duration":,"text":}"#.utf16.count),

@@ -15,7 +15,7 @@ public static partial class MusicNativeLibraryTests
     }
 
     private const string PersistedLyricText =
-        "[offset:-1500]\n[00:01]<00:01.000>A<00:02.000>B<00:03.000>\n[00:04]整句👨‍👩‍👧‍👦\n[6000,20](6000,0,0)Z(6000,20,0)T";
+        "[offset:-1500]\n[00:01]<00:01.000>A<00:02.000>B<00:03.000>\n[00:04]整句👨‍👩‍👧‍👦\n[6000,20](6000,0,0)Z(6000,20,0)T\n[00:08]<00:08.000>末词";
 
     private static JsonArray CurrentLyricRows() => new(
         O(new {
@@ -32,6 +32,10 @@ public static partial class MusicNativeLibraryTests
                 new { time = 4.5, duration = 0d, text = "Z", offset = 0d },
                 new { time = 4.5, duration = .02, text = "T", offset = 0d }
             }
+        }),
+        O(new {
+            time = 6.5, end = 180d, text = "末词",
+            words = new[] { new { time = 6.5, duration = 0d, text = "末词", offset = 0d } }
         }));
 
     private static async Task<(JsonObject Song, string SourceKey)> SeedLyricSong(MusicLibraryOwner owner)

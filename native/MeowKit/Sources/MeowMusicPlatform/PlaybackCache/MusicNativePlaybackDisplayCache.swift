@@ -33,7 +33,7 @@ public actor MusicNativePlaybackDisplayCache: MusicPlaybackDisplayCaching {
     private static func validLyrics(_ lines: [MusicLyricLine]) -> Bool {
         guard lines.count <= 16_384, lines.allSatisfy({
             $0.time.isFinite && $0.end.isFinite && $0.time >= 0 && $0.end >= $0.time &&
-                $0.words.allSatisfy { $0.time.isFinite && $0.duration.isFinite && $0.time >= 0 && $0.duration >= 0 }
+                $0.words.allSatisfy { $0.time.isFinite && $0.duration.isFinite && $0.duration >= 0 }
         }), let bytes = try? JSONEncoder().encode(lines) else { return false }
         return bytes.count <= 1024 * 1024
     }
@@ -50,7 +50,7 @@ public actor MusicNativePlaybackDisplayCache: MusicPlaybackDisplayCaching {
     private func load() throws -> MusicPlaybackDisplaySnapshot? {
         guard let data = try store().read(key: Self.key), data.count <= 12 * 1024 * 1024,
               let saved = try? JSONDecoder().decode(Envelope.self, from: data),
-              saved.version == 1, Self.valid(saved.value.identity), Self.validLyrics(saved.value.lines),
+              saved.version == 2, Self.valid(saved.value.identity), Self.validLyrics(saved.value.lines),
               saved.value.lyricSourceKey.map({ Self.text($0) }) ?? saved.value.lines.isEmpty,
               saved.value.artworkSourceKey.map({ Self.text($0) }) ?? (saved.value.artwork == nil),
               saved.value.artwork.map(Self.validArtwork) ?? true else { return nil }
@@ -74,7 +74,7 @@ public actor MusicNativePlaybackDisplayCache: MusicPlaybackDisplayCaching {
                 let current = try load()
                 let value = update(current?.identity == identity ? current : nil)
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-                let bytes = try encoder.encode(Envelope(version: 1, value: value))
+                let bytes = try encoder.encode(Envelope(version: 2, value: value))
                 guard bytes.count <= 12 * 1024 * 1024 else { return }
                 try Task.checkCancellation()
                 try store().write(bytes, key: Self.key)

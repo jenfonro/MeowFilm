@@ -1,10 +1,12 @@
 using System.ComponentModel;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
@@ -98,6 +100,10 @@ public static class MusicAppearanceTests
             () => MusicQualityConsumerTests.Sta(AutomaticRecoveryConsumer));
         yield return new("Music appearance reload button reads newer authority after a revision conflict without replaying saves",
             () => MusicQualityConsumerTests.Sta(ReloadAfterConflict));
+        yield return new("Music appearance backdrop fades from visible colors and retains an unchanged target",
+            () => MusicQualityConsumerTests.Sta(BackdropTransitions));
+        yield return new("Music appearance fixed palette retains the latest cover sample for song mode",
+            () => MusicQualityConsumerTests.Sta(FixedPaletteKeepsLatestSample));
     }
 
     private static JsonObject Draft(long revision = 0, string palette = "mint") =>
@@ -112,6 +118,132 @@ public static class MusicAppearanceTests
             await Task.Delay(1, timeout.Token);
         }
     }
+
+    private static async Task BackdropTransitions()
+    {
+        Check(SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast,
+            "backdrop motion regression requires normal system animation settings");
+        await using var f = new QualityFixture();
+        var module = new MusicCapability(f.App, f.Store, new Output());
+        var surface = new Border { DataContext = module, Child = module.PlayerView };
+        surface.SetBinding(Border.BackgroundProperty, nameof(MusicCapability.PlayerBackground));
+        var window = GeneralAppearanceTests.Window(surface);
+        try
+        {
+            await module.InitializeAsync(default); await Ready(module);
+            module.RefreshPlayerAppearance(Brushes.Red);
+            var initial = (GradientBrush)module.PlayerBackground;
+            var red = ((GradientBrush)MusicPlayerArtwork.Backdrop(Brushes.Red)).GradientStops[0].Color;
+            Check(initial.GradientStops.All(stop => !stop.HasAnimatedProperties) &&
+                initial.GradientStops[0].Color == red, "first offscreen color is assigned directly");
+            module.RefreshPlayerAppearance(new SolidColorBrush(Colors.Red));
+            Check(ReferenceEquals(initial, module.PlayerBackground), "equal colors do not replace the initial brush");
+            window.Show();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(module.PlayerView.IsVisible && ReferenceEquals(surface.Background, module.PlayerBackground));
+
+            using (Dispatcher.CurrentDispatcher.DisableProcessing())
+            {
+                module.RefreshPlayerAppearance(Brushes.Lime);
+                var moving = (GradientBrush)module.PlayerBackground;
+                var green = ((GradientBrush)MusicPlayerArtwork.Backdrop(Brushes.Lime)).GradientStops[0].Color;
+                Check(!ReferenceEquals(initial, moving) && moving.GradientStops.All(stop => stop.HasAnimatedProperties),
+                    "a new visible target starts a native color transition");
+                var movingClocks = BackdropClocks(moving);
+                SeekBackdrop(movingClocks, 0);
+                Check(moving.GradientStops[0].Color == red,
+                    "the transition starts from the previously visible color");
+                SeekBackdrop(movingClocks, 150);
+                var visible = moving.GradientStops[0].Color;
+                Check(ColorDistance(visible, red) > 55 && ColorDistance(visible, green) > 55,
+                    "the native clock displays an intermediate color");
+                Check((Color)moving.GradientStops[0].GetAnimationBaseValue(GradientStop.ColorProperty) == green,
+                    "the brush retains its real target while showing an intermediate color");
+                for (int i = 0; i < 3; i++)
+                    module.RefreshPlayerAppearance(new SolidColorBrush(Colors.Lime));
+                Check(ReferenceEquals(moving, module.PlayerBackground) && moving.GradientStops[0].Color == visible,
+                    "same-target updates retain both the brush and its in-flight clock");
+                Check(BackdropClocks(moving).SequenceEqual(movingClocks), "same-target updates keep the actual native clocks");
+
+                module.RefreshPlayerAppearance(Brushes.Blue);
+                var redirected = (GradientBrush)module.PlayerBackground;
+                var redirectedClocks = BackdropClocks(redirected);
+                SeekBackdrop(redirectedClocks, 0);
+                Check(redirected.GradientStops[0].Color == visible,
+                    "redirecting starts from the visible color, not the previous green target");
+                module.RefreshPlayerAppearance(Brushes.Magenta);
+                var supersededClocks = BackdropClocks((GradientBrush)module.PlayerBackground);
+                SeekBackdrop(supersededClocks, 0);
+                module.RefreshPlayerAppearance(Brushes.Yellow);
+                var final = (GradientBrush)module.PlayerBackground;
+                var finalClocks = BackdropClocks(final);
+                SeekBackdrop(finalClocks, 0);
+                SeekBackdrop(movingClocks, 300);
+                SeekBackdrop(redirectedClocks, 300);
+                SeekBackdrop(supersededClocks, 300);
+                Check(ReferenceEquals(final, module.PlayerBackground) && final.GradientStops[0].Color == visible,
+                    "retired native clocks cannot write back over the latest visible color");
+                var expected = (GradientBrush)MusicPlayerArtwork.Backdrop(Brushes.Yellow);
+                SeekBackdrop(finalClocks, 300);
+                Check(ReferenceEquals(final, module.PlayerBackground) &&
+                    final.GradientStops.Select(stop => stop.Color)
+                        .SequenceEqual(expected.GradientStops.Select(stop => stop.Color)),
+                    "rapid redirects finish at the newest target without an old writeback");
+            }
+        }
+        finally { window.Close(); await module.AbortAsync(); }
+    }
+
+    private static async Task FixedPaletteKeepsLatestSample()
+    {
+        await using var f = new QualityFixture();
+        var module = new MusicCapability(f.App, f.Store, new Output());
+        try
+        {
+            await module.InitializeAsync(default); await Ready(module);
+            await module.SetAppearanceAsync("colorMode", "fixed"); await Ready(module);
+            var fixedBackground = module.PlayerBackground;
+            module.RefreshPlayerAppearance(Brushes.Red);
+            module.RefreshPlayerAppearance(Brushes.Lime);
+            Check(ReferenceEquals(fixedBackground, module.PlayerBackground),
+                "different samples do not replace the same fixed target");
+            await module.SetAppearanceAsync("colorMode", "song"); await Ready(module);
+            var expected = (GradientBrush)MusicPlayerArtwork.Backdrop(Brushes.Lime);
+            Check(((GradientBrush)module.PlayerBackground).GradientStops.Select(stop => stop.Color)
+                .SequenceEqual(expected.GradientStops.Select(stop => stop.Color)),
+                "song mode uses the newest sample even when fixed-mode colors were deduplicated");
+        }
+        finally { await module.AbortAsync(); }
+    }
+
+    private static AnimationClock[] BackdropClocks(GradientBrush brush)
+    {
+        // WPF exposes no clock getter for BeginAnimation. Read the attached clocks
+        // only; keep the product timelines and sample their real animated DP values.
+        var storageType = typeof(AnimationClock).Assembly.GetType("System.Windows.Media.Animation.AnimationStorage", true)!;
+        var getStorage = storageType.GetMethod("GetStorage", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var clocksField = storageType.GetField("_animationClocks", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        return brush.GradientStops.Select(stop =>
+        {
+            var storage = getStorage.Invoke(null, [stop, GradientStop.ColorProperty])!;
+            var clocks = clocksField.GetValue(storage)!;
+            Check((int)clocks.GetType().GetProperty("Count")!.GetValue(clocks)! == 1,
+                "each backdrop color has one native product clock");
+            return (AnimationClock)clocks.GetType().GetProperty("Item")!.GetValue(clocks, [0])!;
+        }).ToArray();
+    }
+
+    private static void SeekBackdrop(AnimationClock[] clocks, int milliseconds)
+    {
+        foreach (var clock in clocks)
+            clock.Controller!.SeekAlignedToLastTick(TimeSpan.FromMilliseconds(milliseconds), TimeSeekOrigin.BeginTime);
+        Check(clocks.All(clock => clock.CurrentTime == TimeSpan.FromMilliseconds(milliseconds) ||
+            milliseconds == 300 && clock.CurrentState == ClockState.Stopped),
+            "the actual native clocks reached the selected sample time");
+    }
+
+    private static int ColorDistance(Color a, Color b) =>
+        Math.Max(Math.Abs(a.R - b.R), Math.Max(Math.Abs(a.G - b.G), Math.Abs(a.B - b.B)));
 
     private static async Task ImmediateConsumer()
     {

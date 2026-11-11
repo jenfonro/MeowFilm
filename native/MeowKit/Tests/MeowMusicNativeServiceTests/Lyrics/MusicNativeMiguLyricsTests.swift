@@ -11,7 +11,7 @@ final class MusicNativeMiguLyricsTests: XCTestCase {
         XCTAssertEqual(text, "[1000,800](1000,300,0)你(1300,500,0)好\n[2000,500](2000,500,0)世界")
         let rows = try MusicNativeLyricsParser.parse(.init(text: text, translation: "[00:01.000]Hello\n[00:02.000]World"))
         XCTAssertEqual(rows.map(\.text), ["你好", "世界"]); XCTAssertEqual(rows.map(\.translation), ["Hello", "World"])
-        XCTAssertEqual(rows.map(\.timing), ["word", "word"])
+        XCTAssertTrue(rows.allSatisfy { !$0.words.isEmpty })
         XCTAssertEqual(rows[0].words[0].time, 1); XCTAssertEqual(rows[0].words[0].duration, 0.3, accuracy: 0.000001)
         XCTAssertEqual(rows[0].words[1].time, 1.3, accuracy: 0.000001)
         XCTAssertEqual(rows[0].words[1].duration, 0.5, accuracy: 0.000001)

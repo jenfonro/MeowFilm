@@ -166,13 +166,20 @@ import MeowContracts
         let ready = expectation(description: "Local silent media ready")
         let played = expectation(description: "Real time-control playing at selected rate")
         let sought = expectation(description: "Small native seek completed")
+        let advanced = expectation(description: "Natural playback advances after scoped seek")
         let jumped = expectation(description: "Small external native seek observed")
         var events: [PlaybackEvent] = [], didPlay = false
+        var pendingNaturalProgress: (attempt: PlayAttempt, position: TimeInterval)?
         var externalPosition: Double?
         let lease = try controller.bind(owner: "music") { event in
             events.append(event)
             if event.kind == .prepared { ready.fulfill() }
             if event.kind == .played, !didPlay { didPlay = true; played.fulfill() }
+            if let completed = pendingNaturalProgress, event.attempt == completed.attempt,
+               event.kind == .progress, !event.discontinuity, event.snapshot.phase == .playing,
+               event.rate == 1.5, event.snapshot.position > completed.position {
+                pendingNaturalProgress = nil; advanced.fulfill()
+            }
             if let target = externalPosition, event.kind == .progress, event.discontinuity,
                event.snapshot.position >= target {
                 externalPosition = nil; jumped.fulfill()
@@ -194,11 +201,16 @@ import MeowContracts
         let beforeSeek = events.count
         let position = controller.snapshot.position + 0.1
         XCTAssertTrue(controller.seek(to: position, attempt: attempt) { result in
+            if let actualPosition = result.actualPosition {
+                pendingNaturalProgress = (result.attempt, actualPosition)
+            }
             XCTAssertEqual(result.outcome, .completed); sought.fulfill()
         })
         await fulfillment(of: [sought], timeout: 5)
         XCTAssertTrue(events.dropFirst(beforeSeek).contains { $0.kind == .progress && $0.discontinuity })
         XCTAssertTrue(events.contains { $0.kind == .progress && $0.discontinuity && $0.rate == 1.5 })
+        // Seek completion precedes stable playback; do not overlap the external seek with native restart.
+        await fulfillment(of: [advanced], timeout: 5)
         let external = CMTime(seconds: controller.player.currentTime().seconds + 0.1, preferredTimescale: 600)
         externalPosition = external.seconds
         let completed = await controller.player.seek(to: external, toleranceBefore: .zero, toleranceAfter: .zero)

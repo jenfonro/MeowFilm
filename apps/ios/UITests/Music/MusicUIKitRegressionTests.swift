@@ -5009,6 +5009,173 @@ final class MusicPlayerContentModelTests: XCTestCase {
         await content.model.close()
     }
 
+    func testFullLyricsCenterFirstLineBeforePlaybackAndAdvanceWithoutDownwardCorrection() async throws {
+        let (content, player, table, window) = try await makeFullLyrics()
+        defer { window.isHidden = true; window.rootViewController = nil; content.model.player = nil }
+        let initial = table.contentOffset.y
+        XCTAssertEqual(table.rectForRow(at: IndexPath(row: 0, section: 0)).midY,
+                       initial + table.bounds.height / 2, accuracy: 1)
+        XCTAssertNil(content.model.currentLyricIndex)
+        let first = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)))
+        let masks = dockViews(first).compactMap { $0.layer.mask as? CAShapeLayer }
+        XCTAssertFalse(masks.isEmpty)
+        XCTAssertTrue(masks.allSatisfy { $0.path == nil }, "Centering must not sing the first line early")
+        content.model.clock.position = 5
+        await deliverUpdates()
+        XCTAssertEqual(table.contentOffset.y, initial, accuracy: 1)
+        content.model.clock.position = 10
+        await deliverUpdates()
+        var previous = initial
+        for _ in 0..<8 {
+            try await Task.sleep(for: .milliseconds(60))
+            XCTAssertGreaterThanOrEqual(table.contentOffset.y, previous - 0.5)
+            previous = table.contentOffset.y
+        }
+        XCTAssertGreaterThan(table.contentOffset.y, initial)
+        XCTAssertEqual(table.rectForRow(at: IndexPath(row: 1, section: 0)).midY,
+                       table.contentOffset.y + table.bounds.height / 2, accuracy: 1)
+        player.setRendering(false)
+        await content.model.close()
+    }
+
+    func testFullLyricsSeekScrollsContinuouslyWithoutReplacingRowsOrMovingViewportMask() async throws {
+        for phase in [PlaybackPhase.paused, .playing] {
+            let (content, player, table, window) = try await makeFullLyrics()
+            defer { window.isHidden = true; window.rootViewController = nil; content.model.player = nil }
+            content.model.playbackState.phase = phase
+            let driver = MusicSeekRecordingPlayer()
+            content.model.player = driver
+            let slider = try XCTUnwrap(dockViews(player).compactMap { $0 as? MusicProgressSlider }.first)
+            let dataSource = try XCTUnwrap(table.dataSource as? UITableViewDiffableDataSource<Int, Int>)
+            let items = dataSource.snapshot().itemIdentifiers
+            let viewport = try XCTUnwrap(table.superview)
+            let mask = try XCTUnwrap(viewport.layer.mask)
+            let maskFrame = mask.frame
+            let before = table.contentOffset.y
+            slider.sendActions(for: .touchDown)
+            slider.value = 130
+            slider.sendActions(for: .valueChanged)
+            slider.sendActions(for: .touchUpInside)
+            XCTAssertEqual(driver.seeks.last?.0, 130)
+            XCTAssertEqual(content.model.position, 0, "A request is not a confirmed media position")
+            content.model.clock.position = 130
+            await deliverUpdates()
+            let target = table.rectForRow(at: IndexPath(row: 25, section: 0)).midY - table.bounds.height / 2
+            XCTAssertLessThan(table.contentOffset.y, target - 1, "Seek must not jump straight to its destination")
+            try await Task.sleep(for: .milliseconds(90))
+            XCTAssertGreaterThan(table.contentOffset.y, before)
+            XCTAssertLessThan(table.contentOffset.y, target)
+            XCTAssertEqual(mask.frame, maskFrame)
+            XCTAssertNil(table.layer.mask, "The fade belongs to the fixed viewport, not the scrolled layer")
+            XCTAssertFalse(table.visibleCells.isEmpty)
+            try await Task.sleep(for: .milliseconds(400))
+            XCTAssertEqual(table.contentOffset.y, target, accuracy: 1)
+            XCTAssertEqual(dataSource.snapshot().itemIdentifiers, items)
+            XCTAssertTrue(table.dataSource === dataSource)
+            XCTAssertEqual(content.model.phase, phase)
+            XCTAssertTrue(table.visibleCells.contains { $0.accessibilityLabel == "歌词 25" })
+            player.setRendering(false)
+            content.model.player = nil
+            await content.model.close()
+        }
+    }
+
+    func testFullLyricsNewSeekRetargetsCurrentScrollAndPauseKeepsItsPosition() async throws {
+        let (content, player, table, window) = try await makeFullLyrics()
+        defer { window.isHidden = true; window.rootViewController = nil; content.model.player = nil }
+        content.model.clock.position = 145
+        await deliverUpdates()
+        try await Task.sleep(for: .milliseconds(90))
+        let moving = table.contentOffset.y
+        content.model.clock.position = 55
+        await deliverUpdates()
+        XCTAssertEqual(table.contentOffset.y, moving, accuracy: 12, "Retargeting starts at the current visible offset")
+        try await Task.sleep(for: .milliseconds(450))
+        let target = table.rectForRow(at: IndexPath(row: 10, section: 0)).midY - table.bounds.height / 2
+        XCTAssertEqual(table.contentOffset.y, target, accuracy: 1)
+        let settled = table.contentOffset.y
+        content.model.playbackState.phase = .paused
+        await deliverUpdates()
+        player.setNeedsLayout(); player.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(table.contentOffset.y, settled, accuracy: 0.5)
+        player.setRendering(false)
+        await content.model.close()
+    }
+
+    func testFullLyricsSliderSeekLeavesManualPreviewOnlyAfterAdmissionAndUsesConfirmedPosition() async throws {
+        let (content, player, table, window) = try await makeFullLyrics()
+        defer { window.isHidden = true; window.rootViewController = nil; content.model.player = nil }
+        let driver = MusicSeekRecordingPlayer()
+        content.model.player = driver
+        player.scrollViewWillBeginDragging(table)
+        let preview = table.rectForRow(at: IndexPath(row: 20, section: 0)).midY - table.bounds.height / 2
+        table.setContentOffset(CGPoint(x: 0, y: preview), animated: false)
+        player.scrollViewDidScroll(table)
+        player.scrollViewDidEndDragging(table, willDecelerate: false)
+        let follow = try XCTUnwrap(dockViews(player).first {
+            $0.accessibilityIdentifier == "music.player.lyricFollow"
+        })
+        XCTAssertFalse(follow.isHidden)
+        let wrongFence = MusicReferencePlayerFence(occurrence: "another", attempt: nil, access: UUID(),
+                                                  queueRevision: 0, settingsRevision: 0)
+        XCTAssertFalse(content.seek(to: 55, expected: wrongFence))
+        XCTAssertFalse(follow.isHidden, "Rejected seeks must keep the existing preview")
+        XCTAssertTrue(content.seek(to: 55, expected: content.fence))
+        XCTAssertTrue(follow.isHidden)
+        XCTAssertEqual(table.contentOffset.y, preview, accuracy: 1, "Request admission does not invent a media position")
+        content.model.clock.position = 55
+        await deliverUpdates()
+        try await Task.sleep(for: .milliseconds(450))
+        let target = table.rectForRow(at: IndexPath(row: 10, section: 0)).midY - table.bounds.height / 2
+        XCTAssertEqual(table.contentOffset.y, target, accuracy: 1)
+        XCTAssertEqual(content.model.phase, .paused)
+        // A seek within the same line must also leave a manually displaced
+        // viewport, without scrolling back before the media receipt.
+        player.scrollViewWillBeginDragging(table)
+        table.setContentOffset(CGPoint(x: 0, y: preview), animated: false)
+        player.scrollViewDidScroll(table)
+        player.scrollViewDidEndDragging(table, willDecelerate: false)
+        XCTAssertTrue(content.seek(to: 57, expected: content.fence))
+        XCTAssertEqual(table.contentOffset.y, preview, accuracy: 1)
+        content.model.clock.position = 57
+        await deliverUpdates()
+        XCTAssertGreaterThan(table.contentOffset.y, target + 1)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertEqual(table.contentOffset.y, target, accuracy: 1)
+        player.setRendering(false)
+        content.model.player = nil
+        await content.model.close()
+    }
+
+    private func makeFullLyrics() async throws -> (MusicPlayerContentModel, MusicFullPlayerView, UITableView, UIWindow) {
+        let (content, _) = try makeDock()
+        content.model.clock.position = 0
+        content.model.metadataState.lyricState = "loaded"
+        content.model.metadataState.lyricLines = (0..<32).map {
+            .init(index: $0, time: Double($0 + 1) * 5, end: Double($0 + 2) * 5, text: "歌词 \($0)")
+        }
+        await deliverUpdates()
+        let player = MusicFullPlayerView(content: content)
+        let root = UIViewController()
+        root.view = player
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        player.setRendering(true)
+        window.layoutIfNeeded(); player.layoutIfNeeded()
+        let toggle = try XCTUnwrap(dockViews(player).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.player.lyricToggle"
+        })
+        toggle.sendActions(for: .touchUpInside)
+        await deliverUpdates()
+        player.layoutIfNeeded()
+        let table = try XCTUnwrap(dockViews(player).compactMap { $0 as? UITableView }.first)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 32)
+        return (content, player, table, window)
+    }
+
     func testProgressTrackTapsSeekForwardBackwardAndEndpointsInFullAndCardControls() async throws {
         for layout in [MusicPlaybackControlsView.Layout.full, .card] {
             let (content, _) = try makeDock()
