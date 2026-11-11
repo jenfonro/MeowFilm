@@ -58,7 +58,7 @@ final class MusicSearchSettingsViewController: MusicSettingsPageViewController<M
 
     init(appearance: MusicAppearancePreferencesStore) {
         super.init(appearance: appearance, content: MusicSearchSettingsContent(
-            state: state, theme: PageTheme(palette: appearance.pageColorway)
+            state: state, theme: PageTheme(colors: appearance.pagePalette)
         ))
         pageTitle = "搜索设置"
     }

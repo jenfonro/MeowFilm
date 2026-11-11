@@ -21,4 +21,17 @@ public struct MusicRecordMaterials: Equatable, Sendable {
         ring = colors[0]; tone = colors[1]; mist = colors[2]; reflect = colors[3]
         discRotation = palette.hue - 262
     }
+
+    public init(colors: PagePalette) {
+        if case .preset(let preset) = colors {
+            self = MusicRecordMaterials(palette: preset)
+        } else {
+            let accent = colors.lightAccent
+            ring = PageColor(rgb: accent.rgb, alpha: 140)
+            tone = PageColor(rgb: accent.mixed(with: colors.lightTop, ratio: 0.55).rgb, alpha: 112)
+            mist = PageColor(rgb: colors.lightTop.rgb, alpha: 48)
+            reflect = PageColor(rgb: colors.lightTop.mixed(with: .init(rgb: 0xffffff), ratio: 0.5).rgb, alpha: 56)
+            discRotation = colors.hue - 262
+        }
+    }
 }

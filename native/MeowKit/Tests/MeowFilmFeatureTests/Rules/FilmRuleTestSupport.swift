@@ -53,6 +53,16 @@ actor FilmRuleRPC {
             rules = try JSONDecoder().decode(FilmRuleSet.self, from: RuntimeJSON.encode(value))
             revision += 1
         }
+        if let fields = input.filmObject, case .string(let name)? = fields["group"],
+           let group = FilmRuleGroup(rawValue: name), let value = fields["rules"], operation == "rules.group.set" {
+            let rows: [FilmMatchRule]
+            if group.isClean {
+                rows = try JSONDecoder().decode([String].self, from: RuntimeJSON.encode(value)).map { .init(pattern: $0) }
+            } else {
+                rows = try JSONDecoder().decode([FilmMatchRule].self, from: RuntimeJSON.encode(value))
+            }
+            rules.replace(group, with: rows); revision += 1
+        }
         if operation == "rules.clear" { rules = .init(); revision += 1 }
         return .object(["rules": try filmRuleValue(rules), "revision": .string("receipt-\(revision)")])
     }

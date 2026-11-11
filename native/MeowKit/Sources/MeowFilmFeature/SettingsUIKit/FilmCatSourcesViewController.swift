@@ -11,12 +11,23 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
     override func render() {
         let cats = snapshot?.cats ?? []
         selected.formIntersection(cats.map(\.installationId))
+        let add = PageHeaderButton(image: PageIcon.image(.plus), accessibilityLabel: "导入猫源",
+            menu: UIMenu(children: [
+                UIAction(title: "本地导入") { [weak self] _ in self?.importSource(local: true) },
+                UIAction(title: "网络导入") { [weak self] _ in self?.importSource(local: false) },
+            ]))
+        add.isEnabled = !busy; add.accessibilityIdentifier = "film.cats.import"
+        let refresh = PageHeaderButton(image: UIImage(systemName: "arrow.clockwise")!, accessibilityLabel: "刷新猫源") { [weak self] in
+            guard let self else { return }; perform({ [service] in try await service.refresh() })
+        }
+        refresh.isEnabled = !busy; refresh.accessibilityIdentifier = "film.cats.refresh"
+        pageHeader.setTrailing([refresh, add])
         var rows = cats.map { cat in
-            FilmSettingsRow(title: cat.name,
-                detail: "\(cat.sourceType == "local" ? "本地" : "网络") · \(cat.enabled ? "启用" : "停用") · \(filmSourceState(cat.state))\n\(filmSourceDate(cat.modifiedAt)) · \(filmSourceState(cat.updateState))",
-                id: "film.cat.\(cat.installationId)", enabled: !busy,
-                selected: selecting && selected.contains(cat.installationId), disclosure: !selecting,
-                action: { [weak self] in
+            sourceRow(title: cat.name,
+                status: "\(filmSourceState(cat.state)) · \(filmSourceState(cat.updateState))",
+                id: "film.cat.\(cat.installationId)", isOn: cat.enabled, enabled: !busy,
+                selecting: selecting, selected: selected.contains(cat.installationId),
+                open: { [weak self] in
                     guard let self else { return }
                     if selecting {
                         if !selected.insert(cat.installationId).inserted { selected.remove(cat.installationId) }
@@ -25,17 +36,23 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
                         navigationController?.pushViewController(FilmCatDetailController(service: service,
                             installationId: cat.installationId, themeProvider: themeProvider), animated: true)
                     }
-                })
+                }, change: { [weak self] enabled in
+                    guard let self else { return }
+                    perform({ [service] in _ = try await service.enableCat(cat.installationId, enabled: enabled) })
+                }, actions: [
+                    UIAction(title: "编辑") { [weak self] _ in self?.edit(cat) },
+                    UIAction(title: "更新") { [weak self] _ in self?.update([cat]) },
+                    UIAction(title: "重启", attributes: cat.canRestart ? [] : .disabled) { [weak self] _ in
+                        guard let self else { return }
+                        perform({ [service] in _ = try await service.restartCat(cat.installationId) }, success: "已重启")
+                    },
+                    UIAction(title: "删除", attributes: .destructive) { [weak self] _ in self?.remove([cat]) },
+                ])
         }
         rows += sourceStateRows(empty: cats.isEmpty)
         sections = [.init(title: "", rows: [
-            .init(title: "本地导入", id: "film.cats.import.local", enabled: !busy, action: { [weak self] in self?.importSource(local: true) }),
-            .init(title: "网络导入", id: "film.cats.import.network", enabled: !busy, action: { [weak self] in self?.importSource(local: false) }),
-            .init(title: selecting ? "完成选择" : "选择", id: "film.cats.select", enabled: !busy && !cats.isEmpty,
+            .init(title: selecting ? "完成选择" : "选择", id: "film.cats.select", enabled: !busy && (selecting || !cats.isEmpty),
                 action: { [weak self] in self?.selecting.toggle(); self?.render() }),
-            .init(title: "刷新", id: "film.cats.refresh", enabled: !busy, action: { [weak self] in
-                guard let self else { return }; perform({ [service] in try await service.refresh() })
-            }),
         ]), .init(title: "", rows: rows)]
         if selecting {
             sections.append(.init(title: "已选 \(selected.count)", rows: [
@@ -51,34 +68,48 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
         super.render()
     }
     private func importSource(local: Bool) {
+        guard isPageActive, isPageVisible, !busy else { return }
         navigationController?.pushViewController(FilmCatEditorController(service: service, mode: .importSource(local: local),
             themeProvider: themeProvider), animated: true)
     }
+    private func edit(_ cat: FilmCatSource) {
+        guard isPageActive, isPageVisible, !busy else { return }
+        navigationController?.pushViewController(FilmCatEditorController(service: service, mode: .edit(cat),
+            themeProvider: themeProvider), animated: true)
+    }
+    private func remove(_ cats: [FilmCatSource]) {
+        confirm("删除选中的 \(cats.count) 个猫源？", message: "关联视频源也将删除。") { [weak self] in
+            guard let self else { return }
+            deleteBatch(cats, isPresent: { cat, snapshot in
+                snapshot.cats.contains { $0.installationId == cat.installationId }
+            }) { [service] in try await service.deleteCat($0.installationId) }
+        }
+    }
     private func batch(_ action: Int) {
         let cats = (snapshot?.cats ?? []).filter { selected.contains($0.installationId) }
+        let generation = sourcePageGeneration
         if action == 4 {
-            confirm("删除选中的 \(cats.count) 个猫源？", message: "关联视频源也将删除。") { [weak self] in
-                guard let self else { return }
-                deleteBatch(cats, isPresent: { cat, snapshot in
-                    snapshot.cats.contains { $0.installationId == cat.installationId }
-                }) { [service] in try await service.deleteCat($0.installationId) }
-            }
+            remove(cats)
         } else if action == 2 {
             update(cats)
         } else if action == 3 {
             let restartable = cats.filter(\.canRestart)
             var completedCount = 0
-            perform({ [service] in
+            perform({ [weak self, service] in
                 while completedCount < restartable.count {
+                    guard self?.canContinueSourceBatch(generation) == true else { return }
                     _ = try await service.restartCat(restartable[completedCount].installationId)
                     // Advance only after the service confirms the complete operation.
                     completedCount += 1
                 }
             })
         } else {
-            perform({ [service] in
-                for cat in cats {
-                    _ = try await service.enableCat(cat.installationId, enabled: action == 0)
+            var completedCount = 0
+            perform({ [weak self, service] in
+                while completedCount < cats.count {
+                    guard self?.canContinueSourceBatch(generation) == true else { return }
+                    _ = try await service.enableCat(cats[completedCount].installationId, enabled: action == 0)
+                    completedCount += 1
                 }
             })
         }
@@ -104,8 +135,8 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
                 })
         }
     }
-    override func pageDidBecomeHidden() { updateGeneration = UUID() }
-    override func pageDidBecomeInactive() { updateGeneration = UUID() }
+    override func pageDidBecomeHidden() { super.pageDidBecomeHidden(); updateGeneration = UUID() }
+    override func pageDidBecomeInactive() { super.pageDidBecomeInactive(); updateGeneration = UUID() }
 }
 
 @MainActor
@@ -119,8 +150,8 @@ final class FilmCatDetailController: FilmSourcePageController {
         guard let cat = snapshot?.cats.first(where: { $0.installationId == installationId }) else {
             sections = [.init(title: "", rows: sourceStateRows(empty: true))]; super.render(); return
         }
+        pageTitle = cat.name
         sections = [.init(title: "", rows: [
-            .init(title: cat.name, id: "film.cat.name"),
             .init(title: "类型", detail: cat.sourceType == "local" ? "本地" : "网络", id: "film.cat.type"),
             .init(title: "状态", detail: filmSourceState(cat.state), id: "film.cat.state"),
             .init(title: "修改时间", detail: filmSourceDate(cat.modifiedAt), id: "film.cat.modified"),
@@ -159,8 +190,9 @@ final class FilmCatDetailController: FilmSourcePageController {
         super.render()
     }
     private func editor(_ mode: FilmCatEditorController.Mode) {
-        navigationController?.pushViewController(FilmCatEditorController(service: service, mode: mode,
-            themeProvider: themeProvider), animated: true)
+        guard let navigationController, navigationController.topViewController === self else { return }
+        let editor = FilmCatEditorController(service: service, mode: mode, themeProvider: themeProvider)
+        navigationController.setViewControllers(Array(navigationController.viewControllers.dropLast()) + [editor], animated: true)
     }
 }
 #endif

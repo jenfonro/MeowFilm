@@ -53,6 +53,9 @@ Windows 原生候选由 `RuntimeMediaPlaybackIntent` 的同一个实例绑定 pr
 | `manual.update` | `{action:'save',item}` 或 `{action:'remove',id}` |
 | `rules.get` | `{}` → `{rules,revision}` |
 | `rules.set` | `{rules}` → 保存并返回新快照 |
+| `rules.group.set` | `{group,rules}` → 只归一化指定组，在 owner 写队列中原子合并最新已保存配置，返回 `{rules,revision}` |
+| `rules.group.defaults` | `{group}` → 该组默认行数组；不初始化或写入文档 |
+| `rules.group.preview` | `{group,rules,request}` → 此组草稿＋关联组最新已保存配置执行预览；不写入 |
 | `rules.restore` | `{section:'episode'\|'movie'\|'search',rules?}` → 恢复所选段默认值并保存 |
 | `rules.preview` | `{request,rules?}` → 规则预览；可用草稿，不写入 |
 | `rules.normalize` | `{kind:'match'\|'clean',pattern,replace?}` → 新规则输入标准化结果 |
@@ -73,6 +76,16 @@ Windows 原生候选由 `RuntimeMediaPlaybackIntent` 的同一个实例绑定 pr
 ### 规则与搜索
 
 规则文档由 `createFilmRulesService` 唯一读写；默认初始化、保存、恢复及清除均通过同一 owner。
+分组接口的 `group` 为 `episodeClean`／`episode`／`movie`／`search`，分别对应
+`episodeCleanRegexRules`／`episodeRules`／`movieRules`／`aggregateRegexRules`。
+净化组 `rules` 是字符串数组，匹配组是 `{pattern,replace,flags}` 数组。空数组表示清空该组。
+组预览的 `request.section` 须与组一致（`episodeClean` 对应 `episode`）；关联的另一剧集组
+只取 Node 已保存配置，客户端其他组草稿不参与。分组保存仅归一化本组，其他组原样保留；
+写入失败不发布新快照。`rules.set`／`rules.restore` 保留 Windows 使用的整份提交语义。
+iOS 页面新增、编辑、删除和恢复默认只修改本组草稿，唯一页头保存提交本组；失败保留草稿。
+保存一旦交给稳定草稿 owner，其 Task 会等待实际落盘回执并更新本组草稿；离页或取消页面
+等待者不取消该写入，也不丢弃归一化结果。页内测试随页面隐藏或失活取消，旧结果不再发布；
+服务保留取消任务直到调用结束，Node 原生程序先停止并排空实际计算再结束取消。
 `revision` 包含共享 QuickJS-NG 0.18.0／Unicode 身份与实际规则内容。搜索和播放持不可变快照，
 保存新规则不改变旧任务、不清原始数据缓存，也不打断媒体。设置预览与播放识别使用独立于第三方
 脚本的 Runtime/Context；纯计算可中断并排空，失败后下次调用重建同一内核，不回退到 Node vm。

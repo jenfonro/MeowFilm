@@ -15,7 +15,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         super.init(themeProvider: themeProvider)
         switch area {
         case .preferences: pageTitle = "播放偏好"
-        case .siteClean: pageTitle = "站点净化"
+        case .siteClean: pageTitle = "站点净化设置"
         case .autoPrepare: pageTitle = "自动准备"
         }
     }

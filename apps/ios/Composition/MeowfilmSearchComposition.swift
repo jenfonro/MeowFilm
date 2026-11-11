@@ -17,7 +17,7 @@ enum MeowfilmSearchComposition {
                          select: @escaping (FilmSearchContext) -> Void) -> SearchResultCategory {
         SearchResultCategory(target: film) {
             let content = FilmSearchResultsContent(service: service, images: images,
-                                                  theme: PageTheme(palette: themeProvider.pageColorway))
+                                                  theme: PageTheme(colors: themeProvider.pagePalette))
             content.onSelect = select
             return content
         }

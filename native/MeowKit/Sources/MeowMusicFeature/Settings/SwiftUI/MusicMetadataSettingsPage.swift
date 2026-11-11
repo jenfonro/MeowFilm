@@ -20,7 +20,7 @@ final class MusicMetadataSettingsViewController: MusicSettingsPageViewController
             }
         }
         super.init(appearance: appearance, content: MusicMetadataSettingsContent(
-            state: state, theme: PageTheme(palette: appearance.pageColorway)
+            state: state, theme: PageTheme(colors: appearance.pagePalette)
         ))
         pageTitle = "歌词／封面设置"
     }

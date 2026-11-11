@@ -870,7 +870,7 @@ private enum PageLifecycleTestLocal {
 
 @MainActor
 final class PageLifecycleTestTheme: PageThemeProviding {
-    let pageColorway = PageColorway.allCases[0]
+    let pagePalette = PagePalette.preset(.lilac)
     let animatesPageColorway = false
     var pageThemeChanges: AnyPublisher<Void, Never> {
         Empty(completeImmediately: false).eraseToAnyPublisher()

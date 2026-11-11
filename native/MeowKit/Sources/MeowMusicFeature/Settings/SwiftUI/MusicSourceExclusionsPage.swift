@@ -29,7 +29,7 @@ final class MusicSourceExclusionsViewController: MusicSettingsPageViewController
     private let state: MusicSourceExclusionsState
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         state = .init(model: model)
-        super.init(appearance: appearance, content: .init(state: state, theme: .init(palette: appearance.pageColorway)))
+        super.init(appearance: appearance, content: .init(state: state, theme: .init(colors: appearance.pagePalette)))
         pageTitle = "错源管理"
     }
     override func pageDidBecomeVisible() { perform { try await self.state.reload() } }

@@ -18,7 +18,7 @@ final class MusicAccountLoginViewController: MusicSettingsPageViewController<Mus
         self.owner = owner
         state = MusicAccountLoginState(owner: owner, service: service, platform: platform)
         super.init(appearance: appearance, content: MusicAccountLoginContent(
-            state: state, theme: PageTheme(palette: appearance.pageColorway)
+            state: state, theme: PageTheme(colors: appearance.pagePalette)
         ))
         pageTitle = platform.title
         modalPresentationStyle = .overFullScreen

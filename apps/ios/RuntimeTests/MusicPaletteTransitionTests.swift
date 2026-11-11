@@ -96,22 +96,22 @@ final class MusicPaletteTransitionTests: XCTestCase {
 
     func testFullPlayerAndHomeCardInitialColorsAndDetachedUpdates() throws {
         for style in [MusicPlayerBackgroundView.Style.full, .card] {
-            let view = MusicPlayerBackgroundView(style: style, palette: .lilac)
+            let view = MusicPlayerBackgroundView(style: style, palette: .preset(.lilac))
             let gradient = try gradient(in: view.layer)
             let initial = try colors(gradient.colors)
             XCTAssertNil(gradient.animation(forKey: "player.palette"))
-            view.apply(palette: .mint, animated: true)
+            view.apply(palette: .preset(.mint), animated: true)
             let transition = try animation(in: gradient, key: "player.palette")
             assertColors(try colors(transition.fromValue), equal: initial)
             assertColors(try colors(transition.toValue), equal: try colors(gradient.colors))
             XCTAssertEqual(transition.duration, 0.3)
             let began = transition.beginTime
-            view.apply(palette: .mint, animated: true)
+            view.apply(palette: .preset(.mint), animated: true)
             view.frame.size = CGSize(width: 390, height: 700)
             view.layoutIfNeeded()
             XCTAssertEqual(try animation(in: gradient, key: "player.palette").beginTime, began,
                            "Repeated colors and layout must preserve the in-flight transition")
-            view.apply(palette: .rose, animated: false)
+            view.apply(palette: .preset(.rose), animated: false)
             XCTAssertNil(gradient.animation(forKey: "player.palette"),
                          "A direct assignment must retire an older color animation")
         }
@@ -119,7 +119,7 @@ final class MusicPaletteTransitionTests: XCTestCase {
 
     func testFullPlayerAndHomeCardRetargetFromVisibleColorsAndKeepTheirContents() async throws {
         for style in [MusicPlayerBackgroundView.Style.full, .card] {
-            let view = MusicPlayerBackgroundView(style: style, palette: .lilac)
+            let view = MusicPlayerBackgroundView(style: style, palette: .preset(.lilac))
             try await withVisible(view) {
                 let gradient = try self.gradient(in: view.layer)
                 let disc = MusicRecordDiscView(frame: CGRect(x: 10, y: 20, width: 160, height: 160))
@@ -130,7 +130,7 @@ final class MusicPaletteTransitionTests: XCTestCase {
                 rotor.transform = CATransform3DMakeRotation(.pi / 3, 0, 0, 1)
                 let children = view.subviews
                 let initial = try self.colors(gradient.colors)
-                view.apply(palette: .mint, animated: true)
+                view.apply(palette: .preset(.mint), animated: true)
                 await self.display()
                 view.layer.timeOffset += 0.12
                 await self.display()
@@ -138,13 +138,13 @@ final class MusicPaletteTransitionTests: XCTestCase {
                 let target = try self.colors(gradient.colors)
                 XCTAssertNotEqual(visible, initial, "The existing colors must progress between endpoints")
                 XCTAssertNotEqual(visible, target, "Colors must fade rather than jump to the target")
-                view.apply(palette: .rose, animated: true)
+                view.apply(palette: .preset(.rose), animated: true)
                 let redirected = try self.animation(in: gradient, key: "player.palette")
                 self.assertColors(try self.colors(redirected.fromValue), equal: visible)
                 let final = try self.colors(gradient.colors)
                 let began = redirected.beginTime
                 for _ in 0..<3 {
-                    view.apply(palette: .rose, animated: true)
+                    view.apply(palette: .preset(.rose), animated: true)
                     view.setNeedsLayout()
                     view.layoutIfNeeded()
                 }
@@ -206,7 +206,7 @@ final class MusicPaletteTransitionTests: XCTestCase {
             XCTAssertTrue(appearance.applyCover(rgba: [240, 20, 20, 255], ticket: secondTicket))
             await self.display()
             XCTAssertNotNil(gradient.animation(forKey: "page.colorway"))
-            XCTAssertTrue(appearance.selectFixedPalette(.sky))
+            XCTAssertTrue(appearance.selectFixedPalette(.preset(.sky)))
             await self.display()
             XCTAssertNil(gradient.animation(forKey: "page.colorway"),
                          "A synchronous preference update must retire the earlier song transition")
