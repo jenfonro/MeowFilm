@@ -85,7 +85,7 @@ test('TMDB App assembly serves requests and images when the unused Douban provid
       const identity = { sessionId: randomUUID() };
       const app = createAppRuntime({ ...identity, modules: [
         createMusicScriptModule({ dataRoot }), createCatScriptModule({ dataRoot: dataRoot + '/cat' }),
-        createSourceRuntimeModule(), createTMDBDataModule({ dataRoot }),
+        createSourceRuntimeModule({ dataRoot }), createTMDBDataModule({ dataRoot }),
       ] });
       let client;
       t.after(async () => { await client?.close(); await app.close(); });
@@ -95,7 +95,7 @@ test('TMDB App assembly serves requests and images when the unused Douban provid
       assert.equal(described.ok, true);
       assert.deepEqual(described.value.modules.map(module => [module.id, module.version, module.contract]), [
         ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
-        ['source', '0.2.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
+        ['source', '0.3.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
       ]);
       await verifyTMDBAssembly(t, { client, baseUrl: app.baseUrl });
       for (const method of ['douban.data.settings.get', 'pan.providers'])

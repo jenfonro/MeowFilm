@@ -92,8 +92,10 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
             self?.openMenu()
         })
         switch page {
-        case .recommend, .film:
+        case .recommend, .film, .novel:
             let search = makeSearchField()
+            if page == .novel { search.configuration?.title = "搜索小说" }
+            if page == .film { search.configuration?.title = "搜索影视" }
             header.setTitleView(search)
             if page == .recommend {
                 header.setTrailing([Self.iconButton(.recognize, label: "更多功能", identifier: "app.feature")])

@@ -1,6 +1,6 @@
 # meowfilm
 
-原生音乐应用：iPhone（UIKit）与 Windows（WPF / .NET）。
+原生音乐、影视与小说应用：iPhone（UIKit）与 Windows（WPF / .NET）。
 
 ## 构建
 
@@ -19,7 +19,7 @@ Windows 安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\meowfil
 
 上述工具只用于开发与构建。Windows 部署需要完整的 `build/windows/`，不能只复制 `meowfilm.exe`；`-FrameworkDependent` 版本另外需要匹配的 .NET Desktop Runtime。通用运行器使用原生引擎及 `runtime.http.v1`；iOS 通过内置 NodeMobile／MeowScriptHost framework 接入，构建与验证边界见[iOS 运行底座](docs/ios/runtime-preflight.md)。Windows 启动、HTTP 消费者和平台包装已接入，构建工具链见[Windows 打包说明](docs/windows/runtime-packaging.md)；公共或模拟器通过不等于所有平台可发布。
 
-影视规则／搜索统一由 Node film owner 加载共享程序，复用通用脚本宿主的 QuickJS-NG 0.18.0 原生载体，但各自保持独立 Runtime／Context；客户端仅保留草稿和展示，不另带规则 DLL／静态引擎。目标电脑不需要 CMake 或编译器。
+影视规则／搜索由 Node film owner 加载共享程序，小说纯规则由 source owner 执行，复用通用脚本宿主的 QuickJS-NG 0.18.0 原生载体，各自保持独立 Runtime／Context。客户端保留原生业务状态、排版与交互，不另带规则 DLL／静态引擎。目标电脑不需要 CMake 或编译器。Windows 书源 Web 交互使用系统已安装的 Microsoft Edge WebView2 Runtime，不自动下载安装。
 
 ## 测试
 
@@ -42,7 +42,7 @@ Windows 上运行 Python 脚本时将 `python3` 换为 `python -X utf8`。iOS �
 
 ## 脚本运行时
 
-通用运行器由一个 Node 主控管理：LX 和 Reader／CatVod 来源分别使用逐实例原生线程与 QuickJS Runtime；CatNode 使用逐实例 Node Worker，直接执行 Node 能力，不再嵌套 QuickJS／WASM。源码一次完整 HTTP 上传，普通调用使用 JSON，请求与结果不走业务分片。当前模块为 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.2.0`／`source.runtime.v2`。见 [公共运行时](docs/runtime/script-runtime.md)。
+通用运行器由一个 Node 主控管理：LX 和 Reader／CatVod 来源分别使用逐实例原生线程与 QuickJS Runtime；CatNode 使用逐实例 Node Worker，直接执行 Node 能力，不再嵌套 QuickJS／WASM。源码一次完整 HTTP 上传，普通调用使用 JSON，请求与结果不走业务分片。当前模块为 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.3.0`／`source.runtime.v2`。见 [公共运行时](docs/runtime/script-runtime.md)。
 
 已同步的 Windows 业务采用随 App 启动公共宿主、恢复启用猫源的生命周期，官方原生业务不以 Node 为前置条件；Windows 使用私密管道启动握手和上述通用 HTTP 契约，不再通过管道发送业务 RPC。影视规则／搜索使用 Node 业务接口，无旧客户端引擎兜底；见 [Windows 影视设置](docs/windows/film-settings.md)与 [iOS 影视设置](docs/ios/film-settings.md)。
 
@@ -58,7 +58,9 @@ node scripts/package-runtime.mjs --product aggregate --profile common-native --o
 
 LX 特权存储使用请求第二参数 `context.storage`。CatNode 保留有限 Node 风格能力、受控 HTTP 服务、direct Spider 和安装实例私有卷，不获得宿主任意 `require`、文件或进程访问；网络不按公网、私网、回环或局域网域名分类拒绝目标。source 的 CatVod 只接受独立 Spider 输入，不能代替 CatNode。Reader 的 Legado、异次元和轻悦时光规则通过[来源 capability ABI](docs/runtime/source-capability-abi.md)请求平台能力。Node 无关仅指 `source-runtime` 规则包，不表示 Node 兼容层或当前 Windows 承载能脱离 Node。见[公共运行时](docs/runtime/script-runtime.md)。
 
-外部 LX、CatNode 和 Reader／CatVod 来源验收使用[实际声明动作与联网报告](docs/runtime/source-acceptance.md)，不会修改或把用户脚本打包进应用；底层来源支持不表示已接入阅读 UI 或其他平台客户端。
+两端小说提供原生发现、搜索、书架／历史、书源与替换净化管理，以及原生分页／滚动阅读器。书源定义与私有状态归运行器，书架和排版归原生存储；详见[共同阅读契约](docs/common/novel/reading.md)、[iOS](docs/ios/novel.md)与[Windows](docs/windows/novel.md)。
+
+外部 LX、CatNode 和 Reader／CatVod 来源验收使用[实际声明动作与联网报告](docs/runtime/source-acceptance.md)，不会修改或把用户脚本打包进应用；已接入的来源契约不代表所有第三方书源、真实登录或付费流程均已验证。
 
 ## 文档
 

@@ -38,7 +38,7 @@ class ProductConfigurationTests(unittest.TestCase):
 
     def test_single_meowfilm_product_links_its_native_capabilities(self):
         project = self.project("Meowfilm")
-        for library in ("MeowUI", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature"):
+        for library in ("MeowUI", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature", "MeowNovelFeature"):
             self.assertIn(f"productName = {library};", project)
         self.assertEqual(project.count('path = "Navigation/MeowfilmCoordinator.swift";'), 1)
         self.assertEqual({p.name for p in (self.root / "apps/ios").glob("*.xcodeproj")}, {"Meowfilm.xcodeproj"})

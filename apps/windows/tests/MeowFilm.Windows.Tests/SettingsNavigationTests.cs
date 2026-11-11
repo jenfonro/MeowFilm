@@ -59,9 +59,10 @@ public static class SettingsNavigationTests
     {
         var music = new Module("music", "音乐");
         var film = new Module("film", "影视");
+        var novel = new Module("novel", "小说");
         await using var appearance = new AppAppearance(new QualityFixture.DocumentStore());
         await appearance.LoadAsync();
-        var shell = new ShellWindow([music, film], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
+        var shell = new ShellWindow([music, film, novel], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
         {
             Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
         };
@@ -74,7 +75,7 @@ public static class SettingsNavigationTests
             var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
             var slot = (ContentControl)header.FindName("LeadingSlot");
             var tabs = ((Panel)slot.Content).Children.OfType<RadioButton>().ToArray();
-            Check(tabs.Select(tab => tab.Content).SequenceEqual(new[] { "通用", "音乐", "影视" }));
+            Check(tabs.Select(tab => tab.Content).SequenceEqual(new[] { "通用", "音乐", "影视", "小说" }));
             Check(tabs[0].IsChecked == true && !music.SettingsView.IsVisible && !film.SettingsView.IsVisible);
             Check(film.Initializations == 0);
             tabs[1].IsChecked = true;
@@ -92,6 +93,13 @@ public static class SettingsNavigationTests
             tabs[2].IsChecked = true;
             await Drain();
             Check(((TextBox)film.SettingsView).Text == "影视草稿" && film.Initializations == 1);
+            tabs[3].IsChecked = true;
+            await Drain();
+            Check(novel.SettingsView.IsVisible && !film.SettingsView.IsVisible && novel.Initializations == 1);
+            ((TextBox)novel.SettingsView).Text = "小说排版草稿";
+            tabs[2].IsChecked = true;
+            await Drain();
+            Check(((TextBox)film.SettingsView).Text == "影视草稿" && !novel.SettingsView.IsVisible);
             tabs[0].IsChecked = true;
             await Drain();
             Check(!film.SettingsView.IsVisible && !music.SettingsView.IsVisible);

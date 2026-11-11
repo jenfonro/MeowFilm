@@ -16,7 +16,7 @@ public static class AppIdentity
         {
             new RuntimeModule("music", "0.8.0"),
             new RuntimeModule("cat", "0.2.0"),
-            new RuntimeModule("source", "0.2.0"),
+            new RuntimeModule("source", "0.3.0"),
             new RuntimeModule("pan", "0.1.0"),
             new RuntimeModule("tmdb", "0.1.0"),
             new RuntimeModule("douban", "0.1.0"),
@@ -31,7 +31,8 @@ public static class AppIdentity
     {
         "app.appearance.v1", "app.window.v1", "app.media-controls.v1", "music.library.v1", "music.files.v1", "music.accounts.v1", "music.feedback.v1",
         "music.playback-outbox.v1", "music.platform-context.v1",
-        "music.fm-selection.v1", "film.video-sources.v1", "film.library.v1"
+        "music.fm-selection.v1", "film.video-sources.v1", "film.library.v1",
+        "novel.library.v1"
     });
     public static IReadOnlyList<string> CacheNamespaces { get; } = Array.AsReadOnly(new[]
     {

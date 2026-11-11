@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `--kind lx`（默认） | `music.script.v3`／`music@0.8.0` | native LX 运行器 |
 | `--kind cat` | `cat.script.v2`／`cat@0.2.0` | Node Worker、私有卷及服务能力 |
-| `--kind source` | `source.runtime.v2`／`source@0.2.0` | `scripts/accept-reader-sources.mjs`，Reader 规则与 portable CatVod Spider adapter |
+| `--kind source` | `source.runtime.v2`／`source@0.3.0` | `scripts/accept-reader-sources.mjs`，Reader 规则与 portable CatVod Spider adapter |
 
 `--kind cat` 与 `--kind source --protocol cat` 是不同输入契约。前者使用真实 Cat Node 路径；后者使用 portable Spider 的 `homeContent/searchContent/detailContent/playerContent` 等接口，不接收 Node `require`／服务脚本，也不自动回退到 LX。
 

@@ -43,6 +43,8 @@
    <desktop:NoticeOutlet Message="{Binding Error}"/>
   </StackPanel>
   <ContentControl x:Name="MusicHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+  <ScrollViewer x:Name="NovelScroll" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"
+                HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" AutomationProperties.Name="小说搜索结果"/>
   <Grid x:Name="FilmBody" Grid.Row="1" Visibility="Collapsed">
    <ScrollViewer x:Name="FilmScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                  Style="{StaticResource MeowFilm.OverlayScrollViewer}">

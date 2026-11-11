@@ -27,6 +27,9 @@ function fixture(t) {
   write('apps/runtime/client.mjs', 'export {};');
   write('apps/runtime/contracts.mjs', 'export {};');
   write('apps/runtime/modules/source-candidates.mjs', 'export {};');
+  write('apps/runtime/modules/source-library.mjs', 'export {};');
+  write('apps/runtime/modules/source-web.mjs', 'export {};');
+  write('apps/runtime/modules/source-rules.mjs', 'export {};');
   write('apps/runtime/modules/music-script.mjs', 'export {};');
   write('apps/runtime/modules/cat-script.mjs', 'export {};');
   write('apps/runtime/modules/source-runtime.mjs', 'export {};');
@@ -70,7 +73,8 @@ test('shared metadata sources and neutral HTTP imports fit the exact runtime inv
     'apps/runtime/modules/cat-script.mjs', 'apps/runtime/modules/film-playback.mjs',
     ...metadataFiles.map(file => `apps/runtime/${file}`),
     'apps/runtime/modules/music-script.mjs', 'apps/runtime/modules/netease-token.mjs', 'apps/runtime/modules/pan-runtime.mjs',
-    'apps/runtime/modules/source-candidates.mjs', 'apps/runtime/modules/source-runtime.mjs',
+    'apps/runtime/modules/source-candidates.mjs', 'apps/runtime/modules/source-library.mjs',
+    'apps/runtime/modules/source-rules.mjs', 'apps/runtime/modules/source-runtime.mjs', 'apps/runtime/modules/source-web.mjs',
     'apps/runtime/pan-entry.mjs',
   ]);
 });
@@ -95,7 +99,17 @@ test('film business module uses its public workspace without platform dependenci
   assert.equal(verifyAppStructure(f.source).relativeImports, 5);
 });
 
-for (const file of [...metadataFiles, 'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'pan-entry.mjs']) {
+test('novel rule module uses the public program and native JSON entry', t => {
+  const f = fixture(t);
+  f.write('apps/runtime/modules/source-rules.mjs', `
+    import '@meowfilm/novel-rules';
+    import '@meowfilm/script-host/native-json';
+  `);
+  assert.equal(verifyAppStructure(f.source).relativeImports, 4);
+});
+
+for (const file of [...metadataFiles, 'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'pan-entry.mjs',
+  'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs']) {
   test(`shared runtime inventory requires ${file}`, t => {
     const f = fixture(t);
     rmSync(join(f.source, 'apps/runtime', file));

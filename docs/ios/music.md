@@ -35,7 +35,7 @@
   管理地址、类型、平台声明和检测由公共模块持有；iOS 管理与选源见[音源管理与选源](music-sources.md)。
 - 自动与手动调用继续核对 installation、generation、site 和录音；HTTP 音频升级 HTTPS，不新增 ATS 豁免，实测音质不由请求推断。
 - 原生歌词优先；仅 `wy`、`kw`、`mg` 的原生结果为空时，依安装顺序尝试同平台、已启用并声明 `lyric` 的脚本。`tx`／`kg` 保持原生歌词；原生错误不视为空结果。LX `search`／`musicSearch` 无统一结果契约，本端不接入原生搜索。
-- App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器，实际 App entry 按序显式装配 music@0.8.0／music.script.v3、cat@0.2.0／cat.script.v2、source@0.2.0／source.runtime.v2、pan@0.1.0／pan.runtime.v1、tmdb@0.1.0／tmdb.data.v1、douban@0.1.0／douban.data.v1、film@0.1.0／film.playback.v1、netease@0.1.0／netease.token.v1 八模块；通用默认仍为前三模块。App 的 `RuntimeSession` 唯一持有运行器，音乐、猫源、影视、网易 token 与 [TMDB 搜索／设置／图片](film-search.md)借用同一个 `RuntimeHTTPClient`，每个进程只启动一次 Node。LX／source 共享原生绑定并逐实例使用独立 QuickJS Runtime／线程，Cat 使用独立 Node Worker，不嵌套 WASM。冷启动恢复猫源及音乐目录，音乐首次 invoke／resolve／check 才惰性加载；普通来源读取不调用 enable，也不重建 failed 实例。候选与调用保留内容身份及真实执行代次检查，不把 idle 伪装成 ready。
+- App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器，实际 App entry 按序显式装配 music@0.8.0／music.script.v3、cat@0.2.0／cat.script.v2、source@0.3.0／source.runtime.v2、pan@0.1.0／pan.runtime.v1、tmdb@0.1.0／tmdb.data.v1、douban@0.1.0／douban.data.v1、film@0.1.0／film.playback.v1、netease@0.1.0／netease.token.v1 八模块；通用默认仍为前三模块。App 的 `RuntimeSession` 唯一持有运行器，音乐、猫源、影视、网易 token 与 [TMDB 搜索／设置／图片](film-search.md)借用同一个 `RuntimeHTTPClient`，每个进程只启动一次 Node。LX／source 共享原生绑定并逐实例使用独立 QuickJS Runtime／线程，Cat 使用独立 Node Worker，不嵌套 WASM。冷启动恢复猫源及音乐目录，音乐首次 invoke／resolve／check 才惰性加载；普通来源读取不调用 enable，也不重建 failed 实例。候选与调用保留内容身份及真实执行代次检查，不把 idle 伪装成 ready。
 - 启动失败不阻断原生官方业务；关闭／不可恢复退出后本次运行内脚本不可用，不自动重启。音乐关闭取消并排空自身调用，通过 `music.script.close` 的真实终态确认收口，不关闭共享 HTTP 客户端。App 最后关闭运行器 listener、工作线程及启动通道，并等待 `node_start` 返回；HTTP 成功回执本身不代表 Node 已退出。风险及独立诊断工具见[运行底座预检](runtime-preflight.md)。
 
 ## 曲库与网络歌单
@@ -91,7 +91,7 @@
 - 频道有效页面返回继续使用已有内容；首次加载、手动刷新、实际账号／来源失效才读取。切换数据源退休旧首页、频道目录、标签、内存最近频道及在途发布资格；请求游标仍绑定平台、目标、标签与来源 revision，首页另绑定真实账号 binding 和读取代次，拒绝混页。延迟的旧成功／失败不能回填新代次；跨平台搜索打开的详情始终按资源自身平台读取，不改写数据源偏好。
 - 首页与频道将保留资源寿命和实际显示需求分开：隐藏期间首页同来源账号变化保留展示、标记待刷新，来源变化清页；频道仍退休其失效内容，但不新读展示数据或 FM 预览。已准入且仍有效的读取继续完成，非空视觉投影延迟至恢复显示；返回时先核对本地来源，补闭首次订阅前切源的间隙，只有平台或持久 revision 不同才清页退休再刷新，同来源不增加网络读取；再补执行待刷新，不停止后台播放 owner。
 - `MusicPublicBrowseChannel.platform` 标识目录来源，`id` 保留平台频道代码，`identity` 用于页面复用、选择和恢复。恢复只匹配完整 identity，不接受裸 ID 或 pageCode；目录换平台时丢弃平台不符的内存选中项，没有有效匹配时只展示完整目录首项，不改写存量值，显式选择才保存。首页歌单／排行榜标题为整行频道入口，箭头紧邻标题；卡片仍打开自己的详情。首页歌曲标题不放独立播放按钮，歌曲行选曲使用该栏目完整已返回列表一次替换队列，横向三首分组仅影响布局；独立歌单详情的“播放全部”保留。
-- 频道目录及顶部切换条使用服务端返回的顺序、身份与标题；首次无有效历史选择时，在完整目录加载后选择首项，有效历史仍优先恢复，不特殊优先排行榜，异步目录不覆盖本次已作出的选择。切换条直接位于页头菜单之后，右侧依次为目录按钮与搜索按钮；首页和频道页均不再显示「推荐／频道」页面切换控件。底部仅有「首页／影视／我的」，频道页高亮「首页」，点击返回推荐；频道仍可从现有内容入口或音乐侧边栏进入，也可通过侧边栏「首页」返回推荐。主页面入口、搜索路由与边缘返回由 App 外壳提供，见[UI 所有权](architecture.md#ui-所有权)。内容空白处由 UIKit 分页容器切换频道；分页、栏目和轮播的滚动都先等待外壳的左边缘返回失败，非边缘起手的横向滚动仍由各自容器处理。创建相邻页面不读取内容，页面首次实际出现时才读取，返回有效页面复用已有结果。频道及其浏览页的释放沿用 `PageViewController` 的同步 MainActor 清理，避免旧 runtime 的嵌套 isolated-deinit。频道目录面板贴屏幕顶部、随频道数量自适应高度并受 72%／620pt 上限约束，从上方滑入、向上收回；点击遮罩、关闭按钮或选中频道均关闭，滚动区底部以与底部留白相同的 24pt 渐隐收尾，内容不遮挡页面头部。
+- 频道目录及顶部切换条使用服务端返回的顺序、身份与标题；首次无有效历史选择时，在完整目录加载后选择首项，有效历史仍优先恢复，不特殊优先排行榜，异步目录不覆盖本次已作出的选择。切换条直接位于页头菜单之后，右侧依次为目录按钮与搜索按钮；首页和频道页均不再显示「推荐／频道」页面切换控件。App 底部为「首页／影视／小说／我的」，频道页高亮「首页」，点击返回推荐；频道仍可从现有内容入口或音乐侧边栏进入，也可通过侧边栏「首页」返回推荐。主页面入口、搜索路由与边缘返回由 App 外壳提供，见[UI 所有权](architecture.md#ui-所有权)。内容空白处由 UIKit 分页容器切换频道；分页、栏目和轮播的滚动都先等待外壳的左边缘返回失败，非边缘起手的横向滚动仍由各自容器处理。创建相邻页面不读取内容，页面首次实际出现时才读取，返回有效页面复用已有结果。频道及其浏览页的释放沿用 `PageViewController` 的同步 MainActor 清理，避免旧 runtime 的嵌套 isolated-deinit。频道目录面板贴屏幕顶部、随频道数量自适应高度并受 72%／620pt 上限约束，从上方滑入、向上收回；点击遮罩、关闭按钮或选中频道均关闭，滚动区底部以与底部留白相同的 24pt 渐隐收尾，内容不遮挡页面头部。
 - 所有每日推荐入口统一使用 `MusicCollectionViewController` 的歌曲列表、播放全部、多选与单曲操作，保留真实 recommendation 来源身份，不创建可收藏的普通歌单。网易云默认／风格推荐分段控件位于 `PageHeaderView` 的 titleView；切换回到顶部并退休旧展示，不提交播放队列。风格当前选择胶囊位于播放全部下方、第一首歌曲上方，随列表滚动；点击打开动态分类／标签编辑面板，复用频道的 `FilterTagRows` 换行几何及胶囊样式。分类切换和勾选只改草稿，完成后提交并以真实回读更新歌曲及选择；回读与提交不一致保留面板并提示，取消不提交，账号失效清除草稿和旧回执。选择仅校验非空、唯一及同类目录成员，不按分类 ID 硬编码数量上限；实际服务拒绝仍通过统一错误呈现。
 - 普通歌单信息直接排在页面背景上，保留封面、标题、作者、数量和操作，删除包裹信息的外层材质、边框、阴影、封面模糊与独立叠色。页面、页头与吸顶播放栏继续使用同一窗口坐标投影背景，不改变全应用渐变曲线。
 - 普通频道复用首页的栏目、卡片及 VIP 表现；仅顶部轮播采用 16pt 页边距、`2.56:1` 比例与 14pt 圆角，整张图片触发其资源动作，不附加卡片播放按钮。服务端标签多于一项时显示筛选条，筛选条和列表从页面头部下方开始；展开面板覆盖并遮罩下方内容，不移动列表或频道栏；选中、点击遮罩或页面隐藏时收起。无标签频道不预留筛选区域，轮播随页面可见性及标签面板状态启停。
@@ -154,7 +154,7 @@
 
 records 每行为 `epoch整数秒\x01_plv或_pld\x01平铺JSON\n`，`_logTime` 保留原事件毫秒，歌曲 `id` 为数值。start 的 `time/realtime` 均为 0；end 的 `time` 为累计媒体进展整数秒，`realtime` 为真实听音整数秒；向下取整只发生在序列化时，`end` 保留真实原因，`play_speed` 为实际速率。普通网易歌单使用 `source=list`。FM 优先保留逐曲上游 `source/sourceId`，仅普通 FM 未返回来源时使用已证默认 `source=userfm`，规则频道（`ruleFM`）缺来源时省略，不让预览或元数据补全覆盖原归属；心动使用 `play_scene=heartbeat`，逐曲 `source/sourceId/alg` 只取真实上游值，缺失即省略，不把心动收藏歌单或相似模式标签推成远端来源。网易允许未知曲长，不沿用 QQ／酷狗的 86400 秒、rate 16 或 dispatch clock 校验。确认须同时满足 HTTP 200、数值业务 `code=200` 和 `data.successfiles` 包含此次精确 filename，响应 Cookie 不进入凭据。
 
-`NativeMusicAccountService` 持有 `MusicNeteaseFeedbackOutbox`，复用注入的 `DocumentStore`，单文档 key 为 `music.netease-playback-pending.v1`；最多 256 事件、保留 7 天，超出淘汰完整未确认配对。这两个数是本地资源边界。仅存必要事件、原始时间、非秘密账号记录 scope 和设置代次，不存 Cookie／token、媒体 URL、实时来源 proof 或其它遥测；`registered` 仅表示已持久准入，远端 `confirmed` 单独记录。start 确认前不得发送同遍 end。
+`NativeMusicAccountService` 持有 `MusicNeteaseFeedbackOutbox`，复用注入的 `DocumentStore`，单文档 key 为 `music.netease-playback-pending.v1`。App 从 Application Support 的持久 documents 目录注入独立 `music.netease-feedback-outbox.v1` 命名空间，与 Caches 中的账号 URL 缓存分离。最多 256 事件、保留 7 天，超出淘汰完整未确认配对。这两个数是本地资源边界。仅存必要事件、原始时间、非秘密账号记录 scope 和设置代次，不存 Cookie／token、媒体 URL、实时来源 proof 或其它遥测；`registered` 仅表示已持久准入，远端 `confirmed` 单独记录。start 确认前不得发送同遍 end。
 
 发送前先持久写入 `inflight`。超时、连接中断、取消、错误／不精确 ACK 和进程中断均按未知处理，不重放；仅固定上传路由在无响应、发送字节为 0 且系统明确报告未联网／DNS／连接建立失败时回到 `pending`。写盘失败不准入、不进入发送；inflight／ACK 落盘失败停止本进程后续发送，冷启动丢弃遗留 inflight。启动先读取权威设置，账号验证就绪或新的真实反馈只触发一次有界 drain，无业务轮询定时器；冷启动只恢复原账号记录及同一设置代次的安全未发。
 
@@ -188,7 +188,7 @@ App 通过 `MeowfilmResources` 与 `MeowfilmAssembly` 注入受保护客户端�
 
 ## 搜索发现
 
-- 全局搜索复用本页和结果分页外壳；App 通过中性 `SearchResultCategory` 注入影视分类并装配音乐／影视目标，入口、路由及分类联动遵守[共同搜索契约](../common/film/search.md)。音乐提交进入在线综合，不受进入前曲库或旧结果分类影响；音乐三个分类不触发附加业务取数，普通渲染不覆盖手选目标，切目标保留输入且不自动提交。影视端侧类型及接通边界见[影视](film-search.md)，歌曲／歌单算法不依赖影视。
+- 全局搜索复用本页和结果分页外壳；App 通过中性 `SearchResultCategory` 注入影视／小说独立分类并装配音乐／影视／小说三个目标，入口、路由及分类联动遵守[共同搜索契约](../common/film/search.md)。音乐提交进入在线综合，不受进入前曲库或旧结果分类影响；音乐三个分类不触发附加业务取数，普通渲染不覆盖手选目标，切目标保留输入且不自动提交。端侧类型及接通边界见[影视](film-search.md)与[小说](novel.md)，歌曲／歌单算法不依赖附加业务。
 - 本地历史仍按完整 UTF-8 关键词身份去重置顶，最多 60 条。历史胶囊默认折叠一行，按实际宽度显示展开控件；猜你喜欢最多两列三行，只轮换已加载热词，不读取默认搜索词或个性化推荐。
 - `MusicSearchDiscoveryProviding` 只读取所选的 `.hot`／`.charts` 目标。热搜使用 `/eapi/search/pc/chart/list` 的 `HOT_SEARCH_SONG#@#`，优先消费内联成员，仅在其为空时补读一次 `/eapi/search/pc/chart/detail`；返回最多 20 个热词、真实 `needPlay`、当前 `/eapi/toplist` 顺序的前三个榜单摘要及目标级失败。热词在去重前保留真实排名，成员行仍提交关键词搜索。
 - 词池和目录由原生平台 owner 分别以 `AsyncValueCache` 缓存纯数据 600 秒，合并同范围在途执行；快照有效期取实际成功值的最早到期时间，缓存命中不滑动续期。失败不缓存为成功空结果，重试仅读取失败目标；账号／保护代次变化清除对应成功值与在途资格。

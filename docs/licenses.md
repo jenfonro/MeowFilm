@@ -19,6 +19,7 @@
 | `catpawrunner-MIT.txt` | Cat 兼容实现所参考 catpawrunner 的 MIT 正文 |
 | `npm-node-compat-MIT.txt` | 有限 Node 兼容依赖闭包中的 MIT 原始版权与许可文本 |
 | `npm-node-compat-BSD-3-Clause.txt`、`npm-node-compat-ISC.txt` | 对应传递依赖的原始许可文本 |
+| `WebView2-LICENSE.txt`、`WebView2-NOTICE.txt` | Windows 书源交互使用的 Microsoft.Web.WebView2 1.0.4314.35 SDK 原始许可与第三方声明，不包括浏览器 Runtime 分发 |
 
 每种许可正文只保留一份。代码与上游的对应关系记录在 `NOTICE.md`，不在代码目录中另放许可文件。
 

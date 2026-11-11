@@ -392,6 +392,42 @@ public static partial class DesktopTests
                 Host(passive.SettingsView).Visibility == Visibility.Visible, "ordinary settings opens after collapsing the player page");
             Equal(1, module.InitializeCount, "presentation never creates another module");
         });
+        yield return Case("immersive reading retires global audio surfaces without releasing the retained player", async () =>
+        {
+            var player = new ImmersiveProbe();
+            var reader = new ReadingProbe();
+            await using var f = new Fixture([player, reader]); await f.LoadAsync();
+            var retainedPlayer = f.Element<ContentControl>("PlayerHost").Content;
+            player.Request(DesktopGlobalSurface.PlayerDetail);
+            await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Visible,
+                "detail opens before reading");
+            player.Request(DesktopGlobalSurface.PlayQueue);
+            await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Visible,
+                "queue opens before reading");
+            await f.SwitchAsync(reader);
+            await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Collapsed &&
+                f.Element<Border>("QueueSurface").Visibility == Visibility.Collapsed, "reading retires both audio surfaces");
+            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility, "reading hides the audio transport");
+            Equal(0d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "reading hides ordinary navigation");
+            Same(retainedPlayer, f.Element<ContentControl>("PlayerHost").Content, "reading does not detach the retained player");
+            Equal(0, player.DisposeCount, "reading does not dispose the playing module");
+            Equal(2, player.Deactivations, "each open audio surface is retired once");
+            player.Request(DesktopGlobalSurface.PlayerDetail);
+            player.Request(DesktopGlobalSurface.PlayQueue);
+            await DrainAsync();
+            Equal(Visibility.Collapsed, f.Element<Grid>("PlayerDetailSurface").Visibility, "late detail cannot cover the reader");
+            Equal(Visibility.Collapsed, f.Element<Border>("QueueSurface").Visibility, "late queue cannot cover the reader");
+            await f.SwitchAsync(player);
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility, "leaving reading restores the same transport");
+            Same(retainedPlayer, f.Element<ContentControl>("PlayerHost").Content, "leaving reading keeps the same player instance");
+            player.Request(DesktopGlobalSurface.PlayerDetail);
+            await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Visible,
+                "ordinary global player behavior resumes after reading");
+        });
+    }
+    private sealed class ReadingProbe() : ProbeModule("reading", hasPlayer: false), IDesktopImmersiveSource
+    {
+        public bool IsImmersive => true;
     }
     private sealed class ImmersiveProbe() : ProbeModule("immersive"), IDesktopGlobalSurfaceSource
     {

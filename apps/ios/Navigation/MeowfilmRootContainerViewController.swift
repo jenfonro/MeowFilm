@@ -15,6 +15,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
     private var sidebar: MeowfilmSidebarView?
     private let keyboardArea = UILayoutGuide()
+    private var readingVisible = false
     var onOpenSettings: (() -> Void)?
 
     init(navigation: PageNavigationController, themeProvider: any PageThemeProviding) {
@@ -59,7 +60,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
         guard let dock else { return }
         // The dock stays at the bottom edge; the keyboard only insets content.
         let bottom = view.safeAreaInsets.bottom
-        let docked = max(0, view.bounds.maxY - dock.frame.minY - bottom)
+        let docked = readingVisible ? 0 : max(0, view.bounds.maxY - dock.frame.minY - bottom)
         let keyboard = max(0, keyboardArea.layoutFrame.height - bottom)
         let occupied = max(docked, keyboard)
         if abs(navigation.additionalSafeAreaInsets.bottom - occupied) > 0.5 {
@@ -79,6 +80,11 @@ final class MeowfilmRootContainerViewController: PageViewController {
             dock?.updateBackdrop()
             view.setNeedsLayout()
         }
+    }
+
+    func setReadingVisible(_ visible: Bool) {
+        readingVisible = visible; dock?.isHidden = visible
+        view.setNeedsLayout()
     }
 
     func select(_ page: MeowfilmPrimaryPage, duration: TimeInterval = 0) {

@@ -1433,6 +1433,8 @@ public static partial class FilmSourcesTests
     {
         public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("Image requests are not part of this fixture.");
+        public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Image requests are not part of this fixture.");
 
         internal readonly Dictionary<string, CatFixture> Nodes = new(StringComparer.Ordinal);
         internal readonly List<RpcCall> Calls = [];

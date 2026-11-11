@@ -252,7 +252,7 @@ await check('ios-eight-module-http-and-tmdb', async () => {
     assert.deepEqual(described.modules.map(value => value.id), manifest.modules);
     assert.deepEqual(described.modules.map(value => [value.id, value.version, value.contract]), [
       ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
-      ['source', '0.2.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
+      ['source', '0.3.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
       ['tmdb', '0.1.0', 'tmdb.data.v1'], ['douban', '0.1.0', 'douban.data.v1'],
       ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
     ]);

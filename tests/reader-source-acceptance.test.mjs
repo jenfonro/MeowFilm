@@ -938,16 +938,20 @@ test('Reader keeps failed initialization, thrown invocation and unload or close 
       const hostPath = 'node_modules/@meowfilm/script-host/src/index.js';
       const sourcePath = 'node_modules/@meowfilm/source-runtime/src/index.js';
       for (const path of ['app/modules', 'node_modules/@meowfilm/script-host/src',
-        'node_modules/@meowfilm/source-runtime/src']) {
+        'node_modules/@meowfilm/source-runtime/src', 'node_modules/@meowfilm/novel-rules']) {
         mkdirSync(join(payload, path), { recursive: true });
       }
-      for (const file of ['bootstrap.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs']) {
+      for (const file of ['bootstrap.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
+        'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs']) {
         cpSync(join('apps/runtime', file), join(payload, 'app', file));
       }
       cpSync('packages/runtime-bridge', join(payload, 'node_modules/@meowfilm/runtime-bridge'), { recursive: true });
+      cpSync('packages/novel-rules/novel-rules.js', join(payload, 'node_modules/@meowfilm/novel-rules/novel-rules.js'));
       writeFileSync(join(payload, 'runtime-manifest.json'), JSON.stringify({
         status: 'complete', files: [modulePath, hostPath, sourcePath,
           'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/modules/source-candidates.mjs',
+          'app/modules/source-library.mjs', 'app/modules/source-web.mjs',
+          'app/modules/source-rules.mjs', 'node_modules/@meowfilm/novel-rules/novel-rules.js',
           'node_modules/@meowfilm/runtime-bridge/src/index.js'].map(path => ({ path })),
       }));
       writeFileSync(join(payload, hostPath), `
@@ -963,7 +967,7 @@ test('Reader keeps failed initialization, thrown invocation and unload or close 
             code: scenario.startsWith('invoke') ? 'SOURCE_FAILURE' : 'SOURCE_CLEANUP',
           }); };
           return {
-            id: 'source', version: '0.2.0', contract: 'source.runtime.v2',
+            id: 'source', version: '0.3.0', contract: 'source.runtime.v2',
             upload: async () => ({ ok: true, contract: 'source.runtime.v2', value: { sourceRevision: 1 } }),
             methods: {
               'source.runtime.load': async () => ({ ok: true, contract: 'source.runtime.v2', value: { instance: {

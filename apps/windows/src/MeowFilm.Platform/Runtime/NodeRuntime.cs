@@ -219,6 +219,12 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         return client.ReadImageAsync(reference, maximumBytes, cancellationToken);
     }
 
+    public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected) return Task.FromException<byte[]>(new BridgeException("CLOSED"));
+        return client.ReadImageAsync(reference, cancellationToken);
+    }
+
     private static async Task<string> WatchPipeAsync(Stream stream)
     {
         try { return await stream.ReadAsync(new byte[1]).ConfigureAwait(false) == 0 ? "CLOSED" : "INVALID_RESPONSE"; }

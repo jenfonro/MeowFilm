@@ -90,9 +90,10 @@ export function verifyBoundaries(root = windowsRoot) {
   }
   const shared = join(root, 'apps/runtime');
   const sharedImports = new Set([
-    'node:buffer', 'node:crypto', 'node:http', 'node:https',
+    'node:buffer', 'node:crypto', 'node:http', 'node:https', 'node:stream',
     '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
     '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/netease-token',
+    '@meowfilm/novel-rules', '@meowfilm/script-host/native-json',
   ]);
   if (existsSync(shared)) {
     if (lstatSync(shared).isSymbolicLink()) errors.push('apps/runtime: linked source');
@@ -104,7 +105,7 @@ export function verifyBoundaries(root = windowsRoot) {
             errors.push(`${relative(root, file)}: shared runtime depends on platform source: ${target}`);
         } else if (!sharedImports.has(target)) {
           errors.push(`${relative(root, file)}: shared runtime platform/private import: ${target}`);
-        } else if (target.startsWith('@meowfilm/') && !names.has(target)) {
+        } else if (target.startsWith('@meowfilm/') && !names.has(target.split('/').slice(0, 2).join('/'))) {
           errors.push(`${relative(root, file)}: undeclared shared runtime package: ${target}`);
         }
       }

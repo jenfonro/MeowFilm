@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { installIOSFailureBoundary, parseIOSConfiguration, parseIOSLaunchArguments } from '../apps/ios/runtime/bootstrap.mjs';
 import { connect, contract, load, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-support.mjs';
 import { verifyPanAndDoubanAssembly, verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
+import { seedSourceLibrary, verifyRecoveredSourceLibrary } from './source-library-assembly-support.mjs';
 
 const entry = join(root, 'apps/ios/runtime/entries/aggregate.mjs');
 
@@ -176,7 +177,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   assert.equal(described.product, 'aggregate');
   assert.equal(described.protocol, 'runtime.http.v1');
   assert.deepEqual(described.modules.map(module => [module.id, module.version, module.contract]), [
-    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
+    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.3.0', 'source.runtime.v2'],
     ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
     ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
     ['netease', '0.1.0', 'netease.token.v1'],
@@ -221,6 +222,10 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   const result = okay(await client.call('source.runtime.invoke', { installationId: reader.installationId,
     revision: reader.revision, generation: reader.generation, action: 'search', payload: { keyword: '猫' } }), 'source.runtime.v2');
   assert.deepEqual(result, { list: [{ vod_id: '猫', vod_name: '猫' }] });
+  assert.deepEqual(okay(await client.call('source.runtime.rules.process', {
+    request: { operation: 'identity', book: { name: '《测试书》', author: '作者：甲' } },
+  }), 'source.runtime.v2'),
+  { name: '测试书', author: '甲', key: JSON.stringify(['book', '测试书', '甲']) });
   // A single module close never closes the shared listener or another module.
   okay(await client.call('music.script.close'), contract);
   okay(await client.call('source.runtime.status'), 'source.runtime.v2');
@@ -249,6 +254,30 @@ test('owner EOF drains a running guest before the embedded executor returns', { 
   await closed;
   assert.deepEqual(await runtime.exited, { code: 0, signal: null });
   assert.equal(runtime.output().stderr, '');
+});
+
+test('iOS App entry restores its novel source library and private state in a new process', { timeout: 30000 }, async t => {
+  const first = spawnRuntime(t, { entry });
+  const connection = await connect(first);
+  t.after(() => connection.client.close());
+  const source = await seedSourceLibrary(connection.client);
+  okay(await connection.client.shutdown(), 'runtime.http.v1');
+  first.channel.end();
+  await connection.closed;
+  await connection.client.close();
+  assert.deepEqual(await first.exited, { code: 0, signal: null });
+  assert.equal(first.output().stderr, '');
+
+  const second = spawnRuntime(t, { entry, configuration: { dataRoot: first.configuration.dataRoot } });
+  const recovered = await connect(second);
+  try {
+    await verifyRecoveredSourceLibrary(recovered.client, source);
+    okay(await recovered.client.shutdown(), 'runtime.http.v1');
+    second.channel.end();
+    await recovered.closed;
+    assert.deepEqual(await second.exited, { code: 0, signal: null });
+    assert.equal(second.output().stderr, '');
+  } finally { await recovered.client.close(); }
 });
 
 test('an escaped runtime failure closes HTTP and the bootstrap without killing the App host', { timeout: 30000 }, async t => {

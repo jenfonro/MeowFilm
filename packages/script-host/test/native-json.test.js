@@ -42,6 +42,74 @@ function assertReleased(engine) {
   }
 }
 
+test('an explicit budget interrupts the actual native regex and the same program recovers',
+  { timeout }, async t => {
+    const owners = observeOwners(t);
+    const owner = program(t, `globalThis.meowfilmProcess = input => input.loop
+      ? /^(a+)+$/.test('a'.repeat(100000) + '!') : { ready: true };`);
+    const started = Date.now();
+    await assert.rejects(owner.invoke({ loop: true }, { timeoutMs: 35 }), { code: 'TIMEOUT' });
+    assert.ok(Date.now() - started < 2_000, 'the explicit deadline interrupts rather than waiting for 2s');
+    assertReleased(owners[0]);
+    assert.deepEqual(await owner.invoke({}, { timeoutMs: 100 }), { ready: true });
+    assert.equal(owners.length, 2);
+  });
+
+test('an explicit queued budget starts when execution begins, independently of earlier callers',
+  { timeout }, async t => {
+    const owners = observeOwners(t);
+    const owner = program(t, `globalThis.meowfilmProcess = input => {
+      if (input.slow) { const end = Date.now() + 180; while (Date.now() < end) {} }
+      return { ready: true };
+    };`);
+    await owner.invoke({});
+    const first = owner.invoke({ slow: true }, { timeoutMs: 1_000 });
+    await entered(owners[0]);
+    const second = owner.invoke({}, { timeoutMs: 40 });
+    assert.deepEqual(await first, { ready: true });
+    assert.deepEqual(await second, { ready: true });
+    assert.equal(owners.length, 1);
+  });
+
+test('the existing default remains 2s and explicit budgets can exceed it without a business cap',
+  { timeout }, async t => {
+    const owners = observeOwners(t);
+    const owner = program(t, `globalThis.meowfilmProcess = input => {
+      if (input.wait) { const end = Date.now() + 2_200; while (Date.now() < end) {} }
+      return { ready: true };
+    };`);
+    await assert.rejects(owner.invoke({ wait: true }), { code: 'TIMEOUT' });
+    assertReleased(owners[0]);
+    assert.deepEqual(await owner.invoke({ wait: true }, { timeoutMs: 3_000 }), { ready: true });
+    assert.deepEqual(await owner.invoke({}, { timeoutMs: Number.MAX_SAFE_INTEGER }), { ready: true });
+    for (const timeoutMs of [0, -1, 1.5, Infinity, NaN, null]) {
+      await assert.rejects(owner.invoke({}, { timeoutMs }), { code: 'INVALID_ARGUMENT' });
+    }
+    assert.equal(owners.length, 2, 'invalid budgets do not reset a healthy program');
+  });
+
+test('cancellation revokes a delivered native success before JSON publication and releases its owner',
+  { timeout }, async t => {
+    const owners = observeOwners(t);
+    const owner = program(t, 'globalThis.meowfilmProcess = value => value;');
+    await owner.invoke('warm');
+    const engine = owners[0], receive = engine.receive, controller = new AbortController();
+    let nativeResult;
+    t.mock.method(engine, 'receive', function(message) {
+      const result = Reflect.apply(receive, this, [message]);
+      if (message.type === 'result') {
+        nativeResult = message.value;
+        controller.abort();
+      }
+      return result;
+    });
+    await assert.rejects(owner.invoke('late', { signal: controller.signal }), { code: 'CANCELLED' });
+    assert.equal(nativeResult, '"late"');
+    assertReleased(engine);
+    assert.equal(await owner.invoke('recovered'), 'recovered');
+    assert.equal(owners.length, 2);
+  });
+
 test('JSON boundary preserves deep data, all UTF16 keys and values, JSON numbers and complete results',
   { timeout }, async t => {
     const owner = program(t, 'globalThis.meowfilmProcess = value => value;');

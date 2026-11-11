@@ -304,6 +304,8 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
         string? basename = null, CancellationToken token = default) => throw new BridgeException("METHOD_UNAVAILABLE");
     public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Image requests are not part of this fixture.");
+    public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Image requests are not part of this fixture.");
     public ValueTask DisposeAsync() { Connected = false; Owner.Cancel(); events?.Writer.TryComplete(); Owner.Dispose(); return ValueTask.CompletedTask; }
 }
 

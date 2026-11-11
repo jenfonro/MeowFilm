@@ -40,6 +40,31 @@ The new runtime implementation remains application source under GPL-3.0-only.
   provenance, not an additional upstream license or redistribution permission.
   The application's own source remains covered by the project license above.
 
+## meowfilm-server Reader — novel behavior reference
+
+- Source: the same-owner `jenfonro/meowfilm-server` repository at
+  `934a03e5aeda7edbcef0cfb037734fed93bfe881`, `Reader/`.
+- `packages/novel-rules/novel-rules.js` adapts identity normalization from
+  `src/utils/bookIdentity.js` and the fixed simplified/traditional character
+  pairs from `src/utils/chinese.js`. Native novel pages and source-runtime
+  integration follow the Reader's book, chapter and reading behavior; no Vue
+  application, browser database or reference server executable is bundled.
+- The referenced tree contains no separate license notice. This records
+  provenance, not an additional third-party license grant. Application-owned
+  adaptations remain under GPL-3.0-only.
+
+## Microsoft WebView2 SDK — BSD-3-Clause
+
+- NuGet package: `Microsoft.Web.WebView2` `1.0.4314.35`, locked in the
+  Windows capability project and its package lock.
+- Copyright (C) Microsoft Corporation. All rights reserved.
+- Original package files are preserved byte-for-byte as `WebView2-LICENSE.txt`
+  and `WebView2-NOTICE.txt`.
+- Used by the Windows native host for explicit book-source login, verification
+  and dynamic-page requests. The SDK is not the Microsoft Edge WebView2 Runtime;
+  the application uses an installed compatible Runtime and does not bundle or
+  silently install that browser runtime.
+
 ## iWebPlus / iWebPlayer — Apache-2.0
 
 - Source: `songloft-plugin-iwebplus` `b900c259d991a73768cc36a28b48539b31961668`.

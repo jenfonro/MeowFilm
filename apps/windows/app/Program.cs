@@ -24,6 +24,7 @@ internal static class Program
         FilmRuleService? pendingRules = null;
         FilmSourceService? pendingSources = null;
         FilmMetadataService? pendingMetadata = null;
+        NovelCapability? pendingNovel = null;
         SearchResultsPage? searchPage = null;
         AppMediaWindowAttachment? pendingMediaAttachment = null;
         CacheDocumentStore? cacheStore = null;
@@ -52,6 +53,9 @@ internal static class Program
                 pendingRules = null;
                 pendingSources = null;
                 pendingMetadata = null;
+                pendingNovel = new NovelCapability(runtime, storage);
+                capabilities.Add(pendingNovel);
+                pendingNovel = null;
             },
             async () =>
             {
@@ -66,10 +70,12 @@ internal static class Program
                     searchPage = null;
                     await Task.WhenAll(pendingRules?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingSources?.DisposeAsync().AsTask() ?? Task.CompletedTask,
-                        pendingMetadata?.DisposeAsync().AsTask() ?? Task.CompletedTask);
+                        pendingMetadata?.DisposeAsync().AsTask() ?? Task.CompletedTask,
+                        pendingNovel?.DisposeAsync().AsTask() ?? Task.CompletedTask);
                     pendingRules = null;
                     pendingSources = null;
                     pendingMetadata = null;
+                    pendingNovel = null;
                 }
                 finally
                 {
@@ -95,6 +101,7 @@ internal static class Program
             {
                 var music = capabilities.OfType<MusicCapability>().Single();
                 var film = capabilities.OfType<FilmCapability>().Single();
+                var novel = capabilities.OfType<NovelCapability>().Single();
                 var page = searchPage ?? throw new InvalidOperationException("Search page is missing.");
                 var shell = (MeowFilm.Desktop.ShellWindow)window;
                 page.NavigationToken = () => shell.GetPageNavigationToken(page, film.Id, "film-playback");
@@ -104,6 +111,13 @@ internal static class Program
                     await film.ReceiveSearchPlaybackAsync(item, token);
                     // The page lease is admission only; leaving retires that lease itself.
                     await shell.NavigateFromPageAsync(page, film.Id, "film-playback");
+                };
+                page.NovelNavigationToken = () => shell.GetPageNavigationToken(page, novel.Id, NovelCapability.BookRoute);
+                page.NavigateToNovelAsync = async (item, token) =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    await novel.ReceiveBookAsync(item, token);
+                    await shell.NavigateFromPageAsync(page, novel.Id, NovelCapability.BookRoute);
                 };
                 // Platform callbacks are composed before this attachment. Host
                 // restoration is App-owned and independent of the selected page.
@@ -123,6 +137,6 @@ internal static class Program
                 return attachment;
             },
             capabilities => [searchPage = new SearchResultsPage(capabilities.OfType<MusicCapability>().Single(),
-                capabilities.OfType<FilmCapability>().Single())]);
+                capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single())]);
     }
 }

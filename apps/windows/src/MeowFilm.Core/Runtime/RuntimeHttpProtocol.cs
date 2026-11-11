@@ -37,15 +37,17 @@ public static partial class RuntimeHttpProtocol
                 "ROLLBACK_UNAVAILABLE", "INVALID_SOURCE_URL", "SOURCE_DOWNLOAD_FAILED", "SOURCE_REDIRECT",
                 "MEDIA_UNAVAILABLE", "INVALID_MEDIA_CANDIDATE", "EXPIRED_MEDIA_CANDIDATE", "MEDIA_HEADERS_UNSUPPORTED",
                 "TARGET_CHANGED", "RECORDING_MISMATCH" }),
-        ["source"] = new("0.2.0", "source.runtime.v2", "source.runtime.",
+        ["source"] = new("0.3.0", "source.runtime.v2", "source.runtime.",
             ["load", "unload", "invoke", "status",
-                "close"],
+                "library.list", "library.get", "library.import", "library.save", "library.update", "library.remove",
+                "library.export", "library.invoke", "library.image", "library.releaseImage", "web.pending", "web.respond",
+                "rules.process", "close"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT",
                 "SOURCE_INTEGRITY", "SOURCE_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND",
                 "SOURCE_DISABLED", "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "UNSUPPORTED_RULE",
                 "UNSUPPORTED_DEPENDENCY", "CAPABILITY_UNAVAILABLE", "PERMISSION_DENIED", "WEB_INTERACTION_REQUIRED",
                 "TIMEOUT", "SOURCE_CLEANUP", "SOURCE_FAILURE", "NETWORK_ERROR",
-                "HTTP_ERROR", "INVALID_RESPONSE", "STORAGE_ERROR", "VIRTUAL_ROUTE_NOT_FOUND" }),
+                "HTTP_ERROR", "INVALID_RESPONSE", "STORAGE_ERROR", "CORRUPT_STORAGE", "VIRTUAL_ROUTE_NOT_FOUND" }),
         ["cat"] = new("0.2.0", "cat.script.v2", "cat.script.",
             ["start", "status", "refresh", "install",
                 "import", "edit", "update", "restart",
@@ -107,10 +109,14 @@ public static partial class RuntimeHttpProtocol
         RegexOptions.CultureInvariant)]
     private static partial Regex DoubanImagePattern();
 
+    [GeneratedRegex(@"\A/v1/source/images/[A-Za-z0-9-]+\z", RegexOptions.CultureInvariant)]
+    private static partial Regex SourceImagePattern();
+
     public static bool ValidImageReference(string? reference) => ImageProvider(reference) is not null;
 
     internal static string? ImageProvider(string? reference) => reference is null ? null :
-        ImagePattern().IsMatch(reference) ? "tmdb" : DoubanImagePattern().IsMatch(reference) ? "douban" : null;
+        ImagePattern().IsMatch(reference) ? "tmdb" : DoubanImagePattern().IsMatch(reference) ? "douban" :
+        SourceImagePattern().IsMatch(reference) ? "source" : null;
 
     public static bool ValidMethod(string? method) => method is not null && MethodPattern().IsMatch(method);
 

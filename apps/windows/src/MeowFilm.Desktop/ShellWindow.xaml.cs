@@ -283,6 +283,13 @@ public sealed partial class ShellWindow : Window
         ApplyModuleAccent(current);
         ApplyHeaderPresentation(current);
         ApplyGlobalSurfacePresentation(current);
+        bool immersive = _currentPage is null && !current.IsSettingsOpen &&
+            current.Module is IDesktopImmersiveSource { IsImmersive: true };
+        RootLayout.ColumnDefinitions[0].Width = new(immersive ? 0 : 203);
+        PageHeaderHost.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        SidebarBackground.Visibility = Brand.Visibility = SidebarScroll.Visibility =
+            immersive ? Visibility.Collapsed : Visibility.Visible;
+        if (immersive) PlayerFrame.Visibility = Visibility.Collapsed;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
             current.IsSettingsOpen || _returnPage is not null || _history.Count > 1;
         ApplySearchPresentation();
