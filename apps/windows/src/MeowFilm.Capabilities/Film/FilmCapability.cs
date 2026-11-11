@@ -460,13 +460,20 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     }
     private void ObservePresentationLeave(Task operation, string failure = "停止播放失败")
     {
-        operations.Add(operation);
+        // The notification owns the business error; shutdown owns completion of
+        // that observation, not the original operation's success.
+        var settled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        operations.Add(settled.Task);
         _ = SettleAsync();
         async Task SettleAsync()
         {
             try { await operation; }
             catch (Exception) { OperationFailed?.Invoke(this, failure); }
-            finally { operations.Remove(operation); }
+            finally
+            {
+                operations.Remove(settled.Task);
+                settled.TrySetResult();
+            }
         }
     }
 
@@ -773,8 +780,8 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
 
     public Task AbortAsync()
     {
-        if (abortion is not null) return abortion;
-        if (disposal is not null) return disposal;
+        if (abortion is { IsFaulted: false, IsCanceled: false }) return abortion;
+        if (disposal is { IsFaulted: false, IsCanceled: false }) return disposal;
         return abortion = AbortCoreAsync();
     }
 
@@ -791,7 +798,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
 
     public ValueTask DisposeAsync()
     {
-        if (abortion is not null) return new(abortion);
+        if (abortion is not null) return new(AbortAsync());
         if (disposal is not null) return new(disposal);
         var prepare = PrepareShutdownAsync();
         return new(disposal = DisposeCoreAsync(prepare));
@@ -823,7 +830,6 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private void Release()
     {
         if (disposed) return;
-        disposed = true;
         foreach (var page in playbackPages.Values) page.ReleaseSearch();
         if (sources is not null) sources.Changed -= PlaybackSourcesChanged;
         if (filmPlayback is not null)
@@ -833,6 +839,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         }
         if (library is not null) library.Changed -= FavoritesChanged;
         source.Dispose();
+        disposed = true;
         lifetime.Dispose();
     }
 

@@ -46,15 +46,30 @@ internal static class Program
             },
             async () =>
             {
-                if (pendingMediaAttachment is not null) await pendingMediaAttachment.DisposeAsync();
+                if (pendingMediaAttachment is not null)
+                {
+                    await pendingMediaAttachment.DisposeAsync();
+                    pendingMediaAttachment = null;
+                }
                 try
                 {
                     searchPage?.Dispose();
+                    searchPage = null;
                     await Task.WhenAll(pendingRules?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingSources?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingMetadata?.DisposeAsync().AsTask() ?? Task.CompletedTask);
+                    pendingRules = null;
+                    pendingSources = null;
+                    pendingMetadata = null;
                 }
-                finally { if (playback is not null) await playback.DisposeAsync(); }
+                finally
+                {
+                    if (playback is not null)
+                    {
+                        await playback.DisposeAsync();
+                        playback = null;
+                    }
+                }
             },
             (window, capabilities) =>
             {

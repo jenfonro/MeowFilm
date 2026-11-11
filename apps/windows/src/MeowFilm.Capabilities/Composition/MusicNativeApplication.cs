@@ -485,7 +485,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         }
         try { await prepare.ConfigureAwait(false); } catch { /* Preserve failure in DisposeCore, not the explicit abort receipt. */ }
         if (recovering is not null) { try { await recovering.ConfigureAwait(false); } catch { } }
-        await Attempt(() => recommendations.DisposeAsync().AsTask()).ConfigureAwait(false);
+        await Attempt(recommendations.AbortAsync).ConfigureAwait(false);
         lock (gate)
         {
             if (recommendationBinding is { } binding) Interlocked.Exchange(ref binding.Revoked, 1);

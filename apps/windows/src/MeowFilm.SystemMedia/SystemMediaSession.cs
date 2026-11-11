@@ -25,6 +25,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
     private string? owner, identity;
     private Target published = new(0, null, null, false);
     private Task? disposing;
+    private Task? drain;
     private int pending;
     private long interruption;
     public string? LastErrorCode { get; private set; }
@@ -232,7 +233,20 @@ public sealed class SystemMediaSession : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         dispatcher.VerifyAccess();
-        return new(disposing ??= DisposeCore());
+        drain ??= DisposeCore();
+        if (disposing is null || disposing.IsFaulted || disposing.IsCanceled)
+            disposing = ObserveDisposalAsync(drain);
+        return new(disposing);
+    }
+
+    private async Task ObserveDisposalAsync(Task task)
+    {
+        try { await task.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (TimeoutException)
+        {
+            LastErrorCode = "SYSTEM_MEDIA_DRAIN_FAILED";
+            throw new InvalidOperationException("SYSTEM_MEDIA_DRAIN_FAILED");
+        }
     }
 
     private async Task DisposeCore()
@@ -242,17 +256,10 @@ public sealed class SystemMediaSession : IAsyncDisposable
         try { backend.Dispose(); }
         finally
         {
-            // No dispatcher-blocking wait. A non-cooperative capability command is
-            // not claimed terminated merely because this bounded wait expired.
-            var all = Task.WhenAll(running.ToArray());
-            try { await all.WaitAsync(TimeSpan.FromSeconds(5)); }
-            catch
-            {
-                _ = ObserveCancellation(all);
-                LastErrorCode = "SYSTEM_MEDIA_DRAIN_FAILED";
-                throw new InvalidOperationException("SYSTEM_MEDIA_DRAIN_FAILED");
-            }
-            finally { if (all.IsCompleted) lifetime.Dispose(); }
+            // Keep the actual drain alive after an observer times out. Retrying
+            // observes this same work without disposing the backend again.
+            try { await Task.WhenAll(running.ToArray()); }
+            finally { lifetime.Dispose(); }
         }
     }
 

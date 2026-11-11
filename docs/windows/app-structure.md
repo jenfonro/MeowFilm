@@ -72,3 +72,10 @@ Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定 App 启动时的 JS 载荷与协议版本。
 
 当前 App 先注册音乐能力，再注册 `FilmCapability`，因此启动页保持音乐推荐。影视能力拥有客户端规则、视频源、元数据适配／设置、搜索与播放会话消费者；首页仍独立读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。共享 NativePlayback／libVLC 与私有锁定 FFmpeg 解复用桥的边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；共享搜索 JS 以 `MeowFilm.FilmSearch.js` 嵌入 Capabilities，原生 QuickJS 不依赖 Node addon。原生导航／搜索已接入正式播放会话；实现接通、构建、原生测试与真实媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通状态和原生测试清单见[影视搜索](film-search.md)。
+
+
+## 同进程清除本机数据
+
+通用设置的清除操作由 `AppLauncher` 注入，不由音乐或影视模块互相清理数据。`AppUserDataReset` 串行持有一次已确认操作的阶段：记录待清理请求、真实释放旧代、删除自有数据、重新装配；失败显式重试只继续未成功的阶段。旧窗口取消导航并锁定交互，媒体设置先封住系统输入，随后使用 `AppShutdown.ForceReleaseAsync` 退役全部所有者。超时不能放行删除或新代启动。
+
+成功后关闭旧 Shell，但不关闭 WPF dispatcher；复用启动/失败重试窗口创建新的 `AppStartup`、store、runtime、业务模块、偏好、播放和窗口附件。入口装配闭包在资源成功释放后清空，旧 Shell 的 Closed 不会终止替代代次。程序 PID 不变，无需手动重启。下次进程启动同样先完成遗留请求；清理失败不准入业务。范围及文件排他边界见[本机数据清除](protected-storage.md#clear-all-local-user-data)。

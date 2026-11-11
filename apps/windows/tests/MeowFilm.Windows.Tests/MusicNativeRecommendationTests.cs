@@ -69,6 +69,16 @@ public static class MusicNativeRecommendationTests
         yield return Case("anonymous-auth-does-not-prove-login-or-dispatch-http", Anonymous);
         yield return Case("admitted-queue-cas-drains-before-application-library-preparation", CasDrain);
         yield return Case("unknown-cas-reconcile-does-not-retry-or-start-late-media", UnknownCommit);
+        foreach (int outcome in new[] { 1, 2 })
+        {
+            int result = outcome;
+            yield return Case("unknown-settled-cas-" + result + "-prepare-and-dispose-fail-but-abort-releases", () => UnknownAbort(result));
+        }
+        foreach (string boundary in new[] { "http", "cas", "media" })
+        {
+            string owner = boundary;
+            yield return Case("abort-waits-for-noncooperative-" + owner, () => AbortDrain(owner));
+        }
         yield return Case("unknown-applied-cas-full-close-failure-cancel-reconcile-reopens-controls", () => UnknownCloseRecovery(true, 2));
         yield return Case("unknown-not-applied-cas-narrow-close-failure-cancel-reconcile-reopens-controls", () => UnknownCloseRecovery(false, 1));
         yield return Case("fresh-narrow-close-fences-late-unknown-reconciliation-resume", ReconcileCloseFence);
@@ -270,7 +280,7 @@ public static class MusicNativeRecommendationTests
                     : Enumerable.Range(start + 1, 3).Select(WireSong).ToArray();
                 result = path switch
                 {
-                    "/eapi/playmode/intelligence/list" => new { code = 200, data = songs.Select(song => new { songInfo = song }).ToArray() },
+                    "/eapi/playmode/intelligence/list" => new { code = 200, data = songs.Select(song => new { songInfo = song, source = "aiMode" }).ToArray() },
                     "/eapi/homepage/scene/more/rcmd/song" => new { code = 200, data = new { songList = songs,
                         sourceMap = Enumerable.Range(start + 1, 3).ToDictionary(id => id.ToString(), id => "native-source-" + id),
                         offset = start / 100 * 15, hasMore = true } },
@@ -896,6 +906,63 @@ public static class MusicNativeRecommendationTests
         var result = await f.Call("music.recommendations.reconcile", new { id = S(state, "id") });
         Check(!B(result, "requiresReconcile") && f.Selections.IsEmpty && f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes);
         Check(N(await f.Queue(), "total") == 3);
+    }
+    private static async Task UnknownAbort(int outcome)
+    {
+        var f = await Fixture.Create();
+        try
+        {
+            f.Store.UnknownLibraryWrite = outcome;
+            Check(B(await f.Start(), "requiresReconcile"));
+            int writes = f.Store.Writes[MusicLibraryOwner.DocumentNamespace];
+            string persisted = await f.Store.RawLibrary();
+            foreach (var close in new Func<Task>[] { () => f.App.PrepareShutdownAsync(), () => f.App.DisposeAsync().AsTask() })
+            {
+                try { await Wait(close()); throw new InvalidOperationException("Unknown commit must fail ordinary close"); }
+                catch (Exception error) when (error.Message == "COMMIT_UNKNOWN") { }
+            }
+            await Wait(f.App.AbortAsync());
+            await Wait(f.App.AbortAsync());
+            Check(f.Handler.Disposals == 1 && f.Store.Disposals == 0 && f.Runtime.Disposals == 0);
+            Check(f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes &&
+                await f.Store.RawLibrary() == persisted && f.Selections.IsEmpty,
+                "Abort must neither retry nor reconcile the unknown write or select media");
+            Error(await f.App.ExecuteAsync("music.recommendations.get"), "CLOSED");
+        }
+        finally
+        {
+            f.Binding?.Dispose();
+            await f.App.AbortAsync();
+            await f.Store.DisposeAsync();
+        }
+    }
+    private static async Task AbortDrain(string boundary)
+    {
+        await using var f = await Fixture.Create();
+        var hold = boundary switch
+        {
+            "cas" => f.Store.HoldWrite(MusicLibraryOwner.DocumentNamespace),
+            "media" => f.HoldMedia(),
+            _ => f.Handler.Hold()
+        };
+        var start = f.Start();
+        try
+        {
+            await Wait(hold.Entered.Task);
+            using var waiter = new CancellationTokenSource();
+            var cancelled = f.App.AbortAsync(waiter.Token);
+            await Pending(cancelled);
+            waiter.Cancel(); await Cancelled(cancelled);
+            var abort = f.App.AbortAsync();
+            await Pending(abort); await Pending(start);
+            Check(f.Handler.Disposals == 0 && f.Store.Disposals == 0,
+                "Cancellation of an abort waiter must not release owners before physical settlement");
+            hold.Release.TrySetResult();
+            await Wait(abort); await Wait(start);
+            Check(f.Handler.Disposals == 1 && f.Store.Disposals == 0 && f.Runtime.Disposals == 0);
+            Error(await f.App.ExecuteAsync("music.recommendations.get"), "CLOSED");
+        }
+        finally { hold.Release.TrySetResult(); }
     }
     private static async Task Reopen()
     {

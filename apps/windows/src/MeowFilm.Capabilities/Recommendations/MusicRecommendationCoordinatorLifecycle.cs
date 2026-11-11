@@ -11,6 +11,7 @@ public sealed partial class MusicRecommendationCoordinator
     private Task publisher = Task.CompletedTask;
     private bool publishing;
     private JsonElement? notice;
+    private Task? abortion, release;
 
     private Task<T> LaunchLocked<T>(Func<Task<T>> action)
     {
@@ -136,7 +137,7 @@ public sealed partial class MusicRecommendationCoordinator
         {
             stopping = true;
             if (session is { } s) RetireLocked(s, "closing");
-            if (preparation is null || preparation.IsFaulted) preparation = Task.Run(DrainWorkAsync);
+            if (preparation is null || preparation.IsFaulted) preparation = Task.Run(PrepareCoreAsync);
             task = preparation;
         }
         // Cancelling a waiter never marks a non-cooperative HTTP/commit as settled.
@@ -144,13 +145,20 @@ public sealed partial class MusicRecommendationCoordinator
     }
     private async Task DrainWorkAsync()
     {
+        Exception? failure = null;
         while (true)
         {
             Task[] pending;
             lock (gate) pending = work.ToArray();
             if (pending.Length == 0) break;
-            await Task.WhenAll(pending).ConfigureAwait(false);
+            try { await Task.WhenAll(pending).ConfigureAwait(false); }
+            catch (Exception error) { failure ??= error; }
         }
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+    private async Task PrepareCoreAsync()
+    {
+        await DrainWorkAsync().ConfigureAwait(false);
         lock (gate) Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
     }
     public void Resume()
@@ -159,7 +167,7 @@ public sealed partial class MusicRecommendationCoordinator
         {
             // Dispose admission is irreversible. A completed prior preparation
             // must not let Resume reopen the owner while disposal is draining.
-            Require(!closed && disposal is null, "CLOSED");
+            Require(!closed && disposal is null && abortion is null, "CLOSED");
             if (!stopping) return;
             Require(preparation is { IsCompletedSuccessfully: true } && work.Count == 0, "NOT_DRAINED");
             Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
@@ -167,25 +175,45 @@ public sealed partial class MusicRecommendationCoordinator
         }
     }
     public ValueTask DisposeAsync()
+        => new(FinalizeAsync(discardUnsaved: false));
+
+    /// <summary>Discard unsaved state only after all actual work and notifications have settled.</summary>
+    public Task AbortAsync() => FinalizeAsync(discardUnsaved: true);
+
+    private Task FinalizeAsync(bool discardUnsaved)
     {
         Task task;
         lock (gate)
         {
-            if (closed) return new(NotificationBarrier(Task.CompletedTask));
+            if (closed) return NotificationBarrier(release ?? Task.CompletedTask);
             stopping = true;
             if (session is { } s) RetireLocked(s, "closed");
-            if (disposal is null || disposal.IsFaulted)
-                disposal = Task.Run(async () =>
-                {
-                    await DrainWorkAsync().ConfigureAwait(false);
-                    lock (gate) { closed = true; notice = null; session = null; }
-                    queue.Changing -= QueueChanging; queue.Changed -= QueueChanged; queue.Selected -= QueueSelected;
-                    queue.SelectionSource = null;
-                    physical.Dispose();
-                });
-            task = disposal;
+            if (discardUnsaved) task = abortion ??= Task.Run(() => FinalizeCoreAsync(true));
+            else
+            {
+                if (disposal is null || disposal.IsFaulted)
+                    disposal = Task.Run(() => FinalizeCoreAsync(false));
+                task = disposal;
+            }
         }
-        return new(NotificationBarrier(task));
+        return NotificationBarrier(task);
+    }
+    private async Task FinalizeCoreAsync(bool discardUnsaved)
+    {
+        await DrainWorkAsync().ConfigureAwait(false);
+        Task cleanup;
+        lock (gate)
+        {
+            if (!discardUnsaved) Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
+            cleanup = release ??= Task.Run(() =>
+            {
+                lock (gate) { closed = true; notice = null; session = null; }
+                queue.Changing -= QueueChanging; queue.Changed -= QueueChanged; queue.Selected -= QueueSelected;
+                queue.SelectionSource = null;
+                physical.Dispose();
+            });
+        }
+        await cleanup.ConfigureAwait(false);
     }
     private Task NotificationBarrier(Task task) => observerFrame.Value is { } frame && Volatile.Read(ref frame.Active) != 0
         ? task : WaitNotificationsAsync(task);
