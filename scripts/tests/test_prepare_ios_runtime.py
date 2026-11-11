@@ -207,7 +207,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
             def run(command, **kwargs):
                 if "--version" in command:
                     return SimpleNamespace(stdout="v24.21.0\n")
-                self.assertEqual(command[1], str(root / "scripts/package-ios-runtime.mjs"))
+                self.assertEqual(command[1], str(root / "scripts/ios/package-runtime.mjs"))
                 staging = Path(command[command.index("--output") + 1])
                 staging.mkdir()
                 (staging / "runtime-manifest.json").write_text(json.dumps(manifest))
@@ -267,7 +267,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                         self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), previous)
                         self.assertEqual((target / "sentinel").read_bytes(), b"previous-payload")
                 self.assertEqual(commands[1][1:],
-                                 [str(root / "scripts/package-ios-runtime.mjs"), "--product", "aggregate",
+                                 [str(root / "scripts/ios/package-runtime.mjs"), "--product", "aggregate",
                                   "--sdk", "iphonesimulator", "--arch", "x64",
                                   "--output", str(target.parent / "Runtime.partial")])
                 self.assertEqual([path.name for path in target.parent.iterdir()], ["Runtime"])

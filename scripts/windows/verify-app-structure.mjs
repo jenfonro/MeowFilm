@@ -1,10 +1,9 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isWindowsSource, sharedScripts, sourceDirectories } from './source-scope.mjs';
+import { isWindowsSource, sourceDirectories } from './source-scope.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const generated = new Set(['bin', 'obj', 'node_modules', '.git']);
 const runtimeTrees = new Map([
   ['apps/runtime', {
     files: ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
@@ -43,9 +42,8 @@ export function verifyAppStructure(directory = root) {
     if (lstatSync(path).isSymbolicLink() || !samePath(realpathSync(path), path)) fail('linked source: ' + rel);
     directories.push(rel);
     for (const item of readdirSync(join(directory, rel), { withFileTypes: true })) {
-      if (generated.has(item.name)) continue;
       const child = rel + '/' + item.name;
-      if (child === 'packages/script-host/build') continue;
+      if (!isWindowsSource(child)) continue;
       if (item.isSymbolicLink()) fail('linked source: ' + child);
       if (item.isDirectory()) walk(child);
       else if (item.isFile()) files.push(child);
@@ -53,11 +51,11 @@ export function verifyAppStructure(directory = root) {
     }
   }
   for (const part of sourceDirectories) walk(part);
-  for (const file of sharedScripts) {
+  for (const item of readdirSync(join(directory, 'scripts'), { withFileTypes: true })) {
+    const file = 'scripts/' + item.name;
+    if (!isWindowsSource(file)) continue;
     const path = join(directory, file);
-    const stat = lstatSync(path, { throwIfNoEntry: false });
-    if (!stat) continue;
-    if (!stat.isFile() || !samePath(realpathSync(path), path)) fail('linked/non-regular source: ' + file);
+    if (!item.isFile() || !samePath(realpathSync(path), path)) fail('linked/non-regular source: ' + file);
     files.push(file);
   }
   for (const [source, expected] of runtimeTrees) {

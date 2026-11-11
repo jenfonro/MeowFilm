@@ -64,7 +64,7 @@ music.history.restorePlaylist
 music.catalog.playlist.commit action=play|next
 ```
 
-`music.catalog.playlist.commit action=save` 不替换当前队列，但仍与同一个 library owner 串行。
+网络歌单收藏调用 `music.catalog.playlist.save`，传入远端 `platform/id/name` 及必要展示信息，由唯一 library owner 保存引用，无须先 `prepare` 或读取完整成员；不退休推荐、不改变队列或当前 selection。播放时单独 `prepare`，再用 `commit action=play` 进入上述 queue lane，在最终 CAS 前围住旧 selection。共同规则见[歌单所有权与订阅关系](../common/music/playlist-ownership.md)。
 
 `music.queue.recommendation.*` 只供协调器内部使用；普通 application 调用返回 `CAPABILITY_UNAVAILABLE`。
 

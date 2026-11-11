@@ -86,7 +86,7 @@ music.history.restorePlaylist
 music.catalog.playlist.commit action=play|next
 ```
 
-catalog 的 `action=save` 不替换队列，但仍与同一个 library owner 串行，防止交叉 CAS。
+网络歌单收藏使用 `music.catalog.playlist.save`，由同一个 library owner 保存远端引用，不先 prepare／读取成员，也不替换队列或退休当前推荐。
 
 `music.queue.recommendation.*` 是协调器与 library owner 的私有事务协议；普通 application 调用必须返回 `CAPABILITY_UNAVAILABLE`。私有协议只处理当前推荐批次的 capture、enter、append、select、restore、discard 和 reconcile，不暴露给页面。
 

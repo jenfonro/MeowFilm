@@ -50,7 +50,7 @@ public static class MusicNativeRecommendationTests
         }
         yield return Case("queue-replacement-fences-inflight-recommendation-before-final-commit", ReplaceDuringRead);
         yield return Case("queue-clear-and-history-restore-retire-recommendation", ClearAndHistory);
-        yield return Case("catalog-prepare-does-not-retire-save-shares-lane-play-fences-final-cas", CatalogCommit);
+        yield return Case("catalog-reference-save-skips-members-preserves-recommendation-and-selection-play-fences-final-cas", CatalogCommit);
         yield return Case("catalog-next-preserves-active-queue-and-persistence-fences-late-recommendation", () => NextDuringRecommendation(true));
         yield return Case("ordinary-next-append-preserves-active-queue-and-persistence-fences-late-recommendation", () => NextDuringRecommendation(false));
         foreach (int read in new[] { 1, 2 })
@@ -716,11 +716,19 @@ public static class MusicNativeRecommendationTests
     private static async Task CatalogCommit()
     {
         await using var f = await Fixture.Create(); await f.Start(); var old = f.Selections.Last();
+        var before = await f.Queue(); var state = await f.State();
+        int requests = f.Handler.Paths.Count, selections = f.Selections.Count;
+        var saved = await f.Call("music.catalog.playlist.save", new { platform = "wy", id = "77", name = "Complete fixture" });
+        var reference = saved.GetProperty("collection");
+        Check(B(saved, "localSaved") && S(reference, "kind") == "network" && S(reference, "platform") == "wy" &&
+            S(reference, "remoteId") == "77" && S(reference, "name") == "Complete fixture");
+        Check(f.Handler.Paths.Count == requests, "Saving a network reference must not read playlist members");
+        var after = await f.State();
+        Check(old.IsCurrent() && B(after, "active") && S(after, "id") == S(state, "id") &&
+            N(before, "total") == 3 && (await f.Queue()).GetRawText() == before.GetRawText() && f.Selections.Count == selections,
+            "Saving a network reference must preserve the recommendation, queue and current media selection");
         var stage = await f.Call("music.catalog.playlist.prepare", new { platform = "wy", id = "77" });
         Check(old.IsCurrent() && B(await f.State(), "active"));
-        await f.Call("music.catalog.playlist.commit", new { token = S(stage, "token"), action = "save" });
-        Check(old.IsCurrent() && B(await f.State(), "active") && N(await f.Queue(), "total") == 3);
-        stage = await f.Call("music.catalog.playlist.prepare", new { platform = "wy", id = "77" });
         var hold = f.Store.HoldWrite(MusicLibraryOwner.DocumentNamespace); long version = N(await f.Queue(), "version");
         var commit = f.Call("music.catalog.playlist.commit", new { token = S(stage, "token"), action = "play", index = 1, expectedVersion = version });
         await Wait(hold.Entered.Task); Check(!old.IsCurrent(), "Final catalog CAS bypassed queue lane"); hold.Release.TrySetResult();
