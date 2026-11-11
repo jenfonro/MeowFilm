@@ -273,19 +273,19 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         let intent = try XCTUnwrap(page.makeActionIntent())
         page.appear(); await page.loadIfNeeded()
         XCTAssertTrue(page.loaded)
-        XCTAssertEqual(page.sections.map(\.id), ["first"])
+        XCTAssertEqual(page.sections.map(\.id), ["first", "second"])
         var acted = false
         await page.perform(intent: intent) { acted = true }
         XCTAssertTrue(acted)
         XCTAssertNotNil(page.makeActionIntent())
         let count = await service.reads
-        XCTAssertEqual(count, 1)
+        XCTAssertEqual(count, 2)
     }
 
-    func testHomePaginationAppendsWithoutLosingLayoutOrFirstPage() async {
+    func testHomeLoadsAllContinuationsWithoutLosingLayoutOrFirstPage() async {
         let page = MusicPublicBrowseViewModel(service: MusicReferenceHomeService(), request: .discovery(.home))
         page.setAccess(available: true, generation: UUID()); page.appear()
-        await page.refresh(); await page.appendNext()
+        await page.refresh()
         XCTAssertEqual(page.sections.map(\.id), ["first", "second"])
         XCTAssertEqual(page.sections.map(\.layout), [.playlistRail, .playlistRail])
         XCTAssertNil(page.nextCursor); XCTAssertNil(page.error)

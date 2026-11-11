@@ -1753,6 +1753,71 @@ final class MusicUIKitRegressionTests: XCTestCase {
         }
     }
 
+    func testHomeFMCardKeepsExplicitPlayVisibleAndHonorsCallerSuppression() throws {
+        let actions: [MusicHomeAction] = [
+            .fm(mode: .default, submode: "", entry: nil),
+            .ruleFM(ruleID: "42", tabTagID: "", sourceName: "私人漫游"),
+        ]
+        let cell = MusicBrowseCell(frame: CGRect(x: 0, y: 0, width: 180, height: 232))
+        var plays = 0
+        for action in actions {
+            let item = MusicPublicBrowseItem(id: "roaming", title: "私人漫游", content: .action(action))
+            cell.configure(item: item, layout: .featureRail, theme: PageTheme()) { plays += 1 }
+            cell.layoutIfNeeded()
+            let button = try resultButton(id: "music.browse.play.roaming", in: cell)
+            XCTAssertFalse(button.isHidden)
+            XCTAssertTrue(button.isEnabled)
+            XCTAssertTrue(cell.contentView.bounds.contains(button.frame))
+            XCTAssertFalse(button.bounds.isEmpty)
+            XCTAssertTrue(cell.hitTest(button.center, with: nil) === button)
+            XCTAssertEqual(button.accessibilityLabel, "播放私人漫游")
+            button.sendActions(for: .touchUpInside)
+            cell.configure(item: item, layout: .featureRail, theme: PageTheme(),
+                           showsPlayButton: false, onPlay: { plays += 1 })
+            cell.layoutIfNeeded()
+            XCTAssertTrue(button.isHidden, "Explicit caller suppression must remain effective")
+            cell.prepareForReuse()
+        }
+        XCTAssertEqual(plays, 2, "Rendering, suppression and reuse cannot invoke playback")
+    }
+
+    func testHomePrivateRoamingPlayButtonUsesExistingFMActionWithoutOpeningAnotherPage() async throws {
+        let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "roaming", title: "", items: [
+                .init(id: "roaming", title: "私人漫游", content: .action(action)),
+            ], layout: .featureRail),
+        ]))
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        addTeardownBlock { await model.close() }
+        await model.load()
+        let router = MusicUIKitRegressionRouter()
+        defer { withExtendedLifetime(router) {} }
+        let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: MusicAppearancePreferencesStore(),
+            router: router, embedded: true)
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        await waitForResult { collection.layoutIfNeeded(); return collection.visibleCells.count == 1 }
+        let cell = try XCTUnwrap(collection.visibleCells.first)
+        let button = try resultButton(id: "music.browse.play.roaming", in: cell)
+        XCTAssertFalse(button.isHidden)
+        let initial = await service.fmChoices()
+        XCTAssertTrue(initial.isEmpty, "Displaying the roaming card cannot start playback")
+        let requested = expectation(description: "explicit roaming play reaches the existing FM owner")
+        await service.observeFMChoice { requested.fulfill() }
+        button.sendActions(for: .touchUpInside)
+        await fulfillment(of: [requested], timeout: 3)
+        await waitForResult { controller.presentedViewController is UIAlertController }
+        let requests = await service.fmChoices(), counts = await service.counts()
+        XCTAssertEqual(requests, [action])
+        XCTAssertEqual(counts.details, 0)
+        let searches = await service.recordingReads()
+        XCTAssertTrue(searches.isEmpty)
+        XCTAssertTrue(model.queue.isEmpty, "This fixture rejects queue opening; it does not simulate successful audio")
+    }
+
     func testFMArtworkOnlyUpdatesForEffectiveCoverWithoutReconfiguringCard() async throws {
         let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
         let appearance = MusicAppearancePreferencesStore()

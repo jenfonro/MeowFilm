@@ -289,7 +289,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     private func loadAutomaticNextPage() {
-        guard let page, isPageVisible, !automaticPaginationHeld, page.error == nil, !page.isLoading,
+        guard let page, page.request != .discovery(.home),
+              isPageVisible, !automaticPaginationHeld, page.error == nil, !page.isLoading,
               !page.requiresExplicitNext, !page.usesPageNavigation, page.nextCursor != nil else { return }
         runPageTask { await page.appendNext() }
     }
@@ -627,7 +628,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     private func configureActions() {
         guard !embedded, let page else { return }
         let hasError = page.error != nil || sections.contains(where: { $0.error != nil })
-        let nextTitle: String? = page.nextCursor.map { _ in
+        let nextTitle: String? = page.request == .discovery(.home) ? nil : page.nextCursor.map { _ in
             page.usesPageNavigation ? "下一页" : "继续加载"
         }
         let key = BrowseActionsKey(
@@ -672,8 +673,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 self?.runMenuAction(pageID: key.pageID) { await page.previous() }
             })
         }
-        if page.nextCursor != nil {
-            actions.append(UIAction(title: page.usesPageNavigation ? "下一页" : "继续加载") { [weak self] _ in
+        if let nextTitle {
+            actions.append(UIAction(title: nextTitle) { [weak self] _ in
                 self?.runMenuAction(pageID: key.pageID) { await page.appendNext() }
             })
         }
@@ -966,7 +967,12 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             case .rankingStack:
                 group = .vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
                     heightDimension: .absolute(156)), subitems: [item])
-            case .rankedSongs, .artistUpdates:
+            case .artistUpdates:
+                let card = max(240, (width - 32) * 0.91)
+                group = .horizontal(layoutSize: .init(widthDimension: .absolute(card),
+                    heightDimension: .absolute(card / 2.9)), subitems: [item])
+                scrolling = .groupPaging
+            case .rankedSongs:
                 group = .horizontal(layoutSize: .init(widthDimension: .absolute(max(240, (width - 32) * 0.91)),
                     heightDimension: .absolute(210)), subitems: [item])
                 scrolling = .groupPaging

@@ -302,7 +302,30 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
     // Handle registration and the final admission check stay on this actor.
     private func publicItems(_ rows: [MusicNativePublicBrowseItem],
                              layout: MusicPublicBrowseSection.Layout, songs: [Data: MJ]) throws -> [MusicPublicBrowseItem] {
-        try rows.map { item -> MusicPublicBrowseItem in
+        let albums: [String: MusicNativePublicBrowseItem] = layout == .artistUpdates ? Dictionary(
+            rows.compactMap { item -> (String, MusicNativePublicBrowseItem)? in
+                guard case .collection(let album) = item.content, album.kind == .album else { return nil }
+                return (album.id, item)
+            }, uniquingKeysWith: { first, _ in first }) : [:]
+        var seenAlbums = Set<String>()
+        return try rows.compactMap { original -> MusicPublicBrowseItem? in
+            var item = original
+            if layout == .artistUpdates, case .song(let value) = item.content,
+               value.platform == MusicPublicBrowsePlatform.netease.rawValue {
+                let raw = try MJ.parse(value.data)
+                if let id = MusicNativeHomePresentation.positiveID(raw["albumId"]) {
+                    let album = MusicPublicBrowseCollection(platform: .netease, nativeID: id, kind: .album,
+                        title: raw["albumName"].string.isEmpty ? "专辑" : raw["albumName"].string,
+                        creator: raw["singer"].string,
+                        artwork: MusicNativePublicBrowseSupport.artwork(raw["img"]) ?? item.artwork)
+                    item = albums[album.id] ?? .init(id: album.id, title: album.title, subtitle: album.creator,
+                        artwork: album.artwork, content: .collection(album), isEntrance: item.isEntrance,
+                        ranking: item.ranking, previewSongs: item.previewSongs,
+                        recommendationReason: item.recommendationReason, isRanking: item.isRanking)
+                }
+            }
+            if layout == .artistUpdates, case .collection(let album) = item.content, album.kind == .album,
+               !seenAlbums.insert(album.id).inserted { return nil }
             let content: MusicPublicBrowseContent
             var title = item.title, subtitle = item.subtitle, artwork = item.artwork
             switch item.content {
