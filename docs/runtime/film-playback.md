@@ -7,7 +7,7 @@ CatNode／source／pan／TMDB／豆瓣模块，负责规则、搜索聚合、匹
 历史、人工匹配、错误片源屏蔽和偏好。业务不连接 meowfilm-server 的登录、
 数据库或播放 API。收藏仍由现有客户端 owner 保存；规则在 Node 保存，客户端仅持编辑草稿与展示快照。
 
-双端 aggregate entry 显式装配七个模块；通用 `createRuntime` 未显式启用
+双端 aggregate entry 显式装配八个模块；通用 `createRuntime` 未显式启用
 pan／metadata／film 时保持原默认三个模块。`connectFilmPlayback` 在 provider
 变更前后比较真实 generation／revision，再通知数据、会话及媒体 owner 撤权。
 失败回执不证明磁盘变更回滚；仅展示名称变化不使有效媒体失效。

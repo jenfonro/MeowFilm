@@ -48,7 +48,8 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         internal CandidateBatch? Candidates;
         internal HeartbeatContext? Heartbeat;
     }
-    private sealed record Song(JsonElement Value, string NativeId, string Algorithm, string FeedbackSource);
+    private sealed record Song(JsonElement Value, string NativeId, string Algorithm, string FeedbackSource,
+        JsonElement? Context, JsonElement Metadata);
     private sealed record HeartbeatContext(string PlaylistId, string StartMusicId, string SongId, bool FromHome, long Count);
     private sealed record Candidate(string Id, Song Song);
     private sealed record CandidateBatch(long Epoch, MusicRecommendationRequest Request,
@@ -214,7 +215,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
             string entry = Text(p, "entry"), song = Text(p, "songId");
             Require(entry is "favorites" or "current");
             Require(entry == "favorites" && song.Length == 0 || ValidId(song));
-            Require(entry != "current" || ValidId(Text(p, "playlistId")));
+            Require(!p.TryGetProperty("playlistId", out _) || ValidId(Text(p, "playlistId")));
             heartbeat = new(platform, entry == "favorites" ? MusicHeartbeatEntry.Favorites : MusicHeartbeatEntry.CurrentSong,
                 song.Length > 0 ? song : null, p.TryGetProperty("playlistId", out _) ? Text(p, "playlistId") : null);
         }

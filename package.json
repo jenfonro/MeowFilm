@@ -10,7 +10,8 @@
     "packages/pan-runtime",
     "packages/film-rules",
     "packages/film-search",
-    "packages/film-playback"
+    "packages/film-playback",
+    "packages/netease-token"
   ],
   "engines": {
     "node": "^24.0.0"

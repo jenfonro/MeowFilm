@@ -146,8 +146,6 @@ extension NativeMusicService {
         try musicRequire(!selection.installationId.hasPrefix("official:") ||
             Self.officialEnabled(source.platform, d.playback), .sourceUnavailable)
         retireCachedPlaybackRecovery()
-        playbackFeedback.finishCurrent(reason: .ui)
-        playbackFeedback.invalidate(preservingEnds: true)
         retireAudioCacheAttempt()
         cancelWork("playback"); spent.insert(attemptId)
         attempt = Attempt(id: attemptId, occurrence: occurrenceId, sourceKey: selection.sourceKey, selection: selection)
@@ -218,6 +216,11 @@ extension NativeMusicService {
     }
     public func cancel(attemptId: String?) async throws {
         try check()
+        if attemptId == nil || playbackFeedbackAdmission?.retiringReason == nil ||
+            playbackFeedbackAdmission?.attemptID != attemptId {
+            playbackFeedback.finishCurrent(attemptID: attemptId, reason: .interrupt)
+            playbackFeedback.invalidate(attemptID: attemptId, preservingEnds: true)
+        }
         if let attemptId { discardSource(attemptID: attemptId) } else { clearPreparedSources() }
         if let recovery = cachedPlaybackRecovery,
            attemptId == nil || attemptId == recovery.previousAttemptID || attemptId == attempt?.id {
@@ -227,8 +230,6 @@ extension NativeMusicService {
         }
         if attemptId == nil || attempt?.id == attemptId {
             retireAudioCacheAttempt()
-            playbackFeedback.finishCurrent(reason: .interrupt)
-            playbackFeedback.invalidate(attemptID: attemptId, preservingEnds: true)
             attempt = nil; cancelWork("playback")
         }
     }
@@ -287,7 +288,10 @@ extension NativeMusicService {
         else { accepted = try commit() }
         // Publish flags only after a successful CAS.
         if record { attempt?.started = true }
-        if [.ended, .failed, .stopped].contains(fact.kind) { attempt?.ended = true }
+        if [.ended, .failed, .stopped].contains(fact.kind) {
+            attempt?.ended = true
+            if playbackFeedbackAdmission?.attemptID == fact.attemptId { playbackFeedbackAdmission?.ended = true }
+        }
         if accepted {
             if fact.kind == .playing { attempt?.isPlaying = true }
             else if [.paused, .ended, .failed, .stopped].contains(fact.kind) { attempt?.isPlaying = false }

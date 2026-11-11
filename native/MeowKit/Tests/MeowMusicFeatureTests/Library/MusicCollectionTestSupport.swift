@@ -30,6 +30,9 @@ actor MusicCollectionService: MusicServing {
     struct Row: Sendable {
         let collection: MusicCollection
         let tracks: [MusicRemoteTrack]
+        init(collection: MusicCollection, tracks: [MusicRemoteTrack] = []) {
+            self.collection = collection; self.tracks = tracks
+        }
         init(id: String = "playlist:1", revision: Int = 1, title: String = "Synthetic",
              kind: String = "playlist", songs: [String] = ["a", "b", "c", "d"]) {
             collection = .init(id: id, title: title, kind: kind, count: songs.count, revision: revision)
@@ -37,7 +40,7 @@ actor MusicCollectionService: MusicServing {
         }
     }
     struct Counts: Sendable {
-        var lists = 0, tracks = 0, createCalls = 0, editCalls = 0, writes = 0, queueWrites = 0, queueRequests = 0
+        var lists = 0, tracks = 0, createCalls = 0, editCalls = 0, writes = 0, queueWrites = 0, queueRequests = 0, networkSaves = 0
         var edited: [MusicCollection] = []
         var requestedRefs: [[MusicReference]?] = []
         var requestedOrders: [[String]?] = []
@@ -185,6 +188,31 @@ actor MusicCollectionService: MusicServing {
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
     func restoreHistory(id: String, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+}
+
+extension MusicCollectionService: MusicNetworkPlaylistServing {
+    func saveNetworkPlaylist(_ collection: MusicPublicBrowseCollection, intent: MusicQueueAuthorization) throws -> MusicCollection {
+        try intent.perform {
+            counts.networkSaves += 1
+            if let row = rows.first(where: {
+                $0.collection.networkReference?.platform == collection.platform &&
+                    $0.collection.networkReference?.remoteID == collection.nativeID
+            }) { return row.collection }
+            let saved = MusicCollection(id: "network:\(collection.platform.rawValue):\(collection.nativeID)",
+                title: collection.title, kind: "network", count: collection.count ?? 0, revision: 1,
+                networkReference: .init(platform: collection.platform, remoteID: collection.nativeID, creator: collection.creator))
+            rows.append(Row(collection: saved))
+            return saved
+        }
+    }
+    func removeNetworkPlaylist(_ collection: MusicCollection, intent: MusicQueueAuthorization) throws {
+        try intent.perform {
+            guard collection.networkReference != nil, rows.contains(where: { $0.collection == collection }) else {
+                throw MusicServiceError.revisionConflict
+            }
+            rows.removeAll { $0.collection.id == collection.id }
+        }
+    }
 }
 
 extension MusicCollectionService: MusicSearchBatchPlaying {

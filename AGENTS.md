@@ -66,14 +66,15 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0 三个模块。iOS 与 Windows aggregate 显式加装 pan、tmdb、douban、film 共七模块，保留各自平台受信启动，不保留旧运行器协议回退；数据、媒体与会话契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`。
+- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.2.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease 八模块，保留各自平台受信启动，不保留旧运行器协议回退；数据、媒体、会话与网易 token 契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`。
 - `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
 - `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期
-- `packages/pan-runtime/` — 内置网盘账号、分享与取址能力；同进程异步 I/O，不创建脚本执行环境
+- `packages/pan-runtime/` — 内置网盘账号、分享与取址能力；同进程异步 I/O，不创建脚本执行环境，通用默认入口不装配，平台 App 显式装配
 - `packages/film-playback/` — 影视规则配置、搜索/智能播放会话、唯一业务数据缓存、本地历史/人工匹配/屏蔽/偏好，以及受控二进制媒体流；不复制原生收藏或图片缓存
 - `packages/film-rules/`、`packages/film-search/` — Node 影视 owner 使用的纯计算程序，共用宿主 QuickJS-NG；不在客户端执行或持久化规则
+- `packages/netease-token/` — 网易订阅实时 token 的按需 SDK Worker；账号和订阅写入仍由原生管理，契约与信任边界见 `docs/runtime/netease-token.md`
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
 - `scripts/windows/` — Windows 构建、测试、打包与结构检查
 - `tests/` — Node 测试

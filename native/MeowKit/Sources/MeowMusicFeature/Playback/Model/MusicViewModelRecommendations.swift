@@ -199,7 +199,7 @@ extension MusicViewModel {
                   result.state.settingsRevision >= state.settingsRevision else { throw MusicServiceError.cancelled }
             stopFM()
             switch result.action {
-            case .playCurrent, .restoreOnly: invalidateSelection(stopMedia: true, preservingQueueIntent: intent)
+            case .playCurrent, .restoreOnly: invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: intent)
             case .keepCurrent, .togglePlayback: break
             }
             playbackState.state = result.state; notices.queueNotice = nil

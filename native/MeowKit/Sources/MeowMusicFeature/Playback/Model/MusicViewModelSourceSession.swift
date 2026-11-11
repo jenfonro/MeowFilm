@@ -36,7 +36,7 @@ extension MusicViewModel {
         await selectSource(intent: .quality(quality))
     }
     var canRejectCurrentSource: Bool {
-        guard isAvailable, !isClosed, let current, let candidate, let nativeAttempt, lastSelection != nil else { return false }
+        guard isAvailable, !isClosed, !isClosing, let current, let candidate, let nativeAttempt, lastSelection != nil else { return false }
         return candidate.occurrenceId == current.id && nativeAttempt.resourceID == candidate.resourceId
     }
     public func rejectCurrentSource() async {
@@ -56,9 +56,11 @@ extension MusicViewModel {
         let own = lifecycle, start = position, oldAttempt = candidate?.attemptId
         // Excluded media is not a valid handoff donor or resume target.
         // Retire it before any further suspension; keep the song/position.
+        feedbackConsumer.invalidate(rejecting: true)
         invalidateSelection(stopMedia: true)
         let token = selectionID
         position = start; playbackState.phase = .paused
+        await feedbackConsumer.flush()
         // Stop observing/owning the rejected item before the durable write can
         // revoke a still-armed candidate. Its revocation is not a newer user intent.
         var exclusionFailure: Error?
@@ -89,7 +91,10 @@ extension MusicViewModel {
                       admission: QueuePlaybackAdmission?, wrongSource: Bool,
                       recovering: Bool, recoveryPosition: Double?,
                       resumeAfterExclusion: UUID?, lifetime: MusicQueueAuthorization) async {
-        guard let current, let service, let provider = service as? any MusicSourcePlaybackServing, let player else { return }
+        let selection = selectionID
+        await feedbackConsumer.flushRetirements()
+        guard selection == selectionID else { return }
+        guard !isClosing, let current, let service, let provider = service as? any MusicSourcePlaybackServing, let player else { return }
         let own = lifecycle
         let admission = admission ?? fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         do {
@@ -279,7 +284,7 @@ extension MusicViewModel {
                             if !recovering { sourceRenewed = []; remoteAudioRecoveryTried = false }
                             cachedAudioRecovery = nil
                             pendingSourceSelection = nil
-                            // The first new native event resets feedback ownership.
+                            // The first new native event commits resource identity.
                             // A rejected commit must not invalidate the donor's facts.
                             feedbackAutomatic = automatic
                             cachedAudioObservation?.cancel(); cachedAudioObservation = nil

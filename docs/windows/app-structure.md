@@ -63,11 +63,11 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 ## 原生和脚本边界
 
-网易云、QQ、酷狗官方业务独立于 LX。账号、平台 API、搜索、曲库、缓存和播放在 .NET 内执行，不以 Node 连接为前置条件。公共宿主随 App 启动，宿主失败不阻断原生业务；影视随后恢复启用猫源，不因此执行音乐或停用的猫源脚本。
+网易云、QQ、酷狗官方业务独立于 LX。账号、平台目录、搜索、曲库、缓存和官方播放在 .NET 内执行，不以 Node 连接为前置条件。网易订阅／退订的 token 准备按需借用公共 Node，失败保留本地意图，订阅请求及 Cookie 仍归原生 owner。公共宿主随 App 启动，影视随后恢复启用猫源，不因此执行音乐或停用的猫源脚本，也不加载 Watchman SDK。
 
-Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/entry.mjs` 按序装配 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.2.0`／`source.runtime.v2`、`pan@0.1.0`／`pan.runtime.v1`、`tmdb@0.1.0`／`tmdb.data.v1`、`douban@0.1.0`／`douban.data.v1`、`film@0.1.0`／`film.playback.v1` 七模块。公共层管理 LX/source 原生 QuickJS 线程与 Cat Node Worker；Windows 目录只有私密启动／存活管道 bootstrap 与薄 entry，业务使用完整 HTTP，没有业务 module 副本或第二套 runner。
+Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/entry.mjs` 按序装配 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.2.0`／`source.runtime.v2`、`pan@0.1.0`／`pan.runtime.v1`、`tmdb@0.1.0`／`tmdb.data.v1`、`douban@0.1.0`／`douban.data.v1`、`film@0.1.0`／`film.playback.v1`、`netease@0.1.0`／`netease.token.v1` 八模块。公共层管理 LX/source 原生 QuickJS 线程、Cat Node Worker 和按需网易 token Worker；Windows 目录只有私密启动／存活管道 bootstrap 与薄 entry，业务使用完整 HTTP，没有业务 module 副本或第二套 runner。
 
-载荷包含公共 entry/bootstrap/client/contracts、共享七模块、Windows 两个入口文件、runtime-bridge、script-host、source-runtime、pan-runtime、film-playback／film-rules、Node 兼容及规则解析依赖、锁定的原生 QuickJS-NG addon/source SDK 和必要许可，没有普通业务文档桥授权。CatNode 设置、源码和私有卷位于 App 固定 `script-runtime` 数据根，source 的 Reader/CatVod 不继承该私有卷或服务能力。film 复用同一批 provider，独占影视业务缓存、新增历史／人工匹配／屏蔽／偏好；原生 `FilmLibrary` 收藏仍为 `film.library.v1`，规则与图片缓存不迁入 Node。公共执行、存储与网络边界见[共用运行时](../runtime/script-runtime.md)；source 平台能力以[capability ABI](../runtime/source-capability-abi.md)为唯一来源。Node 无关仅指 source-runtime 规则包，不表示 Node 兼容层无需 Node，也不表示已提供阅读 UI 或其他平台客户端。
+载荷包含公共 entry/bootstrap/client/contracts、共享八模块、Windows 两个入口文件、runtime-bridge、script-host、source-runtime、pan-runtime、film-playback／film-rules、netease-token／锁定 jsdom、Node 兼容及规则解析依赖、锁定的原生 QuickJS-NG addon/source SDK 和必要许可，没有普通业务文档桥授权。CatNode 设置、源码和私有卷位于 App 固定 `script-runtime` 数据根，source 的 Reader/CatVod 不继承该私有卷或服务能力。film 复用同一批 provider，独占影视业务缓存、新增历史／人工匹配／屏蔽／偏好；原生 `FilmLibrary` 收藏仍为 `film.library.v1`，规则与图片缓存不迁入 Node。公共执行、存储与网络边界见[共用运行时](../runtime/script-runtime.md)；source 平台能力以[capability ABI](../runtime/source-capability-abi.md)为唯一来源。Node 无关仅指 source-runtime 规则包，不表示 Node 兼容层无需 Node，也不表示已提供阅读 UI 或其他平台客户端。
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定 App 启动时的 JS 载荷与协议版本。
 

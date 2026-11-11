@@ -96,12 +96,14 @@ extension MusicViewModel {
         catch { source.revoke(); await source.close(); throw error }
     }
     public func playHomeAction(_ requested: MusicHomeAction, title: String, forceReload: Bool = false) async throws {
-        let epoch = try enter(), account = searchAccessGeneration
+        let epoch = try enter(), account = searchAccessGeneration, selection = selectionID
         let action: MusicHomeAction
         if !forceReload, case .fm(.default, "", nil) = requested,
            let owner = service as? any MusicFMPlaybackServing {
             action = try await owner.rememberedFM()
         } else { action = requested }
+        try check(epoch)
+        guard searchAccessGeneration == account, selectionID == selection else { throw MusicServiceError.cancelled }
         switch action {
         case .similar(let ids, let name):
             try await performSimilarMode { try await $0.startSimilarMode(.songRoaming(sourceIDs: ids, sourceName: name)) }
@@ -124,10 +126,10 @@ extension MusicViewModel {
         let source = try await openHomeActionQueue(action, title: title)
         defer { releaseRemoteQueueSource(source) }
         try check(epoch)
-        guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
+        guard searchAccessGeneration == account, selectionID == selection else { throw MusicServiceError.cancelled }
         let first = try await remoteQueuePage(source, cursor: nil)
         try check(epoch)
-        guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
+        guard searchAccessGeneration == account, selectionID == selection else { throw MusicServiceError.cancelled }
         guard let track = first.items.first else { throw MusicServiceError.notFound }
         try await prepareRemoteQueue(source, start: .init(index: 0, track: track))
         try check(epoch)
@@ -235,7 +237,7 @@ extension MusicViewModel {
             try check(own); try intent.check()
             guard selection == selectionID, request == remoteQueueRequest else { throw MusicServiceError.staleResult }
             remoteQueueTask = nil; stopFM()
-            invalidateSelection(stopMedia: true, preservingQueueIntent: intent)
+            invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: intent)
             playbackState.state = next; notices.queueNotice = nil
             try await refreshQueue(service, epoch: own, selection: selectionID)
             try intent.check()
@@ -290,7 +292,7 @@ extension MusicViewModel {
             // sound after departure/cancellation/account revocation.
             remoteQueueTask = nil
             if source.context.kind == .fm { activateFM(source) } else { stopFM() }
-            invalidateSelection(stopMedia: true, preservingQueueIntent: intent)
+            invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: intent)
             let committedSelection = selectionID
             let admission = QueuePlaybackAdmission(source: source, intent: intent)
             playbackState.state = next; try await refreshQueue(service, epoch: epoch, selection: committedSelection)
@@ -401,7 +403,10 @@ extension MusicViewModel {
             }
             try check(epoch)
             guard navigationID == navigation, token == selectionID, searchAccessGeneration == account else { return }
-            if result.selectedId != nil { invalidateSelection(stopMedia: true, preservingQueueIntent: intent) }
+            if result.selectedId != nil {
+                invalidateSelection(stopMedia: true, reason: reason == .ended ? .playend : .ui,
+                                    preservingQueueIntent: intent)
+            }
             let committedSelection = selectionID
             let admission = QueuePlaybackAdmission(source: fm, intent: intent)
             playbackState.state = result.state; try await refreshQueue(service, epoch: epoch, selection: committedSelection)
@@ -436,6 +441,7 @@ extension MusicViewModel {
                            onSelection: (@MainActor (MusicQueueEntry) -> Void)? = nil,
                            onCompletion: (@MainActor () -> Void)? = nil) -> Bool {
         guard direction == .next ? canNext : canPrevious else { return false }
+        if reason == .manual { cancelPlayPauseCommands() }
         let token = UUID(); navigationID = token; playbackState.isNavigating = true
         navigationTask = Task { [weak self] in
             guard let self, !Task.isCancelled, self.navigationID == token else { return }

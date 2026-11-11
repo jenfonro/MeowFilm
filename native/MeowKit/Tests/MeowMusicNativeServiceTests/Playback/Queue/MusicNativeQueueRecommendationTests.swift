@@ -496,7 +496,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
                     let source = MusicRemoteQueueSource(
                         context: .init(kind: .fm, id: "fm", title: "私人漫游", platform: "wy"),
                         loadPage: { try await pages.read($0) },
-                        fmAction: .fm(mode: .default, submode: "", entry: nil))
+                        homeAction: .fm(mode: .default, submode: "", entry: nil))
                     let start = try await MusicAccountQueueFixture.start(service, source)
                     _ = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
                     loader = pages; radio = source

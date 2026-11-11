@@ -13,7 +13,7 @@
 
 ## 真实 TMDB 接线
 
-HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata-data.md)，本端不复制其上游路由规则。`apps/ios/runtime/entries/aggregate.mjs` 保留现有 dataRoot 和 Cat 目录布局，显式装配 music／cat／source／pan／tmdb／douban／film 七模块。`RuntimePayload` 和 App launcher 校验同一集合，精确版本／contract 见[运行底座](runtime-preflight.md)；通用 runtime 默认三模块不变。
+HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata-data.md)，本端不复制其上游路由规则。`apps/ios/runtime/entries/aggregate.mjs` 保留现有 dataRoot 和 Cat 目录布局，显式装配 music／cat／source／pan／tmdb／douban／film／netease 八模块。`RuntimePayload` 和 App launcher 按序精确校验同一清单，精确版本／contract 见[运行底座](runtime-preflight.md)；通用 runtime 默认三模块不变。
 
 `FilmTMDBService.search` 请求 `/3/search/multi`，使用真实原查询、page=1、zh-CN 和 w500；`detail` 按 movie／tv 与数字 ID 请求，使用 original 和 `append_to_response=credits,similar,images`，与智能播放完整详情同键，不请求 configuration。必要查询回退仍由原搜索会话决定。空凭据允许代理端认证，错误按运行器回执保留。设置仍调用 `tmdb.data.settings.*`；只有成功保存使旧查询及 Node 详情缓存失效，下次显式同词创建新会话，旧详情保留原查询／已得展示数据。
 
@@ -46,8 +46,8 @@ HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata
 ```text
 FilmTMDBServiceTests
 RuntimeHTTPClientTests/testTMDB
-RuntimeHTTPClientTests/testAppDescribeRequiresExactSevenModuleVersionsContractsAndTMDBMethods
-RuntimeEmbeddedLauncherTests/testPayloadRequiresTheCompleteSevenModuleHTTPAssembly
+RuntimeHTTPClientTests/testAppDescribeRequiresExactEightModuleOrderVersionsContractsAndMethods
+RuntimeEmbeddedLauncherTests/testPayloadRequiresTheCompleteEightModuleHTTPAssembly
 RuntimeMetadataImageTests
 FilmSearchSessionTests/testNewWordFencesOldPublishingButKeepsRetainedNavigationIdentity
 FilmSearchSessionTests/testMetadataChangeNeedsExplicitNewSessionWithoutDiscardingRetainedDisplay

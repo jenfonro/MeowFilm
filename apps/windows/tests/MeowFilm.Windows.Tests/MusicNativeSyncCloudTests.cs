@@ -237,7 +237,7 @@ public static partial class MusicNativeSyncTests
         }, nativeEntropy: true);
     }
     private static async Task InstallCloud(Fixture f, Func<HttpRequestMessage, CancellationToken, Task<byte[]>> transport)
-    { await f.Sync.DisposeAsync(); f.Sync = new(f.Owner, f.Sessions, f.Http, f.Clients.Owner, transport); }
+    { await f.Sync.DisposeAsync(); f.Sync = new(f.Owner, f.Sessions, f.Http, f.Clients.Owner, f.Tokens, transport); }
     private static async Task CloudOrder()
     {
         await using var f = new Fixture("kg"); await Reorder(f); int writes = 0;

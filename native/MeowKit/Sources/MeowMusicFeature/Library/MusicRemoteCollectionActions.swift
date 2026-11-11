@@ -12,20 +12,13 @@ public enum MusicRemoteCollectionFilter {
     }
 }
 
-/// Native actions for complete remote collection snapshots.
-///
-/// Reference: iWebPlus b900c259, browse.js importCloudPlaylist/filteredSongs/
-/// playDetail and browse-data.js importPlaylist. Both actions finish reading
-/// the bounded source snapshot before publishing anything. Display handles
-/// and the currently visible page are never the input to either action.
+/// Native remote-reference saving and complete-snapshot filtering.
 public protocol MusicRemoteCollectionServing: Sendable {
-    /// Creates one device-local playlist, including every source page. The
-    /// normal library identity merge removes duplicate collection membership.
-    /// This does not bind an account, request a remote write, or change playback.
-    ///
-    /// `intent` belongs to this save attempt (cancel it when its dialog closes).
-    /// The caller continues to own and close `source`. A failed read/validation
-    /// or CAS must not leave a partially created playlist.
+    /// Saves only the source's explicit public playlist identity. Does not read
+    /// member pages, create a managed copy, or change playback. Sources without
+    /// a public playlist identity (albums, recommendations, account handles) fail.
+    /// Prefer MusicNetworkPlaylistServing when a detail already has its identity.
+    /// The caller continues to own and close source; revocation and CAS apply.
     func saveRemoteCollection(source: MusicRemoteQueueSource, name: String,
                               intent: MusicQueueAuthorization) async throws -> MusicCollection
 

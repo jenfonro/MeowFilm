@@ -32,7 +32,8 @@ export function fixture(t) {
       receipt.artifact.path, receipt.sdk.path, receipt.catWebValues.path, receipt.catWebValues.license.path,
       receipt.frameworkInfo.path, receipt.exports.path,
       ...receipt.inputs.map(input => input.path)])) copy(path);
-    for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'film-rules', 'film-search', 'film-playback']) {
+    for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
+      'film-rules', 'film-search', 'film-playback', 'netease-token']) {
       copy(`packages/${name}/package.json`);
       for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
         : name === 'film-search' ? ['film-search.js'] : ['src']) copy(`packages/${name}/${file}`);
@@ -44,7 +45,7 @@ export function fixture(t) {
       if (path.includes('node_modules/') && !entry.link && !entry.dev && existsSync(join(repository, path))) copy(path);
     }
     copy('apps/runtime'); copy('apps/ios/runtime');
-    copy('LICENSES/NOTICE.md');
+    for (const name of ['NOTICE.md', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt']) copy(`LICENSES/${name}`);
     workspace = { root, output: join(area, 'payload'), area };
     // This one fixture is shared serially; each case restores all mutations.
     process.once('exit', () => rmSync(area, { recursive: true, force: true }));

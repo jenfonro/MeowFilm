@@ -6,7 +6,7 @@ import UIKit
 @MainActor
 enum MusicPlaybackModeIcon {
     enum Kind: CaseIterable {
-        case loop, single, shuffle, heartbeat, fm
+        case loop, single, shuffle, heartbeat, fm, fmOff
     }
 
     static func image(_ kind: Kind) -> UIImage {
@@ -16,6 +16,7 @@ enum MusicPlaybackModeIcon {
         case .shuffle: images.shuffle
         case .heartbeat: images.heartbeat
         case .fm: images.fm
+        case .fmOff: images.fmOff
         }
     }
 
@@ -24,7 +25,8 @@ enum MusicPlaybackModeIcon {
         single: render(.single),
         shuffle: render(.shuffle),
         heartbeat: render(.heartbeat),
-        fm: render(.fm)
+        fm: render(.fm),
+        fmOff: render(.fmOff)
     )
 
     private static func render(_ kind: Kind) -> UIImage {
@@ -122,7 +124,7 @@ enum MusicPlaybackModeIcon {
             context.addLine(to: .init(x: 22, y: 12))
             context.strokePath()
 
-        case .fm:
+        case .fm, .fmOff:
             context.setLineWidth(1.8)
             context.setLineCap(.butt)
             context.setLineJoin(.miter)
@@ -142,6 +144,12 @@ enum MusicPlaybackModeIcon {
                              control1: .init(x: 17, y: 17), control2: .init(x: 15, y: 17))
             context.closePath()
             context.strokePath()
+            if kind == .fmOff {
+                context.setLineCap(.round)
+                context.move(to: .init(x: 4, y: 4))
+                context.addLine(to: .init(x: 20, y: 20))
+                context.strokePath()
+            }
         }
     }
 }

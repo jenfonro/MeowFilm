@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Native adaptation of the pinned iWebPlus feedback guards. See LICENSES/NOTICE.md.
+// Shared credential/receipt guards; legacy duration/rate constraints apply only to QQ/KG.
 using System.Globalization;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
@@ -103,31 +103,35 @@ internal static class FeedbackProtocolRules
         var recording = value.Recording;
         Require(recording.Platform switch
         {
-            "wy" => Id(recording.Id, true) && recording.MixSongId is null,
+            "wy" => Id(recording.Id) && recording.MixSongId is null,
             "tx" => recording.Id is { Length: > 0 and <= 64 } && recording.Id.All(char.IsAsciiLetterOrDigit) && recording.MixSongId is null,
             "kg" => Hash(recording.Id) && (recording.MixSongId is null || Id(recording.MixSongId, true)),
             _ => false
         }, "IDENTITY_MISMATCH");
+        if (account.Platform == "wy")
+        {
+            Require(FactSeconds(value.Duration) && FactSeconds(value.Position) &&
+                (value.Duration == 0 || value.Position <= value.Duration) &&
+                double.IsFinite(value.Rate) && value.Rate > 0);
+            Require(value.PlaybackId != Guid.Empty && value.StartedAt >= DateTimeOffset.UnixEpoch &&
+                value.AdmittedAt >= DateTimeOffset.UnixEpoch);
+            // Text/byte validation is a resource/input boundary, not an
+            // invented platform enum, duration limit or recommendation recipe.
+            Require(Text(value.Source, NeteasePlaybackOutboxDocument.MaximumEventBytes, true) &&
+                Text(value.SourceId, NeteasePlaybackOutboxDocument.MaximumEventBytes, true) &&
+                Text(value.SourceType, 32, true) &&
+                Text(value.Algorithm, NeteasePlaybackOutboxDocument.MaximumEventBytes, true));
+            return value;
+        }
         Require(Seconds(value.Duration) && value.Duration > 0, "DURATION_REQUIRED");
         Require(Seconds(value.Position) && value.Position <= value.Duration + (account.Platform == "kg" ? 1 : 0));
         Require(Rate(value.Rate, account.Platform));
-        Require(Text(value.Source, value.IsQueueRecommendation ? 512 : 32) && Text(value.SourceId, 512, true) &&
+        Require(Text(value.Source, 32) && Text(value.SourceId, 512, true) &&
             Text(value.SourceType, 32, true) && Text(value.Algorithm, 2000, true) && Mode(value.Mode));
-        Require(!value.IsQueueRecommendation || account.Platform == "wy");
-        if (account.Platform == "wy")
-        {
-            Require(value.IsQueueRecommendation || value.Source is "userfm" or "playlist" or "album" or "search" or
-                "dailySongRecommend" or "song" or "likeMusic" or "aiMode" or "moreRcmd" or "unknown");
-            Require(value.SourceType is "" or "list" or "album" or "track" or "dailyRecommend");
-            if (value.IsQueueRecommendation)
-                Require(value.SourceId.Length == 0 && value.SourceType == "track");
-            else if (value.Source is "playlist" or "likeMusic" or "album" or "aiMode")
-                Require(Id(value.SourceId, true) && value.SourceType ==
-                    (value.Source == "album" ? "album" : value.Source == "aiMode" ? "track" : "list"));
-            else if (value.Source != "search") Require(value.SourceId.Length == 0);
-        }
+        Require(!value.IsQueueRecommendation);
         return account.Platform == "kg" ? value with { Recording = recording with { Id = recording.Id.ToUpperInvariant() } } : value;
     }
+    private static bool FactSeconds(double n) => double.IsFinite(n) && n >= 0;
     private static bool Seconds(double n) => double.IsFinite(n) && n is >= 0 and <= 86400;
     private static bool Rate(double n, string platform) => double.IsFinite(n) && n > 0 && n <= 16 && (platform != "kg" || n >= .25);
     private static bool Mode(string? value) => value is "" or "order" or "circulation" or "single" or "random" or "ai" or "playFm";
@@ -136,6 +140,15 @@ internal static class FeedbackProtocolRules
     internal static void End(MusicFeedbackStart start, MusicFeedbackEnd end, TimeSpan elapsed)
     {
         Require(end is not null);
+        if (start.Recording.Platform == "wy")
+        {
+            Require(FactSeconds(end.Listened) && FactSeconds(end.MediaListened) && FactSeconds(end.Duration) &&
+                FactSeconds(end.Position) && double.IsFinite(end.Rate) && end.Rate > 0 &&
+                (end.Duration == 0 || end.Position <= end.Duration));
+            Require(end.PlaybackId == start.PlaybackId && end.EndedAt >= DateTimeOffset.UnixEpoch);
+            Require(end.Reason is "playend" or "ui" or "interrupt" or "exception");
+            return; // Shared monotonic facts, never elapsed since a late dispatch.
+        }
         Require(Seconds(end.Listened) && Seconds(end.MediaListened) && Seconds(end.Duration) && Seconds(end.Position) &&
             Rate(end.Rate, start.Recording.Platform) && Mode(end.Mode));
         Require(CompatibleDuration(start.Duration, end.Duration), "IDENTITY_MISMATCH");

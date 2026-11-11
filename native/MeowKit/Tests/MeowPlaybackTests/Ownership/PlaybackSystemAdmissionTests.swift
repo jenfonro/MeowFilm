@@ -22,7 +22,7 @@ import MeowContracts
         await fulfillment(of: [ready], timeout: 5)
         XCTAssertFalse(controller.systemCommand(.play, generation: attempt.id))
         XCTAssertFalse(controller.systemCommand(.toggle, generation: attempt.id))
-        XCTAssertEqual(calls, [.play, .play])
+        XCTAssertEqual(calls, [.play, .toggle(wantsPlayback: false)])
         XCTAssertEqual(controller.snapshot.phase, .paused)
         XCTAssertEqual(controller.player.rate, 0)
         accepts = true
@@ -40,7 +40,7 @@ import MeowContracts
         XCTAssertFalse(controller.systemCommand(.play, generation: attempt.id))
     }
 
-    func testSystemPlayingTogglePassesPauseAndUnboundTransportStillWorks() async throws {
+    func testSystemPlayingToggleCarriesNativeIntentAndUnboundTransportStillWorks() async throws {
         let file = try silentFile()
         defer { try? FileManager.default.removeItem(at: file) }
         let controller = PlaybackController()
@@ -56,13 +56,13 @@ import MeowContracts
         await fulfillment(of: [ready], timeout: 5)
         XCTAssertTrue(controller.resume(attempt: attempt))
         XCTAssertTrue(controller.systemCommand(.toggle, generation: attempt.id))
-        XCTAssertEqual(calls, [.pause])
+        XCTAssertEqual(calls, [.toggle(wantsPlayback: true)])
         // Native controls remain available to owners without domain admission.
         lease.cancel()
         XCTAssertTrue(controller.systemCommand(.pause, generation: attempt.id))
         XCTAssertEqual(controller.snapshot.phase, .paused)
         XCTAssertTrue(controller.systemCommand(.play, generation: attempt.id))
-        XCTAssertEqual(calls, [.pause])
+        XCTAssertEqual(calls, [.toggle(wantsPlayback: true)])
         XCTAssertTrue(controller.systemCommand(.toggle, generation: attempt.id))
         XCTAssertEqual(controller.snapshot.phase, .paused)
         let replacement = controller.playAttempt(resource: try .init(id: "other-media", url: file, title: "test"),
@@ -97,6 +97,52 @@ import MeowContracts
         router.updateContext(.init(attempt: .init(id: UUID(), owner: "music", resourceID: "media"), phase: .paused))
         XCTAssertFalse(router.perform(.play, route: rebound))
         XCTAssertEqual(calls, [.play, .pause])
+    }
+
+    func testOutputEnvironmentUsesEnabledCurrentLeasesWithoutNativeAttempt() async throws {
+        let router = PlaybackOwnerRouter()
+        var oldCalls = 0, newCalls = 0
+        let old = try router.bind(owner: "music", onPlayPause: { _, _ in
+            XCTFail("An output fact is not a play/pause command"); return false
+        }, onOutputUnavailable: { oldCalls += 1 }) { _ in XCTFail("An output fact is not a native event") }
+        defer { old.cancel() }
+        XCTAssertTrue(router.hasOutputSubscribers)
+        router.outputUnavailable()
+        XCTAssertEqual(oldCalls, 1)
+        old.setEnabled(false)
+        XCTAssertFalse(router.hasOutputSubscribers)
+        router.outputUnavailable()
+        XCTAssertEqual(oldCalls, 1)
+        old.setEnabled(true)
+        router.outputUnavailable()
+        XCTAssertEqual(oldCalls, 2)
+        let current = try router.bind(owner: "music", onOutputUnavailable: { newCalls += 1 }) { _ in }
+        old.cancel()
+        router.outputUnavailable()
+        XCTAssertEqual(oldCalls, 2)
+        XCTAssertEqual(newCalls, 1)
+        current.cancel()
+        XCTAssertFalse(router.hasOutputSubscribers)
+        router.outputUnavailable()
+        XCTAssertEqual(newCalls, 1)
+    }
+
+    func testOutputEnvironmentRechecksBindingsAfterReentrantReplacement() async throws {
+        let router = PlaybackOwnerRouter()
+        var leases: [PlaybackOwnerLease] = [], replacements: [PlaybackOwnerLease] = []
+        var calls: [String] = []
+        defer { leases.forEach { $0.cancel() }; replacements.forEach { $0.cancel() } }
+        for owner in ["music", "film"] {
+            leases.append(try router.bind(owner: owner, onOutputUnavailable: {
+                calls.append(owner)
+                do {
+                    replacements.append(try router.bind(owner: owner == "music" ? "film" : "music",
+                        onOutputUnavailable: { XCTFail("New subscriptions do not replay an in-flight fact") }) { _ in })
+                } catch { XCTFail("Unexpected bind failure: \(error)") }
+            }) { _ in })
+        }
+        router.outputUnavailable()
+        XCTAssertEqual(calls.count, 1, "A replaced recipient must be rechecked immediately before delivery")
     }
 
     private func silentFile() throws -> URL {

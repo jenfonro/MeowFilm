@@ -30,11 +30,11 @@ public sealed partial class MusicCapability
         }
         return IsCatalogBatch ? CatalogBatchActionAsync("play", 0) : CatalogPlaylistActionAsync("play", 0);
     }
-    public Task SaveCatalogPlaylistAsync() => IsCatalogBatch ? CatalogBatchActionAsync("save", 0) : CatalogPlaylistActionAsync("save", 0);
+    public Task SaveCatalogPlaylistAsync() => IsCatalogBatch ? CatalogBatchActionAsync("save", 0) : SaveNetworkPlaylistAsync();
     private Task CatalogPlaylistActionAsync(string action, int index, string? expectedSongId = null, string? memberId = null,
         MusicCatalogCard? entry = null, string? sourcePlaylistId = null)
     {
-        if (entry is null ? !CanCatalogAction : !CanCatalogBrowse || !(action == "save" ? entry.CanOpen : entry.CanPlay) || !ContainsCatalogCard(entry)) return Task.CompletedTask;
+        if (entry is null ? !CanCatalogAction : !CanCatalogBrowse || !entry.CanPlay || !ContainsCatalogCard(entry)) return Task.CompletedTask;
         var parts = entry is null ? location.Route.Split('/', 3) : new[] { "catalog-playlist", entry.Platform, Uri.EscapeDataString(sourcePlaylistId ?? entry.ActionId) };
         if (parts.Length != 3 || index < 0) return Task.CompletedTask;
         var platform = parts[1]; var id = Uri.UnescapeDataString(parts[2]);
@@ -44,12 +44,8 @@ public sealed partial class MusicCapability
         return TrackCatalogAction(async (signal, currentAction) =>
         {
             RequireCatalogContent();
-            long version = 0;
-            if (action is "play" or "next")
-            {
-                var queue = await Call("music.queue.get", new { offset = 0, limit = 1 }, signal);
-                version = MusicDto.Integer(queue, "version");
-            }
+            var queue = await Call("music.queue.get", new { offset = 0, limit = 1 }, signal);
+            long version = MusicDto.Integer(queue, "version");
             var prepare = new Dictionary<string, object?> { ["platform"] = platform, ["id"] = id, ["refresh"] = true };
             if (personal is not null) prepare["personal"] = personal.Value;
             var prepared = await CallSettledReceipt("music.catalog.playlist.prepare", prepare, signal);
@@ -66,39 +62,27 @@ public sealed partial class MusicCapability
                     if (!currentAction()) return;
                     RequireCatalogContent();
                     var parameters = new Dictionary<string, object?> { ["token"] = token, ["action"] = action };
-                    if (action is "play" or "next")
+                    if (action == "play")
                     {
-                        if (action == "play")
-                        {
-                            if (memberId is not null) parameters["memberId"] = memberId;
-                            else if (sourcePlaylistId is null) parameters["index"] = index;
-                        }
-                        parameters["expectedVersion"] = version;
+                        if (memberId is not null) parameters["memberId"] = memberId;
+                        else if (sourcePlaylistId is null) parameters["index"] = index;
                     }
+                    parameters["expectedVersion"] = version;
                     if (expectedSongId is not null) parameters["expectedSongId"] = expectedSongId;
                     try
                     {
-                        if (action is "play" or "next") queueEpoch++;
+                        queueEpoch++;
                         var result = await CallSettledReceipt("music.catalog.playlist.commit", parameters, signal);
-                        if (action is "play" or "next")
+                        MusicDto.Require(MusicDto.Integer(result, "version") > version);
+                        if (action == "next")
                         {
-                            MusicDto.Require(MusicDto.Integer(result, "version") > version);
-                            if (action == "next")
-                            {
-                                ObservePreloadQueueMutation(result);
-                                InvalidateQueueSurface();
-                            }
-                            await ReadQueue(lifetime.Token);
-                            if (action == "play" && currentAction())
-                            {
-                                await StartCurrent(signal);
-                            }
+                            ObservePreloadQueueMutation(result);
+                            InvalidateQueueSurface();
                         }
-                        else
+                        await ReadQueue(lifetime.Token);
+                        if (action == "play" && currentAction())
                         {
-                            _ = PlaylistRow.Read(result.GetProperty("collection"));
-                            await RefreshPlaylists(lifetime.Token);
-                            if (currentAction()) { status = "已保存到本地歌单"; Changed(nameof(Status)); }
+                            await StartCurrent(signal);
                         }
                     }
                     catch (OperationCanceledException)

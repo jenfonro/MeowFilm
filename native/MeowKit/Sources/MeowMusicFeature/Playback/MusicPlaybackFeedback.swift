@@ -3,24 +3,28 @@ import Foundation
 /// Local, monotonic observations. Neither a resolved URL nor a persisted
 /// position is an observation. The product sends only accepted native events.
 public struct MusicPlaybackFeedbackSample: Sendable {
-    public enum Kind: Sendable, Equatable { case playing, progress, paused, ended, failed, stopped }
+    public enum Kind: Sendable, Equatable { case playing, progress, paused, unavailable, ended, failed, stopped }
     public let attemptID: String, occurrenceID: String, resourceID: String
     public let nativeAttemptID: UUID
     public let sequence: UInt64
-    public let observedAt: TimeInterval
+    public let observedAt: TimeInterval, occurredAt: TimeInterval
     public let kind: Kind
     public let position: Double, duration: Double, rate: Double
     public let running: Bool, hasPlayed: Bool, discontinuity: Bool
     public let automatic: Bool?
+    public let reason: MusicPlaybackFeedbackReport.Reason?
     public init(attemptID: String, occurrenceID: String, resourceID: String, nativeAttemptID: UUID,
                 sequence: UInt64, observedAt: TimeInterval, kind: Kind, position: Double,
                 duration: Double, rate: Double = 1, running: Bool, hasPlayed: Bool, discontinuity: Bool = false,
-                automatic: Bool? = nil) {
+                automatic: Bool? = nil, occurredAt: TimeInterval = Date().timeIntervalSince1970,
+                reason: MusicPlaybackFeedbackReport.Reason? = nil) {
         self.attemptID = attemptID; self.occurrenceID = occurrenceID; self.resourceID = resourceID
         self.nativeAttemptID = nativeAttemptID; self.sequence = sequence; self.observedAt = observedAt
         self.kind = kind; self.position = position; self.duration = duration; self.rate = rate
         self.running = running; self.hasPlayed = hasPlayed; self.discontinuity = discontinuity
         self.automatic = automatic
+        self.occurredAt = occurredAt
+        self.reason = reason
     }
 }
 
@@ -28,7 +32,25 @@ public protocol MusicPlaybackFeedbackConsuming: Sendable {
     /// This admission is separate from throttled durable progress. No network
     /// feedback is awaited by the player or by its navigation drain.
     func consumePlaybackFeedback(_ sample: MusicPlaybackFeedbackSample) async
-    func cancelPlaybackFeedback(attemptID: String?) async
+    func finishPlaybackFeedback(attemptID: String?, reason: MusicPlaybackFeedbackReport.Reason) async
+    func rejectPlaybackFeedback(attemptID: String) async
+}
+
+/// Product provenance, not a provider's wire source value. Absent facts stay
+/// absent; in particular an external collection is never a target-platform ID.
+public struct MusicPlaybackFeedbackOrigin: Sendable, Equatable {
+    public enum Kind: String, Sendable { case song, search, playlist, album, daily, fm, similar, recommendations, heartbeat }
+    public let kind: Kind
+    public let platform: MusicPublicBrowsePlatform?
+    public let sourceID: String, searchKeyword: String
+    public let action: MusicHomeAction?
+    public let seedIDs: [String]
+    public init(kind: Kind, platform: MusicPublicBrowsePlatform? = nil, sourceID: String = "",
+                searchKeyword: String = "", action: MusicHomeAction? = nil, seedIDs: [String] = []) {
+        self.kind = kind; self.platform = platform; self.sourceID = sourceID
+        self.searchKeyword = searchKeyword; self.action = action
+        self.seedIDs = seedIDs
+    }
 }
 
 public struct MusicPlaybackFeedbackSetting: Sendable, Equatable {
@@ -78,12 +100,17 @@ public struct MusicPlaybackFeedbackTarget: Sendable, Equatable {
     public let source: String, sourceID: String, algorithm: String
     public let automatic: Bool
     public let recommendationProof: MusicPlaybackRecommendationProof?
+    public let origin: MusicPlaybackFeedbackOrigin?
     public init(platform: MusicAccountPlatform, nativeID: String, mixsongID: String? = nil,
                 source: String = "", sourceID: String = "", algorithm: String = "", automatic: Bool = false,
-                recommendationProof: MusicPlaybackRecommendationProof? = nil) {
+                recommendationProof: MusicPlaybackRecommendationProof? = nil, origin: MusicPlaybackFeedbackOrigin? = nil) {
         self.platform = platform; self.nativeID = nativeID; self.mixsongID = mixsongID
         self.source = source; self.sourceID = sourceID; self.algorithm = algorithm; self.automatic = automatic
         self.recommendationProof = recommendationProof
+        self.origin = origin
+    }
+    public func isSameRecording(as other: Self) -> Bool {
+        platform == other.platform && nativeID == other.nativeID && mixsongID == other.mixsongID
     }
 }
 public struct MusicPlaybackFeedbackReport: Sendable, Equatable {
@@ -93,16 +120,20 @@ public struct MusicPlaybackFeedbackReport: Sendable, Equatable {
     public let target: MusicPlaybackFeedbackTarget
     public let event: Event
     public let duration: Double, listened: Double, mediaListened: Double, position: Double, rate: Double
+    /// Original Unix seconds captured by the native event, never dispatch time.
+    public let startedAt: TimeInterval, occurredAt: TimeInterval
     public let reason: Reason?
     public init(instanceID: UUID, target: MusicPlaybackFeedbackTarget, event: Event, duration: Double,
-                listened: Double, mediaListened: Double, position: Double, rate: Double, reason: Reason? = nil) {
+                listened: Double, mediaListened: Double, position: Double, rate: Double, reason: Reason? = nil,
+                startedAt: TimeInterval, occurredAt: TimeInterval) {
         self.instanceID = instanceID; self.target = target; self.event = event; self.duration = duration
         self.listened = listened; self.mediaListened = mediaListened; self.position = position
         self.rate = rate; self.reason = reason
+        self.startedAt = startedAt; self.occurredAt = occurredAt
     }
 }
 public enum MusicPlaybackFeedbackReceipt: Sendable, Equatable {
-    /// QQ's local registration is not a remote start acknowledgement.
+    /// Local admission (including a durable NetEase event) is not a remote ACK.
     case registered
     case confirmed
     case unconfirmed
@@ -150,14 +181,19 @@ public final class MusicPlaybackFeedbackAuthorization: @unchecked Sendable {
 public final class MusicPlaybackFeedbackLease: @unchecked Sendable {
     public let id: UUID, platform: MusicAccountPlatform, scope: String, generation: UUID
     public let authorization: MusicPlaybackFeedbackAuthorization
+    public let registersLocally: Bool
     private let send: @Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt
     private let release: @Sendable () -> Void
+    private let lock = NSLock()
+    private var released = false
     public init(id: UUID = UUID(), platform: MusicAccountPlatform, scope: String, generation: UUID,
                 authorization: MusicPlaybackFeedbackAuthorization,
+                registersLocally: Bool = false,
                 send: @escaping @Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt,
                 release: @escaping @Sendable () -> Void = {}) {
         self.id = id; self.platform = platform; self.scope = scope; self.generation = generation
         self.authorization = authorization; self.send = send; self.release = release
+        self.registersLocally = registersLocally
     }
     public func report(_ value: MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt {
         guard value.target.platform == platform, !scope.isEmpty else { throw MusicServiceError.targetChanged }
@@ -166,11 +202,30 @@ public final class MusicPlaybackFeedbackLease: @unchecked Sendable {
         try await authorization.check()
         return result
     }
-    public func revoke() { authorization.revoke(); release() }
+    public func revoke() {
+        authorization.revoke()
+        lock.lock()
+        let shouldRelease = !released
+        released = true
+        lock.unlock()
+        if shouldRelease { release() }
+    }
     deinit { revoke() }
 }
 public protocol MusicNativeFeedbackProviding: Sendable {
     /// Never signs in, refreshes credentials, enables a setting or starts media.
     func beginPlaybackFeedback(platform: MusicAccountPlatform,
                                authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackLease
+}
+
+/// Pending events are owned independently of a completed listening lease.
+/// Normal closing preserves safe unsent events; explicit revocation clears them.
+public protocol MusicPlaybackFeedbackClosePreparing: Sendable {
+    /// Stops physical dispatch while local terminal facts are still accepted.
+    func stopPlaybackFeedbackDispatchForClose()
+}
+public protocol MusicNativeFeedbackLifecycleProviding: MusicPlaybackFeedbackClosePreparing {
+    func configurePlaybackFeedback(_ settings: MusicPlaybackFeedbackSettings) async throws
+    func cancelPendingPlaybackFeedback(platform: MusicAccountPlatform?)
+    func preparePlaybackFeedbackForClose() async
 }

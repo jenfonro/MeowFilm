@@ -27,7 +27,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
         return new(rows, count, version is null ? null : Id(version));
     }
     private async Task<Page> Paginate(Func<int, Task<JsonObject>> read,
-        bool tracks, bool owned, Action<JsonObject>? inspect = null)
+        bool tracks, Action<JsonObject>? inspect = null)
     {
         var all = new List<JsonObject>(); var seen = new HashSet<string>(); long? count = null; string? version = null;
         for (int page = 1; ; page = checked(page + 1))
@@ -37,7 +37,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
             Require(version is null || next.Version == version, "SNAPSHOT_CHANGED"); count = next.Count ?? count; version = next.Version ?? version;
             foreach (var row in next.Rows)
             {
-                string id = tracks ? owned ? Id(row["fileid"]) : PlatformSongs.KgHash(row["hash"] ?? row["audio_info"]?["hash"]) : PJ.Scalar(row["type"]) + ":" + Id(row["listid"]);
+                string id = tracks ? Id(row["fileid"]) : PJ.Scalar(row["type"]) + ":" + Id(row["listid"]);
                 Require(seen.Add(id), "PAGINATION_STALLED"); all.Add(row);
             }
             Require(count is null || all.Count <= count, "INCOMPLETE_PAGE");
@@ -49,7 +49,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
     {
         Require(PJ.Cookie(Cookies, "userid") == AccountId, "INVALID_CREDENTIALS");
         var page = await Paginate(p => Kg("/v7/get_all_list", O(("plat", 1)), body: LJ.Merge(Credentials(), O(("total_ver", 979), ("type", 2), ("page", p), ("pagesize", 30)))),
-            false, false);
+            false);
         var entries = page.Rows.Select(r =>
         {
             string list = Id(r["listid"]), name = Name(r["name"]), owner = Id(r["list_create_userid"]); long type = Count(r["type"]), source = Count(r["source"]);
@@ -62,6 +62,12 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
         Require(entries.Count(e => e.Favorite) <= 1, "FAVORITES_UNCONFIRMED"); return (entries, page.Version);
     }
     private static string DirectorySignature((List<Entry> Entries, string? Version) d) => System.Text.Json.JsonSerializer.Serialize(new { d.Entries, d.Version });
+    private static List<SyncSubscription> Subscriptions(IEnumerable<Entry> entries) => entries.Where(entry => entry.Type == 1 && entry.Source != 2)
+        .Select(entry =>
+        {
+            _ = MusicLibraryOwner.NetworkPlaylistId("kg", entry.GlobalId);
+            return new SyncSubscription(entry.GlobalId, entry.Name, "", entry.Count, O(("listId", entry.ListId)));
+        }).ToList();
     private async Task<SyncRemote> Scan(Entry entry)
     {
         void Identity(JsonObject response)
@@ -77,23 +83,14 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
             if (info["global_collection_id"] is not null && entry.GlobalId.Length > 0)
                 Require(PJ.Scalar(info["global_collection_id"]) == entry.GlobalId, "IDENTITY_MISMATCH");
         }
-        Page page;
-        if (entry.Type == 0)
-            page = await Paginate(p => Kg("/v4/get_list_all_file_v3", new(), body: LJ.Merge(Credentials(), O(("listid", entry.ListId), ("type", 0),
+        var page = await Paginate(p => Kg("/v4/get_list_all_file_v3", new(), body: LJ.Merge(Credentials(), O(("listid", entry.ListId), ("type", 0),
                 ("page", p), ("pagesize", 30), ("area_code", 1), ("allplatform", 1), ("show_cover", 1)))),
-                true, true, Identity);
-        else
-        {
-            Require(System.Text.RegularExpressions.Regex.IsMatch(entry.GlobalId, "^[A-Za-z0-9_-]{1,200}$") && !entry.GlobalId.StartsWith("id_", StringComparison.Ordinal), "IDENTITY_MISMATCH");
-            page = await Paginate(p => Kg("/pubsongs/v2/get_other_list_file_nofilt", O(("area_code", 1), ("begin_idx", (p - 1L) * 30), ("plat", 1),
-                ("type", 1), ("mode", 1), ("personal_switch", 1), ("extend_fields", "abtags,hot_cmt,popularization"), ("pagesize", 30), ("global_collection_id", entry.GlobalId)), null),
-                true, false, Identity);
-        }
+                true, Identity);
         Require(page.Rows.Count == entry.Count); Require(entry.Version is null || page.Version is null || entry.Version == page.Version, "SNAPSHOT_CHANGED");
         var members = page.Rows.OrderBy(r => r["sort"] is null ? long.MaxValue : Count(r["sort"])).Select(r =>
         {
             var song = PlatformSongs.Kg(r); string hash = NativeMusicSong.NativeId(song);
-            return new SyncMember(hash, entry.Type == 0 ? Id(r["fileid"]) : hash, song, r["sort"] is null ? null : PJ.Scalar(r["sort"]));
+            return new SyncMember(hash, Id(r["fileid"]), song, r["sort"] is null ? null : PJ.Scalar(r["sort"]));
         }).ToArray();
         return new(entry.Id, entry.Name, entry.Favorite ? "favorites" : "playlist", entry.Writable, entry.Owner, members,
             O(("listId", entry.ListId), ("type", entry.Type), ("version", page.Version ?? entry.Version), ("special", entry.Special), ("globalId", entry.GlobalId)));
@@ -104,19 +101,58 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
     {
         var before = await Directory(); if (kinds.Contains("favorites")) Require(before.Entries.Count(e => e.Favorite) == 1, "FAVORITES_UNCONFIRMED");
         var result = new List<SyncRemote>();
-        var selected = before.Entries.Where(e => e.Source != 2 &&
+        var selected = before.Entries.Where(e => e.Writable && e.Owner == AccountId &&
             kinds.Contains(e.Favorite ? "favorites" : "playlist")).ToArray();
         foreach (var entry in selected) result.Add(await ReadEntry(entry));
-        Require(DirectorySignature(before) == DirectorySignature(await Directory()), "SNAPSHOT_CHANGED"); return new(AccountId, result);
+        Require(DirectorySignature(before) == DirectorySignature(await Directory()), "SNAPSHOT_CHANGED");
+        return new(AccountId, result, kinds.Contains("playlist") ? Subscriptions(before.Entries) : []);
     }
     internal override async Task<SyncRemote?> ReadCollectionAsync(string id)
     {
-        var before = await Directory(); var entry = before.Entries.FirstOrDefault(e => e.Id == id);
+        var before = await Directory(); var entry = before.Entries.FirstOrDefault(e => e.Id == id && e.Writable && e.Owner == AccountId);
         var result = entry is null ? null : await ReadEntry(entry);
         Require(DirectorySignature(before) == DirectorySignature(await Directory()), "SNAPSHOT_CHANGED"); return result;
     }
+    internal override async Task<IReadOnlyList<SyncSubscription>> ReadSubscriptionsAsync()
+    {
+        var before = await Directory(); var subscriptions = Subscriptions(before.Entries);
+        Require(DirectorySignature(before) == DirectorySignature(await Directory()), "SNAPSHOT_CHANGED"); return subscriptions;
+    }
+    internal override async Task<SyncSubscription> SubscriptionTargetAsync(string id, string name, string cover, long count)
+    {
+        _ = MusicLibraryOwner.NetworkPlaylistId("kg", id);
+        var response = await Kg("/v3/get_list_info", new(), "pubsongs.kugou.com",
+            LJ.Merge(Credentials(), O(("data", new JsonArray(O(("global_collection_id", id)))))));
+        var rows = Rows(response["data"]);
+        Require(rows.Count == 1 && PJ.Scalar(rows[0]["global_collection_id"]) == id &&
+            PJ.Scalar(rows[0]["status"]) == "1", "SUBSCRIPTION_ID_UNCONFIRMED");
+        string creator = Id(rows[0]["list_create_userid"]), list = Id(rows[0]["list_create_listid"]);
+        Require(creator != AccountId, "READ_ONLY");
+        return new(id, Name(rows[0]["name"]), NativeMusicSong.PublicUrl(rows[0]["pic"]), Count(rows[0]["count"]),
+            O(("creatorId", creator), ("creatorListId", list)));
+    }
+    internal override async Task SubscribeAsync(SyncSubscription target)
+    {
+        _ = MusicLibraryOwner.NetworkPlaylistId("kg", target.Id);
+        string creator = Id(target.Locator["creatorId"]), list = Id(target.Locator["creatorListId"]);
+        Require(creator != AccountId, "READ_ONLY");
+        var body = LJ.Merge(Credentials(), O(("total_ver", 0), ("name", target.Name), ("type", 1), ("source", 1), ("is_pri", 0),
+            ("list_create_userid", creator), ("list_create_listid", list), ("list_create_gid", target.Id), ("from_shupinmv", 0)));
+        _ = await Kg("/cloudlist.service/v5/add_list", new(), null, body);
+    }
+    internal override async Task UnsubscribeAsync(SyncSubscription subscription)
+    {
+        CheckWriteCapability("unsubscribe");
+        _ = MusicLibraryOwner.NetworkPlaylistId("kg", subscription.Id);
+        // This is the current account's type=1 subscription list, never the creator's source list.
+        string list = Id(subscription.Locator["listId"]);
+        await Guard();
+        await MusicSyncKgCloud.SendAsync(Session, KgClient, "/v2/delete_list",
+            O(("listid", JsonNode.Parse(list)), ("total_ver", 0), ("type", 1)), cloud!, Token);
+        await Guard();
+    }
     internal override void CheckWriteCapability(string operation)
-    { if (operation is "delete" or "order") Require(cloud is not null, "SYNC_CLOUD_TRANSPORT_REQUIRED"); }
+    { if (operation is "delete" or "order" or "unsubscribe") Require(cloud is not null, "SYNC_CLOUD_TRANSPORT_REQUIRED"); }
     internal override async Task CreateAsync(string name)
     {
         var body = LJ.Merge(Credentials(), O(("total_ver", 0), ("name", name), ("type", 0), ("source", 1), ("is_pri", 1), ("list_create_gid", ""), ("from_shupinmv", 0)));

@@ -121,6 +121,109 @@ final class MusicNativeFMProtocolTests: XCTestCase {
         catch { XCTAssertFalse(binding.authorization.isActive) }
         _ = await f.service.close()
     }
+    func testWrappedFMAlgorithmsSurviveMetadataHydrationWithoutInventingWireSource() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let binding = try await f.service.nativeHomeBinding()
+        await f.http.replies("/eapi/v1/radio/get", [try MusicNeteaseFixture.response(["code": 200, "data": [
+            ["songInfo": ["id": 101], "alg": "outer-101"],
+            ["songInfo": MusicNeteaseFixture.song(102), "alg": "outer-102"]
+        ]])])
+        await f.http.replies("/weapi/v3/song/detail", [try MusicNeteaseFixture.response([
+            "code": 200, "songs": [MusicNeteaseFixture.song(101)]
+        ])])
+        let batch = try await f.service.nativeFM(fm, preview: false, binding: binding)
+        let rows = try batch.tracks.map { try MusicQQWire.decode($0.data) }
+        let origins = try rows.map { try MusicQQWire.object($0["_recommendation"]) }
+        XCTAssertEqual(origins.compactMap { $0["alg"] as? String }, ["outer-101", "outer-102"])
+        XCTAssertTrue(origins.allSatisfy { $0["source"] as? String == "fm" && $0["feedbackSource"] as? String == "userfm" })
+        XCTAssertTrue(rows.allSatisfy { ($0["name"] as? String)?.isEmpty == false })
+        _ = await f.service.close()
+    }
+
+    func testRuleFMOmitsUnprovenDefaultAndPreservesExplicitPerRowSource() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let binding = try await f.service.nativeHomeBinding()
+        await f.http.replies("/eapi/tag/tab/fm/recommends", [try MusicNeteaseFixture.response(["code": 200, "data": [
+            ["songInfo": MusicNeteaseFixture.song(101)],
+            ["songInfo": ["id": 102], "source": "rule-source", "sourceId": 502, "alg": "rule-alg"]
+        ]])])
+        var metadata = MusicNeteaseFixture.song(102)
+        metadata["source"] = "metadata-ignored"; metadata["sourceId"] = "metadata-ignored"; metadata["alg"] = "metadata-ignored"
+        await f.http.replies("/weapi/v3/song/detail", [try MusicNeteaseFixture.response([
+            "code": 200, "songs": [metadata]
+        ])])
+        let result = try await f.service.nativeFM(.ruleFM(ruleID: "40000", tabTagID: "", sourceName: "合成频道"),
+                                                 preview: false, binding: binding)
+        let rows = try result.tracks.map { try MusicQQWire.decode($0.data) }
+        let origins = try rows.map { try MusicQQWire.object($0["_recommendation"]) }
+        XCTAssertEqual(origins.compactMap { $0["songId"] as? String }, ["101", "102"])
+        XCTAssertEqual(origins.compactMap { $0["feedbackSource"] as? String }, ["", "rule-source"])
+        XCTAssertEqual(origins.compactMap { $0["feedbackSourceId"] as? String }, ["", "502"])
+        XCTAssertEqual(origins.compactMap { $0["alg"] as? String }, ["", "rule-alg"])
+        XCTAssertTrue(origins.allSatisfy { $0["source"] as? String == "fm" && $0["sourceId"] as? String == "" })
+        XCTAssertTrue(rows.allSatisfy { ($0["name"] as? String)?.isEmpty == false })
+        _ = await f.service.close()
+    }
+
+    func testDailyStyleAlgorithmCannotReflectCredentialsIntoQueuePayload() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let lease = try await f.service.beginAccountQueue(platform: .netease)
+        await f.http.replies("/xeapi/homepage/category/daily/song/list", [try MusicNeteaseFixture.response([
+            "code": 200, "data": ["dailySongs": [["songInfo": MusicNeteaseFixture.song(), "alg": "synthetic-user-42"]]]
+        ])])
+        do {
+            _ = try await f.service.homeActionPage(lease, action: .daily(branch: .style), cursor: nil)
+            XCTFail("reflected credential cannot become playback provenance")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+        _ = await f.service.close()
+    }
+
+    func testActualPerRowSourcesSurviveFMPreviewAndMetadataHydrationWithoutChangingDefaults() async throws {
+        for preview in [true, false] {
+            let f = try MusicNeteaseNativeFixture(); try await f.enable()
+            let binding = try await f.service.nativeHomeBinding()
+            var nested = MusicNeteaseFixture.song(102)
+            nested["source"] = "song-source"; nested["sourceId"] = 502; nested["alg"] = "song-alg"
+            await f.http.replies("/eapi/v1/radio/get", [try MusicNeteaseFixture.response(["code": 200, "data": [
+                ["songInfo": ["id": 101, "source": "nested-ignored", "sourceId": "nested-ignored"],
+                 "source": "row-source", "sourceId": "row-id", "alg": "row-alg"],
+                ["song": nested], ["songInfo": MusicNeteaseFixture.song(103)]
+            ]])])
+            var metadata = MusicNeteaseFixture.song(101)
+            metadata["source"] = "metadata-ignored"; metadata["sourceId"] = "metadata-ignored"; metadata["alg"] = "metadata-ignored"
+            await f.http.replies("/weapi/v3/song/detail", [try MusicNeteaseFixture.response([
+                "code": 200, "songs": [metadata]
+            ])])
+            let result = try await f.service.nativeFM(.fm(mode: .familiar, submode: "", entry: nil),
+                                                     preview: preview, binding: binding)
+            let rows = try result.tracks.map { try MusicQQWire.decode($0.data) }
+            let origins = try rows.map { try MusicQQWire.object($0["_recommendation"]) }
+            XCTAssertEqual(origins.compactMap { $0["feedbackSource"] as? String }, ["row-source", "song-source", "userfm"])
+            XCTAssertEqual(origins.compactMap { $0["feedbackSourceId"] as? String }, ["row-id", "502", ""])
+            XCTAssertEqual(origins.compactMap { $0["alg"] as? String }, ["row-alg", "song-alg", ""])
+            XCTAssertTrue(origins.allSatisfy { $0["source"] as? String == "fm" && $0["sourceId"] as? String == "" })
+            XCTAssertTrue(rows.allSatisfy { ($0["name"] as? String)?.isEmpty == false })
+            _ = await f.service.close()
+        }
+    }
+
+    func testDailyStyleSourcesCannotReflectCredentialsIntoPublicQueuePayload() async throws {
+        for field in ["source", "sourceId"] {
+            let f = try MusicNeteaseNativeFixture(); try await f.enable()
+            let lease = try await f.service.beginAccountQueue(platform: .netease)
+            var raw: [String: Any] = ["songInfo": MusicNeteaseFixture.song()]
+            raw[field] = "synthetic-user-42"
+            await f.http.replies("/xeapi/homepage/category/daily/song/list", [try MusicNeteaseFixture.response([
+                "code": 200, "data": ["dailySongs": [raw]]
+            ])])
+            do {
+                _ = try await f.service.homeActionPage(lease, action: .daily(branch: .style), cursor: nil)
+                XCTFail("Reflected credential in \(field) cannot become public playback provenance")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+            _ = await f.service.close()
+        }
+    }
+
     func testFMCoverRejectsUntrustedURLAndReflectedCredentials() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let binding = try await f.service.nativeHomeBinding()

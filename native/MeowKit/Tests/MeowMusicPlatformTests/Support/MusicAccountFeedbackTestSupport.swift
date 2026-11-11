@@ -17,7 +17,8 @@ final class MusicAccountFeedbackGate: @unchecked Sendable {
     func release() async { await gate.release() }
 }
 
-actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider {
+actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider, MusicNeteasePlaybackLogUploading {
+    enum UploadOutcome: Sendable { case confirmed, notSent, unknown, badACK }
     struct Counts: Equatable, Sendable {
         var verifies = 0, refreshes = 0, logins = 0, polls = 0
     }
@@ -28,6 +29,25 @@ actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider {
     private var transition: (String, MusicAccountFeedbackGate)?
     private var failure: MusicPlaybackFeedbackReport.Event?
     private var ambiguous: MusicPlaybackFeedbackReport.Event?
+    private var uploadOutcome: UploadOutcome = .confirmed
+    private var uploadRecords: [Data] = []
+    private var qrPlatform: MusicAccountPlatform = .qq
+    func setQRPlatform(_ platform: MusicAccountPlatform) { qrPlatform = platform }
+    func uploads() -> [Data] { uploadRecords }
+    func setUploadOutcome(_ value: UploadOutcome) { uploadOutcome = value }
+    func uploadPlaybackLog(_ records: Data, credential: AccountCredential,
+                           authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
+        try await authorization.check()
+        uploadRecords.append(records)
+        let outcome = uploadOutcome
+        if let gate = feedbackGate { feedbackGate = nil; await gate.wait() }
+        switch outcome {
+        case .confirmed: return .confirmed
+        case .notSent: throw MusicAccountFeedbackNotSent.connectionUnavailable
+        case .unknown: throw MusicServiceError.timeout
+        case .badACK: return .unconfirmed
+        }
+    }
     func counts() -> Counts { countsValue }
     func received() -> [MusicPlaybackFeedbackReport] { reports }
     func credentials() -> [AccountCredential] { inputs }
@@ -63,7 +83,7 @@ actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider {
     }
     func createQR(id: UUID) async throws -> MusicLoginChallenge {
         countsValue.logins += 1; await wait("login")
-        return .init(id: id, platform: .qq, image: Data([0]), expiresAt: .distantFuture)
+        return .init(id: id, platform: qrPlatform, image: Data([0]), expiresAt: .distantFuture)
     }
     func pollQR(id: UUID) -> MusicQQLoginResult {
         countsValue.polls += 1; return .init(progress: .waiting, verified: nil)
@@ -100,6 +120,12 @@ struct MusicAccountFeedbackOwnerFixture {
 }
 
 enum MusicAccountFeedbackFixture {
+    static func uploadFilename(_ request: MusicAccountHTTPRequest) throws -> String {
+        let body = String(decoding: request.body ?? Data(), as: UTF8.self)
+        guard let range = body.range(of: "filename=\""),
+              let end = body[range.upperBound...].firstIndex(of: "\"") else { throw MusicServiceError.invalidRequest }
+        return String(body[range.upperBound..<end])
+    }
     static func target(_ platform: MusicAccountPlatform) -> MusicPlaybackFeedbackTarget {
         switch platform {
         case .qq: return .init(platform: .qq, nativeID: MusicAccountFixture.mid)
@@ -111,7 +137,8 @@ enum MusicAccountFeedbackFixture {
                        instance: UUID, listened: Double = 1.25) -> MusicPlaybackFeedbackReport {
         .init(instanceID: instance, target: target(platform), event: event, duration: 180,
               listened: event == .start ? 0 : listened, mediaListened: event == .start ? 0 : listened,
-              position: event == .start ? 0 : listened, rate: 1, reason: event == .start ? nil : .ui)
+              position: event == .start ? 0 : listened, rate: 1, reason: event == .start ? nil : .ui,
+              startedAt: 1_800_000_000, occurredAt: event == .start ? 1_800_000_000 : 1_800_000_000 + listened)
     }
     static func scope(_ identity: AccountIdentity) -> String {
         identity.source.installationID.uuidString.lowercased() + ":" + identity.source.siteKey + ":" +

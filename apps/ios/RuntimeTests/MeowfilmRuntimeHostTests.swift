@@ -1,6 +1,8 @@
 import XCTest
 import UIKit
 import Combine
+import MeowContracts
+@testable import MeowPlayback
 import MeowMusicFeature
 import MeowMusicNativeService
 import MeowFilmFeature
@@ -91,7 +93,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["assemblyProfile"] as? String, "common-native")
         XCTAssertEqual(manifest["transport"] as? String, "runtime.http.v1")
-        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film"])
+        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"])
         let files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
         XCTAssertFalse(files.contains { ($0["path"] as? String)?.lowercased().hasSuffix(".wasm") == true })
         let frameworks = try XCTUnwrap(Bundle.main.privateFrameworksURL)
@@ -117,11 +119,16 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let resources = try await hostResources()
         let service = resources.musicScripts
         let connection = try await resources.scriptSession.connection()
+        try await connection.validateAppModules()
         let description = try await connection.describe()
         guard case .object(let fields) = description, case .array(let modules)? = fields["modules"] else {
             return XCTFail("Missing runtime module description")
         }
         XCTAssertEqual(fields["protocol"], .string("runtime.http.v1"))
+        XCTAssertEqual(modules.compactMap { value -> String? in
+            guard case .object(let module) = value, case .string(let id)? = module["id"] else { return nil }
+            return id
+        }, ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"])
         XCTAssertTrue(modules.contains {
             guard case .object(let module) = $0 else { return false }
             return module["id"] == .string("music") && module["version"] == .string("0.8.0")
@@ -707,6 +714,188 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
 
     private func startupDescendants(_ view: UIView) -> [UIView] {
         [view] + view.subviews.flatMap(startupDescendants)
+    }
+}
+
+/// Exercises the real Assembly shutdown entry with only synthetic local media
+/// and a feedback peer deliberately held until after product teardown.
+@MainActor
+final class MeowfilmMusicShutdownHostTests: XCTestCase {
+    func testAssemblyReleaseClosesPublishedModelWithoutExplicitShutdown() async throws {
+        let document = MusicStartupDocument(failure: nil)
+        let accounts = MusicShutdownAccounts(), player = MusicShutdownPlayer(), network = MusicStartupNoNetwork()
+        let service = NativeMusicService(document: document, accounts: accounts, qq: accounts, transport: network)
+        var assembly: MeowfilmAssembly? = MeowfilmAssembly()
+        await assembly?.prepareMusic(service, prepareAccounts: {}, makeModel: {
+            MusicViewModel(service: service, player: player)
+        })
+        let model = try XCTUnwrap(assembly?.music)
+        weak var released = assembly
+        assembly = nil
+        XCTAssertNil(released, "The published model's teardown must not retain its Assembly")
+        let closed = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { model.isClosed }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [closed], timeout: 3)
+        await service.close()
+        let calls = await network.calls; XCTAssertEqual(calls, 0)
+    }
+
+    func testShutdownStopsAndDrainsNativeFactsBeforeRevokingAccessWithoutWaitingForACK() async throws {
+        let assembly = MeowfilmAssembly(), document = MusicStartupDocument(failure: nil)
+        let accounts = MusicShutdownAccounts(), player = MusicShutdownPlayer(), network = MusicStartupNoNetwork()
+        let service = NativeMusicService(document: document, accounts: accounts, qq: accounts,
+            transport: network, monotonicClock: { 0 })
+        addTeardownBlock {
+            await accounts.releaseStart()
+            await MainActor.run { assembly.shutdown() }
+            await assembly.waitForShutdown()
+        }
+        await assembly.prepareMusic(service, prepareAccounts: {}, makeModel: {
+            MusicViewModel(service: service, player: player)
+        })
+        let model = try XCTUnwrap(assembly.music)
+        player.onEvent = { [weak model] in model?.onPlaybackEvent($0) }
+        _ = try await service.updateSettings(.init(ifRevision: 0, lyricsEnabled: false, requestQuality: "128k"))
+        _ = try await service.setPlaybackFeedback(platform: .qq, enabled: true, expectedRevision: 1)
+        let page = try await service.search(platform: "tx", query: "SyntheticMID", page: 1, limit: 30)
+        _ = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
+        await model.load()
+        await model.switchQuality("128k")
+        await model.flushPlaybackFacts()
+        await fulfillment(of: [accounts.startDispatched], timeout: 3)
+        let active = await accounts.activeCount(); XCTAssertEqual(active, 1)
+        let occurrence = try XCTUnwrap(model.activeOccurrenceID)
+        var stopKeptOwner = false
+        player.onStop = { [weak model] in
+            stopKeptOwner = model?.isAvailable == true && model?.isClosed == false &&
+                model?.activeOccurrenceID == occurrence
+        }
+        await accounts.observeClose { try? await service.state() }
+        player.position = 7
+        assembly.shutdown()
+        XCTAssertEqual(player.stops, 1)
+        XCTAssertTrue(stopKeptOwner, "Native stop must precede setAvailable(false) or candidate retirement")
+        XCTAssertFalse(model.canNavigate)
+        assembly.shutdown()
+        XCTAssertEqual(player.stops, 1)
+        let ended = expectation(description: "Actual Assembly shutdown completes while feedback ACK is held")
+        let closing = Task { await assembly.waitForShutdown(); ended.fulfill() }
+        await fulfillment(of: [ended], timeout: 3)
+        let settledBeforeACK = model.isClosed
+        let drained = await accounts.stateAtClose()
+        XCTAssertEqual(drained?.currentId, occurrence)
+        XCTAssertEqual(drained?.position, 7, "The final native fact must drain before access revocation")
+        let data = try XCTUnwrap(document.read())
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let records = try XCTUnwrap(root["records"] as? [String: Any])
+        let playback = try XCTUnwrap(records["[\"meowfilm\",\"music\",1,\"device\",\"playback\"]"] as? [String: Any])
+        let position = try XCTUnwrap(playback["position"] as? [String: Any])
+        XCTAssertEqual(position["occurrenceId"] as? String, occurrence)
+        XCTAssertEqual(position["seconds"] as? Double, 0, "The existing queue contract does not restore elapsed media time")
+        XCTAssertTrue(settledBeforeACK)
+        let revoked = await accounts.activeCount(); XCTAssertEqual(revoked, 0)
+        do { _ = try await service.state(); XCTFail("Product access must close after the local drain") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
+        await accounts.releaseStart(); await closing.value
+        let reports = await accounts.recorded()
+        XCTAssertEqual(reports.map(\.event), [.start], "A receipt arriving after access revocation cannot send an end")
+        XCTAssertNil(assembly.shutdownError)
+        await model.close()
+        XCTAssertEqual(player.stops, 1)
+        let calls = await network.calls; XCTAssertEqual(calls, 0)
+    }
+}
+
+@MainActor
+private final class MusicShutdownPlayer: MusicPlaybackHandoffDriving {
+    var onEvent: ((PlaybackEvent) -> Void)?
+    var onStop: (() -> Void)?
+    var position = 0.0
+    var stops = 0
+    func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
+        let native = MusicPlayerAttempt(id: UUID(), resourceID: resource.id)
+        onEvent?(.init(attempt: .init(id: native.id, owner: "music", resourceID: resource.id), kind: .played,
+            snapshot: .init(owner: "music", resourceID: resource.id, phase: .playing, position: position, duration: 180),
+            wantsPlayback: true, observedAt: position, occurredAt: 1000 + position))
+        return native
+    }
+    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
+    func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback {
+        .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
+    }
+    func stop(_ attempt: MusicPlayerAttempt) {
+        stops += 1; onStop?()
+        onEvent?(.init(attempt: .init(id: attempt.id, owner: "music", resourceID: attempt.resourceID), kind: .stopped,
+            snapshot: .init(owner: "music", resourceID: attempt.resourceID, phase: .idle, position: position, duration: 180),
+            wantsPlayback: false, observedAt: position, occurredAt: 1000 + position))
+    }
+    func pause(_ attempt: MusicPlayerAttempt) {}
+    func resume(_ attempt: MusicPlayerAttempt) {}
+    func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { true }
+}
+
+private actor MusicShutdownAccounts: MusicNativeAccountProviding, MusicNativeFeedbackProviding,
+    MusicNativeFeedbackLifecycleProviding, MusicPublicQQProviding {
+    nonisolated let startDispatched = XCTestExpectation(description: "Synthetic feedback start reached its peer")
+    private var receipt: CheckedContinuation<Void, Never>?
+    private var leases: [MusicPlaybackFeedbackLease] = []
+    private var reports: [MusicPlaybackFeedbackReport] = []
+    private var closeObservation: (@Sendable () async -> MusicPlaybackState?)?
+    private var closedState: MusicPlaybackState?
+    func activeCount() -> Int { leases.filter { $0.authorization.isActive }.count }
+    func recorded() -> [MusicPlaybackFeedbackReport] { reports }
+    func releaseStart() { receipt?.resume(); receipt = nil }
+    func observeClose(_ read: @escaping @Sendable () async -> MusicPlaybackState?) { closeObservation = read }
+    func stateAtClose() -> MusicPlaybackState? { closedState }
+    func configurePlaybackFeedback(_ settings: MusicPlaybackFeedbackSettings) {}
+    nonisolated func cancelPendingPlaybackFeedback(platform: MusicAccountPlatform?) {}
+    nonisolated func stopPlaybackFeedbackDispatchForClose() {}
+    func preparePlaybackFeedbackForClose() async {
+        let observation = closeObservation; closeObservation = nil
+        if let observation { closedState = await observation() }
+    }
+    func beginPlaybackFeedback(platform: MusicAccountPlatform,
+                               authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackLease {
+        try await authorization.check()
+        let own = MusicPlaybackFeedbackAuthorization { try await authorization.check() }
+        let lease = MusicPlaybackFeedbackLease(platform: platform, scope: "synthetic-shutdown-account",
+            generation: UUID(), authorization: own, send: { [weak self] value in
+                guard let self else { throw MusicServiceError.closed }
+                return try await self.report(value, authorization: own)
+            })
+        leases.append(lease); return lease
+    }
+    private func report(_ value: MusicPlaybackFeedbackReport,
+                        authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
+        try await authorization.check()
+        reports.append(value)
+        if value.event == .start {
+            await withCheckedContinuation {
+                receipt = $0; startDispatched.fulfill()
+            }
+        }
+        try await authorization.check()
+        return .confirmed
+    }
+    private func page() -> MusicNativeTrackPage {
+        let data = Data(#"{"songmid":"SyntheticMID","name":"Synthetic shutdown","singer":"Fixture","albumName":"Synthetic","duration":180,"types":[{"type":"128k"}]}"#.utf8)
+        return .init(items: [.init(platform: "tx", data: data)])
+    }
+    func search(query: String, page: Int, limit: Int) -> MusicNativeTrackPage { self.page() }
+    func lyrics(mid: String) -> MusicNativeLyrics { .init(text: "") }
+    func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) -> MusicNativeTrackPage { page() }
+    func nativeCollections(platform: MusicAccountPlatform, cursor: String?) -> MusicAccountCollectionPage { .init(items: [], cursor: nil) }
+    func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) -> MusicNativeTrackPage { page() }
+    func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) -> [MusicPlaybackOption] {
+        [.init(installationId: "official:synthetic-shutdown", generation: 1, siteId: "tx", sourceKey: sourceKey,
+            qualities: ["128k"], title: "Synthetic", version: "1", contentHash: String(repeating: "a", count: 64))]
+    }
+    func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) -> MusicNativeAudio {
+        .init(url: URL(string: "https://media.invalid/not-requested")!,
+            delivery: .init(quality: "128k", evidence: .officialResponse, duration: 180))
     }
 }
 

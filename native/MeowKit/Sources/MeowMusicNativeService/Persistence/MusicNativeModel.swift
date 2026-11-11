@@ -29,11 +29,12 @@ enum MusicModel {
               ("revision", .n(0)), ("manualOrder", .bool(false)), ("bindings", .array([])), ("intents", .obj())])
     }
     static var emptyLibrary: MJ {
-        .obj([("version", .n(1)), ("ownerId", .string("device")), ("revision", .n(0)), ("nextId", .n(1)),
+        .obj([("version", .n(2)), ("ownerId", .string("device")), ("revision", .n(0)), ("nextId", .n(1)),
               ("collections", .array([freshCollection("favorites", "我的收藏", "favorites")])),
+              ("networkReferences", .array([])),
               ("songs", .obj()), ("accounts", .obj()), ("status", .obj([("phase", .string("idle")), ("at", .n(0)), ("issues", .array([]))]))])
     }
-    static var library: MJ { .obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(0)), ("library", emptyLibrary)]) }
+    static var library: MJ { .obj([("schema", .n(2)), ("scope", .string("device")), ("revision", .n(0)), ("library", emptyLibrary)]) }
     static var queue: MJ { .obj([("schema", .n(1)), ("entries", .array([])), ("currentId", .null), ("priority", .array([])),
         ("history", .array([])), ("source", .null), ("serial", .n(0)), ("revision", .n(0)), ("failed", .array([]))]) }
     static var playback: MJ { .obj([("schema", .n(1)), ("revision", .n(0)), ("mode", .n(1)), ("qualitySettings", .obj()),

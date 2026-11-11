@@ -75,6 +75,8 @@ public protocol MusicNativeLibrarySyncProviding: Sendable {
     func beginLibrarySync(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession
     func checkLibrarySync(_ session: MusicLibrarySyncSession) async throws
     func readLibrarySync(_ session: MusicLibrarySyncSession, kinds: [MusicLibrarySyncKind]) async throws -> MusicLibrarySyncSnapshot
+    /// Complete subscription directory without reading any playlist members.
+    func readLibrarySubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot
     func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult
     func endLibrarySync(_ session: MusicLibrarySyncSession) async
 }

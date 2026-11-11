@@ -163,6 +163,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private var login: (id: UUID, platform: MusicAccountPlatform, expires: Date, method: MusicAccountLoginMethod)?
     private var checking = Set<UUID>(), lastCreate: [MusicAccountPlatform: Date] = [:]
     private var operations: [UUID: (platform: MusicAccountPlatform, cancel: @Sendable () -> Void)] = [:]
+    var pendingOperationCount: Int { operations.count }
     private var accessTransitions = 0
     private var pendingWrites = 0
     private var dailyStyleWrite: UUID?
@@ -172,6 +173,12 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private var librarySyncBindings: [UUID: MusicAccountSyncBinding] = [:]
     private var accountQueueBindings: [UUID: MusicAccountQueueBinding] = [:]
     private var playbackFeedbackLeases: [UUID: MusicPlaybackFeedbackLease] = [:]
+    private nonisolated let playbackFeedbackOutbox: MusicNeteaseFeedbackOutbox
+    private var playbackFeedbackSetting = MusicPlaybackFeedbackSetting()
+    private var playbackFeedbackSettingsRevision = -1
+    private var playbackFeedbackClosing = false
+    private var feedbackDrain: (id: UUID, task: Task<Void, Never>)?
+    private var feedbackDrainRequested = false
     private var urlCache: MusicNativeAccountURLCache
     private var chorusCache: MusicAccountChorusCache
     private var playbackAuthorizations: [MusicAccountPlatform: MusicQueueAuthorization] = [:]
@@ -318,17 +325,20 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                 cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 clientContexts: NativeMusicClientService? = nil,
-                qqClient: NativeMusicQQPublicService? = nil) {
+                qqClient: NativeMusicQQPublicService? = nil,
+                neteaseTokenProvider: (any MusicNeteaseTokenProviding)? = nil) {
         self.accounts = accounts; self.scopes = scopes; self.now = clock
         self.cacheLifecycle = cacheLifecycle
         self.urlCache = MusicNativeAccountURLCache(store: urlCacheStore)
         self.chorusCache = MusicAccountChorusCache(store: urlCacheStore)
+        self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(store: urlCacheStore)
         let owned = transport == nil ? MusicAccountSMSHTTP() : nil
         self.ownedTransport = owned
         let http = transport ?? owned!
         let clients = clientContexts ?? NativeMusicClientService(clock: clock)
         self.providers = [.qq: QQMusicAccountAdapter(transport: http, now: clock, clientDeviceProvider: qqClient),
-                          .netease: NeteaseMusicAccountAdapter(transport: http, now: clock, clientContexts: clients),
+                          .netease: NeteaseMusicAccountAdapter(transport: http, now: clock, clientContexts: clients,
+                                                              tokenProvider: neteaseTokenProvider),
                           .kugou: KugouMusicAccountAdapter(transport: http, now: clock, clientContexts: clients)]
     }
     // Internal provider injection for deterministic owner/lease contract tests.
@@ -343,6 +353,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         self.cacheLifecycle = cacheLifecycle
         self.urlCache = MusicNativeAccountURLCache(store: urlCacheStore)
         self.chorusCache = MusicAccountChorusCache(store: urlCacheStore)
+        self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(store: urlCacheStore)
     }
     private func configured(_ platform: MusicAccountPlatform) throws -> AccountIdentity {
         guard let identity = scopes[platform], identity.source.siteKey == platform.rawValue,
@@ -373,6 +384,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         return MusicServiceError.sanitized(error)
     }
     private func rotate(_ platform: MusicAccountPlatform, preservingCurrentRequest: Bool = false) {
+        if platform == .netease { playbackFeedbackOutbox.suspend(preserving: false) }
         sessionReads.cancel(excludingCurrent: preservingCurrentRequest) { $0.platform == platform }
         revokeLocalCacheScopes(platform, event: .accountChanged, preservingCurrentRequest: preservingCurrentRequest)
         accountEpochs[platform] = UUID()
@@ -386,6 +398,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         capabilityRequests.cancel(excludingCurrent: preservingCurrentRequest) { $0.platform == platform }
         invalidateNativeHome(platform)
         revokePlaybackFeedback(platform)
+        if platform == .netease { playbackFeedbackOutbox.suspend(preserving: true) }
         revokeLibrarySync(platform)
         revokeAccountQueues(platform)
         credentialUpdates[platform]?.revoke()
@@ -398,6 +411,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         notifyAccountSession(platform)
     }
     private func run<T: Sendable>(_ platform: MusicAccountPlatform, queueAuthorization: MusicQueueAuthorization? = nil,
+                                  timeoutSeconds: UInt64 = 30,
                                   _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         try check()
         let id = UUID(), own = epoch, gate = MusicAccountOperation<T>()
@@ -418,7 +432,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         }
         defer { queueAuthorization?.remove(id) }
         let timeout = Task {
-            do { try await Task.sleep(nanoseconds: 30_000_000_000) }
+            do { try await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000) }
             catch { return }
             gate.finish(.failure(MusicServiceError.timeout)); task.cancel()
         }
@@ -451,8 +465,9 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     }
     private func authenticated<T: Sendable>(_ platform: MusicAccountPlatform, token: AccountSessionToken, own: UUID, revision: Int,
                                             queueAuthorization: MusicQueueAuthorization? = nil,
+                                            timeoutSeconds: UInt64 = 30,
                                             _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        do { return try await run(platform, queueAuthorization: queueAuthorization, operation) }
+        do { return try await run(platform, queueAuthorization: queueAuthorization, timeoutSeconds: timeoutSeconds, operation) }
         catch {
             if safe(error).isAuthenticationFailure, epoch == own, revisions[platform, default: 0] == revision,
                tokens[platform] == token, validated.contains(platform) {
@@ -474,6 +489,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             accessTransitions -= 1
             for platform in scopes.keys { notifyAccountSession(platform) }
         }
+        if accessGeneration > 0 || !value { cancelPendingPlaybackFeedback(platform: nil) }
         accessGeneration = generation; available = value; epoch = UUID()
         audioRequests.cancel()
         capabilityRequests.cancel()
@@ -501,6 +517,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     }
     public func close() async -> MusicAccountCloseReport {
         if !closed {
+            preparePlaybackFeedbackForClose()
             closed = true; available = false; epoch = UUID(); pages.removeAll(); grants.removeAll(); validated.removeAll(); profiles.removeAll()
             audioRequests.cancel()
             capabilityRequests.cancel()
@@ -534,7 +551,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         await drainCacheLifecycle()
         let inFlight = operations.count + restoring.count + localCacheRestoring.count +
             transitions.count + localCacheReads.waiterCount + sessionReads.waiterCount +
-            playbackFeedbackLeases.values.reduce(0) { $0 + $1.authorization.inFlight }
+            playbackFeedbackLeases.values.reduce(0) { $0 + $1.authorization.inFlight } + (feedbackDrain == nil ? 0 : 1)
         return .init(cleanupComplete: inFlight == 0 && pendingWrites == 0,
                      inFlight: inFlight, pendingCredentialWrites: pendingWrites)
     }
@@ -700,6 +717,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         restoring.insert(platform)
         defer {
             restoring.remove(platform)
+            if platform == .netease, validated.contains(platform) { schedulePendingPlaybackFeedback() }
             // A cache observer may have encountered this local restore while
             // it was suspended. Recheck once when it settles, not by polling.
             if aggregateCacheBinding != nil || localCacheBindings[platform] != nil {
@@ -851,6 +869,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                 try check(own)
                 guard login?.id == id else { throw MusicServiceError.staleResult }
                 validated.insert(current.platform); profiles[current.platform] = value.nickname; login = nil
+                if current.platform == .netease { schedulePendingPlaybackFeedback() }
                 notifyAccountSession(current.platform)
                 invalidateNativeHome(current.platform)
                 notifyNativeHome(current.platform)
@@ -1329,6 +1348,7 @@ extension NativeMusicAccountService: MusicAccountsSMSServing, MusicAccountsProfi
             _ = try await accounts.completeLogin(token, credential: value.credential)
             try checkSMS(attemptID, platform: platform, token: token, own: own)
             login = nil; validated.insert(platform); profiles[platform] = value.nickname
+            if platform == .netease { schedulePendingPlaybackFeedback() }
             notifyAccountSession(platform)
             await provider.cancelSMS(attemptID)
             try check(own)
@@ -1383,6 +1403,132 @@ extension NativeMusicAccountService: MusicAccountsSMSServing, MusicAccountsProfi
     }
 }
 
+extension NativeMusicAccountService: MusicNativeFeedbackLifecycleProviding {
+    public func configurePlaybackFeedback(_ settings: MusicPlaybackFeedbackSettings) throws {
+        try check()
+        guard !playbackFeedbackClosing else { throw MusicServiceError.closed }
+        guard settings.revision >= playbackFeedbackSettingsRevision else { throw MusicServiceError.staleRevision }
+        let next = settings.platforms[.netease] ?? .init()
+        guard settings.revision != playbackFeedbackSettingsRevision || next == playbackFeedbackSetting else {
+            throw MusicServiceError.staleRevision
+        }
+        let changed = next != playbackFeedbackSetting
+        try playbackFeedbackOutbox.configure(next, at: now().timeIntervalSince1970)
+        playbackFeedbackSettingsRevision = settings.revision
+        playbackFeedbackSetting = next
+        if changed { schedulePendingPlaybackFeedback() }
+    }
+    public nonisolated func cancelPendingPlaybackFeedback(platform: MusicAccountPlatform?) {
+        if platform == nil || platform == .netease {
+            playbackFeedbackOutbox.suspend(preserving: false, revokingConsent: platform == .netease)
+        }
+    }
+    public nonisolated func stopPlaybackFeedbackDispatchForClose() {
+        playbackFeedbackOutbox.stopDispatching()
+    }
+    public func preparePlaybackFeedbackForClose() {
+        guard !playbackFeedbackClosing else { return }
+        stopPlaybackFeedbackDispatchForClose()
+        playbackFeedbackClosing = true; feedbackDrainRequested = false
+        playbackFeedbackOutbox.suspend(preserving: true, closing: true)
+        // Physical completion still belongs to feedbackDrain/close's report.
+        // Never wait for an uncooperative sender or a remote ACK here.
+        feedbackDrain?.task.cancel()
+    }
+    private func pendingFeedbackScope(_ credential: AccountCredentialUpdateLease,
+                                      provider: any MusicAccountProvider) async throws -> String {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let nativeID = try await provider.nativeID(credential.credential)
+        let identity = try encoder.encode(credential.token.identity)
+        let namespace = Data(SHA256.hash(data: identity + Data(nativeID.utf8))).map { String(format: "%02x", $0) }.joined()
+        // The coordinator's non-secret record UUID survives unchanged cold
+        // verification but not logout/login or a credential-record replacement.
+        return "wy-playback-v1:" + namespace + ":" + credential.revision.cacheScopeID.uuidString.lowercased()
+    }
+    private func registerPendingPlaybackFeedback(_ value: MusicPlaybackFeedbackReport, scope: String,
+                                                setting: MusicPlaybackFeedbackSetting,
+                                                credential: AccountCredentialUpdateLease, own: UUID, revision: Int,
+                                                consent: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
+        try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
+        try await consent.check()
+        try check(own)
+        guard !playbackFeedbackClosing, setting == playbackFeedbackSetting else { throw MusicServiceError.cancelled }
+        let register: () throws -> MusicPlaybackFeedbackReceipt = {
+            try self.playbackFeedbackOutbox.enqueue(value, scope: scope, setting: setting, at: self.now().timeIntervalSince1970)
+        }
+        let result: MusicPlaybackFeedbackReceipt
+        if value.event == .start, let proof = value.target.recommendationProof {
+            result = try proof.authorization.perform(register)
+        } else { result = try register() }
+        schedulePendingPlaybackFeedback()
+        return result
+    }
+    private func schedulePendingPlaybackFeedback() {
+        guard !closed, !playbackFeedbackClosing, available, playbackFeedbackSetting.enabled,
+              tokens[.netease] != nil, validated.contains(.netease),
+              !transitions.contains(.netease), !restoring.contains(.netease) else { return }
+        if feedbackDrain != nil { feedbackDrainRequested = true; return }
+        let id = UUID()
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.drainPendingPlaybackFeedback(id: id)
+        }
+        feedbackDrain = (id, task)
+    }
+    private func drainPendingPlaybackFeedback(id: UUID) async {
+        defer {
+            if feedbackDrain?.id == id {
+                feedbackDrain = nil
+                let requested = feedbackDrainRequested; feedbackDrainRequested = false
+                if requested { schedulePendingPlaybackFeedback() }
+            }
+        }
+        guard let token = tokens[.netease], let provider = providers[.netease] as? any MusicNeteasePlaybackLogUploading else { return }
+        let own = epoch, revision = revisions[.netease, default: 0]
+        do {
+            let credential = try await accounts.credentialUpdateLease(for: token)
+            defer { credential.revoke() }
+            try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
+            let scope = try await pendingFeedbackScope(credential, provider: provider)
+            try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
+            guard !playbackFeedbackClosing else { return }
+            try playbackFeedbackOutbox.activate(scope: scope, at: now().timeIntervalSince1970)
+            let candidates = try playbackFeedbackOutbox.candidates(at: now().timeIntervalSince1970)
+            for candidate in candidates {
+                try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
+                guard let (entry, gate) = try playbackFeedbackOutbox.reserve(candidate) else { continue }
+                let operation = UUID()
+                let authorization = MusicPlaybackFeedbackAuthorization { [weak self] in
+                    try await gate.check()
+                    guard let self else { throw MusicServiceError.closed }
+                    try await self.checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
+                }
+                let worker = Task {
+                    try await authorization.check()
+                    return try await provider.uploadPlaybackLog(entry.records(), credential: credential.credential,
+                        authorization: authorization)
+                }
+                do { try gate.register(operation) { authorization.revoke(); worker.cancel() } }
+                catch { worker.cancel() }
+                defer { gate.remove(operation) }
+                do {
+                    let result = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+                    try await authorization.check()
+                    try playbackFeedbackOutbox.complete(entry, confirmed: result == .confirmed, notSent: false)
+                } catch {
+                    let notSent = error is MusicAccountFeedbackNotSent
+                    try playbackFeedbackOutbox.complete(entry, confirmed: false, notSent: notSent)
+                    if notSent { break } // Retry only on another real trigger.
+                }
+            }
+        } catch { /* Storage, account and feedback failures never block media. */ }
+    }
+    // Deterministic owner tests may await remote work; the product close never does.
+    func flushPendingPlaybackFeedback() async {
+        while let drain = feedbackDrain { await drain.task.value }
+    }
+}
+
 extension NativeMusicAccountService: MusicNativeFeedbackProviding {
     private func revokePlaybackFeedback(_ platform: MusicAccountPlatform? = nil) {
         for lease in playbackFeedbackLeases.values where platform == nil || lease.platform == platform { lease.revoke() }
@@ -1393,6 +1539,7 @@ extension NativeMusicAccountService: MusicNativeFeedbackProviding {
     public func beginPlaybackFeedback(platform: MusicAccountPlatform,
                                       authorization consent: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackLease {
         try check(); try await consent.check()
+        guard !playbackFeedbackClosing else { throw MusicServiceError.closed }
         _ = try configured(platform)
         // Feedback cannot initiate account restore/login/refresh or infer login
         // from an anonymous native ID. A prior verified account is mandatory.
@@ -1411,8 +1558,21 @@ extension NativeMusicAccountService: MusicNativeFeedbackProviding {
             }
             let identity = token.identity
             let scope = identity.source.installationID.uuidString.lowercased() + ":" + identity.source.siteKey + ":" + identity.accountID.uuidString.lowercased()
+            let register: (@Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt)?
+            if platform == .netease {
+                let setting = playbackFeedbackSetting
+                guard setting.enabled else { throw MusicServiceError.cancelled }
+                let pendingScope = try await pendingFeedbackScope(credential, provider: provider)
+                try await checkPlaybackFeedback(platform: platform, lease: credential, epoch: own, revision: revision)
+                try playbackFeedbackOutbox.activate(scope: pendingScope, at: now().timeIntervalSince1970)
+                register = { [weak self] report in
+                    guard let self else { throw MusicServiceError.closed }
+                    return try await self.registerPendingPlaybackFeedback(report, scope: pendingScope,
+                        setting: setting, credential: credential, own: own, revision: revision, consent: consent)
+                }
+            } else { register = nil }
             let value = try MusicAccountFeedbackFactory.make(platform: platform, scope: scope, lease: credential,
-                provider: provider, consent: consent) { [weak self] in
+                provider: provider, consent: consent, register: register) { [weak self] in
                     guard let self else { throw MusicServiceError.closed }
                     try await self.checkPlaybackFeedback(platform: platform, lease: credential, epoch: own, revision: revision)
                 }
@@ -1582,16 +1742,42 @@ extension NativeMusicAccountService: MusicNativeLibrarySyncProviding {
         guard value.accountID == session.accountID else { throw MusicServiceError.targetChanged }
         return value
     }
-    public func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
-        // No automatic refresh or login inside a dispatched write.
+    public func readLibrarySubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
         try await checkLibrarySync(session)
         guard let entry = librarySyncBindings[session.id],
               let provider = providers[session.platform] as? any MusicAccountSyncProvider else { throw MusicServiceError.staleResult }
         let value = try await authenticated(session.platform, token: entry.lease.token, own: entry.epoch, revision: entry.revision) {
-            try await provider.syncWrite(mutation, credential: entry.lease.credential, guard: entry.authorization)
+            try await provider.syncReadSubscriptions(credential: entry.lease.credential, guard: entry.authorization)
         }
         try await checkLibrarySync(session)
+        guard value.accountID == session.accountID, value.collections.isEmpty else { throw MusicServiceError.targetChanged }
         return value
+    }
+    public func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
+        // No automatic refresh or login inside a dispatched write.
+        let dispatch = session.platform == .netease && mutation.action.isSubscription ? MusicAccountSyncDispatch() : nil
+        do {
+            try await checkLibrarySync(session)
+            guard let entry = librarySyncBindings[session.id],
+                  let provider = providers[session.platform] as? any MusicAccountSyncProvider else { throw MusicServiceError.staleResult }
+            let authorization = dispatch.map { MusicAccountSyncAuthorization(parent: entry.authorization, dispatch: $0) }
+                ?? entry.authorization
+            // Leave room for the fresh token's 45s Worker budget, its 60s HTTP
+            // request and the native directory preflight/write. Other calls keep 30s.
+            let timeout: UInt64 = dispatch == nil ? 30 : 120
+            let value = try await authenticated(session.platform, token: entry.lease.token, own: entry.epoch,
+                                                revision: entry.revision, timeoutSeconds: timeout) {
+                try await provider.syncWrite(mutation, credential: entry.lease.credential, guard: authorization)
+            }
+            if case .notDispatched = value { return value }
+            try await checkLibrarySync(session)
+            return value
+        } catch {
+            // run() can finish its logical wait before the adapter returns.
+            // Atomically stop that adapter before issuing a no-send proof.
+            if dispatch?.stopBeforeDispatch() == true { return .notDispatched(safe(error)) }
+            throw error
+        }
     }
     public func endLibrarySync(_ session: MusicLibrarySyncSession) {
         guard librarySyncBindings[session.id]?.session == session else { return }

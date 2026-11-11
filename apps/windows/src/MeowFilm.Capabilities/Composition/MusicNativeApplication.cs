@@ -17,7 +17,7 @@ namespace MeowFilm.Capabilities;
 
 /// <summary>
 /// Complete in-process contract of the one current Windows music application.
-/// The optional runtime executes source scripts only; application capabilities are not optional.
+/// The borrowed runtime executes source scripts and prepares fresh NetEase subscription tokens.
 /// </summary>
 public interface IMusicApplication : IAsyncDisposable,
     IMusicRecommendationSource, IMusicDiscoverySource, IMusicAccountDetailsSource,
@@ -137,9 +137,11 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         scripts = new(library, scriptRuntime);
         lyrics = new(library, new NativeMusicLyrics(sessions, http, clients,
             authenticationFailed: failed => accounts.Revoke(failed)), scripts.ExecuteAsync);
-        librarySync = new(library, accounts, http, clients, http.SendMusicLibrarySyncCloudAsync);
-        Feedback = new(new MusicFeedbackSettingsOwner(store),
-            feedbackFactory?.Invoke(accounts, http) ?? new NativeMusicFeedbackProtocol(accounts, http, clients), accounts);
+        librarySync = new(library, accounts, http, clients, scriptRuntime, http.SendMusicLibrarySyncCloudAsync);
+        var feedbackSettings = new MusicFeedbackSettingsOwner(store);
+        Feedback = new(feedbackSettings,
+            feedbackFactory?.Invoke(accounts, http) ?? new NativeMusicFeedbackProtocol(accounts, http, clients,
+                store: store, settings: feedbackSettings), accounts);
         // Fence recommendation callbacks synchronously before any catalog cleanup.
         accounts.SessionChanged += RecommendationAccountChanged;
         accounts.SessionChanged += nativeCatalog.Invalidate;
@@ -178,6 +180,9 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         // acquisition never replays or automatically clears an unknown write.
         if (clients.NeedsReconciliation) await clients.ReloadAsync(request.Token).ConfigureAwait(false);
         await clients.InitializeAsync(request.Token).ConfigureAwait(false);
+        // This restores local policy/account-bound unsent work, not a remote
+        // startup write. Network drain is owned asynchronously by the adapter.
+        await Feedback.InitializeAsync(request.Token).ConfigureAwait(false);
         await PrepareSongFactsAsync(request.Token).ConfigureAwait(false);
         await librarySync.StartAsync(request.Token).ConfigureAwait(false);
     }

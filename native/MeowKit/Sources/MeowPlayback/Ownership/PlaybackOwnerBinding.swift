@@ -29,8 +29,22 @@ public struct PlaybackEvent {
     /// User intent at this event's identity/time, not inferred from transport
     /// phase (buffering, seek and interruption can pause actual output).
     public let wantsPlayback: Bool
+    public let observedAt: TimeInterval, occurredAt: TimeInterval
+    public let rate: Double
+    public let discontinuity: Bool
     /// Only the controller's sanitized NativePlaybackError / ContractError.
     public let error: Error?
+
+    public init(attempt: PlayAttempt, kind: Kind, snapshot: PlaybackSnapshot,
+                wantsPlayback: Bool, error: Error? = nil,
+                observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime,
+                occurredAt: TimeInterval = Date().timeIntervalSince1970,
+                rate: Double = 1, discontinuity: Bool = false) {
+        self.attempt = attempt; self.kind = kind; self.snapshot = snapshot; self.error = error
+        self.wantsPlayback = wantsPlayback
+        self.observedAt = observedAt; self.occurredAt = occurredAt
+        self.rate = rate; self.discontinuity = discontinuity
+    }
 
     var isExit: Bool { kind == .replaced || kind == .stopped }
 }
@@ -51,10 +65,12 @@ public struct PlaybackNavigationCommands {
     }
 }
 
-/// Explicit system intent, not a toggle inferred again after an asynchronous
-/// domain admission. A handled request must not fall through to raw transport.
+/// Resolve toggle synchronously at owner admission, combining native intent
+/// with any pending domain play. Never toggle after asynchronous admission.
+/// A handled request must not fall through to raw transport.
 public enum PlaybackPlayPauseCommand: Equatable, Sendable {
     case play, pause
+    case toggle(wantsPlayback: Bool)
 }
 
 /// Retain in product assembly or a long-lived domain model, not in a player
@@ -128,6 +144,7 @@ final class PlaybackOwnerRouter {
         var enabled: Bool
         var commands: PlaybackNavigationCommands
         let onPlayPause: (@MainActor (PlayAttempt, PlaybackPlayPauseCommand) -> Bool)?
+        let onOutputUnavailable: (@MainActor () -> Void)?
         let onEvent: @MainActor (PlaybackEvent) -> Void
     }
 
@@ -143,12 +160,16 @@ final class PlaybackOwnerRouter {
     private var isDelivering = false
     var onBindingsChanged: (@MainActor () -> Void)?
     var hasPending: Bool { !pending.isEmpty }
+    var hasOutputSubscribers: Bool {
+        bindings.values.contains { $0.enabled && $0.onOutputUnavailable != nil }
+    }
 
     func bind(
         owner: String,
         enabled: Bool = true,
         commands: PlaybackNavigationCommands = .init(),
         onPlayPause: (@MainActor (PlayAttempt, PlaybackPlayPauseCommand) -> Bool)? = nil,
+        onOutputUnavailable: (@MainActor () -> Void)? = nil,
         onEvent: @escaping @MainActor (PlaybackEvent) -> Void
     ) throws -> PlaybackOwnerLease {
         guard !owner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -156,7 +177,7 @@ final class PlaybackOwnerRouter {
         }
         let id = UUID()
         bindings[owner] = Binding(id: id, enabled: enabled, commands: commands,
-                                 onPlayPause: onPlayPause, onEvent: onEvent)
+                                 onPlayPause: onPlayPause, onOutputUnavailable: onOutputUnavailable, onEvent: onEvent)
         let lease = PlaybackOwnerLease(router: self, owner: owner, id: id)
         onBindingsChanged?()
         return lease
@@ -197,6 +218,20 @@ final class PlaybackOwnerRouter {
     }
 
     func updateContext(_ context: PlaybackCommandContext) { self.context = context }
+
+    /// An environment fact belongs to current subscriptions, not a retired
+    /// attempt. Reentrant clients may revoke another captured recipient.
+    func outputUnavailable() {
+        let recipients = bindings.compactMap { owner, binding in
+            binding.enabled && binding.onOutputUnavailable != nil
+                ? (owner, binding.id, binding.deliveryRevision) : nil
+        }
+        for (owner, id, revision) in recipients {
+            guard let binding = bindings[owner], binding.id == id,
+                  binding.deliveryRevision == revision, binding.enabled else { continue }
+            binding.onOutputUnavailable?()
+        }
+    }
 
     var playPauseRoute: PlaybackPlayPauseRoute? {
         guard context.isActive, let attempt = context.attempt,

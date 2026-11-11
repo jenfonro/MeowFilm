@@ -22,8 +22,6 @@ extension NativeMusicService {
                 (declared.isEmpty || declared.contains(selection.quality)), .sourceUnavailable)
         }
         if seed.cacheRecovery == nil { retireCachedPlaybackRecovery() }
-        playbackFeedback.finishCurrent(reason: .ui)
-        playbackFeedback.invalidate(preservingEnds: true)
         retireAudioCacheAttempt()
         cancelWork("playback"); spent.insert(attemptID)
         attempt = Attempt(id: attemptID, occurrence: seed.occurrenceID, sourceKey: selection.sourceKey,

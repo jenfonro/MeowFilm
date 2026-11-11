@@ -17,9 +17,6 @@ internal sealed record MusicFeedbackRecommendation(MusicRecommendationFeedback V
 
 internal static class MusicFeedbackIdentity
 {
-    internal static string PlaybackMode(MusicFeedbackSelection selection, string fallback) =>
-        selection.Recommendation is { } proof && proof.Value.EntryId == selection.EntryId && proof.IsCurrent()
-            ? proof.Value.Kind switch { "fm" => "playFm", "heartbeat" => "ai", _ => fallback } : fallback;
     internal static MusicFeedbackRecording? Resolve(JsonElement song, string platform,
         MusicFeedbackRecording? pinned = null)
     {
@@ -78,14 +75,22 @@ internal static class MusicFeedbackIdentity
         JsonObject? selectedSong = null;
         try { selectedSong = JsonNode.Parse(selection.Song.GetRawText()) as JsonObject; }
         catch { }
-        bool primaryRecording = selectedSong is not null && Recording(selectedSong, recording.Platform) == recording;
-        if (recording.Platform == "wy" && selection.Recommendation is { } proof && proof.IsCurrent() &&
-            proof.Value.EntryId == selection.EntryId && proof.Value.Platform == "wy" &&
-            primaryRecording)
+        var recommendation = LiveRecommendation(selection, selectedSong);
+        // A second trusted recording on the same platform does not inherit
+        // the per-song recommendation metadata of the selected native ID.
+        if (recommendation is { } originForPlatform && originForPlatform.Platform == recording.Platform &&
+            RecommendedRecording(originForPlatform, selectedSong) != recording.Id)
+            recommendation = null;
+        mode = recommendation?.Kind switch { "fm" => "playFm", "heartbeat" => "ai", _ => mode };
+        JsonElement? context = selection.Context is { ValueKind: JsonValueKind.Object } queued &&
+            Value(queued, "sourceType") is "playlist" or "album" or "daily" or "search" or "search-song" or "song"
+                ? queued.Clone() : null;
+        MusicFeedbackStart Facts(MusicFeedbackStart value) => value with
+        { Context = context, Recommendation = recommendation };
+        if (recording.Platform == "wy" && recommendation is { Platform: "wy" } origin &&
+            RecommendedRecording(origin, selectedSong) == recording.Id)
         {
-            var origin = proof.Value;
-            if (origin.Algorithm.Length <= 2000 && !origin.Algorithm.Any(char.IsControl))
-                algorithm = origin.Algorithm;
+            algorithm = origin.Algorithm;
             if (origin.Kind == "fm")
             {
                 // Rule FM has no verified private-FM reporting attribution.
@@ -96,38 +101,49 @@ internal static class MusicFeedbackIdentity
             { source = "aiMode"; sourceId = origin.SourceId; sourceType = "track"; mode = "ai"; }
             else if (origin.Provider == "queue-recommendations")
             {
-                source = origin.FeedbackSource.Length > 0 ? origin.FeedbackSource : "moreRcmd";
+                if (origin.FeedbackSource.Length > 0) source = origin.FeedbackSource;
                 sourceType = "track";
                 if (origin.Kind == "heartbeat") mode = "ai";
             }
             else if (origin.Kind == "similar") sourceType = "track";
-            return new(instance, recording, duration, position, rate, selection.Automatic,
+            return Facts(new(instance, recording, duration, position, rate, selection.Automatic,
                 source, sourceId, sourceType, algorithm, mode)
-                { IsQueueRecommendation = origin.Provider == "queue-recommendations" };
+                { IsQueueRecommendation = origin.Provider == "queue-recommendations" && origin.FeedbackSource.Length > 0 });
         }
         // Only preserve provenance for the selected exact recording. FM and
         // recommendation modes require their own live controller; old persisted
         // context alone is not proof of a current automatic recommendation.
-        if (recording.Platform == "wy" && selection.Context is { ValueKind: JsonValueKind.Object } context &&
-            Value(context, "sourcePlatform") == "wy")
+        if (recording.Platform == "wy" && context is { } ordinary &&
+            (Value(ordinary, "sourcePlatform") == "wy" ||
+                Value(ordinary, "sourcePlatform") == "" && Value(ordinary, "sourceType") is "search" or "search-song"))
         {
-            string kind = Value(context, "sourceType"), id = Value(context, "sourceId");
-            bool native = primaryRecording;
-            if (kind is "playlist" or "album" && native && Positive(id))
-            { source = kind; sourceId = id; sourceType = kind == "playlist" ? "list" : "album"; }
-            else if (kind == "daily" && native && Value(context, "dailyBranch") is "" or "default")
+            string kind = Value(ordinary, "sourceType"), id = Value(ordinary, "sourceId");
+            if (kind is "playlist" or "album" && Positive(id))
+            { source = kind == "playlist" ? "list" : "album"; sourceId = id; sourceType = source; }
+            else if (kind == "daily" && Value(ordinary, "dailyBranch") is "" or "default")
             { source = "dailySongRecommend"; sourceType = "dailyRecommend"; }
             else if (kind is "search" or "search-song")
             {
-                string keyword = Value(context, "searchKeyword");
+                string keyword = Value(ordinary, "searchKeyword");
                 if (keyword.Length <= 512 && !keyword.Any(c => char.IsControl(c)))
                 { source = "search"; sourceId = keyword; sourceType = "track"; }
             }
             else if (kind == "song") { source = "song"; sourceType = "track"; }
         }
-        return new(instance, recording, duration, position, rate, selection.Automatic,
-            source, sourceId, sourceType, algorithm, mode);
+        return Facts(new(instance, recording, duration, position, rate, selection.Automatic,
+            source, sourceId, sourceType, algorithm, mode));
     }
+
+    private static MusicRecommendationFeedback? LiveRecommendation(MusicFeedbackSelection selection, JsonObject? song)
+    {
+        if (selection.Recommendation is not { } proof || proof.Value.EntryId != selection.EntryId || !proof.IsCurrent()) return null;
+        var origin = proof.Value;
+        string id = RecommendedRecording(origin, song);
+        return id.Length > 0 && Resolve(selection.Song, origin.Platform, new(origin.Platform, id))?.Id == id ? origin : null;
+    }
+    private static string RecommendedRecording(MusicRecommendationFeedback origin, JsonObject? song) =>
+        origin.Metadata is { ValueKind: JsonValueKind.Object } metadata ? Value(metadata, "id") :
+            song is not null ? Recording(song, origin.Platform)?.Id ?? "" : "";
 
     private static string Value(JsonElement value, string key) =>
         value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.String ? item.GetString()! : "";

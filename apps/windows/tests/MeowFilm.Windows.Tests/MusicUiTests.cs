@@ -19,6 +19,7 @@ using MeowFilm.AppHost;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
 
@@ -828,7 +829,7 @@ public static partial class MusicUiTests
             Equal(2, f.Calls.Count("music.queue.playCollection"));
             Equal(1, f.Playback.Opens.Count); True(f.Module.CanPlay, "successful retry restores the current queue");
         });
-        yield return Case("playlist navigation rejects an oversized local total without request expansion", async () =>
+        yield return Case("playlist navigation rejects totals beyond the DTO resource boundary without request expansion", async () =>
         {
             await using var f = await Fixture.Create();
             var before = f.Module.Playlists.ToArray();
@@ -836,7 +837,7 @@ public static partial class MusicUiTests
             f.Calls.TransformNext("music.library.list", reply =>
             {
                 var changed = JsonNode.Parse(reply.GetRawText())!.AsObject();
-                changed["total"] = 10_001;
+                changed["total"] = 100_001;
                 return JsonSerializer.SerializeToElement(changed);
             });
             await f.Module.RefreshAsync();
@@ -1174,8 +1175,9 @@ public static partial class MusicUiTests
         public void Release() => release.TrySetResult();
         public async Task<JsonElement> Hold(JsonElement reply) { Arrived.TrySetResult(); await release.Task; return reply; }
     }
-    private sealed class ObservedApplication(IMusicApplication inner) : MusicApplicationForwarder(inner)
+    private sealed class ObservedApplication(IMusicApplication inner, IMusicPlaybackFeedback? feedback = null) : MusicApplicationForwarder(inner)
     {
+        public override IMusicPlaybackFeedback Feedback => feedback ?? base.Feedback;
         private sealed record Rule(string Method, Func<JsonElement, bool> Match, Func<JsonElement, Task<JsonElement>> Apply, bool Before);
         private readonly List<Rule> rules = [];
         private readonly List<HeldReply> holds = [];
@@ -1271,7 +1273,7 @@ public static partial class MusicUiTests
         public readonly Dialogs Dialogs;
         private Fixture(PlaybackProbe playback, Dialogs dialogs) { Playback = playback; Dialogs = dialogs; }
         public static async Task<Fixture> Create(string? root = null, bool persistent = false, NativePlayback? native = null,
-            IMusicPlayback? output = null, bool withPlaybackCache = false)
+            IMusicPlayback? output = null, bool withPlaybackCache = false, IMusicPlaybackFeedback? feedback = null)
         {
             root ??= NewRoot();
             IDocumentStore store = persistent
@@ -1280,7 +1282,7 @@ public static partial class MusicUiTests
             var application = new MusicNativeApplication(store, runtime, new NoUpstream());
             try
             {
-                var calls = new ObservedApplication(application); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
+                var calls = new ObservedApplication(application, feedback); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
                 module = native is null
                     ? new MusicCapability(calls, store, output ?? playback, withPlaybackCache ?
                         new MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache(Path.Combine(root, "playback-cache"), store) : null, dialogs)

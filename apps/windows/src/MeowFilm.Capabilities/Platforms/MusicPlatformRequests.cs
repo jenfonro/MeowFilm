@@ -14,6 +14,10 @@ internal static class MusicPlatformRequests
     internal static HttpRequestMessage WyWithCookie(string path, JsonObject parameters,
         string? cookieHeader, MusicWyClientContext client, bool weapi = false)
         => Safe(() => PlatformProtocols.WyWithCookie(path, parameters, cookieHeader, client, weapi));
+    internal static HttpRequestMessage WySubscription(string id, bool subscribe, string token,
+        string cookieHeader, MusicWyClientContext client) =>
+        Safe(() => PlatformProtocols.WyWithCookie(subscribe ? "/api/playlist/subscribe" : "/api/playlist/unsubscribe",
+            new() { ["id"] = PJ.Id(JsonValue.Create(id)) }, cookieHeader, client, antiCheatToken: token));
     internal static HttpRequestMessage WyVipSignCard(string cookieHeader, MusicWyClientContext client) =>
         Safe(() => PlatformProtocols.WyVipEapi(
             "/api/vipnewcenter/app/minidesk/music/sign/pc",

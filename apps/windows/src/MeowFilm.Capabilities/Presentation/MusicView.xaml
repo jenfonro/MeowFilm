@@ -211,6 +211,11 @@
          <TextBlock Text="播放全部" Margin="7,0,0,0"/>
         </StackPanel>
        </Button>
+       <Button x:Name="NetworkPlaylistButton" Content="{Binding NetworkPlaylistActionText}"
+               Click="NetworkPlaylist_Click" Margin="10,0,0,0"
+               Visibility="{Binding ShowsNetworkPlaylistAction,Converter={StaticResource Visible}}"
+               IsEnabled="{Binding CanToggleNetworkPlaylist}"
+               AutomationProperties.Name="{Binding NetworkPlaylistActionText}"/>
       </StackPanel>
      </Grid>
     </Grid>

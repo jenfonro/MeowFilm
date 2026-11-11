@@ -11,10 +11,11 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicPlaybackFeedbackTests
+public static partial class MusicPlaybackFeedbackTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in FactCases()) yield return test;
         yield return Case("default-off-and-passive-dispose", async () =>
         {
             var f = new Fixture();
@@ -46,11 +47,12 @@ public static class MusicPlaybackFeedbackTests
             f.Tick(5, 105); f.Controller.Finish("ui"); await f.Drain();
             var end = f.Protocol.Finished.Single(); Check(end.Listened == 15 && end.MediaListened == 15 && end.Reason == "ui");
         });
-        yield return Case("unknown-duration-waits-for-one-real-eligible-sample", async () =>
+        yield return Case("duration-requiring-adapter-waits-for-one-real-eligible-sample", async () =>
         {
-            await using var f = new Fixture(); await f.Enable("wy"); f.Controller.Select(Selection());
+            await using var f = new Fixture(); f.Protocol.NeedsDuration = true;
+            await f.Enable("wy"); f.Controller.Select(Selection());
             f.Controller.Started("entry-1", 0, 0); await f.Drain();
-            foreach (double duration in new[] { 0, double.NaN, double.PositiveInfinity, -1, 86401d })
+            foreach (double duration in new[] { 0, double.NaN, double.PositiveInfinity, -1 })
                 f.Controller.Observe("entry-1", 0, duration, true);
             f.Controller.Observe("entry-1", 201, 200, true);
             await f.Drain(); Check(f.Sessions.Acquires == 0 && f.Protocol.Starts.IsEmpty);
@@ -60,7 +62,7 @@ public static class MusicPlaybackFeedbackTests
             f.Tick(5, 15); f.Controller.Finish(); await f.Drain();
             Check(f.Protocol.Finished.Single().Listened == 5 && f.Protocol.Starts.Single().Position == 10);
         });
-        yield return Case("identity-acceptance-wait-is-not-listening", async () =>
+        yield return Case("start-ack-wait-keeps-admitted-listening", async () =>
         {
             await using var f = new Fixture(); await f.Enable("wy");
             f.Protocol.Arrived = Signal(); f.Protocol.Release = Signal(); f.Play();
@@ -69,7 +71,7 @@ public static class MusicPlaybackFeedbackTests
             f.Protocol.Release.SetResult(); await f.Drain();
             f.Tick(7, 47); f.Controller.Finish(); await f.Drain();
             var end = f.Protocol.Finished.Single();
-            Check(end.Listened == 7 && end.MediaListened == 7 && end.Position == 47);
+            Check(end.Listened == 47 && end.MediaListened == 47 && end.Position == 47);
         });
         yield return Case("invalid-samples-break-the-listening-interval", async () =>
         {
@@ -150,6 +152,16 @@ public static class MusicPlaybackFeedbackTests
             f.Tick(20, 20); f.Sessions.Replace("wy"); f.Controller.AccountChanged("wy");
             await f.Drain(); f.Controller.Finish(); await f.Drain(); Check(f.Protocol.Finished.IsEmpty);
             Check(f.Protocol.StartTokens.Single().IsCancellationRequested);
+        });
+        yield return Case("account-replacement-readmits-only-from-a-new-real-sample", async () =>
+        {
+            await using var f = new Fixture(); await f.Enable("wy"); f.Play(); await f.Drain();
+            f.Tick(20, 20); f.Sessions.Replace("wy"); f.Controller.AccountChanged("wy"); await f.Drain();
+            Check(f.Protocol.Starts.Count == 1 && f.Protocol.StartTokens.Single().IsCancellationRequested);
+            f.Tick(5, 25); await f.Drain();
+            Check(f.Protocol.Starts.Count == 2 && f.Protocol.Starts.Last().Position == 25);
+            f.Tick(3, 28); f.Controller.Finish(); await f.Drain();
+            Check(f.Protocol.Finished.Single().Listened == 3 && f.Protocol.Finished.Single().MediaListened == 3);
         });
         yield return Case("enable-mid-listen-is-prospective-and-draft-has-no-effect", async () =>
         {
@@ -267,7 +279,7 @@ public static class MusicPlaybackFeedbackTests
             f.Protocol.Release.SetResult(); await f.Drain();
             var end = f.Protocol.Finished.Single();
             Check(f.Protocol.Starts.Single().Recording.Id == "123" && end.Position == 10 &&
-                end.Listened == 0 && end.MediaListened == 0);
+                end.Listened == 10 && end.MediaListened == 10);
         });
         yield return Case("upstream-failure-no-repeat-on-timeupdates", async () =>
         {
@@ -290,7 +302,7 @@ public static class MusicPlaybackFeedbackTests
             f.Controller.Select(Selection(context: new { sourcePlatform = "wy", sourceType = "playlist", sourceId = "500" }));
             f.Controller.Started("entry-1", 0, 200); await f.Drain();
             var request = f.Protocol.Starts.Single();
-            Check(request.Source == "playlist" && request.SourceId == "500" && request.SourceType == "list");
+            Check(request.Source == "list" && request.SourceId == "500" && request.SourceType == "list");
             f.Controller.Finish(); await f.Drain();
             f.Controller.Select(Selection(context: new { sourcePlatform = "wy", sourceType = "fm", fm = new { automatic = true } }));
             f.Controller.Started("entry-1", 0, 200); await f.Drain();
@@ -313,7 +325,7 @@ public static class MusicPlaybackFeedbackTests
             ("heartbeat", "heartbeat", "aiMode", "aiMode", "500"),
             ("heartbeat", "queue-recommendations", "queue-heart-source", "queue-heart-source", ""),
             ("queue", "queue-recommendations", "search_song_detail_page_song_rec", "search_song_detail_page_song_rec", ""),
-            ("queue", "queue-recommendations", "", "moreRcmd", "")
+            ("queue", "queue-recommendations", "", "unknown", "")
         })
             yield return Case("live-recommendation-source-" + provider + "-" + source, async () =>
             {
@@ -322,7 +334,8 @@ public static class MusicPlaybackFeedbackTests
                 f.Controller.Started("entry-1", 0, 200); await f.Drain();
                 var start = f.Protocol.Starts.Single();
                 Check(start.Source == expected && start.SourceId == sourceId && start.SourceType == "track" &&
-                    start.Algorithm == "fixture-alg" && start.IsQueueRecommendation == (provider == "queue-recommendations"));
+                    start.Algorithm == "fixture-alg" &&
+                    start.IsQueueRecommendation == (provider == "queue-recommendations" && source.Length > 0));
                 Check(start.Mode == (kind == "heartbeat" ? "ai" : "circulation"));
             });
         yield return Case("recommendation-does-not-grant-feedback-consent", async () =>
@@ -354,21 +367,25 @@ public static class MusicPlaybackFeedbackTests
                 using var http = MusicPlatformHttp.CreateWithHandler(wire);
                 await using var clients = new MusicClientContextFixture(http);
                 var clock = new Clock();
-                var settings = new MusicFeedbackSettingsOwner(new MemoryStore());
+                var store = new NativeFeedbackStore();
+                var settings = new MusicFeedbackSettingsOwner(store);
+                var protocol = new NativeMusicFeedbackProtocol(accounts, http, clients.Owner, clock, store, settings);
                 await using var controller = new MusicFeedbackController(settings,
-                    new NativeMusicFeedbackProtocol(accounts, http, clients.Owner, clock), accounts, clock);
+                    protocol, accounts, clock);
                 await settings.ReadAsync(); await settings.SaveAsync(0, ["wy"]);
                 controller.Select(Selection());
                 controller.Started("entry-1", 0, 0);
-                await controller.DrainAsync(); Check(wire.Paths.IsEmpty);
-                controller.Observe("entry-1", 0, 200, true);
                 await controller.DrainAsync();
                 Check(wire.Paths.Count == 3 && controller.LastError is null);
+                controller.Observe("entry-1", 0, 200, true);
+                await controller.DrainAsync();
+                Check(wire.Paths.Count == 3);
                 clock.Advance(200); controller.Observe("entry-1", 200, 200, true);
                 controller.Finish(reason); await controller.DrainAsync();
                 Check(controller.LastError is null && wire.Paths.SequenceEqual(new[] {
-                    "/weapi/w/nuser/account/get", "/weapi/v3/song/detail", "/eapi/feedback/weblog",
-                    "/weapi/w/nuser/account/get", "/eapi/feedback/weblog" }));
+                    "/weapi/w/nuser/account/get", "/weapi/w/nuser/account/get", "/api/clientlog/encrypt/upload",
+                    "/weapi/w/nuser/account/get", "/api/clientlog/encrypt/upload" }));
+                Check(wire.Filenames.Count == 2 && wire.Filenames.Distinct().Count() == 2);
             });
     }
 
@@ -410,7 +427,8 @@ public static class MusicPlaybackFeedbackTests
         Selection() with
         {
             Recommendation = new(new MusicRecommendationFeedback("session", "batch", entry, "wy", kind, provider,
-                "playlist", "500", "fixture-alg", "", "", true, false, source), () => current)
+                "playlist", "500", "fixture-alg", "", "", true, false, source)
+                { Metadata = JsonSerializer.SerializeToElement(new { id = "123", source = provider, alg = "fixture-alg" }) }, () => current)
         };
 
     private sealed class Clock : TimeProvider
@@ -418,31 +436,43 @@ public static class MusicPlaybackFeedbackTests
         private long ticks;
         public override long TimestampFrequency => 1000;
         public override long GetTimestamp() => Interlocked.Read(ref ticks);
+        public override DateTimeOffset GetUtcNow() => new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero)
+            .AddMilliseconds(Interlocked.Read(ref ticks));
         public void Advance(double seconds) => Interlocked.Add(ref ticks, (long)(seconds * 1000));
     }
     private sealed class Sessions : IMusicPlatformSessionSource
     {
         internal readonly Dictionary<string, MusicPlatformSession> Values = new(StringComparer.Ordinal);
         internal int Acquires;
+        internal TaskCompletionSource? Arrived, Release;
         internal Sessions() { foreach (string p in new[] { "wy", "tx", "kg" }) Replace(p); }
         internal void Replace(string platform) => Values[platform] = new(platform, Guid.NewGuid().ToString("D"), 1, "42", "session=SYNTHETIC");
-        public ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken cancellationToken)
-        { Interlocked.Increment(ref Acquires); return ValueTask.FromResult(Values.GetValueOrDefault(platform)); }
+        public async ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref Acquires);
+            var account = Values.GetValueOrDefault(platform); Arrived?.TrySetResult();
+            if (Release is not null) await Release.Task.WaitAsync(cancellationToken);
+            return account;
+        }
         public bool IsCurrent(MusicPlatformSession session) => ReferenceEquals(Values.GetValueOrDefault(session.Platform), session);
     }
     private sealed class Protocol : IMusicFeedbackProtocol
     {
         internal readonly ConcurrentQueue<MusicFeedbackStart> Starts = new();
         internal readonly ConcurrentQueue<MusicFeedbackEnd> Finished = new();
+        internal readonly ConcurrentQueue<(MusicFeedbackRecording Recording, MusicFeedbackEnd End)> Ends = new();
         internal readonly ConcurrentQueue<CancellationToken> StartTokens = new();
         internal int DisposedSessions, Disposals;
         internal bool Fail;
+        internal bool NeedsDuration = true;
+        internal readonly HashSet<string> FailPlatforms = [];
         internal TaskCompletionSource? Arrived, Release;
+        public bool RequiresDuration(string platform) => NeedsDuration;
         public async Task<IMusicFeedbackSession> StartAsync(MusicPlatformSession account, MusicFeedbackStart request, CancellationToken token)
         {
             Starts.Enqueue(request); StartTokens.Enqueue(token); Arrived?.TrySetResult();
             if (Release is not null) await Release.Task; // Deliberately late trusted transport.
-            if (Fail) throw new IOException("synthetic failure");
+            if (Fail || FailPlatforms.Contains(request.Recording.Platform)) throw new IOException("synthetic failure");
             return new Session(this, request.Recording);
         }
         public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
@@ -450,13 +480,14 @@ public static class MusicPlaybackFeedbackTests
         {
             public MusicFeedbackRecording Recording => recording;
             public Task FinishAsync(MusicFeedbackEnd end, CancellationToken token)
-            { token.ThrowIfCancellationRequested(); owner.Finished.Enqueue(end); return Task.CompletedTask; }
+            { token.ThrowIfCancellationRequested(); owner.Finished.Enqueue(end); owner.Ends.Enqueue((recording, end)); return Task.CompletedTask; }
             public ValueTask DisposeAsync() { Interlocked.Increment(ref owner.DisposedSessions); return ValueTask.CompletedTask; }
         }
     }
     private sealed class NativeWire : System.Net.Http.HttpMessageHandler
     {
         internal readonly ConcurrentQueue<string> Paths = new();
+        internal readonly ConcurrentQueue<string> Filenames = new();
         protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
             System.Net.Http.HttpRequestMessage request, CancellationToken token)
         {
@@ -466,16 +497,48 @@ public static class MusicPlaybackFeedbackTests
             string body = path switch
             {
                 "/weapi/w/nuser/account/get" => "{\"code\":200,\"profile\":{\"userId\":42,\"nickname\":\"synthetic\"},\"account\":{\"id\":42}}",
-                "/weapi/v3/song/detail" => "{\"code\":200,\"songs\":[{\"id\":123,\"dt\":200000}]}",
-                "/eapi/feedback/weblog" => "{\"code\":200}",
+                "/api/clientlog/encrypt/upload" => UploadReply(request),
                 _ => throw new InvalidOperationException("Unexpected synthetic endpoint")
             };
-            Check(request.RequestUri.Host == (path == "/eapi/feedback/weblog"
-                ? "clientlog.music.163.com" : "music.163.com"));
+            Check(request.RequestUri.Host == (path == "/api/clientlog/encrypt/upload"
+                ? "clientlog3.music.163.com" : "music.163.com"));
             Paths.Enqueue(path);
             return Task.FromResult(new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
                 { Content = new System.Net.Http.StringContent(body, Encoding.UTF8, "application/json") });
         }
+        private string UploadReply(System.Net.Http.HttpRequestMessage request)
+        {
+            Check(request.RequestUri!.ToString() == NeteasePlaybackTransport.UploadUrl);
+            var part = ((System.Net.Http.MultipartFormDataContent)request.Content!).Single();
+            string filename = part.Headers.ContentDisposition!.FileName!.Trim('"');
+            Filenames.Enqueue(filename);
+            return JsonSerializer.Serialize(new { code = 200, data = new { successfiles = new[] { filename } } });
+        }
+    }
+    private sealed class NativeFeedbackStore : IDocumentStore
+    {
+        private readonly Dictionary<string, byte[]> rows = [];
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        {
+            lock (rows)
+            {
+                var bytes = rows.GetValueOrDefault(ns)?.ToArray();
+                return Task.FromResult(new DocumentSnapshot(bytes,
+                    bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+            }
+        }
+        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
+            DocumentFingerprint expected, CancellationToken token = default)
+        {
+            lock (rows)
+            {
+                var old = rows.GetValueOrDefault(ns);
+                if ((old is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(old)) != expected)
+                    throw new DocumentStoreException(DocumentStoreError.Conflict);
+                rows[ns] = data.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
+            }
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     private sealed class MemoryStore : IDocumentStore
     {
@@ -521,6 +584,7 @@ public static class MusicPlaybackFeedbackTests
         internal void Tick(double seconds, double position, bool running = true, double rate = 1)
         { Clock.Advance(seconds); Controller.Observe("entry-1", position, 200, running, rate); }
         internal Task Drain() => Controller.DrainAsync().WaitAsync(TimeSpan.FromSeconds(10));
-        public ValueTask DisposeAsync() { Protocol.Release?.TrySetResult(); Store.Release?.TrySetResult(); return Controller.DisposeAsync(); }
+        public ValueTask DisposeAsync()
+        { Protocol.Release?.TrySetResult(); Store.Release?.TrySetResult(); Sessions.Release?.TrySetResult(); return Controller.DisposeAsync(); }
     }
 }

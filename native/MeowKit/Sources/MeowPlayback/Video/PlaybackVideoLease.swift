@@ -23,6 +23,7 @@ public final class PlaybackVideoLease {
     }
 
     private let controller: PlaybackController
+    let willCommit: @MainActor () -> (@MainActor () -> Void)?
     private let onEvent: @MainActor (PlaybackVideoEvent) -> Void
     private var binding: PlaybackOwnerLease?
     private var pending: PlaybackVideoTransport?
@@ -37,15 +38,23 @@ public final class PlaybackVideoLease {
 
     init(controller: PlaybackController, owner: String,
          now: @escaping @MainActor () -> ContinuousClock.Instant = { ContinuousClock.now },
+         willCommit: @escaping @MainActor () -> (@MainActor () -> Void)? = { nil },
          onEvent: @escaping @MainActor (PlaybackVideoEvent) -> Void) {
-        self.controller = controller; self.owner = owner; self.now = now; self.onEvent = onEvent
+        self.controller = controller; self.owner = owner; self.now = now
+        self.willCommit = willCommit; self.onEvent = onEvent
     }
 
     func bind(commands: PlaybackNavigationCommands) throws {
         binding = try controller.bind(owner: owner, commands: commands,
             onPlayPause: { [weak self] attempt, command in
                 guard let self, self.currentAttempt == attempt else { return false }
-                return command == .play ? self.controller.resume(attempt: attempt) : self.controller.pause(attempt: attempt)
+                switch command {
+                case .play: return self.controller.resume(attempt: attempt)
+                case .pause: return self.controller.pause(attempt: attempt)
+                case .toggle(let wantsPlayback):
+                    return wantsPlayback
+                        ? self.controller.pause(attempt: attempt) : self.controller.resume(attempt: attempt)
+                }
             }, onEvent: { [weak self] event in self?.receive(event) })
     }
 

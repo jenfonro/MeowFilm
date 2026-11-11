@@ -137,10 +137,11 @@ extension XCTestCase {
     @MainActor
     func bindWindowedVideo(_ controller: PlaybackController, owner: String,
                            window: PlaybackVideoTestWindow? = nil,
+                           willCommit: @escaping @MainActor () -> (@MainActor () -> Void)? = { nil },
                            onEvent: @escaping @MainActor (PlaybackVideoEvent) -> Void) throws -> PlaybackVideoLease {
         let window = try window ?? PlaybackVideoTestWindow()
         do {
-            let lease = try controller.bindVideo(owner: owner,
+            let lease = try controller.bindVideo(owner: owner, willCommit: willCommit,
                 onEvent: window.preparedEvents(for: controller, forwarding: onEvent))
             hostVideoLease(lease, in: window)
             return lease

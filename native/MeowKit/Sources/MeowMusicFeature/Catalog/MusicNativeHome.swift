@@ -75,6 +75,9 @@ public enum MusicNativeHomeRequest: Sendable, Equatable {
     /// 1...100 exact positive decimal IDs, each at most 18 digits.
     case songMetadata(ids: [String])
     case playlistMetadata(ids: [String])
+    /// Resolve one displayed seed from the current platform account's liked playlist.
+    /// This is a read recipe, not a heartbeat recommendation or synchronization.
+    case heartbeatSeed
 }
 
 /// Optional, injected capability of the existing native account owner.

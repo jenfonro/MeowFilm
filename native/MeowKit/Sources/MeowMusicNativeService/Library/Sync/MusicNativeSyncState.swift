@@ -14,6 +14,10 @@ struct MusicNativeSyncFence: Codable {
 
     func confirmed(in snapshot: MusicLibrarySyncSnapshot) -> Bool {
         guard snapshot.accountID == accountID else { return false }
+        if mutation.action.isSubscription {
+            guard let id = mutation.collectionID else { return false }
+            return snapshot.subscriptions.contains(where: { $0.remoteID == id }) == (mutation.action == .subscribe)
+        }
         let id = mutation.action == .create ? acknowledgedID : mutation.collectionID
         guard let id else { return false } // Lost creation ID is never inferred from name.
         let actual = snapshot.collections.first { $0.id == id }
@@ -42,14 +46,14 @@ struct MusicNativeSyncFence: Codable {
             return actual.name == before.name && surviving.map(\.occurrenceID) == beforeIDs &&
                 surviving.allSatisfy { old[$0.occurrenceID] == $0.nativeID } &&
                 added.map(\.nativeID).sorted() == mutation.members.map(\.nativeID).sorted()
-        case .create, .delete: return false
+        case .create, .delete, .subscribe, .unsubscribe: return false
         }
     }
 }
 
 /// Synchronization metadata in the library wrapper, without credentials or media URLs.
 struct MusicNativeSyncLedger: Codable {
-    var schema = 1
+    var schema = 2
     var selections: [MusicLibrarySyncSelection] = []
     var scopes: [String: String] = [:]
     var fences: [MusicNativeSyncFence] = []
@@ -61,7 +65,7 @@ struct MusicNativeSyncLedger: Codable {
         let value: Self
         do { value = try JSONDecoder().decode(Self.self, from: wrapper["sync"].bytes) }
         catch { throw MusicServiceError.corruptDocument }
-        guard value.schema == 1, value.selections.count <= 3,
+        guard value.schema == 2, value.selections.count <= 3,
               Set(value.selections.map(\.platform)).count == value.selections.count,
               value.scopes.count <= 3, value.scopes.keys.allSatisfy({ MusicAccountPlatform(rawValue: $0) != nil }),
               value.fences.count <= 512, Set(value.fences.map { $0.mutation.id }).count == value.fences.count,
@@ -70,23 +74,40 @@ struct MusicNativeSyncLedger: Codable {
         for fence in value.fences {
             guard fence.localRevision >= 0, !fence.localID.isEmpty, !fence.accountID.isEmpty, !fence.scope.isEmpty,
                   fence.localID.utf8.count <= 1024, fence.accountID.utf8.count <= 128, fence.scope.utf8.count <= 1024,
-                  wrapper["library"]["collections"].array.contains(where: { $0["id"].string == fence.localID }),
+                  (fence.mutation.action.isSubscription
+                    ? wrapper["library"]["networkReferences"].array.contains(where: {
+                        $0["id"].string == fence.localID && $0["platform"].string == fence.platform.rawValue &&
+                            $0["remoteID"].string == fence.mutation.collectionID
+                    })
+                    : wrapper["library"]["collections"].array.contains(where: { $0["id"].string == fence.localID })),
                   wrapper["library"]["accounts"][fence.platform.rawValue].string == fence.accountID,
                   value.scopes[fence.platform.rawValue] == fence.scope,
                   Set(fence.mutation.before?.members.map(\.occurrenceID) ?? []).count == (fence.mutation.before?.members.count ?? 0) else {
                 throw MusicServiceError.corruptDocument
             }
             let mutation = fence.mutation
-            if mutation.action == .create {
+            if mutation.action.isSubscription {
+                guard mutation.before == nil, mutation.members.isEmpty,
+                      mutation.collectionID?.isEmpty == false, !mutation.directoryRevision.isEmpty,
+                      fence.acknowledgedID == nil, fence.acknowledgedName == nil else { throw MusicServiceError.corruptDocument }
+                if mutation.action == .subscribe {
+                    guard mutation.beforeSubscription == nil, mutation.name?.isEmpty == false else { throw MusicServiceError.corruptDocument }
+                } else {
+                    guard let before = mutation.beforeSubscription, before.remoteID == mutation.collectionID,
+                          !before.relationID.isEmpty, mutation.name == nil else { throw MusicServiceError.corruptDocument }
+                }
+            } else if mutation.action == .create {
                 guard mutation.collectionID == nil, mutation.before == nil, mutation.members.isEmpty,
+                      mutation.beforeSubscription == nil,
                       mutation.name?.isEmpty == false, !mutation.directoryRevision.isEmpty,
                       fence.acknowledgedID == nil || fence.acknowledgedID?.isEmpty == false else { throw MusicServiceError.corruptDocument }
             } else {
                 guard let before = mutation.before, before.id == mutation.collectionID, !before.id.isEmpty,
                       before.writable, !before.revision.isEmpty,
+                      mutation.beforeSubscription == nil,
                       fence.acknowledgedID == nil, fence.acknowledgedName == nil else { throw MusicServiceError.corruptDocument }
                 switch mutation.action {
-                case .create: break
+                case .create, .subscribe, .unsubscribe: break
                 case .delete:
                     guard before.canDelete, mutation.members.isEmpty else { throw MusicServiceError.corruptDocument }
                 case .rename:
@@ -137,6 +158,7 @@ struct MusicNativeAutomaticSyncPreferences: Codable {
     var intentRevision = 0
     var settledIntentRevision = 0
     var orderOnly: String?
+    var relationshipPlatforms: [MusicAccountPlatform] = []
 
     func validate() throws {
         let maximum = 9_007_199_254_740_991
@@ -148,6 +170,9 @@ struct MusicNativeAutomaticSyncPreferences: Codable {
             bindings.count <= 3 &&
             bindings.keys.allSatisfy { key in selections.contains { $0.platform.rawValue == key } },
             .corruptDocument)
+        try musicRequire(Set(relationshipPlatforms).count == relationshipPlatforms.count &&
+            relationshipPlatforms.allSatisfy { platform in selections.contains { $0.platform == platform && $0.playlists } } &&
+            (relationshipPlatforms.isEmpty || orderOnly == nil), .corruptDocument)
         for binding in bindings.values {
             try musicRequire(!binding.accountID.isEmpty && binding.accountID.utf8.count <= 1024 &&
                 !binding.scope.isEmpty && binding.scope.utf8.count <= 1024, .corruptDocument)
@@ -169,6 +194,7 @@ struct MusicNativeSyncRound {
     var library: MJ
     var ledger: MusicNativeSyncLedger
     var revision: Int
+    var relationshipsOnly = false
     mutating func issue(_ code: String, platform: MusicAccountPlatform? = nil, collection: String? = nil) {
         let issue = MusicLibrarySyncIssue(platform: platform, collectionID: collection, code: code)
         if !ledger.issues.contains(issue), ledger.issues.count < 128 { ledger.issues.append(issue) }

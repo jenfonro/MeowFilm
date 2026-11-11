@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import plistlib
 import subprocess
 import tempfile
 import unittest
@@ -25,7 +26,7 @@ class NodePreflightTests(unittest.TestCase):
         self.manifest = {
             "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
             "platform": "ios", "transport": "runtime.http.v1",
-            "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film"],
+            "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
             "target": {"sdk": "iphonesimulator", "arch": "x64", "minimumOS": "17.0"},
             "trustedNative": [{"platform": "ios", "arch": "x64", "abi": 1, "napi": 8,
                                "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",
@@ -44,6 +45,7 @@ class NodePreflightTests(unittest.TestCase):
 
     def test_rejects_missing_duplicate_extra_unknown_or_reordered_modules(self):
         for modules in [
+            ["music", "cat", "source", "tmdb"],
             ["music", "cat", "source"], ["music", "cat", "source", "douban"],
             ["music", "cat", "source", "pan"], ["music", "cat", "source", "unknown"],
             ["music", "cat", "source", "tmdb", "douban"], ["music", "cat", "source", "tmdb", "pan"],
@@ -69,10 +71,13 @@ class NodePreflightTests(unittest.TestCase):
     def test_rejects_inexact_app_module_assemblies(self):
         for modules in [
             ["music", "cat", "source"],
+            ["music", "cat", "source", "tmdb", "netease"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "film"],
             ["music", "cat", "source", "pan", "tmdb", "douban"],
             ["music", "cat", "source", "pan", "tmdb", "douban", "film", "unknown"],
             ["music", "cat", "source", "pan", "tmdb", "douban", "douban"],
             ["music", "cat", "source", "tmdb", "pan", "douban", "film"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "netease", "film"],
         ]:
             with self.subTest(modules=modules):
                 self.manifest["modules"] = modules
@@ -164,7 +169,7 @@ class NodePreflightBuildTests(unittest.TestCase):
             (payload / "runtime-manifest.json").write_text(json.dumps({
                 "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
                 "platform": "ios", "transport": "runtime.http.v1",
-                "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film"],
+                "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
                 "target": selected,
                 "trustedNative": [{"platform": "ios", "arch": selected["arch"], "abi": 1, "napi": 8,
                                   "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",
@@ -243,6 +248,73 @@ class NodePreflightBuildTests(unittest.TestCase):
                 output.assert_not_called()
                 validate.assert_not_called()
                 self.assertFalse(self.work.exists())
+
+    def test_simulator_only_prepares_and_builds_only_the_executing_target(self):
+        with patch.object(preflight, "run") as run, \
+                patch.object(preflight, "output", return_value="/fixture/SDK"):
+            preflight.build(simulator_only=True)
+        commands = [list(map(str, call.args[0])) for call in run.call_args_list]
+        self.assertEqual([command for command in commands if "--sdk" in command and "--arch" in command],
+                         self.prepare_commands()[:1])
+        compiles = [command for command in commands if "clang" in command]
+        self.assertEqual([command[command.index("-target") + 1] for command in compiles],
+                         ["x86_64-apple-ios17.0-simulator"])
+        self.assertTrue((self.work / "simulator/NodePreflight.app").is_dir())
+        self.assertFalse((self.work / "device").exists())
+
+
+class NodePreflightProbeTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.documents = self.root / "container/Documents"
+        self.documents.mkdir(parents=True)
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.report = {"complete": True, "passed": True,
+                       "cases": [{"name": "netease-token-sdk-worker", "passed": True}]}
+        self.exit_code = 0
+        self.process = Mock()
+        self.process.poll.return_value = 0
+        for name, value in (("WORK", self.work),):
+            patcher = patch.object(preflight, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def launch(self, command, **options):
+        self.command = command
+        (self.documents / "node-report.json").write_text(json.dumps(self.report))
+        (self.documents / "node-return.plist").write_bytes(plistlib.dumps({"exitCode": self.exit_code}))
+        options["stdout"].close()
+        return self.process
+
+    def probe(self):
+        with patch.object(preflight, "run"), \
+                patch.object(preflight, "output", return_value=str(self.documents.parent)), \
+                patch.object(preflight.subprocess, "Popen", side_effect=self.launch):
+            return preflight.probe("simulator-id", "netease-token-sdk-worker")
+
+    def test_selected_case_is_forwarded_and_actual_result_is_saved(self):
+        self.assertEqual(self.probe(), 0)
+        self.assertEqual(self.command[-2:], ["--case", "netease-token-sdk-worker"])
+        result = json.loads((self.work / "result.json").read_text())
+        self.assertEqual(result["cases"], self.report["cases"])
+        self.assertEqual(result["nodeReturn"]["exitCode"], 0)
+
+    def test_missing_extra_or_different_cases_cannot_satisfy_selected_probe(self):
+        for cases in ([], [{"name": "another-case"}], self.report["cases"] * 2):
+            with self.subTest(cases=cases):
+                self.report["cases"] = cases
+                with self.assertRaisesRegex(ValueError, "exactly once"):
+                    self.probe()
+                self.assertFalse((self.work / "result.json").exists())
+
+    def test_failed_case_or_node_exit_is_not_reported_as_success(self):
+        for passed, code in ((False, 0), (True, 1)):
+            with self.subTest(passed=passed, code=code):
+                self.report["passed"], self.exit_code = passed, code
+                self.assertEqual(self.probe(), 1)
 
 
 if __name__ == "__main__":

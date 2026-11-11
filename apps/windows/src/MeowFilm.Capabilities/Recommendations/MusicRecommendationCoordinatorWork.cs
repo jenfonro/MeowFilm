@@ -88,8 +88,12 @@ public sealed partial class MusicRecommendationCoordinator
             {
                 Require(response.TryGetProperty("entrySong", out var entrySong), "INVALID_RESPONSE");
                 Require(s.Config.Heartbeat!.SongId is null || NativeId(entrySong) == s.Config.Heartbeat.SongId, "IDENTITY_MISMATCH");
-                songs = new[] { new Song(entrySong.Clone(), NativeId(entrySong), "", "aiMode") }
-                    .Concat(songs.Where(song => song.NativeId != NativeId(entrySong))).ToArray();
+                string entryId = NativeId(entrySong);
+                var first = songs.FirstOrDefault(song => song.NativeId == entryId) is { } returned
+                    ? returned with { Value = entrySong.Clone() }
+                    : new Song(entrySong.Clone(), entryId, "", "",
+                        response.GetProperty("context").Clone(), Json(new { id = entryId, source = "heartbeat" }));
+                songs = new[] { first }.Concat(songs.Where(song => song.NativeId != entryId)).ToArray();
             }
             if (initial && songs.Length == 0) throw new RecommendationException("EMPTY_RECOMMENDATIONS");
             if (s.Config.Kind == "queue" && !s.Config.Restore && !s.RecommendationStarted ||
@@ -193,14 +197,15 @@ public sealed partial class MusicRecommendationCoordinator
         Require(Number(response, "count") == rows.GetArrayLength(), "INVALID_RESPONSE");
         Require(response.TryGetProperty("recommendations", out var metadata) && metadata.ValueKind == JsonValueKind.Array &&
             metadata.GetArrayLength() == rows.GetArrayLength(), "INVALID_RESPONSE");
-        var provenance = new Dictionary<string, (string Algorithm, string FeedbackSource)>(StringComparer.Ordinal);
+        JsonElement? context = response.TryGetProperty("context", out var sourceContext) &&
+            sourceContext.ValueKind == JsonValueKind.Object ? sourceContext.Clone() : null;
+        var provenance = new Dictionary<string, (string Algorithm, string FeedbackSource, JsonElement Metadata)>(StringComparer.Ordinal);
         foreach (var item in metadata.EnumerateArray())
         {
             string id = Text(item, "id");
-            string feedbackSource = Text(item, "feedbackSource",
-                request.Method == "heartbeat" ? "aiMode" : request.Method == "queue-recommendations" ? "moreRcmd" : "", 512);
+            string feedbackSource = Text(item, "feedbackSource", "", 512);
             Require(ValidId(id) && Text(item, "source") == request.Method &&
-                provenance.TryAdd(id, (Text(item, "alg", "", 4096), feedbackSource)), "IDENTITY_MISMATCH");
+                provenance.TryAdd(id, (Text(item, "alg", "", 4096), feedbackSource, item.Clone())), "IDENTITY_MISMATCH");
         }
         var seen = new HashSet<string>(known.Where(id => id.Length > 0), StringComparer.Ordinal);
         var result = new List<Song>();
@@ -211,7 +216,8 @@ public sealed partial class MusicRecommendationCoordinator
             string id = NativeId(song);
             Require(ValidId(id) && provenance.ContainsKey(id), "IDENTITY_MISMATCH");
             // Identity is the native recording, never just a normalized title/artist.
-            if (seen.Add(id)) result.Add(new(song.Clone(), id, provenance[id].Algorithm, provenance[id].FeedbackSource));
+            if (seen.Add(id)) result.Add(new(song.Clone(), id, provenance[id].Algorithm, provenance[id].FeedbackSource,
+                context, provenance[id].Metadata));
         }
         return result;
     }
@@ -391,7 +397,8 @@ public sealed partial class MusicRecommendationCoordinator
                     request.Fm?.RuleId ?? request.Fm?.TabTagId ?? s.Heartbeat?.PlaylistId ??
                         s.Config.SourceIds.FirstOrDefault() ?? request.QueueRecommendations?.SeedSongId ?? "",
                     operation.Songs[i].Algorithm, request.Fm?.Mode.ToString().ToLowerInvariant() ?? "",
-                    request.Fm?.Submode ?? "", true, s.Heartbeat?.FromHome ?? false, operation.Songs[i].FeedbackSource);
+                    request.Fm?.Submode ?? "", true, s.Heartbeat?.FromHome ?? false, operation.Songs[i].FeedbackSource)
+                { Context = operation.Songs[i].Context, Metadata = operation.Songs[i].Metadata };
             }
             s.Anchor = ids[^1]; s.Queue = after; s.QueueEpoch = epoch; s.Failures = 0;
             s.InitialPending = false; s.PreviousConfiguration = null;

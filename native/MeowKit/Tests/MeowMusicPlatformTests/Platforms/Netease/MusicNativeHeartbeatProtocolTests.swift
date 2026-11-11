@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import MeowAccounts
 import MeowMusicFeature
 @testable import MeowMusicPlatform
 
@@ -8,6 +9,57 @@ import MeowMusicFeature
     private let detailPath = "/eapi/v6/playlist/detail"
     private let metadataPath = "/weapi/v3/song/detail"
     private let heartbeatPath = "/eapi/playmode/intelligence/list"
+
+    func testHomeSeedNeedsNoSyncAndHydratesOnlyOneSongWhenNoDisplayedMemberWasReturned() async throws {
+        for embedded in [false, true] {
+            let identity = try MusicAccountFixture.identity("wy")
+            let store = MusicAccountTestStore(), clock = MusicAccountTestClock()
+            let secret = "0123456789abcdef"
+            let http = MusicNeteaseTestHTTP(clock: clock, weapiSecret: secret)
+            let accounts = AccountSessionCoordinator(store: store)
+            let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() },
+                clientContexts: NativeMusicClientService(clock: { clock.now() }), weapiSecret: { secret })
+            let service = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],
+                providers: [.netease: adapter], clock: { clock.now() })
+            try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+            _ = try await service.setAccess(available: true, generation: 1)
+            let ids = Array(101..<251)
+            var row = try MusicQQWire.object(MusicNeteaseFixture.detail(ids)["playlist"])
+            row["tracks"] = embedded ? [MusicNeteaseFixture.song(102)] : []
+            await http.replies(detailPath, [try MusicNeteaseFixture.response(["code": 200, "playlist": row])])
+            await http.replies(metadataPath, [try MusicNeteaseFixture.response([
+                "code": 200, "songs": [MusicNeteaseFixture.song(101)]
+            ])])
+            let binding = try await service.nativeHomeBinding()
+            let data = try await service.nativeHomePayload(.heartbeatSeed, binding: binding)
+            let seed = try MusicQQWire.object(MusicQQWire.decode(data)["song"])
+            XCTAssertEqual(try MusicNeteaseWire.id(seed["id"]), embedded ? "102" : "101")
+            let records = await http.recorded()
+            XCTAssertEqual(records.filter { $0.request.url.path == directoryPath }.count, 1)
+            XCTAssertEqual(records.filter { $0.request.url.path == detailPath }.count, 1)
+            let details = records.filter { $0.request.url.path == metadataPath }
+            XCTAssertEqual(details.count, embedded ? 0 : 1)
+            if let request = details.first {
+                let payload = try MusicQQWire.decode(XCTUnwrap(request.payload))
+                XCTAssertEqual(payload["c"] as? String, #"[{"id":101}]"#)
+            }
+            XCTAssertFalse(records.contains { $0.request.url.path == heartbeatPath })
+            _ = await service.close()
+        }
+    }
+    func testEmptyLikesHaveNoHomeSeedAndDoNotRequestSongMetadata() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        await f.http.replies(detailPath, [try MusicNeteaseFixture.response(MusicNeteaseFixture.detail([]))])
+        let binding = try await f.service.nativeHomeBinding()
+        let data = try await f.service.nativeHomePayload(.heartbeatSeed, binding: binding)
+        let payload = try MusicQQWire.decode(data)
+        XCTAssertTrue(payload["song"] is NSNull)
+        let records = await f.http.recorded()
+        XCTAssertEqual(records.filter { $0.request.url.path == directoryPath }.count, 1)
+        XCTAssertEqual(records.filter { $0.request.url.path == detailPath }.count, 1)
+        XCTAssertFalse(records.contains { [metadataPath, heartbeatPath].contains($0.request.url.path) })
+        _ = await f.service.close()
+    }
 
     func testLikedEntryFindsOwnSecondPageAndChoosesFromEveryHydratedMember() async throws {
         let f = try MusicNeteaseNativeFixture()
@@ -262,12 +314,18 @@ import MeowMusicFeature
             XCTAssertEqual(page.total, ids.count + 1)
         } while cursor != nil
         for items in [live.items, legacy] {
+            let seed = try MusicQQWire.decode(XCTUnwrap(items.first?.data))
+            let seedAttribution = try MusicQQWire.object(seed["_recommendation"])
+            XCTAssertEqual(seedAttribution["source"] as? String, "heartbeat")
+            XCTAssertEqual(seedAttribution["feedbackSource"] as? String, "")
+            XCTAssertEqual(seedAttribution["alg"] as? String, "", "A local favorite must not borrow another song's algorithm")
             let songs = try items.dropFirst().map { try MusicQQWire.decode($0.data) }
             XCTAssertEqual(songs.compactMap { $0["songmid"] as? String }, ids.map(String.init))
             for (song, id) in zip(songs, ids) {
                 let attribution = try MusicQQWire.object(song["_recommendation"])
                 XCTAssertEqual(attribution["source"] as? String, "heartbeat")
-                XCTAssertEqual(attribution["feedbackSource"] as? String, "aiMode")
+                XCTAssertEqual(attribution["feedbackSource"] as? String, "")
+                XCTAssertEqual(attribution["feedbackSourceId"] as? String, "")
                 XCTAssertEqual(attribution["sourceId"] as? String, "501")
                 XCTAssertEqual(attribution["alg"] as? String, "alg-\(id)")
             }
@@ -398,6 +456,32 @@ import MeowMusicFeature
         XCTAssertEqual(body["songId"] as? String, "999")
         XCTAssertEqual(body["startMusicId"] as? String, "999")
         XCTAssertEqual(body["playlistId"] as? String, "501")
+        _ = await f.service.close()
+    }
+
+    func testRepeatedDisplayedHomeSeedDoesNotRequireLibrarySyncOrChooseAnotherLikedSong() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        await f.http.replies(heartbeatPath, [try MusicNeteaseFixture.response([
+            "code": 200, "data": [["songInfo": MusicNeteaseFixture.song(103)]]
+        ])])
+        // This account service has no library synchronization owner or enabled sync settings.
+        let lease = try await f.service.beginAccountQueue(platform: .netease)
+        for seed in ["102", "102", "101"] {
+            let batch = try await f.service.similarModeBatch(lease,
+                request: .heartbeat(lastID: seed, fromHome: true, context: nil))
+            XCTAssertEqual(batch.heartbeatContext, .init(playlistID: "501", seedID: seed))
+            let first = try MusicQQWire.decode(XCTUnwrap(batch.items.first).data)
+            XCTAssertEqual(first["songmid"] as? String, seed)
+        }
+        let records = await f.http.recorded()
+        let requests = records.filter { $0.request.url.path == heartbeatPath }
+        XCTAssertEqual(requests.count, 3)
+        for (record, seed) in zip(requests, ["102", "102", "101"]) {
+            let body = try MusicQQWire.decode(XCTUnwrap(record.payload))
+            XCTAssertEqual(body["songId"] as? String, seed)
+            XCTAssertEqual(body["startMusicId"] as? String, seed)
+            XCTAssertEqual(body["playlistId"] as? String, "501")
+        }
         _ = await f.service.close()
     }
 

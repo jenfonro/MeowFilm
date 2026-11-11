@@ -5,6 +5,8 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Controls;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
@@ -184,15 +186,16 @@ public static partial class MusicUiTests
             var footer = (MusicPlayerView)f.Module.PlayerView;
             using var surface = RecommendationPlayerSurface(footer);
             await Drain();
-            var sourceButton = (Button)footer.FindName("PlaybackSourceButton");
+            var sourceButton = (Button)footer.FindName("PlaybackSessionButton");
             sourceButton.RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
-            var menu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
-            var toggle = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "自动续播"));
-            True(toggle.IsEnabled && toggle.IsChecked, "new similar session enables continuation");
-            True(!menu.Items.OfType<MenuItem>().Any(item => Equals(item.Header, "返回原队列")), "similar has no return checkpoint");
+            var menu = (ContextMenu)footer.FindName("PlaybackSessionMenu");
+            var toggle = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "关闭续播"));
+            True(toggle.IsEnabled && !toggle.IsCheckable && f.Module.RecommendationContinue, "new similar session offers a plain disable-continuation action");
+            True(!menu.Items.OfType<MenuItem>().Any(item => Equals(item.Header, "退出推荐") || Equals(item.Header, "退出心动")), "similar has no return checkpoint");
             toggle.RaiseEvent(new(MenuItem.ClickEvent)); await RecommendationUntil(() => !f.Module.RecommendationContinue);
             Equal("repeat", f.Module.PlaybackModeIcon);
-            True(((Button)footer.FindName("FmChannelButton")).Visibility != System.Windows.Visibility.Visible, "only private FM exposes channels");
+            True(!menu.Items.OfType<MenuItem>().Any(item => Equals(item.Header, "频道切换")), "only private FM exposes channels");
+            Equal("fm", ((MusicPlaybackIcon)sourceButton.Content).Key);
             menu.IsOpen = false; surface.RootVisual = null;
         });
         yield return Case("recommendation feedback carries live native provenance but never resurrects it from durable queue", async () =>
@@ -203,6 +206,11 @@ public static partial class MusicUiTests
             await RecommendationUntil(() => f.Reports.Starts.Count == 1);
             var start = f.Reports.Starts.Single();
             Equal("userfm", start.Source); Equal("playFm", start.Mode); Equal("native-recommendation-alg", start.Algorithm);
+            True(start.Recommendation is { Context: { } context, Metadata: { } metadata } &&
+                context.GetProperty("mode").GetString() == "DEFAULT" &&
+                metadata.GetProperty("id").GetString() == start.Recording.Id &&
+                metadata.GetProperty("alg").GetString() == "native-recommendation-alg",
+                "actual native batch context and per-recording metadata reach the playback protocol");
             await f.Module.CancelRecommendationAsync();
             await f.Module.StepAsync(true); f.Playback.Start();
             await RecommendationUntil(() => f.Reports.Starts.Count == 2);
@@ -239,11 +247,11 @@ public static partial class MusicUiTests
                 var footer = (MusicPlayerView)f.Module.PlayerView;
                 using var surface = RecommendationPlayerSurface(footer);
                 await Drain();
-                ((Button)footer.FindName("PlaybackSourceButton")).RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
-                var menu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+                ((Button)footer.FindName("PlaybackSessionButton")).RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+                var menu = (ContextMenu)footer.FindName("PlaybackSessionMenu");
                 var reconcile = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "核对保存结果"));
                 True(reconcile.IsEnabled, "source menu keeps reconciliation reachable after failed close");
-                reconcile.RaiseEvent(new(MenuItem.ClickEvent));
+                ((IInvokeProvider)new MenuItemAutomationPeer(reconcile).GetPattern(PatternInterface.Invoke)).Invoke();
                 await RecommendationUntil(() => !f.Module.CanReconcileRecommendation);
                 Equal(persisted ? 3 : 0, (await f.Queue()).GetProperty("total").GetInt32());
                 Equal(batches, f.Http.Batches); Equal(writes, f.Store.LibraryWrites);

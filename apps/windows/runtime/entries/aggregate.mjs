@@ -1,6 +1,7 @@
 import { startWindowsAppRuntime, reportWindowsRuntimeStartFailure } from '../bootstrap.mjs';
 import { createAppRuntime, createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule,
-  createPanRuntimeModule, createTMDBDataModule, createDoubanDataModule, connectFilmPlayback } from '../../../runtime/entry.mjs';
+  createPanRuntimeModule, createTMDBDataModule, createDoubanDataModule, connectFilmPlayback,
+  createNeteaseTokenModule } from '../../../runtime/entry.mjs';
 
 // Current wire identity; one App, not a selectable aggregate product.
 await startWindowsAppRuntime({
@@ -14,6 +15,7 @@ await startWindowsAppRuntime({
       modules.push(createTMDBDataModule({ dataRoot }));
       modules.push(createDoubanDataModule({ dataRoot }));
       connectFilmPlayback(modules, { dataRoot });
+      modules.push(createNeteaseTokenModule());
       return modules;
     } catch (error) {
       for (const module of modules) void Promise.resolve(module.close()).catch(() => {});

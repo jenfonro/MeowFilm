@@ -12,9 +12,11 @@
 
 ## UIKit
 
-全屏播放器保留现有顶部私人 FM 频道／场景布局和原选择页，侧栏不改成 Windows 布局。底部循环按钮固定为列表循环、单曲循环、随机播放三项；独立“来源／自动续播”菜单承载合资格进入、自动续播与有 checkpoint 的返回操作。相似来源不显示 FM 频道，心动不显示未经验证的续播开关。
+全屏播放器收藏左侧常显 ∞，复用原生 FM 图标及模板着色；普通来源叠加斜线，已激活的推荐、相似、私人 FM 和心动来源不加斜线。续播关闭只改变菜单开关，不改变来源或图标状态。原底部来源文字行及其占位高度删除，紧凑／卡片迷你播放器不增加入口。顶部私人 FM 频道／场景入口和原选择页保留，∞ 菜单不重复频道项，侧栏不改成 Windows 布局。
 
-`MusicPlaybackControlsView`、`MusicPlayerContentModel`、队列页和更多菜单共用同一 `MusicViewModel`。回调绑定 occurrence、attempt、队列／设置 revision、账号、快照及命令代次；隐藏或身份失效的旧菜单不能执行。队列页保留真实候选、分组、重试和适用的返回按钮；不渲染模式成功、退出或耗尽状态块。真实失败使用既有统一错误提醒，同一请求失败以 `errorID` 去重。
+底部循环按钮仍独立提供列表循环、单曲循环、随机播放三项。∞ 使用扁平菜单：合资格且未进入时显示“推荐模式”；有 `canRestoreQueue` 投影才显示“退出推荐”或“退出心动”，由既有 owner 恢复原队列，不回滚循环。可续播来源直接显示“开启续播／关闭续播”；心动有限列表不提供续播，搜索候选和相似／FM 来源不伪造恢复 checkpoint。合资格的当前曲心动入口保留，不在已进入心动时重复。
+
+`MusicPlaybackControlsView`、`MusicPlayerContentModel`、队列页和更多菜单共用同一 `MusicViewModel`。∞ 回调绑定 occurrence、attempt、队列／设置 revision、账号、各来源快照、命令代次及当前菜单状态；隐藏、布局切换或身份失效的旧菜单不能执行。∞ 菜单保留加载状态，重试调用对应快照的既有推荐 API；`commitUnconfirmed` 显示“核对结果”，只重读既有状态，不重放未确认提交，也不以重新进入替代单曲推荐重试。队列页保留真实候选、分组、重试和适用的返回按钮；不渲染模式成功、退出或耗尽状态块。真实失败使用既有统一错误提醒，同一请求失败以 `errorID` 去重。
 
 ## FM 记忆与取数
 
@@ -22,9 +24,11 @@
 
 成功提交 FM 队列时，将规范化动作写入设备音乐文档 `playback.fmSelections[scope]`。登录 scope 为 `wy-fm:` 加真实网易 UID 的 SHA-256，游客使用独立 guest scope；不存凭据，不借短期账号 revision 作为跨重启身份。首次未保存使用 DEFAULT，存储或解码失败不冒充首次默认值。没有云同步。
 
-`MusicRemoteQueueSource.fmAction` 携带真实配置。已在 FM 内切频道先取得新批，再追加旧队列并选择新批首项，保留全局循环与当前续播开关；新进入 FM 默认开启续播。预览仍按既有缓存转移首批，不重复请求已转移批次。
+`MusicRemoteQueueSource.homeAction` 携带真实入口动作，包括 FM 配置、相似种子和日推分支。已在 FM 内切频道先取得新批，再追加旧队列并选择新批首项，保留全局循环与当前续播开关；新进入 FM 默认开启续播。预览仍按既有缓存转移首批，不重复请求已转移批次。
 
 私人 FM 走 `/api/v1/radio/get`：`mode/subMode/limit="3"/unplaySongIds="[]"/openAidj="false"/aidjReqTimes="0"`；频道预览请求 `limit="1"`。规则频道使用其既有 recommends／cover 路径，批次参数 5。相似歌曲／艺人走同一 radio 路径，但为 `mode=SIMILAR`、真实 `sourceType/sourceIds`、`limit="3"` 和少一个 g 的 `unplaySonIds`。这些是请求参数，不是客户端队列长度上限。日推／风格日推仍为歌单来源。
+
+播放反馈的来源值与取曲路由分开：仅普通 FM 在缺少逐曲上游来源时默认 `userfm`，规则频道（`ruleFM`）无上游来源时省略；心动使用真实 `play_scene=heartbeat`，逐曲上游 `source/sourceId/alg` 独立保留；心动收藏歌单 ID 仅描述本地入口，不借作上游反馈来源。推荐 `sourceMap` 缺失、空或 null 时不填 `moreRcmd`，相似模式也不生成猜测标签。反馈协议与有限待发见[音乐能力](music.md#网易协议与有限待发)。
 
 ## 固定单曲推荐
 
@@ -60,6 +64,10 @@ extJson="{}"
 
 同来源同游标只保留一个在途请求。成功续批只追加，不抢当前；请求在途、失败或耗尽不阻塞既有队列循环。关闭续播保留候选、种子及迟到结果，但不自动并入；重新开启在真实播放边界消费缓冲批。页面关闭只退休显示读取，不撤销播放拥有的搜索候选。替换、清队、账号或访问撤销拒绝旧响应；物理 worker 仍追踪到 drain，取消 ACK 不冒充收尾。
 
-原列表来源、推荐 provider 和音频 provider 分离。`_recommendation` 是无凭据标签；只有活 lease 下实际入队且网易录音一致的 occurrence 才获得 `MusicPlaybackRecommendationProof`。心动响应归属 `aiMode`／真实喜欢歌单，单曲推荐保存 `algMap/sourceMap`，缺少 sourceMap 项使用 `moreRcmd`。候选、持久标签、冷恢复或退出不能恢复 live proof；consent 默认关闭。
+原列表来源、推荐 provider 和音频 provider 分离。`_recommendation` 是无凭据标签；只有活 lease 下实际入队且网易录音一致的 occurrence 才获得 `MusicPlaybackRecommendationProof`。`NativeMusicService` 的统一 occurrence map 在队列 CAS 后保留逐曲来源，队列移除后修剪，访问撤销／关闭时清除；新插入的同曲 occurrence 不继承旧 proof。
+
+FM 首批、续取及关闭续播时缓冲的批次同时保留歌曲和逐曲 alg；补展示元数据不覆盖响应外层 alg。相似保留真实歌曲／艺人 seed IDs；心动保留真实喜欢歌单与本次实际 seed；单曲推荐保留原始 `algMap/sourceMap`。FM／相似／风格日推通过中性 `MusicPlaybackFeedbackOrigin` 传递真实动作与来源，不据接口名称猜造网易 wire source。搜索保留关键词，外平台歌单／专辑 ID 不作为网易集合 ID。新暴露的算法文本同样拒绝反射凭据。
+
+反馈的来源 proof 在准入时核对；已准入的听音捕获来源，由独立原账号反馈 lease 继续围栏，正常退休读取 lease 或恢复原队列不拆遍。候选、持久标签及冷恢复不能恢复新的 live proof；consent 默认关闭。共用计量、冻结结束与关闭流程见[原生播放反馈事实与生命周期](music.md#原生播放反馈事实与生命周期)；本层不声明云端统计或推荐效果。
 
 保留既有单响应／逐曲／累计字节预算、游标循环检查和安全整数容量，不新增歌曲条数、随机轮次、冷却或概率配置。合成协议、原生行为、Feature 和 UIKit 测试分别覆盖各自边界；不替代实网算法验证、真实多账号或真机听音。

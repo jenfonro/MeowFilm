@@ -41,7 +41,7 @@ export function installerFixture(t) {
   });
   write('runtime/runtime-manifest.json', {
     schemaVersion: 1, status: 'complete', product: 'aggregate', platform: 'win32', transport: 'windows-http-v1',
-    modules: ['music', 'cat', 'source', 'tmdb'],
+    modules: ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease'],
     assemblyProfile: 'common-native', entry: 'app/windows/entries/aggregate.mjs', files: records('runtime', runtimeFiles),
     node: { version: '24.21.0', sha256: hash('runtime/node.exe'), licenseSha256: hash('runtime/node-LICENSE.txt') },
   });

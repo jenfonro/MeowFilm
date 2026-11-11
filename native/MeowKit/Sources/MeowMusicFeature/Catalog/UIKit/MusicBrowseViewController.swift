@@ -469,7 +469,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     private func renderState() {
         guard isViewLoaded, isPageVisible, tagsHeight != nil else { return }
         configureTags()
-        if sections.isEmpty || sections.allSatisfy({ $0.items.isEmpty }) {
+        if page?.sections.allSatisfy({ $0.items.isEmpty }) ?? true {
             if page?.isLoading == true, page?.loaded == false {
                 loadingSkeleton.configure(loading: true, visible: isPageVisible, theme: theme)
                 collection.backgroundView = loadingSkeleton
@@ -643,7 +643,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             })
         }
         if page.canSaveCollection {
-            actions.append(UIAction(title: "保存到我的歌单", image: UIImage(systemName: "square.and.arrow.down")) {
+            actions.append(UIAction(title: "收藏歌单", image: UIImage(systemName: "star")) {
                 [weak self] _ in
                 guard page.actionPageID == key.pageID else { return }
                 self?.saveCollection()
@@ -727,7 +727,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             ) {
                 switch item.content {
                 case .track(let track):
-                    if page.canSaveCollection {
+                    if page.canPlayRemoteQueue {
                         let (source, index) = try await page.playbackSource(for: track)
                         await self.model.playRemoteQueue(source, start: .init(index: index, track: track))
                     } else {
@@ -779,17 +779,14 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     private func saveCollection() {
-        guard let page, let intent = page.makeActionIntent() else { return }
-        let alert = UIAlertController(title: "保存到我的歌单", message: nil, preferredStyle: .alert)
-        alert.addTextField { [weak self] in $0.text = self?.title }
+        guard let page, let collection = page.networkSaveCollection, let intent = page.makeActionIntent() else { return }
+        let alert = UIAlertController(title: "收藏歌单", message: nil, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "保存", style: .default) { [weak self, weak alert] _ in
-            let name = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard let self, !name.isEmpty else { return }
+        alert.addAction(UIAlertAction(title: "收藏", style: .default) { [weak self] _ in
+            guard let self else { return }
             self.runPageTask {
                 await page.perform(intent: intent, operation: "收藏歌单", kind: .library) {
-                    let (source, _) = try await page.playbackSource()
-                    try await self.model.saveRemoteCollection(source, name: name)
+                    try await self.model.saveNetworkPlaylist(collection)
                 }
             }
         })

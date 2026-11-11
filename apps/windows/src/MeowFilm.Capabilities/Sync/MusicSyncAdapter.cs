@@ -18,7 +18,8 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
     internal string Signature => LJ.Digest(LJ.Obj(("id", Id), ("name", Name), ("kind", Kind), ("writable", Writable),
         ("owner", Owner), ("members", Members.Select(m => new { m.Id, m.Key, m.Sort })), ("locator", Locator)));
 }
-internal sealed record SyncDirectory(string AccountId, IReadOnlyList<SyncRemote> Collections);
+internal sealed record SyncSubscription(string Id, string Name, string Cover, long Count, JsonObject Locator);
+internal sealed record SyncDirectory(string AccountId, IReadOnlyList<SyncRemote> Collections, IReadOnlyList<SyncSubscription> Subscriptions);
 
 internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlatformHttp http,
     MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client,
@@ -83,6 +84,13 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
     protected static void Same(IEnumerable<string> a, IEnumerable<string> b) => Require(a.SequenceEqual(b), "SNAPSHOT_CHANGED");
     internal abstract Task<SyncDirectory> ReadAsync(string[] kinds);
     internal abstract Task<SyncRemote?> ReadCollectionAsync(string id);
+    internal abstract Task<IReadOnlyList<SyncSubscription>> ReadSubscriptionsAsync();
+    internal virtual Task<SyncSubscription> SubscriptionTargetAsync(string id, string name, string cover, long count) =>
+        Task.FromResult(new SyncSubscription(id, name, cover, count, new()));
+    internal virtual Task<Func<Task>> PrepareSubscriptionAsync(SyncSubscription target, bool subscribe) =>
+        Task.FromResult<Func<Task>>(() => subscribe ? SubscribeAsync(target) : UnsubscribeAsync(target));
+    internal abstract Task SubscribeAsync(SyncSubscription target);
+    internal abstract Task UnsubscribeAsync(SyncSubscription subscription);
     internal virtual void CheckWriteCapability(string operation) { }
     internal abstract Task CreateAsync(string name);
     internal abstract Task DeleteAsync(SyncRemote remote);

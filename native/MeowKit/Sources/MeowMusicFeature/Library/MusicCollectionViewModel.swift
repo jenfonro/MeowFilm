@@ -150,8 +150,8 @@ enum MusicCollectionOwnerChange {
             }
         }
     }
-    public var canEdit: Bool { canAct && ["playlist", "favorites"].contains(collection?.kind ?? "") }
-    public var canRename: Bool { canAct && collection?.kind == "playlist" }
+    public var canEdit: Bool { canAct && collection?.canEdit == true }
+    public var canRename: Bool { canEdit && collection?.kind == "playlist" }
     public var isCurrentCollection: Bool {
         guard searchQuery.isEmpty, isAvailable, model.current != nil else { return false }
         if let currentQueueCollectionID {

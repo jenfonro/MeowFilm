@@ -22,7 +22,7 @@ await runtime.start();
 // 宿主结束会话时：await runtime.close();
 ```
 
-也可与既有业务模块一并传给 `createAppRuntime`，每个模块只能出现一次。通用默认 `createRuntime`／`startRuntime` 仍装配 music、cat、source。iOS／Windows 正式 App entry 在同一会话中按 music、cat、source、pan、tmdb、douban、film 顺序精确装配七模块；`connectFilmPlayback` 复用两份元数据 owner，并连接配置变更撤权。provider 本身不创建业务缓存，[影视播放业务](film-playback.md)持有唯一业务数据缓存。模块源文件已纳入公共打包闭包；搜索交接见[共同契约](../common/film/search.md)，端侧事实分别见 [iOS 影视搜索](../ios/film-search.md)和 [Windows 影视搜索](../windows/film-search.md)。
+也可与既有业务模块一并传给 `createAppRuntime`，每个模块只能出现一次。通用默认 `createRuntime`／`startRuntime` 仍装配 music、cat、source。iOS／Windows 正式 App entry 在同一会话中按 music、cat、source、pan、tmdb、douban、film、netease 顺序精确装配八模块；`connectFilmPlayback` 复用两份元数据 owner，并连接配置变更撤权。[网易 token](netease-token.md)最后独立追加，不参与元数据取数；provider 本身不创建业务缓存，[影视播放业务](film-playback.md)持有唯一业务数据缓存。模块源文件已纳入公共打包闭包；搜索交接见[共同契约](../common/film/search.md)，端侧事实分别见 [iOS 影视搜索](../ios/film-search.md)和 [Windows 影视搜索](../windows/film-search.md)。
 
 | 模块 | 版本 | contract | 逻辑方法前缀 |
 | --- | --- | --- | --- |

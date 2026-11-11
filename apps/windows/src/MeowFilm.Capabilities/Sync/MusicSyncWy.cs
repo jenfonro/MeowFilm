@@ -7,9 +7,10 @@ namespace MeowFilm.Capabilities.Sync;
 
 internal sealed class MusicSyncWy(MusicPlatformSession session, MusicPlatformHttp http,
     MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client,
-    Func<Task> guard, Action accountGuard, CancellationToken token)
+    Func<Task> guard, Action accountGuard, CancellationToken token, MusicNeteaseTokenProvider neteaseTokens)
     : MusicSyncAdapter(session, http, clients, client, guard, accountGuard, token)
 {
+    private HashSet<string>? subscriptionOwnedIds;
     private async Task<List<JsonObject>> Directory()
     {
         var all = new List<JsonObject>(); var seen = new HashSet<string>();
@@ -23,8 +24,15 @@ internal sealed class MusicSyncWy(MusicPlatformSession session, MusicPlatformHtt
         }
     }
     private bool Favorite(JsonObject entry) => Id(entry["creator"]?["userId"]) == AccountId && PJ.Scalar(entry["specialType"]) == "5";
+    private bool Writable(JsonObject entry) => Id(entry["creator"]?["userId"]) == AccountId &&
+        PJ.Scalar(entry["specialType"] ?? JsonValue.Create(0)) is "0" or "5";
+    private static SyncSubscription Subscription(JsonObject entry) => new(Id(entry["id"]), Name(entry["name"]),
+        NativeMusicSong.PublicUrl(entry["coverImgUrl"]), Count(entry["trackCount"]), new());
+    private List<SyncSubscription> Subscriptions(IEnumerable<JsonObject> entries) => entries.Where(entry =>
+        Id(entry["creator"]?["userId"]) != AccountId).Select(Subscription).ToList();
     private static string Signature(IEnumerable<JsonObject> rows) => LJ.Digest(LJ.Arr(rows.Select(r => O(("id", Id(r["id"])),
-        ("owner", Id(r["creator"]?["userId"])), ("name", r["name"]), ("specialType", r["specialType"])))));
+        ("owner", Id(r["creator"]?["userId"])), ("name", r["name"]), ("specialType", r["specialType"]),
+        ("count", r["trackCount"]), ("cover", r["coverImgUrl"])))));
     private static string[] TrackIds(JsonObject data, string id, string owner)
     {
         Require(Id(data["id"]) == id && Id(data["creator"]?["userId"]) == owner, "IDENTITY_MISMATCH");
@@ -74,15 +82,50 @@ internal sealed class MusicSyncWy(MusicPlatformSession session, MusicPlatformHtt
     internal override async Task<SyncDirectory> ReadAsync(string[] kinds)
     {
         var before = await Directory(); var all = new List<SyncRemote>();
-        var selected = before.Where(entry => kinds.Contains(Favorite(entry) ? "favorites" : "playlist")).ToArray();
+        var selected = before.Where(entry => Writable(entry) && kinds.Contains(Favorite(entry) ? "favorites" : "playlist")).ToArray();
         foreach (var entry in selected) all.Add(await ReadEntry(entry));
-        Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED"); return new(AccountId, all);
+        Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED");
+        return new(AccountId, all, kinds.Contains("playlist") ? Subscriptions(before) : []);
     }
     internal override async Task<SyncRemote?> ReadCollectionAsync(string id)
     {
         var before = await Directory(); var entry = before.FirstOrDefault(r => Id(r["id"]) == id);
-        var result = entry is null ? null : await ReadEntry(entry);
+        var result = entry is null || !Writable(entry) ? null : await ReadEntry(entry);
         Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED"); return result;
+    }
+    internal override async Task<IReadOnlyList<SyncSubscription>> ReadSubscriptionsAsync()
+    {
+        subscriptionOwnedIds = null;
+        var before = await Directory(); var subscriptions = Subscriptions(before);
+        Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED");
+        subscriptionOwnedIds = before.Where(entry => Id(entry["creator"]?["userId"]) == AccountId)
+            .Select(entry => Id(entry["id"])).ToHashSet(StringComparer.Ordinal);
+        return subscriptions;
+    }
+    internal override Task<SyncSubscription> SubscriptionTargetAsync(string id, string name, string cover, long count)
+    {
+        Require(subscriptionOwnedIds is not null, "SNAPSHOT_CHANGED");
+        Require(!subscriptionOwnedIds!.Contains(id), "READ_ONLY");
+        return base.SubscriptionTargetAsync(id, name, cover, count);
+    }
+    internal override async Task<Func<Task>> PrepareSubscriptionAsync(SyncSubscription target, bool subscribe)
+    {
+        await Guard().ConfigureAwait(false);
+        string freshToken = await neteaseTokens.GetAsync(Token).ConfigureAwait(false);
+        await Guard().ConfigureAwait(false);
+        // Preparation has no subscription side effect. The coordinator journals only after this returns.
+        return async () => { _ = await Send(MusicPlatformRequests.WySubscription(target.Id, subscribe, freshToken,
+            Session.Cookie, WyClient)).ConfigureAwait(false); };
+    }
+    internal override async Task SubscribeAsync(SyncSubscription target)
+    {
+        var dispatch = await PrepareSubscriptionAsync(target, true).ConfigureAwait(false);
+        await dispatch().ConfigureAwait(false);
+    }
+    internal override async Task UnsubscribeAsync(SyncSubscription subscription)
+    {
+        var dispatch = await PrepareSubscriptionAsync(subscription, false).ConfigureAwait(false);
+        await dispatch().ConfigureAwait(false);
     }
     internal override async Task CreateAsync(string name) => _ = await Wy("/api/playlist/create", O(("name", name), ("privacy", 10), ("type", "NORMAL")));
     internal override async Task DeleteAsync(SyncRemote remote)

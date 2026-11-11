@@ -184,6 +184,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public var metadataPreferencesService: (any MusicMetadataPreferencesServing)? { service }
     let feedbackConsumer: MusicPlaybackFeedbackConsumer
     var feedbackAutomatic = false
+    var isClosing = false
+    private var closingTask: Task<Void, Never>?
     var player: (any MusicPlaybackDriving)?
     var primaryPlayback: (intent: UUID, presentation: MusicMiniPlayerPresentation,
                                   receipt: MusicMiniPlayerPlaybackIdentity?)?
@@ -323,7 +325,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             album: track.album, duration: track.duration, sources: track.sources, artwork: metadataArtworkURL)
     }
     public var canNavigate: Bool {
-        isAvailable && !isClosed && service != nil && player != nil && current != nil &&
+        isAvailable && !isClosed && !isClosing && service != nil && player != nil && current != nil &&
         fmSource?.authorization.isActive != false &&
         !isResolving && !isNavigating && !isChangingQueue && !isChangingSimilarMode && !isChangingQueueRecommendations
     }
@@ -347,7 +349,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public var currentLyricIndex: Int? { MusicLyricTimeline.activeIndex(lines: lyricLines, at: position) }
 
     func enter() throws -> UUID {
-        guard !isClosed else { throw MusicServiceError.closed }
+        guard !isClosed, !isClosing else { throw MusicServiceError.closed }
         guard isAvailable else { throw MusicServiceError.accessUnavailable }
         return lifecycle
     }
@@ -386,14 +388,18 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         // model when that callback re-enters.
         if let old { player?.stop(old) }
     }
-    func invalidateSelection(stopMedia: Bool, preservingQueueIntent intent: MusicQueueAuthorization? = nil) {
+    func invalidateSelection(stopMedia: Bool, reason: MusicPlaybackFeedbackReport.Reason = .interrupt,
+                             preservingQueueIntent intent: MusicQueueAuthorization? = nil) {
         let retainsPlayback = !stopMedia && isAvailable && !isClosed && nativeAttempt != nil &&
             candidate?.occurrenceId == current?.id && terminalAttempt == nil
         if remoteQueueIntent !== intent { cancelRemoteQueuePreparation() }
         if recommendationIntent !== intent && recommendationPlaybackIntent !== intent { recommendationPlaybackIntent?.revoke() }
         if navigationPlaybackIntent !== intent { navigationPlaybackIntent?.revoke() }
         if fmAdvanceIntent !== intent { fmAdvanceIntent?.revoke(); fmAdvanceIntent = nil }
-        feedbackConsumer.invalidate()
+        if !retainsPlayback {
+            if reason == .ui || reason == .playend { feedbackConsumer.retire(reason: reason) }
+            else { feedbackConsumer.invalidate(reason: reason) }
+        }
         if !retainsPlayback { feedbackAutomatic = false }
         sourceSwitchID = UUID(); sourceSwitchTask?.cancel(); sourceSwitchTask = nil; sourceMediaTask?.cancel(); sourceMediaTask = nil
         sourceRecoveryTask?.cancel(); sourceRecoveryTask = nil
@@ -434,6 +440,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         metadataPreferencesRefreshTask?.cancel()
         navigationTask?.cancel(); navigationTask = nil
         navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false; pendingNativeResourceID = nil
+        feedbackConsumer.invalidate(rejecting: true)
         invalidateSelection(stopMedia: false); eventTail?.cancel()
         candidate = nil; resolvingAttempt = nil; terminalAttempt = nil
         playbackState.state = MusicPlaybackState(); playbackState.queue = []; notices.queueNotice = nil; libraryState.collections = []; libraryState.platforms = []
@@ -505,16 +512,37 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public func setMode(_ mode: MusicPlaybackMode) async {
         await updateSettings(MusicSettingsChange(ifRevision: state.settingsRevision, mode: mode))
     }
-    public func close() async {
-        guard !isClosed else { return }
+    /// Stops output synchronously while exit observations still own their
+    /// candidate. `close()` drains those local facts, never the network ACK.
+    public func prepareForClose() {
+        guard !isClosed, !isClosing else { return }
+        isClosing = true
+        (service as? any MusicPlaybackFeedbackClosePreparing)?.stopPlaybackFeedbackDispatchForClose()
         cancelPlayPauseCommands()
+        navigationTask?.cancel(); resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
+        sourceSwitchTask?.cancel(); sourceMediaTask?.cancel(); sourceRecoveryTask?.cancel()
+        cachedAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask?.cancel()
+        let attempt = resolvingAttempt ?? candidate?.attemptId
+        // Stop while the immutable native exit still has its owner/candidate.
+        // Freeze that actual final observation before retiring FM/source grants.
+        if let nativeAttempt { player?.stop(nativeAttempt) }
+        nativeAttempt = nil; pendingNativeResourceID = nil
+        closingTask = Task { await completeClose(attemptID: attempt) }
+    }
+    public func close() async {
+        prepareForClose()
+        await closingTask?.value
+    }
+    private func completeClose(attemptID: String?) async {
+        await feedbackConsumer.flush()
+        await eventTail?.value
+        await feedbackConsumer.finish(reason: .interrupt)
         favoritesObservation?.cancel(); favoritesObservation = nil
         favoritesStorage?.suspend()
         accountObservation?.cancel(); accountObservation = nil
         notifyCollectionPages(.revoking)
         cancelRemoteQueuePreparation(); cancelFMNavigation(); stopFM()
         stopSimilarObservation()
-        let attempt = resolvingAttempt ?? candidate?.attemptId
         accessState.isClosed = true; lifecycle = UUID(); navigationTask?.cancel(); eventTail?.cancel()
         metadataPreferencesRefreshRequested = false
         metadataPreferencesRefreshTask?.cancel()
@@ -526,7 +554,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         libraryState.isLoaded = false
         await favoritesStorage?.flush()
         if let service {
-            if let attempt { do { try await service.cancel(attemptId: attempt) } catch { self.error = MusicServiceError.sanitized(error).localizedDescription } }
+            if let attemptID { do { try await service.cancel(attemptId: attemptID) } catch { self.error = MusicServiceError.sanitized(error).localizedDescription } }
         }
     }
     // The model is owned by MainActor UI. Tear down synchronously instead of

@@ -11,7 +11,7 @@
 - `FilmSearchService` 固定借用一个 `RuntimeConnection`，通过 `film.playback.v1` 调用 `film.search.open/snapshot/command/release/handoff`，以 `film` 事件通道订阅 `/v1/film/events/{sessionId}`。同一快照同时提供完整 `cards/rawCards` 与通道状态。
 - Node 唯一执行规则、识别、相关度、分页、聚合与排序，持有来源原始响应和规则快照。客户端只显示选定数组并转发动作，不再直接发搜索内容请求、执行 JS、排序或从卡片生成缓存 seed。
 - Capabilities 无规则／搜索 JS 内嵌资源；Platform 不再构建或复制独立规则 DLL。实际执行由运行器载荷的公共 script-host addon 提供，缺失运行器或方法时显示真实错误，无原生回退。
-- 正式 entry、manifest 与原生 describe 精确装配 `music,cat,source,pan,tmdb,douban,film` 七模块。通用默认三模块不变；加入豆瓣模块不扩展搜索范围。运行器装配与依赖分别见[平台接入](app-runtime.md)、[打包](runtime-packaging.md)。
+- 正式 entry、manifest 与原生 describe 精确装配 `music,cat,source,pan,tmdb,douban,film,netease` 八模块。通用默认三模块不变；加入豆瓣模块不扩展搜索范围。运行器装配与依赖分别见[平台接入](app-runtime.md)、[打包](runtime-packaging.md)。
 - TMDB 设置与图片仍走既有 `FilmMetadataService`、`IRuntimeImageClient` 和 `ArtworkService`。配置、内容缓存、完整度与同 key producer 合并归 [Node 数据 owner](../runtime/film-playback.md)；原生图片缓存与解码预算不等于搜索结果条数限制。
 
 ## 搜索生命周期
@@ -66,7 +66,7 @@ Shell 继续保存原模块位置、公共输入草稿和实际可达的历史�
 
 业务替身组不启动 Node，但测试进程仍要求真实绝对 `MEOWFILM_TEST_NODE` 和当前编译副本 `tmp/test-results/` 内的 `MEOWFILM_TEST_DATA_ROOT`。STA／Dispatcher、WPF HWND 和正常媒体工程构建依赖仍存在，不手工复制任意 DLL 或绕过正常 target。
 
-两个 Runtime 组使用正常 `prepare-test-bundles.mjs` 生成的当前 Windows 七模块 `aggregate` bundle，以及公共 addon；沿用 `MEOWFILM_TEST_RUNTIME_ROOT` 和默认构建缓存。`FilmSearchRuntimeTests` 的受控 TCP HTTP 上游及 Cat 脚本是合成数据，不等于外部账号、代理或第三方来源在线验收；未取得本轮执行回执前不能宣称实际载体通过。
+两个 Runtime 组使用正常 `prepare-test-bundles.mjs` 生成的当前 Windows 八模块 `aggregate` bundle，以及公共 addon；沿用 `MEOWFILM_TEST_RUNTIME_ROOT` 和默认构建缓存。`FilmSearchRuntimeTests` 的受控 TCP HTTP 上游及 Cat 脚本是合成数据，不等于外部账号、代理或第三方来源在线验收；未取得本轮执行回执前不能宣称实际载体通过。
 
 搜索卡片／元数据图片测试使用隐藏 `HwndSource`（无 `WS_VISIBLE`、有 `WS_EX_NOACTIVATE`），不使用系统输入或前台焦点。离屏图位于 `TestWorkspace.DataPath("film-search", ...)`，实际路径由测试输出；其余设置组沿各自既有窗口要求。
 

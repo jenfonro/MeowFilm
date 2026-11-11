@@ -82,6 +82,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public string Version => "0.4.0";
     public ObservableCollection<NavigationItem> Navigation { get; } = [];
     public ObservableCollection<PlaylistRow> Playlists { get; } = [];
+    public ObservableCollection<PlaylistRow> NetworkPlaylists { get; } = [];
     private readonly ObservableCollection<SongRow> searchSongs = [], catalogSongs = [];
     public ObservableCollection<SongRow> Songs => IsSearchPage ? searchSongs : catalogSongs;
     public ObservableCollection<SongRow> SearchSongsSource => searchSongs;
@@ -310,6 +311,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         MusicOperationException { Code: "CAPABILITY_UNAVAILABLE" } => "当前音源不支持此操作或音质",
         MusicOperationException { Code: "PERMISSION_DENIED" } => "音源权限未授权",
         MusicOperationException { Code: "AUTH_REQUIRED" } => "当前内容需要平台登录",
+        MusicOperationException { Code: "SDK_FAILURE" or "SDK_CLEANUP" } => "网易云订阅验证失败",
         MusicOperationException { Code: "AUTH_CHANGED" or "AUTH_EXPIRED" } => "平台登录状态已失效",
         MusicOperationException { Code: "VIP_REQUIRED" } => "当前官方音源需要有效会员",
         MusicOperationException { Code: "TRIAL_ONLY" or "PLAYBACK_RESTRICTED" } => "当前歌曲暂无完整播放权限",
@@ -354,7 +356,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         requested(this, new(destination)); // Shell owns route history and back.
         return Task.CompletedTask;
     }
-    public Task OpenPlaylistAsync(string id) => RequestNavigationAsync(id == "favorites" ? "favorites" : "playlist/" + id);
+    public Task OpenPlaylistAsync(string id) => RequestNavigationAsync(NetworkPlaylists.FirstOrDefault(p => p.Id == id)?.Route
+        ?? (id == "favorites" ? "favorites" : "playlist/" + id));
     public Task RefreshAsync()
     {
         if (IsDiscovery) return RefreshDiscoveryAsync();
@@ -699,9 +702,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         {
             if (epoch != playbackEpoch || playback.OwnerId != Id || !playback.HasMedia) return;
             // Explicit discontinuity: never count a short seek as a listened interval.
-            SampleFeedback(false);
-            await playback.SeekAsync(seconds);
-            SampleFeedback(playback.IsPlaying);
+            SuspendFeedback();
+            try { await playback.SeekAsync(seconds); }
+            finally { ResumeFeedback(epoch); }
         });
     }
     private async Task<JsonElement> QueueCall(string method, object? parameters = null)
@@ -829,6 +832,14 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void PlaybackChanged(object? sender, PropertyChangedEventArgs args)
     {
         if (stopping) return;
+        if (string.IsNullOrEmpty(args.PropertyName) ||
+            args.PropertyName is nameof(IMusicPlayback.DurationSeconds) or nameof(IMusicPlayback.HasMedia))
+            CheckMediaDuration();
+        if (string.IsNullOrEmpty(args.PropertyName) ||
+            args.PropertyName is nameof(IMusicPlayback.PositionSeconds) or nameof(IMusicPlayback.DurationSeconds) or
+            nameof(IMusicPlayback.IsPlaying) or nameof(IMusicPlayback.HasMedia) or
+            nameof(IMusicPlayback.OwnerId) or nameof(IMusicPlayback.Identity))
+            SampleFeedback();
         if (!OwnsCurrent || !playback.HasMedia) playbackRateReceipt = null;
         if ((!OwnsCurrent || !playback.HasMedia) && musicRecovery is not { Opening: true } ||
             args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId is not null && playback.OwnerId != Id)
@@ -836,7 +847,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId != Id &&
             musicRecovery is { Opening: false })
             TrackMusicRecovery(RetireMusicRecovery());
-        SampleFeedback();
         ObserveRecommendationPlayback();
         ObserveMusicPreload();
         if (args.PropertyName == nameof(IMusicPlayback.PositionSeconds))
@@ -844,7 +854,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         else
         {
             if (args.PropertyName != nameof(IMusicPlayback.Volume)) SyncChorus();
-            if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
             DesktopLyricBindings();
             Changed(nameof(CanHeartbeatCurrent));
@@ -869,29 +878,28 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void AcceptPlaybackStarted(MusicRecovery? state)
     {
         if (state is not null && !CurrentRecovery(state)) return;
+        CheckMediaDuration();
+        if (state?.PendingFailure == "RECORDING_MISMATCH") return;
         if (recorded)
         {
             if (state is { ConfirmSourceOnStart: true })
             {
                 state.ConfirmSourceOnStart = false;
-                bool restartFeedback = state.RestartFeedbackOnStart;
-                state.RestartFeedbackOnStart = false;
                 ConfirmOfficialPlayback();
                 ConfirmPlaybackFileCache();
-                if (restartFeedback) StartFeedback();
+                StartFeedback(); SampleFeedback();
             }
             return;
         }
         if (state is not null)
         {
             state.ConfirmSourceOnStart = false;
-            state.RestartFeedbackOnStart = false;
         }
         var entry = openedEntry; var epoch = playbackEpoch; var stamp = statusEpoch;
         recorded = true; playbackEvent++;
         ConfirmOfficialPlayback();
         ConfirmPlaybackFileCache();
-        StartFeedback();
+        StartFeedback(observedStart: true);
         ObserveRecommendationPlayback();
         if (searchRecommendationStart is { } searchPreview)
             _ = TrackRecommendation(StartQueueRecommendationPreviewAsync(searchPreview));

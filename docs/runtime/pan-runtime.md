@@ -2,7 +2,7 @@
 
 `@meowfilm/pan-runtime@0.1.0` 是通用运行器的内置 Node 能力，不运行外部脚本，不创建 Worker 或额外进程。它拥有网盘凭据、分享枚举、必要单文件转存、登录及取播放地址；不拥有影视搜索、播放选路、媒体代理、账号页面或客户端缓存。
 
-本模块仅提供 provider 能力。iOS／Windows 正式 App entry 已在七模块中装配 pan，film 复用同一个 owner；这不等于账号 UI、真实登录／转存或平台播放已验证，具体业务与边界见[影视播放契约](film-playback.md)。
+本模块仅提供 provider 能力。iOS／Windows 正式 App entry 已在八模块中装配 pan，film 复用同一个 owner；这不等于账号 UI、真实登录／转存或平台播放已验证，具体业务与边界见[影视播放契约](film-playback.md)。
 
 ## 受信装配
 

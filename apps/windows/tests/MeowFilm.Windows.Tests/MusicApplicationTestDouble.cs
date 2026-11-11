@@ -110,6 +110,7 @@ internal abstract class MusicApplicationTestDouble : IMusicApplication
         }
         public void Select(MusicFeedbackSelection value) { }
         public void UpdateSelection(MusicFeedbackSelection value) { }
+        public void Invalidate() { }
         public void Started(string entryId, double position, double duration, double rate = 1, int mode = 1) { }
         public void Observe(string entryId, double position, double duration, bool isPlaying,
             double rate = 1, int mode = 1) { }

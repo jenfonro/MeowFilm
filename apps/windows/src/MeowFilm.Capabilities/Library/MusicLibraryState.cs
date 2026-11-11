@@ -15,11 +15,11 @@ public sealed partial class MusicLibraryOwner
     private static JsonObject FreshCollection(string id, string name, string kind) =>
         LJ.Obj(("id", id), ("name", name), ("kind", kind), ("order", new JsonArray()), ("revision", 0), ("manualOrder", false),
             ("bindings", new JsonArray()), ("intents", new JsonObject()));
-    private JsonObject EmptyLibrary() => LJ.Obj(("version", 1), ("ownerId", scope), ("revision", 0), ("nextId", 1),
+    private JsonObject EmptyLibrary() => LJ.Obj(("version", 2), ("ownerId", scope), ("revision", 0), ("nextId", 1),
         ("collections", new JsonArray(FreshCollection("favorites", "我的收藏", "favorites"))), ("songs", new JsonObject()),
-        ("accounts", new JsonObject()));
+        ("accounts", new JsonObject()), ("networkPlaylists", new JsonArray()));
     private JsonObject LibraryState(JsonObject doc) => Value(doc, "library") as JsonObject ??
-        LJ.Obj(("schema", 1), ("scope", scope), ("revision", 0), ("library", EmptyLibrary()));
+        LJ.Obj(("schema", 2), ("scope", scope), ("revision", 0), ("library", EmptyLibrary()));
     private static JsonObject FindCollection(JsonObject library, string id) => LJ.Array(library["collections"]).OfType<JsonObject>()
         .FirstOrDefault(c => LJ.S(c["id"]) == id && !LJ.B(c["deleted"])) ?? throw new MusicLibraryException("COLLECTION_NOT_FOUND");
     private static JsonObject CollectionView(JsonObject c) => LJ.Obj(("id", c["id"]), ("name", c["name"]), ("kind", c["kind"]),
@@ -55,7 +55,7 @@ public sealed partial class MusicLibraryOwner
             {
                 var state = LJ.Object(Value(doc, "library"), "CORRUPT_LIBRARY");
                 LJ.Fields(state, "schema scope revision library", "schema scope revision library");
-                LJ.Require(LJ.I(state["schema"]) == 1 && LJ.S(state["scope"]) == scope, "CORRUPT_LIBRARY");
+                LJ.Require(LJ.I(state["schema"]) == 2 && LJ.S(state["scope"]) == scope, "CORRUPT_LIBRARY");
                 long wrapperRevision = Revision(state);
                 currentLibrary = ValidateLibrary(LJ.Object(state["library"]), scope);
                 LJ.Require(wrapperRevision == Revision(currentLibrary), "CORRUPT_LIBRARY");
@@ -100,9 +100,9 @@ public sealed partial class MusicLibraryOwner
     {
         try
         {
-            LJ.Fields(raw, "version ownerId revision nextId collections songs accounts",
-                "version ownerId revision nextId collections songs accounts");
-            LJ.Require(LJ.I(raw["version"]) == 1 && LJ.S(raw["ownerId"]) == owner && LJ.Id(owner), "CORRUPT_LIBRARY");
+            LJ.Fields(raw, "version ownerId revision nextId collections songs accounts networkPlaylists",
+                "version ownerId revision nextId collections songs accounts networkPlaylists");
+            LJ.Require(LJ.I(raw["version"]) == 2 && LJ.S(raw["ownerId"]) == owner && LJ.Id(owner), "CORRUPT_LIBRARY");
             _ = Revision(raw); long next = LJ.I(raw["nextId"], 1);
             var songs = LJ.Object(raw["songs"]); var collections = LJ.Array(raw["collections"]); var accounts = LJ.Object(raw["accounts"]);
             LJ.Require(songs.Count <= 100000 && collections.Count <= 10000, "LIMIT");
@@ -154,7 +154,7 @@ public sealed partial class MusicLibraryOwner
                     string platform = LJ.Text(b["platform"]), account = LJ.Text(b["accountId"]); _ = LJ.Text(b["id"]);
                     string key = LJ.Stringify(new JsonArray(platform, account, LJ.S(b["id"])));
                     var baseline = LJ.Array(b["baseline"]); var map = LJ.Object(b["map"]);
-                    LJ.Require(SyncPlatforms.Contains(platform) && bound.Add(key) && remote.Add(key) && LJ.IsBool(b["writable"]) &&
+                    LJ.Require(SyncPlatforms.Contains(platform) && bound.Add(key) && remote.Add(key) && LJ.IsBool(b["writable"]) && LJ.B(b["writable"]) &&
                         baseline.All(value => value is JsonValue scalar && scalar.TryGetValue<string>(out string? nativeId) && LJ.Id(nativeId)) &&
                         (platform == "kg" || baseline.Select(value => LJ.S(value)).Distinct(StringComparer.Ordinal).Count() == baseline.Count),
                         "INVALID_BINDING");
@@ -182,6 +182,7 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(collections.All(c => c is JsonObject) && next > greatestPlaylist, "INVALID_NEXT_ID");
             LJ.Require(accounts.All(p => SyncPlatforms.Contains(p.Key) && p.Value is JsonValue scalar &&
                 scalar.TryGetValue<string>(out string? account) && LJ.Id(account, 64)), "INVALID_ACCOUNT");
+            ValidateNetworkPlaylists(raw);
             result["songs"] = cleaned;
             return result;
         }

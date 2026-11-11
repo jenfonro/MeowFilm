@@ -9,7 +9,7 @@ namespace MeowFilm.Capabilities;
 /// <summary>
 /// Native catalog orchestration. Its platform and library ports are borrowed.
 /// Complete playlist staging never crosses a script process or writes half a
-/// remote playlist to the local queue/library.
+/// remote playlist to the local queue. Favorites persist only a remote reference.
 /// </summary>
 public sealed class MusicNativeCatalogOwner : IAsyncDisposable
 {
@@ -177,6 +177,20 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 case "music.catalog.playlist.prepare":
                     result = await PrepareAsync(input, signal, captured).ConfigureAwait(false);
                     preparedToken = Text(result, "token"); break;
+                case "music.catalog.playlist.save":
+                    Fields(input, ["platform", "id", "name", "cover", "count"], ["platform", "id", "name"]);
+                    var reference = new Dictionary<string, object?>
+                    {
+                        ["platform"] = Platform(input, publicCatalog: true), ["id"] = Text(input, "id"),
+                        ["name"] = Text(input, "name")
+                    };
+                    if (input.TryGetProperty("cover", out var cover)) reference["cover"] = cover.Clone();
+                    if (input.TryGetProperty("count", out var count)) reference["count"] = count.Clone();
+                    Guard(signal, captured);
+                    result = await library.ExecuteAsync("music.library.network.save", reference, signal).ConfigureAwait(false);
+                    if (result.GetProperty("ok").ValueKind != JsonValueKind.True)
+                        throw new CatalogFailure(Text(result, "code"));
+                    return result;
                 case "music.catalog.playlist.commit":
                     result = await CommitAsync(input, signal, captured).ConfigureAwait(false);
                     // Storage admission is final: a cancelled caller must not be
@@ -325,12 +339,10 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
 
     private async Task<JsonElement> CommitAsync(JsonElement input, CancellationToken signal, long captured)
     {
-        Fields(input, ["token", "action", "index", "memberId", "expectedVersion", "expectedSongId", "name"], ["token", "action"]);
+        Fields(input, ["token", "action", "index", "memberId", "expectedVersion", "expectedSongId"], ["token", "action"]);
         var token = Text(input, "token"); var action = Text(input, "action");
-        Check(action is "save" or "play" or "next", "INVALID_REQUEST");
-        var name = OptionalText(input, "name");
+        Check(action is "play" or "next", "INVALID_REQUEST");
         var memberId = OptionalText(input, "memberId");
-        Check(name is null || name.Length <= 200, "INVALID_REQUEST");
         int index = 0; long version = 0;
         if (action == "next")
         {
@@ -341,11 +353,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         else if (action == "play")
         {
             index = Number(input, "index", 0); version = Long(input, "expectedVersion");
-            Check(index >= 0 && version >= 0 && !input.TryGetProperty("name", out _) &&
+            Check(index >= 0 && version >= 0 &&
                 (memberId is null || !input.TryGetProperty("index", out _)), "INVALID_REQUEST");
         }
-        else Check(!input.TryGetProperty("index", out _) && !input.TryGetProperty("expectedVersion", out _) &&
-            !input.TryGetProperty("expectedSongId", out _) && !input.TryGetProperty("memberId", out _), "INVALID_REQUEST");
         Stage item;
         Guard(signal, captured);
         lock (gate)
@@ -368,24 +378,18 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         }
         try
         {
-            JsonElement result;
-            if (action == "save")
-                result = await library.CreatePlaylistAsync(name ?? item.Name, item.Songs, signal).ConfigureAwait(false);
-            else
+            var context = JsonSerializer.SerializeToNode(new { sourceTitle = item.Name,
+                sourcePlatform = item.Platform, sourceType = "playlist", sourceId = item.Id,
+                queueSource = new { id = item.Id, title = item.Name, kind = "playlist", platform = item.Platform } })!.AsObject();
+            if (item.HeartbeatAccount.Length > 0)
             {
-                var context = JsonSerializer.SerializeToNode(new { sourceTitle = item.Name,
-                    sourcePlatform = item.Platform, sourceType = "playlist", sourceId = item.Id,
-                    queueSource = new { id = item.Id, title = item.Name, kind = "playlist", platform = item.Platform } })!.AsObject();
-                if (item.HeartbeatAccount.Length > 0)
-                {
-                    context["heartbeatPlaylistId"] = item.Id;
-                    context["heartbeatAccountId"] = item.HeartbeatAccount;
-                }
-                var sourceContext = JsonSerializer.SerializeToElement(context);
-                result = action == "next"
-                    ? await library.AppendQueueAsync(item.Songs, sourceContext, version, signal).ConfigureAwait(false)
-                    : await library.ReplaceQueueAsync(item.Songs, index, sourceContext, version, signal).ConfigureAwait(false);
+                context["heartbeatPlaylistId"] = item.Id;
+                context["heartbeatAccountId"] = item.HeartbeatAccount;
             }
+            var sourceContext = JsonSerializer.SerializeToElement(context);
+            var result = action == "next"
+                ? await library.AppendQueueAsync(item.Songs, sourceContext, version, signal).ConfigureAwait(false)
+                : await library.ReplaceQueueAsync(item.Songs, index, sourceContext, version, signal).ConfigureAwait(false);
             Check(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("ok", out _), "INVALID_RESPONSE");
             if (result.GetProperty("ok").ValueKind != JsonValueKind.True)
             {
@@ -394,9 +398,8 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 if (code == "CANCELLED" && signal.IsCancellationRequested) signal.ThrowIfCancellationRequested();
                 throw new CatalogFailure(code);
             }
-            return action == "save" ? JsonSerializer.SerializeToElement(new { collection = result.GetProperty("collection") })
-                : JsonSerializer.SerializeToElement(new { currentId = result.GetProperty("currentId"),
-                    version = result.GetProperty("version"), mode = result.GetProperty("mode") });
+            return JsonSerializer.SerializeToElement(new { currentId = result.GetProperty("currentId"),
+                version = result.GetProperty("version"), mode = result.GetProperty("mode") });
         }
         finally { lock (gate) reservedBytes -= item.Bytes; }
     }

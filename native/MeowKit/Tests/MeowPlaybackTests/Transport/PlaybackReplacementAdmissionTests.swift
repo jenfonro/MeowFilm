@@ -159,6 +159,68 @@ import MeowContracts
         XCTAssertThrowsError(try controller.commitReplacement(prepared))
     }
 
+    func testRealNativeStartRateAndSmallSeekCarryListeningBoundaries() async throws {
+        let file = try silentFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let controller = PlaybackController()
+        let ready = expectation(description: "Local silent media ready")
+        let played = expectation(description: "Real time-control playing at selected rate")
+        let sought = expectation(description: "Small native seek completed")
+        let jumped = expectation(description: "Small external native seek observed")
+        var events: [PlaybackEvent] = [], didPlay = false
+        var externalPosition: Double?
+        let lease = try controller.bind(owner: "music") { event in
+            events.append(event)
+            if event.kind == .prepared { ready.fulfill() }
+            if event.kind == .played, !didPlay { didPlay = true; played.fulfill() }
+            if let target = externalPosition, event.kind == .progress, event.discontinuity,
+               event.snapshot.position >= target {
+                externalPosition = nil; jumped.fulfill()
+            }
+        }
+        defer { lease.cancel(); controller.stop() }
+        let attempt = controller.playAttempt(resource: try .init(id: "listening", url: file, title: "Synthetic"),
+            owner: "music", autoplay: false)
+        _ = controller.setVolume(0, attempt: attempt)
+        await fulfillment(of: [ready], timeout: 5)
+        XCTAssertFalse(events.contains { $0.kind == .played })
+        XCTAssertTrue(controller.setPreferredRate(2, attempt: attempt))
+        XCTAssertFalse(events.contains { $0.kind == .played }, "Selecting rate while paused cannot start media")
+        XCTAssertTrue(controller.resume(attempt: attempt))
+        await fulfillment(of: [played], timeout: 5)
+        XCTAssertEqual(events.first { $0.kind == .played }?.rate, 2)
+        XCTAssertEqual(events.first { $0.kind == .played }?.wantsPlayback, true)
+        XCTAssertTrue(controller.setPreferredRate(1.5, attempt: attempt))
+        let beforeSeek = events.count
+        let position = controller.snapshot.position + 0.1
+        XCTAssertTrue(controller.seek(to: position, attempt: attempt) { result in
+            XCTAssertEqual(result.outcome, .completed); sought.fulfill()
+        })
+        await fulfillment(of: [sought], timeout: 5)
+        XCTAssertTrue(events.dropFirst(beforeSeek).contains { $0.kind == .progress && $0.discontinuity })
+        XCTAssertTrue(events.contains { $0.kind == .progress && $0.discontinuity && $0.rate == 1.5 })
+        let external = CMTime(seconds: controller.player.currentTime().seconds + 0.1, preferredTimescale: 600)
+        externalPosition = external.seconds
+        let completed = await controller.player.seek(to: external, toleranceBefore: .zero, toleranceAfter: .zero)
+        XCTAssertTrue(completed)
+        await fulfillment(of: [jumped], timeout: 5)
+        XCTAssertTrue(controller.pause(attempt: attempt))
+        let paused = try XCTUnwrap(events.last { $0.kind == .paused })
+        XCTAssertEqual(paused.attempt, attempt)
+        XCTAssertFalse(paused.wantsPlayback)
+        XCTAssertEqual(paused.rate, 1.5)
+        XCTAssertTrue(controller.stop(attempt: attempt))
+        let stopped = try XCTUnwrap(events.last)
+        XCTAssertEqual(stopped.kind, .stopped)
+        XCTAssertEqual(stopped.attempt, attempt)
+        XCTAssertFalse(stopped.wantsPlayback)
+        XCTAssertEqual(stopped.rate, 1.5)
+        XCTAssertEqual(stopped.snapshot.position, paused.snapshot.position, accuracy: 0.05)
+        XCTAssertNil(controller.currentAttempt)
+        XCTAssertTrue(events.allSatisfy { $0.observedAt > 0 && $0.occurredAt > 0 })
+        XCTAssertTrue(zip(events, events.dropFirst()).allSatisfy { pair in pair.0.observedAt <= pair.1.observedAt })
+    }
+
     private func silentFile() throws -> URL {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
         var data = Data()

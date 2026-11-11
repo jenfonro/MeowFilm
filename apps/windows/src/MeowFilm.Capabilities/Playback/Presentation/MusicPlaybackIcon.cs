@@ -81,6 +81,7 @@ public sealed class MusicPlaybackIcon : Control
         // Ordinary modes follow the supplied screenshots, including solid arrowheads and the crossing gap.
         var repeat = Stroke("M 22 13 C 22 17.42 17.52 21 12 21 C 6.48 21 2 17.42 2 13 C 2 8.58 6.48 5 12 5 L 20 5", 1.6);
         var repeatArrow = Fill("F1 M 18.8 1.9 L 22.5 5 L 18.8 8.1 Z");
+        var fm = Stroke("M 12 12 C 9 7 7 7 5 8 C 1 10 1 14 5 16 C 7 17 9 17 12 12 C 15 7 17 7 19 8 C 23 10 23 14 19 16 C 17 17 15 17 12 12 Z", 1.8, round: false);
         return new Dictionary<string, Icon>(StringComparer.Ordinal)
         {
             ["repeat"] = new(24, [repeat, repeatArrow]),
@@ -91,8 +92,8 @@ public sealed class MusicPlaybackIcon : Control
                 Fill("F1 M 18 1 L 22 4 L 18 7 Z M 18 17 L 22 20 L 18 23 Z")]),
             ["heartbeat"] = new(24, [
                 Stroke("M 21 5 A 5.5 5.5 0 0 0 13 4 L 12 5 L 11 4 A 5.5 5.5 0 0 0 3 12 L 12 21 L 21 12 A 5.5 5.5 0 0 0 21 5 Z M 2 12 L 7 12 L 9 8 L 13 16 L 15 12 L 22 12", 1.65)]),
-            ["fm"] = new(24, [
-                Stroke("M 12 12 C 9 7 7 7 5 8 C 1 10 1 14 5 16 C 7 17 9 17 12 12 C 15 7 17 7 19 8 C 23 10 23 14 19 16 C 17 17 15 17 12 12 Z", 1.8, round: false)]),
+            ["fm"] = new(24, [fm]),
+            ["fm-off"] = new(24, [fm, Stroke("M 4 21 L 20 3", 1.8)]),
             // iWebPlus fm-icons.js: all 42 source scenes, preserving official key spellings.
             ["NIGHT_EMO"] = new(32, [
                 Fill("F1 M 25 6 A 3 3 0 1 0 19 6 A 3 3 0 1 0 25 6 Z"),

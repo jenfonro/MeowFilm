@@ -7,7 +7,7 @@ namespace MeowFilm.Capabilities.Library;
 /// <summary>Native authority for local music state. Never install beside a writing Node owner of the same namespace.</summary>
 public sealed partial class MusicLibraryOwner : IAsyncDisposable
 {
-    public const string ContractVersion = "0.6.0";
+    public const string ContractVersion = "0.7.0";
     public const string DocumentNamespace = "music.library.v1";
     private readonly IDocumentStore store;
     private readonly string scope;
@@ -46,7 +46,9 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     { ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope; }
 
     public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-        ExecuteCoreAsync(method, parameters, cancellationToken, method == "music.queue.recommendation.enter");
+        method is "music.library.network.save" or "music.library.network.remove"
+            ? ExecuteNetworkPlaylistMutationAsync(method, parameters, cancellationToken)
+            : ExecuteCoreAsync(method, parameters, cancellationToken, method == "music.queue.recommendation.enter");
     public Task<JsonElement> CreatePlaylistAsync(string name, IReadOnlyList<JsonElement> songs, CancellationToken cancellationToken = default) =>
         ExecuteCoreAsync("music.library.create", new { name, songs }, cancellationToken, true);
     public Task<JsonElement> ReplaceQueueAsync(IReadOnlyList<JsonElement> songs, int index, JsonElement? context,

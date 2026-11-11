@@ -151,8 +151,10 @@ extension NativeMusicService: MusicSourcePlaybackServing {
             _ = try activeSourceDocument(occurrenceID: candidate.occurrenceId,
                                          songID: value.cache.identity.songID, selection: selection)
             try musicRequire(fact.resourceId == candidate.resourceId && fact.occurrenceId == candidate.occurrenceId, .staleResult)
+            let song = try song(.init(kind: .queue, id: candidate.occurrenceId), read())
+            replaceFeedbackAttempt(attemptID: fact.attemptId, occurrenceID: candidate.occurrenceId,
+                                   song: song, sourceKey: selection.sourceKey, authorization: value.cache.authorization)
             retireCachedPlaybackRecovery(); retireAudioCacheAttempt()
-            playbackFeedback.finishCurrent(reason: .ui); playbackFeedback.invalidate(preservingEnds: true)
             cancelWork("playback"); spent.insert(fact.attemptId)
             attempt = .init(id: fact.attemptId, occurrence: candidate.occurrenceId, sourceKey: selection.sourceKey,
                             selection: selection, ready: true, authorization: value.cache.authorization)
@@ -167,8 +169,10 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         let song = try song(value.seed.ref, d)
         try musicRequire(fact.occurrenceId == value.seed.ref.id && fact.resourceId == value.candidate.resourceId, .staleResult)
         try value.candidate.playbackAuthorization?.check()
+        replaceFeedbackAttempt(attemptID: fact.attemptId, occurrenceID: value.seed.ref.id,
+                               song: song, sourceKey: value.result.option.sourceKey,
+                               authorization: value.candidate.playbackAuthorization)
         retireCachedPlaybackRecovery(); retireAudioCacheAttempt()
-        playbackFeedback.finishCurrent(reason: .ui); playbackFeedback.invalidate(preservingEnds: true)
         cancelWork("playback"); spent.insert(fact.attemptId)
         attempt = .init(id: fact.attemptId, occurrence: value.seed.ref.id, sourceKey: value.result.option.sourceKey,
             selection: selection, authorization: value.candidate.playbackAuthorization)

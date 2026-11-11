@@ -167,7 +167,7 @@ public static partial class MusicNativeLibraryTests
     }
     private static Task Contract()
     {
-        Check(MusicLibraryOwner.ContractVersion == "0.6.0" && MusicLibraryOwner.DocumentNamespace == "music.library.v1");
+        Check(MusicLibraryOwner.ContractVersion == "0.7.0" && MusicLibraryOwner.DocumentNamespace == "music.library.v1");
         return Task.CompletedTask;
     }
     private static async Task Initial()
@@ -197,7 +197,7 @@ public static partial class MusicNativeLibraryTests
         await Ok(o, "music.library.removeSong", new { id, ifRevision = 3, songId = "library:local:b" });
         await Ok(o, "music.library.edit", new { id, ifRevision = 4, name = "Renamed", order = new[] { "library:local:c", "library:local:a" } });
         var library = f.Store.State("library")["library"]!;
-        Check(library["collections"]![1]!["intents"]!["library:local:b"]!["present"]!.GetValue<bool>() == false);
+        Check(!library["collections"]![1]!["intents"]!.AsObject().ContainsKey("library:local:b"));
         await Ok(o, "music.library.remove", new { id, ifRevision = 5 });
         Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 1);
         Check(f.Store.State("library")["library"]!["collections"]![1]!["deleted"]!.GetValue<bool>());
@@ -208,8 +208,17 @@ public static partial class MusicNativeLibraryTests
         await Error(o, "music.library.remove", new { id = "favorites", ifRevision = 0 }, "FAVORITES_PROTECTED");
         await Error(o, "music.library.edit", new { id = "favorites", ifRevision = 0, name = "Name" }, "INVALID_NAME");
         await Ok(o, "music.library.addSongs", new { id = "favorites", ifRevision = 0, songs = new[] { Song() } });
+        var added = f.Store.State("library")["library"]!["collections"]![0]!["intents"]!["library:local:a"]!;
+        Check(added["present"]!.GetValue<bool>() && added["pending"]!.GetValue<bool>());
         await Ok(o, "music.library.removeSong", new { id = "favorites", ifRevision = 1, songId = "library:local:a" });
-        Check(f.Store.State("library")["library"]!["collections"]![0]!["intents"]!["library:local:a"]!["pending"]!.GetValue<bool>());
+        Check(f.Store.State("library")["library"]!["collections"]![0]!["intents"]!.AsObject().Count == 0);
+        await o.DisposeAsync();
+        var cold = f.Owner();
+        var detail = await Ok(cold, "music.library.detail", new { id = "favorites" });
+        Check(detail.GetProperty("songs").GetArrayLength() == 0);
+        await Ok(cold, "music.library.addSongs", new { id = "favorites", ifRevision = 2, songs = new[] { Song() } });
+        var readded = f.Store.State("library")["library"]!["collections"]![0]!["intents"]!["library:local:a"]!;
+        Check(readded["present"]!.GetValue<bool>() && readded["pending"]!.GetValue<bool>());
     }
     private static async Task Paging()
     {
@@ -486,17 +495,18 @@ public static partial class MusicNativeLibraryTests
         var songs = new JsonObject { [songId] = Song() };
         var library = new JsonObject
         {
-            ["version"] = 1,
+            ["version"] = 2,
             ["ownerId"] = "local",
             ["revision"] = 0,
             ["nextId"] = 1,
             ["collections"] = new JsonArray(favorite),
             ["songs"] = songs,
-            ["accounts"] = new JsonObject()
+            ["accounts"] = new JsonObject(),
+            ["networkPlaylists"] = new JsonArray()
         };
         return new JsonObject
         {
-            ["schema"] = 1,
+            ["schema"] = 2,
             ["scope"] = "local",
             ["revision"] = 0,
             ["library"] = library
