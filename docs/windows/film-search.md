@@ -6,6 +6,8 @@
 
 原始列表开关置于综合／单曲等分类同行最右侧，TMDB 状态在开关左边；分类区域不足时独立横向滚动，状态和开关不覆盖标签。切换复用同一 Node 会话，不重新搜索。
 
+类别选中项加重，文字下方使用独立居中的短横线，不以按钮圆角边框充当高亮。搜索卡片沿用服务器版媒体卡展示：备注／年份／更新进度为海报右上角橙色圆角角标，标题下方的电影／剧集／聚合／站点名为居中浅底描边标签；长文本单行省略，空值不显示。搜索不显示评分，首页仍保留评分角标；数据文字直接消费 Node 快照，不在客户端重新推导进度。
+
 ## 类型与装配
 
 - App 只装配一个 `SearchResultsPage`，复用既有音乐视图与影视卡片。综合、单曲、歌单、影视分类及手动音乐／影视目标保持现行交互；普通数据刷新不覆盖手动目标。
@@ -55,7 +57,7 @@ Shell 继续保存原模块位置、公共输入草稿和实际可达的历史�
 | `FilmSearchTests` | 完整投影与 typed ID、精确顺序／状态、停止／恢复／断线、迟到 SSE/open、来源与 source wire；业务替身 |
 | `FilmSearchPlaybackTests` | 原样 handoff、原始单源、迟到 reference、初次与重进、实际 producer、来源交集及取消；业务替身 |
 | `SearchResultsConsumerTests` | 真实 Shell/WPF 分类、目标、返回复用、三类导航、迟到更新、封面投影、UInt16 展示与导航先后 |
-| `FilmSearchPresentationTests` | 既有卡片／布局、两视图顺序及独立滚动，1110／860 宽度与隐藏 HWND 离屏图 |
+| `FilmSearchPresentationTests` | 类别短横线／可达与高对比、服务器角标／类型来源标签、既有卡片／布局、两视图顺序及独立滚动，1110／860 宽度与隐藏 HWND 离屏图 |
 | `FilmSettingsUiTests` | 规则草稿／编辑／恢复／失败／取消及受影响设置装配；规则业务替身 |
 | `SettingsNavigationTests` | 公共设置导航、App 装配及 Node 不可用时的真实规则错误 |
 | `FilmMetadataConsumerTests` | 配置保存成功／失败隔离、迟到结果、关闭写回执及实际内容 producer |

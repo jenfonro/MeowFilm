@@ -40,6 +40,7 @@ public final class MusicAppearanceSettingsViewController: HostingPageViewControl
     public override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
+        view.tintColor = UIColor(theme.settings.accent)
         setContent(MusicAppearanceSettingsContent(state: state, theme: theme, openColors: { [weak self] in
             self?.showColors()
         }))
@@ -65,7 +66,7 @@ public struct MusicAppearanceSettingsContent: View {
                             Text("配色设置")
                             Spacer(minLength: 8)
                             Text(state.value.colorMode == .fixed ? state.value.colorPalette.title : state.value.colorMode.title)
-                                .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                                .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         }
                     }
                 }
@@ -159,7 +160,7 @@ struct MusicColorSettingsContent: View {
                 Spacer(minLength: 8)
                 if selected {
                     Image(systemName: "checkmark")
-                        .foregroundStyle(Color(uiColor: UIColor(theme.accent)))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                         .accessibilityHidden(true)
                 }
             }

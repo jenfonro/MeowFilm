@@ -2527,7 +2527,7 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
                 let snapshot = await accounts.snapshot(for: identity)
                 try check(own)
                 switch (snapshot.phase, snapshot.failure) {
-                case (.signedOut, nil), (.invalidated, .invalidated?): break
+                case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): break
                 default: throw error
                 }
                 return try await makeNativeHomeGuest(identity, own: own)
@@ -2565,10 +2565,10 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
               login?.platform != .netease, !requiresExplicitRestore.contains(.netease) else {
             throw MusicServiceError.staleResult
         }
-        // Only confirmed logout or authentication invalidation allows guest
-        // browsing. Missing/replaced records and storage failures still fail.
+        // Confirmed absence also includes a finished failed/cancelled login.
+        // Missing/replaced records and storage failures still fail.
         switch (snapshot.phase, snapshot.failure) {
-        case (.signedOut, nil), (.invalidated, .invalidated?): break
+        case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): break
         default: throw MusicServiceError.authRequired
         }
         if let existing = homeBinding {

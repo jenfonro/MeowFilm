@@ -49,6 +49,49 @@
      </MultiTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/></MultiTrigger>
     </Style.Triggers>
    </Style>
+   <Style x:Key="DesktopLyrics.LyricAdjust" TargetType="Button" BasedOn="{StaticResource DesktopLyrics.Tool}">
+    <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+    <Setter Property="FontSize" Value="10"/>
+    <Setter Property="BorderBrush" Value="#30FFFFFF"/><Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+     <Border CornerRadius="16" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+             BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+      <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+     </Border>
+    </ControlTemplate></Setter.Value></Setter>
+    <Style.Triggers>
+     <Trigger Property="IsMouseOver" Value="True"><Setter Property="BorderBrush" Value="#60FFFFFF"/></Trigger>
+     <Trigger Property="IsPressed" Value="True"><Setter Property="BorderBrush" Value="#80FFFFFF"/></Trigger>
+     <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="#E0FFFFFF"/></Trigger>
+     <Trigger Property="IsEnabled" Value="False">
+      <Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="#18FFFFFF"/>
+     </Trigger>
+     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+     </Trigger>
+     <MultiTrigger><MultiTrigger.Conditions>
+      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsKeyboardFocused" Value="True"/>
+     </MultiTrigger.Conditions><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
+     <MultiTrigger><MultiTrigger.Conditions>
+      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsMouseOver" Value="True"/>
+     </MultiTrigger.Conditions>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+     </MultiTrigger>
+     <MultiTrigger><MultiTrigger.Conditions>
+      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsPressed" Value="True"/>
+     </MultiTrigger.Conditions>
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+     </MultiTrigger>
+     <MultiTrigger><MultiTrigger.Conditions>
+      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsEnabled" Value="False"/>
+     </MultiTrigger.Conditions>
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+     </MultiTrigger>
+    </Style.Triggers>
+   </Style>
   </ResourceDictionary>
  </Window.Resources>
  <Border x:Name="LyricsFrame" Background="Transparent" MouseLeftButtonDown="Lyrics_MouseLeftButtonDown"
@@ -67,13 +110,25 @@
     <StackPanel x:Name="Toolbar" Visibility="Collapsed" Orientation="Horizontal" HorizontalAlignment="Right" Margin="8,4">
      <Button x:Name="ActivateButton" Style="{StaticResource DesktopLyrics.Tool}" Content="&#xE8D6;" Click="Activate_Click"
              AutomationProperties.Name="打开 meowfilm" ToolTip="打开 meowfilm"/>
-     <Button x:Name="DelayButton" Style="{StaticResource DesktopLyrics.Tool}" Click="Delay_Click" IsEnabled="{Binding CanAdjustLyricOffset}"
+     <Button x:Name="DelayButton" Style="{StaticResource DesktopLyrics.LyricAdjust}" Click="Delay_Click" IsEnabled="{Binding CanAdjustLyricOffset}"
              AutomationProperties.Name="歌词延后 0.5 秒" ToolTip="歌词延后 0.5 秒（+0.5s）">
-      <TextBlock Text="+0.5" FontSize="11" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+      <Grid Width="26" Height="26" IsHitTestVisible="False">
+       <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2"
+             StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+             Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+      </Grid>
      </Button>
-     <Button x:Name="AdvanceButton" Style="{StaticResource DesktopLyrics.Tool}" Click="Advance_Click" IsEnabled="{Binding CanAdjustLyricOffset}"
+     <Button x:Name="AdvanceButton" Style="{StaticResource DesktopLyrics.LyricAdjust}" Click="Advance_Click" IsEnabled="{Binding CanAdjustLyricOffset}"
              AutomationProperties.Name="歌词提前 0.5 秒" ToolTip="歌词提前 0.5 秒（−0.5s）">
-      <TextBlock Text="−0.5" FontSize="11" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+      <Grid Width="26" Height="26" IsHitTestVisible="False">
+       <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2"
+             StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+             Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+      </Grid>
      </Button>
      <Button x:Name="PreviousButton" Style="{StaticResource DesktopLyrics.Tool}" Content="&#xE892;" Click="Previous_Click"
              IsEnabled="{Binding CanPlay}" AutomationProperties.Name="上一首" ToolTip="上一首"/>

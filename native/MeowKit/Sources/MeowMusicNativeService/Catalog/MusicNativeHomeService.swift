@@ -256,10 +256,21 @@ extension NativeMusicService: MusicHomeBrowsing {
             return homeDisplay
         }
         guard let display, display.source == source else { return nil }
-        let songs = try await publicSongMetadata(display.page)
+        // Last-success snapshots deliberately carry no account binding. Retain
+        // public albums/songs, but only a live scoped read may publish private
+        // entrances, including a section's account-only navigation action.
+        var page = display.page
+        page.sections = page.sections.compactMap { section in
+            var section = section
+            section.items.removeAll { $0.content.requiresAccount }
+            if let channel = section.channel,
+               MusicNativePublicBrowseContent.channel(channel).requiresAccount { section.channel = nil }
+            return section.items.isEmpty ? nil : section
+        }
+        let songs = try await publicSongMetadata(page)
         try checkHomeSource(source, revision: revision, epoch: own)
         return try access.perform {
-            .init(sections: try convertedPublicSections(display.page, prefix: source.rawValue + ":home:", songs: songs))
+            .init(sections: try convertedPublicSections(page, prefix: source.rawValue + ":home:", songs: songs))
         }
     }
     public func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {

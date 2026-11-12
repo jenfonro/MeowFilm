@@ -10,6 +10,93 @@ import MeowPlayback
 
 @MainActor
 final class MusicSettingsPlatformTests: XCTestCase {
+    func testAccountLoginFormKeepsDraftAndReadableControlsAcrossAppearances() throws {
+        let appearance = MusicAppearancePreferencesStore()
+        let service = makeService()
+        let accounts = MusicSettingsSMSAccountsFixture(base: service)
+        let owner = makeOwner(service: service, accounts: accounts)
+        let state = MusicAccountLoginState(owner: owner, service: accounts, platform: .netease)
+        defer {
+            state.close()
+            let closed = expectation(description: "account color owner closed")
+            Task { await owner.close(); closed.fulfill() }
+            wait(for: [closed], timeout: 3)
+        }
+        state.start(); state.selectMethod(.sms)
+        state.fields.setPhone("10000000000")
+        let page = MusicSettingsPageViewController(appearance: appearance,
+            content: MusicAccountLoginContent(state: state, theme: PageTheme(palette: .coral)))
+        try withSettingsComponent(page) {
+            for dark in [false, true] {
+                page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+                waitForSettingsComponent("account form appearance propagated") { page.theme.dark == dark }
+                page.setContent(MusicAccountLoginContent(state: state, theme: PageTheme(palette: .coral, dark: dark)))
+                for enabled in [false, true] {
+                    state.fields.setCode(enabled ? "000000" : "")
+                    waitForSettingsComponent("account form retains its draft and button availability") {
+                        page.view.layoutIfNeeded()
+                        let fields = self.settingsDescendants(page.view).compactMap { $0 as? UITextField }
+                        return state.actions.value.canSubmit == enabled &&
+                            fields.contains { $0.text == "10000000000" } &&
+                            fields.contains { $0.text == (enabled ? "000000" : "") }
+                    }
+                    let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
+                        XCTAssertTrue(page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true))
+                    })
+                    screenshot.name = "settings-semantic-account-\(dark ? "dark" : "light")-\(enabled ? "enabled" : "disabled")"
+                    screenshot.lifetime = .keepAlways; add(screenshot)
+                }
+            }
+        }
+    }
+
+    func testSettingsControlsKeepStableBlueAcrossPaletteAndAppearanceChanges() throws {
+        let domain = "MusicSettingsSemanticColors." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let service = makeService()
+        let owner = makeOwner(service: service, accounts: service)
+        defer {
+            let closed = expectation(description: "semantic color owner closed")
+            Task { await owner.close(); closed.fulfill() }
+            wait(for: [closed], timeout: 3)
+        }
+        let router = MusicSettingsRouterFixture()
+        let page = MusicSettingsViewController(model: owner, appearance: appearance, router: router)
+        try withSettingsComponent(page) {
+            for dark in [false, true] {
+                page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+                waitForSettingsComponent("settings appearance propagated") { page.theme.dark == dark }
+                for palette in [PagePalette.preset(.coral), .custom(0xffff00)] {
+                    appearance.selectFixedPalette(palette)
+                    let accent = SettingsTheme(dark: dark).accent
+                    let expected = UIColor(accent)
+                    waitForSettingsComponent("settings switch rendered after palette change") {
+                        page.view.layoutIfNeeded()
+                        return page.view.tintColor == expected &&
+                            !self.settingsDescendants(page.view).compactMap { $0 as? UISwitch }.isEmpty
+                    }
+                    let toggle = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UISwitch }.first)
+                    let tint = try XCTUnwrap(toggle.onTintColor)
+                    var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+                    XCTAssertTrue(tint.resolvedColor(with: toggle.traitCollection)
+                        .getRed(&red, green: &green, blue: &blue, alpha: &alpha), "\(tint)")
+                    XCTAssertEqual([red, green, blue, alpha].map { Int(($0 * 255).rounded()) },
+                        [accent.red, accent.green, accent.blue, accent.alpha].map(Int.init), "\(tint)")
+                    XCTAssertEqual(page.theme.palette, palette)
+                    XCTAssertEqual(page.pageHeader.background.theme.palette, palette)
+                    XCTAssertEqual(page.view.tintColor, expected)
+                }
+                let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
+                    XCTAssertTrue(page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true))
+                })
+                screenshot.name = "settings-semantic-music-\(dark ? "dark" : "light")"
+                screenshot.lifetime = .keepAlways; add(screenshot)
+            }
+        }
+    }
+
     func testMusicSettingsLockLyricControlPersistsAndReportsFailedWrites() throws {
         let domain = "MusicLockLyricSettings." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))

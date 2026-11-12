@@ -13,12 +13,42 @@
   </ResourceDictionary.MergedDictionaries>
   <Style x:Key="Search.Tab" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
    <Setter Property="Margin" Value="0,0,24,0"/><Setter Property="Padding" Value="0,4,0,8"/>
-   <Setter Property="BorderThickness" Value="0,0,0,2"/>
-   <Style.Triggers><DataTrigger Binding="{Binding Selected}" Value="True">
-    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-    <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
-    <Setter Property="FontWeight" Value="SemiBold"/>
-   </DataTrigger></Style.Triggers>
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
+   <Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border Background="{TemplateBinding Background}" CornerRadius="4">
+     <Grid>
+      <ContentPresenter Margin="{TemplateBinding Padding}" RecognizesAccessKey="True"
+                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                        VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+      <Border x:Name="SelectionIndicator" Width="20" Height="3" CornerRadius="1.5"
+              HorizontalAlignment="Center" VerticalAlignment="Bottom" IsHitTestVisible="False">
+       <Border.Style><Style TargetType="Border">
+        <Setter Property="Visibility" Value="Collapsed"/>
+        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+        <Style.Triggers>
+         <DataTrigger Binding="{Binding Selected}" Value="True">
+          <Setter Property="Visibility" Value="Visible"/>
+         </DataTrigger>
+         <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+          <Setter Property="Background" Value="{Binding Foreground,RelativeSource={RelativeSource TemplatedParent}}"/>
+         </Trigger>
+        </Style.Triggers>
+       </Style></Border.Style>
+      </Border>
+     </Grid>
+    </Border>
+   </ControlTemplate></Setter.Value></Setter>
+   <Style.Triggers>
+    <DataTrigger Binding="{Binding Selected}" Value="True"><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
+    <MultiDataTrigger><MultiDataTrigger.Conditions>
+     <Condition Binding="{Binding Selected}" Value="True"/>
+     <Condition Binding="{Binding IsEnabled,RelativeSource={RelativeSource Self}}" Value="True"/>
+     <Condition Binding="{Binding Path=(desktop:DesktopTheme.IsHighContrast),RelativeSource={RelativeSource Self}}" Value="False"/>
+    </MultiDataTrigger.Conditions>
+     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+    </MultiDataTrigger>
+   </Style.Triggers>
   </Style>
  </ResourceDictionary></UserControl.Resources>
  <Grid Margin="40,20,24,20" MaxWidth="1490">

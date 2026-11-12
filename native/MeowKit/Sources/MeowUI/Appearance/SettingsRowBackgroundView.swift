@@ -10,14 +10,16 @@ public final class SettingsRowBackgroundView: UIView {
     private let outlineMask = CAShapeLayer()
     private let first, last: Bool
 
-    public init(theme: PageTheme, first: Bool, last: Bool) {
+    public init(theme: PageTheme, first: Bool, last: Bool, selected: Bool = false, settings: Bool = true) {
         self.first = first; self.last = last
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         accessibilityElementsHidden = true
-        fill.fillColor = UIColor(theme.surface).cgColor
+        fill.fillColor = UIColor(settings ? (selected ? theme.settings.selected : theme.settings.surface) : theme.surface).cgColor
         layer.addSublayer(fill)
-        outline.colors = [0.12, 0.24, 0.52].map { UIColor(theme.border).withAlphaComponent($0).cgColor }
+        outline.colors = (settings ? [0.55, 0.72, 1] : [0.12, 0.24, 0.52]).map {
+            UIColor(settings ? theme.settings.border : theme.border).withAlphaComponent($0).cgColor
+        }
         outline.locations = [0, 0.55, 1]
         outline.startPoint = CGPoint(x: 0.5, y: 0)
         outline.endPoint = CGPoint(x: 0.5, y: 1)

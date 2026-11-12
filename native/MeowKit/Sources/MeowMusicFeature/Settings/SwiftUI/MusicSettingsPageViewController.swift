@@ -16,6 +16,11 @@ class MusicSettingsPageViewController<Content: View>: HostingPageViewController<
         super.init(themeProvider: appearance, content: content)
     }
 
+    override func applyTheme() {
+        super.applyTheme()
+        if isViewLoaded { view.tintColor = UIColor(theme.settings.accent) }
+    }
+
     func contentThemeChanged() -> Bool {
         guard isViewLoaded, renderedTheme != theme else { return false }
         renderedTheme = theme

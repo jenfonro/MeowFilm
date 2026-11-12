@@ -200,6 +200,7 @@ struct MusicSourceManagementContent: View {
                 sourceLayout {
                     Button { selecting.toggle() } label: {
                         Text(selecting ? "完成选择" : "选择")
+                            .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                             .contentShape(Rectangle())
                     }
@@ -216,6 +217,7 @@ struct MusicSourceManagementContent: View {
                                 .disabled(!state.scripts.contains { state.selected.contains($0.id) })
                         } label: {
                             Text("已选 \(state.selected.count)").frame(minWidth: 44, minHeight: 44)
+                                .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                         }
                         .accessibilityLabel("批量操作，已选 \(state.selected.count) 个音源")
                         .accessibilityIdentifier("music.sources.batch")
@@ -230,7 +232,7 @@ struct MusicSourceManagementContent: View {
                         HStack(spacing: 8) {
                             if selecting { selection(id) }
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(platform.title).foregroundStyle(Color(uiColor: UIColor(theme.ink)))
+                                Text(platform.title).foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
                                     .fixedSize(horizontal: false, vertical: true)
                                 health(state.officialChecks[platform].map { $0 ? "ok" : "failed" },
                                        checking: state.checking.contains(id), prefix: "内置")
@@ -261,7 +263,7 @@ struct MusicSourceManagementContent: View {
                                 Button {
                                     if selecting { state.select(item.id) } else { openScript(item.id) }
                                 } label: {
-                                    Text(item.name).foregroundStyle(Color(uiColor: UIColor(theme.ink)))
+                                    Text(item.name).foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
                                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }.buttonStyle(.plain)
@@ -311,13 +313,14 @@ struct MusicSourceManagementContent: View {
     private func selection(_ id: String) -> some View {
         Button { state.select(id) } label: {
             Image(systemName: state.selected.contains(id) ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(Color(uiColor: UIColor(state.selected.contains(id) ? theme.settings.accent : theme.settings.muted)))
                 .frame(minWidth: 44, minHeight: 44)
         }.buttonStyle(.plain).accessibilityLabel((state.selected.contains(id) ? "取消选择 " : "选择 ") +
             (state.item(id)?.name ?? MusicAccountPlatform.allCases.first { id == "official:" + $0.rawValue }?.title ?? "音源"))
     }
     private func health(_ value: String?, checking: Bool, prefix: String) -> some View {
         Label(prefix + " · " + (checking ? "检测中" : Self.healthName(value)), systemImage: checking ? "clock" : "circle.fill")
-            .font(.caption).foregroundStyle(checking ? Color.secondary : Self.healthColor(value))
+            .font(.caption).foregroundStyle(Color(uiColor: UIColor(checking ? theme.settings.muted : healthColor(value))))
             .fixedSize(horizontal: false, vertical: true)
     }
     static func origin(_ item: MusicScriptSourceItem) -> String { if case .file = item.origin { return "本地" }; return "网络" }
@@ -326,8 +329,13 @@ struct MusicSourceManagementContent: View {
         switch value { case "ok", "normal": return "正常"; case "partial": return "部分可用"; case "failed", "abnormal": return "异常"
         case "unsupported": return "不支持"; default: return "未检测" }
     }
-    static func healthColor(_ value: String?) -> Color {
-        switch value { case "ok", "normal": return .green; case "partial": return .orange; case "failed", "abnormal": return .red; default: return .secondary }
+    private func healthColor(_ value: String?) -> PageColor {
+        switch value {
+        case "ok", "normal": return theme.settings.success
+        case "partial": return theme.settings.warning
+        case "failed", "abnormal": return theme.settings.danger
+        default: return theme.settings.muted
+        }
     }
 }
 
@@ -420,6 +428,7 @@ struct MusicScriptSourceDetailContent: View {
                     if state.details[id]?.rollbackAvailable == true {
                         Button { state.rollback(id) } label: {
                             Text("回退更新")
+                                .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                                 .contentShape(Rectangle())
                         }
@@ -428,6 +437,7 @@ struct MusicScriptSourceDetailContent: View {
                     }
                     Button(role: .destructive, action: remove) {
                         Text("删除音源")
+                            .foregroundStyle(theme.settingsDanger)
                             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                             .contentShape(Rectangle())
                     }
@@ -445,7 +455,7 @@ struct MusicScriptSourceDetailContent: View {
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
             : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 12))
         return layout {
-            Text(title).foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+            Text(title).foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
             if !typeSize.isAccessibilitySize { Spacer(minLength: 12) }
             Text(value).multilineTextAlignment(typeSize.isAccessibilitySize ? .leading : .trailing)
                 .textSelection(.enabled)

@@ -71,6 +71,7 @@ public static partial class MusicUiTests
                 var delay = (Button)detail.FindName("DelayLyricButton");
                 var advance = (Button)detail.FindName("AdvanceLyricButton");
                 Equal(2, ((StackPanel)detail.FindName("LyricTimingRail")).Children.Count);
+                await AssertLyricTimingIconAsync(delay); await AssertLyricTimingIconAsync(advance);
                 Equal(0, f.Module.ActiveLyricIndex); Equal(1.25, list.Position);
                 var firstWord = Visuals(list).OfType<MusicLyricWordView>().Single(word => word.Word?.Text == "甲");
                 True(Math.Abs(firstWord.WordProgress - .25) < .01, "the initial sample uses real source word times");
@@ -107,18 +108,18 @@ public static partial class MusicUiTests
                 var first = f.Module.Lyrics[0]; var second = f.Module.Lyrics[1];
                 f.Module.AdjustLyricOffset(.5); f.Module.AdjustLyricOffset(.5);
                 f.Module.PreviewLyric(second);
-                Equal("0:06", f.Module.LyricPreviewTime);
+                Equal("00:06", f.Module.LyricPreviewTime);
                 await f.Module.ConfirmLyricPreviewAsync();
                 Equal(6d, f.Playback.PositionSeconds); Equal(1, f.Playback.SeekCalls);
                 True(f.Playback.IsPlaying && !f.Module.HasLyricPreview, "confirmation preserves existing resume intent");
                 f.Module.AdjustLyricOffset(-2);
                 await f.Playback.PauseAsync();
-                f.Module.PreviewLyric(first); Equal("0:00", f.Module.LyricPreviewTime);
+                f.Module.PreviewLyric(first); Equal("00:00", f.Module.LyricPreviewTime);
                 await f.Module.ConfirmLyricPreviewAsync();
                 Equal(0d, f.Playback.PositionSeconds); Equal(2, f.Playback.SeekCalls);
                 f.Module.AdjustLyricOffset(500);
                 Equal(499d, f.Module.LyricOffsetSeconds);
-                f.Module.PreviewLyric(second); Equal("3:00", f.Module.LyricPreviewTime);
+                f.Module.PreviewLyric(second); Equal("03:00", f.Module.LyricPreviewTime);
                 await f.Module.ConfirmLyricPreviewAsync();
                 Equal(180d, f.Playback.PositionSeconds);
             }
@@ -194,6 +195,40 @@ public static partial class MusicUiTests
             }
             finally { owner.Close(); replacement.Close(); }
         });
+    }
+
+    private static async Task AssertLyricTimingIconAsync(Button button)
+    {
+        True(button.Content is System.Windows.FrameworkElement &&
+            Visuals(button).OfType<System.Windows.Shapes.Path>().Any(path => path.Data is not null),
+            "lyric timing uses directional vector artwork instead of a plain text button");
+        True(Visuals(button).OfType<Border>().Any(border =>
+            border.CornerRadius.TopLeft >= button.ActualHeight / 2 - 1),
+            "the timing control has the reference's circular outline");
+        Equal("5", Visuals(button).OfType<TextBlock>().Single().Text);
+        True(System.Windows.Automation.AutomationProperties.GetName(button).Contains("0.5") &&
+            button.ToolTip?.ToString()?.Contains("0.5") == true,
+            "the icon retains the exact half-second accessible name and tooltip");
+        bool highContrast = DesktopTheme.GetIsHighContrast(button);
+        var admission = System.Windows.Data.BindingOperations.GetBindingExpression(button, System.Windows.UIElement.IsEnabledProperty)!;
+        try
+        {
+            DesktopTheme.SetIsHighContrast(button, true); await Drain();
+            Equal(System.Windows.SystemColors.WindowTextColor,
+                ((System.Windows.Media.SolidColorBrush)button.Foreground).Color);
+            True(Visuals(button).OfType<System.Windows.Shapes.Path>().All(path => Equals(path.Stroke, button.Foreground)),
+                "the vector follows system high-contrast ink");
+            button.SetCurrentValue(System.Windows.UIElement.IsEnabledProperty, false); await Drain();
+            Equal(System.Windows.SystemColors.GrayTextColor,
+                ((System.Windows.Media.SolidColorBrush)button.Foreground).Color);
+            Equal(System.Windows.SystemColors.GrayTextColor,
+                ((System.Windows.Media.SolidColorBrush)button.BorderBrush).Color);
+        }
+        finally
+        {
+            DesktopTheme.SetIsHighContrast(button, highContrast);
+            admission.UpdateTarget(); await Drain();
+        }
     }
 }
 

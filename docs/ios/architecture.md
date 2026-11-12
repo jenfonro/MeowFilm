@@ -18,6 +18,12 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
 
+### 设置语义配色
+
+设置内容使用 `PageTheme.settings` 提供的 `SettingsTheme`，仅由浅／深外观决定，不依赖歌曲、命名预设或自定义基准色。UIKit 与 SwiftUI 统一使用中性不透明卡片、淡中性渐变轮廓、行分隔线和独立输入底／边界；正文、辅助文字与字段提示保持可读对比度。操作、选中和开关为稳定蓝色，危险操作为红色，来源状态使用可读的成功／警告／错误语义色；平台标识与真实颜色数据不重染。
+
+设置窗口背景和 App 页头仍使用原 `PageTheme` 渐变；首页、播放器、原始播放目录、FM 选择器和阅读正文的配色契约不变。原始目录复用影视列表布局但显式不采用设置语义色。该投影不读写偏好，不新增主题模式或存储。
+
 ### 启动与首页发布
 
 `MeowfilmLaunchController` 只持有用户清除数据的冷启动屏障。屏障成功后才创建 `MeowfilmAssembly`，业务本地恢复不进入清除流程。Coordinator 继续使用已有 `startupPage`，通过原生 `UIActivityIndicatorView` 表示等待，并保留设置入口；不增加品牌画面或最低停留时长。

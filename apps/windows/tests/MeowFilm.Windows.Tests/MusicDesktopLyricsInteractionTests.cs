@@ -52,6 +52,8 @@ public static partial class MusicUiTests
                 True(controls.SequenceEqual(new[] { "ActivateButton", "DelayButton", "AdvanceButton",
                     "PreviousButton", "PlaybackButton", "NextButton", "SettingsButton", "LockButton", "CloseButton" }),
                     "toolbar follows the confirmed action order");
+                await AssertLyricTimingIconAsync((Button)window.FindName("DelayButton"));
+                await AssertLyricTimingIconAsync((Button)window.FindName("AdvanceButton"));
                 double audio = f.Module.PositionSeconds;
                 Click((Button)window.FindName("DelayButton"));
                 Equal(.5d, f.Module.LyricOffsetSeconds);

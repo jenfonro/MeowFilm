@@ -42,7 +42,7 @@ final class MusicNeteaseProtocolTests: XCTestCase {
         }
     }
 
-    func testInvalidHandshakeTimestampCannotReachAnonymousOrAudioEndpoints() async throws {
+    func testInvalidHandshakeTimestampCannotReachAudioEndpoint() async throws {
         let invalid: [Any] = [true, 0, -1, 1.5, 9_007_199_254_740_992, "001700000000000", "1e12", "not-a-time"]
         for timestamp in invalid {
             let clock = MusicAccountTestClock()
@@ -59,6 +59,16 @@ final class MusicNeteaseProtocolTests: XCTestCase {
             XCTAssertEqual(calls.map(\.request.url.path), ["/api/bsr/sk/get"])
         }
     }
+    func testInvalidHandshakeSignatureCannotReachAudioEndpoint() async throws {
+        let clock = MusicAccountTestClock(), http = MusicNeteaseTestHTTP(clock: clock)
+        await http.replies("/api/bsr/sk/get", [try MusicNeteaseFixture.response(["code": 200,
+            "data": ["timestamp": "1800000000000", "signature": "not-a-signature", "encryptedData": "bad"]])])
+        let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() })
+        do { _ = try await adapter.publicStandardAudio(nativeID: "101"); XCTFail("Invalid handshake accepted") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+        let calls = await http.recorded()
+        XCTAssertEqual(calls.map(\.request.url.path), ["/api/bsr/sk/get"])
+    }
 
     func testAllAccountProtocolsRejectCRLFAndNULBeforeNetworking() async throws {
         let transport = URLSessionMusicAccountTransport()
@@ -67,7 +77,7 @@ final class MusicNeteaseProtocolTests: XCTestCase {
         transport.close()
         for url in ["https://u.y.qq.com/cgi-bin/musicu.fcg", "https://music.163.com/weapi/w/nuser/account/get",
                     "https://interfacepc.music.163.com/eapi/login/qrcode/unikey",
-                    "https://interface3.music.163.com/xeapi/register/anonimous"] {
+                    "https://interface3.music.163.com/xeapi/song/enhance/player/url/v1"] {
             do {
                 _ = try await transport.send(.init(url: URL(string: url)!, headers: ["X-Synthetic": "safe"]))
                 XCTFail("Closed transport accepted a request")
