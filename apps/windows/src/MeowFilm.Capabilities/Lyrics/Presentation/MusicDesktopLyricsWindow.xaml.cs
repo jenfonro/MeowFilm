@@ -9,7 +9,8 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-internal readonly record struct MusicDesktopLyricsWindowState(double Left, double Top, bool IsLocked);
+internal readonly record struct MusicDesktopLyricsWindowState(
+    double Left, double Top, double Width, double Height, bool IsLocked, bool UserSized);
 
 internal partial class MusicDesktopLyricsWindow : Window
 {
@@ -20,7 +21,8 @@ internal partial class MusicDesktopLyricsWindow : Window
     private MusicDesktopLyricColorWindow? colorWindow;
     private ContextMenu? settingsMenu;
     private DispatcherOperation? reposition;
-    private bool locked, restoreLock, dragging, closed;
+    private bool locked, restoreLock, dragging, closed, sizing, userSized;
+    private Size sizeAtMove;
 
     internal bool IsLyricsLocked => locked;
     internal bool IsPointerObserverRunning => pointerObserver.IsEnabled;
@@ -30,6 +32,7 @@ internal partial class MusicDesktopLyricsWindow : Window
     {
         this.module = module;
         InitializeComponent();
+        UnlockAnchor.RenderTransform = new System.Windows.Media.TranslateTransform();
         DataContext = module;
         UpdateLayoutHeight();
         module.PropertyChanged += ModuleChanged;
@@ -55,6 +58,7 @@ internal partial class MusicDesktopLyricsWindow : Window
     // Window's native resize publication takes local precedence over style setters.
     private void UpdateLayoutHeight()
     {
+        if (userSized || sizing) return;
         double next = module.DesktopLyricLayout == "double" ? 240 : 144;
         double previous = Height;
         Height = next;
@@ -69,6 +73,7 @@ internal partial class MusicDesktopLyricsWindow : Window
         source = HwndSource.FromHwnd(handle)!;
         source.AddHook(WindowMessage);
         MusicDesktopLyricsNative.SetInputStyle(handle, clickThrough: false);
+        MusicDesktopLyricsNative.SetResizableStyle(handle);
         ApplyHighContrast(SystemParameters.HighContrast);
         SystemParameters.StaticPropertyChanged += SystemSettingChanged;
     }
@@ -76,6 +81,23 @@ internal partial class MusicDesktopLyricsWindow : Window
     private nint WindowMessage(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
         if (message == 0x0021) { handled = true; return 3; } // WM_MOUSEACTIVATE / MA_NOACTIVATE
+        if (message == 0x0084 && !locked)
+        {
+            var hit = MusicDesktopLyricsNative.ResizeHitTest(hwnd, lParam);
+            if (hit != 0) { handled = true; return hit; }
+        }
+        if (message == 0x0231)
+        {
+            sizing = true;
+            sizeAtMove = new(ActualWidth, ActualHeight);
+        }
+        else if (message == 0x0232)
+        {
+            if (sizing && (Math.Abs(ActualWidth - sizeAtMove.Width) > .5 ||
+                Math.Abs(ActualHeight - sizeAtMove.Height) > .5))
+                userSized = true;
+            sizing = false;
+        }
         if (message == 0x02E0) QueueUnlockPlacement(); // Let WPF accept WM_DPICHANGED first.
         return 0;
     }
@@ -284,6 +306,7 @@ internal partial class MusicDesktopLyricsWindow : Window
         {
             ClosePopups();
             ReleaseOwnedCapture();
+            UpdateUnlockAnchorOffset();
             var unlock = new MusicDesktopLyricsUnlockWindow(this);
             DesktopTheme.SetIsHighContrast(unlock, DesktopTheme.GetIsHighContrast(this));
             try
@@ -314,13 +337,26 @@ internal partial class MusicDesktopLyricsWindow : Window
         }
     }
 
-    internal MusicDesktopLyricsWindowState CapturePresentationState() => new(Left, Top, locked);
+    internal MusicDesktopLyricsWindowState CapturePresentationState() =>
+        new(Left, Top, Width, Height, locked, userSized);
 
     internal void RestorePresentationState(MusicDesktopLyricsWindowState state)
     {
-        Left = state.Left; Top = state.Top;
+        Left = state.Left; Top = state.Top; Width = state.Width; Height = state.Height;
+        userSized = state.UserSized;
         if (IsLoaded) _ = ChangeLockAsync(state.IsLocked);
         else restoreLock = state.IsLocked;
+    }
+
+    private void UpdateUnlockAnchorOffset()
+    {
+        bool restoreToolbar = Toolbar.Visibility != Visibility.Visible;
+        ShowHover(true);
+        UpdateLayout();
+        var root = (FrameworkElement)Content;
+        var lockCenter = LockButton.TranslatePoint(new(LockButton.ActualWidth / 2, LockButton.ActualHeight / 2), root);
+        ((System.Windows.Media.TranslateTransform)UnlockAnchor.RenderTransform).X = lockCenter.X - root.ActualWidth / 2;
+        if (restoreToolbar) ShowHover(false);
     }
 
     private void QueueUnlockPlacement()

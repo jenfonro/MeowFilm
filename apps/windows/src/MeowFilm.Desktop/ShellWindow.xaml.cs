@@ -6,6 +6,7 @@ using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 
 namespace MeowFilm.Desktop;
@@ -154,6 +155,7 @@ public sealed partial class ShellWindow : Window
     {
         // Install before WindowChrome's SourceInitialized handler so the custom maximize button
         // can retain the native HTMAXBUTTON/Snap Layout hit target.
+        ShellWindowStartupSize.ApplyToPrimaryScreen(this, new WindowInteropHelper(this).Handle);
         _nativeCaption = new(this, MaximizeButton, ToggleMaximize);
         base.OnSourceInitialized(e);
         _nativeCaption.SetImmersiveBorder(false);

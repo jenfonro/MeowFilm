@@ -119,6 +119,57 @@
      </MultiTrigger>
     </Style.Triggers>
    </Style>
+   <Style x:Key="Player.LyricTranslation" TargetType="Button" BasedOn="{StaticResource Player.LyricAdjust}">
+    <Setter Property="Margin" Value="0,10,0,0"/>
+    <Setter Property="IsEnabled" Value="{Binding IsLyrics}"/>
+    <Setter Property="AutomationProperties.Name" Value="显示译文歌词"/>
+    <Setter Property="AutomationProperties.ItemStatus" Value="已隐藏"/>
+    <Setter Property="ToolTip" Value="显示译文歌词"/>
+    <Style.Triggers>
+     <DataTrigger Binding="{Binding ShowLyricTranslation}" Value="True">
+      <Setter Property="Background" Value="#18FFFFFF"/>
+      <Setter Property="BorderBrush" Value="#60FFFFFF"/>
+      <Setter Property="AutomationProperties.Name" Value="隐藏译文歌词"/>
+      <Setter Property="AutomationProperties.ItemStatus" Value="已显示"/>
+      <Setter Property="ToolTip" Value="隐藏译文歌词"/>
+     </DataTrigger>
+     <MultiDataTrigger>
+      <MultiDataTrigger.Conditions>
+       <Condition Binding="{Binding ShowLyricTranslation}" Value="True"/>
+       <Condition Binding="{Binding IsEnabled,RelativeSource={RelativeSource Self}}" Value="False"/>
+      </MultiDataTrigger.Conditions>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="#18FFFFFF"/>
+     </MultiDataTrigger>
+     <MultiDataTrigger>
+      <MultiDataTrigger.Conditions>
+       <Condition Binding="{Binding ShowLyricTranslation}" Value="True"/>
+       <Condition Binding="{Binding (desktop:DesktopTheme.IsHighContrast),RelativeSource={RelativeSource Self}}" Value="True"/>
+      </MultiDataTrigger.Conditions>
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+     </MultiDataTrigger>
+     <MultiDataTrigger>
+      <MultiDataTrigger.Conditions>
+       <Condition Binding="{Binding ShowLyricTranslation}" Value="False"/>
+       <Condition Binding="{Binding (desktop:DesktopTheme.IsHighContrast),RelativeSource={RelativeSource Self}}" Value="True"/>
+      </MultiDataTrigger.Conditions>
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+     </MultiDataTrigger>
+     <MultiTrigger>
+      <MultiTrigger.Conditions>
+       <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
+       <Condition Property="IsEnabled" Value="False"/>
+      </MultiTrigger.Conditions>
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+     </MultiTrigger>
+    </Style.Triggers>
+   </Style>
    <Style x:Key="Player.LyricPreviewAction" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
     <Setter Property="Height" Value="24"/><Setter Property="MinHeight" Value="0"/>
     <Setter Property="Padding" Value="6,1"/><Setter Property="FontSize" Value="12"/>
@@ -297,26 +348,37 @@
                HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
 
    </Grid>
-   <StackPanel x:Name="LyricTimingRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
-    <Button x:Name="DelayLyricButton" Click="DelayLyric_Click"
-            Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词延后 0.5 秒" AutomationProperties.Name="歌词延后 0.5 秒">
-     <Grid Width="26" Height="26" IsHitTestVisible="False">
-      <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2"
-            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+   <StackPanel x:Name="LyricControlRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
+    <StackPanel x:Name="LyricTimingRail">
+     <Button x:Name="DelayLyricButton" Click="DelayLyric_Click"
+             Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词延后 0.5 秒" AutomationProperties.Name="歌词延后 0.5 秒">
+      <Grid Width="26" Height="26" IsHitTestVisible="False">
+       <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2"
+             StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+             Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+      </Grid>
+     </Button>
+     <Button x:Name="AdvanceLyricButton" Click="AdvanceLyric_Click"
+             Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词提前 0.5 秒" AutomationProperties.Name="歌词提前 0.5 秒">
+      <Grid Width="26" Height="26" IsHitTestVisible="False">
+       <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2"
+             StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+             Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+      </Grid>
+     </Button>
+    </StackPanel>
+    <Border Height="1" Margin="9,2,9,0" Background="#30FFFFFF" IsHitTestVisible="False"/>
+    <Button x:Name="LyricTranslationButton" Click="Translation_Click"
+            Style="{StaticResource Player.LyricTranslation}">
+     <Viewbox Width="24" Height="24" Stretch="Uniform" IsHitTestVisible="False">
+      <Path Data="M3,5 L15,5 M9,3 L9,5 M12,5 C11,11 8,14 3,16 M5,8 C6,12 9,14 12,16 M13,21 L17,10 L21,21 M14.5,17 L19.5,17"
+            StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
             Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-      <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
-                 Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-     </Grid>
-    </Button>
-    <Button x:Name="AdvanceLyricButton" Click="AdvanceLyric_Click"
-            Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词提前 0.5 秒" AutomationProperties.Name="歌词提前 0.5 秒">
-     <Grid Width="26" Height="26" IsHitTestVisible="False">
-      <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2"
-            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-            Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-      <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
-                 Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-     </Grid>
+     </Viewbox>
     </Button>
    </StackPanel>
   </Grid>

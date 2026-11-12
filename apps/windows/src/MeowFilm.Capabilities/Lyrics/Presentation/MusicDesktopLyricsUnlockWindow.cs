@@ -66,6 +66,41 @@ internal sealed class MusicDesktopLyricsUnlockWindow : Window
 
 internal static class MusicDesktopLyricsNative
 {
+    internal static void SetResizableStyle(nint handle)
+    {
+        Marshal.SetLastPInvokeError(0);
+        nint style = GetWindowLongPtr(handle, -16);
+        if (style == 0 && Marshal.GetLastPInvokeError() != 0) throw new Win32Exception();
+        style |= (nint)0x00040000; // WS_THICKFRAME
+        Marshal.SetLastPInvokeError(0);
+        if (SetWindowLongPtr(handle, -16, style) == 0 && Marshal.GetLastPInvokeError() != 0)
+            throw new Win32Exception();
+        if (!SetWindowPos(handle, 0, 0, 0, 0, 0, 0x0037)) // SWP_FRAMECHANGED | NOACTIVATE | NOZORDER | NOSIZE | NOMOVE
+            throw new Win32Exception();
+    }
+
+    internal static nint ResizeHitTest(nint handle, nint lParam)
+    {
+        if (!GetWindowRect(handle, out var rect)) throw new Win32Exception();
+        uint dpi = GetDpiForWindow(handle);
+        int edge = (int)Math.Ceiling(8d * dpi / 96d);
+        long packed = lParam.ToInt64();
+        int x = unchecked((short)(packed & 0xffff));
+        int y = unchecked((short)((packed >> 16) & 0xffff));
+        if (x < rect.Left || x >= rect.Right || y < rect.Top || y >= rect.Bottom) return 0;
+        bool left = x < rect.Left + edge, right = x >= rect.Right - edge;
+        bool top = y < rect.Top + edge, bottom = y >= rect.Bottom - edge;
+        if (top && left) return 13;     // HTTOPLEFT
+        if (top && right) return 14;    // HTTOPRIGHT
+        if (bottom && left) return 16;  // HTBOTTOMLEFT
+        if (bottom && right) return 17; // HTBOTTOMRIGHT
+        if (left) return 10;            // HTLEFT
+        if (right) return 11;           // HTRIGHT
+        if (top) return 12;             // HTTOP
+        if (bottom) return 15;          // HTBOTTOM
+        return 0;
+    }
+
     internal static void SetInputStyle(nint handle, bool clickThrough)
     {
         Marshal.SetLastPInvokeError(0);
@@ -96,6 +131,8 @@ internal static class MusicDesktopLyricsNative
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetWindowRect(nint handle, out ScreenRect rect);
+    [DllImport("user32.dll")]
+    internal static extern uint GetDpiForWindow(nint handle);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
     private static extern nint GetWindowLongPtr(nint window, int index);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
