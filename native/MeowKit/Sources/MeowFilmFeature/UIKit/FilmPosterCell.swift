@@ -21,6 +21,7 @@ final class FilmPosterCell: UICollectionViewCell {
     private var artwork: ArtworkView?
     private let titleLabel = UILabel()
     private let badge = UILabel(), sourceLabel = UILabel()
+    private let badgeContainer = UIView(), sourceContainer = UIView()
     private lazy var feedback = PressFeedback(view: contentView)
 
     override var isHighlighted: Bool {
@@ -33,19 +34,29 @@ final class FilmPosterCell: UICollectionViewCell {
         titleLabel.numberOfLines = 2
         titleLabel.lineBreakMode = .byTruncatingTail
         contentView.addSubview(titleLabel)
-        badge.font = .systemFont(ofSize: 10, weight: .medium)
+        badge.font = .systemFont(ofSize: 10, weight: .bold)
         badge.textColor = .white
-        badge.backgroundColor = UIColor.black.withAlphaComponent(0.65)
-        badge.layer.cornerRadius = 3
-        badge.clipsToBounds = true
         badge.textAlignment = .center
         badge.lineBreakMode = .byTruncatingTail
         badge.accessibilityIdentifier = "film.poster.badge"
-        sourceLabel.font = .systemFont(ofSize: 11)
+        badgeContainer.backgroundColor = UIColor(PageColor(rgb: 0xf97316))
+        badgeContainer.layer.cornerRadius = 8
+        badgeContainer.layer.shadowColor = UIColor.black.cgColor
+        badgeContainer.layer.shadowOpacity = 0.18
+        badgeContainer.layer.shadowRadius = 8
+        badgeContainer.layer.shadowOffset = CGSize(width: 0, height: 8)
+        badgeContainer.accessibilityIdentifier = "film.poster.badge.container"
+        sourceLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        sourceLabel.textAlignment = .center
         sourceLabel.lineBreakMode = .byTruncatingTail
         sourceLabel.accessibilityIdentifier = "film.poster.label"
-        contentView.addSubview(badge)
-        contentView.addSubview(sourceLabel)
+        sourceContainer.layer.cornerRadius = 8
+        sourceContainer.layer.borderWidth = 1
+        sourceContainer.accessibilityIdentifier = "film.poster.label.container"
+        badgeContainer.addSubview(badge)
+        sourceContainer.addSubview(sourceLabel)
+        contentView.addSubview(badgeContainer)
+        contentView.addSubview(sourceContainer)
         isAccessibilityElement = true
         accessibilityTraits = .button
     }
@@ -67,9 +78,13 @@ final class FilmPosterCell: UICollectionViewCell {
         titleLabel.textColor = UIColor(theme.ink)
         badge.text = textBadge
         badge.isHidden = textBadge.isEmpty
+        badgeContainer.isHidden = textBadge.isEmpty
         sourceLabel.text = label
         sourceLabel.isHidden = label.isEmpty
-        sourceLabel.textColor = UIColor(theme.muted)
+        sourceContainer.isHidden = label.isEmpty
+        sourceLabel.textColor = UIColor(PageColor(rgb: theme.dark ? 0x9ca3af : 0x6b7280))
+        sourceContainer.backgroundColor = theme.dark ? UIColor.white.withAlphaComponent(0.06) : UIColor(PageColor(rgb: 0xf8fafc))
+        sourceContainer.layer.borderColor = (theme.dark ? UIColor.white.withAlphaComponent(0.1) : UIColor(PageColor(rgb: 0xe2e8f0))).cgColor
         accessibilityLabel = [item.title, textBadge, label].filter { !$0.isEmpty }.joined(separator: "，")
         accessibilityIdentifier = "film.poster.\(item.sourceID).\(item.id)"
         setNeedsLayout()
@@ -80,10 +95,15 @@ final class FilmPosterCell: UICollectionViewCell {
         let height = contentView.bounds.width * 1.5
         artwork?.frame = CGRect(x: 0, y: 0, width: contentView.bounds.width, height: height)
         titleLabel.frame = CGRect(x: 0, y: height + 7, width: contentView.bounds.width, height: 32)
-        let badgeWidth = min(max(0, contentView.bounds.width - 8), ceil(badge.intrinsicContentSize.width) + 8)
-        badge.frame = CGRect(x: contentView.bounds.width - badgeWidth - 4, y: height - 23,
-                             width: badgeWidth, height: 19)
-        sourceLabel.frame = CGRect(x: 0, y: height + 41, width: contentView.bounds.width, height: 16)
+        let badgeWidth = min(contentView.bounds.width * 0.7, ceil(badge.intrinsicContentSize.width) + 16)
+        badgeContainer.frame = CGRect(x: contentView.bounds.width - badgeWidth - 8, y: 8,
+                                      width: badgeWidth, height: 19)
+        badge.frame = badgeContainer.bounds.insetBy(dx: 8, dy: 2)
+        badgeContainer.layer.shadowPath = UIBezierPath(roundedRect: badgeContainer.bounds, cornerRadius: 8).cgPath
+        let sourceWidth = min(contentView.bounds.width, ceil(sourceLabel.intrinsicContentSize.width) + 18)
+        sourceContainer.frame = CGRect(x: (contentView.bounds.width - sourceWidth) / 2, y: height + 41,
+                                       width: sourceWidth, height: 18)
+        sourceLabel.frame = sourceContainer.bounds.insetBy(dx: 9, dy: 3)
     }
 
     override func prepareForReuse() {

@@ -11,50 +11,98 @@ final class FilmSearchUIKitTests: XCTestCase {
     func testExistingPosterAddsSearchBadgeAndSourceLabelAtNarrowAndWideWidths() throws {
         let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { _ in throw FilmSearchError.unavailable }
         let item = FilmItem(sourceID: "source", id: "id", title: String(repeating: "长标题", count: 10), score: "8.9")
-        let variants = [("来源名称", "更新至12集"), ("聚合", "更新至24集"), ("电影", "2026"), ("剧集", "更新至第十二季十二集")]
-        let canvas = UIView(frame: CGRect(x: 0, y: 0, width: 412, height: 220))
-        canvas.backgroundColor = UIColor(PageTheme().top)
-        for width in [CGFloat(90), 110, 160] {
-            let cell = FilmPosterCell(frame: CGRect(x: 0, y: 0, width: width, height: width * 1.5 + 59))
-            for (index, variant) in variants.enumerated() {
-                let (label, textBadge) = variant
-                cell.configure(item: item, images: images, theme: PageTheme(), textBadge: textBadge, label: label)
-                cell.layoutIfNeeded()
-                let badge = try XCTUnwrap(find("film.poster.badge", in: cell) as? UILabel)
-                let source = try XCTUnwrap(find("film.poster.label", in: cell) as? UILabel)
-                let title = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UILabel }.first { $0.text == item.title })
-                XCTAssertEqual(title.numberOfLines, 2)
-                XCTAssertTrue(cell.contentView.bounds.contains(title.frame))
-                XCTAssertGreaterThan(source.frame.minY, title.frame.maxY)
-                XCTAssertEqual(badge.text, textBadge)
-                XCTAssertEqual(source.text, label)
-                XCTAssertTrue(cell.contentView.bounds.contains(source.frame))
-                XCTAssertLessThanOrEqual(badge.frame.maxX, width)
-                XCTAssertGreaterThanOrEqual(badge.frame.minX, 0)
-                XCTAssertLessThanOrEqual(badge.frame.maxY, width * 1.5)
-                XCTAssertFalse(badge.isHidden)
-                XCTAssertFalse(cell.accessibilityLabel?.contains("8.9") == true, "Relevance and film scores are not search badges")
-                if width == 90 {
-                    let rendered = FilmPosterCell(frame: CGRect(x: 12 + CGFloat(index) * 100, y: 12, width: width, height: width * 1.5 + 59))
-                    rendered.configure(item: item, images: images, theme: PageTheme(), textBadge: textBadge, label: label)
+        let variants = [("来源名称", "更新至12集"), ("聚合", "更新至24集"), ("电影", "2026"), ("剧集", "共2季78集"),
+                        (String(repeating: "长站点名称", count: 8), String(repeating: "更新至第十二季十二集", count: 8))]
+        for dark in [false, true] {
+            let theme = PageTheme(dark: dark)
+            for width in [CGFloat(90), 110, 160] {
+                let cellHeight = width * 1.5 + 59
+                let canvas = UIView(frame: CGRect(x: 0, y: 0, width: width * 3 + 40, height: (cellHeight + 16) * 2 + 16))
+                canvas.backgroundColor = UIColor(theme.top)
+                let cell = FilmPosterCell(frame: CGRect(x: 0, y: 0, width: width, height: width * 1.5 + 59))
+                for (index, variant) in variants.enumerated() {
+                    let (label, textBadge) = variant
+                    cell.configure(item: item, images: images, theme: theme, textBadge: textBadge, label: label)
+                    cell.layoutIfNeeded()
+                    let badge = try XCTUnwrap(find("film.poster.badge", in: cell) as? UILabel)
+                    let source = try XCTUnwrap(find("film.poster.label", in: cell) as? UILabel)
+                    let badgeContainer = try XCTUnwrap(find("film.poster.badge.container", in: cell))
+                    let sourceContainer = try XCTUnwrap(find("film.poster.label.container", in: cell))
+                    let title = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UILabel }.first { $0.text == item.title })
+                    XCTAssertEqual(title.numberOfLines, 2)
+                    XCTAssertTrue(cell.contentView.bounds.contains(title.frame))
+                    XCTAssertGreaterThan(sourceContainer.frame.minY, title.frame.maxY)
+                    XCTAssertEqual(badge.text, textBadge)
+                    XCTAssertEqual(source.text, label)
+                    XCTAssertTrue(cell.contentView.bounds.contains(sourceContainer.frame))
+                    XCTAssertEqual(badgeContainer.frame.minY, 8, accuracy: 0.01)
+                    XCTAssertEqual(badgeContainer.frame.maxX, width - 8, accuracy: 0.01)
+                    XCTAssertLessThanOrEqual(badgeContainer.bounds.width, width * 0.7)
+                    XCTAssertGreaterThanOrEqual(badgeContainer.frame.minX, 0)
+                    XCTAssertLessThanOrEqual(badgeContainer.frame.maxY, width * 1.5)
+                    XCTAssertEqual(badgeContainer.backgroundColor, UIColor(PageColor(rgb: 0xf97316)))
+                    XCTAssertEqual(badgeContainer.layer.cornerRadius, 8)
+                    XCTAssertEqual(badgeContainer.layer.shadowOpacity, 0.18, accuracy: 0.001)
+                    XCTAssertNotNil(badgeContainer.layer.shadowPath)
+                    XCTAssertEqual(badge.textColor, .white)
+                    XCTAssertEqual(badge.font, .systemFont(ofSize: 10, weight: .bold))
+                    XCTAssertEqual(badge.frame, badgeContainer.bounds.insetBy(dx: 8, dy: 2))
+                    XCTAssertEqual(badge.lineBreakMode, .byTruncatingTail)
+                    XCTAssertEqual(badge.numberOfLines, 1)
+                    XCTAssertEqual(sourceContainer.frame.midX, width / 2, accuracy: 0.01)
+                    XCTAssertLessThanOrEqual(sourceContainer.bounds.width, width)
+                    XCTAssertEqual(sourceContainer.layer.cornerRadius, 8)
+                    XCTAssertEqual(sourceContainer.layer.borderWidth, 1)
+                    XCTAssertEqual(sourceContainer.backgroundColor,
+                        dark ? UIColor.white.withAlphaComponent(0.06) : UIColor(PageColor(rgb: 0xf8fafc)))
+                    XCTAssertEqual(sourceContainer.layer.borderColor,
+                        (dark ? UIColor.white.withAlphaComponent(0.1) : UIColor(PageColor(rgb: 0xe2e8f0))).cgColor)
+                    XCTAssertEqual(source.textColor, UIColor(PageColor(rgb: dark ? 0x9ca3af : 0x6b7280)))
+                    XCTAssertEqual(source.font, .systemFont(ofSize: 10, weight: .medium))
+                    XCTAssertEqual(source.frame, sourceContainer.bounds.insetBy(dx: 9, dy: 3))
+                    XCTAssertEqual(source.textAlignment, .center)
+                    XCTAssertEqual(source.lineBreakMode, .byTruncatingTail)
+                    XCTAssertEqual(source.numberOfLines, 1)
+                    if label == "电影" { XCTAssertLessThan(sourceContainer.bounds.width, width) }
+                    if index == variants.count - 1 {
+                        XCTAssertEqual(sourceContainer.bounds.width, width)
+                        XCTAssertEqual(badgeContainer.bounds.width, width * 0.7)
+                    }
+                    XCTAssertFalse(badge.isHidden)
+                    XCTAssertFalse(source.isHidden)
+                    XCTAssertFalse(badgeContainer.isHidden)
+                    XCTAssertFalse(sourceContainer.isHidden)
+                    XCTAssertFalse(cell.accessibilityLabel?.contains("8.9") == true, "Relevance and film scores are not search badges")
+                    let restingTitle = title.frame, restingBadge = badgeContainer.frame, restingSource = sourceContainer.frame
+                    cell.isHighlighted = true; cell.setNeedsLayout(); cell.layoutIfNeeded()
+                    XCTAssertEqual(title.frame, restingTitle, "Search titles keep both lines during press feedback")
+                    XCTAssertEqual(badgeContainer.frame, restingBadge)
+                    XCTAssertEqual(sourceContainer.frame, restingSource)
+                    cell.resetPressFeedback()
+                    let rendered = FilmPosterCell(frame: CGRect(x: 10 + CGFloat(index % 3) * (width + 10),
+                        y: 8 + CGFloat(index / 3) * (cellHeight + 16), width: width, height: cellHeight))
+                    rendered.configure(item: item, images: images, theme: theme, textBadge: textBadge, label: label)
                     canvas.addSubview(rendered)
                     rendered.layoutIfNeeded()
                 }
+                cell.prepareForReuse()
+                cell.configure(item: item, images: images, theme: theme)
+                cell.layoutIfNeeded()
+                XCTAssertTrue(try XCTUnwrap(find("film.poster.badge", in: cell)).isHidden)
+                XCTAssertTrue(try XCTUnwrap(find("film.poster.label", in: cell)).isHidden)
+                XCTAssertTrue(try XCTUnwrap(find("film.poster.badge.container", in: cell)).isHidden)
+                XCTAssertTrue(try XCTUnwrap(find("film.poster.label.container", in: cell)).isHidden)
+                XCTAssertEqual(cell.accessibilityLabel, item.title, "Existing home presentation is unchanged")
+                let format = UIGraphicsImageRendererFormat(); format.scale = 2
+                let image = UIGraphicsImageRenderer(bounds: canvas.bounds, format: format).image { context in
+                    canvas.layer.render(in: context.cgContext)
+                }
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "film-search-server-posters-\(Int(width))-\(dark ? "dark" : "light")"
+                attachment.lifetime = .keepAlways
+                add(attachment)
             }
-            cell.configure(item: item, images: images, theme: PageTheme())
-            cell.layoutIfNeeded()
-            XCTAssertTrue(try XCTUnwrap(find("film.poster.badge", in: cell)).isHidden)
-            XCTAssertTrue(try XCTUnwrap(find("film.poster.label", in: cell)).isHidden)
-            XCTAssertEqual(cell.accessibilityLabel, item.title, "Existing home presentation is unchanged")
         }
-        let format = UIGraphicsImageRendererFormat(); format.scale = 2
-        let image = UIGraphicsImageRenderer(bounds: canvas.bounds, format: format).image { context in
-            canvas.layer.render(in: context.cgContext)
-        }
-        let attachment = XCTAttachment(image: image)
-        attachment.name = "film-search-existing-posters-narrow-three-kinds"
-        attachment.lifetime = .keepAlways
-        add(attachment)
     }
 
     func testSearchContentUsesExistingPostersKeepsBothModesAndDeliversLiveContext() async throws {
