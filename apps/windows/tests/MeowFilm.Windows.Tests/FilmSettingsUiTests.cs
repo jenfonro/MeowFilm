@@ -40,6 +40,7 @@ public static class FilmSettingsUiTests
         yield return Case("empty source pages keep their actions and columns", Empty);
         yield return Case("data sources echo one token and cookie and save server proxy options independently", DataSources);
         yield return Case("site clean lives under matching and playback uses half-width shared order lists", PlaybackLayout);
+        yield return Case("playback management separates counted target groups from bounded source tables and empty states", PlaybackManagement);
         yield return Case("cache controls invalidate exact domains and drain both providers on failure", MetadataCache);
     }
 
@@ -538,6 +539,10 @@ public static class FilmSettingsUiTests
         Check(scene.Box("MetadataApiToken").Text == "synthetic.v4.token" &&
             scene.Box("DoubanCookie").Text == "synthetic_cookie=initial", "settings echo their actual plain values");
         Check(!Visuals(scene.View).OfType<PasswordBox>().Any(), "no secret-mask controls or second token editor");
+        Check(scene.Notices.Count == 0 && !data.Calls.Any(call => call.Method.EndsWith(".update", StringComparison.Ordinal)),
+            "reading a settings section does not save or claim a successful save");
+        HeadingSave(scene.View, "豆瓣配置", "保存豆瓣设置");
+        HeadingSave(scene.View, "TMDB 设置", "保存 TMDB 设置");
         scene.Box("MetadataApiToken").Text = "synthetic-v3-key";
         scene.Box("MetadataApiBase").Text = "https://fixture.invalid/pan/tmdb/3";
         scene.Box("MetadataImageBase").Text = "https://fixture.invalid/pan/tmdb-img";
@@ -550,6 +555,12 @@ public static class FilmSettingsUiTests
             saved.GetProperty("language").GetString() == "en-US" && saved.GetProperty("region").GetString() == "US" &&
             saved.GetProperty("includeAdult").GetBoolean(), "single token replaces prior auth and all query options reach the runtime");
         Check(scene.Box("MetadataApiToken").Text == "synthetic-v3-key", "successful save stays editable without a configured placeholder");
+        await Drain();
+        int notices = scene.Notices.Count, writes = data.Calls.Count(call => call.Method.EndsWith(".update", StringComparison.Ordinal));
+        scene.View.Visibility = Visibility.Collapsed; await Drain();
+        scene.View.Visibility = Visibility.Visible; await Until(() => scene.View.CanEditMetadata);
+        Check(scene.Notices.Count == notices && data.Calls.Count(call => call.Method.EndsWith(".update", StringComparison.Ordinal)) == writes,
+            "returning from another module does not replay a save notice or repeat the save");
         scene.Element<ComboBox>("DoubanDataProxy").SelectedValue = "custom";
         scene.Element<ComboBox>("DoubanImageProxy").SelectedValue = "cdn-tx";
         scene.Box("DoubanDataAddress").Text = "https://fixture.invalid/nested/";
@@ -583,6 +594,7 @@ public static class FilmSettingsUiTests
         var playback = (FilmPlaybackSettingsView)cleanHost.Content;
         await Until(() => playback.Idle && ((TextBox)playback.FindName("CleanKeywords")).Text == "直播,预告");
         Check(((Border)playback.FindName("CleanForm")).IsVisible, "matching includes its site-clean editor");
+        HeadingSave(playback, "站点净化设置", "保存站点净化");
         ((TextBox)playback.FindName("CleanKeywords")).Text = " 广告,，直播, ";
         Click(Button(playback, "保存站点净化")); await Until(() => playback.Idle);
         Check(FilmPreferences.Read(scene.Data!.Preferences).SiteCleanKeywords.SequenceEqual(["广告", "直播"]),
@@ -599,10 +611,127 @@ public static class FilmSettingsUiTests
             "film reuses the music order control without an enable flag or a full-width list");
         Check(playback.ManualGroups.Single().Rows.Single().DetailId == "0" &&
             playback.BlockGroups.Single().Rows.Single().Pan == "0", "both management lists retain typed source identity");
-        Capture(scene.View, "film-settings-smart-playback.png");
+        HeadingSave(playback, "关键字匹配规则", "保存关键字匹配规则");
+        Check(Visuals(playback).OfType<Button>().Where(button => button.IsVisible).Count(button => Equals(button.Content, "保存")) == 1 &&
+            !Visuals(playback).OfType<Button>().Any(button => button.IsVisible && Equals(button.Content, "刷新")) &&
+            !Button(playback, "重新读取智能播放设置").IsVisible,
+            "the healthy page has one explicit keyword save and no refresh or order save");
+        foreach (int width in new[] { 1248, 600 })
+        {
+            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            var pan = (SettingsPriorityList)playback.FindName("PanOrder");
+            var left = new Rect(order.TranslatePoint(new(), playback), order.RenderSize);
+            var right = new Rect(pan.TranslatePoint(new(), playback), pan.RenderSize);
+            Check(width == 1248 ? Math.Abs(left.Top - right.Top) < 1 && Math.Abs(left.Width - right.Width) <= 1 &&
+                Math.Abs(right.Left - left.Right - 24) <= 1 : right.Top >= left.Bottom && Math.Abs(left.Left - right.Left) < 1,
+                "the two ordering panels are equal columns on desktop and stack in a narrow window");
+            foreach (var priority in new[] { order, pan })
+            {
+                Check(!priority.ShowTitle && Visuals(playback).OfType<TextBlock>().Count(text => text.IsVisible && text.Text == priority.Title) == 1,
+                    "only the larger section heading is visible while the list keeps its accessible title");
+                var list = (ListBox)priority.FindName("PriorityItems");
+                Check(AutomationProperties.GetName(list) == priority.Title, "hiding the duplicate caption does not remove the accessible name");
+                foreach (var item in list.Items)
+                {
+                    var row = (ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(item);
+                    var grip = Visuals(row).OfType<Thumb>().Single();
+                    Check(row.ActualHeight == 52 && grip.ActualWidth == 36 && grip.ActualHeight == 36,
+                        "film uses the same music row and drag handle dimensions");
+                }
+            }
+            Capture(scene.View, $"film-settings-smart-playback-{width}.png");
+        }
         await scene.Select("rules"); await Until(() => playback.Idle && ((Border)playback.FindName("CleanForm")).IsVisible);
         Check(ReferenceEquals(cleanHost.Content, playback) && scene.Element<Grid>("BusinessPage").Children.Count == 0,
             "returning to matching cannot leave a second copy or a stale management form");
+    }
+
+    private static async Task PlaybackManagement()
+    {
+        await using var scene = await Scene.Create(dataSettings: true);
+        const string longSource = "完整站源名称-abcdefghijklmnopqrstuvwxyz-0123456789";
+        scene.Data!.Library = FilmJson.Encode(new
+        {
+            manual = new object[]
+            {
+                new { id = "a1", targetId = "tmdb:tv:7", title = "仙逆(tv:7)", sourceKey = longSource, detailId = "detail-1", enabled = true },
+                new { id = "a2", targetId = "tmdb:tv:7", title = "仙逆(tv:7)", sourceKey = "站源二", detailId = "detail-2", enabled = false },
+                new { id = "b1", targetId = "tmdb:tv:8", title = "第二组", sourceKey = "站源三", detailId = 0, enabled = true }
+            },
+            blocks = new object[]
+            {
+                new { targetId = "tmdb:tv:7", title = "仙逆", sourceKey = longSource, detailId = "detail-1", lineId = "百度网盘-完整线路标识" },
+                new { targetId = "tmdb:tv:8", title = "第二组", sourceKey = "站源二", detailId = 0, lineId = 0 }
+            }
+        });
+        await scene.Select("preferences");
+        var playback = (FilmPlaybackSettingsView)scene.Element<Grid>("BusinessPage").Children[0];
+        await Until(() => playback.Idle && playback.ManualGroups.Count == 2);
+        foreach (int width in new[] { 1248, 600 })
+        {
+            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            foreach (var (targetsName, rowsName, title) in new[]
+            { ("ManualTargets", "ManualRows", "TMDB 数据"), ("BlockTargets", "BlockRows", "禁用数据") })
+            {
+                var targets = (ListBox)playback.FindName(targetsName);
+                var grid = (DataGrid)playback.FindName(rowsName);
+                var right = (Grid)grid.Parent; var split = (Grid)right.Parent; var surface = (Border)split.Parent;
+                surface.BringIntoView(); await Drain(); playback.UpdateLayout();
+                Check(surface.BorderThickness == new Thickness(1) && surface.BorderBrush is not null &&
+                    surface.CornerRadius.TopLeft > 0 && ((Border)split.Children[0]).BorderThickness.Right == 1,
+                    "each manager has a real shared surface and a separate sidebar boundary");
+                Check(Visuals(surface).OfType<TextBlock>().Any(text => text.IsVisible && text.Text == title) &&
+                    grid.HeadersVisibility == DataGridHeadersVisibility.Column && grid.GridLinesVisibility == DataGridGridLinesVisibility.Horizontal,
+                    "target group and table column headers remain legible inside the frame");
+                targets.SelectedIndex = 0; playback.UpdateLayout();
+                var first = (ListBoxItem)targets.ItemContainerGenerator.ContainerFromIndex(0);
+                var group = (FilmSettingGroup)targets.SelectedItem;
+                Check(Visuals(first).OfType<TextBlock>().Any(text => text.Text == group.Title) &&
+                    Visuals(first).OfType<TextBlock>().Any(text => text.Text == group.Rows.Count.ToString(CultureInfo.InvariantCulture)),
+                    "the selected target exposes its name and exact row count");
+                Check(first.IsSelected && ((SolidColorBrush)first.Background).Color ==
+                    ((SolidColorBrush)playback.FindResource("Settings.Brush.Selected")).Color, "the current group has a visible selected state");
+                Check(grid.Items.Count == group.Rows.Count, "the selected group owns only its source rows");
+                var source = Visuals(grid).OfType<TextBlock>().First(text => text.Text == longSource);
+                Check(Equals(source.ToolTip, longSource), "truncated source values remain fully available");
+                var scroll = Visuals(grid).OfType<ScrollViewer>().First();
+                Check((width != 600 || scroll.ExtentWidth > scroll.ViewportWidth) &&
+                    scroll.HorizontalScrollBarVisibility == ScrollBarVisibility.Auto && grid.ActualWidth < playback.ActualWidth &&
+                    surface.ActualWidth <= playback.ActualWidth, "long tables scroll inside the frame rather than widening the page");
+                Capture(surface, $"film-settings-{targetsName}-{width}.png");
+                targets.SelectedIndex = 1; playback.UpdateLayout();
+                Check(grid.Items.Count == 1 && ReferenceEquals(grid.Items[0], ((FilmSettingGroup)targets.SelectedItem).Rows[0]),
+                    "switching groups replaces only the visible detail rows");
+                DesktopTheme.SetIsHighContrast(playback, true); playback.UpdateLayout();
+                var selected = (ListBoxItem)targets.ItemContainerGenerator.ContainerFromIndex(1);
+                Check(selected.Background == SystemColors.HighlightBrush && selected.Foreground == SystemColors.HighlightTextBrush &&
+                    surface.BorderBrush == SystemColors.WindowTextBrush && ((Border)split.Children[0]).BorderBrush == SystemColors.WindowTextBrush,
+                    "high contrast keeps selected groups and both boundaries distinct");
+                DesktopTheme.SetIsHighContrast(playback, false);
+            }
+        }
+        scene.Data.Library = FilmJson.Encode(new { manual = Array.Empty<object>(), blocks = Array.Empty<object>() });
+        await scene.Select("rules"); await scene.Select("preferences");
+        await Until(() => playback.Idle && playback.ManualGroups.Count == 0);
+        foreach (var (name, empty) in new[] { ("ManualRows", "暂无人工匹配源"), ("BlockRows", "暂无禁用片源") })
+        {
+            var grid = (DataGrid)playback.FindName(name);
+            var right = (Grid)grid.Parent; var surface = (Border)((Grid)right.Parent).Parent;
+            Check(grid.Items.Count == 0 && grid.HeadersVisibility == DataGridHeadersVisibility.Column &&
+                surface.BorderThickness == new Thickness(1) && Visuals(right).OfType<TextBlock>().Any(text => text.IsVisible && text.Text == empty),
+                "empty collections keep the structural frame and table header with a clear empty state");
+            Capture(surface, $"film-settings-{name}-empty.png");
+        }
+    }
+
+    private static void HeadingSave(FrameworkElement root, string title, string action)
+    {
+        var heading = Visuals(root).OfType<TextBlock>().Single(text => text.IsVisible && text.Text == title);
+        var button = Button(root, action);
+        var a = new Rect(heading.TranslatePoint(new(), root), heading.RenderSize);
+        var b = new Rect(button.TranslatePoint(new(), root), button.RenderSize);
+        Check(b.Left >= a.Right && b.Left - a.Right <= 16 && Math.Abs((a.Top + a.Bottom) / 2 - (b.Top + b.Bottom) / 2) < 1,
+            action + " is beside its heading instead of at the form footer");
     }
 
     private static async Task MetadataCache()
@@ -723,6 +852,11 @@ public static class FilmSettingsUiTests
             ["imageBase"] = "https://img3.doubanio.com", ["apiProxy"] = "", ["imageProxy"] = "", ["cookie"] = "synthetic_cookie=initial"
         };
         internal JsonElement Preferences = FilmJson.Encode(FilmPreferences.Defaults with { SiteCleanKeywords = ["直播", "预告"] });
+        internal JsonElement Library = FilmJson.Encode(new
+        {
+            manual = new[] { new { id = "manual", targetId = "tmdb:tv:7", title = "管理样例", sourceKey = "source", detailId = 0, enabled = true } },
+            blocks = new[] { new { targetId = "tmdb:tv:7", sourceKey = "source", detailId = 0, lineId = 0 } }
+        });
         internal bool FailWrite;
         internal string? FailDomain;
         internal Task? HeldInvalidation;
@@ -740,11 +874,7 @@ public static class FilmSettingsUiTests
             }
             if (method == "film.settings.get") return FilmRuntimeProbe.Ok(Preferences);
             if (method == "film.settings.set") { Preferences = input.Clone(); return FilmRuntimeProbe.Ok(Preferences); }
-            if (method == "film.library.get") return FilmRuntimeProbe.Ok(FilmJson.Encode(new
-            {
-                manual = new[] { new { id = "manual", targetId = "tmdb:tv:7", title = "管理样例", sourceKey = "source", detailId = 0, enabled = true } },
-                blocks = new[] { new { targetId = "tmdb:tv:7", sourceKey = "source", detailId = 0, lineId = 0 } }
-            }));
+            if (method == "film.library.get") return FilmRuntimeProbe.Ok(Library);
             bool tmdb = method.StartsWith("tmdb.", StringComparison.Ordinal);
             var values = tmdb ? Tmdb : douban;
             Check(method.EndsWith(".settings.get", StringComparison.Ordinal) || method.EndsWith(".settings.update", StringComparison.Ordinal),
@@ -929,7 +1059,13 @@ public static class FilmSettingsUiTests
         element.UpdateLayout();
         var bitmap = new RenderTargetBitmap((int)Math.Ceiling(element.ActualWidth), (int)Math.Ceiling(element.ActualHeight),
             96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(element);
+        var visual = new DrawingVisual();
+        using (var drawing = visual.RenderOpen())
+        {
+            drawing.DrawRectangle(SystemColors.WindowBrush, null, new Rect(element.RenderSize));
+            drawing.DrawRectangle(new VisualBrush(element), null, new Rect(element.RenderSize));
+        }
+        bitmap.Render(visual);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var output = File.Create(Path.Combine(root, name)); encoder.Save(output);
     }

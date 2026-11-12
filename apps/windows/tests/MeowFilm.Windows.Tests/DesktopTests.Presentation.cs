@@ -48,12 +48,22 @@ public static partial class DesktopTests
             notice.Message = "隐藏前"; await DrainAsync(); Equal(1, stack.Children.Count, "new message");
             page.Visibility = Visibility.Collapsed; await DrainAsync();
             Equal(0, stack.Children.Count, "hidden page withdraws");
+            page.Visibility = Visibility.Visible; await DrainAsync();
+            Equal(0, stack.Children.Count, "returning does not replay an already consumed save");
+            notice.Message = "隐藏前"; await DrainAsync();
+            Equal(1, stack.Children.Count, "a second real action can publish the same message");
+            page.Visibility = Visibility.Collapsed; await DrainAsync();
+            Equal(0, stack.Children.Count, "the second notice also withdraws");
             notice.Message = "隐藏后"; await DrainAsync();
             Equal(0, stack.Children.Count, "hidden changes do not notify");
             page.Visibility = Visibility.Visible; await DrainAsync();
             Equal(1, stack.Children.Count, "visible error is still surfaced");
             page.Children.Remove(notice); await DrainAsync();
             Equal(0, stack.Children.Count, "unload retires source");
+            page.Children.Add(notice); await DrainAsync();
+            Equal(0, stack.Children.Count, "remount does not replay the consumed error");
+            notice.Message = "隐藏后"; await DrainAsync();
+            Equal(1, stack.Children.Count, "an explicit same-message action after remount still notifies");
         });
         yield return Case("player entrance and close never wait for data and late activation cannot change a newer page", async () =>
         {
