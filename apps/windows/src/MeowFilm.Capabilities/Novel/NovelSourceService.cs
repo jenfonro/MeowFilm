@@ -203,10 +203,31 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
         if (fileName is not null) payload["fileName"] = fileName;
         return EditAsync("library.import", payload, token);
     }
+    public Task<JsonElement> PreviewImportAsync(string? text = null, string? url = null, string? fileName = null,
+        CancellationToken token = default)
+    {
+        var payload = new Dictionary<string, object>();
+        if (text is not null) payload["text"] = text;
+        if (url is not null) payload["url"] = url;
+        if (fileName is not null) payload["fileName"] = fileName;
+        return work.Run(ct => CallAsync("library.previewImport", payload, ct), token);
+    }
     public Task<JsonElement> GetAsync(NovelSource source, CancellationToken token = default) => work.Run(ct =>
         CallAsync("library.get", new { installationId = source.InstallationId }, ct), token);
-    public Task<JsonElement> SaveAsync(NovelSource source, string definition, CancellationToken token = default) =>
-        EditAsync("library.save", new { installationId = source.InstallationId, expectedRevision = source.Revision, definition }, token);
+    public Task<JsonElement> SaveAsync(NovelSource source, string definition, CancellationToken token = default) => work.Run(async ct =>
+    {
+        await changes.WaitAsync(ct);
+        try
+        {
+            var receipt = await CallAsync("library.save", new { installationId = source.InstallationId, expectedRevision = source.Revision, definition }, ct);
+            var saved = NovelJson.Decode<NovelSource>(receipt.GetProperty("source"));
+            // The save receipt is authoritative. A subsequent list failure must
+            // not lose its revision and make retrying this editor stale.
+            Publish(sources.Where(s => s.InstallationId != saved.InstallationId).Append(saved).ToArray());
+            return receipt;
+        }
+        finally { changes.Release(); }
+    }, token);
     public Task<JsonElement> UpdateAsync(NovelSource source, object patch, CancellationToken token = default) =>
         EditAsync("library.update", new { installationId = source.InstallationId, expectedRevision = source.Revision, patch }, token);
     public Task<JsonElement> RemoveAsync(NovelSource source, CancellationToken token = default) =>

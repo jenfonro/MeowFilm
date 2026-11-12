@@ -109,6 +109,19 @@ public struct NovelImportReceipt: Codable, Sendable {
     public var sources: [NovelSource]
     public var failures: [NovelImportFailure]
 }
+public struct NovelSourceImportItem: Codable, Sendable {
+    public var index: Int
+    public var name: String
+    public var sourceUrl: String
+    public var group: String
+    public var `protocol`: String
+    public var exists: Bool
+    public var definition: String
+}
+public struct NovelSourceImportPreview: Codable, Sendable {
+    public var items: [NovelSourceImportItem]
+    public var failures: [NovelImportFailure]
+}
 public struct NovelCatalog: Sendable {
     public var book: NovelBook
     public var chapters: [NovelChapter]
@@ -171,9 +184,10 @@ public struct NovelSourceClient: Sendable {
         if let chapter { fields["chapter"] = chapter.wire; fields["chapterUrl"] = .string(chapter.chapterUrl) }
         return .object(fields)
     }
-    public func definition(_ source: NovelSource) async throws -> String {
+    public func definition(_ source: NovelSource) async throws -> (source: NovelSource, definition: String) {
         let result = try await runtime.call("library.get", .object(["installationId": .string(source.id)]))
-        guard let definition = result["definition"].string else { throw NovelError.invalidResponse }; return definition
+        guard let definition = result["definition"].string else { throw NovelError.invalidResponse }
+        return (try result["source"].decoding(NovelSource.self), definition)
     }
     public func importSources(text: String? = nil, url: String? = nil, fileName: String? = nil) async throws -> NovelImportReceipt {
         var fields = RuntimeObject()
@@ -181,9 +195,16 @@ public struct NovelSourceClient: Sendable {
         if let fileName { fields["fileName"] = .string(fileName) }
         return try await runtime.call("library.import", .object(fields)).decoding(NovelImportReceipt.self)
     }
-    public func save(_ source: NovelSource, definition: String) async throws {
-        _ = try await runtime.call("library.save", .object(["installationId": .string(source.id),
+    public func previewImport(text: String? = nil, url: String? = nil, fileName: String? = nil) async throws -> NovelSourceImportPreview {
+        var fields = RuntimeObject()
+        if let text { fields["text"] = .string(text) }; if let url { fields["url"] = .string(url) }
+        if let fileName { fields["fileName"] = .string(fileName) }
+        return try await runtime.call("library.previewImport", .object(fields)).decoding(NovelSourceImportPreview.self)
+    }
+    public func save(_ source: NovelSource, definition: String) async throws -> NovelSource {
+        let receipt = try await runtime.call("library.save", .object(["installationId": .string(source.id),
             "expectedRevision": .number(Double(source.revision)), "definition": .string(definition)]))
+        return try receipt["source"].decoding(NovelSource.self)
     }
     public func update(_ source: NovelSource, patch: RuntimeObject) async throws {
         _ = try await runtime.call("library.update", .object(["installationId": .string(source.id),

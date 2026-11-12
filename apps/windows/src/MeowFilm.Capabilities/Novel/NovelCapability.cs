@@ -64,7 +64,7 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
     public string DiscoveryError { get; private set; } = "";
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
-    private void LibraryChanged(object? sender, EventArgs e) => Publish();
+    private void LibraryChanged(object? sender, EventArgs e) { settings.Refresh(); Publish(); }
     private void SourcesChanged(object? sender, EventArgs e)
     {
         Search.SourcesChanged();

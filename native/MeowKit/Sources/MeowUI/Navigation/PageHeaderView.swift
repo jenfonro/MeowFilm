@@ -73,6 +73,12 @@ public final class PageHeaderTextButton: UIButton {
 @MainActor
 public final class PageHeaderView: UIView {
     public let background: WindowGradientView
+    public var horizontalInset: CGFloat = 8 {
+        didSet {
+            leadingPosition?.constant = horizontalInset
+            trailingPosition?.constant = -horizontalInset
+        }
+    }
     public var statusBarHeight: CGFloat = 0 {
         didSet {
             guard statusBarHeight != oldValue else { return }
@@ -105,6 +111,8 @@ public final class PageHeaderView: UIView {
     private let titleLabel = UILabel()
     private let titleContainer = UIView()
     private var rowTop: NSLayoutConstraint!
+    private var leadingPosition: NSLayoutConstraint?
+    private var trailingPosition: NSLayoutConstraint?
     private var emptyTrailingWidth: NSLayoutConstraint!
     private var leading: UIView?
     private var titleContent: UIView?
@@ -144,16 +152,19 @@ public final class PageHeaderView: UIView {
         row.addSubview(titleContainer)
         titleContainer.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        let leadingPosition = leadingStack.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: horizontalInset)
+        let trailingPosition = trailingStack.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -horizontalInset)
+        self.leadingPosition = leadingPosition; self.trailingPosition = trailingPosition
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
             rowTop,
             row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            leadingStack.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 8),
+            leadingPosition,
             leadingStack.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             leadingStack.heightAnchor.constraint(equalToConstant: 44),
             leadingStack.widthAnchor.constraint(equalToConstant: 44),
-            trailingStack.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -8),
+            trailingPosition,
             trailingStack.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             trailingStack.heightAnchor.constraint(equalToConstant: 44),
             emptyTrailingWidth,

@@ -3,6 +3,7 @@ import XCTest
 import UIKit
 import WebKit
 import Combine
+import CoreImage
 import MeowUI
 import MeowRuntime
 import MeowStorage
@@ -57,6 +58,107 @@ final class NovelUIKitTests: XCTestCase {
         let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in drawn = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
         XCTAssertTrue(drawn, "The native window hierarchy must actually render for its screenshot")
         let attachment = XCTAttachment(image: image); attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+    }
+    private func attachManagement(_ window: UIWindow, _ name: String) async throws {
+        window.layoutIfNeeded(); XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
+        // App-hosted XCTest is not an XCUITest runner, so XCUIScreen is intentionally
+        // unavailable here.  Render the visible UIWindow hierarchy itself instead of using
+        // a detached view or a second-process screenshot bridge.  drawHierarchy preserves
+        // safe-area layout and UIVisualEffectView composition for the native page and sheets.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "screen-" + name; attachment.lifetime = .keepAlways; add(attachment)
+    }
+    func testNativeSourceAndRuleManagersKeepSelectionTabsFieldsAndImportLayout() async throws {
+        let (feature, _) = try await fixture(), theme = NovelTestPageTheme()
+        let page = NovelSourcesViewController(feature: feature, themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme); navigation.setViewControllers([page], animated: false)
+        let window = try mount(navigation); await wait { page.isPageVisible }
+        page.render(); window.layoutIfNeeded()
+        XCTAssertEqual(descendants(page.manager).compactMap { $0 as? UISearchBar }.count, 1)
+        let table = try XCTUnwrap(descendants(page.manager).first { $0.accessibilityIdentifier == "management.list" } as? UITableView)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 1); try await attachManagement(window, "source-manager")
+        page.manager.setRows([], total: 0, validIDs: [], emptyMessage: "暂无书源，请先导入")
+        try await attachManagement(window, "source-manager-empty")
+        let selectAll = try button("management.selectAll", in: page.manager)
+        XCTAssertEqual(selectAll.title(for: .normal), "  全选 (0/0)"); XCTAssertGreaterThan(selectAll.titleLabel?.bounds.width ?? 0, 0)
+        page.render()
+        try button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside); XCTAssertEqual(page.manager.selected, ["fixture"])
+        page.manager.setRows([], total: 1, validIDs: ["fixture"], emptyMessage: "没有匹配的书源")
+        try button("management.invert", in: page.manager).sendActions(for: .touchUpInside); XCTAssertEqual(page.manager.selected, ["fixture"])
+        page.render(); try button("management.invert", in: page.manager).sendActions(for: .touchUpInside); XCTAssertTrue(page.manager.selected.isEmpty)
+        let editor = try NovelSourceEditor(source: nil, protocol: .legado, definition: #"{"bookSourceName":"全本同人小说网","bookSourceUrl":"https://www.qbtr.org","bookSourceGroup":"同人","bookSourceType":0,"enabled":true,"enabledExplore":true,"enabledCookieJar":false,"ruleSearch":{}}"#, feature: feature, themeProvider: theme)
+        navigation.pushViewController(editor, animated: false); await wait { editor.isPageVisible }; try await attachManagement(window, "source-basic")
+        let basic = try XCTUnwrap(descendants(editor.view).first { $0.accessibilityIdentifier == "novel.source.field.bookSourceName" } as? UITextField)
+        basic.text = "书源名称"; basic.sendActions(for: .editingChanged)
+        try button("novel.source.tab.1", in: editor.view).sendActions(for: .touchUpInside)
+        XCTAssertNotNil(descendants(editor.view).first { $0.accessibilityIdentifier == "novel.source.field.ruleSearch.bookList" } as? UITextView)
+        try await attachManagement(window, "source-search")
+        for index in 2..<6 {
+            try button("novel.source.tab.\(index)", in: editor.view).sendActions(for: .touchUpInside)
+            XCTAssertFalse(descendants(editor.view).filter { $0.accessibilityIdentifier?.hasPrefix("novel.source.field.") == true }.isEmpty)
+            try await attachManagement(window, "source-tab-\(index)")
+        }
+        try button("novel.source.tab.0", in: editor.view).sendActions(for: .touchUpInside)
+        XCTAssertEqual((descendants(editor.view).first { $0.accessibilityIdentifier == "novel.source.field.bookSourceName" } as? UITextField)?.text, "书源名称")
+        navigation.popViewController(animated: false)
+        let rules = NovelRulesViewController(feature: feature, themeProvider: theme); navigation.pushViewController(rules, animated: false)
+        await wait { rules.isPageVisible }; try await attachManagement(window, "rule-manager")
+        var rule = NovelRule(); rule.name = "净化广告"; rule.pattern = "广告"; rule.isRegex = true
+        let ruleEditor = NovelRuleEditor(rule: rule, feature: feature, themeProvider: theme); navigation.pushViewController(ruleEditor, animated: false)
+        await wait { ruleEditor.isPageVisible }; try await attachManagement(window, "rule-editor")
+        XCTAssertEqual(descendants(ruleEditor.view).filter { $0.accessibilityIdentifier?.hasPrefix("novel.rule.field.") == true }.count, 7)
+        let scopeChecks = descendants(ruleEditor.view).compactMap { $0 as? UIButton }.filter { ["作用于标题", "作用于正文"].contains($0.accessibilityLabel ?? "") }
+        XCTAssertEqual(scopeChecks.count, 2); XCTAssertTrue(scopeChecks.allSatisfy { $0.buttonType == .custom && $0.bounds.width > 0 })
+        let form = try XCTUnwrap(descendants(ruleEditor.view).first { $0 is ManagementFormView } as? ManagementFormView)
+        let timeout = try XCTUnwrap(descendants(form).first { $0.accessibilityIdentifier == "novel.rule.field.timeoutMillisecond" })
+        form.scrollRectToVisible(timeout.convert(timeout.bounds, to: form), animated: false)
+        try await attachManagement(window, "rule-editor-bottom")
+        try button("novel.rule.save", in: ruleEditor.view).sendActions(for: .touchUpInside)
+        await wait { feature.local.rules.contains { $0.id == rule.id } && navigation.topViewController === rules }
+        let dialog = ManagementDialog(title: "导入书源", action: "确定导入", themeProvider: theme)
+        let names = ["全本同人小说网", "南极小说（优）", "🍊淘小说吧🍊", "小原文学网", "错层小说", "思兔阅读", "猫眼看书", "未来天王", "梦想家文学", "📚 梦书中文", "搬山人小说网", "书包书库", "阅读源 13", "阅读源 14", "阅读源 15", "异次元", "阅读源 17", "阅读源 18"]
+        let selection = ManagementImportView(items: names.map { .init(title: $0, detail: "阅读源 · 常规", status: "已存在") })
+        dialog.body.addArrangedSubview(selection); rules.present(dialog, animated: false)
+        await wait { dialog.view.window === window && !dialog.isBeingPresented }
+        window.layoutIfNeeded(); dialog.view.layoutIfNeeded()
+        XCTAssertEqual(selection.selected, Set(names.indices)); XCTAssertGreaterThan(selection.bounds.height, 0); try await attachManagement(window, "source-import-confirm")
+        try button("management.dialog.cancel", in: dialog.view).sendActions(for: .touchUpInside); await wait { rules.presentedViewController == nil }
+    }
+    func testManagementModalCancellationWaitsForActualOperationDrain() async throws {
+        let (feature, _) = try await fixture(), theme = NovelTestPageTheme()
+        let page = NovelSourcesViewController(feature: feature, themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme); navigation.setViewControllers([page], animated: false)
+        let window = try mount(navigation); await wait { page.isPageVisible }
+        let entered = expectation(description: "preview entered"), cancelled = expectation(description: "preview cancelled")
+        var drain: CheckedContinuation<Void, Never>?, accepted = false
+        page.addressDialog(label: "书源地址", placeholder: "请输入网络书源地址", load: { _ in
+            entered.fulfill()
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) }
+            catch { cancelled.fulfill(); await withCheckedContinuation { drain = $0 }; throw error }
+        }, completed: { accepted = true })
+        let dialog = try XCTUnwrap(page.presentedViewController as? ManagementDialog)
+        let input = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.import.url" } as? UITextField)
+        await wait { dialog.view.window === window && !dialog.isBeingPresented }
+        window.layoutIfNeeded(); try await attachManagement(window, "source-network-import")
+        input.text = "https://source.invalid/book-sources.json"
+        try button("management.dialog.confirm", in: dialog.view).sendActions(for: .touchUpInside); await fulfillment(of: [entered], timeout: 5)
+        try button("management.dialog.cancel", in: dialog.view).sendActions(for: .touchUpInside); await fulfillment(of: [cancelled], timeout: 5)
+        XCTAssertTrue(page.presentedViewController === dialog); XCTAssertFalse(accepted)
+        let receipt = try XCTUnwrap(drain); receipt.resume(); await wait { page.presentedViewController == nil }; XCTAssertFalse(accepted)
+    }
+    func testReplacementQrImageDecodesTheOriginalRuleTextAndRejectsNonImages() throws {
+        let text = #"{"id":42,"pattern":"advertisement","replacement":""}"#
+        let filter = try XCTUnwrap(CIFilter(name: "CIQRCodeGenerator"))
+        filter.setValue(Data(text.utf8), forKey: "inputMessage")
+        let output = try XCTUnwrap(filter.outputImage).transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+        let pixels = try XCTUnwrap(CIContext().createCGImage(output, from: output.extent))
+        let data = try XCTUnwrap(UIImage(cgImage: pixels).pngData())
+        XCTAssertEqual(try NovelRulesViewController.readRuleQr(data), text)
+        XCTAssertThrowsError(try NovelRulesViewController.readRuleQr(Data("not an image".utf8)))
     }
     func testEmptyAndPopulatedShelfKeepNativeSelectorsAndReturnToSameBook() async throws {
         let (feature, _) = try await fixture(), theme = NovelTestPageTheme()

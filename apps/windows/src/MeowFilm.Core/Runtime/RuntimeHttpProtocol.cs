@@ -39,7 +39,7 @@ public static partial class RuntimeHttpProtocol
                 "TARGET_CHANGED", "RECORDING_MISMATCH" }),
         ["source"] = new("0.3.0", "source.runtime.v2", "source.runtime.",
             ["load", "unload", "invoke", "status",
-                "library.list", "library.get", "library.import", "library.save", "library.update", "library.remove",
+                "library.list", "library.get", "library.previewImport", "library.import", "library.save", "library.update", "library.remove",
                 "library.export", "library.invoke", "library.image", "library.releaseImage", "web.pending", "web.respond",
                 "rules.process", "close"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT",

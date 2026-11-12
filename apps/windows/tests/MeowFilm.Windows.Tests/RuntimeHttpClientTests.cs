@@ -64,7 +64,7 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(96, declared.Count);
+            BridgeTests.Equal(97, declared.Count);
             BridgeTests.Equal(true, declared.Contains("netease.token.get"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.set"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.defaults"));
@@ -646,7 +646,7 @@ public static class RuntimeHttpClientTests
             new { id = "source", version = "0.3.0", contract = "source.runtime.v2", methods = new[]
             {
                 "source.runtime.load", "source.runtime.unload", "source.runtime.invoke", "source.runtime.status", "source.runtime.close",
-                "source.runtime.library.list", "source.runtime.library.get", "source.runtime.library.import", "source.runtime.library.save",
+                "source.runtime.library.list", "source.runtime.library.get", "source.runtime.library.previewImport", "source.runtime.library.import", "source.runtime.library.save",
                 "source.runtime.library.update", "source.runtime.library.remove", "source.runtime.library.export", "source.runtime.library.invoke",
                 "source.runtime.library.image", "source.runtime.library.releaseImage", "source.runtime.web.pending", "source.runtime.web.respond",
                 "source.runtime.rules.process"
