@@ -797,318 +797,214 @@ final class FilmPlaybackModelTests: XCTestCase {
         await model.close()
     }
 
-    func testExternalPlayerRequiresActualStartedOutputNotAnIdleOrPreparedSession() async throws {
-        for attempt in [RuntimeValue.null, FilmPlaybackFixture.attempt("prepared", prepareOnly: true)] {
-            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(attempt: attempt))
+    func testExactCandidateAndEpisodeSelectionsReopenAfterBackgroundWithoutFallingBackToPlay() async throws {
+        let selections: [(String, RuntimeObject)] = [
+            ("select.candidate", ["candidateId": .string("exact-b")]),
+            ("select.episode", ["episode": .object(["season": .number(2), "episode": .number(3)])]),
+        ]
+        for (action, fields) in selections {
+            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+                attempt: FilmPlaybackFixture.attempt("a")))
             let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
-            await model.open()?.value
+            await model.open()?.value; await model.waitForPendingWork()
+            await model.applicationDidEnterBackground()
+            await server.reply(to: action, with: FilmPlaybackFixture.snapshot(100, stage: "pending",
+                attempt: FilmPlaybackFixture.attempt("b")))
+            await model.send(action, parameters: fields)?.value
             await model.waitForPendingWork()
-            XCTAssertNil(model.openExternalPlayer(.infuse))
-            XCTAssertEqual(model.actionError?.code, "EXTERNAL_PLAYER_NO_CURRENT")
-            let calls = await server.calls()
-            XCTAssertFalse(calls.contains { $0.0 == "session.attempt" })
-            XCTAssertEqual(media.pauses, 0)
-            await model.close()
-        }
-        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("not-started")))
-        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
-        let entered = FilmPlaybackGate(), output = FilmPlaybackGate()
-        media.preparationEntered = entered; media.preparationGate = output
-        await model.open()?.value
-        await entered.wait()
-        XCTAssertNil(model.openExternalPlayer(.nPlayer))
-        XCTAssertEqual(model.actionError?.code, "EXTERNAL_PLAYER_NO_CURRENT")
-        XCTAssertEqual(media.pauses, 0)
-        await output.release()
-        await model.waitForPendingWork()
-        await model.close()
-    }
-
-    func testExternalPlayerReceivesLocalAndExternalNodeURLsAndRestoresTheOwnerWhenDeclined() async throws {
-        for player in FilmExternalPlayer.allCases {
-            for address in ["http://127.0.0.1:19191/media/receipt/opaque?token=fixture",
-                            "http://localhost:19191/video.mp4", "http://[::1]:19191/video.mp4",
-                            "http://192.168.1.2:19191/video.mp4"] {
-                var fields = try FilmPlaybackFixture.mediaInput("original").filmRequiredObject()
-                fields["url"] = .string(address)
-                let receipt = RuntimeValue.object(fields)
-                let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-                    attempt: FilmPlaybackFixture.attempt("original")))
-                await server.replyToReceipt { _ in receipt }
-                let media = FilmPlaybackTestMedia()
-                var opened: [URL] = []
-                let model = makeModel(server, media, opener: { opened.append($0); return false })
-                await model.open()?.value
-                await model.waitForPendingWork()
-                await model.openExternalPlayer(player)?.value
-                await model.waitForPendingWork()
-                XCTAssertEqual(opened, [try player.url(for: XCTUnwrap(URL(string: address)))])
-                XCTAssertEqual(model.actionError?.code, "EXTERNAL_PLAYER_OPEN_FAILED")
-                XCTAssertEqual(model.mediaState.attemptID, "original")
-                XCTAssertFalse(model.mediaState.paused); XCTAssertFalse(model.requiresExplicitPlay)
-                XCTAssertEqual(media.pauses, 1); XCTAssertEqual(media.resumes, 1)
-                XCTAssertTrue(media.stopped.isEmpty)
-                let calls = await server.calls()
-                XCTAssertFalse(calls.contains { $0.0 == "session.media.release" || $0.0 == "session.release" })
-                await model.close()
-            }
-        }
-    }
-
-    func testExternalPlayerRejectsDRMReceiptsWithoutPausingOrExporting() async throws {
-        var drm = try FilmPlaybackFixture.mediaInput("protected").filmRequiredObject()
-        drm["drm"] = .object(["type": .string("clearkey"), "clearKeys": .object([
-            "00000000000000000000000000000001": .string("00000000000000000000000000000002"),
-        ])])
-        let receipt = RuntimeValue.object(drm)
-        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("protected")))
-        await server.replyToReceipt { _ in receipt }
-        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
-        await model.open()?.value
-        await model.waitForPendingWork()
-        await model.openExternalPlayer(.infuse)?.value
-        XCTAssertEqual(model.actionError?.code, "EXTERNAL_PLAYER_DRM")
-        XCTAssertEqual(model.mediaState.attemptID, "protected")
-        XCTAssertFalse(model.mediaState.paused)
-        XCTAssertFalse(model.requiresExplicitPlay)
-        XCTAssertEqual(media.pauses, 0)
-        XCTAssertTrue(media.stopped.isEmpty)
-        let calls = await server.calls()
-        XCTAssertFalse(calls.contains { $0.0 == "session.media.release" || $0.0 == "session.release" })
-        await model.close()
-    }
-
-    func testExternalPlayerSystemRejectionRestoresOnlyThePlayingOwnerItPaused() async throws {
-        for (alreadyPaused, buffering) in [(false, false), (true, false), (false, true), (true, true)] {
-            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-                attempt: FilmPlaybackFixture.attempt("original")))
-            let media = FilmPlaybackTestMedia()
-            var opened: [URL] = []
-            let model = makeModel(server, media, opener: { opened.append($0); return false })
-            await model.open()?.value
-            await model.waitForPendingWork()
-            var state = model.mediaState; state.paused = alreadyPaused; state.buffering = buffering
-            media.emit(.state(state), attemptID: "original")
-            await model.openExternalPlayer(.nPlayer)?.value
-            await model.waitForPendingWork()
-            XCTAssertEqual(opened.map(\.scheme), ["nplayer-https"])
-            XCTAssertEqual(media.pauses, alreadyPaused ? 0 : 1)
-            XCTAssertEqual(media.resumes, alreadyPaused ? 0 : 1)
-            XCTAssertEqual(model.mediaState.paused, alreadyPaused)
-            XCTAssertEqual(model.mediaState.buffering, buffering)
-            XCTAssertEqual(model.actionError?.code, "EXTERNAL_PLAYER_OPEN_FAILED")
-            XCTAssertFalse(model.requiresExplicitPlay)
-            XCTAssertFalse(model.isReleased)
-            XCTAssertTrue(media.stopped.isEmpty)
-            await model.close()
-        }
-    }
-
-    func testExternalPlayerAcceptedHandoffDrainsPiPAndKeepsTheExactReceiptUntilForegroundWithoutInventingPlayback() async throws {
-        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("original")))
-        let media = FilmPlaybackTestMedia()
-        var opened: [URL] = []
-        let model = makeModel(server, media, opener: { opened.append($0); return true })
-        await model.open()?.value
-        await model.waitForPendingWork()
-        media.systemOwner = true
-        await model.openExternalPlayer(.infuse)?.value
-        XCTAssertEqual(opened.count, 1)
-        XCTAssertEqual(media.pauses, 1); XCTAssertEqual(media.resumes, 0)
-        XCTAssertEqual(media.stopped, [FilmPlaybackFixture.sessionID])
-        XCTAssertFalse(media.systemOwner)
-        XCTAssertFalse(model.isReleased); XCTAssertTrue(model.canLeave)
-        XCTAssertFalse(model.hasSystemOwner)
-        XCTAssertTrue(model.requiresExplicitPlay)
-        XCTAssertNil(model.open(), "Foreground visibility must not restart an external handoff")
-        var calls = await server.calls()
-        XCTAssertTrue(calls.filter { $0.0 == "session.media.release" }.isEmpty)
-        XCTAssertEqual(calls.filter { $0.0 == "session.release" }.map { $0.1.filmObject?["keepMedia"] }, [.bool(true)])
-        await model.applicationDidBecomeActive()
-        XCTAssertTrue(model.isReleased)
-        calls = await server.calls()
-        let releases = calls.filter { $0.0 == "session.media.release" }
-        XCTAssertEqual(releases.map(\.1), [.object([
-            "sessionId": .string(FilmPlaybackFixture.sessionID.uuidString.lowercased()),
-            "attemptId": .string("original"), "resourceId": .string("resource-original"),
-        ])])
-        XCTAssertEqual(calls.filter { $0.0 == "session.release" }.map(\.1), [.object([
-            "sessionId": .string(FilmPlaybackFixture.sessionID.uuidString.lowercased()), "keepMedia": .bool(true),
-        ]), .object([
-            "sessionId": .string(FilmPlaybackFixture.sessionID.uuidString.lowercased()), "keepMedia": .bool(false),
-        ])])
-        XCTAssertEqual(actions(calls).filter { $0 == "media.started" }, ["media.started"],
-                       "Only the original real native output may report started")
-        XCTAssertFalse(actions(calls).contains("media.ended"))
-        XCTAssertTrue(calls.filter { $0.1.filmObject?["action"] == .string("media.progress") }
-            .allSatisfy { $0.1.filmObject?["position"] == .number(0) &&
-                $0.1.filmObject?["attemptId"] == .string("original") })
-        XCTAssertFalse(calls.contains { $0.0.hasPrefix("library.") || $0.0.hasPrefix("history.") })
-    }
-
-    func testExternalPlayerLateSystemResultCannotRestoreOrCloseANewerAttempt() async throws {
-        for accepted in [false, true] {
-            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-                attempt: FilmPlaybackFixture.attempt("old")))
-            let media = FilmPlaybackTestMedia(), entered = FilmPlaybackGate(), result = FilmPlaybackGate()
-            let model = makeModel(server, media, opener: { _ in
-                await entered.release(); await result.wait(); return accepted
-            })
-            await model.open()?.value
-            await server.awaitObservation()
-            await model.waitForPendingWork()
-            let handoff = model.openExternalPlayer(.infuse)
-            await entered.wait()
-            try await server.publish(FilmPlaybackFixture.snapshot(100, stage: "pending",
-                attempt: FilmPlaybackFixture.attempt("new"), current: FilmPlaybackFixture.current("old")))
-            await model.waitForPendingWork()
-            XCTAssertEqual(model.mediaState.attemptID, "new")
-            await result.release()
-            await handoff?.value
-            XCTAssertEqual(media.pauses, 1); XCTAssertEqual(media.resumes, 0)
-            XCTAssertTrue(media.stopped.isEmpty)
-            XCTAssertEqual(model.mediaState.attemptID, "new")
-            XCTAssertFalse(model.requiresExplicitPlay)
+            XCTAssertEqual(model.mediaState.attemptID, "b")
             XCTAssertNil(model.actionError)
-            let calls = await server.calls()
-            XCTAssertFalse(calls.contains { $0.0 == "session.release" })
-            await model.close()
-        }
-    }
-
-    func testExplicitReplayDuringSystemOpenInvalidatesTheHandoffBeforeItsResultCanCloseTheOwner() async throws {
-        for accepted in [false, true] {
-            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-                attempt: FilmPlaybackFixture.attempt("original")))
-            let media = FilmPlaybackTestMedia(), entered = FilmPlaybackGate(), result = FilmPlaybackGate()
-            let model = makeModel(server, media, opener: { _ in
-                await entered.release(); await result.wait(); return accepted
-            })
-            await model.open()?.value
-            await model.waitForPendingWork()
-            let handoff = model.openExternalPlayer(.infuse)
-            await entered.wait()
-            let replay = model.send("play")
-            await result.release()
-            await handoff?.value; await replay?.value
-            await model.waitForPendingWork()
-            XCTAssertEqual(media.pauses, 1); XCTAssertEqual(media.resumes, 1)
-            XCTAssertEqual(model.mediaState.attemptID, "original"); XCTAssertFalse(model.mediaState.paused)
-            XCTAssertFalse(model.requiresExplicitPlay); XCTAssertFalse(model.isReleased)
-            XCTAssertTrue(media.stopped.isEmpty); XCTAssertNil(model.actionError)
-            let calls = await server.calls()
-            XCTAssertEqual(actions(calls).filter { $0 == "play" }, ["play"])
-            XCTAssertFalse(calls.contains { $0.0 == "session.release" })
-            await model.close()
-        }
-    }
-
-    func testExternalPlayerLateReceiptCannotExportOrFailANewerIntent() async throws {
-        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("old")))
-        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
-        await model.open()?.value
-        await server.awaitObservation()
-        await model.waitForPendingWork()
-        let entered = FilmPlaybackGate(), receipt = FilmPlaybackGate()
-        await server.replyToReceipt { id in
-            if id == "old" {
-                await entered.release(); await receipt.wait()
-                return .object([:])
-            }
-            return FilmPlaybackFixture.mediaInput(id)
-        }
-        let handoff = model.openExternalPlayer(.nPlayer)
-        await entered.wait()
-        try await server.publish(FilmPlaybackFixture.snapshot(100, stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("new"), current: FilmPlaybackFixture.current("old")))
-        await model.waitForPendingWork()
-        await receipt.release()
-        await handoff?.value
-        XCTAssertEqual(model.mediaState.attemptID, "new")
-        XCTAssertEqual(media.pauses, 0)
-        XCTAssertNil(model.actionError)
-        XCTAssertTrue(media.stopped.isEmpty)
-        await model.close()
-    }
-
-    func testExternalPlayerRejectsAChangedResourceAndTerminalOutput() async throws {
-        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("original")))
-        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
-        await model.open()?.value
-        await model.waitForPendingWork()
-        var changed = try FilmPlaybackFixture.mediaInput("original").filmRequiredObject()
-        changed["id"] = .string("different-resource")
-        let changedReceipt = RuntimeValue.object(changed)
-        await server.replyToReceipt { _ in changedReceipt }
-        await model.openExternalPlayer(.infuse)?.value
-        XCTAssertEqual(model.actionError?.code, "INVALID_RESPONSE")
-        XCTAssertEqual(media.pauses, 0)
-        media.emit(.ended(attemptID: "original"), attemptID: "original")
-        XCTAssertNil(model.openExternalPlayer(.infuse))
-        XCTAssertEqual(model.actionError?.code, "EXTERNAL_PLAYER_NO_CURRENT")
-        try await media.dispose(attemptID: "original")
-        XCTAssertNil(model.openExternalPlayer(.nPlayer))
-        XCTAssertEqual(media.pauses, 0)
-        await model.close()
-    }
-
-    func testExternalPlayerCannotExportARetiredReceiptBeforeItsTerminalCallback() async throws {
-        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("retired")))
-        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
-        await model.open()?.value
-        await model.waitForPendingWork()
-        try await media.dispose(attemptID: "retired")
-        XCTAssertNil(model.openExternalPlayer(.nPlayer))
-        XCTAssertEqual(model.actionError?.code, "EXTERNAL_PLAYER_NO_CURRENT")
-        XCTAssertEqual(media.pauses, 0)
-        let calls = await server.calls()
-        XCTAssertEqual(calls.filter { $0.0 == "session.attempt" }.count, 1,
-                       "An already-retired lease must not be reread or exported before its terminal event arrives")
-        await model.close()
-    }
-
-    func testExternalPlayerBackgroundDrainAndExplicitReplaySupersedeALateSystemResult() async throws {
-        for accepted in [false, true] {
-            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-                attempt: FilmPlaybackFixture.attempt("old")))
-            let media = FilmPlaybackTestMedia()
-            let opening = FilmPlaybackGate(), result = FilmPlaybackGate()
-            let stopping = FilmPlaybackGate(), drain = FilmPlaybackGate()
-            let model = makeModel(server, media, opener: { _ in
-                await opening.release(); await result.wait(); return accepted
-            })
-            await model.open()?.value
-            await model.waitForPendingWork()
-            media.systemOwner = true; media.stopEntered = stopping; media.stopGate = drain
-            let handoff = model.openExternalPlayer(.infuse)
-            await opening.wait()
-            let background = Task { await model.applicationDidEnterBackground() }
-            await stopping.wait()
-            XCTAssertNil(model.open(), "Returning to foreground alone must not resurrect the old receipt")
-            try await server.publish(FilmPlaybackFixture.snapshot(100, stage: "pending",
-                attempt: FilmPlaybackFixture.attempt("returned-new")))
-            let replay = model.send("play")
-            await result.release()
-            await drain.release()
-            await background.value; await handoff?.value; await replay?.value
-            await model.waitForPendingWork()
             XCTAssertEqual(media.stopped, [FilmPlaybackFixture.sessionID])
-            XCTAssertEqual(media.resumes, 0)
-            XCTAssertEqual(model.mediaState.attemptID, "returned-new")
-            XCTAssertFalse(model.requiresExplicitPlay)
-            XCTAssertFalse(model.isReleased)
-            XCTAssertNil(model.actionError)
             let calls = await server.calls()
-            XCTAssertEqual(calls.filter { $0.0 == "session.release" }.map { $0.1.filmObject?["keepMedia"] }, [.bool(false)])
-            XCTAssertEqual(calls.filter { $0.0 == "session.media.release" }.map { $0.1.filmObject?["attemptId"] }, [.string("old")])
+            let selections = calls.filter { $0.1.filmObject?["action"] == .string(action) }
+            XCTAssertEqual(selections.count, 1)
+            for (key, value) in fields { XCTAssertEqual(selections.first?.1.filmObject?[key], value) }
+            XCTAssertFalse(actions(calls).contains("play"),
+                           "Do not silently fall back to a different candidate or episode")
+            XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
+            XCTAssertEqual(sessionReleases(calls), [.bool(false)])
             await model.close()
         }
+    }
+
+    func testLatestExactSelectionOwnsReentryAcrossTheOldCloseDrain() async throws {
+        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+            attempt: FilmPlaybackFixture.attempt("a")))
+        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+        let releaseEntered = FilmPlaybackGate(), releaseResult = FilmPlaybackGate()
+        let selectionEntered = FilmPlaybackGate(), selectionResult = FilmPlaybackGate()
+        await model.open()?.value; await model.waitForPendingWork()
+        await server.beforeRelease { operation, _ in
+            if operation == "session.release" {
+                await releaseEntered.release(); await releaseResult.wait()
+            }
+        }
+        let background = Task { await model.applicationDidEnterBackground() }
+        await releaseEntered.wait()
+        await server.reply(to: "select.episode", with: FilmPlaybackFixture.snapshot(100, stage: "pending",
+            attempt: FilmPlaybackFixture.attempt("c")))
+        await server.beforeAction { action in
+            if action == "select.episode" {
+                await selectionEntered.release(); await selectionResult.wait()
+            }
+        }
+        let older = model.send("select.candidate", parameters: ["candidateId": .string("exact-b")])
+        let episode: RuntimeValue = .object(["season": .number(2), "episode": .number(3)])
+        let latest = model.send("select.episode", parameters: ["episode": episode])
+        await releaseResult.release()
+        await selectionEntered.wait()
+        XCTAssertEqual(media.prepared.map(\.attemptID), ["a"],
+                       "The reopening snapshot cannot publish media ahead of the exact selection response")
+        await selectionResult.release()
+        await background.value; await older?.value; await latest?.value; await model.waitForPendingWork()
+        XCTAssertEqual(model.mediaState.attemptID, "c")
+        XCTAssertEqual(media.prepared.map(\.attemptID), ["a", "c"])
+        XCTAssertEqual(media.resumes, 0)
+        XCTAssertNil(model.actionError)
+        let calls = await server.calls()
+        XCTAssertFalse(actions(calls).contains("select.candidate") || actions(calls).contains("play"))
+        let selections = calls.filter { $0.1.filmObject?["action"] == .string("select.episode") }
+        XCTAssertEqual(selections.count, 1)
+        XCTAssertEqual(selections.first?.1.filmObject?["episode"], episode)
+        XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
+        XCTAssertEqual(sessionReleases(calls), [.bool(false)])
+        await model.close()
+        XCTAssertTrue(model.isReleased)
+    }
+
+    func testStopDuringReentryOpenDrainsItsReceiptWithoutSendingTheQueuedSelection() async throws {
+        let entered = FilmPlaybackGate(), finish = FilmPlaybackGate()
+        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+            attempt: FilmPlaybackFixture.attempt("a")))
+        let media = FilmPlaybackTestMedia(), gate = FilmPlaybackReentryGate()
+        let base = server.transport
+        let transport = FilmPlaybackTransport(request: { operation, input in
+            if operation == "session.open" { await gate.waitIfArmed(entered: entered, finish: finish) }
+            return try await base.call(operation, parameters: input)
+        }, observation: { sessionID, after, receive in
+            try await base.snapshots(sessionID: sessionID, after: after, receive: receive)
+        })
+        let model = FilmPlaybackModel(transport: transport, media: media, request: { FilmPlaybackFixture.request() })
+        await model.open()?.value; await model.waitForPendingWork()
+        await model.applicationDidEnterBackground()
+        await gate.arm()
+        let selection = model.send("select.candidate", parameters: ["candidateId": .string("exact-b")])
+        await entered.wait()
+        XCTAssertNil(model.sessionID, "The new open is admitted but its session identity has not returned")
+        let stop = model.send("stop")
+        XCTAssertNotNil(stop, "Stop must revoke a queued selection even before the new open returns its ID")
+        await finish.release()
+        await selection?.value; await stop?.value; await model.waitForPendingWork()
+        XCTAssertTrue(model.isReleased)
+        XCTAssertNil(model.mediaState.attemptID)
+        XCTAssertEqual(media.prepared.map(\.attemptID), ["a"])
+        let calls = await server.calls()
+        XCTAssertFalse(actions(calls).contains("select.candidate") || actions(calls).contains("play"))
+        XCTAssertEqual(calls.filter { $0.0 == "session.open" }.count, 2)
+        XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
+        XCTAssertEqual(sessionReleases(calls), [.bool(false), .bool(false)])
+        await model.close()
+    }
+
+    func testUnstartedStopCannotCancelTheNewerExplicitPlayAfterBackground() async throws {
+        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+            attempt: FilmPlaybackFixture.attempt("a")))
+        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+        await model.open()?.value; await model.waitForPendingWork()
+        await model.applicationDidEnterBackground()
+        try await server.publish(FilmPlaybackFixture.snapshot(100, stage: "pending",
+            attempt: FilmPlaybackFixture.attempt("b")))
+        let stop = model.send("stop")
+        let play = model.send("play")
+        await stop?.value; await play?.value; await model.waitForPendingWork()
+        XCTAssertEqual(model.mediaState.attemptID, "b")
+        XCTAssertFalse(model.isReleased)
+        XCTAssertEqual(media.stopped, [FilmPlaybackFixture.sessionID])
+        let calls = await server.calls()
+        XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
+        XCTAssertEqual(sessionReleases(calls), [.bool(false)])
+        XCTAssertEqual(actions(calls).filter { $0 == "play" }, ["play"])
+        await model.close()
+    }
+
+    func testNativeReleaseFailureRemainsAnImmutableFailedReceipt() async throws {
+        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+            attempt: FilmPlaybackFixture.attempt("a")))
+        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+        await model.open()?.value; await model.waitForPendingWork()
+        await server.beforeRelease { operation, _ in
+            if operation == "session.media.release" { throw FilmPlaybackError(code: "MEDIA_RELEASE_FAILED") }
+        }
+        await model.close()
+        XCTAssertFalse(model.isReleased)
+        XCTAssertEqual(model.mediaStopError?.code, "MEDIA_RELEASE_FAILED")
+        await server.beforeRelease { _, _ in }
+        await model.close()
+        XCTAssertFalse(model.isReleased, "An immutable native failure cannot turn into an empty success")
+        XCTAssertFalse(model.canLeave)
+        XCTAssertEqual(model.mediaStopError?.code, "MEDIA_RELEASE_FAILED")
+        XCTAssertTrue(media.isLocallyDrained(sessionID: FilmPlaybackFixture.sessionID))
+        XCTAssertEqual(media.nativeReleases, ["a"])
+        let calls = await server.calls()
+        XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
+    }
+
+    func testPiPKeepAndFinalSessionFailuresNeedRealAcknowledgementWithoutRepeatingMediaRelease() async throws {
+        for failingKeep in [false, true] {
+            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+                attempt: FilmPlaybackFixture.attempt("a")))
+            let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+            await model.open()?.value; await model.waitForPendingWork()
+            media.systemOwner = true
+            await server.beforeRelease { operation, input in
+                if operation == "session.release", input.filmObject?["keepMedia"] == .bool(failingKeep) {
+                    throw FilmPlaybackError(code: "STORAGE_ERROR")
+                }
+            }
+            await model.applicationDidEnterBackground()
+            if failingKeep {
+                XCTAssertFalse(model.canLeave); XCTAssertFalse(model.isReleased)
+                XCTAssertEqual(model.sessionReleaseError?.code, "STORAGE_ERROR")
+                XCTAssertTrue(model.hasSystemOwner)
+                let calls = await server.calls()
+                XCTAssertTrue(mediaReleases(calls).isEmpty)
+                await server.beforeRelease { _, _ in }
+            }
+            await model.close()
+            if !failingKeep {
+                XCTAssertFalse(model.isReleased); XCTAssertFalse(model.canLeave)
+                XCTAssertEqual(model.sessionReleaseError?.code, "STORAGE_ERROR")
+                await model.close()
+                XCTAssertFalse(model.isReleased)
+                await server.beforeRelease { _, _ in }
+                await model.send("stop")?.value
+            }
+            XCTAssertTrue(model.isReleased); XCTAssertNil(model.sessionReleaseError)
+            await model.close()
+            let calls = await server.calls()
+            XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
+            XCTAssertEqual(sessionReleases(calls), failingKeep ?
+                [.bool(true), .bool(false)] : [.bool(true), .bool(false), .bool(false), .bool(false)])
+            XCTAssertEqual(media.nativeReleases, ["a"])
+        }
+    }
+
+    func testBackgroundClosePreservesProgressFailureAfterPhysicalDrain() async throws {
+        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+            attempt: FilmPlaybackFixture.attempt("a")))
+        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+        await model.open()?.value; await model.waitForPendingWork()
+        await server.fail("media.progress", with: .remote("STORAGE_ERROR"))
+        await model.applicationDidEnterBackground()
+        XCTAssertTrue(model.isReleased)
+        XCTAssertEqual(model.actionError?.code, "STORAGE_ERROR")
+        XCTAssertTrue(media.isLocallyDrained(sessionID: FilmPlaybackFixture.sessionID))
+        let calls = await server.calls()
+        XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
+        XCTAssertEqual(sessionReleases(calls), [.bool(false)])
+        XCTAssertEqual(actions(calls).filter { $0 == "media.started" }, ["media.started"])
+        XCTAssertFalse(actions(calls).contains("media.ended"))
+        XCTAssertFalse(calls.contains { $0.0.hasPrefix("library.") || $0.0.hasPrefix("history.") })
     }
 
     func testBlockForwardsTheCapturedAttemptAndDoesNotRetargetAStaleConfirmation() async throws {
@@ -1147,13 +1043,29 @@ final class FilmPlaybackModelTests: XCTestCase {
         await model.close()
     }
 
-    private func makeModel(_ server: FilmPlaybackWireServer, _ media: FilmPlaybackTestMedia,
-                           opener: @escaping @MainActor (URL) async -> Bool = { _ in
-                               XCTFail("Unexpected external-player launch"); return false
-                           }) -> FilmPlaybackModel {
-        .init(transport: server.transport, media: media, openExternalURL: opener, request: { FilmPlaybackFixture.request() })
+    private func makeModel(_ server: FilmPlaybackWireServer, _ media: FilmPlaybackTestMedia) -> FilmPlaybackModel {
+        .init(transport: server.transport, media: media, request: { FilmPlaybackFixture.request() })
     }
     private func actions(_ calls: [(String, RuntimeValue)]) -> [String] {
         calls.filter { $0.0 == "session.command" }.compactMap { $0.1.filmObject?["action"]?.filmText }
+    }
+    private func mediaReleases(_ calls: [(String, RuntimeValue)]) -> [RuntimeValue] {
+        calls.filter { $0.0 == "session.media.release" }.map(\.1)
+    }
+    private func releasePayload(_ attempt: String) -> RuntimeValue {
+        .object(["sessionId": .string(FilmPlaybackFixture.sessionID.uuidString.lowercased()),
+                 "attemptId": .string(attempt), "resourceId": .string("resource-\(attempt)")])
+    }
+    private func sessionReleases(_ calls: [(String, RuntimeValue)]) -> [RuntimeValue?] {
+        calls.filter { $0.0 == "session.release" }.map { $0.1.filmObject?["keepMedia"] }
+    }
+}
+
+private actor FilmPlaybackReentryGate {
+    private var armed = false
+    func arm() { armed = true }
+    func waitIfArmed(entered: FilmPlaybackGate, finish: FilmPlaybackGate) async {
+        guard armed else { return }
+        await entered.release(); await finish.wait()
     }
 }

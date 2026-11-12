@@ -336,7 +336,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             self.filmPlayer = nil
             if let top = self.navigation.topViewController { self.activateFilmPage(top) }
         }
-        root.present(page, animated: true, completion: completion)
+        page.present(from: root, completion: completion)
         return true
     }
 

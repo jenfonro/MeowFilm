@@ -3,27 +3,6 @@ import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmPlaybackWireTests: XCTestCase {
-    func testExternalPlayerTemplatesPreserveSignedQueriesAndSpecialCharacters() throws {
-        let suffix = "://media.example.invalid:8443/a%20b/%E4%B8%AD.m3u8?sig=a%2Fb%2Bc%3D&part=one+two&part=%26%3D%25&empty=&punct=!~*'()"
-        for scheme in ["http", "https"] {
-            let source = try XCTUnwrap(URL(string: scheme + suffix))
-            let infuse = try FilmExternalPlayer.infuse.url(for: source)
-            let components = try XCTUnwrap(URLComponents(url: infuse, resolvingAgainstBaseURL: false))
-            XCTAssertEqual(components.scheme, "infuse")
-            XCTAssertEqual(components.host, "x-callback-url"); XCTAssertEqual(components.path, "/play")
-            XCTAssertEqual(components.queryItems?.count, 1)
-            XCTAssertEqual(components.queryItems?.first?.name, "url")
-            XCTAssertEqual(components.queryItems?.first?.value, source.absoluteString,
-                           "Exactly one decode must restore the complete URL, including repeated signed parameters")
-            XCTAssertTrue(infuse.absoluteString.contains("sig%3Da%252Fb%252Bc%253D"))
-            XCTAssertTrue(infuse.absoluteString.contains("one%2Btwo"))
-            XCTAssertTrue(infuse.absoluteString.hasSuffix("punct%3D!~*'()"))
-            let nPlayer = try FilmExternalPlayer.nPlayer.url(for: source)
-            XCTAssertEqual(nPlayer.absoluteString, "nplayer-" + source.absoluteString,
-                           "nPlayer changes only the scheme, not a query's encoding, order or signature")
-        }
-    }
-
     func testManualShareSourceDoesNotRequireOrInventScriptInstallation() throws {
         let pan: RuntimeValue = .object(["key": .string("manual:fixture"), "engine": .string("pan"),
                                         "name": .string("私人分享"), "detailId": .number(0)])
