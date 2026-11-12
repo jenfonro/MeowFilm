@@ -384,7 +384,7 @@ final class FilmPlaybackCacheTests: XCTestCase {
     }
 
     private func makeModel(_ server: FilmPlaybackWireServer, _ media: FilmPlaybackTestMedia) -> FilmPlaybackModel {
-        .init(transport: server.transport, media: media, openExternalURL: { _ in true },
+        .init(transport: server.transport, media: media,
               request: { FilmPlaybackFixture.request() })
     }
 

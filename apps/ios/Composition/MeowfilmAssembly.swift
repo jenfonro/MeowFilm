@@ -87,12 +87,6 @@ final class MeowfilmAssembly: ObservableObject {
             MainActor.assumeIsolated {
                 self?.foreground = true
                 self?.refreshAutomaticSync()
-                guard let self, let model = self.filmPlayback else { return }
-                let previous = self.filmBackground
-                self.filmBackground = Task {
-                    await previous?.value
-                    await model.applicationDidBecomeActive()
-                }
             }
         })
         observers.append(center.addObserver(
@@ -322,11 +316,7 @@ final class MeowfilmAssembly: ObservableObject {
         }
         return FilmPlaybackModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
-        }, media: filmMedia!, openExternalURL: { url in
-            await withCheckedContinuation { continuation in
-                UIApplication.shared.open(url, options: [:]) { continuation.resume(returning: $0) }
-            }
-        }, searchContext: searchContext, request: request)
+        }, media: filmMedia!, searchContext: searchContext, request: request)
     }
 
     private func filmRequest(target: FilmPlaybackTarget, resources: MeowfilmResources) async throws -> FilmPlaybackRequest {
