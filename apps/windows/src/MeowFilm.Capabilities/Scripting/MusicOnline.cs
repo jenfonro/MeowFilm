@@ -59,7 +59,7 @@ public sealed partial class MusicCapability
     {
         get
         {
-            var position = PositionSeconds;
+            var position = LyricPositionSeconds;
             int low = 0, high = Lyrics.Count;
             while (low < high)
             {

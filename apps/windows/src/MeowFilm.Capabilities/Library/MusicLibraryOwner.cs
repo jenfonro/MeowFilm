@@ -25,6 +25,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         Appearance,
         CatalogSource,
         DeviceSettings,
+        DesktopLyrics,
         History,
         Library,
         LocalLyrics,
@@ -107,6 +108,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         if (method is "music.metadata.settings.save") return PendingOwner.Metadata;
         if (method is "music.appearance.save") return PendingOwner.Appearance;
         if (method is "music.device.settings.save") return PendingOwner.DeviceSettings;
+        if (method is "music.lyrics.desktop.settings.save") return PendingOwner.DesktopLyrics;
         if (method is "music.sourceExclusions.add" or "music.sourceExclusions.remove") return PendingOwner.SourceExclusions;
         if (method is "music.search.settings.save") return PendingOwner.SearchPolicy;
         if (method is "music.search.history.record" or "music.search.history.clear") return PendingOwner.SearchHistory;
@@ -117,6 +119,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     {
         PendingOwner.Appearance => method == "music.appearance.get",
         PendingOwner.CatalogSource => method == "music.catalogSource.settings.get",
+        PendingOwner.DesktopLyrics => method == "music.lyrics.desktop.settings.get",
         PendingOwner.Metadata => method == "music.metadata.settings.get",
         PendingOwner.Quality => method == "music.quality.settings.get",
         PendingOwner.OfficialSources => method == "music.officialSources.settings.get",

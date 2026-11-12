@@ -31,6 +31,7 @@ public sealed partial class MusicCapability
     private LyricRequestIdentity? lyricLoadingIdentity, lyricPublishedIdentity;
     private MusicLyricSourceRow? selectedLyricSource;
     private string? lyricSongIdentity;
+    private string? lyricResolvedSource;
     private MusicLyricRow? lyricPreview;
     private MusicLyricRow? publishedLyric;
     private int publishedLyricIndex = -1, publishedLyricDisplayIndex = -1;
@@ -44,7 +45,7 @@ public sealed partial class MusicCapability
     public MusicLyricRow? FirstLyric => Lyrics.Count > 0 ? Lyrics[0] : null;
     public MusicLyricRow? LastLyric => Lyrics.Count > 0 ? Lyrics[^1] : null;
     public bool CanConfirmLyricPreview => HasLyricPreview && CanSeek;
-    public string LyricPreviewTime => lyricPreview is { } row ? Clock(row.Time).PadLeft(5, '0') : "";
+    public string LyricPreviewTime => lyricPreview is { } row ? Clock(LyricAudioPosition(row)).PadLeft(5, '0') : "";
     public int LyricDisplayIndex => lyricPreview is null ? ActiveLyricIndex : Lyrics.IndexOf(lyricPreview);
     private void OnLyricRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
@@ -56,10 +57,25 @@ public sealed partial class MusicCapability
         if (e.Action == NotifyCollectionChangedAction.Reset || newTail || removedTail || movedTail)
             Changed(nameof(LastLyric));
         LyricTimingBindings();
+        DesktopLyricBindings();
     }
-    internal void RefreshLyricPosition() => LyricTimingBindings();
+    internal void RefreshLyricPosition()
+    {
+        var position = LyricPositionSeconds;
+        if (publishedLyricPosition != position)
+        {
+            publishedLyricPosition = position;
+            Changed(nameof(LyricPositionSeconds));
+        }
+        LyricTimingBindings();
+    }
     private void LyricTimingBindings()
     {
+        if (publishedCanAdjustLyricOffset != CanAdjustLyricOffset)
+        {
+            publishedCanAdjustLyricOffset = CanAdjustLyricOffset;
+            Changed(nameof(CanAdjustLyricOffset));
+        }
         int index = ActiveLyricIndex;
         var row = index >= 0 ? Lyrics[index] : null;
         if (publishedLyricIndex != index)
@@ -112,6 +128,7 @@ public sealed partial class MusicCapability
         set
         {
             if (value is null || !LyricSources.Contains(value) || value == selectedLyricSource) return;
+            ResetLyricOffset();
             RetireLyrics(); selectedLyricSource = value; Changed();
             if (NeedsLyrics) _ = RestoreLyricsAsync();
         }
@@ -121,7 +138,13 @@ public sealed partial class MusicCapability
         // UI editions are metadata choices for the playing song, never the row
         // highlighted elsewhere in the library or the chosen delivery platform.
         var signature = current is null ? null : current.Id + "\0" + PlaybackSong(current).GetRawText();
+        if (lyricOffsetEntry != current?.EntryId)
+        {
+            lyricOffsetEntry = current?.EntryId;
+            ResetLyricOffset();
+        }
         if (signature == lyricSongIdentity) return;
+        ResetLyricOffset();
         string? previousChoice = current is not null &&
             lyricSongIdentity?.StartsWith(current.Id + "\0", StringComparison.Ordinal) == true
                 ? selectedLyricSource?.SourceKey : null;
@@ -155,6 +178,7 @@ public sealed partial class MusicCapability
     {
         Interlocked.Increment(ref selectionSourcesRevision);
         lyricSourcesRevision = checked(lyricSourcesRevision + 1);
+        ResetLyricOffset();
         RetireLyrics();
         if (NeedsLyrics) _ = RestoreLyricsAsync();
     }
@@ -193,6 +217,7 @@ public sealed partial class MusicCapability
                 // invent a rollback or lose a known receipt.
                 await Call("music.lyrics.local.save", new { song = selected.Raw, text = snapshot.Text });
                 if (epoch != lyricEpoch || selected != current || stopping) return;
+                ResetLyricOffset();
             }
             finally
             {
@@ -216,6 +241,7 @@ public sealed partial class MusicCapability
                 !dialogs.Confirm("移除“" + selected.Title + "”的本地歌词？", "移除本地歌词")) return;
             RetireLyrics();
             await Call("music.lyrics.local.remove", new { song = selected.Raw });
+            if (selected == current) ResetLyricOffset();
             if (selected == current && NeedsLyrics) await RestoreLyricsAsync();
         });
     }
@@ -293,6 +319,14 @@ public sealed partial class MusicCapability
                         words);
                 }).ToArray();
                 if (!CurrentRequest()) return;
+                // Empty/disabled results have no resolved source; they do not select a new one.
+                if (rows.Length > 0)
+                {
+                    var resolvedSource = useLocal ? "local" : MusicDto.Text(reply, "sourceKey");
+                    if (lyricResolvedSource is not null && lyricResolvedSource != resolvedSource)
+                        ResetLyricOffset();
+                    lyricResolvedSource = resolvedSource;
+                }
                 // Publish one complete snapshot, not thousands of synchronous row
                 // and edge-binding updates during the player's entrance.
                 lyricRows.Publish(rows);
@@ -356,7 +390,7 @@ public sealed partial class MusicCapability
             // Recheck playback identity here, not CanEdit/CanSeek's UI gate,
             // otherwise an admitted seek would reject itself as "busy".
             if (epoch != playbackEpoch || !Lyrics.Contains(row) || !OwnsCurrent || !playback.HasMedia || !queueSaved) return;
-            await playback.SeekAsync(row.Time);
+            await playback.SeekAsync(LyricAudioPosition(row));
             if (epoch == playbackEpoch && playback.OwnerId == Id && playback.HasMedia && !playback.IsPlaying)
                 await ResumePlaybackAsync();
         });

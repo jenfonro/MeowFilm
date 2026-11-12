@@ -90,6 +90,7 @@ public static partial class MusicLyricDisplayTests
             var action = (Button)view.FindName("ConfirmLyric");
             var frame = (Border)view.FindName("LyricPreviewFrame");
             var record = (FrameworkElement)view.FindName("DetailRecord");
+            var rail = (FrameworkElement)view.FindName("LyricTimingRail");
             var scroll = LyricVisuals(list).OfType<ScrollViewer>().First();
             foreach (var size in new[] { new Size(1000, 740), new Size(1298, 848), new Size(1440, 900) })
             {
@@ -108,6 +109,11 @@ public static partial class MusicLyricDisplayTests
                 if (size.Width >= 1298) Check(disc.Width >= 360, "desktop record retains the reference scale");
                 Check(title.TranslatePoint(new Point(), view).Y is >= 100 and <= 115,
                     "the title leaves the reference's top breathing room");
+                var lyrics = viewport.TransformToAncestor(view).TransformBounds(new Rect(viewport.RenderSize));
+                var timing = rail.TransformToAncestor(view).TransformBounds(new Rect(rail.RenderSize));
+                Check(timing.Left >= lyrics.Right + 10 && timing.Right <= view.ActualWidth &&
+                    timing.Top >= lyrics.Top && timing.Bottom <= lyrics.Bottom,
+                    "the timing controls remain beside the lyric viewport without clipping or covering its text");
                 BrowseLyricKey(viewport, window, Key.Home);
                 window.UpdateLayout();
                 await WaitForLyric(() => frame.IsVisible && action.ActualHeight > 0 && CenterGap(list, scroll, 0) < 1);

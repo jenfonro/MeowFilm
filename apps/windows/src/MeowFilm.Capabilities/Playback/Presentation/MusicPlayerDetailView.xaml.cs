@@ -127,6 +127,9 @@ public partial class MusicPlayerDetailView : UserControl
         if (!e.IsRepeat) await module.TogglePlaybackAsync();
     }
 
+    private void DelayLyric_Click(object sender, RoutedEventArgs e) => module.AdjustLyricOffset(.5);
+    private void AdvanceLyric_Click(object sender, RoutedEventArgs e) => module.AdjustLyricOffset(-.5);
+
     private void Detail_PreviewKeyUp(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Space || !playbackSpacePressed) return;

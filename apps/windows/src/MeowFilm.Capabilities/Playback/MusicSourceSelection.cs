@@ -267,7 +267,7 @@ public sealed partial class MusicCapability
             ForgetRecording(state.Song.Id);
         }
     }
-    private Task Notify(string message)
+    internal Task Notify(string message)
     {
         status = message; Changed(nameof(Status));
         return Task.CompletedTask;
