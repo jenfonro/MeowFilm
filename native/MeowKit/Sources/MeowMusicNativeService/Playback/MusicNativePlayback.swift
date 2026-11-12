@@ -186,13 +186,16 @@ extension NativeMusicService {
                 Self.officialEnabled(source.platform, current.playback), .sourceUnavailable)
             let valid = try media(audio)
             try validateDelivery(valid, song: song, playback: current.playback, automaticQuality: false)
+            let authorization = valid.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
+            audioCacheAttempt = try await prepareAudioCache(audio: valid, song: song,
+                selection: resolvedSelection, attemptID: attemptId, playbackAuthorization: authorization)
+            observeAudioCacheCapture(audioCacheAttempt)
             let candidate = MusicPlaybackCandidate(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
                 url: valid.url, headers: valid.headers, title: song["title"].string, startPosition: start,
                 requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
                 expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
-                delivery: valid.delivery, playbackAuthorization: valid.playbackAuthorization)
+                delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
             _ = try candidate.resource()
-            try await stageAudioCache(audio: valid, song: song, selection: resolvedSelection, attemptID: attemptId)
             try await admitRecordingSource(song, sourceKey: selection.sourceKey)
             try check(own)
             try musicRequire(attempt?.id == attemptId, .staleResult)
@@ -203,11 +206,10 @@ extension NativeMusicService {
             try admitSource(song, selection: selection)
             try pinPlaybackRecovery(candidate: candidate, song: song, state: latest)
             let publish = {
-                self.attempt?.authorization = valid.playbackAuthorization
+                self.attempt?.authorization = authorization
                 self.attempt?.ready = true
             }
-            if let authorization = valid.playbackAuthorization { try authorization.perform(publish) }
-            else { publish() }
+            try authorization.perform(publish)
             return candidate
         } catch {
             if attempt?.id == attemptId { retireAudioCacheAttempt(); attempt = nil }

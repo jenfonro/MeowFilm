@@ -36,6 +36,7 @@ public partial class MusicPlayerView : UserControl
         if (showArtwork)
         {
             var record = new MusicRecordView { Width = 60, Height = 60 };
+            module.AttachPlaybackArtwork(record);
             record.SetBinding(MusicRecordView.AddressProperty, new Binding(nameof(MusicCapability.CurrentArtwork)));
             record.SetBinding(MusicRecordView.TrackIdentityProperty, new Binding(nameof(MusicCapability.CurrentTrackIdentity)));
             record.SetBinding(MusicRecordView.PlayingProperty, new Binding(nameof(MusicCapability.IsPlaying)));

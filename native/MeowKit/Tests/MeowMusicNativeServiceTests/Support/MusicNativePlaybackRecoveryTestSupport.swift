@@ -218,6 +218,7 @@ actor MusicRecoveryTestFileCache: MusicAudioFileCaching {
               hit.identity.songID == songID, accepts(hit.identity) else { return nil }
         return hit
     }
+    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback { MusicTestByteSource() }
     func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) -> MusicAudioFileCacheVersion? { nil }
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion, confirmedAt: Date, authorization: MusicQueueAuthorization) {}
     func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) {

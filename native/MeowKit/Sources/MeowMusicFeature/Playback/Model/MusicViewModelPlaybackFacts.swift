@@ -240,6 +240,9 @@ extension MusicViewModel {
               candidate.playbackAuthorization?.isActive != false else {
             retireRevokedAudio(); return
         }
+        if event.kind == .paused, (event.error as? NativePlaybackError) == .audioSessionUnavailable {
+            error = NativePlaybackError.audioSessionUnavailable.localizedDescription
+        }
         if ![.failed, .stopped, .replaced].contains(event.kind),
            !MusicMediaDuration.matches(expected: current?.track.duration ?? 0, actual: event.snapshot.duration),
            recoverSourceAudio(.init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,

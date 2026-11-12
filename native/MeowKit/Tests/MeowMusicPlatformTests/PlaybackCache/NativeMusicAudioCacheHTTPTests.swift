@@ -3,6 +3,37 @@ import XCTest
 @testable import MeowMusicPlatform
 
 final class NativeMusicAudioCacheHTTPTests: XCTestCase {
+    func testSequentialStreamingPreservesAdmittedHeadersAndOriginBoundary() throws {
+        let source = URL(string: "http://[::1]/audio#position")!
+        let headers = ["X-Media-Key": "fixture", "Cookie": "media=fixture", "User-Agent": "fixture"]
+        let request = try NativeMusicAudioCacheHTTPPolicy.request(
+            .init(url: source, platform: "mg", headers: headers, streaming: true))
+        XCTAssertEqual(request.url?.absoluteString, "http://[::1]/audio")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Media-Key"), "fixture")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Cookie"), "media=fixture")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Range"))
+        XCTAssertFalse(NativeMusicAudioCacheHTTPPolicy.permits(source, platform: "mg"))
+        let response = try XCTUnwrap(HTTPURLResponse(url: source, statusCode: 302, httpVersion: nil, headerFields: nil))
+        let same = try NativeMusicAudioCacheHTTPPolicy.redirect(response,
+            proposed: URLRequest(url: URL(string: "http://[::1]:80/next")!), platform: "mg", count: 1,
+            headers: headers, streaming: true)
+        XCTAssertEqual(same.value(forHTTPHeaderField: "X-Media-Key"), "fixture")
+        let other = try NativeMusicAudioCacheHTTPPolicy.redirect(response,
+            proposed: URLRequest(url: URL(string: "http://[::1]:8080/next")!), platform: "mg", count: 1,
+            headers: headers, streaming: true)
+        XCTAssertNil(other.value(forHTTPHeaderField: "X-Media-Key"))
+        XCTAssertNil(other.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertEqual(other.value(forHTTPHeaderField: "User-Agent"), "fixture")
+        for header in ["Range", "Host", "Proxy-Authorization", "Accept-Encoding"] {
+            XCTAssertThrowsError(try NativeMusicAudioCacheHTTPPolicy.request(
+                .init(url: source, platform: "mg", headers: [header: "fixture"], streaming: true)))
+        }
+        let secure = try XCTUnwrap(HTTPURLResponse(url: URL(string: "https://media.invalid/a")!,
+                                                statusCode: 302, httpVersion: nil, headerFields: nil))
+        XCTAssertThrowsError(try NativeMusicAudioCacheHTTPPolicy.redirect(secure,
+            proposed: URLRequest(url: URL(string: "http://media.invalid/a")!), platform: "mg", count: 1, streaming: true))
+    }
+
     func testOfficialCDNIsBoundToExactPlatformAndHTTPSBoundary() throws {
         for (platform, host) in [("wy", "m701.music.126.net"), ("tx", "isure.stream.qqmusic.qq.com"),
                                  ("kg", "fs.kugou.com"), ("kg", "fs.kugou.net"), ("kg", "fs.kgimg.com")] {

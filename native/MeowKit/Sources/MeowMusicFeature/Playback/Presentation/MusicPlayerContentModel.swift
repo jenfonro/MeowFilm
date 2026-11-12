@@ -36,6 +36,8 @@ public final class MusicPlayerContentModel {
     private var artworkBytes: Data?
     private var artworkReads: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
     private var playbackTasks: [UUID: Task<Void, Never>] = [:]
+    private var cacheProgressSource: UUID?
+    private var cacheProgressTask: Task<Void, Never>?
     private var autoCollapseTask: Task<Void, Never>?
     private var modeTasks: [UUID: Task<Void, Never>] = [:]
     private struct ChorusRequest: Equatable {
@@ -516,22 +518,34 @@ public final class MusicPlayerContentModel {
         let matching = MusicReferencePlayerFence.ownsAttempt(
             active: model.activeNativeAttemptID, observed: playback.currentAttempt?.id, owner: snapshot.owner
         ) && snapshot.resourceID == model.activeResourceID
-        let ranges = matching ? playback.player.currentItem?.loadedTimeRanges.compactMap { value -> Range<Double>? in
-            let range = value.timeRangeValue
-            let start = range.start.seconds, end = (range.start + range.duration).seconds
-            return start.isFinite && end.isFinite && end > start ? start..<end : nil
-        } ?? [] : []
+        let source = matching ? model.candidate?.byteSource : nil
+        if cacheProgressSource != source?.id {
+            cacheProgressTask?.cancel()
+            cacheProgressSource = source?.id
+            cacheProgressTask = source.map { source in
+                Task { [weak self] in
+                    for await _ in source.updates() {
+                        guard !Task.isCancelled, let self, self.cacheProgressSource == source.id else { return }
+                        self.updateClock()
+                    }
+                }
+            }
+        }
+        let progress = source?.progress
+        let complete = matching && (model.activeAudioIsCached == true || progress?.complete == true)
+        let fraction = progress.flatMap { $0.length > 0 ? Double($0.received) / Double($0.length) : nil } ?? 0
+        let buffers: [Range<Double>] = complete ? [0..<1] : fraction > 0 ? [0..<fraction] : []
         let next = MusicPlayerClockState(
             position: model.position, duration: model.duration, rate: playback.preferredRate,
             playing: matching && model.phase == .playing && playback.player.timeControlStatus == .playing,
-            buffers: MusicReferenceProgressGeometry.buffers(
-                ranges, duration: model.duration, complete: matching && model.activeAudioIsCached == true),
+            buffers: buffers,
             chorus: chorus.map { MusicReferenceProgressGeometry.fraction($0.start, duration: model.duration) })
         if clock != next { clock = next; clockUpdates.send() }
     }
 
     deinit {
         for task in playbackTasks.values { task.cancel() }
+        cacheProgressTask?.cancel()
         autoCollapseTask?.cancel()
         for task in modeTasks.values { task.cancel() }
         chorusRead?.task.cancel()

@@ -413,13 +413,13 @@ public sealed partial class MusicCapability
         var pending = BeginPendingMedia(state, next, reopening: false, token);
         try
         {
-            if (next.Uri is null)
+            if (pending.Media.Uri is null || pending.Media.Bytes is not null)
             {
-                var lease = await OpenPlaybackFileAsync(state, next, pending.Access.Token);
+                var lease = await OpenPlaybackFileAsync(state, pending.Media, pending.Access.Token);
                 if (lease is null) throw new MusicOperationException("CACHE_MISS");
                 await port.PrepareReadHandoffAsync(lease, pending.Access.Token);
             }
-            else await port.PrepareHandoffAsync(next.Uri, next.Headers, pending.Access.Token);
+            else await port.PrepareHandoffAsync(pending.Media.Uri, pending.Media.Headers, pending.Access.Token);
             EnsurePendingMedia(state, pending);
             await state.Session!.LoadExclusionsAsync(pending.Access.Token);
             if (state.Session.Excluded(next.Target!)) throw new MusicOperationException("SOURCE_EXCLUDED");

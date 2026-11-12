@@ -82,7 +82,7 @@ public protocol FilmPlaybackMediaControlling: AnyObject {
     func isCurrent(sessionID: UUID, attemptID: String) -> Bool
     /// Returns true only if this call actually pauses the exact playing owner.
     func pause(sessionID: UUID, attemptID: String) -> Bool
-    func resume(sessionID: UUID, attemptID: String)
+    func resume(sessionID: UUID, attemptID: String, userInitiated: Bool)
     func seek(sessionID: UUID, to position: Double)
     func setRate(sessionID: UUID, rate: Double)
     func setVolume(sessionID: UUID, volume: Double)

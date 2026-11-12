@@ -286,6 +286,15 @@ public final class PlaybackController: ObservableObject {
         let binding: NativePlaybackAsset
         do {
             let plan = try PlaybackNetworkPlan(resource: resource, options: network)
+            if let source = resource.byteSource {
+                localMediaFetch = true; player.allowsExternalPlayback = false
+                binding = NativePlaybackAsset(source: source) { [weak self] error in
+                    Task { @MainActor [weak self] in self?.fail(error, generation: token) }
+                }
+                installNetworkAsset(binding, generation: token)
+                publish()
+                return attempt
+            }
             if plan.route == .scopedHLS {
                 try prepareScopedHLS(plan, generation: token)
                 publish()
@@ -383,7 +392,7 @@ public final class PlaybackController: ObservableObject {
             throw NativePlaybackError.seekFailed
         }
         let resource = try PlaybackResource(id: prepared.resource.id, url: prepared.resource.url,
-            title: prepared.resource.title, headers: prepared.resource.headers)
+            title: prepared.resource.title, headers: prepared.resource.headers, byteSource: prepared.resource.byteSource)
         mutationDepth += 1
         defer { finishMutation() }
         sampleCurrentProgress()
@@ -625,10 +634,10 @@ public final class PlaybackController: ObservableObject {
         publish()
     }
 
-    public func resume() {
+    public func resume(userInitiated: Bool = true) {
         mutationDepth += 1
         defer { finishMutation() }
-        guard state.resume() else { return }
+        guard state.resume(userInitiated: userInitiated) else { return }
         drivePlayback()
     }
 
@@ -670,9 +679,9 @@ public final class PlaybackController: ObservableObject {
     }
 
     @discardableResult
-    public func resume(attempt: PlayAttempt) -> Bool {
+    public func resume(attempt: PlayAttempt, userInitiated: Bool = true) -> Bool {
         guard isCurrent(attempt), state.isPlayable else { return false }
-        resume()
+        resume(userInitiated: userInitiated)
         return true
     }
 
@@ -969,6 +978,10 @@ public final class PlaybackController: ObservableObject {
         @unknown default: break
         }
         #if os(iOS)
+        if state.requestsAudioAdmission, state.isReady, state.outstandingSeek == nil {
+            guard activateAudio(generation: generation) else { return }
+            state.audioSessionActivated(generation: generation)
+        }
         if state.shouldPlay {
             guard activateAudio(generation: generation) else { return }
         } else if !state.wantsPlayback {
@@ -1012,6 +1025,12 @@ public final class PlaybackController: ObservableObject {
                 }
             }
         }
+        #if os(iOS)
+        if state.requestsAudioAdmission, state.isReady, state.outstandingSeek == nil {
+            guard activateAudio(generation: generation) else { return }
+            state.audioSessionActivated(generation: generation)
+        }
+        #endif
         if state.shouldPlay {
             #if os(iOS)
             guard activateAudio(generation: generation) else { return }
@@ -1053,6 +1072,12 @@ public final class PlaybackController: ObservableObject {
                 }
             }
         }
+        #if os(iOS)
+        if state.requestsAudioAdmission, state.isReady, state.outstandingSeek == nil {
+            guard activateAudio(generation: generation) else { return }
+            state.audioSessionActivated(generation: generation)
+        }
+        #endif
         if state.shouldPlay {
             #if os(iOS)
             guard activateAudio(generation: generation) else { return }
@@ -1227,9 +1252,17 @@ public final class PlaybackController: ObservableObject {
                 guard let self, self.audioActivation == admission, self.state.accepts(generation) else { return }
                 self.audioActivation = nil
                 if let failure {
-                    self.fail(failure, generation: generation)
-                } else if self.state.shouldPlay {
-                    self.drivePlayback()
+                    if failure == .audioSessionUnavailable {
+                        self.state.audioSessionUnavailable(generation: generation)
+                        self.publish()
+                    } else {
+                        self.fail(failure, generation: generation)
+                    }
+                } else {
+                    self.state.audioSessionActivated(generation: generation)
+                    if self.state.shouldPlay {
+                        self.drivePlayback()
+                    }
                 }
             }
         }

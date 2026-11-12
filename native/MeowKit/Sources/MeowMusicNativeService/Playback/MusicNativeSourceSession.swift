@@ -17,6 +17,7 @@ struct MusicNativePreparedSource: Sendable {
     let seed: MusicSourceInspectionSeed
     let result: MusicNativeResolvedSource
     let candidate: MusicPlaybackCandidate
+    var cache: MusicNativeAudioCacheAttempt?
     var armed = false
 }
 
@@ -102,7 +103,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         sourceResults[songID]?.removeAll { $0.choice.selection == selection }
     }
     func prepareSource(_ value: MusicNativeResolvedSource, seed: MusicSourceInspectionSeed, staged: MJ)
-        throws -> (MusicSourceInspectionSeed, MusicPreparedSource) {
+        async throws -> (MusicSourceInspectionSeed, MusicPreparedSource) {
         try inspectionCheck(seed)
         try admitSource(seed.song, selection: value.choice.selection)
         try value.audio.playbackAuthorization?.check()
@@ -117,15 +118,26 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         // scripts without account authorization. Never revoke a cached URL's
         // shared account grant when discarding just this preparation.
         let authorization = audio.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
-        let candidate = MusicPlaybackCandidate(attemptId: id, occurrenceId: seed.ref.id, resourceId: "music:" + id,
-            url: audio.url, headers: audio.headers, title: staged["title"].string,
-            startPosition: try read().playback["position"]["seconds"].number, requestedQuality: value.quality,
-            resolvedSelection: value.choice.selection,
-            expiresAt: audio.expiresAt.map { $0.timeIntervalSince1970 * 1000 }, delivery: audio.delivery,
-            playbackAuthorization: authorization)
-        _ = try candidate.resource()
-        preparedSources[id] = .init(seed: updated, result: value, candidate: candidate)
-        return (updated, .init(candidate: candidate, selection: value.choice.selection))
+        var cache: MusicNativeAudioCacheAttempt?
+        do {
+            cache = try await prepareAudioCache(audio: audio, song: staged, selection: value.choice.selection,
+                attemptID: id, playbackAuthorization: authorization, preparing: true)
+            try inspectionCheck(updated)
+            let candidate = MusicPlaybackCandidate(attemptId: id, occurrenceId: seed.ref.id, resourceId: "music:" + id,
+                url: audio.url, headers: audio.headers, title: staged["title"].string,
+                startPosition: try read().playback["position"]["seconds"].number, requestedQuality: value.quality,
+                resolvedSelection: value.choice.selection,
+                expiresAt: audio.expiresAt.map { $0.timeIntervalSince1970 * 1000 }, delivery: audio.delivery,
+                playbackAuthorization: authorization, byteSource: cache?.source)
+            _ = try candidate.resource()
+            preparedSources[id] = .init(seed: updated, result: value, candidate: candidate, cache: cache)
+            observeAudioCacheCapture(cache)
+            return (updated, .init(candidate: candidate, selection: value.choice.selection))
+        } catch {
+            authorization.revoke(); cache?.source?.retire()
+            if let cache { cache.authorization.revoke(); access.remove(cache.accessRegistration) }
+            throw error
+        }
     }
     public func activateSource(attemptID: String) async throws {
         if let value = preparedCacheSources[attemptID] {
@@ -182,11 +194,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
             try pinPlaybackRecovery(candidate: value.candidate, song: song, state: d)
         }
         attempt?.ready = true
-        Task {
-            try? await stageAudioCache(audio: value.result.audio, song: song,
-                                      selection: selection, attemptID: fact.attemptId)
-            if attempt?.id == fact.attemptId, let latest = attempt?.latestFact { audioCacheAcceptedFact(latest) }
-        }
+        audioCacheAttempt = value.cache
     }
     private func activeSourceDocument(occurrenceID: String, songID: String,
                                       selection: MusicPlaybackSelection) throws -> MusicDocument {
@@ -200,13 +208,25 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         return d
     }
     public func discardSource(attemptID: String) {
-        preparedSources.removeValue(forKey: attemptID)?.candidate.playbackAuthorization?.revoke()
+        if let value = preparedSources.removeValue(forKey: attemptID) {
+            value.candidate.playbackAuthorization?.revoke()
+            value.cache?.source?.retire()
+            if let cache = value.cache, cache.captureCompleted {
+                cache.authorization.revoke(); access.remove(cache.accessRegistration)
+            }
+        }
         if let value = preparedCacheSources.removeValue(forKey: attemptID) {
             value.cache.authorization.revoke(); access.remove(value.cache.accessRegistration)
         }
     }
     func clearPreparedSources() {
-        for value in preparedSources.values { value.candidate.playbackAuthorization?.revoke() }
+        for value in preparedSources.values {
+            value.candidate.playbackAuthorization?.revoke()
+            value.cache?.source?.retire()
+            if let cache = value.cache, cache.captureCompleted {
+                cache.authorization.revoke(); access.remove(cache.accessRegistration)
+            }
+        }
         preparedSources = [:]
         for value in preparedCacheSources.values {
             value.cache.authorization.revoke(); access.remove(value.cache.accessRegistration)

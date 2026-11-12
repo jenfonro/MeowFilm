@@ -130,7 +130,7 @@ public static class MusicOfficialAudioTests
             var revoked = await app.ExecuteAsync("music.official.resolve", input);
             Check(!revoked.GetProperty("ok").GetBoolean() && runtime.Calls == 0 && vkeys == 1);
         });
-        yield return new("Official native cache-only resolve is local on a miss and returns a hit only after current rights", async () =>
+        yield return new("Official native cache-only resolve is local and reuses its admitted URL without membership requests", async () =>
         {
             await using var store = new MemoryStore(); var runtime = new NoRuntime();
             int calls = 0, vkeys = 0, rights = 0;
@@ -164,7 +164,7 @@ public static class MusicOfficialAudioTests
             var hit = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k", cacheOnly = true });
             Check(hit.GetProperty("ok").GetBoolean() && vkeys == 1 &&
                 hit.GetProperty("url").GetString() == resolved.GetProperty("url").GetString(), "a valid receipt is reused: " + hit.GetRawText());
-            Check(rights > checks, "a cached URL is still returned only after the current rights check");
+            Check(rights == checks, "an admitted URL needs no membership-derived rights check");
             var invalid = await app.ExecuteAsync("music.official.resolve",
                 new { platform = "tx", song, quality = "320k", cacheOnly = true, refresh = true });
             Check(!invalid.GetProperty("ok").GetBoolean() && invalid.GetProperty("code").GetString() == "INVALID_REQUEST");
@@ -420,7 +420,6 @@ public static class MusicOfficialAudioTests
         string platform = "tx")
     {
         var recording = Recording(platform);
-        long license = now + 3600000;
         return new JsonObject
         {
             ["ok"] = true,
@@ -443,10 +442,7 @@ public static class MusicOfficialAudioTests
             ["duration"] = 100d,
             ["size"] = 120L,
             ["full"] = true,
-            ["licenseExpiresAt"] = license,
             ["delivery"] = platform + "-official",
-            ["offlineAllowed"] = true,
-            ["authorizationExpiresAt"] = license
         };
     }
     private sealed class HeldCacheStore : IDocumentStore

@@ -252,13 +252,8 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
         long? expires = OptionalLong(info.GetProperty("expiresAt"));
         _ = CanonicalDouble(info.GetProperty("duration"), true);
         _ = CanonicalLong(info.GetProperty("size"), true);
-        bool full = Boolean(info.GetProperty("full"));
-        long? license = OptionalLong(info.GetProperty("licenseExpiresAt"));
+        _ = Boolean(info.GetProperty("full"));
         if (Text(info.GetProperty("delivery"), 128) != platform + "-official")
-            throw MusicPlaybackCacheDataException.Corrupt();
-        bool offline = Boolean(info.GetProperty("offlineAllowed"));
-        long? authorization = OptionalLong(info.GetProperty("authorizationExpiresAt"));
-        if (authorization != license || offline && (!full || license is null))
             throw MusicPlaybackCacheDataException.Corrupt();
         return expires;
     }

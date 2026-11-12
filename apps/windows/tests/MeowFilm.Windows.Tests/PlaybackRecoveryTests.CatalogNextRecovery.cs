@@ -51,7 +51,8 @@ public static partial class PlaybackRecoveryTests
                 await Until(() => Field(f.Module, "musicPreload") is null, "lost receipt old peek drained");
                 await using var absent = await f.Cache!.OpenAsync("fixture", f.NextSongId!, new string('a', 64), default);
                 Check(absent is null && f.Prepared is null && !f.ValidationEntered.Task.IsCompleted &&
-                    !Directory.EnumerateFiles(f.CacheRoot!, "*.audio").Any() && f.App.Resolutions.Count == resolutions &&
+                    Directory.EnumerateFiles(f.CacheRoot!, "*.audio").All(f.CurrentFiles.Contains) &&
+                    f.App.Resolutions.Count == resolutions &&
                     f.Output.HasMedia && f.Output.IsPlaying &&
                     before == (f.Output.Identity, f.Output.NetworkOpens, f.Output.ReadOpens, f.Output.Reopens,
                         f.Output.Commits, f.Output.CandidateStarts, f.App.HistoryWrites, f.App.ConfirmWrites),

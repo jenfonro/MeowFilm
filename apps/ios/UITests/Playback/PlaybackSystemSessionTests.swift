@@ -13,6 +13,35 @@ import MeowContracts
 /// or an upstream HLS/physical-headphone acceptance test.
 @MainActor
 final class PlaybackSystemSessionTests: XCTestCase {
+    func testPlayerReadsAndSeeksTheOwnedByteSourceWithoutOpeningTheRemoteURL() async throws {
+        let file = try silentFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let source = SystemSessionBytes(data: try Data(contentsOf: file))
+        let controller = PlaybackController(audioSessionActions: SystemAudioProbe().actions)
+        let played = expectation(description: "cached source decoded")
+        let seeked = expectation(description: "cached source sought while paused")
+        var sawPlay = false, sawSeek = false
+        let lease = try controller.bind(owner: "music") { event in
+            if event.kind == .failed { XCTFail("Owned bytes must not fall through to a remote request") }
+            if event.kind == .played, !sawPlay { sawPlay = true; played.fulfill() }
+            if event.snapshot.position >= 19, !sawSeek { sawSeek = true; seeked.fulfill() }
+        }
+        defer { controller.stop(); lease.cancel() }
+        let attempt = controller.playAttempt(resource: try .init(id: "shared-file",
+            url: URL(string: "https://unused.invalid/never-requested.wav")!, title: "Bytes", byteSource: source), owner: "music")
+        _ = controller.setVolume(0, attempt: attempt)
+        await fulfillment(of: [played], timeout: 5)
+        XCTAssertTrue(controller.requiresLocalMediaFetch)
+        XCTAssertFalse(controller.player.allowsExternalPlayback)
+        _ = controller.pause(attempt: attempt)
+        _ = controller.seek(to: 20, attempt: attempt)
+        await fulfillment(of: [seeked], timeout: 5)
+        XCTAssertEqual(controller.snapshot.phase, .paused)
+        XCTAssertGreaterThan(source.readCount, 0)
+        controller.stop()
+        XCTAssertTrue(source.isRetired)
+    }
+
     func testControllerReleaseFromMainQueueDrainsOwnedScopesWithoutNestedDeinitTasks() async throws {
         let released = expectation(description: "UIKit-style main queue release completed")
         DispatchQueue.main.async {
@@ -232,7 +261,7 @@ final class PlaybackSystemSessionTests: XCTestCase {
         try await interruptedHandoff(endedBeforeReady: true)
     }
 
-    func testHLSReadyAndExplicitPlayCannotBypassActiveInterruption() async throws {
+    func testHLSExplicitPlayReactivatesWithoutInterruptionEnded() async throws {
         try await interruptedHandoff(endedBeforeReady: false)
     }
 
@@ -273,16 +302,15 @@ final class PlaybackSystemSessionTests: XCTestCase {
         XCTAssertEqual(played, [old], "The new owner cannot inherit the old owner's automatic-resume permission")
         XCTAssertFalse(controller.systemCommand(.play, generation: old.id))
         XCTAssertTrue(controller.systemCommand(.play, generation: next.id))
-        if !endedBeforeReady {
-            XCTAssertEqual(controller.player.rate, 0, "Explicit play cannot bypass an interruption that has not ended")
-            XCTAssertEqual(played, [old])
-            postInterruption(.ended, shouldResume: true, to: notifications)
-        }
         await fulfillment(of: [filmPlayed], timeout: 5)
         XCTAssertEqual(controller.currentAttempt, next)
         XCTAssertEqual(controller.snapshot.phase, .playing)
         XCTAssertGreaterThan(controller.player.rate, 0)
         XCTAssertEqual(played, [old, next])
+        if !endedBeforeReady {
+            postInterruption(.ended, shouldResume: false, to: notifications)
+            XCTAssertEqual(controller.snapshot.phase, .playing, "A late end cannot cancel newer explicit playback")
+        }
     }
 
     func testOutputUnavailablePausesImmediatelyAndNotifiesOwnerEvenWhenAlreadyPaused() async throws {
@@ -566,6 +594,27 @@ final class PlaybackSystemSessionTests: XCTestCase {
         data.append(Data(count: Int(length))); try data.write(to: file)
         return file
     }
+}
+
+private final class SystemSessionBytes: PlaybackByteSource, @unchecked Sendable {
+    let id = UUID()
+    let data: Data
+    private let lock = NSLock()
+    private var reads = 0, retired = false
+    init(data: Data) { self.data = data }
+    var progress: PlaybackCacheProgress { .init(received: Int64(data.count), length: Int64(data.count), complete: true) }
+    var readCount: Int { lock.withLock { reads } }
+    var isRetired: Bool { lock.withLock { retired } }
+    func information() async throws -> PlaybackByteInformation { .init(length: Int64(data.count), mime: "audio/wav") }
+    func read(offset: Int64, count: Int) async throws -> Data {
+        try lock.withLock {
+            if retired { throw CancellationError() }
+            reads += 1
+            return data.subdata(in: Int(offset)..<min(data.count, Int(offset) + count))
+        }
+    }
+    func updates() -> AsyncStream<PlaybackCacheProgress> { AsyncStream { $0.yield(progress); $0.finish() } }
+    func retire() { lock.withLock { retired = true } }
 }
 
 /// Initialized on main, then transferred to one release site. The lock protects
@@ -968,32 +1017,33 @@ extension PlaybackSystemSessionTests {
         }
     }
 
-    func testCurrentActivationFailureFailsAttemptAndExplicitNewPlayRetries() async throws {
+    func testActivationFailurePreservesAttemptMediaAndPositionForExplicitRetry() async throws {
         let file = try silentFile()
         defer { try? FileManager.default.removeItem(at: file) }
         let probe = SystemAudioProbe(activate: { number in
             if number == 1 { throw NativePlaybackError.audioSessionUnavailable }
         })
         let controller = PlaybackController(audioSessionActions: probe.actions)
-        let failed = expectation(description: "current activation rejected"), playing = expectation(description: "explicit retry played")
+        let rejected = expectation(description: "current activation rejected"), playing = expectation(description: "same media retry played")
         var failures: [PlayAttempt] = [], plays: [PlayAttempt] = []
         let lease = try controller.bind(owner: "music") { event in
-            if event.kind == .failed { failures.append(event.attempt); failed.fulfill() }
+            if event.kind == .failed { failures.append(event.attempt) }
+            if event.kind == .paused, event.error as? NativePlaybackError == .audioSessionUnavailable { rejected.fulfill() }
             if event.kind == .played { plays.append(event.attempt); playing.fulfill() }
         }
         defer { controller.stop(); lease.cancel() }
-        let old = controller.playAttempt(resource: try .init(id: "failure", url: file, title: "Failure"), owner: "music")
-        await fulfillment(of: [failed], timeout: 5)
-        XCTAssertEqual(failures, [old]); XCTAssertTrue(plays.isEmpty)
-        XCTAssertEqual(controller.snapshot.phase, .failed)
+        let attempt = controller.playAttempt(resource: try .init(id: "retry", url: file, title: "Retry"), owner: "music")
+        _ = controller.setVolume(0, attempt: attempt)
+        await fulfillment(of: [rejected], timeout: 5)
+        XCTAssertTrue(failures.isEmpty); XCTAssertTrue(plays.isEmpty)
+        XCTAssertEqual(controller.snapshot.phase, .paused)
         XCTAssertEqual(controller.lastError as? NativePlaybackError, .audioSessionUnavailable)
-        XCTAssertEqual(controller.player.rate, 0)
-        XCTAssertNil(controller.player.currentItem)
-        XCTAssertFalse(controller.resume(attempt: old))
-        let next = controller.playAttempt(resource: try .init(id: "retry", url: file, title: "Retry"), owner: "music")
-        _ = controller.setVolume(0, attempt: next)
+        let item = try XCTUnwrap(controller.player.currentItem), position = controller.snapshot.position
+        XCTAssertTrue(controller.resume(attempt: attempt))
         await fulfillment(of: [playing], timeout: 5)
-        XCTAssertEqual(plays, [next]); XCTAssertEqual(failures, [old])
+        XCTAssertEqual(plays, [attempt]); XCTAssertTrue(failures.isEmpty)
+        XCTAssertTrue(controller.player.currentItem === item)
+        XCTAssertGreaterThanOrEqual(controller.snapshot.position, position)
         XCTAssertNil(controller.lastError)
         XCTAssertEqual(probe.counts.activations, 2)
     }

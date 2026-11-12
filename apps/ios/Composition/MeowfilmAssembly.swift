@@ -570,7 +570,7 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         record.nativeAttempt = event.nativeAttempt ?? record.nativeAttempt
         record.state.position = event.snapshot.position
         record.state.duration = event.snapshot.duration ?? 0
-        record.state.paused = !event.wantsPlayback
+        record.state.paused = event.snapshot.phase == .paused || !event.wantsPlayback
         record.state.buffering = event.snapshot.phase == .preparing || event.snapshot.phase == .buffering
         record.state.rate = playback.preferredRate; record.state.volume = playback.volume
         record.state.pictureInPicture = event.pictureInPicture == .active
@@ -640,10 +640,10 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
               let value = attempt(sessionID) else { return false }
         return playback.pause(attempt: value)
     }
-    func resume(sessionID: UUID, attemptID: String) {
-        guard isCurrent(sessionID: sessionID, attemptID: attemptID), !playback.wantsPlayback,
+    func resume(sessionID: UUID, attemptID: String, userInitiated: Bool) {
+        guard isCurrent(sessionID: sessionID, attemptID: attemptID), userInitiated || !playback.wantsPlayback,
               let value = attempt(sessionID) else { return }
-        playback.resume(attempt: value)
+        playback.resume(attempt: value, userInitiated: userInitiated)
     }
     func seek(sessionID: UUID, to position: Double) {
         if let value = attempt(sessionID) { playback.seek(to: position, attempt: value) }

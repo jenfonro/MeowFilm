@@ -23,22 +23,11 @@ class MusicPlayerBackgroundView: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func apply(palette: PagePalette, animated: Bool) {
-        var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0, alpha: CGFloat = 0
-        UIColor(palette.lightTop).getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
-        let chroma = saturation < 0.06 ? saturation : min(0.25, max(0.10, saturation))
-        let top = UIColor(hue: hue, saturation: chroma,
-                          brightness: min(0.94, max(0.86, brightness)), alpha: 1)
-        let pale = UIColor(PageColor(rgb: 0xffffff))
-        let amount: CGFloat = style == .card ? 0.44 : 0.10
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
-        top.getRed(&r, green: &g, blue: &b, alpha: &alpha)
-        let head = UIColor(red: r + (1 - r) * amount, green: g + (1 - g) * amount,
-                           blue: b + (1 - b) * amount, alpha: 1)
-        let next = [head.cgColor, pale.cgColor]
+        let next = Self.backgroundColors(palette: palette, style: style).map(\.cgColor)
         guard next != colors else { return }
         let previous = gradient.presentation()?.colors ?? gradient.colors
         colors = next
-        backgroundColor = pale
+        backgroundColor = .white
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         gradient.removeAnimation(forKey: "player.palette")
@@ -55,6 +44,31 @@ class MusicPlayerBackgroundView: UIView {
             gradient.add(animation, forKey: "player.palette")
         }
         CATransaction.commit()
+    }
+
+    static func backgroundColors(palette: PagePalette, style: Style) -> [UIColor] {
+        var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0, alpha: CGFloat = 0
+        UIColor(palette.lightTop).getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+        let chroma = saturation < 0.06 ? saturation : min(0.25, max(0.10, saturation))
+        let top = UIColor(hue: hue, saturation: chroma,
+                          brightness: min(0.94, max(0.86, brightness)), alpha: 1)
+        let pale = UIColor(PageColor(rgb: 0xffffff))
+        let amount: CGFloat = style == .card ? 0.44 : 0.10
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
+        top.getRed(&r, green: &g, blue: &b, alpha: &alpha)
+        let head = UIColor(red: r + (1 - r) * amount, green: g + (1 - g) * amount,
+                           blue: b + (1 - b) * amount, alpha: 1)
+        return [head, pale]
+    }
+
+    static func lyricColors(palette: PagePalette, artwork: Bool) -> MusicLyricColors {
+        let backgrounds = backgroundColors(palette: palette, style: .full).map { color -> PageColor in
+            var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+            color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            return PageColor(rgb: UInt32((red * 255).rounded()) << 16 |
+                UInt32((green * 255).rounded()) << 8 | UInt32((blue * 255).rounded()))
+        }
+        return MusicLyricColors(backgrounds: backgrounds, accent: palette.lightAccent, artwork: artwork)
     }
 
     override func layoutSubviews() {

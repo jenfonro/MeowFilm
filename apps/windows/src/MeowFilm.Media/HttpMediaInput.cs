@@ -39,7 +39,8 @@ public sealed class HttpMediaInput : MediaInput
     public long? Length => _length;
     /// <summary>Bounded complete progressive transfer for a native cache consumer, not a download job.
     /// Call on a fresh input only; the same range/redirect/header/EOF policies as playback apply.</summary>
-    public async Task<long> CopyCompleteAsync(Stream destination, long maximumBytes, CancellationToken token = default)
+    public async Task<long> CopyCompleteAsync(Stream destination, long maximumBytes, CancellationToken token = default,
+        Action<long>? progress = null)
     {
         if (maximumBytes <= 0 || Interlocked.Exchange(ref _opened, 1) != 0)
             throw new PlaybackException(PlaybackError.InvalidRequest);
@@ -60,6 +61,7 @@ public sealed class HttpMediaInput : MediaInput
             if (written + _bufferCount > maximumBytes) throw new PlaybackException(PlaybackError.InvalidRequest);
             await destination.WriteAsync(_buffer.AsMemory(_bufferOffset, _bufferCount), linked.Token).ConfigureAwait(false);
             written += _bufferCount; _bufferCount = 0;
+            progress?.Invoke(written);
         }
         if (written == 0 || _length is { } expected && written != expected)
             throw new PlaybackException(PlaybackError.HttpTruncated);

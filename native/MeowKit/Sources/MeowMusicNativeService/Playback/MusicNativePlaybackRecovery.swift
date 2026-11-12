@@ -88,14 +88,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         // the source session may exhaust peers and then downgrade automatic play.
         try musicRequire(valid.delivery?.quality == nil || valid.delivery?.quality == selection.quality, .invalidMediaCandidate)
         try musicRequire(valid.url != rejectedURL, .invalidMediaCandidate)
-        let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: pin.occurrenceID,
-            resourceId: "music:" + attemptID, url: valid.url, headers: valid.headers,
-            title: pin.song["title"].string, startPosition: position, requestedQuality: selection.quality,
-            resolvedSelection: selection,
-            expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
-            delivery: valid.delivery, playbackAuthorization: valid.playbackAuthorization)
-        _ = try candidate.resource()
-
         // Cache staging needs the same existing attempt owner, not a separate
         // resolver or a playing fact. Hold it unready until all async checks end.
         guard let suspended = attempt, suspended.id == previousAttemptID else { throw MusicServiceError.staleResult }
@@ -107,7 +99,17 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             attempt?.recovery = suspended.recovery
         }
         do {
-            try await stageAudioCache(audio: valid, song: pin.song, selection: selection, attemptID: attemptID)
+            let authorization = valid.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
+            audioCacheAttempt = try await prepareAudioCache(audio: valid, song: pin.song,
+                selection: selection, attemptID: attemptID, playbackAuthorization: authorization)
+            observeAudioCacheCapture(audioCacheAttempt)
+            let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: pin.occurrenceID,
+                resourceId: "music:" + attemptID, url: valid.url, headers: valid.headers,
+                title: pin.song["title"].string, startPosition: position, requestedQuality: selection.quality,
+                resolvedSelection: selection,
+                expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
+                delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
+            _ = try candidate.resource()
             try checkPlaybackRecoveryAttempt(pin, activeAttemptID: attemptID,
                 reservedAttemptID: attemptID, ready: false)
             // Recheck after cache staging too. A logout/switch while suspended
@@ -119,11 +121,10 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             let publish = { [self] in try access.perform {
                 attempt?.recovery?.attemptID = attemptID
                 attempt?.recovery?.url = valid.url
-                attempt?.authorization = valid.playbackAuthorization
+                attempt?.authorization = authorization
                 attempt?.ready = true
             } }
-            if let authorization = valid.playbackAuthorization { try authorization.perform(publish) }
-            else { try publish() }
+            try authorization.perform(publish)
             return .init(candidate: candidate, selection: selection)
         } catch {
             // A failed optional stage/recheck may return the terminal fact to the

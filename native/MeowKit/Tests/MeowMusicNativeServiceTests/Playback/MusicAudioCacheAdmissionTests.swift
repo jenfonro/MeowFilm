@@ -60,282 +60,143 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         }
     }
 
-    func testPublicPlayingStageFillsWithoutAccountRotation() async throws {
-        try await assertDeferredPlayingFill(progressDuringScope: false)
-    }
-
-    func testPublicPlayingThenProgressDuringScopeFillsExactlyOnce() async throws {
-        try await assertDeferredPlayingFill(progressDuringScope: true)
-    }
-
-    private func assertDeferredPlayingFill(progressDuringScope: Bool) async throws {
+    func testPreparationDownloadsBeforePlayingAndPauseDoesNotStopIt() async throws {
         let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes()
         let root = try cacheRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
-        let called = expectation(description: "fill called"), finished = expectation(description: "fill completed")
-        let file = AdmissionFillCache(real: real, clock: clock, called: called, finished: finished)
-        let accounts = AdmissionAccounts()
+        let file = AdmissionFillCache(real: real, clock: clock), accounts = AdmissionAccounts()
         let store = try MusicNativeCandidateDiscoveryFixture.store()
-        let service = NativeMusicService(document: store, accounts: accounts,
-            qq: NativeMusicQQFixture(), audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+        let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
+            audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         clock.advance(1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
-        let selected = try await session.match(quality: "flac", sourceID: nil)
+        let selected = try await session.match(intent: .quality("flac"))
         try await service.activateSource(attemptID: selected.candidate.attemptId)
-        let gate = MusicNativeCandidateDiscoveryBarrier()
-        await accounts.holdScope(gate)
-        let accepted = try await service.record(fact(selected.candidate))
-        XCTAssertTrue(accepted)
-        let history = try MusicDocument(store.read(), runID: "deferred-fill").history
-        await gate.started(1)
-        if progressDuringScope {
-            let progressed = try await service.record(fact(selected.candidate, kind: .progress))
-            XCTAssertTrue(progressed)
-        }
-        await gate.release()
-        await fulfillment(of: [called, finished], timeout: 3)
-        for kind: MusicPlaybackFact.Kind in [.progress, .playing, .progress] {
-            let accepted = try await service.record(fact(selected.candidate, kind: kind))
-            XCTAssertTrue(accepted)
-        }
+        let source = try XCTUnwrap(selected.candidate.byteSource)
+        let paused = try await service.record(fact(selected.candidate, kind: .paused))
+        XCTAssertTrue(paused)
+        _ = try await source.information()
+        let data = try await source.read(offset: 0, count: 32)
+        XCTAssertEqual(data.count, 32, "Preparation, not playback position, drives the whole transfer")
+        let requests = await file.requests, calls = await bytes.calls
+        XCTAssertEqual(requests.count, 1); XCTAssertEqual(calls, 1)
+        XCTAssertFalse(source.progress.complete, "Unplayed media is not a published cache entry")
+        let progressed = try await service.record(fact(selected.candidate, kind: .progress))
+        XCTAssertTrue(progressed)
+        let noHistory = try await service.playedSongs()
+        XCTAssertEqual(noHistory.count, 0, "Progress alone cannot manufacture played history")
+        let played = try await service.record(fact(selected.candidate))
+        XCTAssertTrue(played)
+        _ = try await service.record(fact(selected.candidate, kind: .paused))
         await drainCaptures(service)
-        let versions = await file.versions
-        XCTAssertEqual(versions.count, 1); XCTAssertNotNil(versions.first ?? nil)
-        let requests = await file.requests
-        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(source.progress.complete)
+        let history = try await service.playedSongs()
+        XCTAssertEqual(history.count, 1)
         let scope = await accounts.scope
         let hit = await real.lookup(scope: scope.scope, songID: try MusicNativeCandidateDiscoveryFixture.song()["songId"].string,
             authorization: scope.authorization, accepts: { _ in true })
         XCTAssertNotNil(hit)
-        let transfers = await bytes.calls
-        XCTAssertEqual(transfers, 1)
-        XCTAssertEqual(try MusicDocument(store.read(), runID: "deferred-fill").history, history,
-                       "Progress and staging must not manufacture another history event")
-        let played = try await service.playedSongs()
-        XCTAssertEqual(played.count, 1)
+        // Publication must not retire the reader that is still playing this file.
+        let again = try await source.read(offset: 0, count: 32)
+        XCTAssertEqual(again, data)
         await service.close()
     }
 
-    func testDeferredStageDoesNotTreatProgressOrInactiveFactsAsPlaying() async throws {
+    func testInactiveFactsCannotPublishUnplayedDownloadOrCreateHistory() async throws {
         for kind: MusicPlaybackFact.Kind in [.progress, .paused, .ended, .failed, .stopped] {
-            let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes()
-            let root = try cacheRoot()
+            let clock = MusicRecoveryTestClock(), root = try cacheRoot()
             defer { try? FileManager.default.removeItem(at: root) }
-            let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() },
-                transport: bytes, inspector: AdmissionMeasurement())
-            let file = AdmissionFillCache(real: real, clock: clock), accounts = AdmissionAccounts()
-            let store = try MusicNativeCandidateDiscoveryFixture.store()
-            let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
-                audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+            let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: AdmissionBytes(), inspector: AdmissionMeasurement())
+            let accounts = AdmissionAccounts()
+            let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
+                qq: NativeMusicQQFixture(), audioFileCache: real, transport: NativeMusicNoNetwork(), clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)
-            clock.advance(1)
             let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
             let selected = try await session.match(intent: .quality("flac"))
             try await service.activateSource(attemptID: selected.candidate.attemptId)
-            let gate = MusicNativeCandidateDiscoveryBarrier()
-            await accounts.holdScope(gate)
-            let accepted = try await service.record(fact(selected.candidate, kind: kind == .progress ? .progress : .playing))
-            XCTAssertTrue(accepted)
-            await gate.started(1)
-            if kind != .progress {
-                let inactive = try await service.record(fact(selected.candidate, kind: kind))
-                XCTAssertTrue(inactive)
-            }
-            if kind == .paused {
-                let progressed = try await service.record(fact(selected.candidate, kind: .progress))
-                XCTAssertTrue(progressed)
-            }
-            let history = try MusicDocument(store.read(), runID: "inactive-stage").history
-            await gate.release()
-            // Observe actual staging, not a guessed delay. This uses internals
-            // only to drain work; all stimuli and cache/history assertions are real.
-            try await waitForStage(service, candidate: selected.candidate)
-            let terminal = [.ended, .failed, .stopped].contains(kind)
-            let progressed = try await service.record(fact(selected.candidate, kind: .progress))
-            XCTAssertEqual(progressed, !terminal)
+            let source = try XCTUnwrap(selected.candidate.byteSource)
+            _ = try await source.information()
+            _ = try await source.read(offset: 0, count: 32)
+            _ = try await service.record(fact(selected.candidate, kind: kind))
+            source.retire()
             await drainCaptures(service)
-            let requests = await file.requests, transfers = await bytes.calls
-            XCTAssertTrue(requests.isEmpty, "No current accepted playing state: \(kind)")
-            XCTAssertEqual(transfers, 0)
-            XCTAssertEqual(try MusicDocument(store.read(), runID: "inactive-stage").history, history)
-            let played = try await service.playedSongs()
-            XCTAssertEqual(played.count, kind == .progress ? 0 : 1)
-            if !terminal {
-                let resumed = try await service.record(fact(selected.candidate))
-                XCTAssertTrue(resumed, "A real playing fact may start filling after progress-only or pause")
-                await drainCaptures(service)
-                let versions = await file.versions, requests = await file.requests
-                XCTAssertEqual(requests.count, 1)
-                XCTAssertEqual(versions.count, 1); XCTAssertNotNil(versions.first ?? nil)
-                let afterResume = try await service.playedSongs()
-                XCTAssertEqual(afterResume.count, 1)
-            }
+            XCTAssertFalse(source.progress.complete)
+            let history = try await service.playedSongs()
+            XCTAssertTrue(history.isEmpty, String(describing: kind))
             await service.close()
         }
     }
 
-    func testAwaitedStageCannotCarryPlayingIntoAnotherRecording() async throws {
-        let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes()
-        let root = try cacheRoot()
+    func testPreparationRejectsOldAttemptAfterScopeSuspensionAndQueueChange() async throws {
+        let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes(), root = try cacheRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() },
-            transport: bytes, inspector: AdmissionMeasurement())
-        let file = AdmissionFillCache(real: real, clock: clock), accounts = AdmissionAccounts()
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(),
-            accounts: accounts, qq: NativeMusicQQFixture(), audioFileCache: file,
-            transport: NativeMusicNoNetwork(), clock: { clock.now() })
+        let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
+        let accounts = AdmissionAccounts(), file = AdmissionFillCache(real: real, clock: clock)
+        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
+            qq: NativeMusicQQFixture(), audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
-        clock.advance(1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let old = try await session.match(intent: .quality("flac"))
         try await service.activateSource(attemptID: old.candidate.attemptId)
-        let playing = try await service.record(fact(old.candidate))
-        XCTAssertTrue(playing)
-        try await MusicCandidateDiscoveryDeadline.run(seconds: 3) {
-            while await service.audioCacheAttempt?.captured != true {
-                try Task.checkCancellation(); await Task.yield()
-            }
-        }
-        await drainCaptures(service)
-        let song = try MusicNativeCandidateDiscoveryFixture.song()
-        let staged = await service.audioCacheAttempt
-        let audio = try XCTUnwrap(staged?.audio)
+        _ = try await service.record(fact(old.candidate, kind: .paused))
+        let captured = await service.audioCacheAttempt
+        let staged = try XCTUnwrap(captured)
+        let audio = try XCTUnwrap(staged.audio), song = try MusicNativeCandidateDiscoveryFixture.song()
         let gate = MusicNativeCandidateDiscoveryBarrier()
         await accounts.holdScope(gate)
-        // The first-fact stage is complete. Await this additional real stage
-        // explicitly so the negative assertion cannot pass before it returns.
-        let pending = Task {
-            try await service.stageAudioCache(audio: audio, song: song, selection: old.selection,
-                                              attemptID: old.candidate.attemptId)
+        let preparing = Task {
+            try await service.prepareAudioCache(audio: audio, song: song, selection: old.selection,
+                attemptID: old.candidate.attemptId, playbackAuthorization: MusicQueueAuthorization())
         }
         await gate.started(1)
         let page = try await service.search(platform: "tx", query: "Different recording", page: 1, limit: 30)
-        let other = try XCTUnwrap(page.items.first)
-        XCTAssertNotEqual(other.songId, song["songId"].string)
-        let state = try await service.state()
-        let next = try await service.changeQueue(.replace([other.ref], index: 0), expectedRevision: state.revision)
-        let current = try await service.sourceSession(occurrenceID: XCTUnwrap(next.currentId),
-                                                      expectedQueueRevision: next.revision)
-        let selected = try await current.match(intent: .quality("flac"))
-        try await service.activateSource(attemptID: selected.candidate.attemptId)
-        let progressed = try await service.record(fact(selected.candidate, kind: .progress))
-        XCTAssertTrue(progressed)
-        try await waitForStage(service, candidate: selected.candidate)
+        let other = try XCTUnwrap(page.items.first), state = try await service.state()
+        _ = try await service.changeQueue(.replace([other.ref], index: 0), expectedRevision: state.revision)
         await gate.release()
-        do { try await pending.value; XCTFail("An old playing attempt was staged for another recording") }
+        do { _ = try await preparing.value; XCTFail("An old recording escaped preparation") }
         catch { XCTAssertEqual(MusicServiceError.sanitized(error), .staleResult) }
-        await drainCaptures(service)
-        let before = await file.requests, transfers = await bytes.calls
-        XCTAssertEqual(before.count, 1)
-        XCTAssertEqual(before.first?.identity.songID, song["songId"].string)
-        XCTAssertEqual(transfers, 1)
-        let history = try await service.playedSongs()
-        XCTAssertEqual(history.map(\.track.songId), [song["songId"].string])
-        let started = try await service.record(fact(selected.candidate))
-        XCTAssertTrue(started)
-        await drainCaptures(service)
-        let after = await file.requests, versions = await file.versions
-        XCTAssertEqual(after.map(\.identity.songID), [song["songId"].string, other.songId])
-        XCTAssertEqual(versions.count, 2); XCTAssertTrue(versions.allSatisfy { $0 != nil })
+        let requests = await file.requests
+        XCTAssertEqual(requests.count, 1, "Stale work must not start another transfer")
         await service.close()
     }
 
-    func testAwaitedStageRejectsOldMediaAfterAccountScopeRotation() async throws {
-        let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes()
-        let root = try cacheRoot()
+    func testPreparationRechecksMediaAfterScopeRotationOrMediaRevocation() async throws {
+        for rotation in [false, true] { try await checkRevokedPreparation(rotation: rotation) }
+    }
+    private func checkRevokedPreparation(rotation: Bool) async throws {
+        let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes(), root = try cacheRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
-        let file = AdmissionFillCache(real: real, clock: clock)
-        let accounts = AdmissionAccounts(), song = try MusicNativeCandidateDiscoveryFixture.song()
-        let source = try XCTUnwrap(MusicModel.sources(song).first)
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song), accounts: accounts,
+        let file = AdmissionFillCache(real: real, clock: clock), accounts = AdmissionAccounts()
+        let song = try MusicNativeCandidateDiscoveryFixture.song(), source = try XCTUnwrap(MusicModel.sources(song).first)
+        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
             qq: NativeMusicQQFixture(), audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
-        clock.advance(1)
         let options = await accounts.nativeOptions(platform: .qq, nativeID: source.nativeId, sourceKey: source.sourceKey)
         let selection = try XCTUnwrap(options.first).selection(quality: "flac")
-        // The real resolver installs the committed attempt and stages its media;
-        // no playing fact has started a fill and no first-fact task is pending.
-        let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(),
-            occurrenceId: "entry-1", selection: selection)
-        let committed = await service.attempt
-        XCTAssertEqual(committed?.id, candidate.attemptId)
-        XCTAssertEqual(committed?.ready, true)
-        let staged = await service.audioCacheAttempt
-        let original = try XCTUnwrap(staged)
-        let audio = try XCTUnwrap(original.audio)
-        XCTAssertEqual(original.identity.scope, "old-account-scope")
+        let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: "entry-1", selection: selection)
+        let captured = await service.audioCacheAttempt
+        let original = try XCTUnwrap(captured), audio = try XCTUnwrap(original.audio)
         let gate = MusicNativeCandidateDiscoveryBarrier()
         await accounts.holdScope(gate)
-        let staging = Task {
-            try await service.stageAudioCache(audio: audio, song: song, selection: selection, attemptID: candidate.attemptId)
+        let preparing = Task {
+            try await service.prepareAudioCache(audio: audio, song: song, selection: selection,
+                attemptID: candidate.attemptId, playbackAuthorization: MusicQueueAuthorization())
         }
         await gate.started(1)
-        await accounts.rotate()
-        await file.clearOfficial()
+        if rotation { await accounts.rotate() } else { await accounts.revokeMedia() }
         await gate.release()
-        do {
-            try await staging.value
-            XCTFail("Revoked media was staged under a replacement account scope")
-        } catch { XCTAssertEqual(MusicServiceError.sanitized(error), .staleAccess) }
-        let after = await service.audioCacheAttempt
-        XCTAssertNil(after, "Completed staging must not bind old media to the replacement scope")
-        // The public first-fact task replays its latest fact after optional
-        // staging. Exercise that real consumer and drain any resulting capture.
-        await service.audioCacheAcceptedFact(fact(candidate))
-        let captures = await Array(service.audioCacheCaptures.values)
-        for capture in captures { await capture.value }
-        let requests = await file.requests, versions = await file.versions
-        XCTAssertTrue(requests.isEmpty, "Must not submit old media under the replacement scope")
-        XCTAssertTrue(versions.isEmpty)
+        do { _ = try await preparing.value; XCTFail("Revoked media adopted a replacement account") }
+        catch { XCTAssertEqual(MusicServiceError.sanitized(error), .staleAccess) }
+        let requests = await file.requests
+        XCTAssertEqual(requests.count, 1)
         let scope = await accounts.scope
-        XCTAssertEqual(scope.scope, "replacement-account-scope")
         let hit = await real.lookup(scope: scope.scope, songID: song["songId"].string,
             authorization: scope.authorization, accepts: { _ in true })
         XCTAssertNil(hit)
-        let transfers = await bytes.calls
-        XCTAssertEqual(transfers, 0)
         await service.close()
-    }
-
-    func testMediaRevokedAfterStageBeforeRealFillIsRejectedWithoutScopeRotation() async throws {
-        for revoke in [false, true] {
-            let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes()
-            let root = try cacheRoot()
-            defer { try? FileManager.default.removeItem(at: root) }
-            let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
-            let gate = MusicNativeCandidateDiscoveryBarrier()
-            let called = expectation(description: "fill request staged"), finished = expectation(description: "real fill returned")
-            let file = AdmissionFillCache(real: real, clock: clock, called: called, finished: finished, gate: gate)
-            let accounts = AdmissionAccounts()
-            let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
-                qq: NativeMusicQQFixture(), audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
-            try await service.setAccess(available: true, generation: 1)
-            clock.advance(1)
-            let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
-            let selected = try await session.match(quality: "flac", sourceID: nil)
-            try await service.activateSource(attemptID: selected.candidate.attemptId)
-            let accepted = try await service.record(fact(selected.candidate))
-            XCTAssertTrue(accepted)
-            await gate.started(1)
-            let progressed = try await service.record(fact(selected.candidate, kind: .progress))
-            XCTAssertTrue(progressed)
-            if revoke { await accounts.revokeMedia() }
-            let requests = await file.requests
-            let request = try XCTUnwrap(requests.first)
-            XCTAssertTrue(request.authorization.isActive, "Account scope remains valid in this case")
-            XCTAssertEqual(request.playbackAuthorization.isActive, !revoke, "Fill must retain original media authority")
-            await gate.release()
-            await fulfillment(of: [called, finished], timeout: 3)
-            let versions = await file.versions
-            XCTAssertEqual(versions.count, 1)
-            XCTAssertEqual((versions.first ?? nil) != nil, !revoke)
-            let transfers = await bytes.calls
-            XCTAssertEqual(transfers, revoke ? 0 : 1)
-            await service.close()
-        }
     }
 
     func testDirectRealPortRejectsRevokedAudioEvenWithFreshRequestFences() async throws {
@@ -361,7 +222,7 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         }
     }
 
-    func testStageRejectsAlreadyRevokedMediaBeforeScopeRead() async throws {
+    func testPreparationRejectsAlreadyRevokedMediaBeforeScopeRead() async throws {
         let accounts = AdmissionAccounts(), gate = MusicNativeCandidateDiscoveryBarrier()
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let source = try XCTUnwrap(MusicModel.sources(song).first)
@@ -374,8 +235,8 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         try await service.setAccess(available: true, generation: 1)
         let media = MusicQueueAuthorization(); media.revoke()
         do {
-            try await service.stageAudioCache(audio: AdmissionAccounts.audio(media), song: song, selection: hit.identity.selection,
-                attemptID: UUID().uuidString.lowercased())
+            _ = try await service.prepareAudioCache(audio: AdmissionAccounts.audio(media), song: song, selection: hit.identity.selection,
+                attemptID: UUID().uuidString.lowercased(), playbackAuthorization: MusicQueueAuthorization())
             XCTFail("Revoked media reached staging")
         } catch { XCTAssertEqual(MusicServiceError.sanitized(error), .staleAccess) }
         let reads = await accounts.scopeReads
@@ -390,13 +251,6 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
     private func drainCaptures(_ service: NativeMusicService) async {
         let captures = await Array(service.audioCacheCaptures.values)
         for capture in captures { await capture.value }
-    }
-    private func waitForStage(_ service: NativeMusicService, candidate: MusicPlaybackCandidate) async throws {
-        try await MusicCandidateDiscoveryDeadline.run(seconds: 3) {
-            while await service.audioCacheAttempt?.attemptID != candidate.attemptId {
-                try Task.checkCancellation(); await Task.yield()
-            }
-        }
     }
     private func fact(_ candidate: MusicPlaybackCandidate, kind: MusicPlaybackFact.Kind = .playing) -> MusicPlaybackFact {
         .init(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
@@ -453,6 +307,7 @@ private actor AdmissionLookupCache: MusicAudioFileCaching {
         await gate.enter()
         return hit // Eligibility was captured before suspension, just like an asynchronous cache port.
     }
+    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback { MusicTestByteSource() }
     func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) -> MusicAudioFileCacheVersion? { nil }
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion, confirmedAt: Date, authorization: MusicQueueAuthorization) {}
     func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) {}
@@ -465,35 +320,24 @@ private actor AdmissionLookupCache: MusicAudioFileCaching {
 private actor AdmissionFillCache: MusicAudioFileCaching {
     let real: NativeMusicAudioFileCache
     let clock: MusicRecoveryTestClock
-    let called: XCTestExpectation?, finished: XCTestExpectation?
-    let gate: MusicNativeCandidateDiscoveryBarrier?
-    var requests: [MusicAudioFileCacheRequest] = []
-    var versions: [MusicAudioFileCacheVersion?] = []
-    init(real: NativeMusicAudioFileCache, clock: MusicRecoveryTestClock, called: XCTestExpectation? = nil,
-         finished: XCTestExpectation? = nil, gate: MusicNativeCandidateDiscoveryBarrier? = nil) {
-        self.real = real; self.clock = clock; self.called = called; self.finished = finished; self.gate = gate
-    }
+    var requests: [MusicAudioFilePlaybackRequest] = []
+    init(real: NativeMusicAudioFileCache, clock: MusicRecoveryTestClock) { self.real = real; self.clock = clock }
     func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
                 accepts: @escaping @Sendable (MusicAudioFileCacheIdentity) -> Bool) async -> MusicAudioFileCacheHit? {
         await real.lookup(scope: scope, songID: songID, authorization: authorization, accepts: accepts)
     }
-    func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) async -> MusicAudioFileCacheVersion? {
-        requests.append(request); called?.fulfill()
-        if let gate { await gate.enter() }
-        let result = await real.storeAfterPlayback(request)
-        versions.append(result); finished?.fulfill()
-        return result
+    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback {
+        requests.append(request)
+        return try await real.preparePlayback(request)
     }
+    func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) async -> MusicAudioFileCacheVersion? { await real.storeAfterPlayback(request) }
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion, confirmedAt: Date, authorization: MusicQueueAuthorization) async {
         await real.touch(identity, version: version, confirmedAt: confirmedAt, authorization: authorization)
     }
     func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) async { await real.remove(identity, version: version) }
     func cancelPending() async { await real.cancelPending() }
     func clear() async { await real.clear() }
-    func clearOfficial() async {
-        await real.clearOfficial()
-        clock.advance(1) // A stale fill must not be rejected merely by the clear cutoff.
-    }
+    func clearOfficial() async { await real.clearOfficial(); clock.advance(1) }
     func close() async { await real.close() }
 }
 

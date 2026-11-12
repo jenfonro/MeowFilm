@@ -41,6 +41,7 @@ private struct ManualExplorationFileCache: MusicAudioFileCaching {
                 accepts: @escaping @Sendable (MusicAudioFileCacheIdentity) -> Bool) -> MusicAudioFileCacheHit? {
         hit.identity.scope == scope && accepts(hit.identity) ? hit : nil
     }
+    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback { MusicTestByteSource() }
     func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) -> MusicAudioFileCacheVersion? { nil }
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion,
                confirmedAt: Date, authorization: MusicQueueAuthorization) {}

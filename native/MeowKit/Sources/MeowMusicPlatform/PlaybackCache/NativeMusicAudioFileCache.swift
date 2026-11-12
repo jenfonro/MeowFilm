@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import Darwin
 import MeowMusicFeature
+import MeowContracts
 
 /// Product-owned, disposable cache, NOT a download library. Pass a new private
 /// leaf under the app's canonical Caches directory (its parent must exist).
@@ -15,6 +16,8 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private let capacity: Int64
     private let requiresCachesDirectory: Bool
     private let timing: NativeMusicAudioCacheTiming
+    private let displayCache: MusicNativePlaybackDisplayCache?
+    private var evictedSongs: Set<String> = []
     private var directory: NativeMusicAudioCacheDirectory?
     private var entries: [String: NativeMusicAudioCacheEntry] = [:]
     private var pending: [UUID: Pending] = [:]
@@ -31,10 +34,13 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         let sink: NativeMusicAudioCacheSink
         var task: Task<MusicAudioFileCacheVersion?, Never>?
         var reserved: Int64 = 0
+        var mayPublish = true
     }
 
-    public init(rootURL: URL, clock: @escaping @Sendable () -> Date = { Date() }) {
+    public init(rootURL: URL, clock: @escaping @Sendable () -> Date = { Date() },
+                displayCache: MusicNativePlaybackDisplayCache? = nil) {
         self.rootURL = rootURL; self.clock = clock
+        self.displayCache = displayCache
         transport = URLSessionNativeMusicAudioCacheTransport()
         inspector = NativeMusicAudioCacheInspector()
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
@@ -44,8 +50,10 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
 
     /// Trusted in-process test/platform dependencies, never script-provided.
     public init(rootURL: URL, clock: @escaping @Sendable () -> Date = { Date() },
-                transport: any NativeMusicAudioCacheTransport, inspector: any NativeMusicAudioCacheInspecting) {
+                transport: any NativeMusicAudioCacheTransport, inspector: any NativeMusicAudioCacheInspecting,
+                displayCache: MusicNativePlaybackDisplayCache? = nil) {
         self.rootURL = rootURL; self.clock = clock; self.transport = transport; self.inspector = inspector
+        self.displayCache = displayCache
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
         requiresCachesDirectory = true
         timing = .init()
@@ -55,11 +63,12 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     // enlarge the reference's 256 MiB limit through public configuration.
     init(rootURL: URL, clock: @escaping @Sendable () -> Date,
          transport: any NativeMusicAudioCacheTransport, inspector: any NativeMusicAudioCacheInspecting,
-         capacity: Int64, timing: NativeMusicAudioCacheTiming = .init()) {
+         capacity: Int64, timing: NativeMusicAudioCacheTiming = .init(), displayCache: MusicNativePlaybackDisplayCache? = nil) {
         self.rootURL = rootURL; self.clock = clock; self.transport = transport; self.inspector = inspector
         self.capacity = max(0, min(capacity, NativeMusicAudioCacheHTTPPolicy.maximumBytes))
         requiresCachesDirectory = false
         self.timing = timing
+        self.displayCache = displayCache
     }
 
     public func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
@@ -67,7 +76,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         guard !closed, !Task.isCancelled, authorization.isActive,
               Self.text(scope), Self.text(songID) else { return nil }
         do {
-            return try authorization.perform {
+            let result: MusicAudioFileCacheHit? = try authorization.perform {
                 let directory = try open()
                 try prune(directory)
                 let matches = entries.values.filter { $0.identity.scope == scope && $0.identity.songID == songID && accepts($0.identity) }
@@ -79,37 +88,32 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                              duration: entry.inspection.duration, measuredQuality: entry.quality,
                              expiresAt: entry.expiresAt)
             }
+            await flushDisplayEvictions()
+            return authorization.isActive ? result : nil
         } catch { return nil }
     }
 
     @discardableResult public func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) async -> MusicAudioFileCacheVersion? {
         let now = clock()
         guard !closed, !Task.isCancelled, request.authorization.isActive, request.playbackAuthorization.isActive,
-              request.audio.playbackAuthorization?.isActive != false,
+              request.audio.playbackAuthorization?.isActive != false, Self.valid(request.identity),
+              Self.confirmed(request.confirmedAt, now: now),
               captureCutoff.map({ request.confirmedAt > $0 }) ?? true,
               !request.identity.isOfficial || (officialCaptureCutoff.map({ request.confirmedAt > $0 }) ?? true),
-              Self.valid(request.identity), Self.confirmed(request.confirmedAt, now: now),
-              request.expectedDuration.isFinite, request.expectedDuration > 0,
-              request.audio.fileCachePolicy.allowed,
+              request.expectedDuration.isFinite, request.expectedDuration > 0, request.audio.fileCachePolicy.allowed,
               Self.licenseValid(request.audio.fileCachePolicy.licenseExpiresAt, now: now),
-              Self.expiry(request.confirmedAt, request.audio.fileCachePolicy.licenseExpiresAt) > now,
               NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality),
-              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform, scriptMedia: !request.identity.isOfficial)
-        else { return nil }
-        // A URL expiry is only a fetch eligibility check. It is NEVER persisted
-        // or used to expire already captured audio.
-        if let expiry = request.audio.expiresAt,
-           !expiry.timeIntervalSince1970.isFinite || expiry <= now { return nil }
-        let key = Self.key(request.identity)
+              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
+                                                      scriptMedia: !request.identity.isOfficial),
+              request.audio.expiresAt.map({ $0.timeIntervalSince1970.isFinite && $0 > now }) ?? true else { return nil }
         do {
-            let directory = try open()
+            let directory = try open(), key = Self.key(request.identity)
             try prune(directory)
             if var old = entries[key], old.identity == request.identity,
                (try? old.inspection.quality(for: request.audio.delivery?.quality ?? request.identity.requestedQuality,
                                            expectedDuration: request.expectedDuration)) != nil,
                try directory.matches(old.file, stamp: old.stamp) {
                 try request.authorization.perform {
-                    try Task.checkCancellation()
                     old.lastPlayedAt = max(old.lastPlayedAt, request.confirmedAt)
                     if let expiry = request.audio.fileCachePolicy.licenseExpiresAt {
                         old.licenseExpiresAt = min(old.licenseExpiresAt ?? expiry, expiry)
@@ -120,68 +124,104 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 }
                 return .init(rawValue: old.file)
             }
-            // Reservations share the actual byte budget. Cancelled work stays
-            // charged until it has released its pinned descriptors.
-            for value in pending.values where value.key == key && value.identity != request.identity {
-                cancelCapture(value)
-            }
+            for value in pending.values where value.key == key && value.identity != request.identity { cancelCapture(value) }
             guard !pending.values.contains(where: { $0.key == key }) else { return nil }
-            let id = UUID(), fence = NativeMusicAudioCacheFence(authorization: request.authorization, timing: timing)
-            let sink = try NativeMusicAudioCacheSink(directory: directory, fence: fence,
-                playbackAuthorization: request.playbackAuthorization,
-                platform: request.identity.platform, scriptMedia: !request.identity.isOfficial) { [weak self] length in
-                    guard let self else { throw NativeMusicAudioCacheFailure.miss }
-                    try await self.reserve(id: id, bytes: length)
-                }
-            pending[id] = Pending(id: id, key: key, identity: request.identity, fence: fence, sink: sink)
-            let http = NativeMusicAudioCacheHTTPRequest(url: request.audio.url, platform: request.identity.platform,
-                scriptMedia: !request.identity.isOfficial, headers: request.audio.headers)
-            let transport = self.transport, inspector = self.inspector
-            let task = Task<MusicAudioFileCacheVersion?, Never> {
-                defer { self.finished(id: id) }
-                do {
-                    try sink.checkReceivingAuthorization()
-                    try await transport.transfer(http, into: sink)
-                    let file = try sink.seal()
-                    let measured = try await inspector.inspect(file, expectedDuration: request.expectedDuration)
-                    try fence.check()
-                    return try self.publish(id: id, request: request, inspection: measured)
-                } catch { /* Evictable cache failure does not affect remote playback. */ }
-                return nil
+            let source = try await preparePlayback(.init(identity: request.identity, audio: request.audio,
+                expectedDuration: request.expectedDuration, authorization: request.authorization,
+                playbackAuthorization: request.playbackAuthorization), streaming: false)
+            source.confirmPlayback(at: request.confirmedAt)
+            let sink = pending[source.id]?.sink
+            return await withTaskCancellationHandler { await source.result() } onCancel: { sink?.cancel() }
+        } catch { return nil }
+    }
+
+    public func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback {
+        try await preparePlayback(request, streaming: true)
+    }
+
+    private func preparePlayback(_ request: MusicAudioFilePlaybackRequest, streaming: Bool) async throws -> any MusicAudioFilePlayback {
+        let now = clock()
+        guard !closed, !Task.isCancelled, request.authorization.isActive, request.playbackAuthorization.isActive,
+              request.audio.playbackAuthorization?.isActive != false, Self.valid(request.identity),
+              request.expectedDuration.isFinite, request.expectedDuration >= 0,
+              Self.licenseValid(request.audio.fileCachePolicy.licenseExpiresAt, now: now),
+              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
+                                                      scriptMedia: !request.identity.isOfficial, streaming: streaming),
+              request.audio.expiresAt.map({ $0.timeIntervalSince1970.isFinite && $0 > now }) ?? true else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
+        let persist = request.audio.fileCachePolicy.allowed && request.expectedDuration > 0 &&
+            NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality) &&
+            NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
+                                                    scriptMedia: !request.identity.isOfficial)
+        let key = Self.key(request.identity)
+        let directory = try request.authorization.perform { try open() }
+        try prune(directory)
+        await flushDisplayEvictions()
+        try request.authorization.check(); try request.playbackAuthorization.check()
+        let id = UUID(), fence = NativeMusicAudioCacheFence(authorization: request.authorization, timing: timing)
+        let sink = try NativeMusicAudioCacheSink(id: id, directory: directory, fence: fence,
+            playbackAuthorization: request.playbackAuthorization, platform: request.identity.platform,
+            scriptMedia: !request.identity.isOfficial, streaming: streaming, clock: clock,
+            released: { [weak self] in Task { await self?.finished(id: id) } }) { [weak self] length in
+                guard let self else { throw NativeMusicAudioCacheFailure.miss }
+                try await self.reserve(id: id, bytes: length)
             }
-            pending[id]?.task = task
-            let revocations = request.authorization.revocations()
+        pending[id] = Pending(id: id, key: key, identity: request.identity, fence: fence, sink: sink)
+        let http = NativeMusicAudioCacheHTTPRequest(url: request.audio.url, platform: request.identity.platform,
+            scriptMedia: !request.identity.isOfficial, headers: request.audio.headers, streaming: streaming)
+        let transport = self.transport, inspector = self.inspector
+        let task = Task<MusicAudioFileCacheVersion?, Never> {
             let revocation = Task {
-                for await _ in revocations {
-                    fence.cancel(); sink.cancel(); task.cancel()
-                    break
+                for await _ in request.authorization.revocations() {
+                    fence.cancel(); sink.cancel(); break
                 }
             }
-            let playbackRevocations = request.playbackAuthorization.revocations()
             let playbackRevocation = Task {
-                for await _ in playbackRevocations {
-                    if sink.retireIfIncomplete() { task.cancel() }
-                    break
+                for await _ in request.playbackAuthorization.revocations() {
+                    _ = sink.retireIfIncomplete(); break
                 }
             }
-            // One sleeper per capture. On wake it rechecks the actual byte/EOF
-            // deadline; no per-chunk tasks, polling loop or wall-clock lease.
             let deadline = Task {
                 do {
-                    try await fence.waitForExpiry()
-                    fence.cancel(); sink.cancel(); task.cancel()
+                    if try await fence.waitForExpiry() { fence.cancel(); sink.cancel() }
                 } catch {}
             }
-            let published = await withTaskCancellationHandler {
-                await task.value
-            } onCancel: {
-                fence.cancel(); sink.cancel(); task.cancel()
+            let version: MusicAudioFileCacheVersion?
+            do {
+                try sink.checkReceivingAuthorization()
+                try await transport.transfer(http, into: sink)
+                let file = try sink.seal()
+                if persist {
+                    let measured = try await inspector.inspect(file, expectedDuration: request.expectedDuration)
+                    // A valid paused item is not an unfinished network/decode
+                    // operation. Waiting for its real playing fact has no timer.
+                    try fence.finishedInspection()
+                    deadline.cancel(); await deadline.value
+                    try fence.check()
+                    if let confirmed = try await sink.firstPlayback() {
+                        let capture = MusicAudioFileCacheRequest(identity: request.identity, audio: request.audio,
+                            expectedDuration: request.expectedDuration, confirmedAt: confirmed,
+                            authorization: request.authorization, playbackAuthorization: request.playbackAuthorization)
+                        version = try self.publish(id: id, request: capture, inspection: measured)
+                    } else { version = nil }
+                } else {
+                    try fence.finishedInspection()
+                    version = nil
+                }
+                sink.complete(published: version != nil)
+            } catch {
+                sink.cancel()
+                version = nil
             }
             revocation.cancel(); playbackRevocation.cancel(); deadline.cancel()
             await revocation.value; await playbackRevocation.value; await deadline.value
-            return published
-        } catch { /* Invalid/unavailable storage is a miss. */ }
-        return nil
+            self.finished(id: id)
+            return version
+        }
+        pending[id]?.task = task
+        sink.attach(task)
+        return sink
     }
 
     public func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion, confirmedAt: Date,
@@ -200,6 +240,8 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 var next = entries; next[key] = entry
                 try commitIndex(next, directory: directory)
             }
+            await displayCache?.touch(songID: identity.songID, confirmedAt: confirmedAt)
+            await flushDisplayEvictions()
         } catch {}
     }
 
@@ -217,25 +259,31 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
 
     public func cancelPending() async {
         fenceQueuedCaptures()
-        cancelCaptures()
+        await cancelAndDrainCaptures()
     }
 
     public func clear() async {
         guard !closed else { return }
         fenceQueuedCaptures()
-        cancelCaptures() // Synchronous fence BEFORE any further work.
+        // Clearing disposable history is not a new playback intent. Keep the
+        // current reader's growing file, but fence its future index publication.
+        for id in pending.keys { pending[id]?.mayPublish = false }
+        for value in pending.values { value.sink.discardPublication() }
         do {
             let directory = try open()
             try commitIndex([:], directory: directory)
             try directory.recover(keeping: [], activeTemporaries: Set(pending.values.map(\.sink.name)))
         } catch {}
+        await displayCache?.clear()
     }
 
     public func clearOfficial() async {
         guard !closed else { return }
         let now = clock()
         officialCaptureCutoff = max(officialCaptureCutoff ?? now, now)
-        for value in pending.values where value.identity.isOfficial { cancelCapture(value) }
+        let captures = pending.values.filter { $0.identity.isOfficial }
+        for value in captures { cancelCapture(value) }
+        for value in captures { _ = await value.task?.value }
         do {
             let directory = try open()
             try commitIndex(entries.filter { !$0.value.identity.isOfficial }, directory: directory)
@@ -244,14 +292,17 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
 
     public func close() async {
         closed = true
-        cancelCaptures()
+        await cancelAndDrainCaptures()
         entries.removeAll()
         // In-flight descriptors retain the directory lock until actual release.
         directory = nil
     }
 
-    private func cancelCaptures() {
-        for value in pending.values { cancelCapture(value) }
+    private func cancelAndDrainCaptures() async {
+        let captures = Array(pending.values)
+        for value in captures { cancelCapture(value) }
+        for value in captures { _ = await value.task?.value }
+        for value in captures { finished(id: value.id) }
     }
     private func fenceQueuedCaptures() {
         // Also reject previously confirmed requests whose caller Task has not
@@ -266,11 +317,13 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     }
 
     private func finished(id: UUID) {
-        guard let value = pending.removeValue(forKey: id) else { return }
-        value.fence.cancel(); value.sink.cancel()
+        guard let value = pending[id], !value.sink.finishCapture() else { return }
+        pending.removeValue(forKey: id)
+        // Successful publication ends the producer, not the active reader.
+        // Its authorization and explicit retire still fence every read.
     }
 
-    private func reserve(id: UUID, bytes: Int64) throws {
+    private func reserve(id: UUID, bytes: Int64) async throws {
         guard !closed, let value = pending[id], value.reserved == 0, bytes > 0, bytes <= capacity else {
             throw NativeMusicAudioCacheFailure.miss
         }
@@ -283,6 +336,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 pending.values.reduce(Int64(0)) { $0 + $1.reserved }
             for victim in next.values.sorted(by: Self.oldest) where total > capacity && !protectedKeys.contains(victim.key) {
                 next.removeValue(forKey: victim.key); total -= victim.stamp.size
+                evictedSongs.insert(victim.identity.songID)
             }
             guard total <= capacity else { throw NativeMusicAudioCacheFailure.miss }
             try commitIndex(next, directory: directory)
@@ -292,10 +346,11 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                                   activeTemporaries: Set(pending.values.map(\.sink.name)))
             pending[id]?.reserved = bytes
         }
+        await flushDisplayEvictions()
     }
 
     private func publish(id: UUID, request: MusicAudioFileCacheRequest,
-                         inspection: NativeMusicAudioCacheInspection) throws -> MusicAudioFileCacheVersion {
+                         inspection: NativeMusicAudioCacheInspection) throws -> MusicAudioFileCacheVersion? {
         guard !closed, let value = pending[id] else { throw NativeMusicAudioCacheFailure.miss }
         return try value.fence.perform {
             let now = clock()
@@ -306,6 +361,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             }
             let quality = try inspection.quality(for: request.audio.delivery?.quality ?? request.identity.requestedQuality,
                                                  expectedDuration: request.expectedDuration)
+            guard value.mayPublish else { return nil }
             let directory = try open()
             let name = UUID().uuidString.lowercased() + "." + inspection.container
             let stamp = try value.sink.publish(as: name)
@@ -379,6 +435,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         var total = loaded.values.reduce(Int64(0)) { $0 + $1.stamp.size }
         for entry in loaded.values.sorted(by: Self.oldest) where total > capacity {
             loaded.removeValue(forKey: entry.key); total -= entry.stamp.size
+            evictedSongs.insert(entry.identity.songID)
         }
         try value.writeIndex(Self.encode(loaded))
         try value.recover(keeping: Set(loaded.values.map(\.file)), activeTemporaries: [])
@@ -389,10 +446,17 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private func prune(_ directory: NativeMusicAudioCacheDirectory) throws {
         let now = clock()
         let next = entries.filter { _, entry in
-            guard entry.expiresAt > now, Self.licenseValid(entry.licenseExpiresAt, now: now) else { return false }
+            guard entry.expiresAt > now, Self.licenseValid(entry.licenseExpiresAt, now: now) else {
+                evictedSongs.insert(entry.identity.songID); return false
+            }
             return (try? directory.matches(entry.file, stamp: entry.stamp)) == true
         }
         if next.count != entries.count { try commitIndex(next, directory: directory) }
+    }
+    private func flushDisplayEvictions() async {
+        let songs = evictedSongs.subtracting(entries.values.map { $0.identity.songID })
+        evictedSongs.removeAll()
+        if !songs.isEmpty { await displayCache?.remove(songIDs: songs, through: clock()) }
     }
 
     private func commitIndex(_ next: [String: NativeMusicAudioCacheEntry],
@@ -467,6 +531,7 @@ final class NativeMusicAudioCacheFence: @unchecked Sendable {
     private let authorization: MusicQueueAuthorization
     private let timing: NativeMusicAudioCacheTiming
     private var deadline: NativeMusicAudioCacheDeadline
+    private var inspected = false
     private var cancelled = false
     init(authorization: MusicQueueAuthorization, timing: NativeMusicAudioCacheTiming = .init()) {
         self.authorization = authorization; self.timing = timing
@@ -477,7 +542,7 @@ final class NativeMusicAudioCacheFence: @unchecked Sendable {
     func perform<T>(_ body: () throws -> T) throws -> T {
         try authorization.perform {
             lock.lock(); defer { lock.unlock() }
-            guard !cancelled, !Task.isCancelled, deadline.remaining(at: timing.now()) > .zero else {
+            guard !cancelled, !Task.isCancelled, inspected || deadline.remaining(at: timing.now()) > .zero else {
                 throw NativeMusicAudioCacheFailure.miss
             }
             return try body()
@@ -489,15 +554,19 @@ final class NativeMusicAudioCacheFence: @unchecked Sendable {
     func completedBody() throws {
         try perform { try deadline.completedBody(at: timing.now()) }
     }
-    private func remaining() -> Duration {
-        lock.lock(); defer { lock.unlock() }
-        return cancelled ? .zero : deadline.remaining(at: timing.now())
+    func finishedInspection() throws {
+        try perform { inspected = true }
     }
-    func waitForExpiry() async throws {
+    private func expiryState() -> (Bool, Duration) {
+        lock.lock(); defer { lock.unlock() }
+        return (inspected, cancelled ? .zero : deadline.remaining(at: timing.now()))
+    }
+    func waitForExpiry() async throws -> Bool {
         while true {
             try Task.checkCancellation()
-            let duration = remaining()
-            if duration <= .zero { return }
+            let (finished, duration) = expiryState()
+            if finished { return false }
+            if duration <= .zero { return true }
             try await timing.sleep(duration)
         }
     }
@@ -505,28 +574,48 @@ final class NativeMusicAudioCacheFence: @unchecked Sendable {
 
 /// The transport cannot choose a destination or obtain a path/file handle.
 /// Bounds, EOF, disk reservation and cancellation are enforced by this sink.
-public final class NativeMusicAudioCacheSink: @unchecked Sendable {
+public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked Sendable {
+    public let id: UUID
     private let lock = NSLock()
     private var directory: NativeMusicAudioCacheDirectory?
     private let fence: NativeMusicAudioCacheFence
     private let playbackAuthorization: MusicQueueAuthorization
     private let platform: String
     private let scriptMedia: Bool
+    private let streaming: Bool
     private let reserve: @Sendable (Int64) async throws -> Void
+    private let clock: @Sendable () -> Date
+    private let released: @Sendable () -> Void
     let name: String
     private var descriptor: Int32
     private var expected: Int64?
+    private var mime = "application/octet-stream"
     private var received: Int64 = 0
     private var sealed = false
     private var published = false
     private var bodyComplete = false
     private var cancelled = false
     private var sealedStamp: NativeMusicAudioCacheStamp?
+    private var readerRetired = false
+    private var captureFinished = false
+    private var confirmedAt: Date?
+    private var publicationDiscarded = false
+    private var captureTask: Task<MusicAudioFileCacheVersion?, Never>?
+    private var byteInformation: PlaybackByteInformation?
+    private var cacheProgress = PlaybackCacheProgress(received: 0, length: 0)
+    private var changeRevision: UInt64 = 0
+    private var changes: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var progressObservers: [UUID: AsyncStream<PlaybackCacheProgress>.Continuation] = [:]
 
-    init(directory: NativeMusicAudioCacheDirectory, fence: NativeMusicAudioCacheFence,
-         playbackAuthorization: MusicQueueAuthorization, platform: String, scriptMedia: Bool = false,
+    init(id: UUID = UUID(), directory: NativeMusicAudioCacheDirectory, fence: NativeMusicAudioCacheFence,
+         playbackAuthorization: MusicQueueAuthorization, platform: String, scriptMedia: Bool = false, streaming: Bool = false,
+         clock: @escaping @Sendable () -> Date = { Date() },
+         released: @escaping @Sendable () -> Void = {},
          reserve: @escaping @Sendable (Int64) async throws -> Void) throws {
-        self.directory = directory; self.fence = fence; self.platform = platform; self.scriptMedia = scriptMedia; self.reserve = reserve
+        self.directory = directory; self.fence = fence; self.platform = platform; self.scriptMedia = scriptMedia
+        self.streaming = streaming; self.reserve = reserve
+        self.id = id; self.clock = clock
+        self.released = released
         self.playbackAuthorization = playbackAuthorization
         let temporary = UUID().uuidString.lowercased() + ".part"
         name = temporary
@@ -534,14 +623,22 @@ public final class NativeMusicAudioCacheSink: @unchecked Sendable {
     }
     public func accept(_ response: NativeMusicAudioCacheHTTPResponse) async throws {
         try checkReceivingAuthorization()
-        let length = try NativeMusicAudioCacheHTTPPolicy.length(response, platform: platform, scriptMedia: scriptMedia)
-        try await reserve(length)
+        let length = try NativeMusicAudioCacheHTTPPolicy.length(response, platform: platform, scriptMedia: scriptMedia, streaming: streaming)
+        try await reserve(length ?? NativeMusicAudioCacheHTTPPolicy.maximumBytes)
         try accepted(length)
+        let mime = response.headers.first { $0.key.lowercased() == "content-type" }?.value
+            .split(separator: ";", maxSplits: 1).first.map(String.init) ?? "application/octet-stream"
+        lock.withLock {
+            self.mime = mime
+            byteInformation = length.map { .init(length: $0, mime: mime) }
+            cacheProgress = .init(received: 0, length: length ?? 0)
+        }
+        notifyChanges()
     }
     func checkReceivingAuthorization() throws {
         try playbackAuthorization.perform { try fence.check() }
     }
-    private func accepted(_ length: Int64) throws {
+    private func accepted(_ length: Int64?) throws {
         try fence.perform {
             lock.lock(); defer { lock.unlock() }
             guard descriptor >= 0, expected == nil, !sealed, !cancelled else { throw NativeMusicAudioCacheFailure.miss }
@@ -552,15 +649,19 @@ public final class NativeMusicAudioCacheSink: @unchecked Sendable {
         try fence.perform {
             lock.lock(); defer { lock.unlock() }
             guard descriptor >= 0, !sealed, !bodyComplete, !cancelled,
-                  let expected, Int64(data.count) <= expected - received else {
+                  Int64(data.count) <= (expected ?? NativeMusicAudioCacheHTTPPolicy.maximumBytes) - received else {
                 throw NativeMusicAudioCacheFailure.miss
             }
             try NativeMusicAudioCacheDirectory.write(data, to: descriptor)
             received += Int64(data.count)
+            // Receiving the last byte is not a complete-cache receipt. Keep
+            // the previous prefix visible until EOF, inspection and publication.
+            if let expected, received < expected { cacheProgress = .init(received: received, length: expected) }
             // Only successful nonempty body writes count as progress, never
             // response headers, empty data callbacks or UI progress.
             try fence.received(data.count)
         }
+        notifyChanges()
     }
     /// Called by the transport at successful HTTP EOF, never by a byte-count
     /// heuristic. This linearizes a song switch against body completion.
@@ -571,11 +672,14 @@ public final class NativeMusicAudioCacheSink: @unchecked Sendable {
             try fence.perform {
                 lock.lock(); defer { lock.unlock() }
                 guard descriptor >= 0, !cancelled, !bodyComplete, !sealed,
-                      let expected, expected == received else { throw NativeMusicAudioCacheFailure.miss }
+                      received > 0, expected.map({ $0 == received }) ?? true else { throw NativeMusicAudioCacheFailure.miss }
+                expected = received
+                byteInformation = .init(length: received, mime: mime)
                 try fence.completedBody()
                 bodyComplete = true
             }
         }
+        notifyChanges()
     }
     func retireIfIncomplete() -> Bool {
         lock.lock()
@@ -618,13 +722,176 @@ public final class NativeMusicAudioCacheSink: @unchecked Sendable {
     }
     func cancel() {
         lock.lock()
+        let wasCancelled = cancelled
         cancelled = true
         let fd = descriptor; descriptor = -1
         let remove = !published
         let directory = self.directory; self.directory = nil
+        let task = captureTask
         lock.unlock()
+        task?.cancel()
+        notifyChanges()
         if fd >= 0 { Darwin.close(fd) }
         if remove { try? directory?.remove(name) }
+        if !wasCancelled { released() }
+    }
+
+    func attach(_ task: Task<MusicAudioFileCacheVersion?, Never>) {
+        lock.lock(); captureTask = task
+        let stopped = cancelled
+        lock.unlock()
+        if stopped { task.cancel() }
+    }
+
+    @discardableResult func finishCapture() -> Bool {
+        lock.lock()
+        captureFinished = true
+        let release = cancelled || readerRetired
+        let retain = !published && !release
+        lock.unlock()
+        if release { cancel() }
+        return retain
+    }
+
+    func complete(published: Bool) {
+        lock.lock()
+        if published { cacheProgress = .init(received: received, length: expected ?? received, complete: true) }
+        lock.unlock()
+        notifyChanges()
+    }
+
+    public var progress: PlaybackCacheProgress {
+        lock.lock(); defer { lock.unlock() }
+        return cacheProgress
+    }
+
+    public func updates() -> AsyncStream<PlaybackCacheProgress> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let id = UUID()
+            lock.lock()
+            let ended = cancelled || readerRetired
+            if !ended { progressObservers[id] = continuation }
+            continuation.yield(cacheProgress)
+            lock.unlock()
+            if ended { continuation.finish() }
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                self.lock.lock(); self.progressObservers[id] = nil; self.lock.unlock()
+            }
+        }
+    }
+
+    private func notifyChanges() {
+        lock.lock()
+        changeRevision &+= 1
+        let waiters = Array(changes.values); changes.removeAll()
+        let observers = Array(progressObservers.values), progress = cacheProgress
+        let ended = cancelled || readerRetired
+        if ended { progressObservers.removeAll() }
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+        for observer in observers {
+            observer.yield(progress)
+            if ended { observer.finish() }
+        }
+    }
+
+    private func waitForChange(after revision: UInt64) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                lock.lock()
+                if Task.isCancelled { lock.unlock(); continuation.resume(throwing: CancellationError()) }
+                else if cancelled || changeRevision != revision { lock.unlock(); continuation.resume() }
+                else { changes[id] = continuation; lock.unlock() }
+            }
+        } onCancel: {
+            self.lock.lock(); let waiter = self.changes.removeValue(forKey: id); self.lock.unlock()
+            waiter?.resume(throwing: CancellationError())
+        }
+    }
+
+    public func information() async throws -> PlaybackByteInformation {
+        while true {
+            try Task.checkCancellation()
+            try fence.check()
+            let (information, revision, cancelled, retired) = lock.withLock { (byteInformation, changeRevision, self.cancelled, readerRetired) }
+            if retired { throw CancellationError() }
+            if cancelled { throw NativeMusicAudioCacheFailure.miss }
+            if let information { return information }
+            try await waitForChange(after: revision)
+        }
+    }
+
+    public func read(offset: Int64, count: Int) async throws -> Data {
+        guard offset >= 0, count > 0, count <= 65_536 else { throw NativeMusicAudioCacheFailure.miss }
+        while true {
+            try Task.checkCancellation()
+            try fence.check()
+            let (revision, data): (UInt64, Data?) = try lock.withLock {
+                if readerRetired { throw CancellationError() }
+                if cancelled { throw NativeMusicAudioCacheFailure.miss }
+                guard let expected, offset <= expected else { throw NativeMusicAudioCacheFailure.miss }
+                if offset == expected { return (changeRevision, Data()) }
+                guard offset < received else { return (changeRevision, nil) }
+                let length = Int(min(Int64(count), received - offset))
+                var data = Data(count: length)
+                var result: Int
+                repeat {
+                    result = data.withUnsafeMutableBytes { bytes in
+                        Darwin.pread(descriptor, bytes.baseAddress, length, off_t(offset))
+                    }
+                } while result < 0 && errno == EINTR
+                guard result == length else { throw NativeMusicAudioCacheFailure.miss }
+                return (changeRevision, data)
+            }
+            if let data {
+                try Task.checkCancellation()
+                return data
+            }
+            try await waitForChange(after: revision)
+        }
+    }
+
+    public func confirmPlayback(at date: Date) {
+        guard date.timeIntervalSince1970.isFinite, date.timeIntervalSince1970 > 0, date <= clock() else { return }
+        lock.lock()
+        if !cancelled, confirmedAt == nil { confirmedAt = date }
+        lock.unlock()
+        notifyChanges()
+    }
+
+    func firstPlayback() async throws -> Date? {
+        while true {
+            try Task.checkCancellation()
+            let (date, revision, ended, discarded) = lock.withLock {
+                (confirmedAt, changeRevision, cancelled || readerRetired && confirmedAt == nil, publicationDiscarded)
+            }
+            if ended { throw CancellationError() }
+            if discarded { return nil }
+            if let date { return date }
+            try await waitForChange(after: revision)
+        }
+    }
+    func discardPublication() {
+        lock.withLock { publicationDiscarded = true }
+        notifyChanges()
+    }
+
+    public func result() async -> MusicAudioFileCacheVersion? {
+        let task = lock.withLock { captureTask }
+        return await task?.value
+    }
+
+    public func retire() {
+        lock.lock()
+        readerRetired = true
+        let incomplete = !bodyComplete || confirmedAt == nil, release = captureFinished
+        lock.unlock()
+        playbackAuthorization.revoke()
+        notifyChanges()
+        if incomplete || release { cancel() }
     }
     deinit { cancel() }
 }

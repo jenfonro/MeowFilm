@@ -44,7 +44,7 @@ public sealed partial class MusicCapability
     public MusicLyricRow? FirstLyric => Lyrics.Count > 0 ? Lyrics[0] : null;
     public MusicLyricRow? LastLyric => Lyrics.Count > 0 ? Lyrics[^1] : null;
     public bool CanConfirmLyricPreview => HasLyricPreview && CanSeek;
-    public string LyricPreviewText => lyricPreview is { } row ? Clock(row.Time) + " · " + row.Text : "";
+    public string LyricPreviewTime => lyricPreview is { } row ? Clock(row.Time) : "";
     public int LyricDisplayIndex => lyricPreview is null ? ActiveLyricIndex : Lyrics.IndexOf(lyricPreview);
     private void OnLyricRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
@@ -96,7 +96,7 @@ public sealed partial class MusicCapability
     }
     private void PreviewBindings()
     {
-        Changed(nameof(HasLyricPreview)); Changed(nameof(LyricPreviewText));
+        Changed(nameof(HasLyricPreview)); Changed(nameof(LyricPreviewTime));
         LyricTimingBindings();
     }
     public async Task ConfirmLyricPreviewAsync()

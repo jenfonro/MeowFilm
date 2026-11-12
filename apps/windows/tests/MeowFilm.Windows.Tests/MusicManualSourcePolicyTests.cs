@@ -97,22 +97,20 @@ public static class MusicManualSourcePolicyTests
         var context = await Ok("music.official.cacheContext", input);
         Check(transport.Calls == 0, "manual cache context is still local and grants no new URL");
         var resolved = await Ok("music.official.resolve", input);
-        Check(resolved.GetProperty("quality").GetString() == "128k" &&
-            !resolved.GetProperty("offlineAllowed").GetBoolean(), "manual guest standard creates no offline rights");
+        Check(resolved.GetProperty("quality").GetString() == "128k", "manual guest standard resolves its real quality");
         await Ok("music.official.confirm", input);
-        await Ok("music.official.authorize", input);
-        Check(transport.Calls == 2, "manual complete-file admission still checks current upstream permission");
+        Check(transport.Calls == 1, "confirmation does not request another media URL");
         QualityFixture.Code(await app.ExecuteAsync("music.official.resolve",
             new { platform = "wy", song, quality = "master", manualSource = true }), "AUTH_REQUIRED");
-        Check(transport.Calls == 2, "manual higher quality never manufactures login authority");
+        Check(transport.Calls == 1, "manual higher quality never manufactures login authority");
         await Ok("music.officialSources.settings.save", new { ifRevision = 0, enabled = Array.Empty<string>() });
         Check(!app.IsOfficialPlaybackCurrent("wy", context.GetProperty("scope").GetString()!,
             context.GetProperty("generation").GetInt64()), "disabling the provider revokes its issued scope");
-        foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+        foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
             QualityFixture.Code(await app.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
         var disabled = await Ok("music.official.candidates",
             new { song, quality = "128k", qualityPolicySignature = signature, manualSource = true });
-        Check(disabled.GetProperty("candidates").GetArrayLength() == 0 && transport.Calls == 2,
+        Check(disabled.GetProperty("candidates").GetArrayLength() == 0 && transport.Calls == 1,
             "manual mode cannot resolve or read through an explicitly disabled official provider");
     }
     private sealed class StandardOrigin : HttpMessageHandler

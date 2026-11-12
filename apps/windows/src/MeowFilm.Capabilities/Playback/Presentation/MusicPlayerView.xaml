@@ -92,7 +92,7 @@
    <Grid.RowDefinitions><RowDefinition Height="8"/><RowDefinition Height="72"/></Grid.RowDefinitions>
    <local:SeekBar x:Name="Progress" Grid.RowSpan="2" Panel.ZIndex="2" VerticalAlignment="Top" Height="16" RailAtTop="True"
     Minimum="0" Maximum="{Binding DurationSeconds}" PlayedBrush="{Binding PlayerProgressBrush}" RailBrush="{DynamicResource Capability.Player.Rail}"
-    Value="{Binding PositionSeconds,Mode=OneWay}" ChorusSeconds="{Binding ChorusPositionSeconds}"
+    Value="{Binding PositionSeconds,Mode=OneWay}" ChorusSeconds="{Binding ChorusPositionSeconds}" CacheFraction="{Binding PlaybackCacheFraction}"
     IsPlaying="{Binding IsPlaying}" PlaybackRate="{Binding AcceptedPlaybackRate}"
     PresentationKey="{Binding PlaybackPresentationKey}"
     IsEnabled="{Binding CanSeek}" AutomationProperties.Name="播放进度"/>

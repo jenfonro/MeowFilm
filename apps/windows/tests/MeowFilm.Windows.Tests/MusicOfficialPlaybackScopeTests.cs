@@ -358,6 +358,8 @@ public static partial class MusicOfficialPlaybackScopeTests
         yield return Case("opening source list is cache-only and load more keeps playback and queue", async () =>
         {
             await using var f = await Scene.Create(files: true);
+            // Isolate source exploration from the independent near-end next-track preload.
+            await f.Module.ChangeModeAsync(3);
             var song = Song("first");
             await f.SeedFile(song, "wy");
             await f.Play(song, Song("next"));
@@ -371,7 +373,9 @@ public static partial class MusicOfficialPlaybackScopeTests
             surface.Search();
             await Until(() => f.Module.CanLoadMoreSources && f.App.Completions.Count == 1);
             Check(f.Module.SourceChoices.Any(row => row.Platform == "QQ") && f.Module.CurrentSource == "网易云音乐" &&
-                f.Output.Identity == identity && f.Output.ReadOpens == 1 && f.Output.NetworkOpens == 0 && f.Files.Requests == transfers);
+                f.Output.Identity == identity && f.Output.ReadOpens == 1 && f.Output.NetworkOpens == 0 && f.Files.Requests == transfers,
+                $"source={f.Module.CurrentSource}; qq={f.Module.SourceChoices.Any(row => row.Platform == "QQ")}; " +
+                $"identity={f.Output.Identity}/{identity}; opens={f.Output.ReadOpens}/{f.Output.NetworkOpens}; transfers={f.Files.Requests}/{transfers}");
             Check(await f.Queue() == queue, "exploring sources does not mutate the queue");
             Check(await f.Files.Cache.ReadInfoAsync("fixture", LJ.S(song["songId"]), Signature("wy"), default) is not null);
         });
@@ -530,9 +534,6 @@ public static partial class MusicOfficialPlaybackScopeTests
             var info = await App.Receipt(song, platform);
             info["full"] = true;
             info["size"] = Files.Bytes.Length;
-            info["licenseExpiresAt"] = Files.Clock.Now + 3600000;
-            info["authorizationExpiresAt"] = info["licenseExpiresAt"]!.DeepClone();
-            info["offlineAllowed"] = true;
             await Files.Cache.StorePlayedAsync("fixture", LJ.S(song["songId"]), Signature(platform),
                 Element(info), () => true, default);
             Check(await Files.Cache.ReadInfoAsync("fixture", LJ.S(song["songId"]), Signature(platform), default) is not null);
@@ -608,8 +609,8 @@ public static partial class MusicOfficialPlaybackScopeTests
                 ["qualityCacheSignature"] = Signature(platform),
                 ["url"] = new Uri(files.Origin, platform + ".wav").AbsoluteUri,
                 ["headers"] = new JsonObject(), ["expiresAt"] = files.Clock.Now + 60000,
-                ["duration"] = 1d, ["size"] = 0, ["full"] = false, ["licenseExpiresAt"] = null,
-                ["delivery"] = platform + "-official", ["offlineAllowed"] = false, ["authorizationExpiresAt"] = null
+                ["duration"] = 1d, ["size"] = 0, ["full"] = false,
+                ["delivery"] = platform + "-official"
             };
         }
         public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
