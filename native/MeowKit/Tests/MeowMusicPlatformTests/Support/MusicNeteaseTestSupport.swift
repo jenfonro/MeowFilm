@@ -36,7 +36,8 @@ enum MusicNeteaseFixture {
     static func audio(level: String = "lossless", id: Int = 101, trial: Any? = nil,
                       url: String = "https://m801.music.126.net/synthetic.flac") -> [String: Any] {
         var row: [String: Any] = ["id": id, "code": 200, "url": url, "level": level, "expi": 3600,
-                                  "freeTrialInfo": NSNull(),
+                                  "freeTrialInfo": NSNull(), "type": "mp3",
+                                  "br": level == "standard" ? 128000 : 0,
                                   "freeTrialPrivilege": ["resConsumable": false, "userConsumable": false]]
         if let trial { row["freeTrialPrivilege"] = trial }
         return ["code": 200, "data": [row]]
@@ -220,6 +221,11 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
             var row: [String: Any] = ["songId": payload["songId"] ?? "101"]
             for key in ["l", "m", "h", "sq", "hr", "je", "db", "sk", "jm", "vi"] { row[key] = ["size": 123] }
             return try MusicNeteaseFixture.response(["code": 200, "data": row])
+        case "/eapi/song/enhance/player/url":
+            guard payload["ids"] as? String == "[101]", (payload["br"] as? NSNumber)?.intValue == 128000 else {
+                throw MusicServiceError.invalidRequest
+            }
+            return try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "standard"))
         case "/xeapi/song/enhance/player/url/v1":
             return try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: payload["level"] as? String ?? ""),
                 headers: ["x-encr-ssid": "synthetic-session",

@@ -187,7 +187,7 @@ extension MusicViewModel {
 
     public func loadLyrics(occurrenceId: String) async {
         guard isAvailable, !isClosed, current?.id == occurrenceId else { return }
-        beginPlaybackMetadata()
+        beginPlaybackMetadata(refreshSources: true)
         await playbackMetadata.flush()
     }
 

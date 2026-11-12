@@ -811,7 +811,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             let page = try await model.remoteQueuePage(source, cursor: cursor)
             try Task.checkCancellation()
             let index = selected.flatMap { selected in page.items.firstIndex {
-                $0.songId.utf8.elementsEqual(selected.songId.utf8) && $0.sources == selected.sources
+                MusicPublicBrowseViewModel.sameActionIdentity($0, selected)
             } } ?? (selected == nil && !page.items.isEmpty ? 0 : nil)
             if let index {
                 await model.playRemoteQueue(source, start: .init(index: offset + index, track: page.items[index]))

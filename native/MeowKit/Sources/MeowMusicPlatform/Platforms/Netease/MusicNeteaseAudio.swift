@@ -77,14 +77,26 @@ extension NeteaseMusicAccountAdapter {
         let id = try MusicNeteaseWire.id(mid), own = epoch, context = try context(credential)
         guard let format = Self.formats.first(where: { $0.quality == quality }) else { throw MusicServiceError.qualityDisabled }
         try check(own)
+        if quality != "128k" {
+            let available = try await capabilities(mid: id, credential: credential)
+            try check(own)
+            guard available.contains(quality) else { throw MusicServiceError.sourceUnavailable }
+        }
         return try await resolveAudio(id: id, quality: quality, level: format.level, context: context)
     }
     func resolveAudio(id: String, quality: String, level: String, context: MusicNeteaseContext) async throws -> JSONValue {
         let own = epoch
-        var data = ["ids": "[" + id + "]", "level": level, "encodeType": "flac"]
-        if quality == "sky" { data["immerseType"] = "c51" }
-        if quality == "vivid" { data["encodeType"] = "mp3" }
-        let root = try await request("/api/song/enhance/player/url/v1", data: data, crypto: "xeapi", context: context)
+        let standard = quality == "128k"
+        let root: [String: Any]
+        if standard {
+            root = try await request("/api/song/enhance/player/url",
+                data: ["ids": "[" + id + "]", "br": 128000], crypto: "eapi", context: context)
+        } else {
+            var data = ["ids": "[" + id + "]", "level": level, "encodeType": "flac"]
+            if quality == "sky" { data["immerseType"] = "c51" }
+            if quality == "vivid" { data["encodeType"] = "mp3" }
+            root = try await request("/api/song/enhance/player/url/v1", data: data, crypto: "xeapi", context: context)
+        }
         try check(own)
         let rows = try MusicNeteaseWire.rows(root["data"], maximum: 1)
         guard let row = rows.first else { throw MusicServiceError.audioUnavailable }
@@ -98,7 +110,7 @@ extension NeteaseMusicAccountAdapter {
             throw MusicServiceError.rateLimited
         }
         if [250, 460, 461].contains(code) { throw MusicServiceError.verificationRequired }
-        guard code == 0 || code == 200 else { throw MusicServiceError.audioUnavailable }
+        guard code == 200 || !standard && code == 0 else { throw MusicServiceError.audioUnavailable }
         for key in ["freeTrialInfo", "trial", "preview"] {
             guard let value = row[key], !(value is NSNull) else { continue }
             if let number = value as? NSNumber {
@@ -115,7 +127,14 @@ extension NeteaseMusicAccountAdapter {
         // reject full, free standard recordings for non-members.
         // Specifying a level does not prove delivery. Never label a downgrade,
         // an unknown actual level, or an automatic retry as the selected one.
-        let actual = Self.formats.first(where: { $0.level == row["level"] as? String })
+        let bitrate = try MusicQQWire.integer(row["br"] ?? 0, maximum: 100_000_000)
+        let actual: String?
+        if standard {
+            guard ["mp3", "aac", "m4a", "flac"].contains(row["type"] as? String ?? "") else {
+                throw MusicServiceError.audioUnavailable
+            }
+            actual = [128000: "128k", 192000: "192k", 320000: "320k"][bitrate]
+        } else { actual = Self.formats.first(where: { $0.level == row["level"] as? String })?.quality }
         guard let value = row["url"], !(value is NSNull) else { throw MusicServiceError.audioUnavailable }
         guard let rawURL = value as? String else { throw MusicServiceError.upstreamInvalid }
         guard !rawURL.isEmpty else { throw MusicServiceError.audioUnavailable }
@@ -125,8 +144,8 @@ extension NeteaseMusicAccountAdapter {
         guard expires > now() else { throw MusicServiceError.invalidMediaCandidate }
         return .object(["url": .string(url.absoluteString), "expiresAt": .number(expires.timeIntervalSince1970 * 1000),
                         "qualityVerified": .bool(actual != nil),
-                        "actualQuality": actual.map { .string($0.quality) } ?? .null,
-                        "bitrate": .number(Double(try MusicQQWire.integer(row["br"] ?? 0, maximum: 100_000_000))),
+                        "actualQuality": actual.map(JSONValue.string) ?? .null,
+                        "bitrate": .number(Double(bitrate)),
                         "sampleRate": .number(Double(try MusicQQWire.integer(row["sr"] ?? 0, maximum: 768_000))),
                         "duration": .number(Double(try MusicQQWire.integer(row["time"] ?? 0, maximum: 604_800_000)) / 1000),
                         "cacheAllowed": .bool(true),
@@ -149,8 +168,8 @@ extension NeteaseMusicAccountAdapter: MusicNeteasePublicAudioProvider {
             publicAudioContext = context
         }
         // Public standard/chorus endpoints do not require anonymous
-        // registration. XEAPI negotiates its own keys on demand; account login
-        // uses a separate challenge-local context.
+        // registration or XEAPI negotiation. Account login uses a separate
+        // challenge-local context.
         guard context.accountID.isEmpty, context.cookies["MUSIC_U"] == nil else { throw MusicServiceError.targetChanged }
         return context
     }

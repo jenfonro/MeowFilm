@@ -132,12 +132,12 @@ public struct MusicRemoteQueueContext: Sendable, Equatable {
 public struct MusicRemoteQueueStart: Sendable {
     public let index: Int
     public let songID: String
-    public let sourceKeys: [String]
-    public init(index: Int, songID: String, sourceKeys: [String]) {
-        self.index = index; self.songID = songID; self.sourceKeys = sourceKeys
+    public let primarySource: MusicNativeSource?
+    public init(index: Int, songID: String, primarySource: MusicNativeSource) {
+        self.index = index; self.songID = songID; self.primarySource = primarySource
     }
     public init(index: Int, track: MusicRemoteTrack) {
-        self.init(index: index, songID: track.songId, sourceKeys: track.sources.map(\.sourceKey))
+        self.index = index; songID = track.songId; primarySource = track.sources.first
     }
 }
 

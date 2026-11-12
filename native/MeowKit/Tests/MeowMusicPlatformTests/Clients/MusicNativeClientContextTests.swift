@@ -192,8 +192,8 @@ final class MusicNativeClientContextTests: XCTestCase {
         _ = try await adapter.publicStandardAudio(nativeID: "101")
         let calls = await http.recorded()
         XCTAssertEqual(calls.map(\.request.url.path), [
-            "/api/bsr/sk/get", "/xeapi/song/enhance/player/url/v1", "/eapi/login/qrcode/unikey",
-            "/api/bsr/sk/get", "/xeapi/song/enhance/player/url/v1",
+            "/eapi/song/enhance/player/url", "/eapi/login/qrcode/unikey",
+            "/eapi/song/enhance/player/url",
         ])
         for call in calls {
             XCTAssertTrue(call.request.headers["Cookie"]?.contains("deviceId=" + installed.fields["deviceId"]!) == true)

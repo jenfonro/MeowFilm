@@ -81,8 +81,7 @@ public actor MusicCandidateDiscoveryConsumer {
         case .automatic(let preferred, let force):
             // Already-known sources first. Matching (platform searches) starts
             // only after every known target failed, so a playable mapping never
-            // pays for discovery. Matching itself has no durable queue effect
-            // until the explicit CAS below.
+            // pays for discovery. Matching has no durable queue effect.
             let known = try await session.snapshot(discover: false, force: false)
             var issues = known.issues, attempted: [MusicCandidateDiscoveryTarget] = []
             var winner: MusicCandidateDiscoveryResolution?
@@ -92,7 +91,6 @@ public actor MusicCandidateDiscoveryConsumer {
                 else {
                     snapshot = try await session.snapshot(discover: true, force: force)
                     issues += snapshot.issues.filter { !issues.contains($0) }
-                    try await session.commitDiscovery()
                 }
                 let plan = try policy.plan(snapshot, preferred: preferred)
                 for target in plan where !attempted.contains(where: { $0.sameRequest(as: target) }) {

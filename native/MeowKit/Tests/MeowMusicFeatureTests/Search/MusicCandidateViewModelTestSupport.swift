@@ -18,7 +18,8 @@ actor MusicCandidateViewModelGate {
 
 actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServing {
     struct Counts: Sendable {
-        var begins = 0, commits = 0, automatic = 0, options = 0, manual = 0
+        var stateReads = 0, queueReads = 0
+        var begins = 0, automatic = 0, options = 0, manual = 0
         var retained: [String] = [], cancelled: [String] = [], facts: [MusicPlaybackFact] = []
     }
     static func track(_ id: String) -> MusicRemoteTrack {
@@ -35,27 +36,25 @@ actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServi
     var currentID = "entry-1", revision = 1, settingsRevision = 0
     var discoveryRequired = false
     var automaticFailure: MusicServiceError?, manualFailure: MusicServiceError?
-    var resolveGate: MusicCandidateViewModelGate?, refreshGate: MusicCandidateViewModelGate?
+    var resolveGate: MusicCandidateViewModelGate?
     var ready: String?
     var owned: [UUID: String] = [:]
     var closed: Set<UUID> = []
     var counts = Counts()
     func configure(discovery: Bool = false, automaticFailure: MusicServiceError? = nil,
-                   manualFailure: MusicServiceError? = nil, resolve: MusicCandidateViewModelGate? = nil,
-                   refresh: MusicCandidateViewModelGate? = nil) {
+                   manualFailure: MusicServiceError? = nil, resolve: MusicCandidateViewModelGate? = nil) {
         discoveryRequired = discovery; self.automaticFailure = automaticFailure; self.manualFailure = manualFailure
-        resolveGate = resolve; refreshGate = refresh
+        resolveGate = resolve
     }
     func snapshot() -> MusicPlaybackState {
         .init(revision: revision, settingsRevision: settingsRevision, currentId: currentID,
             total: entries.count, position: 23, canNext: true, canPrevious: true)
     }
     func state() async -> MusicPlaybackState {
-        let value = snapshot()
-        if ready != nil, let gate = refreshGate { refreshGate = nil; await gate.wait() }
-        return value
+        counts.stateReads += 1
+        return snapshot()
     }
-    func queue() -> MusicQueueSnapshot { .init(revision: revision, currentId: currentID, entries: entries) }
+    func queue() -> MusicQueueSnapshot { counts.queueReads += 1; return .init(revision: revision, currentId: currentID, entries: entries) }
     func beginCandidateDiscovery(occurrenceID: String, expectedQueueRevision: Int) throws -> any MusicCandidateDiscoverySession {
         guard currentID == occurrenceID, revision == expectedQueueRevision else { throw MusicServiceError.staleRevision }
         counts.begins += 1
@@ -71,15 +70,6 @@ actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServi
         }
         return .init(track: track, state: snapshot(),
             options: discoveryRequired ? (discover ? [Self.option("source-b")] : []) : [Self.option()])
-    }
-    func commit(_ id: UUID) throws {
-        guard !closed.contains(id) else { throw MusicServiceError.cancelled }
-        guard discoveryRequired, let index = entries.firstIndex(where: { $0.id == currentID }) else { return }
-        let t = entries[index].track
-        entries[index] = .init(id: currentID, track: .init(ref: t.ref, songId: t.songId,
-            title: t.title, artist: t.artist, album: t.album, duration: t.duration,
-            sources: t.sources + [.init(sourceKey: "source-b", platform: "tx", nativeId: "B")]))
-        counts.commits += 1; revision += 1
     }
     func resolveCandidate(_ id: UUID, occurrence: String, target: MusicCandidateDiscoveryTarget,
                           attempt: String) async throws -> MusicPlaybackCandidate {
@@ -134,7 +124,6 @@ actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServi
         guard settingsRevision == change.ifRevision else { throw MusicServiceError.staleRevision }
         settingsRevision += 1; return snapshot()
     }
-    func mutateQueueDuringRefresh() { revision += 1; entries.reverse() }
     func metrics() -> Counts { counts }
     func activeAttempt() -> String? { ready }
     func record(_ fact: MusicPlaybackFact) throws -> Bool {
@@ -160,7 +149,6 @@ actor MusicCandidateViewModelService: MusicServing, MusicCandidateDiscoveryServi
         func snapshot(discover: Bool, force: Bool) async throws -> MusicCandidateDiscoverySnapshot {
             try await owner.discoverySnapshot(id, discover: discover)
         }
-        func commitDiscovery() async throws { try await owner.commit(id) }
         func resolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String) async throws -> MusicPlaybackCandidate {
             try await owner.resolveCandidate(id, occurrence: occurrenceID, target: target, attempt: attemptID)
         }

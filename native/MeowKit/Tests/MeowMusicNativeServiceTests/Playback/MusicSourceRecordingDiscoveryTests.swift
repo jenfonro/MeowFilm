@@ -500,7 +500,7 @@ extension MusicSourceRecordingDiscoveryTests {
         await lease.close(); await closePublication(f)
     }
 
-    @MainActor func testOldDiscoveryReceiptCannotReintroduceRejectedRecordingThroughStagedAdoption() async throws {
+    @MainActor func testOldDiscoveryReceiptCannotReintroduceRejectedRecordingOrRewriteQueue() async throws {
         let f = try await publicationFixture(adopted: false)
         _ = try await f.session.loadMore(refresh: false)
         let first = try await publicationUpdates(await f.session.updates())
@@ -522,14 +522,17 @@ extension MusicSourceRecordingDiscoveryTests {
             XCTAssertTrue(value.sources.contains { $0.selection.sourceKey == f.primary })
             XCTAssertTrue(value.sources.contains { $0.selection.sourceKey == f.other })
         }
-        let before = await f.scripts.calls()
+        let before = await f.scripts.calls(), original = try await f.service.read()
         let prepared = try await f.session.match(intent: .exact(survivor.selection))
         XCTAssertEqual(prepared.selection, survivor.selection)
         let after = await f.scripts.calls()
         XCTAssertEqual(after.count, before.count, "The other discovered recording retains its usable URL")
         let queue = try await f.service.queue()
-        XCTAssertEqual(Set(queue.entries[0].track.sources.map(\.sourceKey)), [f.primary, f.other],
-                       "Choosing a lawful peer cannot adopt the rejected key from a late staged snapshot")
+        XCTAssertFalse(queue.entries[0].track.sources.contains { $0.sourceKey == f.rejected },
+                       "A late staged snapshot cannot reintroduce the rejected recording")
+        let current = try await f.service.read()
+        XCTAssertEqual(current.queue, original.queue, "Choosing a lawful peer does not rewrite the queue")
+        XCTAssertEqual(current.playback, original.playback)
         await f.service.discardSource(attemptID: prepared.candidate.attemptId)
         try await assertPublicationDonor(f)
         await closePublication(f)

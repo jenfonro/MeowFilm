@@ -78,7 +78,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
             await rejected { try await owner.remoteQueuePage(source, cursor: nil) }
             await rejected {
                 try await owner.replaceRemoteQueue(source,
-                    start: .init(index: 0, songID: "saved", sourceKeys: []),
+                    start: .init(index: 0, songID: "saved", primarySource: .init(sourceKey: "disabled", platform: platform.rawValue, nativeId: "saved")),
                     expectedRevision: 0, intent: .init())
             }
             await source.close()
@@ -141,7 +141,6 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         XCTAssertEqual(qqCalls.count, 1)
         XCTAssertEqual(Set(accountCalls), Set(["options:wy", "options:tx", "options:kg"]))
         XCTAssertEqual(store.snapshot().0, before, "discovery is staged")
-        try await session.commitDiscovery()
         let saved = try MusicDocument(store.snapshot().0, runID: "inspection")
         let current = saved.queue["entries"].array[0]["song"]
         XCTAssertEqual(current["songId"], song["songId"])
@@ -303,7 +302,6 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         let snapshot = try await session.snapshot(discover: true, force: true)
         XCTAssertFalse(snapshot.searched); XCTAssertTrue(snapshot.options.isEmpty)
         XCTAssertEqual(snapshot.track.sources.count, 5)
-        try await session.commitDiscovery()
         XCTAssertEqual(store.snapshot().0, before); XCTAssertEqual(store.snapshot().2, 0)
         let network = await http.calls(), qqCalls = await qq.calls()
         let scriptCalls = await scripts.events(), accountCalls = await accounts.events()

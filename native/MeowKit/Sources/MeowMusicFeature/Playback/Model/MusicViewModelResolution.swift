@@ -84,36 +84,19 @@ extension MusicViewModel {
         guard !isClosing, token == selectionID, current?.id == occurrenceID else { throw MusicServiceError.staleResult }
     }
 
-    /// A discovery CAS may only enrich the current recording, once. Read both
-    /// snapshots before publishing either, also on exhaustion after a commit.
-    /// Unrelated queue/settings mutations are not permission to play the result.
-    func refreshCandidateQueue(_ service: any MusicServing, epoch: UUID, token: UUID,
-        before: MusicPlaybackState, entries: [MusicQueueEntry], admission: QueuePlaybackAdmission?) async throws {
+    /// Only the explicit "not this song" edit can change a queue member here.
+    private func refreshAfterSourceRejection(_ service: any MusicServing, epoch: UUID, token: UUID,
+        before: MusicPlaybackState, admission: QueuePlaybackAdmission?) async throws {
         guard let occurrenceID = before.currentId else { throw MusicServiceError.notFound }
         let next = try await service.state()
         try checkSelection(epoch, token: token, occurrenceID: occurrenceID, admission: admission)
         let snapshot = try await service.queue()
         try checkSelection(epoch, token: token, occurrenceID: occurrenceID, admission: admission)
         guard next.revision == snapshot.revision, next.currentId == snapshot.currentId,
-              next.currentId == occurrenceID, next.settingsRevision == before.settingsRevision,
-              next.settingsRevision >= state.settingsRevision,
-              next.revision >= before.revision, next.revision - before.revision <= 1,
-              next.revision >= state.revision, snapshot.entries.map(\.id) == entries.map(\.id),
-              next.total == snapshot.entries.count else { throw MusicServiceError.staleRevision }
-        for (old, new) in zip(entries, snapshot.entries) {
-            let a = old.track, b = new.track
-            guard a.ref == b.ref, a.songId == b.songId, a.title == b.title, a.artist == b.artist,
-                  a.album == b.album, a.duration == b.duration else { throw MusicServiceError.targetChanged }
-            // Shared source facts can enrich repeated/non-current display rows
-            // without changing their frozen queue occurrence or context.
-            if old.id != occurrenceID {
-                guard a.artwork == b.artwork, old.sourceTitle == new.sourceTitle,
-                      old.remoteSessionID == new.remoteSessionID, old.displayIdentity == new.displayIdentity else {
-                    throw MusicServiceError.targetChanged
-                }
-            }
+              next.currentId == occurrenceID, next.settingsRevision == before.settingsRevision else {
+            throw MusicServiceError.staleRevision
         }
-        playbackState.state = next; playbackState.queue = snapshot.entries; position = next.position
+        playbackState.state = next; playbackState.queue = snapshot.entries
     }
 
     func prepareAutomaticCandidate(_ provider: any MusicCandidateDiscoveryServing, epoch: UUID,
@@ -121,7 +104,7 @@ extension MusicViewModel {
         replacement: SourceReplacementIntent? = nil) async {
         guard let current, let service, player != nil else { return }
         do { try admission?.check() } catch { report(error, epoch: epoch); return }
-        let before = state, entries = queue, oldAttempt = resolvingAttempt ?? candidate?.attemptId
+        let before = state, oldAttempt = resolvingAttempt ?? candidate?.attemptId
         invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: admission?.intent)
         feedbackAutomatic = automatic
         let token = selectionID
@@ -157,16 +140,11 @@ extension MusicViewModel {
             } catch { outcome = .failure(error) }
             try checkSelection(epoch, token: token, occurrenceID: current.id, admission: admission)
             resolvingAttempt = returnedAttempt
-            try await refreshCandidateQueue(service, epoch: epoch, token: token, before: before,
-                entries: entries, admission: admission)
             let result = try outcome.get()
-            guard self.current?.track.sources.contains(where: {
-                $0.sourceKey == result.target.selection.sourceKey && $0.platform == result.target.selection.siteId
-            }) == true else { throw MusicServiceError.targetChanged }
             accepted = try acceptResolvedCandidate(result.candidate, selection: result.target.selection,
                 attemptID: result.candidate.attemptId, occurrenceID: current.id, epoch: epoch, token: token,
                 admission: admission, replacement: replacement)
-            if accepted { beginPlaybackMetadata() }
+            if accepted { beginPlaybackMetadata(refreshSources: true) }
         } catch {
             if selectionID == token {
                 if !accepted { clearUnacceptedCandidate(returnedAttempt) }
@@ -268,17 +246,15 @@ extension MusicViewModel {
             await selectSource(intent: .exact(source.selection))
             return
         }
-        let own = lifecycle, token = selectionID, before = state, entries = queue
+        let own = lifecycle, token = selectionID, before = state
         let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         do {
             try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
             let selection = try await session.adopt(sourceID: source.id, occurrenceID: current.id,
                                                      expectedQueueRevision: before.revision)
             try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
-            try await refreshCandidateQueue(service, epoch: own, token: token, before: before,
-                                            entries: entries, admission: admission)
             guard selection == source.selection else { throw MusicServiceError.targetChanged }
-            // Adoption verifies/enriches the recording; it is not permission to
+            // Adoption verifies the session recording; it is not permission to
             // bypass complete local bytes for this explicitly selected quality.
             await choose(selection, automatic: false, admission: admission, useAudioCache: true)
         } catch { report(error, epoch: own) }
@@ -288,7 +264,7 @@ extension MusicViewModel {
     /// keeping the live position and paused intent.
     func rejectInspectedSource(_ source: MusicResolvedSource, session: any MusicSourceInspectionSession) async {
         guard let current, let service else { return }
-        let own = lifecycle, token = selectionID, before = state, entries = queue
+        let own = lifecycle, token = selectionID, before = state
         let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let key = source.selection.sourceKey
         let operation = sourceSwitchID
@@ -300,8 +276,8 @@ extension MusicViewModel {
                 let token = self.selectionID
                 try await session.reject(sourceKey: key, occurrenceID: current.id, expectedQueueRevision: before.revision)
                 try self.checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
-                try await self.refreshCandidateQueue(service, epoch: own, token: token, before: before,
-                                                     entries: entries, admission: admission)
+                try await self.refreshAfterSourceRejection(service, epoch: own, token: token, before: before,
+                                                     admission: admission)
             }
             return
         }
@@ -314,8 +290,8 @@ extension MusicViewModel {
             try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
             guard sourceSwitchID == operation else { return }
             let livePosition = position
-            try await refreshCandidateQueue(service, epoch: own, token: token, before: before,
-                                            entries: entries, admission: admission)
+            try await refreshAfterSourceRejection(service, epoch: own, token: token, before: before,
+                                            admission: admission)
             guard sourceSwitchID == operation else { return }
             if playing { position = livePosition }
         } catch { report(error, epoch: own); return }
@@ -372,7 +348,7 @@ extension MusicViewModel {
             accepted = try acceptResolvedCandidate(value, selection: selection, attemptID: attemptId,
                 occurrenceID: current.id, epoch: epoch, token: token, admission: admission,
                 replacement: replacement)
-            if accepted { beginPlaybackMetadata() }
+            if accepted { beginPlaybackMetadata(refreshSources: true) }
         } catch {
             if selectionID == token {
                 if !accepted { clearUnacceptedCandidate(attemptId) }
@@ -411,7 +387,7 @@ extension MusicViewModel {
             accepted = try acceptResolvedCandidate(hit.candidate, selection: selection ?? hit.selection,
                 attemptID: attemptID, occurrenceID: occurrenceID, epoch: epoch, token: token,
                 admission: admission, replacement: replacement)
-            if accepted { beginPlaybackMetadata() }
+            if accepted { beginPlaybackMetadata(refreshSources: true) }
             else { await releaseUnacceptedAttempt(attemptID, service: service) }
             if selectionID == token { cachedAudioLookup = nil }
             return true
@@ -473,7 +449,7 @@ extension MusicViewModel {
               let service, let cache = service as? any MusicCachedPlaybackRecoveryServing else { return false }
         cachedAudioRecovery = nil; terminalAttempt = fact.attemptId; playbackState.isResolving = true
         cachedAudioObservation?.cancel(); cachedAudioObservation = nil
-        let epoch = lifecycle, token = selectionID, previous = eventTail, before = state, entries = queue
+        let epoch = lifecycle, token = selectionID, previous = eventTail
         let drainID = UUID()
         let task = Task { [weak self] in
             await previous?.value
@@ -497,14 +473,12 @@ extension MusicViewModel {
                     throw MusicServiceError.invalidResponse
                 }
                 self.resolvingAttempt = result.candidate.attemptId
-                try await self.refreshCandidateQueue(service, epoch: epoch, token: token, before: before,
-                    entries: entries, admission: recovery.admission)
                 self.stopOwned()
                 self.feedbackAutomatic = recovery.automatic
                 accepted = try self.acceptResolvedCandidate(result.candidate, selection: recovery.selection ?? result.selection,
                     attemptID: result.candidate.attemptId, occurrenceID: fact.occurrenceId,
                     epoch: epoch, token: token, admission: recovery.admission)
-                if accepted { self.beginPlaybackMetadata() }
+                if accepted { self.beginPlaybackMetadata(refreshSources: true) }
             } catch {
                 if self.lifecycle == epoch, self.selectionID == token, !Task.isCancelled {
                     if !accepted { self.stopOwned(); playbackState.phase = .failed }

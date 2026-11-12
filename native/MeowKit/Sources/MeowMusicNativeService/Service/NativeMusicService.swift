@@ -204,6 +204,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     struct Attempt: Sendable {
         let id: String, occurrence: String, sourceKey: String
         var selection: MusicPlaybackSelection
+        var recording: MusicNativePlaybackRecording? = nil
         var scriptSource: MusicScriptSource? = nil
         var ready = false, started = false, ended = false, endedConsumed = false
         var isPlaying = false

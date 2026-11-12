@@ -19,7 +19,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
             XCTAssertEqual(result.target.selection.generation, 0)
             XCTAssertTrue(result.target.sameRequest(as: target))
             let facts = await session.facts()
-            XCTAssertEqual(facts.targets, [target]); XCTAssertEqual(facts.commits, 0)
+            XCTAssertEqual(facts.targets, [target])
             XCTAssertEqual(facts.retained, result.candidate.attemptId)
             XCTAssertTrue(facts.cancellations.isEmpty)
         }
@@ -79,7 +79,6 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
                 XCTAssertEqual(facts.cancellations, facts.attempts, name)
                 XCTAssertNil(facts.retained, name)
                 XCTAssertEqual(facts.discoveries, 0, name)
-                XCTAssertEqual(facts.commits, 0, name)
             }
         }
     }
@@ -105,7 +104,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
         do { _ = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .manual(target)); XCTFail("must fail") }
         catch { XCTAssertEqual(error as? MusicServiceError, .upstreamFailed) }
         let facts = await session.facts()
-        XCTAssertEqual(facts.targets, [target]); XCTAssertEqual(facts.snapshots, 0); XCTAssertEqual(facts.commits, 0)
+        XCTAssertEqual(facts.targets, [target]); XCTAssertEqual(facts.snapshots, 0)
         XCTAssertNil(facts.retained)
     }
     func testExplicitAutomaticModeRetriesAnotherExactProviderOnlyForAllowedFailure() async throws {
@@ -129,7 +128,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
             do { _ = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic()); XCTFail("must stop") }
             catch { XCTAssertEqual((error as? MusicCandidateDiscoveryFailure)?.failure, failure) }
             let facts = await session.facts()
-            XCTAssertEqual(facts.targets.count, 1); XCTAssertEqual(facts.commits, 0)
+            XCTAssertEqual(facts.targets.count, 1)
             XCTAssertEqual(facts.discoveries, 0)
         }
     }
@@ -157,7 +156,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
         let result = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic())
         XCTAssertEqual(result.attempts, 1)
         let facts = await session.facts()
-        XCTAssertEqual(facts.commits, 0); XCTAssertEqual(facts.retained, result.candidate.attemptId)
+        XCTAssertEqual(facts.retained, result.candidate.attemptId)
         XCTAssertEqual(facts.discoveries, 0, "A playable known source never starts platform searches")
     }
     func testContentFailureTriesNextKnownTargetBeforeAnyDiscovery() async throws {
@@ -171,7 +170,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
             XCTAssertEqual(result.issues.map(\.failure), [failure])
             let facts = await session.facts()
             XCTAssertEqual(facts.targets.map(\.selection.installationId), ["a", "b"])
-            XCTAssertEqual(facts.discoveries, 0); XCTAssertEqual(facts.commits, 0)
+            XCTAssertEqual(facts.discoveries, 0)
         }
     }
     func testDiscoveryStartsOnlyAfterEveryKnownTargetFailed() async throws {
@@ -184,7 +183,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
         XCTAssertEqual(result.target.selection.sourceKey, "new-source"); XCTAssertEqual(result.attempts, 2)
         let facts = await session.facts()
         XCTAssertEqual(facts.targets.map(\.selection.installationId), ["a", "b"], "the known target is not retried")
-        XCTAssertEqual(facts.discoveries, 1); XCTAssertEqual(facts.commits, 1)
+        XCTAssertEqual(facts.discoveries, 1)
     }
     func testExhaustedContentFailuresKeepThePlatformExplanation() async throws {
         let a = MusicCandidateDiscoveryFixture.option("a", qualities: ["flac"])
@@ -203,7 +202,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
             XCTAssertEqual(facts.discoveries, 1); XCTAssertNil(facts.retained)
         }
     }
-    func testDiscoveredSourceIsConsumedOnlyAfterExplicitCASAdoption() async throws {
+    func testDiscoveredSourceIsConsumedFromItsSessionWithoutQueueAdoption() async throws {
         let found = MusicCandidateDiscoveryFixture.option("b", platform: "wy", source: "new-source", qualities: ["128k"])
         let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot([]),
             discovered: MusicCandidateDiscoveryFixture.snapshot([found]))
@@ -211,7 +210,7 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
         let result = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic())
         XCTAssertEqual(result.target.selection.siteId, "wy")
         let facts = await session.facts()
-        XCTAssertEqual(facts.commits, 1); XCTAssertEqual(facts.targets.map(\.selection.sourceKey), ["new-source"])
+        XCTAssertEqual(facts.targets.map(\.selection.sourceKey), ["new-source"])
         XCTAssertEqual(facts.discoveries, 1)
     }
     func testRepeatedSnapshotsDoNotRetrySameRequestOrTruncateValidCandidates() async throws {

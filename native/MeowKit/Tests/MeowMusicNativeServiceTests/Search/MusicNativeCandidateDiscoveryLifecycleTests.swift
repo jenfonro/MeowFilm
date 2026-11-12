@@ -18,6 +18,7 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
         let state = try await service.replaceRemoteQueue(source, start: .init(index: 7, track: page.items[7]),
             expectedRevision: 0, intent: .init())
         let queued = try await service.queue()
+        let original = try await service.read(), writes = store.snapshot().2
         XCTAssertEqual(queued.entries.count, 40)
         XCTAssertEqual(state.currentId, queued.entries[7].id)
         let initialHTTP = await http.calls(), initialQQ = await qq.calls(), sourceCalls = await pages.events()
@@ -37,8 +38,12 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
         XCTAssertTrue(qqCalls.isEmpty)
         let discovered = try await service.queue()
         XCTAssertEqual(discovered.entries.count, 40)
-        XCTAssertEqual(discovered.revision, state.revision + 1)
+        XCTAssertEqual(discovered.revision, state.revision)
         XCTAssertEqual(discovered.entries[7].track.sources.count, 2)
+        let prepared = try await service.read()
+        XCTAssertEqual(prepared.queue, original.queue)
+        XCTAssertEqual(prepared.playback, original.playback)
+        XCTAssertEqual(store.snapshot().2, writes)
         for index in discovered.entries.indices where index != 7 {
             XCTAssertEqual(discovered.entries[index].track.sources, queued.entries[index].track.sources)
             let song = try MusicModel.normalize(tracks[index])
@@ -54,7 +59,7 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
         await source.close(); await service.close()
     }
 
-    func testQueueAndSettingsRevisionChangesRejectStagedCommit() async throws {
+    func testQueueAndSettingsRevisionChangesRejectStagedDiscovery() async throws {
         for settings in [true, false] {
             let store = try MusicNativeCandidateDiscoveryFixture.store()
             let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
@@ -64,7 +69,7 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
             if settings { _ = try await service.updateSettings(.init(ifRevision: 0, mode: .shuffle)) }
             else { _ = try await service.changeQueue(.select("entry-1"), expectedRevision: 1) }
             let before = store.snapshot().0
-            do { try await session.commitDiscovery(); XCTFail("stale snapshot") }
+            do { _ = try await session.snapshot(discover: false, force: false); XCTFail("stale snapshot") }
             catch { XCTAssertEqual(error as? MusicServiceError, .staleRevision) }
             XCTAssertEqual(store.snapshot().0, before)
             await session.close(retainingAttemptID: nil); await service.close()
@@ -83,11 +88,11 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
         await barrier.release()
         try await service.setAccess(available: false, generation: 2)
         try await service.setAccess(available: true, generation: 3)
-        do { try await session.commitDiscovery(); XCTFail("old access epoch") } catch {}
+        do { _ = try await session.snapshot(discover: false, force: false); XCTFail("old access epoch") } catch {}
         XCTAssertEqual(store.snapshot().0, before)
         await session.close(retainingAttemptID: nil); await service.close()
     }
-    func testClosedSessionCannotCommitOrResolveEvenIfItsCallbacksArriveLater() async throws {
+    func testClosedSessionCannotReadOrResolveEvenIfItsCallbacksArriveLater() async throws {
         let barrier = MusicNativeCandidateDiscoveryBarrier(), store = try MusicNativeCandidateDiscoveryFixture.store()
         let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
             qq: MusicNativeCandidateDiscoveryQQ(barrier: barrier), http: MusicNativeCandidateDiscoveryHTTP(barrier: barrier))
@@ -97,7 +102,7 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
         await barrier.started(4); await session.close(retainingAttemptID: nil)
         do { _ = try await task.value; XCTFail("closed") } catch {}
         await barrier.release()
-        do { try await session.commitDiscovery(); XCTFail("closed commit") }
+        do { _ = try await session.snapshot(discover: false, force: false); XCTFail("closed session") }
         catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
         XCTAssertEqual(store.snapshot().0, before); await service.close()
     }

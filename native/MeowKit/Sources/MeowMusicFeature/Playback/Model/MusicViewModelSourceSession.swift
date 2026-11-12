@@ -152,7 +152,6 @@ extension MusicViewModel {
             if !recovering { await session.beginSelection(); try checkRequest() }
             while true {
                 try checkRequest()
-                let before = state, entries = queue
                 let task = Task { try await session.match(intent: intent) }
                 sourceSwitchTask = task
                 var result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
@@ -167,9 +166,6 @@ extension MusicViewModel {
                     throw MusicServiceError.invalidResponse
                 }
                 try result.candidate.validateResolvedSelection(for: result.selection)
-                let livePosition = position
-                try await refreshCandidateQueue(service, epoch: own, token: token, before: before, entries: entries, admission: admission)
-                if previousNative != nil || recovering { position = livePosition }
                 func rejectMediaFailure(_ error: Error) async throws {
                     try checkRequest()
                     if MusicServiceError.sanitized(error) == .cancelled { throw error }
@@ -313,7 +309,7 @@ extension MusicViewModel {
                                     if wrongSource { playbackState.phase = .paused }
                                     if wrongSource, resumeAfterExclusion == playbackControlRevision { player.resume(started) }
                                 }
-                                committed = true; capturePrimaryPlayback(); beginPlaybackMetadata()
+                                committed = true; capturePrimaryPlayback(); beginPlaybackMetadata(refreshSources: true)
                                 if let failure = committedFailure?.failure {
                                     _ = recoverSourceAudio(failure, invalidDuration: committedFailure?.invalidDuration ?? false)
                                 }
@@ -361,7 +357,7 @@ extension MusicViewModel {
                         cachedAudioRecovery = nil; pendingSourceSelection = nil
                         feedbackAutomatic = automatic
                     }
-                    if committed { beginPlaybackMetadata() }
+                    if committed { beginPlaybackMetadata(refreshSources: true) }
                 }
                 break
             }

@@ -7,29 +7,32 @@ private actor OwnershipDiscoveryCache: MusicSourceDiscoveryCaching {
     nonisolated var persistsRecords: Bool { false }
     let gate: MusicNativeCandidateDiscoveryBarrier
     init(_ gate: MusicNativeCandidateDiscoveryBarrier) { self.gate = gate }
-    func entries(fingerprint: String, duration: Double) -> [String: MusicSourceDiscoveryEntry] { [:] }
+    func entries(fingerprint: String, duration: Double) async -> [String: MusicSourceDiscoveryEntry] {
+        await gate.enter(); return [:]
+    }
     func record(fingerprint: String, duration: Double, platform: String, checkedAt: Double,
                 sources: [MusicSourceDiscoverySource]) {}
-    func excluded(fingerprint: String, duration: Double) async -> Set<String> {
-        await gate.enter(); return []
-    }
-    func exclude(fingerprint: String, duration: Double, sourceKey: String) {}
     func persist(retaining recordings: [MusicSourceDiscoveryRecording]) {}
 }
 
 final class MusicSourceSessionOwnershipTests: XCTestCase {
+    private func selection() throws -> MusicPlaybackSelection {
+        let source = try XCTUnwrap(MusicModel.sources(MusicNativeCandidateDiscoveryFixture.song()).first)
+        return .init(installationId: NativeMusicFixture.installation, generation: 1,
+                     siteId: source.platform, sourceKey: source.sourceKey, quality: "flac")
+    }
     func testConcurrentFirstPlaybackAndInspectionShareResultsAndURLRequest() async throws {
         let gate = MusicNativeCandidateDiscoveryBarrier(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(),
             scripts: scripts, sourceDiscovery: OwnershipDiscoveryCache(gate))
-        let playback = Task { try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1) }
+        let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let selected = try selection()
+        let playback = Task { try await session.match(intent: .exact(selected)) }
         await gate.started(1)
-        let inspection = Task { try await service.inspectSources(for: .init(kind: .queue, id: "entry-1")) }
-        await gate.started(2)
+        let page = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
         let before = await scripts.calls(); XCTAssertTrue(before.isEmpty)
         await gate.release()
-        let session = try await playback.value, page = try await inspection.value
-        let first = try await session.match(intent: .quality("flac"))
+        let first = try await playback.value
         var updates = await page.updates().makeAsyncIterator()
         let view = try await updates.next()
         let row = try XCTUnwrap(view?.sources.first)
@@ -45,24 +48,26 @@ final class MusicSourceSessionOwnershipTests: XCTestCase {
         await service.close()
     }
 
-    func testConfigurationChangeDuringFirstCreationCannotPublishOldSession() async throws {
-        try await interruptedCreation(.configuration)
+    func testConfigurationChangeDuringFirstMatchCannotPublishOldResult() async throws {
+        try await interruptedFirstMatch(.configuration)
     }
-    func testQueueChangeDuringFirstCreationCannotPublishOldSession() async throws {
-        try await interruptedCreation(.queue)
+    func testQueueChangeDuringFirstMatchCannotPublishOldResult() async throws {
+        try await interruptedFirstMatch(.queue)
     }
-    func testCloseDuringFirstCreationCannotPublishOldSession() async throws {
-        try await interruptedCreation(.close)
+    func testCloseDuringFirstMatchCannotPublishOldResult() async throws {
+        try await interruptedFirstMatch(.close)
     }
-    func testSettingsChangeDuringFirstCreationCannotPublishOldSession() async throws {
-        try await interruptedCreation(.settings)
+    func testSettingsChangeDuringFirstMatchCannotPublishOldResult() async throws {
+        try await interruptedFirstMatch(.settings)
     }
     private enum Interruption { case configuration, queue, close, settings }
-    private func interruptedCreation(_ interruption: Interruption) async throws {
+    private func interruptedFirstMatch(_ interruption: Interruption) async throws {
         let gate = MusicNativeCandidateDiscoveryBarrier(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(),
             scripts: scripts, sourceDiscovery: OwnershipDiscoveryCache(gate))
-        let task = Task { try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1) }
+        let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let selected = try selection()
+        let task = Task { try await session.match(intent: .exact(selected)) }
         await gate.started(1)
         switch interruption {
         case .configuration: await service.sourceConfigurationChanged()
@@ -71,11 +76,11 @@ final class MusicSourceSessionOwnershipTests: XCTestCase {
         case .settings: _ = try await service.updateSettings(.init(ifRevision: 0, requestQuality: "128k"))
         }
         await gate.release()
-        do { _ = try await task.value; XCTFail("Invalidated creation returned a session") }
+        do { _ = try await task.value; XCTFail("Invalidated first match published a result") }
         catch {
             let failure = MusicServiceError.sanitized(error)
             switch interruption {
-            case .configuration: XCTAssertEqual(failure, .staleResult)
+            case .configuration: XCTAssertEqual(failure, .closed)
             case .queue: XCTAssertEqual(failure, .notFound)
             case .close: XCTAssertEqual(failure, .closed)
             case .settings: XCTAssertEqual(failure, .staleRevision)

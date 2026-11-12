@@ -102,7 +102,7 @@ extension NativeMusicService {
         try musicRequire(!occurrenceID.isEmpty)
         try musicRequire(musicSame(d.queue["currentId"].string, occurrenceID), .targetChanged)
         let ref = MusicReference(kind: .queue, id: occurrenceID)
-        let song = try self.song(ref, d), track = try MusicModel.track(song, ref)
+        let song = try await sharedSongMetadata(playbackSong(ref, d)), track = try MusicModel.track(song, ref)
         let prefs = try NativeMetadataPreferences(d.playback)
             .visible(revision: d.playback["revision"].int, available: enabledPlatforms)
         let sources = try MusicModel.sources(song)
@@ -133,6 +133,10 @@ extension NativeMusicService {
             preferences: prefs, track: track, contentRevision: nil,
             contentFingerprint: identity.stable.digest, candidates: candidates)
         try check(own)
+        let latest = try read()
+        try musicRequire(latest.queue["currentId"].string == occurrenceID &&
+            latest.queue["revision"] == d.queue["revision"] &&
+            latest.playback["revision"] == d.playback["revision"], .staleRevision)
         return result
     }
 }
