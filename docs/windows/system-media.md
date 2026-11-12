@@ -7,7 +7,7 @@
 - App 窗口只附加一个 `SystemMediaSession` 和一个 `WindowsSystemMediaBackend`。
 - `Program` 从 `ShellWindow.MediaControls` 获取启动时已恢复的设置，并显式调用音乐能力的 `AttachDesktopLyricsOwner(window)`；媒体动作统一交给 `ExecuteMediaShortcutAsync`，不创建第二播放器或隐式主窗口依赖。
 - `AppMediaWindowAttachment` 统一持有系统媒体附件、快捷键附件和设置订阅；初始及后续 SMTC 开关为 `IsAvailable && Preferences.SystemMediaEnabled`，不受全局快捷键开关或录制状态影响。未完成装配时的附件仍由入口持有并清理。
-- `ISystemPlayback` 投影当前播放器状态及 play、pause、stop、seek；外层附件持有 App 的 `AppSystemMediaAttachment`，以唯一 `NativePlayback` 的准确 owner／identity 选择投影。Film 使用同一 `FilmCapability.PlaybackMedia`，包含外播的真实时钟和暂停状态；其他 owner 保持原生播放器投影，不创建第二个媒体会话。
+- `ISystemPlayback` 投影当前播放器状态及 play、pause、stop、seek；外层附件持有 App 的 `AppSystemMediaAttachment`，以唯一 `NativePlayback` 的准确 owner／identity 选择投影。Film 使用同一 `FilmCapability.PlaybackMedia`，包含当前原生输出的真实时钟和暂停状态；其他 owner 保持原生播放器投影，不创建第二个媒体会话。
 - `SystemPlaybackOwner` 按 `OwnerId` 注册 next／previous 和 audio／video kind，可提供 Play 回调执行业务恢复准入；提供后不再回退到原生 Play。音乐用此入口阻止恢复已排除的错源，未提供回调的 owner 保持原生恢复行为。未注册 owner 的媒体不会向系统控制面声明可操作。
 - 系统只接收标题、播放状态、位置、时长和能力标志；不接收平台凭据、媒体 URL、文件路径或脚本状态。
 
@@ -49,7 +49,7 @@
 - 音乐 owner 随后封闭业务命令并排空已接纳工作；之前已开始的系统命令继续遵守原有取消与实际排空语义。
 - 准备失败后取消退出，业务 owner 恢复后共享设置恢复 `IsAvailable`；两个通道依当前权威开关重新启用，保留的订阅继续生效。
 
-系统 Play／Next／Previous 走各业务 owner 的恢复与切集入口。App typed attachment 将 Film 的 Pause／Stop／Seek 交回准确 Film owner，外播不误控暂停的 native donor；Film 的会话／attempt 围栏拒绝退休或替换后的操作。其他 owner 的直接控制仍操作 App 持有的唯一 `NativePlayback`，播放器自身的命令门与 disposing 围栏继续管理原生操作。
+系统 Play／Next／Previous 走各业务 owner 的恢复与切集入口。App typed attachment 将 Film 的 Pause／Stop／Seek 交回准确 Film owner；Film 的会话／attempt 围栏拒绝退休或替换后的操作。其他 owner 的直接控制仍操作 App 持有的唯一 `NativePlayback`，播放器自身的命令门与 disposing 围栏继续管理原生操作。
 
 真正释放由 App 生命周期调用 attachment 的 `DisposeAsync`：正常关闭先完成模块 preparation 和 disposal，强制清理则等待 owner 的 Abort 实际完成。两条路径都在释放 attachment 后，才通过 App 的资源回调释放 `NativePlayback`。准备失败后取消退出不会释放 attachment。
 

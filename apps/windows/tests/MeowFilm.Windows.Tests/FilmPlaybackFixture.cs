@@ -4,7 +4,6 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
-using System.Windows;
 using System.Windows.Controls;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -310,16 +309,17 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
 internal sealed class FilmPlaybackRig : IAsyncDisposable
 {
     internal readonly FilmRuntimeProbe Runtime = new();
-    internal readonly FilmNativeProbe Native = new();
+    internal readonly FilmNativeProbe Native;
     internal readonly FilmMemoryStore Store = new();
     internal readonly FilmLibrary Library;
     internal readonly FilmPlaybackSession Session;
     internal Func<CancellationToken, Task<RuntimeConnection>>? Capture;
     internal FilmPlaybackPage Page { get; private set; } = null!;
-    internal FilmPlaybackRig(Func<string, FilmMediaReceipt, int, CancellationToken, Task<IFilmExternalPlayer>>? external = null)
+    internal FilmPlaybackRig(ContentControl? view = null)
     {
+        Native = new(view);
         Library = new(Store);
-        Session = new(token => (Capture ?? Runtime.CaptureConnectionAsync)(token), Native, external);
+        Session = new(token => (Capture ?? Runtime.CaptureConnectionAsync)(token), Native);
     }
     internal async Task OpenAsync(FilmCardItem? item = null, FilmPlaybackRequest? request = null, CancellationToken token = default)
     {
@@ -341,12 +341,13 @@ internal sealed class FilmPlaybackRig : IAsyncDisposable
     }
 }
 
-internal sealed class FilmNativeProbe : IFilmNativeMedia
+internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNativeMedia
 {
-    public FrameworkElement View { get; } = new Border();
+    public ContentControl View { get; } = view ?? new ContentControl();
     public NativePlaybackScope? Scope { get; private set; }
     public string? Identity { get; private set; }
     public bool HasOutput { get; private set; }
+    public bool Buffering { get; private set; }
     public bool Paused { get; private set; }
     public double Position { get; private set; }
     public double Duration { get; private set; } = 600;
@@ -358,10 +359,8 @@ internal sealed class FilmNativeProbe : IFilmNativeMedia
     internal readonly List<(NativePlaybackScope Scope, string Command, object? Value)> Controls = [];
     internal Func<CancellationToken, Task>? Preparing;
     internal Func<CancellationToken, Task>? Committing;
-    internal Func<CancellationToken, Task>? Attaching;
     internal Func<Task>? Stopping;
     internal INativeMediaResourceLease? AcceptedLease, PendingLease;
-    private IAsyncDisposable? ownedOutput;
     private RuntimeMediaPlaybackIntent? intent;
     private NativePlaybackScope? preparedFrom;
     private (RuntimeMediaPlaybackIntent Intent, string Code)? inputFailure;
@@ -412,12 +411,10 @@ internal sealed class FilmNativeProbe : IFilmNativeMedia
         if (Committing is { } committing) await committing(token);
         CheckPrepared();
         if (!canCommit()) return false;
-        if (ownedOutput is { } output) { await output.DisposeAsync(); ownedOutput = null; }
-        CheckPrepared();
-        if (!canCommit()) return false;
         if (!value.PreserveCurrent) { Position = value.Position; Paused = value.Paused; }
         AcceptedLease = PendingLease; PendingLease = null; intent = null;
         Identity = value.Identity; Scope = new("film", value.Identity, ++generation); HasOutput = true; Commits++;
+        SetBuffering(false);
         committed(); Pulse("Identity");
         if (old is not null) await old.DisposeAsync();
         SettledIdentity = value.Identity;
@@ -433,23 +430,6 @@ internal sealed class FilmNativeProbe : IFilmNativeMedia
     }
     internal void FailPendingInput(string code) =>
         inputFailure = (intent ?? throw new InvalidOperationException("No prepared input to fail"), code);
-    public async Task<IAsyncDisposable> OwnOutputAsync(NativePlaybackScope scope, IAsyncDisposable output, CancellationToken token)
-    {
-        var owned = new ProbeOwnedOutput(output);
-        try
-        {
-            token.ThrowIfCancellationRequested(); Require(scope);
-            if (ownedOutput is { } previous) await previous.DisposeAsync();
-            token.ThrowIfCancellationRequested();
-            Require(scope);
-            if (Attaching is { } attach) await attach(token);
-            token.ThrowIfCancellationRequested();
-            Require(scope);
-            ownedOutput = owned;
-            return owned;
-        }
-        catch { await owned.DisposeAsync(); throw; }
-    }
     public Task PauseAsync(NativePlaybackScope scope, bool paused) { Require(scope); Controls.Add((scope, "pause", paused)); Paused = paused; Pulse("PauseRequested"); return Task.CompletedTask; }
     public Task SeekAsync(NativePlaybackScope scope, double value) { Require(scope); Controls.Add((scope, "seek", value)); Position = value; Pulse("PositionSeconds"); return Task.CompletedTask; }
     public Task RateAsync(NativePlaybackScope scope, double value) { Require(scope); Controls.Add((scope, "rate", value)); Rate = value; return Task.CompletedTask; }
@@ -458,8 +438,8 @@ internal sealed class FilmNativeProbe : IFilmNativeMedia
     {
         Require(scope); Stops++;
         if (Stopping is { } stop) await stop();
-        if (ownedOutput is { } output) { await output.DisposeAsync(); ownedOutput = null; }
         HasOutput = false; Scope = null;
+        SetBuffering(false);
         if (AcceptedLease is { } lease) { AcceptedLease = null; await lease.DisposeAsync(); }
         Identity = null; Pulse("Identity");
     }
@@ -467,55 +447,24 @@ internal sealed class FilmNativeProbe : IFilmNativeMedia
     {
         long terminalGeneration = generation;
         HasOutput = false; Scope = null;
+        SetBuffering(false);
         if (AcceptedLease is { } lease) { AcceptedLease = null; await lease.DisposeAsync(); }
         if (terminalGeneration != generation) return;
         if (ended) Ended?.Invoke(this, EventArgs.Empty); else Failed?.Invoke(this, EventArgs.Empty);
     }
     internal async Task TakeMusicAsync()
     {
-        if (ownedOutput is { } output) { await output.DisposeAsync(); ownedOutput = null; }
         if (AcceptedLease is { } lease) { AcceptedLease = null; await lease.DisposeAsync(); }
         Identity = null; Scope = null; HasOutput = false;
+        SetBuffering(false);
         Pulse("OwnerId");
     }
-    private sealed class ProbeOwnedOutput(IAsyncDisposable output) : IAsyncDisposable
+    internal void SetBuffering(bool value)
     {
-        private Task? closing;
-        public ValueTask DisposeAsync() => new(closing ??= output.DisposeAsync().AsTask());
+        if (Buffering == value) return;
+        Buffering = value;
+        Pulse(nameof(NativePlayback.IsBuffering));
     }
     internal void Pulse(string property) => PropertyChanged?.Invoke(this, new(property));
     private void Require(NativePlaybackScope scope) { if (Scope != scope) throw new FilmPlaybackException("STALE_SESSION"); }
-}
-
-internal sealed class FilmExternalProbe(FilmMediaReceipt receipt) : IFilmExternalPlayer
-{
-    public bool Running { get; private set; } = true;
-    public double Position { get; private set; } = receipt.Position;
-    public double Duration { get; private set; } = 600;
-    public bool Paused { get; private set; } = receipt.Paused;
-    internal int Volume, Disposals, DisposeCalls, DisposalCompletions;
-    internal readonly List<(string Command, object? Value)> Controls = [];
-    internal double Rate = 1;
-    internal string? Aspect;
-    internal Func<Task>? Draining;
-    internal Func<double, Task>? SettingRate;
-    internal Func<int, Task>? SettingVolume;
-    private Task? disposal;
-    public event EventHandler? Changed;
-    public event EventHandler<string>? Terminal;
-    private void RequireRunning() { if (!Running) throw new FilmPlaybackException("EXTERNAL_PLAYER_FAILED"); }
-    public Task PauseAsync(bool value) { RequireRunning(); Controls.Add(("pause", value)); Paused = value; Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
-    public Task SeekAsync(double value) { RequireRunning(); Controls.Add(("seek", value)); Position = value; Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
-    public async Task RateAsync(double value) { RequireRunning(); Controls.Add(("rate", value)); if (SettingRate is { } set) await set(value); Rate = value; }
-    public Task AspectAsync(string? value) { RequireRunning(); Controls.Add(("aspect", value)); Aspect = value; return Task.CompletedTask; }
-    public async Task VolumeAsync(int value) { RequireRunning(); Controls.Add(("volume", value)); if (SettingVolume is { } set) await set(value); Volume = value; }
-    internal void SetClock(double position, double duration, bool paused) { Position = position; Duration = duration; Paused = paused; }
-    internal void Finish(string action) { Running = false; Terminal?.Invoke(this, action); }
-    public ValueTask DisposeAsync() { DisposeCalls++; return new(disposal ??= CloseAsync()); }
-    private async Task CloseAsync()
-    {
-        Running = false; Disposals++;
-        if (Draining is { } drain) await drain();
-        DisposalCompletions++;
-    }
 }

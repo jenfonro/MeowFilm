@@ -16,24 +16,6 @@ public sealed record RuntimeMediaPlaybackIntent(string OwnerId, string Identity,
 
 public sealed partial class NativePlayback
 {
-    private sealed class RuntimeOutput(IAsyncDisposable output) : IAsyncDisposable
-    {
-        private readonly object gate = new();
-        private Task? closing;
-        internal bool ReleaseFailed { get { lock (gate) return closing?.IsFaulted == true; } }
-        public ValueTask DisposeAsync()
-        {
-            lock (gate) return new(closing ??= CloseAsync());
-        }
-        private async Task CloseAsync()
-        {
-            // Publish the one receipt before invoking a child that can reenter disposal.
-            await Task.Yield();
-            try { await output.DisposeAsync().ConfigureAwait(false); }
-            catch { throw Error(PlaybackError.ReleaseFailed); }
-        }
-    }
-
     private RuntimeMediaPlaybackIntent? _runtimeHandoffIntent;
     private HwndSource? _runtimeHandoffWindow;
 
@@ -115,8 +97,7 @@ public sealed partial class NativePlayback
         TryCommitRuntimeMediaAsync(intent, static () => true, committed, token);
 
     /// <summary>
-    /// False defers publication without retiring the prepared input. The donor's
-    /// attached child may already be drained; its native session remains current.
+    /// False defers publication without retiring either native input.
     /// The caller must release its own control lock before awaiting business admission.
     /// </summary>
     public async Task<bool> TryCommitRuntimeMediaAsync(RuntimeMediaPlaybackIntent intent,
@@ -182,52 +163,6 @@ public sealed partial class NativePlayback
         RequireScope(scope);
         return StopCoreAsync();
     });
-
-    /// <summary>
-    /// Owns one secondary output of this exact paused native occurrence (for example
-    /// an external player). Every replacement/stop drains it before another owner
-    /// may output. Ownership transfers on entry, including rejected attachment.
-    /// </summary>
-    public async Task<IAsyncDisposable> OwnRuntimeOutputAsync(NativePlaybackScope scope,
-        IAsyncDisposable output, CancellationToken token = default)
-    {
-        IAsyncDisposable? owned = null;
-        await TrackOwnedMediaRequestAsync(async () =>
-        {
-            owned = await OwnRuntimeOutputCoreAsync(scope, output, token);
-        }).ConfigureAwait(false);
-        return owned!;
-    }
-
-    private async Task<IAsyncDisposable> OwnRuntimeOutputCoreAsync(NativePlaybackScope scope,
-        IAsyncDisposable output, CancellationToken token)
-    {
-        ArgumentNullException.ThrowIfNull(output);
-        var owned = new RuntimeOutput(output);
-        try
-        {
-            await DispatchAsync(async () =>
-            {
-                await _commands.WaitAsync(token);
-                try
-                {
-                    var session = RequireScope(scope);
-                    if (!_pauseRequested) throw Error(PlaybackError.InvalidRequest);
-                    if (session.RuntimeOutput is { } previous) await previous.DisposeAsync();
-                    token.ThrowIfCancellationRequested();
-                    if (!ReferenceEquals(RequireScope(scope), session)) throw Error(PlaybackError.Superseded);
-                    session.RuntimeOutput = owned;
-                }
-                finally { _commands.Release(); }
-            }).ConfigureAwait(false);
-            return owned;
-        }
-        catch
-        {
-            await owned.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-    }
 
     /// <summary>
     /// Prepares an owned runtime input using the existing muted/paused handoff.

@@ -74,8 +74,12 @@ public static class FilmPlaybackTests
                 "the native consumer does not repeat metadata or detail loading");
             Check(ReferenceEquals(scene.Playback.DataContext, page) && Named<Grid>(scene.View, "PlaybackPage").IsVisible,
                 "FilmView binds the seeded playback page");
-            Check(Visuals(scene.Playback).OfType<FrameworkElement>().All(element => element.ToolTip is null),
-                "film titles descriptions and playback controls have no hover hints");
+            var playerOverlay = Named<Grid>(scene.Playback, "PlayerOverlay");
+            var shortVideo = Named<CheckBox>(scene.Playback, "ShortVideoButton");
+            Check(Visuals(scene.Playback).OfType<FrameworkElement>()
+                    .Where(element => !element.IsDescendantOf(playerOverlay) && !ReferenceEquals(element, shortVideo))
+                    .All(element => element.ToolTip is null),
+                "film titles and descriptions remain free of hover hints; picture icon controls and prefetch state have their own labels");
             Check(((IDesktopHeaderSource)scene.View).Header is
                 { Title: "播放页", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
                 "the shell receives the playback heading and retains the film search entry");
@@ -802,7 +806,7 @@ public static class FilmPlaybackTests
         var selected = scene.Page.SelectedEpisode;
         Check(selected is { IsSelected: true } && selected.Season == episode.Season && selected.Number == episode.Number &&
             scene.Page.Episodes.Count(candidate => candidate.IsSelected) == 1 &&
-            Named<TextBlock>(scene.Playback, "PlayerEpisode").Text.Length == 0 && !scene.Page.HasOutput,
+            scene.Page.CurrentLabel.Length == 0 && !scene.Page.HasOutput,
             "one exact target is selected, but no player title is invented before actual media output");
         var host = Named<ItemsControl>(scene.Playback, scene.Page.IsListLayout ? "EpisodeList" : "EpisodeCards");
         var badges = Visuals(host).OfType<TextBlock>().Where(text => text.IsVisible && text.Text == "当前").ToArray();
