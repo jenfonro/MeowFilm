@@ -96,6 +96,7 @@ const configFor = (rules = []) => ({
 const stripNativeAdaptation = (item) => {
   const {
     displayKey, siteId, installationId, generation, siteOrder, sitePage,
+    detailId, raw,
     ...result
   } = clone(item);
   if (result.sourceKind === 'site') {
@@ -117,6 +118,11 @@ for (const fixture of siteCases) {
   config.searchDisplayMode = 'sites';
   const expected = clone(await reference.streamSearch(fixture.query, config));
   const actual = invoke({ operation: 'site', ...fixture });
+  for (const item of actual.items) {
+    const row = fixture.payload.list.find((entry) => entry && (entry.vod_id ?? entry.id) === item.detailId);
+    assert.notEqual(row, undefined, `${fixture.name}: typed source identity remains available`);
+    assert.deepEqual(item.raw, row, `${fixture.name}: native handoff keeps the original row`);
+  }
   assert.deepEqual(actual.items.map(stripNativeAdaptation), expected.siteItems.map(stripNativeAdaptation), fixture.name);
   counters.sites++;
 }
