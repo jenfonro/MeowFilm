@@ -82,6 +82,8 @@ public static class PanAccountTransportTests
             client.UploadSourceAsync(module, installationId, sourceRevision, source, basename, cancellationToken);
         public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
             client.ReadImageAsync(reference, maximumBytes, cancellationToken);
+        public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
+            client.ReadImageAsync(reference, cancellationToken);
         public ValueTask DisposeAsync() => client.DisposeAsync();
     }
 }

@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
@@ -7,7 +5,6 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
@@ -29,13 +26,16 @@ public static class FilmPlaybackControlsTests
             await using var scene = await Scene.Create();
             await scene.Play();
             Click(scene.Element<Button>("PlayButton")); await Until(() => scene.Rig.Native.Paused);
-            var seek = scene.Element<Slider>("SeekSlider"); seek.Value = 89;
+            var seek = scene.Element<Slider>("SeekSlider");
+            seek.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(seek)!, 0, Key.Right)
+            { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+            seek.Value = 89;
             seek.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(seek)!, 0, Key.Right)
             { RoutedEvent = Keyboard.PreviewKeyUpEvent });
             await Until(() => scene.Rig.Native.Position == 89);
-            scene.Element<ComboBox>("RateBox").SelectedIndex = 3;
-            scene.Element<ComboBox>("AspectBox").SelectedIndex = 2;
-            var volume = Visuals(scene.View).OfType<Slider>().Single(slider => AutomationProperties.GetName(slider) == "音量");
+            scene.Element<ListBox>("RateBox").SelectedIndex = 4;
+            scene.Element<ListBox>("AspectBox").SelectedIndex = 2;
+            var volume = scene.Element<Slider>("VolumeSlider");
             volume.Value = 37;
             await Until(() => scene.Rig.Native.Rate == 1.5 && scene.Rig.Native.Aspect == "4:3" && scene.Rig.Native.Volume == 37);
             Check(scene.Rig.Session.Rate == 1.5 && scene.Rig.Session.Aspect == "4:3" &&
@@ -49,13 +49,14 @@ public static class FilmPlaybackControlsTests
             await scene.Play();
             var frame = scene.Element<Grid>("PlayerFrame"); var host = scene.Element<ContentControl>("VideoHost");
             var view = scene.Rig.Native.View;
-            Click(scene.Button("全屏"));
+            Click(scene.Element<Button>("FullscreenButton"));
             var full = scene.Window.OwnedWindows.Cast<Window>().Single();
             Check(ReferenceEquals(host.Content, view) && frame.IsDescendantOf(full) && scene.Rig.Native.Commits == 1,
                 "full screen moves the existing native surface rather than opening a new player");
             full.Close();
-            await Until(() => frame.IsDescendantOf(scene.View));
-            Click(scene.Button("画中画"));
+            await Until(() => frame.IsDescendantOf(scene.View) && !full.IsVisible &&
+                !scene.Window.OwnedWindows.Cast<Window>().Contains(full));
+            Click(scene.Element<Button>("PipButton"));
             var pip = scene.Window.OwnedWindows.Cast<Window>().Single();
             Check(ReferenceEquals(host.Content, view) && frame.IsDescendantOf(pip) && scene.Rig.Session.CanRetainMedia,
                 "the visible PiP window owns the same accepted output");
@@ -72,6 +73,8 @@ public static class FilmPlaybackControlsTests
         {
             await using var scene = await Scene.Create();
             await scene.Play();
+            scene.Rig.Runtime.Change(root => root["current"]!["candidate"]!["provider"] = "uc");
+            await Until(() => scene.Rig.Page.PlayerPanLabel == "UC");
             int before = scene.Rig.Runtime.Calls.Count;
             var pan = scene.Element<Button>("PanButton"); Click(pan);
             Check(scene.Rig.Runtime.Calls.Count == before, "opening the pan menu does not request sources or start matching");
@@ -90,32 +93,121 @@ public static class FilmPlaybackControlsTests
             Click(scene.Element<Button>("SwitchButton")); await Until(() => scene.Called("switch"));
             Check(scene.Element<Button>("BlockButton").IsEnabled && scene.Rig.Native.Identity == "controls",
                 "permanent block is available for a real current target while browse/switch acknowledgement does not destroy its donor");
-            var answer = AnswerBlockDialog(scene, confirm: true);
             Click(scene.Element<Button>("BlockButton"));
-            await answer;
             await Until(() => scene.Called("block"));
             selected = scene.Rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "block");
             Check(FilmJson.Text(selected.Parameters, "attemptId") == "controls",
-                "the real confirmation sends the exact occurrence it described");
+                "the direct wrong-source action sends the exact current occurrence without a second confirmation");
         });
-        yield return Test("wrong-source confirmation cancels without a command and failed persistence keeps its output", async () =>
+        yield return Test("same pending source actions follow snapshot constraints without blocking a different selection or a later retry", async () =>
+        {
+            foreach (var selection in new[]
+            {
+                (Action: "switch", Field: "", Value: "", Index: -1),
+                (Action: "pan", Field: "provider", Value: "uc", Index: 3),
+                (Action: "quality", Field: "quality", Value: "4k_hdr", Index: 0)
+            })
+            {
+                await using var scene = await Scene.Create();
+                await scene.Play();
+                scene.Window.Width = 1900;
+                await Until(() => scene.Element<Button>("PanButton").IsVisible &&
+                    scene.Element<Button>("QualityButton").IsVisible && scene.Element<Button>("SwitchButton").IsVisible);
+                var scope = scene.Rig.Native.Scope;
+                JsonElement[] SourceCommands() => scene.Rig.Runtime.Calls
+                    .Where(call => call.Method == "film.session.command" &&
+                        FilmJson.Text(call.Parameters, "action") is "switch" or "pan" or "quality")
+                    .Select(call => call.Parameters).ToArray();
+                void Choose(string action, int index)
+                {
+                    var button = scene.Element<Button>(action switch
+                    {
+                        "pan" => "PanButton", "quality" => "QualityButton", _ => "SwitchButton"
+                    });
+                    Click(button);
+                    if (index < 0) return;
+                    ((MenuItem)button.ContextMenu.Items[index]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                    button.ContextMenu.IsOpen = false;
+                }
+                scene.Rig.Runtime.Intercept = (method, input, _) =>
+                {
+                    string action = FilmJson.Text(input, "action");
+                    if (method == "film.session.command" && action is "switch" or "pan" or "quality")
+                        scene.Rig.Runtime.Change(root =>
+                        {
+                            root["stage"] = "resolving";
+                            var constraint = new JsonObject { ["action"] = action };
+                            if (action != "switch")
+                            {
+                                string field = action == "pan" ? "provider" : "quality";
+                                constraint[field] = FilmJson.Text(input, field);
+                            }
+                            root["constraint"] = constraint;
+                        });
+                    // The RPC has completed; the server snapshot, not a client in-flight latch, remains pending.
+                    return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+                };
+                Choose(selection.Action, selection.Index);
+                await Until(() => SourceCommands().Length == 1 && scene.Rig.Page.PlayerBusy);
+                var first = SourceCommands().Single();
+                Check(FilmJson.Text(first, "action") == selection.Action &&
+                    (selection.Field.Length == 0 || FilmJson.Text(first, selection.Field) == selection.Value),
+                    "the initial UI source action sends its exact business action and selected constraint");
+                Choose(selection.Action, selection.Index);
+                Choose(selection.Action, selection.Index);
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(SourceCommands().Length == 1,
+                    "repeating the same server-pending action and value sends no additional business command");
+
+                scene.Rig.Runtime.Change(root => root["stage"] = "playing");
+                await Until(() => !scene.Rig.Page.PlayerBusy);
+                Choose(selection.Action, selection.Index);
+                await Until(() => SourceCommands().Length == 2 && scene.Rig.Page.PlayerBusy);
+                Check(FilmJson.Text(SourceCommands()[1], "action") == selection.Action &&
+                    (selection.Field.Length == 0 || FilmJson.Text(SourceCommands()[1], selection.Field) == selection.Value),
+                    "once busy ends the same retained constraint can be requested again");
+
+                string differentAction = selection.Action == "switch" ? "pan" : selection.Action;
+                string differentField = differentAction == "pan" ? "provider" : "quality";
+                string differentValue = selection.Action switch { "pan" => "baidu", "quality" => "4k_fps", _ => "uc" };
+                int differentIndex = selection.Action switch { "pan" => 4, "quality" => 1, _ => 3 };
+                Choose(differentAction, differentIndex);
+                await Until(() => SourceCommands().Length == 3);
+                Check(FilmJson.Text(SourceCommands()[2], "action") == differentAction &&
+                    FilmJson.Text(SourceCommands()[2], differentField) == differentValue &&
+                    scene.Rig.Native.Scope == scope && scene.Rig.Native.Commits == 1 &&
+                    scene.Rig.Native.Stops == 0 && scene.Rig.Native.SettledIdentity == "controls" && scene.Notices.Count == 0,
+                    "busy allows a different action or constraint value without reopening or stopping its usable output");
+            }
+        });
+        yield return Test("busy wrong-source clicks do nothing while the settled action sends its exact current occurrence", async () =>
         {
             await using var scene = await Scene.Create();
             await scene.Play();
+            scene.Rig.Runtime.Change(root => root["stage"] = "resolving");
+            await Until(() => scene.Rig.Page.PlayerBusy);
             int before = scene.Rig.Runtime.Calls.Count;
-            var cancel = AnswerBlockDialog(scene, confirm: false);
             Click(scene.Element<Button>("BlockButton"));
-            await cancel;
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(scene.Rig.Runtime.Calls.Count == before && scene.Rig.Native.SettledIdentity == "controls" &&
-                scene.Rig.Native.Stops == 0, "Cancel closes the native dialog without writing, matching or stopping media");
-
+                scene.Rig.Native.Stops == 0, "loading ignores wrong-source input without writing, matching or stopping its donor");
+            scene.Rig.Runtime.Change(root => root["stage"] = "playing");
+            await Until(() => !scene.Rig.Page.PlayerBusy);
+            Click(scene.Element<Button>("BlockButton"));
+            await Until(() => scene.Called("block"));
+            var command = scene.Rig.Runtime.Calls.Single(call => FilmJson.Text(call.Parameters, "action") == "block");
+            Check(FilmJson.Text(command.Parameters, "attemptId") == "controls" && scene.Rig.Runtime.Calls.Count == before + 1 &&
+                scene.Rig.Native.Stops == 0 && scene.Rig.Native.SettledIdentity == "controls",
+                "once loading settles the real action directly sends only the accepted occurrence");
+        });
+        yield return Test("failed wrong-source persistence retains the exact requested occurrence and its usable output", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.Play();
             scene.Rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
                 method == "film.session.command" && FilmJson.Text(input, "action") == "block"
                     ? FilmRuntimeProbe.Failure("STORAGE_ERROR") : scene.Rig.Runtime.Handle(method, input));
-            var confirm = AnswerBlockDialog(scene, confirm: true);
             Click(scene.Element<Button>("BlockButton"));
-            await confirm;
             await Until(() => scene.Notices.Count == 1);
             var command = scene.Rig.Runtime.Calls.Single(call => FilmJson.Text(call.Parameters, "action") == "block");
             Check(FilmJson.Text(command.Parameters, "attemptId") == "controls" && scene.Notices.Single() == "本地存储失败" &&
@@ -123,33 +215,41 @@ public static class FilmPlaybackControlsTests
                 !scene.Rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "switch"),
                 "a failed durable receipt is observable and never authorizes replacement of the still-usable output");
         });
-        yield return Test("confirming an old wrong-source dialog cannot silently retarget a newer playing occurrence", async () =>
+        yield return Test("an in-flight wrong-source failure keeps its captured attempt and preserves the pending replacement", async () =>
         {
             await using var scene = await Scene.Create();
             await scene.Play();
+            bool entered = false;
+            var pending = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
             scene.Rig.Runtime.Intercept = (method, input, _) =>
             {
                 if (method == "film.session.command" && FilmJson.Text(input, "action") == "block")
                 {
                     Check(FilmJson.Text(input, "attemptId") == "controls",
                         "the view must send the original captured occurrence, never the later current");
-                    return Task.FromResult(FilmRuntimeProbe.Failure("STALE_SESSION"));
+                    entered = true;
+                    return pending.Task;
                 }
                 return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
             };
-            var confirm = AnswerBlockDialog(scene, confirm: true, async () =>
+            try
             {
+                Click(scene.Element<Button>("BlockButton"));
+                await Until(() => entered);
                 scene.Rig.Runtime.Attempt("replacement", Candidate("replacement", episode: 2));
-                await Until(() => scene.Rig.Native.SettledIdentity == "replacement" &&
+                await Until(() => scene.Rig.Page.PlayerBusy);
+                Check(scene.Rig.Native.SettledIdentity == "controls" && scene.Rig.Session.HasOutput,
+                    "the pending business receipt keeps its usable donor while the replacement waits for admission");
+                pending.SetResult(FilmRuntimeProbe.Failure("STALE_SESSION"));
+                await Until(() => scene.Notices.Count == 1 && scene.Rig.Native.SettledIdentity == "replacement" &&
                     scene.Rig.Page.CurrentAttemptId == "replacement");
-            });
-            Click(scene.Element<Button>("BlockButton"));
-            await confirm;
-            await Until(() => scene.Notices.Count == 1);
-            Check(scene.Rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "block") == 1 &&
-                scene.Notices.Single() == "会话已失效，请重连" &&
-                scene.Rig.Native.SettledIdentity == "replacement" && scene.Rig.Session.HasOutput,
-                "a stale confirmation surfaces the rejection and leaves the newer occurrence playing");
+                Check(scene.Rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "block") == 1 &&
+                    FilmJson.Text(scene.Rig.Runtime.Calls.Single(call => FilmJson.Text(call.Parameters, "action") == "block").Parameters, "attemptId") == "controls" &&
+                    scene.Notices.Single() == "会话已失效，请重连" &&
+                    scene.Rig.Native.SettledIdentity == "replacement" && scene.Rig.Session.HasOutput,
+                    "the old attempt's classified rejection remains observable and leaves the newer occurrence playing");
+            }
+            finally { pending.TrySetResult(FilmRuntimeProbe.Failure("CANCELLED")); }
         });
         foreach (var rejected in new[]
         {
@@ -166,7 +266,8 @@ public static class FilmPlaybackControlsTests
                     if (accepted) scene.Rig.Runtime.Change(root => root[rejected.Field] = true);
                     bool PageValue() => rejected.Action == "preview" ? scene.Rig.Page.PreviewEpisodes : scene.Rig.Page.ShortVideo;
                     var box = Visuals(scene.View).OfType<CheckBox>().Single(value => Equals(value.Content, rejected.Label));
-                    await Until(() => PageValue() == accepted && box.IsChecked == accepted);
+                    await Until(() => PageValue() == accepted && box.IsChecked == accepted,
+                        () => $"Initial {rejected.Action} state did not settle: accepted={accepted}, page={PageValue()}, checkbox={box.IsChecked}");
                     long sequence = scene.Rig.Runtime.Value.GetProperty("sequence").GetInt64();
                     int before = scene.Rig.Runtime.Calls.Count;
                     var toggledValues = new List<bool?>();
@@ -179,8 +280,10 @@ public static class FilmPlaybackControlsTests
                     };
                     for (int click = 1; click <= 2; click++)
                     {
-                        ToggleByKeyboard(box);
-                        await Until(() => scene.Rig.Runtime.Calls.Count == before + click && scene.Notices.Count == 1);
+                        await ToggleByKeyboardAsync(box);
+                        await Until(() => scene.Rig.Runtime.Calls.Count == before + click && scene.Notices.Count == 1,
+                            () => $"{rejected.Action} rejection did not settle: accepted={accepted}, click={click}, " +
+                                $"calls={scene.Rig.Runtime.Calls.Count - before}, notices={scene.Notices.Count}, page={PageValue()}, checkbox={box.IsChecked}");
                         var commands = scene.Rig.Runtime.Calls.Where(call =>
                             call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == rejected.Action).ToArray();
                         Console.WriteLine($"WFR01 action={rejected.Action} error={rejected.Code} accepted={accepted} click={click} " +
@@ -463,16 +566,16 @@ public static class FilmPlaybackControlsTests
         {
             await using var scene = await Scene.Create();
             await scene.Play();
-            var rate = scene.Element<ComboBox>("RateBox");
-            var aspect = scene.Element<ComboBox>("AspectBox");
+            var rate = scene.Element<ListBox>("RateBox");
+            var aspect = scene.Element<ListBox>("AspectBox");
             int originalRate = rate.SelectedIndex, originalAspect = aspect.SelectedIndex;
-            var rateChoice = (ComboBoxItem)rate.Items[3];
-            var aspectChoice = (ComboBoxItem)aspect.Items[2];
+            var rateChoice = (ListBoxItem)rate.Items[4];
+            var aspectChoice = (ListBoxItem)aspect.Items[2];
             object rateTag = rateChoice.Tag, aspectTag = aspectChoice.Tag;
             try
             {
                 rateChoice.Tag = "fixture-invalid-rate";
-                rate.SelectedIndex = 3;
+                rate.SelectedIndex = 4;
                 await Until(() => scene.Notices.Count == 1);
                 Check(rate.SelectedIndex == originalRate && scene.Rig.Native.Rate == 1 &&
                     scene.Rig.Native.SettledIdentity == "controls" && scene.Notices.Single() == "倍速设置失败",
@@ -625,74 +728,48 @@ public static class FilmPlaybackControlsTests
         internal bool Called(string action) => Rig.Runtime.Calls.Any(call =>
             call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == action);
         internal T Element<T>(string name) where T : FrameworkElement => (T)View.FindName(name);
-        internal Button Button(string label) => Visuals(View).OfType<Button>().Single(button => Equals(button.Content, label));
         public async ValueTask DisposeAsync()
         {
-            foreach (Window owned in Window.OwnedWindows.Cast<Window>().ToArray()) owned.Close();
+            foreach (Window owned in Window.OwnedWindows.Cast<Window>().ToArray())
+            {
+                owned.Close();
+                await Until(() => !owned.IsVisible && !Window.OwnedWindows.Cast<Window>().Contains(owned));
+            }
             View.DataContext = null; Window.Content = null; Window.Close(); await Rig.DisposeAsync();
         }
     }
     private static void Click(ButtonBase button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-    private static void ToggleByKeyboard(CheckBox box)
+    private static async Task ToggleByKeyboardAsync(CheckBox box)
     {
         box.BringIntoView();
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        // ButtonBase also consults the real mouse and modifiers for Space; the
+        // KeyboardProbe only supplies the routed key, not those desktop states.
+        await Until(() => Mouse.PrimaryDevice.LeftButton == MouseButtonState.Released &&
+            Keyboard.Modifiers == ModifierKeys.None && !box.IsMouseCaptured,
+            () => $"Keyboard input is not idle: mouse={Mouse.PrimaryDevice.LeftButton}, modifiers={Keyboard.Modifiers}, captured={box.IsMouseCaptured}");
         var keyboard = new KeyboardProbe();
         var source = PresentationSource.FromVisual(box)!;
-        box.RaiseEvent(new KeyEventArgs(keyboard, source, 0, Key.Space) { RoutedEvent = Keyboard.KeyDownEvent });
-        box.RaiseEvent(new KeyEventArgs(keyboard, source, 1, Key.Space) { RoutedEvent = Keyboard.KeyUpEvent });
+        var down = new KeyEventArgs(keyboard, source, Environment.TickCount, Key.Space) { RoutedEvent = Keyboard.KeyDownEvent };
+        box.RaiseEvent(down);
+        Check(down.Handled && box.IsPressed,
+            $"Space keydown must press the actual checkbox: handled={down.Handled}, pressed={box.IsPressed}, captured={box.IsMouseCaptured}, mouse={Mouse.PrimaryDevice.LeftButton}, modifiers={Keyboard.Modifiers}");
+        var up = new KeyEventArgs(keyboard, source, Environment.TickCount, Key.Space) { RoutedEvent = Keyboard.KeyUpEvent };
+        box.RaiseEvent(up);
+        Check(up.Handled && !box.IsPressed,
+            $"Space keyup must release the actual checkbox: handled={up.Handled}, pressed={box.IsPressed}, captured={box.IsMouseCaptured}, mouse={Mouse.PrimaryDevice.LeftButton}, modifiers={Keyboard.Modifiers}");
     }
     private sealed class KeyboardProbe() : KeyboardDevice(InputManager.Current)
     {
         protected override KeyStates GetKeyStatesFromSystem(Key key) => KeyStates.None;
     }
-    // Drive only the native dialog owned by this hidden fixture window. No
-    // SendInput, foreground activation, or other process/window is targeted.
-    private static async Task AnswerBlockDialog(Scene scene, bool confirm, Func<Task>? beforeReply = null)
+    private static async Task Until(Func<bool> condition, Func<string>? failure = null)
     {
-        uint thread = GetCurrentThreadId();
-        nint owner = new WindowInteropHelper(scene.Window).Handle, dialog = 0;
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        try
+        try { await FilmPlaybackFixture.Until(condition); }
+        catch (InvalidOperationException error) when (failure is not null)
         {
-            while (dialog == 0)
-            {
-                EnumThreadWindows(thread, (window, _) =>
-                {
-                    if (GetWindow(window, 4) != owner) return true; // GW_OWNER
-                    var name = new StringBuilder(64);
-                    GetClassName(window, name, name.Capacity);
-                    if (name.ToString() != "#32770") return true;
-                    dialog = window;
-                    return false;
-                }, 0);
-                if (dialog == 0) await Task.Delay(10, deadline.Token);
-            }
-            var title = new StringBuilder(64);
-            GetWindowText(dialog, title, title.Capacity);
-            Check(title.ToString() == "片源错误" && GetDlgItem(dialog, 1) != 0 && GetDlgItem(dialog, 2) != 0,
-                "the product opened the actual expected OK/Cancel confirmation");
-            if (beforeReply is not null) await beforeReply();
-            int choice = confirm ? 1 : 2;
-            Check(PostMessage(dialog, 0x0111, choice, GetDlgItem(dialog, choice)),
-                "the exact owned native confirmation accepted its button command");
-            dialog = 0;
+            throw new InvalidOperationException(failure(), error);
         }
-        finally
-        {
-            if (dialog != 0) PostMessage(dialog, 0x0111, 2, GetDlgItem(dialog, 2));
-        }
-    }
-    private delegate bool EnumerateWindow(nint window, nint parameter);
-    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, EnumerateWindow callback, nint parameter);
-    [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint window, StringBuilder text, int count);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(nint window, StringBuilder text, int count);
-    [DllImport("user32.dll")] private static extern nint GetDlgItem(nint dialog, int id);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool PostMessage(nint window, uint message, nint wParam, nint lParam);
-    private static async Task Until(Func<bool> condition)
-    {
-        await FilmPlaybackFixture.Until(condition);
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
     }
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)

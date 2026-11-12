@@ -71,7 +71,7 @@ public static class FFmpegVideoKernelTests
                         "exact public receipt ownership is unchanged by URL userinfo support");
                 });
         foreach (string entry in new[] { "typed-validation", "runtime-validation", "resource-handoff",
-            "resource-open", "material-validation", "output-rejection", "read-open", "read-handoff", "read-reopen" })
+            "resource-open", "material-validation", "read-open", "read-handoff", "read-reopen" })
             foreach (bool failRelease in new[] { false, true })
                 yield return Test("WKF01 outer rejection drain " + entry + " failure=" + failRelease, async () =>
                 {
@@ -106,7 +106,6 @@ public static class FFmpegVideoKernelTests
                             receipt.InvalidHeaders = true;
                             request = player.PrepareResourceHandoffAsync(receipt);
                         }
-                        else request = player.OwnRuntimeOutputAsync(Scope(player) with { Generation = -1 }, receipt);
                         await receipt.Entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
                         Check(!request.IsCompleted && Field(player, "_handoffPreparation") is null &&
                             ReferenceEquals(Session(player), donor) && native.NativeReference != IntPtr.Zero,
@@ -429,278 +428,6 @@ public static class FFmpegVideoKernelTests
                 if (preparation is not null) await Reject(() => preparation);
             }
         });
-        foreach (string api in new[] { "try", "legacy" })
-            yield return Test("WKF02 failed child keeps ready A B and fixed repeated " + api + " outcome", async () =>
-            {
-                await using var a = Fixture("progressive"); await using var b = Fixture("progressive");
-                using var runtime = new CancellationTokenSource(); using var lifetime = new CancellationTokenSource();
-                int releasedA = 0, releasedB = 0, publications = 0;
-                bool allowed = true;
-                await using var authorityA = Authority(runtime.Token, _ => { releasedA++; return ValueTask.CompletedTask; });
-                await using var authorityB = Authority(runtime.Token, _ => { releasedB++; return ValueTask.CompletedTask; });
-                var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-                var child = new FailingOutput();
-                var rejectedChild = new OutputDrain(); rejectedChild.Finish.TrySetResult();
-                var rejectedFailure = new FailingOutput(); rejectedFailure.Finish.TrySetResult();
-                try
-                {
-                    var first = Intent();
-                    await player.PrepareRuntimeMediaAsync(first,
-                        authorityA.CreateLease(ResourceId, a.Uri(RootPath), lifetime.Token), Input("progressive"));
-                    await player.CommitRuntimeMediaAsync(first, () => { });
-                    await player.PauseAsync(); await player.SeekAsync(7);
-                    var donor = Session(player)!; var scope = Scope(player);
-                    var donorPlayer = (LibVLCSharp.Shared.MediaPlayer)Field(donor, "Player")!;
-                    var owned = await player.OwnRuntimeOutputAsync(scope, child);
-                    var intent = Intent(scope);
-                    await player.PrepareRuntimeMediaAsync(intent,
-                        authorityB.CreateLease(ResourceId, b.Uri(RootPath), lifetime.Token), Input("progressive"));
-                    var candidate = Field(player, "_handoffSession")!;
-                    var candidatePlayer = (LibVLCSharp.Shared.MediaPlayer)Field(candidate, "Player")!;
-                    var engine = (LibVLCSharp.Shared.LibVLC)Field(player, "_engine")!;
-                    Check(DisplayedPictures(donor) > 0 && DisplayedPictures(candidate) > 0 &&
-                        Field(candidate, "RuntimeOutputReady") is true, "both A and B have real native ready pictures");
-                    Task Commit() => api == "try"
-                        ? player.TryCommitRuntimeMediaAsync(intent, () => allowed, () => publications++)
-                        : player.CommitRuntimeMediaAsync(intent, () => publications++);
-                    var committing = Commit();
-                    await child.Entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
-                    var handle = owned.DisposeAsync().AsTask();
-                    Check(!committing.IsCompleted && !handle.IsCompleted &&
-                        ReferenceEquals(handle, owned.DisposeAsync().AsTask()) && publications == 0,
-                        "commit and owned handle join the same actual failed-child work");
-                    allowed = false;
-                    child.Finish.TrySetResult();
-                    await ReleaseFailure(() => committing);
-                    await ReleaseFailure(() => handle);
-                    await ReleaseFailure(() => owned.DisposeAsync().AsTask());
-                    await ReleaseFailure(() => player.TryCommitRuntimeMediaAsync(intent,
-                        () => allowed, () => publications++));
-                    allowed = true;
-                    await ReleaseFailure(Commit);
-                    // The other public commit API must observe the same failure, too.
-                    await ReleaseFailure(() => api == "try"
-                        ? player.CommitRuntimeMediaAsync(intent, () => publications++)
-                        : player.TryCommitRuntimeMediaAsync(intent, static () => true, () => publications++));
-                    await ReleaseFailure(() => player.OwnRuntimeOutputAsync(scope, rejectedChild));
-                    await ReleaseFailure(() => player.OwnRuntimeOutputAsync(
-                        scope with { Generation = scope.Generation + 1 }, rejectedFailure));
-                    Check(child.Disposals == 1 && rejectedChild.Disposals == 1 && rejectedFailure.Disposals == 1 && publications == 0 &&
-                        ReferenceEquals(Session(player), donor) && ReferenceEquals(Field(player, "_handoffSession"), candidate) &&
-                        ReferenceEquals(Field(player, "_runtimeHandoffIntent"), intent) && Scope(player) == scope &&
-                        donorPlayer.NativeReference != IntPtr.Zero && candidatePlayer.NativeReference != IntPtr.Zero &&
-                        Field(candidate, "HasStarted") is false && releasedA == 0 && releasedB == 0 &&
-                        player.HasMedia && player.PauseRequested && !player.IsPlaying && !donorPlayer.Mute &&
-                        Math.Abs(player.PositionSeconds - 7) < .5 && player.Identity == first.Identity,
-                        "failure never becomes Deferred or success, never swaps B, and leaves exact native A controls intact");
-                    await player.DiscardRuntimeMediaAsync(intent);
-                    await player.DiscardRuntimeMediaAsync(intent);
-                    Check(releasedB == 1 && releasedA == 0 && candidatePlayer.NativeReference == IntPtr.Zero &&
-                        ReferenceEquals(Session(player), donor), "exact B discard still drains without consuming the donor");
-                    await ReleaseFailure(() => player.DisposeAsync().AsTask());
-                    await ReleaseFailure(() => player.DisposeAsync().AsTask());
-                    await ReleaseFailure(() => owned.DisposeAsync().AsTask());
-                    Check(child.Disposals == 1 && releasedA == 1 && releasedB == 1 &&
-                        donorPlayer.NativeReference == IntPtr.Zero && engine.NativeReference == IntPtr.Zero &&
-                        Session(player) is null && Field(player, "_handoffSession") is null &&
-                        Field(player, "_runtimeHandoffWindow") is null && Field(player, "_engine") is null &&
-                        !player.HasMedia && player.LastErrorCode == PlaybackError.ReleaseFailed,
-                        "later close reports the child failure only after every other owner physically drains");
-                }
-                finally
-                {
-                    child.Finish.TrySetResult();
-                    await CleanupReleaseFailure(player);
-                }
-            });
-        yield return Test("WKF02 shared music handoff keeps fixed child failure before swap and drains both inputs", async () =>
-        {
-            await using var a = Fixture("progressive");
-            using var runtime = new CancellationTokenSource(); using var lifetime = new CancellationTokenSource();
-            int releases = 0, publications = 0;
-            await using var authority = Authority(runtime.Token, _ => { releases++; return ValueTask.CompletedTask; });
-            var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            var child = new FailingOutput(); child.Finish.TrySetResult();
-            var music = new RuntimeMediaTests.WaveLease();
-            try
-            {
-                var first = Intent();
-                await player.PrepareRuntimeMediaAsync(first,
-                    authority.CreateLease(ResourceId, a.Uri(RootPath), lifetime.Token), Input("progressive"));
-                await player.CommitRuntimeMediaAsync(first, () => { }); await player.PauseAsync();
-                var donor = Session(player)!; var donorScope = Scope(player);
-                var owned = await player.OwnRuntimeOutputAsync(donorScope, child);
-                await player.PrepareReadHandoffAsync(music, default);
-                var candidate = Field(player, "_handoffSession")!;
-                var native = (LibVLCSharp.Shared.MediaPlayer)Field(candidate, "Player")!;
-                Check(Field(player, "_handoffReady") is TaskCompletionSource { Task.IsCompletedSuccessfully: true },
-                    "the shared-core music handoff is actually native-ready");
-                await ReleaseFailure(() => player.CommitHandoffAsync(() => publications++, default));
-                await ReleaseFailure(() => player.CommitHandoffAsync(() => publications++, default));
-                await ReleaseFailure(() => owned.DisposeAsync().AsTask());
-                Check(child.Disposals == 1 && publications == 0 && releases == 0 && music.Disposals == 0 &&
-                    ReferenceEquals(Session(player), donor) && ReferenceEquals(Field(player, "_handoffSession"), candidate) &&
-                    Scope(player) == donorScope && native.NativeReference != IntPtr.Zero,
-                    "the legacy shared core preserves both exact native occurrences on child failure");
-                await player.DiscardHandoffAsync();
-                Check(native.NativeReference == IntPtr.Zero && music.Disposals == 1 && releases == 0,
-                    "music discard releases only its exact rejected input");
-                await ReleaseFailure(() => player.DisposeAsync().AsTask());
-                Check(releases == 1 && Session(player) is null && Field(player, "_engine") is null,
-                    "shared-core cleanup still drains the retained donor after the fixed child failure");
-            }
-            finally { child.Finish.TrySetResult(); await CleanupReleaseFailure(player); }
-        });
-        yield return Test("cancelling only commit after child drain begins cannot publish B or retire real A output", async () =>
-        {
-            await using var a = Fixture("progressive"); await using var b = Fixture("progressive");
-            using var runtime = new CancellationTokenSource();
-            using var lifetimeA = new CancellationTokenSource(); using var lifetimeB = new CancellationTokenSource();
-            using var publication = new CancellationTokenSource();
-            int releasedA = 0, releasedB = 0;
-            await using var authorityA = Authority(runtime.Token, _ => { releasedA++; return ValueTask.CompletedTask; });
-            await using var authorityB = Authority(runtime.Token, _ => { releasedB++; return ValueTask.CompletedTask; });
-            await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            var first = Intent();
-            var leaseA = authorityA.CreateLease(ResourceId, a.Uri(RootPath), lifetimeA.Token);
-            await player.PrepareRuntimeMediaAsync(first, leaseA, Input("progressive"));
-            await player.CommitRuntimeMediaAsync(first, () => { });
-            await player.PauseAsync(); await player.SeekAsync(7);
-            await Until(() => player.ObservedVideoOutput is { DisplayedPictures: > 0 } &&
-                Math.Abs(player.PositionSeconds - 7) < .5, "real paused donor video and seek");
-            var donorScope = Scope(player);
-            var donor = Session(player)!;
-            var donorPlayer = (LibVLCSharp.Shared.MediaPlayer)Field(donor, "Player")!;
-            var child = new OutputDrain();
-            var owned = await player.OwnRuntimeOutputAsync(donorScope, child);
-            var replacement = Intent(donorScope);
-            var leaseB = authorityB.CreateLease(ResourceId, b.Uri(RootPath), lifetimeB.Token);
-            await player.PrepareRuntimeMediaAsync(replacement, leaseB, Input("progressive"));
-            var prepared = Field(player, "_handoffSession")!;
-            var preparedPlayer = (LibVLCSharp.Shared.MediaPlayer)Field(prepared, "Player")!;
-            Check(DisplayedPictures(prepared) > 0, "B is a genuinely ready native input before commit");
-            int publications = 0;
-            var commit = player.CommitRuntimeMediaAsync(replacement, () => publications++, publication.Token);
-            try
-            {
-                await child.Entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
-                Check(!commit.IsCompleted && publications == 0 && ReferenceEquals(Session(player), donor),
-                    "the commit is really awaiting A's child, not a preparation gate");
-                publication.Cancel();
-                Check(!lifetimeA.IsCancellationRequested && !lifetimeB.IsCancellationRequested &&
-                    !runtime.IsCancellationRequested && !leaseA.Revoked.IsCancellationRequested &&
-                    !leaseB.Revoked.IsCancellationRequested && !commit.IsCompleted,
-                    "only the new commit token is cancelled; both admitted native input lifetimes remain valid");
-                Console.WriteLine("OBSERVED video-kernel commit-gate: " +
-                    $"publishedB={publications}; commitTokenCancelled={publication.IsCancellationRequested}; " +
-                    $"inputACancelled={lifetimeA.IsCancellationRequested}; inputBCancelled={lifetimeB.IsCancellationRequested}; " +
-                    $"runtimeCancelled={runtime.IsCancellationRequested}; " +
-                    $"resourceARevoked={leaseA.Revoked.IsCancellationRequested}; resourceBRevoked={leaseB.Revoked.IsCancellationRequested}; " +
-                    $"picturesA={DisplayedPictures(donor)}; picturesB={DisplayedPictures(prepared)}; childPhysicalDisposals={child.Disposals}");
-                child.Finish.TrySetResult();
-                try { await commit.WaitAsync(TimeSpan.FromSeconds(8)); throw new InvalidOperationException("Cancelled commit published."); }
-                catch (OperationCanceledException) { }
-                Check(publications == 0 && player.Identity == first.Identity && player.HasMedia &&
-                    ReferenceEquals(Session(player), donor) && Scope(player) == donorScope &&
-                    player.ObservedVideoOutput is { DisplayedPictures: > 0 } output && output.Identity == first.Identity &&
-                    DisplayedPictures(donor) > 0 && donorPlayer.NativeReference != IntPtr.Zero &&
-                    player.PauseRequested && !player.IsPlaying && Math.Abs(player.PositionSeconds - 7) < .5 &&
-                    !donorPlayer.Mute && child.Disposals == 1 && releasedA == 0,
-                    "failed publication leaves A's exact live native picture, pause, time and audibility intent intact");
-                await player.DiscardRuntimeMediaAsync(replacement);
-                Check(preparedPlayer.NativeReference == IntPtr.Zero && releasedB == 1 && releasedA == 0 &&
-                    ReferenceEquals(Session(player), donor), "discard drains only the rejected B occurrence");
-                long picturesBeforeResume = DisplayedPictures(donor);
-                await player.SeekRuntimeAsync(donorScope, 9);
-                await player.SetRuntimePausedAsync(donorScope, false);
-                await Until(() => player.IsPlaying && player.ObservedVideoOutput is { DisplayedPictures: > 0 } current &&
-                    current.Identity == first.Identity && player.PositionSeconds >= 8.5 &&
-                    DisplayedPictures(donor) > picturesBeforeResume, "A's real controls and new video frames remain live");
-                await player.SetRuntimePausedAsync(donorScope, true);
-                await owned.DisposeAsync(); await owned.DisposeAsync();
-                Check(child.Disposals == 1, "repeated attachment-handle disposal joins the already-drained child");
-                Console.WriteLine("OBSERVED video-kernel commit-token-only: " +
-                    $"publishedB={publications}; picturesA={DisplayedPictures(donor)}; " +
-                    $"identityA={player.Identity}; scopeA={donorScope.Generation}; " +
-                    $"actualPositionA={player.PositionSeconds}; pauseA={player.PauseRequested}; " +
-                    $"childPhysicalDisposals={child.Disposals}; releasedA={releasedA}; releasedB={releasedB}; " +
-                    $"nativeBReleased={preparedPlayer.NativeReference == IntPtr.Zero}");
-                await player.StopRuntimeAsync(donorScope);
-                Check(releasedA == 1 && donorPlayer.NativeReference == IntPtr.Zero && child.Disposals == 1,
-                    "the accepted donor still has one final real retirement");
-                Console.WriteLine("OBSERVED video-kernel commit-final-drain: " +
-                    $"releasedA={releasedA}; releasedB={releasedB}; nativeAReleased={donorPlayer.NativeReference == IntPtr.Zero}; " +
-                    $"childPhysicalDisposals={child.Disposals}");
-            }
-            finally
-            {
-                child.Finish.TrySetResult();
-                try { await commit; } catch (OperationCanceledException) { }
-                await player.DiscardRuntimeMediaAsync(replacement);
-            }
-        });
-        yield return Test("an exact runtime occurrence physically drains its attached output before replacement publication", async () =>
-        {
-            await using var a = Fixture("progressive"); await using var b = Fixture("progressive");
-            using var runtime = new CancellationTokenSource(); using var lifetime = new CancellationTokenSource();
-            await using var authorityA = Authority(runtime.Token); await using var authorityB = Authority(runtime.Token);
-            await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            var first = Intent();
-            await player.PrepareRuntimeMediaAsync(first,
-                authorityA.CreateLease(ResourceId, a.Uri(RootPath), lifetime.Token), Input("progressive"));
-            await player.CommitRuntimeMediaAsync(first, () => { });
-            await player.PauseAsync();
-            var old = Scope(player);
-            var child = new OutputDrain();
-            var owned = await player.OwnRuntimeOutputAsync(old, child);
-            var replacement = Intent();
-            await player.PrepareRuntimeMediaAsync(replacement,
-                authorityB.CreateLease(ResourceId, b.Uri(RootPath), lifetime.Token), Input("progressive"));
-            bool published = false;
-            var commit = player.CommitRuntimeMediaAsync(replacement, () => published = true);
-            try
-            {
-                await child.Entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
-                Check(!commit.IsCompleted && !published && player.Identity == first.Identity,
-                    "a replacing native output cannot publish before actual child drain");
-                child.Finish.TrySetResult();
-                await commit;
-                Check(published && player.Identity == replacement.Identity && child.Disposals == 1,
-                    "one native occurrence owns the external lifetime");
-                await owned.DisposeAsync();
-                Check(child.Disposals == 1, "caller/native retirement share one physical completion");
-                var rejected = new OutputDrain(); rejected.Finish.TrySetResult();
-                await Reject(() => player.OwnRuntimeOutputAsync(old, rejected));
-                Check(rejected.Disposals == 1 && player.Identity == replacement.Identity,
-                    "a rejected stale scope releases its offered child without touching the current owner");
-            }
-            finally { child.Finish.TrySetResult(); await commit; }
-        });
-        yield return Test("ordinary music replacement waits for the exact film child before accepting another output", async () =>
-        {
-            await using var origin = Fixture("progressive");
-            using var runtime = new CancellationTokenSource(); using var lifetime = new CancellationTokenSource();
-            await using var authority = Authority(runtime.Token);
-            await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            var first = Intent();
-            await player.PrepareRuntimeMediaAsync(first,
-                authority.CreateLease(ResourceId, origin.Uri(RootPath), lifetime.Token), Input("progressive"));
-            await player.CommitRuntimeMediaAsync(first, () => { });
-            await player.PauseAsync();
-            var child = new OutputDrain();
-            _ = await player.OwnRuntimeOutputAsync(Scope(player), child);
-            var replacement = player.OpenReadAsync("music", "music-next", new RuntimeMediaTests.WaveLease(), "music");
-            try
-            {
-                await child.Entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
-                Check(!replacement.IsCompleted && player.OwnerId != "music",
-                    "ordinary Open must also join the old attached output");
-                child.Finish.TrySetResult();
-                await replacement;
-                Check(player.OwnerId == "music" && child.Disposals == 1, "one actual media owner after takeover");
-            }
-            finally { child.Finish.TrySetResult(); await replacement; }
-        });
         foreach (int checkpoint in new[] { 1, 2, 3 })
             yield return Test("deferred runtime commit retains its exact ready receipt at checkpoint " + checkpoint, async () =>
             {
@@ -718,131 +445,56 @@ public static class FFmpegVideoKernelTests
                 await Until(() => Math.Abs(player.PositionSeconds - 7) < .5, "ready donor time");
                 var donorScope = Scope(player); var donor = Session(player)!;
                 var donorPlayer = (LibVLCSharp.Shared.MediaPlayer)Field(donor, "Player")!;
-                var child = new OutputDrain();
-                try
-                {
-                    _ = await player.OwnRuntimeOutputAsync(donorScope, child);
-                    var replacement = Intent(donorScope);
-                    var leaseB = authorityB.CreateLease(ResourceId, b.Uri(RootPath), lifetime.Token);
-                    await player.PrepareRuntimeMediaAsync(replacement, leaseB, Input("progressive"));
-                    var candidate = Field(player, "_handoffSession")!;
-                    var candidatePlayer = (LibVLCSharp.Shared.MediaPlayer)Field(candidate, "Player")!;
-                    var ready = Field(player, "_handoffReady");
-                    Check(DisplayedPictures(candidate) > 0 && Field(candidate, "RuntimeOutputReady") is true &&
-                        Field(candidate, "HasStarted") is false, "one actual prepared picture, not a started surrogate");
-                    await player.SeekRuntimeAsync(donorScope, 9);
-                    await Until(() => Math.Abs(player.PositionSeconds - 9) < .5, "new donor position after preparation");
-                    int gates = 0;
-                    bool swapped = await player.TryCommitRuntimeMediaAsync(replacement,
-                        () => ++gates < checkpoint, () => publications++);
-                    Check(!swapped && gates == checkpoint && publications == 0 &&
-                        ReferenceEquals(Session(player), donor) && Scope(player) == donorScope &&
-                        ReferenceEquals(Field(player, "_handoffSession"), candidate) &&
-                        ReferenceEquals(Field(player, "_runtimeHandoffIntent"), replacement) &&
-                        ReferenceEquals(Field(player, "_handoffReady"), ready) &&
-                        candidatePlayer.NativeReference != IntPtr.Zero && Field(candidate, "HasStarted") is false &&
-                        !lifetime.IsCancellationRequested && !runtime.IsCancellationRequested && child.Disposals == 0 &&
-                        releasedA == 0 && releasedB == 0 && !leaseA.Revoked.IsCancellationRequested &&
-                        !leaseB.Revoked.IsCancellationRequested && player.LastErrorCode is null,
-                        "each pre-dispose gate defers without replacing, releasing, re-preparing or failing either receipt");
-                    await Reject(() => player.TryCommitRuntimeMediaAsync(replacement with { },
-                        static () => false, () => publications++));
-                    Check(ReferenceEquals(Field(player, "_handoffSession"), candidate) && releasedB == 0,
-                        "a copied intent cannot use Deferred to adopt or discard this preparation");
-                    // These operations also prove that false released the native command lock.
-                    await player.SeekRuntimeAsync(donorScope, 11);
-                    long pictures = DisplayedPictures(donor);
-                    await player.SetRuntimePausedAsync(donorScope, false);
-                    await Until(() => player.IsPlaying && player.PositionSeconds >= 10.5 &&
-                        DisplayedPictures(donor) > pictures, "live donor controls after Deferred");
-                    child.Finish.TrySetResult();
-                    double donorTimeAtSwap = -1, candidateTimeAtSwap = -1;
-                    swapped = await player.TryCommitRuntimeMediaAsync(replacement, static () => true, () =>
-                    {
-                        publications++; donorTimeAtSwap = donorPlayer.Time / 1000d;
-                        candidateTimeAtSwap = candidatePlayer.Time / 1000d;
-                    });
-                    Check(swapped && publications == 1 && ReferenceEquals(Session(player), candidate) &&
-                        Field(player, "_handoffSession") is null && Field(candidate, "HasStarted") is true &&
-                        player.Identity == replacement.Identity && player.HasMedia && !player.PauseRequested &&
-                        player.IsPlaying && Math.Abs(candidateTimeAtSwap - donorTimeAtSwap) <= .5 &&
-                        donorTimeAtSwap >= 10.5 && child.Disposals == 1 && releasedA == 1 && releasedB == 0 &&
-                        donorPlayer.NativeReference == IntPtr.Zero,
-                        "explicit admission publishes the same prepared native candidate once at latest donor time and pause intent");
-                    await player.StopAsync();
-                    Check(releasedB == 1 && candidatePlayer.NativeReference == IntPtr.Zero,
-                        "the preserved candidate receipt still has exactly one final retirement");
-                }
-                finally { child.Finish.TrySetResult(); }
-            });
-        yield return Test("gate closing during child disposal defers the same candidate and retains the live native donor", async () =>
-        {
-            await using var a = Fixture("progressive"); await using var b = Fixture("progressive");
-            using var runtime = new CancellationTokenSource(); using var lifetime = new CancellationTokenSource();
-            int releasedA = 0, releasedB = 0, publications = 0;
-            await using var authorityA = Authority(runtime.Token, _ => { releasedA++; return ValueTask.CompletedTask; });
-            await using var authorityB = Authority(runtime.Token, _ => { releasedB++; return ValueTask.CompletedTask; });
-            await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            var first = Intent();
-            var leaseA = authorityA.CreateLease(ResourceId, a.Uri(RootPath), lifetime.Token);
-            await player.PrepareRuntimeMediaAsync(first, leaseA, Input("progressive"));
-            await player.CommitRuntimeMediaAsync(first, () => { });
-            await player.PauseAsync(); await player.SeekAsync(7);
-            await Until(() => Math.Abs(player.PositionSeconds - 7) < .5, "actual paused donor");
-            var donorScope = Scope(player); var donor = Session(player)!;
-            var donorPlayer = (LibVLCSharp.Shared.MediaPlayer)Field(donor, "Player")!;
-            var child = new OutputDrain();
-            var replacement = Intent(donorScope);
-            bool allowed = true;
-            Task<bool>? committing = null;
-            try
-            {
-                var owned = await player.OwnRuntimeOutputAsync(donorScope, child);
+                var replacement = Intent(donorScope);
                 var leaseB = authorityB.CreateLease(ResourceId, b.Uri(RootPath), lifetime.Token);
                 await player.PrepareRuntimeMediaAsync(replacement, leaseB, Input("progressive"));
                 var candidate = Field(player, "_handoffSession")!;
                 var candidatePlayer = (LibVLCSharp.Shared.MediaPlayer)Field(candidate, "Player")!;
-                Check(DisplayedPictures(candidate) > 0, "B has a real native picture before this commit");
-                committing = player.TryCommitRuntimeMediaAsync(replacement, () => allowed, () => publications++);
-                await child.Entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
-                Check(!committing.IsCompleted && publications == 0 && ReferenceEquals(Session(player), donor),
-                    "the gate will change during actual child disposal, not before commit entry");
-                allowed = false;
-                child.Finish.TrySetResult();
-                Check(!await committing.WaitAsync(TimeSpan.FromSeconds(8)), "closing admission returns Deferred, not publication");
-                Check(publications == 0 && child.Disposals == 1 &&
+                var ready = Field(player, "_handoffReady");
+                Check(DisplayedPictures(candidate) > 0 && Field(candidate, "RuntimeOutputReady") is true &&
+                    Field(candidate, "HasStarted") is false, "one actual prepared picture, not a started surrogate");
+                await player.SeekRuntimeAsync(donorScope, 9);
+                await Until(() => Math.Abs(player.PositionSeconds - 9) < .5, "new donor position after preparation");
+                int gates = 0;
+                bool swapped = await player.TryCommitRuntimeMediaAsync(replacement,
+                    () => ++gates < checkpoint, () => publications++);
+                Check(!swapped && gates == checkpoint && publications == 0 &&
                     ReferenceEquals(Session(player), donor) && Scope(player) == donorScope &&
-                    donorPlayer.NativeReference != IntPtr.Zero && !donorPlayer.Mute &&
-                    player.HasMedia && player.PauseRequested && !player.IsPlaying &&
-                    Math.Abs(player.PositionSeconds - 7) < .5 &&
                     ReferenceEquals(Field(player, "_handoffSession"), candidate) &&
                     ReferenceEquals(Field(player, "_runtimeHandoffIntent"), replacement) &&
+                    ReferenceEquals(Field(player, "_handoffReady"), ready) &&
                     candidatePlayer.NativeReference != IntPtr.Zero && Field(candidate, "HasStarted") is false &&
-                    !lifetime.IsCancellationRequested && !runtime.IsCancellationRequested && releasedA == 0 && releasedB == 0 &&
-                    !leaseA.Revoked.IsCancellationRequested && !leaseB.Revoked.IsCancellationRequested &&
-                    player.LastErrorCode is null,
-                    "child drain is irreversible, but neither exact native donor nor candidate receipt has been retired");
-                await owned.DisposeAsync();
-                Check(child.Disposals == 1, "Deferred does not resurrect the already-disposed child");
-                await player.SeekRuntimeAsync(donorScope, 9);
-                await Until(() => Math.Abs(player.PositionSeconds - 9) < .5, "donor lock and controls after child drain");
-                allowed = true;
-                Check(await player.TryCommitRuntimeMediaAsync(replacement, () => allowed, () => publications++),
-                    "the same exact candidate can explicitly pass admission later");
-                Check(publications == 1 && ReferenceEquals(Session(player), candidate) &&
-                    Field(candidate, "HasStarted") is true && player.Identity == replacement.Identity &&
-                    player.PauseRequested && Math.Abs(player.PositionSeconds - 9) < .5 &&
-                    child.Disposals == 1 && releasedA == 1 && releasedB == 0,
-                    "retry re-aligns latest paused native donor and publishes once without a second prepare or child drain");
+                    !lifetime.IsCancellationRequested && !runtime.IsCancellationRequested &&
+                    releasedA == 0 && releasedB == 0 && !leaseA.Revoked.IsCancellationRequested &&
+                    !leaseB.Revoked.IsCancellationRequested && player.LastErrorCode is null,
+                    "each pre-publication gate defers without replacing, releasing, re-preparing or failing either receipt");
+                await Reject(() => player.TryCommitRuntimeMediaAsync(replacement with { },
+                    static () => false, () => publications++));
+                Check(ReferenceEquals(Field(player, "_handoffSession"), candidate) && releasedB == 0,
+                    "a copied intent cannot use Deferred to adopt or discard this preparation");
+                // These operations also prove that false released the native command lock.
+                await player.SeekRuntimeAsync(donorScope, 11);
+                long pictures = DisplayedPictures(donor);
+                await player.SetRuntimePausedAsync(donorScope, false);
+                await Until(() => player.IsPlaying && player.PositionSeconds >= 10.5 &&
+                    DisplayedPictures(donor) > pictures, "live donor controls after Deferred");
+                double donorTimeAtSwap = -1, candidateTimeAtSwap = -1;
+                swapped = await player.TryCommitRuntimeMediaAsync(replacement, static () => true, () =>
+                {
+                    publications++; donorTimeAtSwap = donorPlayer.Time / 1000d;
+                    candidateTimeAtSwap = candidatePlayer.Time / 1000d;
+                });
+                Check(swapped && publications == 1 && ReferenceEquals(Session(player), candidate) &&
+                    Field(player, "_handoffSession") is null && Field(candidate, "HasStarted") is true &&
+                    player.Identity == replacement.Identity && player.HasMedia && !player.PauseRequested &&
+                    player.IsPlaying && Math.Abs(candidateTimeAtSwap - donorTimeAtSwap) <= .5 &&
+                    donorTimeAtSwap >= 10.5 && releasedA == 1 && releasedB == 0 &&
+                    donorPlayer.NativeReference == IntPtr.Zero,
+                    "explicit admission publishes the same prepared native candidate once at latest donor time and pause intent");
                 await player.StopAsync();
-                Check(releasedB == 1 && candidatePlayer.NativeReference == IntPtr.Zero, "one final candidate release");
-            }
-            finally
-            {
-                child.Finish.TrySetResult();
-                if (committing is not null) await committing;
-            }
-        });
+                Check(releasedB == 1 && candidatePlayer.NativeReference == IntPtr.Zero,
+                    "the preserved candidate receipt still has exactly one final retirement");
+            });
         foreach (string invalidation in new[] { "cancel", "revoke", "stop" })
             yield return Test("false runtime admission cannot hide native " + invalidation, async () =>
             {
@@ -1192,7 +844,13 @@ public static class FFmpegVideoKernelTests
                 await using var rejected = Fixture("progressive"); await using var good = Fixture("progressive");
                 using var runtime = new CancellationTokenSource(); using var lifetime = new CancellationTokenSource();
                 int releases = 0, donorReleases = 0;
-                await using var donorAuthority = Authority(runtime.Token, _ => { donorReleases++; return ValueTask.CompletedTask; });
+                var donorEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var donorFinish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                await using var donorAuthority = Authority(runtime.Token, async _ =>
+                {
+                    donorReleases++; donorEntered.TrySetResult();
+                    await donorFinish.Task.ConfigureAwait(false);
+                });
                 var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 async ValueTask Release(string _)
@@ -1204,7 +862,6 @@ public static class FFmpegVideoKernelTests
                 var failedAuthority = Authority(runtime.Token, Release);
                 var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
                 object? donor = null;
-                var child = new OutputDrain();
                 try
                 {
                     if (withDonor)
@@ -1215,7 +872,6 @@ public static class FFmpegVideoKernelTests
                         await player.CommitRuntimeMediaAsync(first, () => { });
                         await player.PauseAsync();
                         donor = Session(player);
-                        _ = await player.OwnRuntimeOutputAsync(Scope(player), child);
                     }
                     var intent = Intent();
                     await PrepareBeforeRelease(player.PrepareRuntimeMediaAsync(intent,
@@ -1231,9 +887,9 @@ public static class FFmpegVideoKernelTests
                     finish.TrySetResult();
                     if (withDonor)
                     {
-                        await child.Entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
-                        Check(!close.IsCompleted && !repeated.IsCompleted, "candidate failure cannot skip donor's actual child drain");
-                        child.Finish.TrySetResult();
+                        await donorEntered.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                        Check(!close.IsCompleted && !repeated.IsCompleted, "candidate failure cannot skip donor's actual resource drain");
+                        donorFinish.TrySetResult();
                     }
                     await ReleaseFailure(() => close);
                     await ReleaseFailure(() => repeated);
@@ -1244,14 +900,14 @@ public static class FFmpegVideoKernelTests
                         Field(player, "_engine") is null && !player.HasMedia && player.LastErrorCode == PlaybackError.ReleaseFailed,
                         "first close reports fixed failure after native, window, engine and logical state drain");
                     if (withDonor)
-                        Check(donorReleases == 1 && child.Disposals == 1 &&
+                        Check(donorReleases == 1 &&
                             ((LibVLCSharp.Shared.MediaPlayer)Field(donor!, "Player")!).NativeReference == IntPtr.Zero,
-                            "the donor and its attached output were not skipped by a candidate exception");
+                            "the donor and its exact resource were not skipped by a candidate exception");
                     await ReleaseFailure(() => failedAuthority.DisposeAsync().AsTask());
                 }
                 finally
                 {
-                    finish.TrySetResult(); child.Finish.TrySetResult();
+                    finish.TrySetResult(); donorFinish.TrySetResult();
                     await CleanupReleaseFailure(player);
                     await CleanupReleaseFailure(failedAuthority);
                 }
@@ -1377,18 +1033,6 @@ public static class FFmpegVideoKernelTests
         });
     }
 
-    private sealed class OutputDrain : IAsyncDisposable
-    {
-        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal readonly TaskCompletionSource Finish = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal int Disposals;
-        public async ValueTask DisposeAsync()
-        {
-            Disposals++; Entered.TrySetResult();
-            await Finish.Task;
-        }
-    }
-
     private sealed class HeaderReceipt(Uri address, IReadOnlyDictionary<string, string> headers,
         CancellationTokenSource revoked) : INativeMediaResourceLease
     {
@@ -1427,19 +1071,6 @@ public static class FFmpegVideoKernelTests
         public long Length => 0;
         public CancellationToken Revoked => receipt.Revoked;
         public ValueTask DisposeAsync() => receipt.DisposeAsync();
-    }
-
-    private sealed class FailingOutput : IAsyncDisposable
-    {
-        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal readonly TaskCompletionSource Finish = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal int Disposals;
-        public async ValueTask DisposeAsync()
-        {
-            Disposals++; Entered.TrySetResult();
-            await Finish.Task.ConfigureAwait(false);
-            throw new IOException(@"C:\synthetic-private-child-canary\player.exe https://private.invalid/media?canary=secret");
-        }
     }
 
     private static void SetWorkerObserver(NativePlayback player, Action<LibVLCSharp.Shared.MediaPlayer?>? observer) =>

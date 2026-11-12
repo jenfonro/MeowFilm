@@ -23,10 +23,10 @@ public static class FilmTrayPlaybackTests
                 () => TrayAndLeave(otherModule));
         yield return Test("tray hiding without accepted output cancels preparation and drains its late result", PendingOutput);
         yield return Test("PiP still retains ordinary leave but explicit exit waits for actual native drain", PipExit);
-        yield return Test("typed external clock and commands survive tray and exit joins child then receipt", ExternalExit);
+        yield return Test("typed native clock and commands survive tray and exit joins output then receipt", NativeExit);
         yield return Test("failed exit preparation remains visible and cancellation keeps the typed Film owner", FailedExit);
         yield return Test("real system media settings fence disabled Film startup and queued requests across restart", SystemMediaSettings);
-        yield return Test("system media re-enable publishes the typed external Film clock instead of its native donor", ExternalSystemMediaSettings);
+        yield return Test("system media re-enable publishes the current typed native Film clock", NativeSystemMediaClock);
     }
 
     private static TestCase Test(string name, Func<Task> body) =>
@@ -81,7 +81,7 @@ public static class FilmTrayPlaybackTests
         await scene.Film.PausePlaybackAsync();
         var scope = scene.Rig.Native.Scope;
         int calls = scene.Rig.Runtime.Calls.Count;
-        Check(!scene.Rig.Session.CanRetainMedia, "ordinary native output has no PiP or external retention grant");
+        Check(!scene.Rig.Session.CanRetainMedia, "ordinary native output has no PiP retention grant");
         await scene.HideToTray();
         Check(scene.Rig.Session.HasSession && scene.Rig.Session.HasOutput && scene.Rig.Native.Scope == scope &&
             scene.Rig.Native.Paused && scene.Rig.Native.Position == 81 && !scene.Rig.Session.CanRetainMedia &&
@@ -145,8 +145,7 @@ public static class FilmTrayPlaybackTests
             var view = (FilmPlaybackView)((FilmView)scene.Film.View).FindName("PlaybackView");
             view.UpdateLayout();
             var frame = (Grid)view.FindName("PlayerFrame");
-            var button = Visuals(view).OfType<Button>().SingleOrDefault(button => Equals(button.Content, "画中画"))
-                ?? throw new InvalidOperationException("The actual playback view has not materialized its PiP control");
+            var button = (Button)view.FindName("PipButton");
             Check(button.IsVisible && button.IsEnabled, "PiP is an available control on the actual playback page");
             Click(button);
             var pip = scene.Shell.OwnedWindows.Cast<Window>().Single();
@@ -169,35 +168,32 @@ public static class FilmTrayPlaybackTests
         finally { finish.TrySetResult(); }
     }
 
-    private static async Task ExternalExit()
+    private static async Task NativeExit()
     {
-        var childEntered = Gate(); var childFinish = Gate(); var receiptEntered = Gate(); var receiptFinish = Gate();
+        var outputEntered = Gate(); var outputFinish = Gate(); var receiptEntered = Gate(); var receiptFinish = Gate();
         await using var scene = await Scene.Create();
         try
         {
             await scene.Play();
-            await scene.Film.SeekPlaybackAsync(11);
-            await scene.Rig.Session.ExternalAsync("fixture-tray-mpv.exe");
             await scene.Film.SeekPlaybackAsync(81);
             await scene.Film.PausePlaybackAsync();
-            var child = scene.Players.Single();
-            Check(scene.Rig.Native.Position == 11 && scene.Rig.Native.Paused &&
+            var scope = scene.Rig.Native.Scope;
+            Check(scene.Rig.Native.Position == 81 && scene.Rig.Native.Paused &&
                 scene.Backend.Last is { PositionSeconds: 81, IsPlaying: false, Kind: SystemPlaybackKind.Video },
-                "the actual App typed wrapper publishes the external clock rather than its paused native donor");
+                "the actual App typed wrapper publishes the accepted native clock and pause state");
             await scene.HideToTray();
             scene.Backend.Request(SystemPlaybackCommand.Play);
-            await Until(() => !child.Paused && scene.Backend.Last is { IsPlaying: true });
+            await Until(() => !scene.Rig.Native.Paused && scene.Backend.Last is { IsPlaying: true });
             scene.Backend.Request(SystemPlaybackCommand.Seek, 93);
-            await Until(() => child.Position == 93 && scene.Backend.Last?.PositionSeconds == 93);
+            await Until(() => scene.Rig.Native.Position == 93 && scene.Backend.Last?.PositionSeconds == 93);
             scene.Tray.ShowWindow();
             await Until(() => scene.Shell.IsVisible);
-            scene.Leave(otherModule: true);
-            await Until(() => !scene.Film.View.IsVisible);
-            Check(scene.Rig.Session.HasOutput && scene.Rig.Session.HasExternalPlayer && scene.Rig.Native.Commits == 1 &&
-                scene.Started == 1 && child.Disposals == 0 && scene.Port.FallbackCalls.Count == 0,
-                "external retention and typed Film commands remain the same occurrence across tray and ordinary leave");
+            Check(scene.Rig.Session.HasOutput && scene.Rig.Session.OwnsNativeMedia && scene.Rig.Native.Scope == scope &&
+                scene.Rig.Native.Commits == 1 && scene.Started == 1 && scene.Rig.Native.Stops == 0 &&
+                scene.Port.FallbackCalls.Count == 0,
+                "typed Film commands retain the same native occurrence across tray hiding and restoration");
             await scene.HideToTray();
-            child.Draining = async () => { childEntered.TrySetResult(); await childFinish.Task; };
+            scene.Rig.Native.Stopping = async () => { outputEntered.TrySetResult(); await outputFinish.Task; };
             scene.Rig.Runtime.Intercept = async (method, input, _) =>
             {
                 if (method == "film.session.media.release")
@@ -209,31 +205,33 @@ public static class FilmTrayPlaybackTests
             };
             var late = scene.Backend.Capture(SystemPlaybackCommand.Play);
             scene.Tray.ExitApplication();
-            await childEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await outputEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             scene.Shell.Close();
             Check(scene.Shell.IsVisible && !scene.IsClosed && scene.ShutdownCalls == 1 &&
                 scene.Backend.Disabled == 1 && scene.Backend.Disposals == 0 && !receiptEntered.Task.IsCompleted,
-                "tray exit restores an operable window and waits for child drain before releasing its receipt");
-            // Shared preparation reversibly disables admission while the actual child and receipt still drain.
-            childFinish.TrySetResult();
+                "tray exit restores an operable window and waits for native drain before releasing its receipt");
+            // Shared preparation reversibly disables admission while the actual output and receipt still drain.
+            outputFinish.TrySetResult();
             await receiptEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(child.DisposalCompletions == 1 && !scene.IsClosed && scene.Backend.Disabled == 1 && scene.Backend.Disposals == 0 &&
-                !scene.Rig.Runtime.Released.Contains("tray-output"), "physical child completion is not a release acknowledgement");
+            Check(!scene.Rig.Native.HasOutput && !scene.IsClosed && scene.Backend.Disabled == 1 && scene.Backend.Disposals == 0 &&
+                !scene.Rig.Runtime.Released.Contains("tray-output"), "physical output stop is not a release acknowledgement");
             receiptFinish.TrySetResult();
             await scene.WaitClosed();
-            int controls = child.Controls.Count;
+            int controls = scene.Rig.Native.Controls.Count;
             late(); scene.Backend.Request(SystemPlaybackCommand.Seek, 120);
             await Pump();
             await scene.Attachment.DisposeAsync();
-            // Final suspension disables permanently; the backend, child and receipt are each released only once.
+            // Final suspension disables permanently; the backend, output and receipt are each released only once.
             Check(scene.Lifecycle.IsReleased && scene.Shell.ShutdownSucceeded && scene.Shell.CleanupCompleted &&
-                child.Disposals == 1 && child.DisposeCalls == 1 && scene.Rig.Native.Stops == 1 &&
+                scene.Rig.Native.Stops == 1 &&
                 scene.Rig.Runtime.Released.Contains("tray-output") && scene.Backend.Disabled == 2 &&
-                scene.Backend.Disposals == 1 && scene.Backend.Subscribers == 0 && child.Controls.Count == controls &&
-                scene.Port.FallbackCalls.Count == 0 && scene.Tray.Disposals == 1,
+                scene.Backend.Disposals == 1 && scene.Backend.Subscribers == 0 && scene.Rig.Native.Controls.Count == controls &&
+                scene.Port.FallbackCalls.Count == 0 && scene.Tray.Disposals == 1 &&
+                scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.media.release" &&
+                    FilmJson.Text(call.Parameters, "attemptId") == "tray-output") == 1,
                 "successful final exit releases once; captured late system commands never reopen Film or touch music");
         }
-        finally { childFinish.TrySetResult(); receiptFinish.TrySetResult(); }
+        finally { outputFinish.TrySetResult(); receiptFinish.TrySetResult(); }
     }
 
     private static async Task FailedExit()
@@ -319,45 +317,41 @@ public static class FilmTrayPlaybackTests
             scene.Port.FallbackCalls.Count == 0, "fresh system requests regain the original typed Film route after re-enable");
     }
 
-    private static async Task ExternalSystemMediaSettings()
+    private static async Task NativeSystemMediaClock()
     {
         await using var scene = await Scene.Create();
         await scene.Play();
-        await scene.Film.SeekPlaybackAsync(11);
-        await scene.Rig.Session.ExternalAsync("fixture-tray-mpv.exe");
         await scene.Film.SeekPlaybackAsync(81);
         await scene.Film.PausePlaybackAsync();
-        var child = scene.Players.Single();
         var scope = scene.Rig.Native.Scope;
-        int controls = scene.Rig.Native.Controls.Count, updates = scene.Backend.Updates, disabled = scene.Backend.Disabled;
+        int updates = scene.Backend.Updates, disabled = scene.Backend.Disabled;
         Check(scene.Backend.Last is { OwnerId: "film", Identity: "tray-output", HasMedia: true, IsPlaying: false,
                 PositionSeconds: 81, Kind: SystemPlaybackKind.Video } state &&
-            state.Title == scene.Film.PlaybackMedia.Title && state.DurationSeconds == child.Duration &&
-            scene.Rig.Native.Position == 11 && scene.Rig.Native.Paused,
-            "the enabled setting exposes the external Film clock rather than the paused native donor");
+            state.Title == scene.Film.PlaybackMedia.Title && state.DurationSeconds == scene.Rig.Native.Duration &&
+            scene.Rig.Native.Position == 81 && scene.Rig.Native.Paused,
+            "the enabled setting exposes the current typed native Film clock");
         await scene.MediaControls.SaveAsync(scene.MediaControls.Preferences with { SystemMediaEnabled = false });
         await scene.Film.ResumePlaybackAsync();
         await scene.Film.SeekPlaybackAsync(93);
         Check(!scene.MediaControls.Preferences.SystemMediaEnabled && scene.Backend.Disabled == disabled + 1 &&
-            scene.Backend.Updates == updates && child.Running && !child.Paused && child.Position == 93 &&
-            child.Disposals == 0 && scene.Rig.Native.Stops == 0 && scene.Rig.Native.Scope == scope &&
-            scene.Rig.Native.Position == 11 && scene.Rig.Native.Paused,
-            "turning off system media neither stops external Film playback nor publishes its changing clock");
+            scene.Backend.Updates == updates && scene.Rig.Native.HasOutput && !scene.Rig.Native.Paused &&
+            scene.Rig.Native.Position == 93 && scene.Rig.Native.Stops == 0 && scene.Rig.Native.Scope == scope,
+            "turning off system media preserves native Film playback without publishing its changing clock");
         await scene.MediaControls.SaveAsync(scene.MediaControls.Preferences with { SystemMediaEnabled = true });
-        Check(scene.MediaControls.Preferences.SystemMediaEnabled && scene.Rig.Session.HasExternalPlayer &&
+        Check(scene.MediaControls.Preferences.SystemMediaEnabled && scene.Rig.Session.OwnsNativeMedia &&
             scene.Backend.Last is { OwnerId: "film", Identity: "tray-output", HasMedia: true, IsPlaying: true,
                 PositionSeconds: 93, Kind: SystemPlaybackKind.Video, CanNext: true, CanPrevious: true } restored &&
             restored.Title == scene.Film.PlaybackMedia.Title && restored.Title != scene.Port.State.Title &&
-            restored.DurationSeconds == child.Duration,
-            "re-enable immediately publishes the current typed external Film state, not stale native metadata or position");
-        int childControls = child.Controls.Count;
+            restored.DurationSeconds == scene.Rig.Native.Duration,
+            "re-enable immediately publishes the current typed Film state and the clock changed while disabled");
+        int controls = scene.Rig.Native.Controls.Count;
         scene.Backend.Request(SystemPlaybackCommand.Pause);
-        await Until(() => child.Paused && scene.Backend.Last is { IsPlaying: false });
-        Check(child.Controls.Count == childControls + 1 && child.Controls.Last().Command == "pause" &&
-            child.Disposals == 0 && scene.Rig.Native.Controls.Count == controls && scene.Rig.Native.Stops == 0 &&
-            scene.Rig.Native.Scope == scope && scene.Rig.Native.Position == 11 && scene.Rig.Native.Paused &&
+        await Until(() => scene.Rig.Native.Paused && scene.Backend.Last is { IsPlaying: false });
+        Check(scene.Rig.Native.Controls.Count == controls + 1 && scene.Rig.Native.Controls.Last().Command == "pause" &&
+            scene.Rig.Native.Controls.Last().Scope == scope && scene.Rig.Native.Stops == 0 &&
+            scene.Rig.Native.Scope == scope && scene.Rig.Native.Position == 93 &&
             scene.Rig.Native.Commits == 1 && scene.Started == 1 && scene.Port.FallbackCalls.Count == 0,
-            "a fresh re-enabled system request controls only the retained external Film occurrence");
+            "a fresh re-enabled system request controls only the original native Film occurrence");
     }
 
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
@@ -369,7 +363,6 @@ public static class FilmTrayPlaybackTests
 
     private sealed class Scene : IAsyncDisposable
     {
-        internal readonly List<FilmExternalProbe> Players = [];
         internal readonly FilmPlaybackRig Rig;
         internal readonly FilmCapability Film;
         internal readonly ShellWindow Shell;
@@ -393,11 +386,7 @@ public static class FilmTrayPlaybackTests
             QualityFixture.DocumentStore store, ShutdownReceipt? receipt)
         {
             this.preferences = preferences; this.store = store; MediaControls = mediaControls;
-            Rig = new((_, media, _, _) =>
-            {
-                var child = new FilmExternalProbe(media); Players.Add(child);
-                return Task.FromResult<IFilmExternalPlayer>(child);
-            });
+            Rig = new();
             Film = new(new HomeSource(), Rig.Session, Rig.Library);
             Shell = new([Film, new SettingsNavigationTests.Module("other", "其他")], [],
                 () => { ShutdownCalls++; return ShutdownWork = Lifecycle!.CloseAsync(); },

@@ -284,11 +284,6 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             if (!CommitAllowed()) return false;
             if (Math.Abs(prepared.Player.Time - HandoffPosition()) > 250)
                 throw Error(PlaybackError.ReadSeekFailed);
-            if (current?.RuntimeOutput is { } output)
-            {
-                await output.DisposeAsync();
-                if (!CommitAllowed()) return false;
-            }
             var runtimeIntent = _runtimeHandoffIntent;
             bool keepPaused = runtimeIntent is { PreserveCurrent: false } ? runtimeIntent.Paused : _pauseRequested;
             prepared.Player.Volume = _volume;
@@ -369,7 +364,6 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
                 _handoffOpening is not { IsCancellationRequested: false } || !HandoffScopeCurrent(target))
                 throw Error(PlaybackError.Superseded);
             CheckHandoffInput(prepared, failure);
-            if (_session?.RuntimeOutput is { ReleaseFailed: true }) throw Error(PlaybackError.ReleaseFailed);
             return canCommit();
         }
     }

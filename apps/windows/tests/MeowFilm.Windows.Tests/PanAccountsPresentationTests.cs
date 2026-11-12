@@ -10,7 +10,6 @@ using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
-using MeowFilm.Core.Scripting;
 using MeowFilm.Desktop;
 using static MeowFilm.Windows.Tests.PanAccountFixture;
 
@@ -183,7 +182,9 @@ public static class PanAccountsPresentationTests
     {
         var runtime = new PanAccountFixture();
         await using var store = new QualityFixture.DocumentStore();
-        await using var rules = new FilmRuleService(new EmptyRules(), store);
+        runtime.Overrides["film.rules.get"] = (_, _) => Task.FromResult(FilmRuntimeProbe.Ok(
+            JsonSerializer.SerializeToElement(new { rules = new FilmRuleSet(), revision = "fixture-rules" }, Json)));
+        await using var rules = new FilmRuleService(runtime);
         await using var sources = new FilmSourceService(runtime, store);
         var view = new FilmSettingsView(rules, sources);
         var navigation = (StackPanel)view.FindName("SettingsNavigation");
@@ -209,12 +210,6 @@ public static class PanAccountsPresentationTests
             window.Content = null; window.Close(); await Drain();
             await view.PreparePlaybackSettingsShutdownAsync();
         }
-    }
-    private sealed class EmptyRules : IJavaScriptJsonEngine
-    {
-        public Task<JsonElement> InvokeAsync(object request, CancellationToken cancellationToken = default) =>
-            Task.FromResult(JsonSerializer.SerializeToElement(new { changed = false, rules = new FilmRuleSet() }, Json));
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     private static string[] VisibleActions(DependencyObject view, PanAccountRow row) =>
         Visuals(view).OfType<Button>().Where(button => ReferenceEquals(button.DataContext, row) && button.IsVisible)

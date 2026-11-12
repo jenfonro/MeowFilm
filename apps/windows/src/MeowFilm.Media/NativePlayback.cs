@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Threading;
 using LibVLCSharp.Shared;
 using VlcMedia = LibVLCSharp.Shared.Media;
@@ -69,13 +70,15 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
     public string? Identity => _identity;
     public string Title => _title;
     public bool IsPlaying => _isPlaying;
+    /// <summary>Native playback is waiting for its input cache; not a downloaded media range.</summary>
+    public bool IsBuffering => _session is { Buffering: true } session && IsCurrent(session);
     public bool HasMedia => _hasMedia;
     public double PositionSeconds => _positionSeconds;
     public double DurationSeconds => _durationSeconds;
     public string? LastErrorCode => _lastErrorCode;
     /// <summary>Observed library version only, not codec/decoder/output capability evidence.</summary>
     public string? NativeVersion => _nativeVersion;
-    public FrameworkElement VideoView => _view;
+    public ContentControl VideoView => _view;
     public VideoOutputObservation? ObservedVideoOutput => _videoOutput;
 
     /// <summary>Dispatcher-affine binding property; clamps to 0..100, applied through the command gate.</summary>
@@ -493,6 +496,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             finally
             {
                 _session = null;
+                NotifyBuffering();
                 Set(ref _isPlaying, false, nameof(IsPlaying));
                 Set(ref _hasMedia, false, nameof(HasMedia));
             }
@@ -514,12 +518,11 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         session.Released = true;
         session.ContinuationReady?.TrySetCanceled(new CancellationToken(true));
         session.Invalidate();
+        if (ReferenceEquals(_session, session)) NotifyBuffering();
         session.ProgressTimer?.Stop();
         session.Cancellation.Dispose(); // Cancellation callback only enqueues work; never waits for this dispatcher.
         if (detachView) _view.BeginRetirement();
         bool failed = false;
-        try { if (session.RuntimeOutput is { } output) await output.DisposeAsync(); }
-        catch { failed = true; }
         // Stop joins native threads. Never call it on a libVLC callback or block the WPF message pump.
         try { await Task.Run(session.Player.Stop); }
         catch { failed = true; }
@@ -608,6 +611,13 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             if (session.ContinuationReady is not null) Observe(InitializeContinuationAsync(session));
         }
     }
+
+    private void OnBuffering(Session session, bool buffering)
+    {
+        if (IsCurrent(session)) Set(ref session.Buffering, buffering, nameof(IsBuffering));
+    }
+
+    private void NotifyBuffering() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsBuffering)));
 
     private void QueueVolume()
     {
@@ -709,6 +719,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         Set(ref _pauseRequested, false, nameof(PauseRequested));
         _opening?.Cancel(); // Preflight may hold the command gate before a Session exists.
         _session?.Invalidate();
+        NotifyBuffering();
         return ++_generation;
     }
 
@@ -744,6 +755,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private void ClearState()
     {
+        NotifyBuffering();
         Set(ref _tracks, null, nameof(Tracks));
         Set(ref _videoOutput, null, nameof(ObservedVideoOutput));
         Set(ref _ownerId, null, nameof(OwnerId));
@@ -852,7 +864,6 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         internal readonly AdaptiveMediaSession? Adaptive = adaptive;
         internal readonly MediaResourceSession? Resource = resource;
         internal readonly FFmpegMediaInput? FFmpeg = ffmpeg;
-        internal RuntimeOutput? RuntimeOutput;
         internal string? LastInputError => FFmpeg?.LastErrorCode ?? ReadInput?.LastErrorCode ??
             Input?.LastErrorCode ?? Adaptive?.LastErrorCode;
         internal CancellationTokenRegistration Cancellation;
@@ -870,7 +881,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             FFmpeg?.Cancel();
             Resource?.Cancel();
         }
-        internal bool HasStarted, Terminal, Released, RuntimeOutputReady;
+        internal bool HasStarted, Terminal, Released, RuntimeOutputReady, Buffering;
         internal Task<bool>? ReleaseTask;
         internal TaskCompletionSource? ContinuationReady;
         internal bool ContinuationInitializing;
@@ -883,6 +894,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         private EventHandler<EventArgs>? _playing, _paused, _ended, _failed;
         private EventHandler<MediaPlayerTimeChangedEventArgs>? _time;
         private EventHandler<MediaPlayerLengthChangedEventArgs>? _length;
+        private EventHandler<MediaPlayerBufferingEventArgs>? _buffering;
         private Action<string>? _inputFailed;
         private Action<string>? _readFailed;
         private Action<string>? _adaptiveFailed;
@@ -896,6 +908,11 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             _failed = (_, _) => owner.Post(() => owner.Observe(owner.FinishSessionAsync(this, PlaybackError.PlaybackFailed)));
             _time = (_, args) => owner.Progress(this, time: args.Time);
             _length = (_, args) => owner.Progress(this, length: args.Length);
+            _buffering = (_, args) =>
+            {
+                bool buffering = args.Cache < 100;
+                owner.Post(() => owner.OnBuffering(this, buffering));
+            };
             ProgressTick = (_, _) => owner.FlushProgress(this);
             Player.Playing += _playing;
             Player.Paused += _paused;
@@ -903,6 +920,8 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             Player.EncounteredError += _failed;
             Player.TimeChanged += _time;
             Player.LengthChanged += _length;
+            Player.Buffering += _buffering;
+            if (owner.IsCurrent(this)) owner.NotifyBuffering();
             if (Input is not null)
             {
                 _inputFailed = code => owner.Post(() => owner.Observe(owner.FinishSessionAsync(this, code)));
@@ -934,6 +953,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             Player.EncounteredError -= _failed;
             Player.TimeChanged -= _time;
             Player.LengthChanged -= _length;
+            Player.Buffering -= _buffering;
             if (Input is not null) Input.Failed -= _inputFailed;
             if (ReadInput is not null) ReadInput.Failed -= _readFailed;
             if (Adaptive is not null) Adaptive.Failed -= _adaptiveFailed;
