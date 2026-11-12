@@ -94,7 +94,7 @@ final class NovelRuleEditor: NovelTablePage {
                     guard let self else { return }; guard let number = Int(value), number > 0 else { showError("超时无效"); return }; rule.timeoutMillisecond = number; render()
                 }
             },
-            .init(title: "删除") { [weak self] in
+            .init(title: "删除", destructive: true) { [weak self] in
                 guard let self else { return }
                 let alert = UIAlertController(title: "删除净化规则", message: rule.name, preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: "取消", style: .cancel)); alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in

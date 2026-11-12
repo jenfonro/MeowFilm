@@ -87,7 +87,7 @@ class FilmSourcePageController: FilmSettingsListController {
         }
         let name = UIButton(type: .system)
         let label = UILabel()
-        label.text = title; label.textColor = UIColor(theme.ink)
+        label.text = title; label.textColor = UIColor(theme.settings.ink)
         label.font = .preferredFont(forTextStyle: .body)
         label.adjustsFontForContentSizeCategory = true; label.numberOfLines = 0
         label.isAccessibilityElement = false
@@ -104,7 +104,7 @@ class FilmSourcePageController: FilmSettingsListController {
         name.addAction(UIAction { _ in open() }, for: .touchUpInside)
         name.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         let summary = UILabel()
-        summary.text = status; summary.textColor = UIColor(theme.muted)
+        summary.text = status; summary.textColor = UIColor(theme.settings.muted)
         summary.font = .preferredFont(forTextStyle: .footnote)
         summary.adjustsFontForContentSizeCategory = true; summary.numberOfLines = 0
         let text = UIStackView(arrangedSubviews: [name, summary])

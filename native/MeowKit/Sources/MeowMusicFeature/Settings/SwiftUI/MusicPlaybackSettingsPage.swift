@@ -144,7 +144,7 @@ private struct MusicQualityRowLabel: View {
                 Spacer(minLength: 8)
                 Text(symbol)
                     .font(.subheadline)
-                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                     .lineLimit(1)
                     .accessibilityHidden(true)
             }

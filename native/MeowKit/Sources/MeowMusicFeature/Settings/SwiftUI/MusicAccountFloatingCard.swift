@@ -26,7 +26,7 @@ struct MusicAccountFloatingCard<Content: View>: View {
                     .frame(maxWidth: 420, alignment: .leading)
                     .background(
                         RoundedRectangle(cornerRadius: 24, style: .continuous)
-                            .fill(Color(uiColor: UIColor(theme.dark ? theme.surface : PageColor(rgb: 0xffffff))))
+                            .fill(Color(uiColor: UIColor(theme.settings.surface)))
                     )
                     .shadow(color: .black.opacity(0.12), radius: 24, y: 8)
                     .padding(16)
@@ -34,8 +34,8 @@ struct MusicAccountFloatingCard<Content: View>: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
-        .foregroundStyle(Color(uiColor: UIColor(theme.ink)))
-        .tint(Color(uiColor: UIColor(theme.accent)))
+        .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
+        .tint(Color(uiColor: UIColor(theme.settings.accent)))
     }
 }
 
@@ -58,7 +58,7 @@ struct MusicAccountCardHeader<Trailing: View>: View {
             Button(action: close) {
                 Image(systemName: "xmark")
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
@@ -77,8 +77,8 @@ struct MusicAccountInputCapsule<Content: View>: View {
     var body: some View {
         HStack(spacing: 0) { content() }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Capsule().fill(Color(uiColor: UIColor(theme.chip)).opacity(0.45)))
-            .overlay(Capsule().strokeBorder(Color(uiColor: UIColor(theme.border))))
+            .background(Capsule().fill(Color(uiColor: UIColor(theme.settings.input))))
+            .overlay(Capsule().strokeBorder(Color(uiColor: UIColor(theme.settings.inputBorder))))
     }
 }
 
@@ -114,25 +114,25 @@ private struct MusicAccountButtonBody: View {
             .foregroundStyle(foreground)
             .background(shape.fill(fill))
             .overlay {
-                if destructive { shape.strokeBorder(Color(uiColor: UIColor(theme.border))) }
+                if destructive { shape.strokeBorder(Color(uiColor: UIColor(theme.settings.inputBorder))) }
             }
             .contentShape(shape)
             .opacity(configuration.isPressed ? 0.8 : 1)
     }
 
     private var foreground: Color {
-        if !isEnabled { return Color(uiColor: UIColor(theme.muted)) }
-        return destructive ? theme.settingsDanger : Color(uiColor: UIColor(theme.dark ? theme.top : PageColor(rgb: 0xffffff)))
+        if !isEnabled { return Color(uiColor: UIColor(theme.settings.muted)) }
+        return destructive ? theme.settingsDanger : Color(uiColor: UIColor(theme.settings.onAccent))
     }
 
     private var fill: Color {
         if destructive { return Color.clear }
-        return isEnabled ? Color(uiColor: UIColor(theme.ink)) : Color(uiColor: UIColor(theme.chip)).opacity(0.6)
+        return Color(uiColor: UIColor(isEnabled ? theme.settings.accent : theme.settings.input))
     }
 }
 
 extension PageTheme {
     /// Error and destructive red shared by account rows, details and confirmations.
-    var settingsDanger: Color { Color(uiColor: UIColor(PageColor(rgb: dark ? 0xe5566f : 0xc4242a))) }
+    var settingsDanger: Color { Color(uiColor: UIColor(settings.danger)) }
 }
 #endif

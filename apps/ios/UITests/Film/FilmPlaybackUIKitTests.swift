@@ -363,6 +363,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let window = try mount(navigation)
         defer { unmount(navigation, window) }
         try await visible(page)
+        XCTAssertEqual(page.view.tintColor, UIColor(page.theme.accent), "Playback directories keep the selected page theme")
+        let directoryRow = try await visibleCell("film.directory.folder.0", page)
+        XCTAssertEqual((directoryRow.contentConfiguration as? UIListContentConfiguration)?.textProperties.color,
+            UIColor(page.theme.ink))
+        XCTAssertEqual(directoryRow.selectionStyle, .default)
+        XCTAssertFalse(directoryRow.selectedBackgroundView is SettingsRowBackgroundView)
         try select("film.directory.folder.0", page)
         let root = try XCTUnwrap(navigation.topViewController as? FilmDirectoryViewController)
         try await visible(root)

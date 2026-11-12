@@ -50,7 +50,7 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
     private var importing: Bool { if case .importSource = mode { return true }; return false }
     override func render() {
         name.isEnabled = !busy; sourceURL.isEnabled = !busy
-        name.textColor = UIColor(theme.ink); sourceURL.textColor = UIColor(theme.ink)
+        name.textColor = UIColor(theme.settings.ink); sourceURL.textColor = UIColor(theme.settings.ink)
         if case .updateLocal = mode { sections = [] }
         else { sections = [.init(title: "名称", rows: [.init(title: "", id: "", content: name)])] }
         if !local { sections.append(.init(title: "URL", rows: [.init(title: "", id: "", content: sourceURL)])) }

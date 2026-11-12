@@ -75,7 +75,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         case .autoPrepare:
             sections = [.init(title: "", rows: [
                 filmSwitchRow("进入播放页自动准备", id: "film.preferences.auto-prepare",
-                              isOn: draft.iosAutoPrepare, enabled: !owner.busy, ink: UIColor(theme.ink)) { [weak owner] value in
+                              isOn: draft.iosAutoPrepare, enabled: !owner.busy) { [weak owner] value in
                     owner?.edit { $0.iosAutoPrepare = value }
                 },
                 restoreRow("恢复默认", group: .autoPrepare),
@@ -94,7 +94,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
 
     private func keywordRows(_ values: [String], group: FilmPlaybackSettingsModel.Group) -> [FilmSettingsRow] {
         keywords.text = values.joined(separator: ",")
-        keywords.isEnabled = !owner.busy; keywords.textColor = UIColor(theme.ink)
+        keywords.isEnabled = !owner.busy; keywords.textColor = UIColor(theme.settings.ink)
         return [.init(title: "关键字匹配规则", id: "film.preferences.keywords.row", content: keywords),
                 restoreRow("恢复默认关键词", group: group)]
     }

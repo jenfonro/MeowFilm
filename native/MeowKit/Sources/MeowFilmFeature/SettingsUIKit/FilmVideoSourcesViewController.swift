@@ -59,7 +59,7 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
                 .init(title: "取消选择", id: "film.videos.deselectAll", enabled: !busy && !detecting, action: { [weak self] in self?.selected.removeAll(); self?.render() }),
                 .init(title: detecting ? "取消检测" : "检测", id: "film.videos.detect", enabled: !busy && (detecting || !selected.isEmpty),
                       action: { [weak self] in self?.detectSelected() }),
-                .init(title: "删除", id: "film.videos.delete", enabled: !busy && !detecting && !selected.isEmpty, action: { [weak self] in
+                .init(title: "删除", id: "film.videos.delete", enabled: !busy && !detecting && !selected.isEmpty, destructive: true, action: { [weak self] in
                     guard let self else { return }
                     let keys = videos.filter { self.selected.contains($0.key) }.map(\.key)
                     remove(keys)
@@ -137,7 +137,7 @@ final class FilmVideoDetailController: FilmSourcePageController {
         ]
         sections = [.init(title: "选项", rows: options.map { title, id, path in
                 filmSwitchRow(title, id: "film.video.option.\(id)", isOn: video.options[keyPath: path],
-                              enabled: !busy, ink: UIColor(theme.ink)) { [weak self] value in
+                              enabled: !busy) { [weak self] value in
                     guard let self else { return }
                     var changed = video.options; changed[keyPath: path] = value
                     saveOptions(changed)
@@ -148,7 +148,7 @@ final class FilmVideoDetailController: FilmSourcePageController {
             .init(title: "操作", rows: [
                 .init(title: detecting ? "取消检测" : "检测", id: "film.video.detect", enabled: !busy && (canDetect || detecting),
                       action: { [weak self] in self?.detect() }),
-                .init(title: "删除", id: "film.video.delete", enabled: !busy, action: { [weak self] in
+                .init(title: "删除", id: "film.video.delete", enabled: !busy, destructive: true, action: { [weak self] in
                     self?.confirm("删除视频源？") { [weak self] in
                         guard let self else { return }; cancelDetection()
                         deleteBatch([key], isPresent: { key, snapshot in snapshot.videos.contains { $0.key == key } },
