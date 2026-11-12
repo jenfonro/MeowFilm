@@ -216,10 +216,10 @@ final class PanAccountsUIKitTests: XCTestCase {
 
 @MainActor
 private final class PanAccountsTheme: ObservableObject, PageThemeProviding {
-    @Published private(set) var pageColorway: PageColorway = .lilac
+    @Published private(set) var pagePalette: PagePalette = .preset(.lilac)
     let animatesPageColorway = false
     var pageThemeChanges: AnyPublisher<Void, Never> { objectWillChange.eraseToAnyPublisher() }
-    func setColorway(_ value: PageColorway) { pageColorway = value }
+    func setColorway(_ value: PageColorway) { pagePalette = .preset(value) }
 }
 
 private func panUIProvider(_ id: PanProviderID) -> RuntimeValue {

@@ -64,6 +64,11 @@ class SourceScopeTests(unittest.TestCase):
     def test_current_repository(self):
         self.assertEqual(scope.check(ROOT), [])
 
+    def test_generated_app_build_cache_is_not_source(self):
+        self.write("apps/ios/.cache/DerivedData/Meowfilm/Build/DerivedSources/GeneratedAssetSymbols.swift",
+                   "import Foundation\n")
+        self.assertEqual(scope.check(self.root), [])
+
     def test_windows_sources_and_tools_are_outside_ios_scope(self):
         self.write("apps/windows/Unlisted.swift", "import MeowUnknown\n")
         self.write("scripts/windows/probe.mjs", "import './missing-runtime.mjs';\n")
