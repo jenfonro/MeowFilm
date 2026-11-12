@@ -91,7 +91,7 @@ final class FilmPlaybackSearchContextTests: XCTestCase {
         let service = FilmSearchService(transport: rpc.transport(), sites: { await gate.wait(); return [F.site] })
         let session = try service.session(for: "原查询"), context = session.context(for: FilmSearchCard(value: F.group([F.row()])))
         let server = FilmPlaybackWireServer(), request = FilmPlaybackFixture.request()
-        let model = FilmPlaybackModel(transport: server.transport, media: FilmPlaybackTestMedia(), openExternalURL: { _ in false }, searchContext: context, request: {
+        let model = FilmPlaybackModel(transport: server.transport, media: FilmPlaybackTestMedia(), searchContext: context, request: {
             entered.fulfill()
             return try await context.playbackRequest(sources: request.sources, owner: nil)
         })
@@ -121,7 +121,7 @@ final class FilmPlaybackSearchContextTests: XCTestCase {
     }
 
     private func makeModel(_ transport: FilmPlaybackTransport, _ media: FilmPlaybackTestMedia, _ context: FilmSearchContext) -> FilmPlaybackModel {
-        .init(transport: transport, media: media, openExternalURL: { _ in XCTFail("Unexpected external handoff"); return false }, searchContext: context,
+        .init(transport: transport, media: media, searchContext: context,
               request: { try await context.playbackRequest(sources: [F.site.playbackSource], owner: transport.producer()) })
     }
 }
