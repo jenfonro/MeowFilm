@@ -550,7 +550,6 @@ extension NativeMusicScriptServiceTests {
                 do {
                     let snapshot = try await session.snapshot(discover: true, force: false)
                     let option = try XCTUnwrap(snapshot.options.first { $0.playback.installationId.hasPrefix("official:") })
-                    try await session.commitDiscovery()
                     let target = option.target(quality: "flac")
                     _ = try await session.resolve(target, attemptID: UUID().uuidString.lowercased())
                     selection = target.selection

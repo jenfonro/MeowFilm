@@ -207,6 +207,7 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
     private(set) var resources: [PlaybackResource] = [], attempts: [MusicPlayerAttempt] = []
     private(set) var stopped: [MusicPlayerAttempt] = [], paused: [MusicPlayerAttempt] = []
     private(set) var resumed: [MusicPlayerAttempt] = [], handoffs: [MusicPlayerAttempt] = []
+    var onStop: (@MainActor (MusicPlayerAttempt) -> Void)?
     var evidence: SystemPlaybackPlayerEvidence {
         .init(opened: attempts, stopped: stopped, paused: paused, resumed: resumed, handoffs: handoffs)
     }
@@ -222,7 +223,7 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         handoffs.append(replacing)
         return .init(duration: 180, synchronize: {}, commit: { self.play(resource) }, cancel: {})
     }
-    func stop(_ attempt: MusicPlayerAttempt) { stopped.append(attempt) }
+    func stop(_ attempt: MusicPlayerAttempt) { stopped.append(attempt); onStop?(attempt) }
     func pause(_ attempt: MusicPlayerAttempt) { paused.append(attempt) }
     func resume(_ attempt: MusicPlayerAttempt) { resumed.append(attempt) }
     func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool { true }
@@ -240,7 +241,7 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         let store: NativeMusicMemoryDocument
     }
     private func fixture(providers: [String: [String]] = ["a": ["flac", "128k"], "b": ["flac", "128k"]],
-                         paused: Bool = true) async throws -> Fixture {
+                         paused: Bool = true, recordInitialFacts: Bool = true) async throws -> Fixture {
         let first = try NativeMusicFixture.song("First"), second = try NativeMusicFixture.song("Second")
         XCTAssertNotEqual(first["songId"].string, second["songId"].string)
         var document = try MusicDocument(nil, runID: "system-admission")
@@ -262,6 +263,7 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
             sourceKey: source.sourceKey, quality: "flac"))
         XCTAssertEqual(model.activePlaybackSelection?.installationId, "a")
         XCTAssertEqual(model.activePlaybackSelection?.quality, "flac")
+        guard recordInitialFacts else { return value }
         try await fact(value, .playing)
         if paused { try await fact(value, .paused) }
         XCTAssertEqual(model.phase, paused ? .paused : .playing)
@@ -289,6 +291,80 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
     private func close(_ fixture: Fixture) async {
         await fixture.model.close()
         await fixture.native.close()
+    }
+
+    func testMediaHandoffPersistsUnflushedFirstPlayingAndExitPositionBeforeExplicitResume() async throws {
+        let f = try await fixture(paused: false, recordInitialFacts: false)
+        let original = try attempt(f.model), native = try XCTUnwrap(f.player.attempts.first)
+        let current = try XCTUnwrap(f.model.current)
+        let beforeQueue = try await f.native.queue(), beforePlayed = try await f.native.playedSongs()
+        XCTAssertTrue(beforePlayed.isEmpty)
+        XCTAssertTrue(try history(f)["days"].array.isEmpty)
+        let exitPosition = 61.0
+        f.player.onStop = { [weak model = f.model] stopped in
+            model?.onPlaybackEvent(.init(attempt: .init(id: stopped.id, owner: "music", resourceID: stopped.resourceID),
+                kind: .stopped, snapshot: .init(owner: "music", resourceID: stopped.resourceID,
+                    phase: .idle, position: exitPosition, duration: 180), wantsPlayback: false, error: nil))
+        }
+
+        // Do not drain or yield between the first native playing event and the
+        // synchronous native exit. Both must persist after selection retirement.
+        f.model.onPlaybackEvent(.init(attempt: original, kind: .played,
+            snapshot: .init(owner: "music", resourceID: original.resourceID, phase: .playing,
+                position: 37, duration: 180), wantsPlayback: true, error: nil))
+        f.model.stopForMediaHandoff()
+        f.model.onOutputUnavailable() // A retained idle fact owner is not new playback work.
+        XCTAssertEqual(f.player.stopped, [native])
+        XCTAssertNil(f.model.activeNativeAttemptID)
+        XCTAssertEqual(f.model.phase, .idle)
+        XCTAssertEqual(f.model.position, exitPosition, "The native exit must be accepted synchronously before selection retirement")
+        await f.model.flushPlaybackFacts()
+
+        let played = try await f.native.playedSongs(), state = try await f.native.state()
+        let savedHistory = try history(f), queue = try await f.native.queue()
+        let kinds = await f.service.recordedKinds()
+        XCTAssertEqual(kinds, [.playing, .stopped])
+        XCTAssertEqual(played.map(\.track.songId), [current.track.songId])
+        XCTAssertEqual(savedHistory["days"].array.flatMap { $0["songs"].array }.map { $0["song"]["songId"].string },
+            [current.track.songId], "The first playing fact must create real persisted history, not just reach a record port")
+        XCTAssertEqual(state.position, exitPosition)
+        XCTAssertEqual(state.currentId, beforeQueue.currentId)
+        XCTAssertEqual(queue.entries, beforeQueue.entries)
+        XCTAssertEqual(queue.currentId, beforeQueue.currentId)
+        XCTAssertEqual(queue.revision, beforeQueue.revision)
+        XCTAssertEqual(f.model.queue, beforeQueue.entries)
+        XCTAssertEqual(f.model.current?.id, current.id)
+        let stoppedEvidence = f.player.evidence
+        for command in [PlaybackPlayPauseCommand.play, .pause, .toggle(wantsPlayback: false)] {
+            XCTAssertFalse(f.model.acceptPlayPause(command, attempt: original))
+        }
+        XCTAssertFalse(f.model.acceptNext(original))
+        XCTAssertFalse(f.model.acceptPrevious(original))
+        XCTAssertEqual(f.player.evidence, stoppedEvidence)
+
+        await f.model.togglePlayback()
+        let resumed = try attempt(f.model)
+        XCTAssertNotEqual(resumed.id, original.id)
+        XCTAssertNotEqual(resumed.resourceID, original.resourceID)
+        XCTAssertEqual(f.player.resources.count, 2)
+        XCTAssertEqual(f.player.resources.last?.startPosition, exitPosition)
+        XCTAssertFalse(f.player.resumed.contains(native), "Explicit replay must not raw-resume the retired native attempt")
+        f.model.onPlaybackEvent(.init(attempt: resumed, kind: .played,
+            snapshot: .init(owner: "music", resourceID: resumed.resourceID, phase: .playing,
+                position: exitPosition, duration: 180), wantsPlayback: true, error: nil))
+        await f.model.flushPlaybackFacts()
+        let resumedState = try await f.native.state(), resumedQueue = try await f.native.queue()
+        let resumedKinds = await f.service.recordedKinds()
+        XCTAssertEqual(resumedKinds, [.playing, .stopped, .playing])
+        XCTAssertEqual(f.model.phase, .playing)
+        XCTAssertEqual(resumedState.position, exitPosition)
+        XCTAssertEqual(resumedQueue.entries, beforeQueue.entries)
+        XCTAssertEqual(resumedQueue.currentId, beforeQueue.currentId)
+        XCTAssertEqual(resumedQueue.revision, beforeQueue.revision)
+        XCTAssertFalse(f.model.acceptPlayPause(.play, attempt: original))
+        XCTAssertFalse(f.model.acceptNext(original))
+        XCTAssertNil(f.model.error)
+        await close(f)
     }
 
     func testRemotePreparedIdentityFailureKeepsHealthyDonorBeforeHandoff() async throws {

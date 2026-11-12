@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -8,14 +9,14 @@ public static partial class MusicNativeLibraryTests
 {
     private static IEnumerable<TestCase> LyricPersistenceCases()
     {
-        yield return new("Native music lyric display current schema preserves plain and true words across restart", LyricDisplayRestart);
+        yield return new("Native music lyric display independent cache preserves plain and true words across restart", LyricDisplayRestart);
         yield return new("Native music local lyrics current schema preserves plain and true words across restart", LocalLyricsRestart);
-        yield return new("Native music lyric snapshots reject non-current schemas without writes", LyricSnapshotSchemas);
+        yield return new("Native music local lyric documents reject invalid schemas without writes", LyricSnapshotSchemas);
         yield return new("Native music lyric snapshots reject timing fields without writes", LyricSnapshotFields);
     }
 
     private const string PersistedLyricText =
-        "[offset:-1500]\n[00:01]<00:01.000>A<00:02.000>B<00:03.000>\n[00:04]整句👨‍👩‍👧‍👦\n[6000,20](6000,0,0)Z(6000,20,0)T";
+        "[offset:-1500]\n[00:01]<00:01.000>A<00:02.000>B<00:03.000>\n[00:04]整句👨‍👩‍👧‍👦\n[6000,20](6000,0,0)Z(6000,20,0)T\n[00:08]<00:08.000>末词";
 
     private static JsonArray CurrentLyricRows() => new(
         O(new {
@@ -32,6 +33,10 @@ public static partial class MusicNativeLibraryTests
                 new { time = 4.5, duration = 0d, text = "Z", offset = 0d },
                 new { time = 4.5, duration = .02, text = "T", offset = 0d }
             }
+        }),
+        O(new {
+            time = 6.5, end = 180d, text = "末词",
+            words = new[] { new { time = 6.5, duration = 0d, text = "末词", offset = 0d } }
         }));
 
     private static async Task<(JsonObject Song, string SourceKey)> SeedLyricSong(MusicLibraryOwner owner)
@@ -50,8 +55,6 @@ public static partial class MusicNativeLibraryTests
         lines[0]!["translation"] = "译文";
         lines[0]!["romanization"] = "A B";
         await Ok(owner, "music.lyrics.display.save", new { song, sourceKey, lines });
-        var saved = f.Store.State("native-lyric-display");
-        Check(saved["schema"]!.GetValue<int>() == 2 && JsonNode.DeepEquals(saved["lines"], lines));
         byte[] bytes = f.Store.Bytes!.ToArray(); int writes = f.Store.Writes;
         await owner.DisposeAsync();
 
@@ -82,72 +85,22 @@ public static partial class MusicNativeLibraryTests
         Check(f.Store.Writes == writes && bytes.SequenceEqual(f.Store.Bytes!));
     }
 
-    private static JsonObject LyricSnapshot(string area, int schema, JsonArray lines) =>
-        area == "native-lyric-display" ?
-            O(new { schema, songKey = new string('a', 64), songId = "library:local:a", sourceKey = "synthetic-source", lines }) :
-            O(new { schema, items = new[] {
-                new { songKey = new string('a', 64), songId = "library:local:a", contentHash = new string('b', 64), lines }
-            } });
+    private static JsonObject LyricSnapshot(int schema, JsonArray lines) =>
+        O(new { schema, items = new[] {
+            new { songKey = new string('a', 64), songId = "library:local:a", contentHash = new string('b', 64), lines }
+        } });
 
     private static async Task LyricSnapshotSchemas()
     {
-        foreach (string legacy in new[] {
-            """
-            {
-              "version": 1,
-              "entries": [{
-                "key": "[\"meowfilm\",\"music\",1,\"local\",\"native-lyric-display\"]",
-                "value": {
-                  "schema": 1,
-                  "songKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                  "songId": "library:local:a",
-                  "sourceKey": "synthetic-source",
-                  "lines": [{
-                    "time": 1, "end": 6, "text": "AB", "timing": "estimated",
-                    "words": [
-                      { "time": 1, "duration": 2.5, "text": "A", "offset": 0 },
-                      { "time": 3.5, "duration": 2.5, "text": "B", "offset": 2.5 }
-                    ]
-                  }]
-                }
-              }]
-            }
-            """,
-            """
-            {
-              "version": 1,
-              "entries": [{
-                "key": "[\"meowfilm\",\"music\",1,\"local\",\"native-local-lyrics\"]",
-                "value": {
-                  "schema": 1,
-                  "items": [{
-                    "songKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "songId": "library:local:a",
-                    "contentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "lines": [{
-                      "time": 1, "end": 6, "text": "AB", "timing": "estimated",
-                      "words": [
-                        { "time": 1, "duration": 2.5, "text": "A", "offset": 0 },
-                        { "time": 3.5, "duration": 2.5, "text": "B", "offset": 2.5 }
-                      ]
-                    }]
-                  }]
-                }
-              }]
-            }
-            """
-        })
-            await RejectDocument(Encoding.UTF8.GetBytes(legacy));
-        foreach (string area in new[] { "native-lyric-display", "native-local-lyrics" })
-            await RejectDocument(Document((area, LyricSnapshot(area, 3, CurrentLyricRows()))));
+        foreach (int schema in new[] { 1, 3 })
+            await RejectDocument(Document(("native-local-lyrics", LyricSnapshot(schema, CurrentLyricRows()))));
     }
 
     private static async Task LyricSnapshotFields()
     {
         var lines = CurrentLyricRows();
         lines[0]!["timing"] = "word";
-        foreach (string area in new[] { "native-lyric-display", "native-local-lyrics" })
-            await RejectDocument(Document((area, LyricSnapshot(area, 2, lines))));
+        await RejectDocument(Document(("native-local-lyrics", LyricSnapshot(2, lines))));
 
         await using var f = new Fixture(); var owner = f.Owner();
         var (song, sourceKey) = await SeedLyricSong(owner);
@@ -155,4 +108,21 @@ public static partial class MusicNativeLibraryTests
         await Error(owner, "music.lyrics.display.save", new { song, sourceKey, lines }, "INVALID_REQUEST");
         Check(f.Store.Writes == writes && bytes.SequenceEqual(f.Store.Bytes!));
     }
+    private sealed class LyricCacheStore : IDocumentStore
+    {
+        internal byte[]? Data;
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        {
+            Check(ns == MusicLibraryOwner.LyricDisplayNamespace); token.ThrowIfCancellationRequested();
+            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
+        }
+        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
+        {
+            Check(ns == MusicLibraryOwner.LyricDisplayNamespace); token.ThrowIfCancellationRequested();
+            Check(expected == (Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
+            Data = bytes.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(Data));
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
 }

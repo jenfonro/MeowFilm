@@ -14,30 +14,6 @@ public enum FilmVideoScale: String, CaseIterable, Sendable {
     }
 }
 
-public enum FilmExternalPlayer: CaseIterable, Sendable {
-    case infuse, nPlayer
-
-    public var title: String { self == .infuse ? "Infuse" : "nPlayer" }
-
-    func url(for input: URL) throws -> URL {
-        let text = input.absoluteString
-        let target: String
-        switch self {
-        case .infuse:
-            let characters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()")
-            guard let encoded = text.addingPercentEncoding(withAllowedCharacters: characters) else {
-                throw FilmPlaybackError.invalidResponse
-            }
-            target = "infuse://x-callback-url/play?url=\(encoded)"
-        case .nPlayer:
-            let scheme = input.scheme!.lowercased()
-            target = "nplayer-\(scheme)\(text.dropFirst(scheme.count))"
-        }
-        guard let url = URL(string: target) else { throw FilmPlaybackError.invalidResponse }
-        return url
-    }
-}
-
 public struct FilmMediaState: Equatable, Sendable {
     public var sessionID: UUID?
     public var attemptID: String?
@@ -82,7 +58,7 @@ public protocol FilmPlaybackMediaControlling: AnyObject {
     func isCurrent(sessionID: UUID, attemptID: String) -> Bool
     /// Returns true only if this call actually pauses the exact playing owner.
     func pause(sessionID: UUID, attemptID: String) -> Bool
-    func resume(sessionID: UUID, attemptID: String)
+    func resume(sessionID: UUID, attemptID: String, userInitiated: Bool)
     func seek(sessionID: UUID, to position: Double)
     func setRate(sessionID: UUID, rate: Double)
     func setVolume(sessionID: UUID, volume: Double)

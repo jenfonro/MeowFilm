@@ -34,9 +34,14 @@ public sealed partial class MusicPlatformHttp : IDisposable
         uri.UserInfo.Length == 0 && uri.Fragment.Length == 0 && (platform switch {
             "wy" => uri.Host is "music.163.com" or "interfacepc.music.163.com" ||
                 uri.Host == "interface.music.163.com" && uri.AbsolutePath == "/api/bsr/sk/get" ||
-                uri.Host == "interface3.music.163.com" && uri.AbsolutePath is "/xeapi/v3/discovery/recommend/songs" or "/xeapi/homepage/category/daily/song/list" or "/xeapi/song/enhance/player/url/v1",
+                uri.Host == "interface3.music.163.com" &&
+                (uri.AbsolutePath is "/xeapi/v3/discovery/recommend/songs" or "/xeapi/homepage/category/daily/song/list" or "/xeapi/song/enhance/player/url/v1" ||
+                 uri.Query.Length == 0 && IsDailyStylePreferencePath(uri.AbsolutePath)),
             "tx" => uri.Host == "u.y.qq.com", "kg" => uri.Host == "gateway.kugou.com" ||
                 uri.Host == "lyrics.kugou.com" && uri.AbsolutePath is "/v1/search" or "/download", _ => false });
+    private static bool IsDailyStylePreferencePath(string path) =>
+        path is "/xeapi/homepage/daily/song/config/get" or "/xeapi/homepage/daily/song/tag/save";
+
     private static int HeaderBytes(HttpHeaders headers)
     {
         var count = 0;
@@ -133,9 +138,10 @@ public sealed partial class MusicPlatformHttp : IDisposable
         if (uri is null || !uri.IsAbsoluteUri || uri.Scheme != "https" || !uri.IsDefaultPort ||
             uri.UserInfo.Length != 0 || uri.Fragment.Length != 0 || request.Method != HttpMethod.Post) return false;
         return policy switch {
-            NativeHttpPolicy.Feedback => platform == "wy" && uri.Query.Length == 0 &&
-                (uri.Host == "music.163.com" && uri.AbsolutePath is "/weapi/w/nuser/account/get" or "/weapi/v3/song/detail" ||
-                 uri.Host == "clientlog.music.163.com" && uri.AbsolutePath == "/eapi/feedback/weblog"),
+            NativeHttpPolicy.Feedback => platform == "wy" &&
+                (uri.Host == "music.163.com" && uri.AbsolutePath == "/weapi/w/nuser/account/get" && uri.Query.Length == 0 ||
+                 uri.Host == "clientlog3.music.163.com" && uri.AbsolutePath == "/api/clientlog/encrypt/upload" &&
+                    uri.Query == "?multiupload=true" && request.Content is MultipartFormDataContent),
             NativeHttpPolicy.MusicLibrarySyncCloud => platform == "kg" && uri.Host == "gateway.kugou.com" &&
                 uri.AbsolutePath is "/v2/delete_list" or "/v1/modify_song_sort" &&
                 request.Headers.TryGetValues("x-router", out var router) &&
@@ -360,6 +366,9 @@ public sealed partial class MusicPlatformHttp : IDisposable
                     ? platform.Length > 0 && platform == AccountPlatform(step) && AccountOrigin(step, request)
                     : IsAllowedOrigin(platform, request.RequestUri)), "ORIGIN_DENIED");
             PJ.Require(request.Method == HttpMethod.Post || request.Method == HttpMethod.Get);
+            if (platform == "wy" && request.RequestUri!.Host == "interface3.music.163.com" &&
+                IsDailyStylePreferencePath(request.RequestUri.AbsolutePath))
+                PJ.Require(request.Method == HttpMethod.Post, "ORIGIN_DENIED");
             PJ.Require(request.Content is null || request.Content.Headers.ContentLength is >= 0 and <= 65536, "LIMIT");
             PJ.Require(HeaderBytes(request.Headers) +
                 (nativePolicy is not null && request.Content is not null ? HeaderBytes(request.Content.Headers) : 0) <= 32768, "LIMIT");
@@ -382,7 +391,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
                 using (request)
                 {
                 await CheckNativeBody(nativePolicy, request, token).ConfigureAwait(false);
-                if (nativePolicy is NativeHttpPolicy.QqQimei or NativeHttpPolicy.QqAccount or NativeHttpPolicy.QqProfile or
+                if (nativePolicy is NativeHttpPolicy.Feedback or NativeHttpPolicy.QqQimei or NativeHttpPolicy.QqAccount or NativeHttpPolicy.QqProfile or
                     NativeHttpPolicy.QqSession or NativeHttpPolicy.QqFeedbackJson or NativeHttpPolicy.QqFeedbackReport or
                     NativeHttpPolicy.PublicCatalogRead or NativeHttpPolicy.AccountDetails or NativeHttpPolicy.Chorus or
                     NativeHttpPolicy.VipPage)

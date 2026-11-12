@@ -10,7 +10,7 @@ extension NativeMusicService: MusicSimilarModeServing {
         try check()
         if let active = similarMode.active {
             guard active.lease.authorization.isActive else { try cancelSimilarModeState(); return nil }
-            let retry = active.provider != .heartbeat && active.continueEnabled && active.pending == nil &&
+            let retry = active.continueEnabled && active.pending == nil &&
                 (active.exhausted || active.status == .error)
             return .init(id: active.id, active: true, status: active.status,
                 seed: MusicNativeSimilarData.display(active.seed), seedEntryID: active.seedEntryID,
@@ -63,7 +63,8 @@ extension NativeMusicService: MusicSimilarModeServing {
     func heartbeatSource(_ d: MusicDocument) -> Bool {
         guard let row = d.queue["entries"].array.first(where: { $0["id"] == d.queue["currentId"] }) else { return false }
         let source = row["context"]
-        return source["platform"].string == "wy" && source["sourceId"].string == "favorites"
+        return source["collectionId"].string == "favorites" ||
+            (source["platform"].string == "wy" && source["sourceId"].string == "favorites")
     }
     func similarCanEnter(_ d: MusicDocument) -> Bool {
         heartbeatSource(d) && platformEnabled("wy") && accounts is any MusicNativeSimilarModeProviding &&
@@ -100,19 +101,24 @@ extension NativeMusicService: MusicSimilarModeServing {
         return similarMode.preview
     }
     public func enterSimilarMode() async throws -> MusicSimilarModeResult {
+        let selection = similarMode.modeSelection
         try await restoreSimilarSessionIfNeeded()
         // Set enter intent before the network completes, so explicit retry can
         // commit a failed first entry just as the original enterAfter flag does.
         guard let item = try await prepareSimilarPreview() else { throw MusicServiceError.sourceUnavailable }
+        try musicRequire(similarMode.modeSelection == selection, .targetChanged)
         item.enterAfter = true
         let own = epoch
         let pending = item.task
         await withTaskCancellationHandler { await pending?.value } onCancel: { pending?.cancel() }
         try check(own)
+        try musicRequire(similarMode.modeSelection == selection, .targetChanged)
         return try commitSimilarPreview(id: item.id)
     }
     public func startSimilarMode(_ start: MusicSimilarModeStart) async throws -> MusicSimilarModeResult {
+        let selection = similarMode.modeSelection
         try await restoreSimilarSessionIfNeeded()
+        try musicRequire(similarMode.modeSelection == selection, .targetChanged)
         try check(); try requirePlatform("wy")
         let provider: MusicSimilarModeProvider, ids: [String], name: String
         switch start {
@@ -126,10 +132,12 @@ extension NativeMusicService: MusicSimilarModeServing {
             let allowed = try await canEnterSongRecommendations()
             try musicRequire(allowed, .sourceUnavailable)
             guard let item = try await prepareSimilarPreview(provider: .queueRecommendations) else { throw MusicServiceError.sourceUnavailable }
+            try musicRequire(similarMode.modeSelection == selection, .targetChanged)
             item.enterAfter = true
             let pending = item.task
             await withTaskCancellationHandler { await pending?.value } onCancel: { pending?.cancel() }
             try check()
+            try musicRequire(similarMode.modeSelection == selection, .targetChanged)
             return try commitSimilarPreview(id: item.id)
         case .currentHeartbeat(let occurrenceID, let expectedRevision):
             let d = try read()
@@ -146,6 +154,7 @@ extension NativeMusicService: MusicSimilarModeServing {
            ids.isEmpty || active.sourceIDs == ids {
             try active.lease.authorization.check()
             discardSimilarPreview()
+            try await setSimilarContinue(true, snapshotID: active.id)
             return .init(state: stateDTO(try read()), action: .togglePlayback)
         }
         let d = try read()
@@ -161,9 +170,11 @@ extension NativeMusicService: MusicSimilarModeServing {
                          navigation: similarMode.navigation)
             similarMode.preview = item; item.task = Task { await loadSimilarPreview(item.id) }; emitSimilar()
         }
+        item.enterAfter = true
         let pending = item.task
         await withTaskCancellationHandler { await pending?.value } onCancel: { pending?.cancel() }
         try check()
+        try musicRequire(similarMode.modeSelection == selection, .targetChanged)
         return try commitSimilarPreview(id: item.id)
     }
     public func playSimilarCandidate(snapshotID: UUID, candidateID: String) async throws -> MusicSimilarModeResult {
@@ -178,10 +189,14 @@ extension NativeMusicService: MusicSimilarModeServing {
         try check()
         guard let session = similarMode.active, session.id == snapshotID else { throw MusicServiceError.targetChanged }
         try session.lease.authorization.check()
-        if session.continueEnabled == enabled { return }
-        try musicRequire(session.provider != .heartbeat, .unsupported)
+        if !enabled && !session.continueEnabled { return }
         var saved = session.saved; saved["continue"] = .bool(enabled)
-        try session.lease.authorization.perform { try similarQueueTransaction(["queue"]) { $0.queue["similar"] = saved } }
+        try session.lease.authorization.perform {
+            try similarQueueTransaction(enabled ? ["queue", "playback"] : ["queue"]) { d in
+                d.queue["similar"] = saved
+                if enabled { selectContinuationMode(&d) }
+            }
+        }
         session.continueEnabled = enabled
         emitSimilar()
         if enabled { try similarBoundary() }
@@ -199,13 +214,14 @@ extension NativeMusicService: MusicSimilarModeServing {
             return .init(state: stateDTO(try read()), action: .keepCurrent)
         }
         let enterAfter = similarMode.preview?.enterAfter == true
+        let selection = similarMode.modeSelection
         let provider = similarMode.preview?.provider ?? .heartbeat
         discardSimilarPreview()
         let prepared = try await prepareSimilarPreview(provider: provider)
         await prepared?.task?.value
         guard let item = similarMode.preview else { throw MusicServiceError.targetChanged }
-        item.enterAfter = enterAfter
-        if enterAfter { return try commitSimilarPreview(id: item.id) }
+        item.enterAfter = enterAfter && similarMode.modeSelection == selection
+        if item.enterAfter { return try commitSimilarPreview(id: item.id) }
         return .init(state: stateDTO(try read()), action: .keepCurrent)
     }
     public func cancelSimilarMode() async throws { try cancelSimilarModeState() }
@@ -230,16 +246,10 @@ extension NativeMusicService: MusicSimilarModeServing {
         switch fact.kind {
         case .playing:
             similarMode.playing = (fact.attemptId, fact.occurrenceId)
-            let newEvent = similarMode.playbackEvent == nil || similarMode.eventOccurrence != fact.occurrenceId
-            if newEvent {
-                similarMode.playbackEvent = fact.attemptId
-                similarMode.eventOccurrence = fact.occurrenceId
-                similarMode.randomFetch = try read().playback["mode"].int == MusicPlaybackMode.shuffle.rawValue && random() < 0.5
-            }
             _ = try? await prepareQueueRecommendations()
             try? similarBoundary(); try? queueRecommendationBoundary(); try? fmBoundary()
         case .ended:
-            similarMode.playing = nil; similarMode.playbackEvent = nil; similarMode.eventOccurrence = nil
+            similarMode.playing = nil
         case .paused, .stopped, .failed: similarMode.playing = nil
         case .progress: break
         }

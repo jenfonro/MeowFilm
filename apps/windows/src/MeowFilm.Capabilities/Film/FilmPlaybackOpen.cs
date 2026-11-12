@@ -134,7 +134,12 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
                 FilmJson.Text(old, "revision") == FilmJson.Text(current, "revision"))
                 trusted.Add(key);
         }
+        if (!SameOwner(page.Request.DataOwner, connection))
+            parameters.Remove("searchReference");
         parameters["target"] = JsonSerializer.SerializeToNode(target.Wire(), FilmJson.Options);
+        if (parameters["searchReference"] is JsonObject && page.HasPlaybackSnapshot)
+            parameters["resumeTarget"] = JsonSerializer.SerializeToNode(target.Wire(), FilmJson.Options);
+        else parameters.Remove("resumeTarget");
         parameters["metadata"] = page.CaptureRequest.Metadata is { } metadata
             ? JsonNode.Parse(metadata.GetRawText()) : null;
         parameters["sources"] = sources;
@@ -165,27 +170,6 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
     internal static bool SourceEquals(JsonElement left, JsonElement right) =>
         new[] { "engine", "installationId", "siteId", "generation", "revision" }
             .All(name => FilmJson.Text(left, name) == FilmJson.Text(right, name));
-
-    internal static JsonElement SearchUpdateFor(FilmPlaybackPage page, FilmPlaybackTarget selection,
-        FilmPlaybackTarget carrier, long revision, RuntimeConnection connection, IReadOnlyList<JsonElement> scope)
-    {
-        var request = page.CaptureRequest;
-        var sanitized = ParametersFor(page, FilmJson.Encode(new
-        {
-            target = request.Target.Wire(), sources = request.Sources, results = request.Results,
-            search = request.Search, metadata = request.Metadata, cacheEntries = request.CacheEntries
-        }), connection, scope);
-        var update = JsonNode.Parse(sanitized.GetRawText())!.AsObject();
-        update.Remove("target");
-        update["selectionId"] = selection.Id;
-        update["revision"] = revision;
-        var active = page.CaptureRequest.Target;
-        if (selection.Kind != "source" && (carrier.Kind is "movie" or "tv") &&
-            (selection.Kind == "group" || active.Kind == carrier.Kind &&
-                active.MetadataProvider == carrier.MetadataProvider && active.MetadataId == carrier.MetadataId))
-            update["metadataTarget"] = JsonSerializer.SerializeToNode(carrier.Wire(), FilmJson.Options);
-        return JsonSerializer.SerializeToElement(update, FilmJson.Options);
-    }
 
     private static JsonElement DetailIdentity(JsonElement value)
     {

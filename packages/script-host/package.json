@@ -11,6 +11,7 @@
     ".": "./src/index.js",
     "./cat-output": "./src/cat-output.js",
     "./media-manifest": "./src/media-manifest.js",
+    "./native-json": "./src/native-json.js",
     "./unicode": "./src/unicode.js"
   },
   "main": "./src/index.js",

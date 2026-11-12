@@ -7,7 +7,7 @@ import MeowUI
 public final class MusicCollectionViewController: MusicPageViewController, UITableViewDelegate {
     private enum Content {
         case local(MusicCollectionViewModel)
-        case remote(MusicPublicBrowseCollection, MusicPublicBrowseViewModel)
+        case remote(MusicPublicBrowseCollection?, MusicPublicBrowseViewModel)
     }
 
     private enum RowID: Hashable {
@@ -35,6 +35,11 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     private var searchButton: PageHeaderButton?
     private var deleteButton: PageHeaderButton?
     private var refreshButton: PageHeaderButton?
+    private let dailyBranches = UISegmentedControl(items: ["默认推荐", "风格推荐"])
+    private var isRecommendation: Bool { remotePage?.request.dailyPlatform != nil }
+    private var recommendationTitle: String {
+        remotePage?.request.dailyBranch == .style ? "风格推荐" : "每日推荐"
+    }
     private var shownReadError: String?
     private var automaticPaginationHeld = false
     private var cachedLocalTracks: [MusicRemoteTrack]?
@@ -57,11 +62,6 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     private var remotePage: MusicPublicBrowseViewModel? {
         guard case .remote(_, let page) = content else { return nil }
         return page
-    }
-
-    private var requestedRemoteCollection: MusicPublicBrowseCollection? {
-        guard case .remote(let collection, _) = content else { return nil }
-        return collection
     }
 
     public convenience init(
@@ -111,6 +111,25 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             appearance: appearance,
             router: router
         )
+    }
+
+    public convenience init(
+        model: MusicViewModel,
+        recommendation request: MusicPublicBrowseRequest,
+        browser: any MusicPublicBrowsing,
+        appearance: MusicAppearancePreferencesStore,
+        router: any MusicUIRouting
+    ) {
+        precondition(request.dailyPlatform != nil)
+        let page = MusicPublicBrowseViewModel(
+            service: browser, request: request,
+            queuePage: { [weak model] source, cursor in
+                guard let model else { throw MusicServiceError.closed }
+                return try await model.remoteQueuePage(source, cursor: cursor)
+            },
+            releaseSource: { [weak model] in model?.releaseRemoteQueueSource($0) }
+        )
+        self.init(model: model, content: .remote(nil, page), appearance: appearance, router: router)
     }
 
     private init(
@@ -167,6 +186,13 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         ])
         view.addSubview(detailHeader.actionBar)
 
+        if remotePage?.request.dailyPlatform == .netease {
+            dailyBranches.accessibilityIdentifier = "music.daily.branches"
+            dailyBranches.selectedSegmentIndex = remotePage?.request.dailyBranch == .style ? 1 : 0
+            dailyBranches.addAction(UIAction { [weak self] _ in self?.selectDailyBranch() }, for: .valueChanged)
+            pageHeader.setTitleView(dailyBranches)
+        }
+        detailHeader.onStyle = { [weak self] in self?.openDailyStyle() }
         detailHeader.onPlay = { [weak self] in self?.playAll() }
         detailHeader.onSave = { [weak self] in self?.saveRemoteCollection() }
         detailHeader.onEdit = { [weak self] in self?.openEditor() }
@@ -254,12 +280,17 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
 
     public override func pageDidBecomeVisible() {
         if remotePage != nil { automaticPaginationHeld = false }
+        remotePage?.setDisplayVisible(true)
+        if let page = remotePage, page.needsDateRefresh {
+            runPageTask { await page.refreshForDateIfNeeded() }
+        }
         renderState()
         MusicArtworkView.retryFailedLoads(in: view)
     }
 
     public override func pageDidBecomeHidden() {
         statusFooter.setDisplayVisible(false)
+        remotePage?.setDisplayVisible(false)
         if remotePage != nil { automaticPaginationHeld = true }
     }
 
@@ -309,6 +340,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             return
         }
         page.appear()
+        page.setDisplayVisible(isPageVisible)
         if !page.loaded, !page.isLoading, page.error == nil {
             runPageTask { [weak self] in await self?.remotePage?.loadIfNeeded() }
         }
@@ -639,7 +671,9 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         table.backgroundView = nil
         showRemoteActionError()
         showRemoteReadErrorIfNeeded()
-        if orderedRows.isEmpty, page.loaded, !page.requiresExplicitNext {
+        // State notifications may arrive before the rows render. Only continue
+        // an actually empty source page, not a pending table snapshot.
+        if page.tracks.isEmpty, page.loaded, !page.requiresExplicitNext {
             loadAutomaticRemoteNextPage()
         }
     }
@@ -677,30 +711,38 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             )
         case .remote(let requested, let page):
             let collection = page.collection ?? requested
-            let total = page.total ?? collection.count ?? page.tracks.count
-            let owner = collection.creator.isEmpty ? collection.platform.title : collection.creator
+            let total = page.total ?? collection?.count ?? page.tracks.count
+            let owner = collection.map { $0.creator.isEmpty ? $0.platform.title : $0.creator } ?? ""
             let current = isCurrentRemoteCollection(page)
             let playing = current && (model.phase == .playing || model.phase == .buffering)
             detailHeader.configure(
                 content: MusicCollectionDetailContent(
-                    title: collection.title,
+                    title: collection?.title ?? recommendationTitle,
                     owner: owner,
                     count: total,
-                    artwork: collection.artwork ?? page.tracks.first?.artwork
+                    artwork: collection?.artwork ?? page.tracks.first?.artwork
                 ),
                 filteredCount: remoteFilter.isEmpty ? total : orderedRows.count,
                 searchQuery: remoteFilter,
                 playTitle: playing ? "暂停播放" : current ? "继续播放" : "播放全部",
                 isPlaying: playing,
                 canPlay: canActRemotely(page) && !orderedRows.isEmpty,
-                showsSave: true,
+                showsSave: page.canSaveCollection,
                 canSave: canActRemotely(page) && page.canSaveCollection,
                 showsEdit: true,
                 canEdit: canActRemotely(page) && !page.tracks.isEmpty,
                 showsRename: false,
                 canRename: false,
-                theme: theme
+                theme: theme,
+                recommendation: isRecommendation
             )
+            let selectedStyle = page.dailyStyle?.tags.map(\.name).joined(separator: " · ") ?? ""
+            let styleTitle: String? = page.request.dailyBranch == .style
+                ? (selectedStyle.isEmpty ? "选择推荐风格" : selectedStyle) : nil
+            detailHeader.configureStyle(title: styleTitle,
+                enabled: canActRemotely(page) && page.remoteSource?.dailyStyle != nil)
+            dailyBranches.selectedSegmentIndex = page.request.dailyBranch == .style ? 1 : 0
+            dailyBranches.isEnabled = !page.isActing && model.isAvailable && !model.isClosed
         }
         updateHeaderFrame()
     }
@@ -777,7 +819,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         updateScrollChrome()
     }
 
-    /// The card fades over its own height; the action bar follows it, then pins below navigation.
+    /// The information fades over its own height; the action bar follows it, then pins below navigation.
     private func updateScrollChrome() {
         guard isViewLoaded else { return }
         let heroHeight = detailHeader.heroHeight(for: detailHeader.bounds.width)
@@ -785,7 +827,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         let progress = heroHeight > 1 ? offset / heroHeight : 0
         detailHeader.setCollapseProgress(progress)
         let collapsed = detailHeader.hasContent && progress >= 0.98
-        let nextTitle = collapsed ? collectionTitle : nil
+        let nextTitle = isRecommendation ? recommendationTitle : collapsed ? collectionTitle : nil
         if pageHeader.title != nextTitle { pageHeader.title = nextTitle }
         let bar = detailHeader.actionBar
         bar.isHidden = !detailHeader.hasContent
@@ -806,7 +848,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     private var collectionTitle: String? {
         switch content {
         case .local(let page): page.collection?.title
-        case .remote(let requested, let page): (page.collection ?? requested).title
+        case .remote(let requested, let page): (page.collection ?? requested)?.title ?? recommendationTitle
         }
     }
 
@@ -852,6 +894,30 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             remoteFilter = query
         }
         render()
+    }
+
+    private func selectDailyBranch() {
+        guard let page = remotePage, !page.isActing else { return }
+        let branch: MusicHomeAction.DailyBranch = dailyBranches.selectedSegmentIndex == 1 ? .style : .default
+        guard page.request.dailyBranch != branch else { return }
+        view.endEditing(true)
+        detailHeader.setSearchVisible(false)
+        remoteFilter = ""
+        table.setContentOffset(.zero, animated: false)
+        automaticPaginationHeld = false
+        shownReadError = nil
+        runPageTask { await page.selectDailyBranch(branch) }
+    }
+
+    private func openDailyStyle() {
+        guard canPresentPageAlert, let page = remotePage, canActRemotely(page),
+              let source = page.remoteSource, source.dailyStyle != nil else { return }
+        let editor = MusicDailyStyleViewController(page: page, source: source, appearance: appearance)
+        let wrapper = PageNavigationController(themeProvider: appearance)
+        wrapper.setViewControllers([editor], animated: false)
+        wrapper.modalPresentationStyle = .pageSheet
+        wrapper.sheetPresentationController?.detents = [.medium(), .large()]
+        present(wrapper, animated: true)
     }
 
     private func playAll() {
@@ -1110,25 +1176,20 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     private func saveRemoteCollection() {
-        guard let page = remotePage, let intent = page.makeActionIntent() else { return }
+        guard let page = remotePage, let collection = page.networkSaveCollection,
+              let intent = page.makeActionIntent() else { return }
         let alert = UIAlertController(title: "收藏歌单", message: nil, preferredStyle: .alert)
-        alert.addTextField { [weak self, weak page] in
-            $0.text = page?.collection?.title ?? self?.requestedRemoteCollection?.title
-        }
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "保存", style: .default) {
-            [weak self, weak page, weak alert] _ in
-            let name = alert?.textFields?.first?.text?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard let self, let page, page === self.remotePage, !name.isEmpty else { return }
+        alert.addAction(UIAlertAction(title: "收藏", style: .default) {
+            [weak self, weak page] _ in
+            guard let self, let page, page === self.remotePage else { return }
             self.runPageTask {
                 await page.perform(
                     intent: intent,
                     operation: "收藏歌单",
                     kind: .library
                 ) {
-                    let (source, _) = try await page.playbackSource()
-                    try await self.model.saveRemoteCollection(source, name: name)
+                    try await self.model.saveNetworkPlaylist(collection)
                 }
             }
         })
@@ -1214,12 +1275,12 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     private func showRemoteActionError() {
-        guard let page = remotePage else { return }
-        let message = page.actionError?.message(
+        guard let page = remotePage, let error = page.actionError, let id = page.actionErrorID else { return }
+        let message = error.message(
             operation: page.actionOperation,
             diagnosticID: page.actionDiagnosticID
         )
-        _ = showError(message)
+        showError(message) { [weak page] in page?.dismissActionError(id: id) }
     }
 
     private func showFavoriteError() {
@@ -1247,7 +1308,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             guard canActRemotely(page), !page.tracks.isEmpty else { return }
             editor = MusicCollectionEditorViewController(
                 page: page,
-                title: page.collection?.title ?? requested.title,
+                title: page.collection?.title ?? requested?.title ?? recommendationTitle,
                 owner: model,
                 origin: self,
                 appearance: appearance

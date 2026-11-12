@@ -23,13 +23,14 @@ public static class MusicKwMgCatalogTests
     {
         yield return Case("capabilities are public-only and do not acquire accounts", Capabilities);
         yield return Case("KW search retains precise recording quality and identity", KwSearch);
+        yield return Case("KW search consumes the final duplicate field value", KwDuplicateFields);
         yield return Case("KW search artwork reaches song rows without detail requests", KwSearchArtwork);
         yield return Case("KW short search page against a larger total is terminal", () => ShortSearch("kw"));
         yield return Case("KW empty search page against a larger total is terminal", () => EmptySearch("kw"));
         yield return Case("KW single-quoted playlist card opens complete detail", KwQuotedPlaylist);
         yield return Case("KW detail has exact ID and no invented quality", KwDetail);
         yield return Case("KW specific missing-detail response uses literal Nuxt aliases", KwPage);
-        foreach (string defect in new[] { "show", "quality", "duplicate-key", "code", "id", "cross-id" })
+        foreach (string defect in new[] { "show", "quality", "code", "id", "cross-id" })
             yield return Case("KW rejects " + defect, () => KwFailure(defect));
         foreach (string defect in new[] { "call", "duplicate", "object-alias", "wrong-id", "missing-alias", "trailing-code" })
             yield return Case("KW SSR rejects " + defect, () => KwUnsafePage(defect));
@@ -185,6 +186,14 @@ public static class MusicKwMgCatalogTests
         Check(!song.TryGetProperty("id", out _) && !song.TryGetProperty("plugin_entry_path", out _) &&
             S(song, "songId").StartsWith("song:", StringComparison.Ordinal));
     }
+    private static async Task KwDuplicateFields()
+    {
+        using var f = new Fixture(_ => Text("""{"TOTAL":"1","TOTAL":"0","abslist":[]}"""));
+        var result = await f.Catalog.SearchAsync(new("kw", "x", Limit: 1));
+        Check(N(result, "total") == 0 && result.GetProperty("items").GetArrayLength() == 0 &&
+            !result.GetProperty("more").GetBoolean() && result.GetProperty("continuation").ValueKind == JsonValueKind.Null);
+        Check(f.Handler.Calls == 1);
+    }
     private static async Task KwSearchArtwork()
     {
         const string shortPath = "120/s4s12/76/3598052169.jpg";
@@ -320,7 +329,6 @@ public static class MusicKwMgCatalogTests
             if (defect == "quality") raw.Remove("N_MINFO");
             if (defect == "cross-id") raw["musicrid"] = "MUSIC_2";
             if (defect == "show") return Json(new { TOTAL = "1", SHOW = "0", abslist = new[] { raw } });
-            if (defect == "duplicate-key") return Text("""{"TOTAL":"1","TOTAL":"0","abslist":[]}""");
             if (defect == "code") return Json(new { status = 301, msg = "Different failure" });
             if (defect == "id") { raw["id"] = "2"; return Json(new { status = 200, data = new { songinfo = raw } }); }
             return KwResults(raw);

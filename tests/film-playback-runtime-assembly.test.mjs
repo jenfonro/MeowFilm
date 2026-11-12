@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRuntime, createRuntimeClient } from '../apps/runtime/entry.mjs';
@@ -25,14 +25,17 @@ test('E49/E50: the common embedding factory retains its default three-module con
   const description = await client.describe();
   assert.equal(description.ok, true);
   assert.deepEqual(description.value.modules.map(({ id, version, contract }) => [id, version, contract]), [
-    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
+    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.3.0', 'source.runtime.v2'],
   ]);
   assert.equal((await client.call('music.script.sources.list')).ok, true);
 });
 
 for (const platform of ['ios', 'windows']) {
-  test(`E42/E48/E49/E50: the ${platform} App entry assembles seven real owners and connects provider invalidation`, t => {
-    const dataRoot = join(area(t), 'data');
+  test(`E42/E48/E49/E50: the ${platform} App entry assembles eight real owners and connects provider invalidation`, t => {
+    const base = area(t), actual = join(base, 'private', 'var'), alias = join(base, 'var');
+    mkdirSync(actual, { recursive: true });
+    symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const dataRoot = join(alias, 'data');
     const bootstrap = new URL(`../apps/${platform}/runtime/bootstrap.mjs`, import.meta.url).href;
     const entry = new URL(`../apps/${platform}/runtime/entries/aggregate.mjs`, import.meta.url).href;
     const sharedBootstrap = new URL('../apps/runtime/bootstrap.mjs', import.meta.url).href;
@@ -105,9 +108,10 @@ for (const platform of ['ios', 'windows']) {
         assert.equal(description.value.protocol, 'runtime.http.v1');
         assert.equal(description.value.product, 'aggregate');
         assert.deepEqual(description.value.modules.map(({ id, version, contract }) => [id, version, contract]), [
-          ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
+          ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.3.0', 'source.runtime.v2'],
           ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
           ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
+          ['netease', '0.1.0', 'netease.token.v1'],
         ]);
         for (const module of description.value.modules)
           assert.deepEqual(module.methods, contracts[module.id].operations.map(name => contracts[module.id].prefix + name).sort());
@@ -159,7 +163,7 @@ for (const platform of ['ios', 'windows']) {
         assert.equal(unknown.ok, false);
         assert.equal(unknown.code, 'METHOD_NOT_FOUND');
         assert.equal((await client.shutdown()).ok, true);
-        console.log('APP_ASSEMBLY_OK ' + JSON.stringify({ platform: ${JSON.stringify(platform)}, modules: 7, counts }));
+        console.log('APP_ASSEMBLY_OK ' + JSON.stringify({ platform: ${JSON.stringify(platform)}, modules: 8, counts }));
       } finally {
         await client?.close();
         await globalThis.fixtureRuntime?.close();

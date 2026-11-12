@@ -12,7 +12,6 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly IDocumentStore store;
     private readonly CatScriptTransport transport;
-    private readonly IRuntimeClient searchRuntime;
     private readonly IRuntimeRecovery? recovery;
     private readonly SemaphoreSlim stateGate = new(1, 1), managementGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
@@ -34,12 +33,13 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     {
         ArgumentNullException.ThrowIfNull(runtime);
         ArgumentNullException.ThrowIfNull(store);
+        Runtime = runtime;
         transport = new(runtime);
-        searchRuntime = runtime;
         recovery = runtime as IRuntimeRecovery;
         this.store = store;
     }
 
+    internal IRuntimeClient Runtime { get; }
     public IReadOnlyList<FilmCatSource> Cats => Volatile.Read(ref snapshot).Cats;
     public IReadOnlyList<FilmVideoSource> Videos => Volatile.Read(ref snapshot).Videos;
     public string? RuntimeError => Volatile.Read(ref runtimeError);
@@ -66,31 +66,6 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                 .Where(source => source.Cat.CanDetect).ToArray());
         }
     }
-
-    public bool IsSearchSourceCurrent(FilmSearchSource source)
-    {
-        var current = Volatile.Read(ref snapshot);
-        return current.Cats.Any(cat => cat.InstallationId == source.Cat.InstallationId &&
-            cat.CanDetect && cat.Generation == source.Cat.Generation) &&
-            current.Videos.Any(site => site.Key == source.Site.Key &&
-                site.Options.Enabled && site.Options.SearchEnabled &&
-                site.Actions.Contains("search", StringComparer.Ordinal));
-    }
-
-    public Task<FilmSearchData> SearchAsync(FilmSearchSource source, string query, int page, CancellationToken token) =>
-        RunAsync(async ct =>
-        {
-            if (!IsSearchSourceCurrent(source)) throw new OperationCanceledException(ct);
-            var result = await FilmSearchDataClient.ReadAsync(searchRuntime, "search",
-                new { source = source.Wire, query, page },
-                new { kind = "search", source = source.Wire, query, page }, ct).ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested();
-            if (!IsSearchSourceCurrent(source)) throw new OperationCanceledException(ct);
-            if (FilmJson.Member(result.Value, "raw").ValueKind != JsonValueKind.Object ||
-                FilmJson.Member(result.Value, "items").ValueKind != JsonValueKind.Array)
-                throw new FilmPlaybackException("INVALID_RESPONSE");
-            return result;
-        }, token);
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunAsync(token => InStateAsync(LoadAsync, token), cancellationToken);

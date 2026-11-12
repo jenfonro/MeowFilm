@@ -29,7 +29,7 @@ final class MusicSourceExclusionsViewController: MusicSettingsPageViewController
     private let state: MusicSourceExclusionsState
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         state = .init(model: model)
-        super.init(appearance: appearance, content: .init(state: state, theme: .init(palette: appearance.pageColorway)))
+        super.init(appearance: appearance, content: .init(state: state, theme: .init(colors: appearance.pagePalette)))
         pageTitle = "错源管理"
     }
     override func pageDidBecomeVisible() { perform { try await self.state.reload() } }
@@ -77,25 +77,34 @@ struct MusicSourceExclusionsContent: View {
                     ForEach(MusicPublicBrowsePlatform.allCases) { Text($0.title).tag($0.rawValue) }
                 }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme))
                 Button("添加", action: add).disabled(state.song.isEmpty)
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .modifier(MusicSettingsRowStyle(theme: theme))
             }
             Section("已排除") {
-                if state.rows.isEmpty { Text("暂无错源").foregroundStyle(.secondary).modifier(MusicSettingsRowStyle(theme: theme)) }
+                if state.rows.isEmpty { Text("暂无错源").foregroundStyle(Color(uiColor: UIColor(theme.settings.muted))).modifier(MusicSettingsRowStyle(theme: theme)) }
                 ForEach(state.rows) { row in
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(row.title + " — " + row.artist)
-                            Text(providerName(row) + " · " + (MusicPublicBrowsePlatform(rawValue: row.platform)?.title ?? row.platform))
-                                .font(.caption).foregroundStyle(.secondary)
+                            Text(exclusionLabel(row))
+                                .font(.caption).foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         }
                         Spacer()
                         Button("恢复") { restore(row.id) }
+                            .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     }.modifier(MusicSettingsRowStyle(theme: theme))
                 }
             }
         }
         .disabled(state.busy || !state.model.isAvailable)
         .modifier(MusicSettingsListStyle(theme: theme))
+    }
+    private func exclusionLabel(_ row: MusicSourceExclusion) -> String {
+        let platform = MusicPublicBrowsePlatform(rawValue: row.platform)?.title ?? row.platform
+        switch row.scope {
+        case .providerPlatform: return providerName(row) + " · " + platform + " · 全部录音"
+        case .recording(_, _, let key): return "录音来源 · " + platform + " · " + key
+        }
     }
     private func providerName(_ row: MusicSourceExclusion) -> String {
         row.provider.hasPrefix("official:") ? "官方音源" : state.scripts.first { $0.id == row.provider }?.name ?? row.provider

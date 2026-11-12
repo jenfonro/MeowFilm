@@ -1,7 +1,7 @@
 import Foundation
 import MeowRuntime
 
-public enum FilmSearchChannelState: Equatable, Sendable {
+public enum FilmSearchChannelState: String, Equatable, Sendable {
     case idle, loading, completed, unavailable, failed, cancelled
 }
 
@@ -57,7 +57,14 @@ public struct FilmSearchCard: Equatable, Sendable {
         value.catField("detailId").flatMap { try? FilmPlaybackIdentifier($0) }
     }
     public var members: [RuntimeValue] { value.catField("aggregateItems")?.catArray ?? [] }
-    func text(_ field: String) -> String { value.catField(field)?.catText ?? "" }
+    func text(_ field: String) -> String {
+        guard let value = value.catField(field) else { return "" }
+        if let text = value.catText { return text }
+        // Code-unit arrays stay intact in value; replacement is display-only.
+        guard let data = try? RuntimeJSON.encode(value),
+              let text = try? JSONDecoder().decode(FilmRuleText.self, from: data) else { return "" }
+        return text.displayString
+    }
     public func filmItem(imageURL: (String) -> URL?) -> FilmItem {
         FilmItem(sourceID: sourceKind == "tmdb" ? "tmdb" : text("siteKey"),
             id: sourceKind == "tmdb" ? tmdbID.map(String.init) ?? id : id, title: title,
@@ -71,6 +78,7 @@ public struct FilmSearchSnapshot: Equatable, Sendable {
     public let query: String
     public var round = 0
     public var revision = 0
+    public var sequence: Int64 = -1
     public var siteState: FilmSearchChannelState = .idle
     public var metadataState: FilmSearchChannelState = .idle
     public var loading = false
@@ -84,7 +92,32 @@ public struct FilmSearchSnapshot: Equatable, Sendable {
     public var cards: [FilmSearchCard] = []
     public var rawCards: [FilmSearchCard] = []
     public var failed: Bool {
-        !loading && cards.isEmpty && rawCards.isEmpty && siteState == .failed &&
+        !loading && cards.isEmpty && rawCards.isEmpty &&
+            [.failed, .unavailable].contains(siteState) &&
             [.completed, .failed, .unavailable].contains(metadataState)
+    }
+}
+
+extension FilmSearchSnapshot {
+    public init(value: RuntimeValue) throws {
+        let fields = try value.filmRequiredObject()
+        guard let id = UUID(uuidString: try fields.filmString("sessionId")),
+              let sequence = fields["sequence"]?.filmInteger,
+              let revision = fields["revision"]?.filmInteger,
+              let round = fields["round"]?.filmInteger,
+              let site = FilmSearchChannelState(rawValue: try fields.filmString("siteState")),
+              let metadata = FilmSearchChannelState(rawValue: try fields.filmString("metadataState")),
+              let details = fields["metadataDetails"]?.filmObject else { throw FilmSearchError.invalidResponse }
+        sessionID = id; query = try fields.filmString("query")
+        self.sequence = Int64(sequence); self.revision = revision; self.round = round
+        siteState = site; metadataState = metadata
+        loading = try fields.filmBool("loading"); hasMore = try fields.filmBool("hasMore")
+        noSources = try fields.filmBool("noSources")
+        siteItems = try fields.filmArray("siteItems"); tmdbItems = try fields.filmArray("tmdbItems")
+        metadataSearch = fields["metadataSearch"].flatMap { $0 == .null ? nil : $0 }
+        metadataQuery = fields["metadataQuery"]?.filmText
+        metadataDetails = Dictionary(uniqueKeysWithValues: details.map { ($0.key, $0.value) })
+        cards = try fields.filmArray("cards").map(FilmSearchCard.init)
+        rawCards = try fields.filmArray("rawCards").map(FilmSearchCard.init)
     }
 }

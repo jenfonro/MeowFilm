@@ -1,26 +1,14 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using MeowFilm.Platform.Storage;
+using MeowFilm.Capabilities.PlaybackCache;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    // A display snapshot, not a media URL/cache, login session or new writer.
-    private const string LyricDisplayArea = "native-lyric-display";
-    private static string DisplayKey(JsonObject song) => LJ.Digest(LJ.Obj(
-        ("songId", song["songId"]), ("descriptor", NativeMusicSong.Descriptor(song)),
-        ("duration", song["duration"]),
-        ("sources", LJ.Arr(LJ.Array(song["sources"]).OfType<JsonObject>()
-            .Select(row => LJ.S(row["sourceKey"])).Order(StringComparer.Ordinal)))));
-
-    private static void ValidateLyricDisplay(JsonObject display)
-    {
-        LJ.Fields(display, "schema songKey songId sourceKey lines", "schema songKey songId sourceKey lines");
-        LJ.Require(LJ.I(display["schema"]) == 2 && LJ.S(display["songKey"]).Length == 64, "CORRUPT_STORAGE");
-        _ = LJ.Text(display["songId"], 8192);
-        _ = LJ.Text(display["sourceKey"], 8192);
-        ValidateDisplayLines(LJ.Array(display["lines"]));
-        LJ.Require(LJ.Bytes(display).Length <= 512 * 1024, "LIMIT");
-    }
+    public const string LyricDisplayNamespace = MusicRecordingPresentationCache.Namespace;
+    private static string DisplayKey(JsonObject song) => MusicRecordingPresentationCache.Key(song);
 
     private static void ValidateDisplayLines(JsonArray lines)
     {
@@ -68,44 +56,136 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private (JsonObject Result, bool Mutate) LyricDisplayCommand(string method, JsonObject p, JsonObject doc)
+    private static JsonArray DecodeCachedDisplayLines(JsonNode? value)
     {
-        bool save = method == "music.lyrics.display.save";
-        LJ.Require(save || method == "music.lyrics.display.get", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, save ? "song sourceKey lines" : "song sourceKey", save ? "song sourceKey lines" : "song");
-        var song = NativeMusicSong.Normalize(p["song"]);
-        string key = DisplayKey(song);
-        string? requested = p["sourceKey"] is null ? null : LJ.Text(p["sourceKey"], 8192);
-        if (requested is not null)
-            LJ.Require(LJ.Array(song["sources"]).OfType<JsonObject>()
-                .Any(source => LJ.S(source["sourceKey"]) == requested), "TARGET_CHANGED");
-        if (!save)
+        var rows = value!.AsArray();
+        LJ.Require(rows.Count is > 0 and <= 10000, "INVALID_LYRIC_RESPONSE");
+        var decoded = new JsonArray();
+        double previous = -1;
+        int characters = 0, wordCount = 0;
+        string Text(JsonNode? node)
         {
-            LJ.Require(pending is null, "PENDING_WRITE");
-            if (!LJ.B(Settings(doc)["lyrics"]))
-                return (LJ.Obj(("state", "disabled"), ("lines", new JsonArray())), false);
-            var saved = Value(doc, LyricDisplayArea) as JsonObject;
-            if (saved is null || LJ.S(saved["songKey"]) != key ||
-                requested is not null && LJ.S(saved["sourceKey"]) != requested)
-                return (LJ.Obj(("state", "none"), ("lines", new JsonArray())), false);
-            if (!MetadataSourceEnabled(doc, song, LJ.S(saved["sourceKey"])))
-            {
-                bool alternative = requested is null && LJ.Array(song["sources"]).OfType<JsonObject>()
-                    .Any(source => MetadataSourceEnabled(doc, song, LJ.S(source["sourceKey"])));
-                return (LJ.Obj(("state", alternative ? "none" : "disabled"), ("lines", new JsonArray())), false);
-            }
-            return (LJ.Obj(("state", "restored"), ("sourceKey", saved["sourceKey"]), ("lines", saved["lines"])), false);
+            string text = node!.GetValue<string>();
+            characters += text.Length;
+            LJ.Require(text.Length <= 65536 && !text.Contains('\0') && characters <= 4 * 65536, "LIMIT");
+            return text;
         }
-        LJ.Require(pending is null, "PENDING_WRITE");
-        LJ.Require(LJ.B(Settings(doc)["lyrics"]) && requested is not null &&
-            MetadataSourceEnabled(doc, song, requested), "DISABLED");
-        RequireCurrentLyricSong(doc, key);
-        var display = LJ.Obj(("schema", 2), ("songKey", key), ("songId", song["songId"]),
-            ("sourceKey", requested), ("lines", p["lines"]));
-        ValidateLyricDisplay(display);
-        if (Value(doc, LyricDisplayArea) is { } existing && JsonNode.DeepEquals(existing, display))
-            return (LJ.Obj(("saved", true)), false);
-        Set(doc, LyricDisplayArea, display);
-        return (LJ.Obj(("saved", true)), true);
+        double Number(JsonNode? node, bool signed = false)
+        {
+            double number = node!.GetValue<double>();
+            LJ.Require(double.IsFinite(number) && Math.Abs(number) <= 86400000 && (signed || number >= 0), "INVALID_LYRIC_RESPONSE");
+            return number;
+        }
+        foreach (var item in rows)
+        {
+            var row = item!.AsObject();
+            double time = Number(row["time"]);
+            LJ.Require(time >= previous, "INVALID_LYRIC_RESPONSE"); previous = time;
+            var line = LJ.Obj(("time", time), ("text", Text(row["text"])));
+            if (row["end"] is { } end)
+            {
+                double seconds = Number(end); LJ.Require(seconds >= time, "INVALID_LYRIC_RESPONSE");
+                line["end"] = seconds;
+            }
+            foreach (string field in new[] { "translation", "romanization" })
+                if (row[field] is { } text) line[field] = Text(text);
+            if (row["words"] is { } words)
+            {
+                var decodedWords = new JsonArray();
+                foreach (var wordValue in words.AsArray())
+                {
+                    LJ.Require(++wordCount <= 65536, "LIMIT");
+                    var word = wordValue!.AsObject();
+                    var decodedWord = LJ.Obj(("time", Number(word["time"], true)),
+                        ("duration", Number(word["duration"])), ("text", Text(word["text"])));
+                    if (word["offset"] is { } offset) decodedWord["offset"] = Number(offset, true);
+                    decodedWords.Add(decodedWord);
+                }
+                line["words"] = decodedWords;
+            }
+            decoded.Add(line);
+        }
+        return decoded;
+    }
+
+    private async Task<JsonElement> ExecuteLyricDisplayAsync(string method, object? parameters, CancellationToken token)
+    {
+        bool entered = false;
+        try
+        {
+            bool save = method == "music.lyrics.display.save";
+            LJ.Require(save || method == "music.lyrics.display.get", "CAPABILITY_UNAVAILABLE");
+            var p = LJ.Parameters(parameters, 512 * 1024);
+            LJ.Fields(p, save ? "song sourceKey lines" : "song sourceKey", save ? "song sourceKey lines" : "song");
+            var song = NativeMusicSong.Normalize(p["song"]);
+            string key = DisplayKey(song);
+            string? requested = p["sourceKey"] is null ? null : LJ.Text(p["sourceKey"], 8192);
+            if (requested is not null)
+                LJ.Require(LJ.Array(song["sources"]).OfType<JsonObject>()
+                    .Any(source => LJ.S(source["sourceKey"]) == requested), "TARGET_CHANGED");
+            JsonObject? saved = null;
+            var presentations = new MusicRecordingPresentationCache(displayCache);
+            // Load once before either patch or read. The cache's memory CAS
+            // preserves concurrent artwork/other-song patches.
+            try { await presentations.LoadAsync(token).ConfigureAwait(false); }
+            catch (DocumentStoreException) { }
+            await EnterAsync(token).ConfigureAwait(false); entered = true;
+            LJ.Require(!closed && !preparing, "CLOSED");
+            token.ThrowIfCancellationRequested();
+            await LoadAsync(token).ConfigureAwait(false);
+            await AdmitCommandLockedAsync(method, token).ConfigureAwait(false);
+            var doc = document!;
+            JsonObject result;
+            if (!save)
+            {
+                // A save admitted while disk loading or gate acquisition was in
+                // flight wins; inspect the latest memory snapshot without I/O.
+                try
+                {
+                    saved = presentations.ReadMemory(key);
+                    if (saved is not null)
+                    {
+                        saved["lines"] = DecodeCachedDisplayLines(saved["lines"]);
+                    }
+                }
+                catch { saved = null; }
+                if (!LJ.B(Settings(doc)["lyrics"])) result = LJ.Obj(("state", "disabled"), ("lines", new JsonArray()));
+                else if (saved is null ||
+                    requested is not null && LJ.S(saved["sourceKey"]) != requested)
+                    result = LJ.Obj(("state", "none"), ("lines", new JsonArray()));
+                else if (!MetadataSourceEnabled(doc, song, LJ.S(saved["sourceKey"])))
+                {
+                    bool alternative = requested is null && LJ.Array(song["sources"]).OfType<JsonObject>()
+                        .Any(source => MetadataSourceEnabled(doc, song, LJ.S(source["sourceKey"])));
+                    result = LJ.Obj(("state", alternative ? "none" : "disabled"), ("lines", new JsonArray()));
+                }
+                else result = LJ.Obj(("state", "restored"), ("sourceKey", saved["sourceKey"]), ("lines", saved["lines"]));
+            }
+            else
+            {
+                LJ.Require(LJ.B(Settings(doc)["lyrics"]) && requested is not null &&
+                    MetadataSourceEnabled(doc, song, requested), "DISABLED");
+                RequireCurrentLyricSong(doc, key);
+                ValidateDisplayLines(LJ.Array(p["lines"]));
+                var display = LJ.Obj(("sourceKey", requested), ("lines", p["lines"]));
+                byte[] bytes = LJ.Bytes(display);
+                LJ.Require(bytes.Length <= 512 * 1024, "LIMIT");
+                try
+                {
+                    await presentations.PatchAsync(key, LJ.S(song["songId"]), value =>
+                    {
+                        value["sourceKey"] = requested; value["lines"] = p["lines"]?.DeepClone();
+                    }, token).ConfigureAwait(false);
+                }
+                catch (DocumentStoreException) { System.Diagnostics.Trace.TraceWarning("LYRIC_DISPLAY_CACHE_UNAVAILABLE"); }
+                result = LJ.Obj(("saved", true));
+            }
+            return LJ.Element(LJ.Merge(LJ.Obj(("ok", true)), result));
+        }
+        catch (OperationCanceledException) { return LJ.Element(LJ.Obj(("ok", false), ("code", "CANCELLED"))); }
+        catch (MusicLibraryException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Code))); }
+        catch (DocumentStoreException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE"))); }
+        catch { return LJ.Element(LJ.Obj(("ok", false), ("code", "INVALID_REQUEST"))); }
+        finally { if (entered) gate.Release(); }
     }
 }

@@ -3,11 +3,16 @@ import SwiftUI
 import UIKit
 import Combine
 import MeowUI
+import UniformTypeIdentifiers
 
 @MainActor
-final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAccountsSettingsContent> {
+final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAccountsSettingsContent>, UIDocumentPickerDelegate {
     private let owner: MusicViewModel
     private let state: MusicAccountsSettingsState
+    let transfer: MusicAccountTransferState
+    private weak var filePicker: UIDocumentPickerViewController?
+    private var exportingFile = false
+    private weak var transferAlert: UIAlertController?
     private weak var router: (any MusicUIRouting)?
     private weak var accessAlert: UIAlertController?
     private weak var detail: MusicAccountDetailViewController?
@@ -17,19 +22,28 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: (any MusicUIRouting)?) {
         owner = model
         state = MusicAccountsSettingsState(owner: model)
+        transfer = MusicAccountTransferState(owner: model)
         self.router = router
         super.init(appearance: appearance, content: MusicAccountsSettingsContent(
-            state: state, theme: PageTheme(palette: appearance.pageColorway)
+            state: state, transfer: transfer, theme: PageTheme(colors: appearance.pagePalette)
         ))
         pageTitle = "平台账号"
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        transfer.confirm = { [weak self] in self?.confirmImport($0) }
+        transfer.exported = { [weak self] in self?.saveFile($0) }
+        transfer.result = { [weak self] in self?.showTransferResult($0) }
         observe(owner.accessChanges) { [weak self] in
             guard let self else { return }
             invalidateErrorPresentation()
             state.reconcileAccess()
+            transfer.reconcileAccess()
+            pendingTransferResult = nil
+            filePicker?.dismiss(animated: false)
+            transferAlert?.dismiss(animated: false)
+            filePicker = nil; transferAlert = nil
             if !owner.isAvailable || owner.isClosed || dialogAccess != owner.accountAccessGeneration {
                 accessAlert?.dismiss(animated: false)
                 closeDetail(animated: false)
@@ -44,21 +58,114 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
             self?.closeDetailIfSignedOut()
         }
         observe(state.errorChanges) { [weak self] in self?.showFailure() }
+        observe(transfer.$busy.removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher()) { [weak self] in
+            self?.showPendingTransferResult()
+        }
     }
 
-    override func pageDidBecomeActive() { state.start() }
+    override func pageDidBecomeActive() { state.start(); transfer.start() }
 
-    override func pageDidBecomeVisible() { showFailure() }
+    override func pageDidBecomeVisible() { showFailure(); showPendingTransferResult() }
 
-    override func pageDidBecomeInactive() { state.close() }
+    override func pageDidFinishAppearing() {
+        super.pageDidFinishAppearing()
+        showPendingTransferResult()
+    }
+
+    override func pageDidBecomeInactive() {
+        state.close(); transfer.close()
+        pendingTransferResult = nil
+        filePicker?.dismiss(animated: false); transferAlert?.dismiss(animated: false)
+        filePicker = nil; transferAlert = nil
+    }
 
     override func applyTheme() {
         super.applyTheme()
         guard contentThemeChanged() else { return }
         setContent(MusicAccountsSettingsContent(
-            state: state, theme: theme,
-            openAccount: { [weak self] in self?.openAccount($0) }
+            state: state, transfer: transfer, theme: theme,
+            openAccount: { [weak self] in self?.openAccount($0) },
+            importAccounts: { [weak self] in self?.openAccountFile() },
+            exportAccounts: { [weak self] in self?.transfer.exportFile() }
         ))
+    }
+
+    func openAccountFile() {
+        guard presentedViewController == nil, transfer.beginSelection() else { return }
+        exportingFile = false
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json], asCopy: false)
+        picker.allowsMultipleSelection = false; picker.delegate = self
+        filePicker = picker
+        present(picker, animated: true)
+    }
+
+    private func saveFile(_ url: URL) {
+        guard isPageActive, transfer.available, presentedViewController == nil else {
+            transfer.selectionCancelled(); return
+        }
+        exportingFile = true
+        let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+        picker.delegate = self; filePicker = picker
+        present(picker, animated: true)
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard controller === filePicker else { return }
+        filePicker = nil
+        if exportingFile {
+            // Destination belongs to the user. Cleanup touches only our private staging directory.
+            transfer.exportFinished(); return
+        }
+        let selection = transfer.selectionID
+        dismissPageModal(controller) { [weak self] in
+            guard let self, transfer.selectionID == selection else { return }
+            guard isPageActive, transfer.available, let file = urls.first else {
+                transfer.selectionCancelled(); return
+            }
+            transfer.importFile(file)
+        }
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        guard controller === filePicker else { return }
+        filePicker = nil; transfer.selectionCancelled()
+    }
+
+    private func confirmImport(_ plan: MusicAccountImportPlan) {
+        guard isPageActive, transfer.available, presentedViewController == nil else {
+            transfer.selectionCancelled(); return
+        }
+        let alert = UIAlertController(title: "已有平台账号", message: plan.conflicts.map(\.title).joined(separator: "、"), preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in self?.transfer.selectionCancelled() })
+        alert.addAction(UIAlertAction(title: "跳过", style: .default) { [weak self, weak alert] _ in
+            guard let self, let alert else { return }
+            dismissPageModal(alert) { [weak self] in
+                guard let self, transfer.plan === plan else { return }
+                transfer.commit(.skip)
+            }
+        })
+        alert.addAction(UIAlertAction(title: "覆盖", style: .default) { [weak self, weak alert] _ in
+            guard let self, let alert else { return }
+            dismissPageModal(alert) { [weak self] in
+                guard let self, transfer.plan === plan else { return }
+                transfer.commit(.overwrite)
+            }
+        })
+        transferAlert = alert; present(alert, animated: true)
+    }
+
+    private func showTransferResult(_ message: String) {
+        pendingTransferResult = message
+        showPendingTransferResult()
+    }
+
+    private var pendingTransferResult: String?
+    private func showPendingTransferResult() {
+        guard transfer.available, let message = pendingTransferResult, canPresentPageAlert else { return }
+        pendingTransferResult = nil
+        let alert = UIAlertController(title: "账号导入导出", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default))
+        transferAlert = alert; present(alert, animated: true)
     }
 
     private func openAccount(_ row: MusicAccountStatus) {
@@ -171,7 +278,7 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
 
     private func showFailure() {
         // The floating detail reports the same state errors while it covers this page.
-        guard detail == nil else { return }
+        guard detail == nil, !transfer.busy else { return }
         let access = owner.accountAccessGeneration
         reportError(state.error, retry: { [weak state] in state?.retry(generation: access) })
     }
@@ -180,15 +287,18 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
 @MainActor
 struct MusicAccountsSettingsContent: View {
     @ObservedObject var state: MusicAccountsSettingsState
+    @ObservedObject var transfer: MusicAccountTransferState
     let theme: PageTheme
     var openAccount: (MusicAccountStatus) -> Void = { _ in }
+    var importAccounts: () -> Void = {}
+    var exportAccounts: () -> Void = {}
 
     var body: some View {
         List {
-            Section("音乐平台") {
+            Section {
                 if state.accounts == nil {
                     Text("账号服务不可用")
-                        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         .modifier(MusicSettingsRowStyle(theme: theme))
                 }
                 ForEach(MusicAccountPlatform.allCases) { platform in
@@ -203,11 +313,22 @@ struct MusicAccountsSettingsContent: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("music.accounts." + platform.rawValue)
-                    .disabled(summary == nil || !state.available || state.pendingAccounts.contains(platform))
+                    .disabled(summary == nil || !state.available || transfer.busy || state.pendingAccounts.contains(platform))
                     .modifier(MusicSettingsRowStyle(theme: theme))
                 }
             }
-            .headerProminence(.increased)
+            Section {
+                Button("导入账号", action: importAccounts)
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
+                    .accessibilityIdentifier("music.accounts.import")
+                    .modifier(MusicSettingsRowStyle(theme: theme))
+                Button("导出账号", action: exportAccounts)
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
+                    .accessibilityIdentifier("music.accounts.export")
+                    .modifier(MusicSettingsRowStyle(theme: theme))
+                if transfer.busy { ProgressView().accessibilityLabel("账号导入导出中") }
+            }
+            .disabled(!state.available || transfer.service == nil || transfer.busy)
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }
@@ -226,7 +347,7 @@ private struct MusicPlatformAccountRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(platform.title)
                     .font(.body.weight(.medium))
-                    .foregroundStyle(Color(uiColor: UIColor(theme.ink)))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
                 if loading {
                     ProgressView().accessibilityLabel("读取账号")
                 } else {
@@ -238,13 +359,13 @@ private struct MusicPlatformAccountRow: View {
                 if account.phase == .signedOut, account.canLogin {
                     Text("登录")
                         .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color(uiColor: UIColor(theme.accent)))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                         .frame(minWidth: 44, minHeight: 44)
                         .fixedSize(horizontal: true, vertical: false)
                 } else if account.phase != .unavailable {
                     Image(systemName: "chevron.right")
                         .font(.footnote.weight(.semibold))
-                        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         .frame(width: 16)
                         .accessibilityHidden(true)
                 }
@@ -258,7 +379,7 @@ private struct MusicPlatformAccountRow: View {
     @ViewBuilder
     private func accountDetail(_ detail: MusicAccountSettingsDetail) -> some View {
         let status = Text(detail.status)
-            .foregroundColor(detail.isNonVIP ? theme.settingsDanger : Color(uiColor: UIColor(theme.muted)))
+            .foregroundColor(detail.isNonVIP ? theme.settingsDanger : Color(uiColor: UIColor(theme.settings.muted)))
         Group {
             if let name = detail.name {
                 ViewThatFits(in: .horizontal) {
@@ -276,7 +397,7 @@ private struct MusicPlatformAccountRow: View {
             }
         }
         .font(.subheadline)
-        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+        .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
     }
 }
 #endif

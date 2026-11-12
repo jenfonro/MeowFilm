@@ -212,7 +212,7 @@ final class MeowfilmSidebarTests: XCTestCase {
         XCTAssertEqual(try menuActions(source).map(\.state), [.on, .off])
         let firstReads = await first.reads
         let secondReads = await second.reads
-        XCTAssertEqual(firstReads, 1)
+        XCTAssertEqual(firstReads, 2)
         XCTAssertEqual(secondReads, 1)
     }
 
@@ -638,7 +638,7 @@ private actor SidebarMetadataSource: FilmSource {
 
     init(id: String, title: String) { descriptor = .init(id: id, title: title) }
 
-    func loadHome() async throws -> [FilmHomeSection] {
+    func loadHome(refresh: Bool) async throws -> [FilmHomeSection] {
         reads += 1
         return [.init(id: "movies", title: descriptor.title,
                       items: [.init(sourceID: descriptor.id, id: "shared", title: "\(descriptor.title)影片")])]
@@ -664,12 +664,23 @@ private final class SidebarFilmFixture {
         sources = FilmSourceService(transport: .init(
             request: { method, _ in try await transport.call(method) },
             upload: { _, _, _ in try await transport.call("upload") }), storeFactory: { store })
-        rules = try FilmRuleService(store: DocumentStore(baseURL: directory, namespace: FilmRuleService.documentNamespace))
+        rules = FilmRuleService(connection: {
+            let resources = try await MainActor.run {
+                let app = try XCTUnwrap(UIApplication.shared.delegate as? MeowfilmAppDelegate)
+                return try XCTUnwrap(app.readyAssembly()?.resources)
+            }
+            return try await resources.scriptSession.connection()
+        })
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: {
             XCTFail("Rendering the saved sidebar must not request TMDB")
             throw FilmSearchError.unavailable
         }), didSave: {})
-        model = FilmSettingsModel(rules: rules, sources: sources, tmdb: tmdb)
+        let douban = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(connection: {
+            XCTFail("Rendering the saved sidebar must not request Douban")
+            throw FilmSearchError.unavailable
+        }), didSave: {})
+        model = FilmSettingsModel(rules: rules, sources: sources, tmdb: tmdb, douban: douban,
+            pan: PanAccountsModel(service: .init(request: { _, _, _ in throw RuntimeHTTPError.closed })))
     }
 
     static func cats(for videos: [FilmVideoSource]) -> [FilmCatSource] {

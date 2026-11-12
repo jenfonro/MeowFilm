@@ -41,6 +41,7 @@ public sealed partial class MusicLibraryOwner
         var state = LibraryState(doc); var library = LJ.Object(state["library"]); var collections = LJ.Array(library["collections"]);
         JsonObject AtRevision()
         {
+            LJ.Require(!NetworkPlaylists(library).OfType<JsonObject>().Any(r => LJ.S(r["id"]) == LJ.S(p["id"])), "READ_ONLY");
             var c = FindCollection(library, LJ.Text(p["id"]));
             LJ.Require(Revision(c) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT"); return c;
         }
@@ -48,11 +49,15 @@ public sealed partial class MusicLibraryOwner
         if (method == "music.library.list")
         {
             LJ.Fields(p, "offset limit");
-            return (LJ.Merge(LJ.Page(collections.OfType<JsonObject>().Where(c => !LJ.B(c["deleted"])).Select(CollectionView), p), LJ.Obj(("revision", library["revision"]))), false);
+            var items = collections.OfType<JsonObject>().Where(c => !LJ.B(c["deleted"])).Select(CollectionView)
+                .Concat(NetworkPlaylists(library).OfType<JsonObject>().Where(r => LJ.B(r["present"])).Select(NetworkPlaylistView));
+            return (LJ.Merge(LJ.Page(items, p), LJ.Obj(("revision", library["revision"]))), false);
         }
         if (method == "music.library.detail")
         {
-            LJ.Fields(p, "id offset limit", "id"); var c = FindCollection(library, LJ.Text(p["id"]));
+            LJ.Fields(p, "id offset limit", "id");
+            LJ.Require(!NetworkPlaylists(library).OfType<JsonObject>().Any(r => LJ.S(r["id"]) == LJ.S(p["id"])), "READ_ONLY");
+            var c = FindCollection(library, LJ.Text(p["id"]));
             return (LJ.Merge(LJ.Page(Order(c).Select(DetailSong), p, "songs"), LJ.Obj(("collection", CollectionView(c)))), false);
         }
         if (method == "music.library.membership")
@@ -132,7 +137,13 @@ public sealed partial class MusicLibraryOwner
             }
             if (p["name"] is not null) { LJ.Require(LJ.S(c["kind"]) != "favorites", "INVALID_NAME"); c["name"] = LJ.Text(p["name"], 200); }
             foreach (string id in before.Concat(next).Distinct())
-                if (before.Contains(id) != next.Contains(id)) LJ.Object(c["intents"])[id] = LJ.Obj(("present", next.Contains(id)), ("pending", true), ("origin", "local"));
+                if (before.Contains(id) != next.Contains(id))
+                {
+                    var intents = LJ.Object(c["intents"]); bool present = next.Contains(id);
+                    // An unbound local removal must not become a future account's delete.
+                    if (!present && LJ.Array(c["bindings"]).Count == 0) intents.Remove(id);
+                    else intents[id] = LJ.Obj(("present", present), ("pending", true), ("origin", "local"));
+                }
             c["order"] = LJ.Arr(next); c["manualOrder"] = true; Increment(c);
             result = LJ.Obj(("collection", CollectionView(c)));
         }

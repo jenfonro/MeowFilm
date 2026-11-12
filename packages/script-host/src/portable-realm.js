@@ -1045,6 +1045,53 @@ export const portableRealmSource = String.raw`
     toString() { return this.body(); },
   });
 
+  function makeBrowserResponse(value, fallbackUrl) {
+    const details = value && typeof value === 'object' ? value : { data:String(value ?? '') };
+    const response = makeResponse({ ...details,
+      data:details.data ?? details.html ?? details.body ?? '',
+      url:details.responseUrl ?? details.url ?? fallbackUrl,
+      statusCode:details.statusCode ?? details.status ?? 200 });
+    const headers = {};
+    for (const [name, value] of Object.entries(response.headers)) headers[name.toLowerCase()] = value;
+    if (response.url !== fallbackUrl && !headers.location) headers.location = response.url;
+    const header = name => {
+      if (!name) return headerValues;
+      const key = String(name).trim().toLowerCase(), value = headers[key];
+      if (key === 'set-cookie') return value === undefined ? [] : Array.isArray(value) ? value : [value];
+      return Array.isArray(value) ? value.join(', ') : String(value ?? '');
+    };
+    const headerValues = {};
+    for (const name of Object.keys(headers)) {
+      const title = name.replace(/(^|-)([a-z])/g, (_match, prefix, letter) => prefix + letter.toUpperCase());
+      headerValues[name] = headerValues[title] = String(header(name));
+    }
+    Object.defineProperties(headerValues, {
+      get:{ value:name => header(name) },
+      containsKey:{ value:name => Object.hasOwn(headers, String(name).trim().toLowerCase()) },
+      toString:{ value:() => JSON.stringify(headerValues) },
+    });
+    const cookies = () => {
+      const result = Object.fromEntries(header('set-cookie').flatMap(value => {
+        const pair = String(value).split(';', 1)[0], index = pair.indexOf('=');
+        return index > 0 ? [[pair.slice(0, index).trim(), pair.slice(index + 1).trim()]] : [];
+      }));
+      Object.defineProperties(result, {
+        get:{ value:name => result[String(name ?? '').trim()] ?? '' },
+        toString:{ value:() => Object.entries(result).map(([name, value]) => name+'='+value).join('; ') },
+      });
+      return result;
+    };
+    const url = () => response.url, code = () => response.statusCode;
+    const raw = { headers:header, request:() => ({ url }), code,
+      priorResponse:() => null, isRedirect:() => details.redirected === true };
+    return {
+      responseUrl:response.url, url, body:() => response.body(), header, headers:header,
+      cookie:name => cookies().get(name), cookies, raw:() => raw, code, statusCode:code,
+      isSuccessful:() => response.statusCode >= 200 && response.statusCode < 300,
+      toString:() => response.body(), [Symbol.toPrimitive]:() => response.body(),
+    };
+  }
+
   const requestObject = value => {
     if (value === undefined || value === null || value === '') return {};
     if (typeof value === 'string') {
@@ -1378,6 +1425,19 @@ export const portableRealmSource = String.raw`
       return makeResponse(response);
     };
     const runtimeInfo = () => sync(taskId, 'legado.runtimeInfo', {});
+    const browser = async (url, title) => {
+      const target = String(url ?? '').trim() || String(bindings.source?.bookSourceUrl ?? '');
+      const value = await capability(taskId, 'legado.web', {
+        mode:'browser', url:target, title:String(title || ''),
+      });
+      return makeBrowserResponse(value, target);
+    };
+    const webView = (html, url, script, sourceRegex, overrideUrlRegex, delayTime) =>
+      capability(taskId, 'legado.web', {
+        mode:'webview', html:String(html || ''), url:String(url ?? '').trim() || currentBaseUrl,
+        script:String(script || ''), sourceRegex:String(sourceRegex || ''),
+        overrideUrlRegex:String(overrideUrlRegex || ''), delayTime:Number(delayTime),
+      });
     const variable = key => {
       const value = sync(taskId, 'legado.variableGet', { key:String(key) });
       return value === null || value === undefined
@@ -1466,16 +1526,17 @@ export const portableRealmSource = String.raw`
         const hex = Array.from(bytes, value => value.toString(16).padStart(2,'0')).join('');
         return hex.slice(0,8)+'-'+hex.slice(8,12)+'-'+hex.slice(12,16)+'-'+hex.slice(16,20)+'-'+hex.slice(20);
       },
-      startBrowser: async (url, title) => capability(taskId, 'legado.web', { mode:'browser', url:String(url), title:String(title || '') }),
-      startBrowserAwait: async (url, title) => capability(taskId, 'legado.web', { mode:'browser', url:String(url), title:String(title || '') }),
-      showBrowser: async (url, title) => capability(taskId, 'legado.web', { mode:'browser', url:String(url), title:String(title || '') }),
+      startBrowser: browser,
+      startBrowserAwait: browser,
+      showBrowser: browser,
       openUrl: async url => capability(taskId, 'legado.web', { mode:'openUrl', url:String(url) }),
       getVerificationCode: async (url, headers) =>
         capability(taskId, 'legado.web', { mode:'verificationCode', url:String(url || ''), headers:headers || {} }),
-      webView: async (html, url, script, sourceRegex, overrideUrlRegex, delayTime) =>
-        capability(taskId, 'legado.web', { mode:'webview', html:String(html || ''), url:String(url || ''),
-          script:String(script || ''), sourceRegex:String(sourceRegex || ''), overrideUrlRegex:String(overrideUrlRegex || ''),
-          delayTime:Number(delayTime || 0) }),
+      webView: (html, url, script = '', delayTime = 1000) => webView(html, url, script, '', '', delayTime),
+      webViewGetSource: (html, url, script = '', sourceRegex = '', delayTime = 1000) =>
+        webView(html, url, script, sourceRegex, '', delayTime),
+      webViewGetOverrideUrl: (html, url, script = '', overrideUrlRegex = '', delayTime = 1000) =>
+        webView(html, url, script, '', overrideUrlRegex, delayTime),
       getWebViewUA: () => runtimeInfo().userAgent,
       androidId: () => runtimeInfo().deviceId,
       deviceID: () => runtimeInfo().deviceId,
@@ -1623,6 +1684,7 @@ export const portableRealmSource = String.raw`
     return {
       java:guarded(java, 'java'), cookie:guarded(cookie, 'cookie'),
       cache:guarded(cache, 'cache'), source, book, chapter:bindings.chapter || {},
+      nextChapterUrl:bindings.nextChapterUrl || '',
       org, Jsoup, Packages, Java,
     };
   }

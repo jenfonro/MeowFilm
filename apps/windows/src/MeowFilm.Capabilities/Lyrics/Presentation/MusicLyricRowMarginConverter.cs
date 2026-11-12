@@ -6,19 +6,20 @@ namespace MeowFilm.Capabilities;
 
 public sealed class MusicLyricRowMarginConverter : IMultiValueConverter
 {
-    internal const double ReadingAnchor = .24;
-    internal static Thickness EdgeSpace(double height)
+    internal const double ReadingAnchor = .5;
+    internal static Thickness EdgeSpace(double height, double firstHeight, double lastHeight)
     {
-        var anchor = ReadingAnchor;
-        return new(0, Math.Max(24, height * anchor), 0, Math.Max(24, height * (1 - anchor)));
+        return new(0, Math.Max(0, height * ReadingAnchor - firstHeight / 2),
+            0, Math.Max(0, height * (1 - ReadingAnchor) - lastHeight / 2));
     }
 
     public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture)
     {
-        if (values.Length != 4 || values[0] is not MusicLyricRow row ||
-            values[3] is not double height || !double.IsFinite(height) || height <= 0)
+        if (values.Length != 5 || values[0] is not MusicLyricRow row ||
+            values[3] is not double height || !double.IsFinite(height) || height <= 0 ||
+            values[4] is not double rowHeight || !double.IsFinite(rowHeight))
             return new Thickness();
-        var space = EdgeSpace(height);
+        var space = EdgeSpace(height, rowHeight, rowHeight);
         return new Thickness(0, ReferenceEquals(row, values[1]) ? space.Top : 0,
             0, ReferenceEquals(row, values[2]) ? space.Bottom : 0);
     }

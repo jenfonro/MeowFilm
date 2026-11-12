@@ -23,6 +23,24 @@ public static partial class MusicUiTests
 
     internal static IEnumerable<TestCase> NativeServiceIntegrationCases()
     {
+        foreach (var test in FeedbackBoundaryCases()) yield return test;
+        yield return Case("assembled native store registers the credential-free playback outbox", async () =>
+        {
+            await using var store = ServiceStore();
+            True(AppIdentity.NativeNamespaces.Contains(NeteasePlaybackOutboxDocument.Namespace), "native-only outbox registered");
+            True(!AppIdentity.ProtectedNamespaces.Contains(NeteasePlaybackOutboxDocument.Namespace), "no credential document");
+            var missing = await store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace);
+            True(!missing.Fingerprint.Exists, "outbox starts absent");
+            byte[] empty = NeteasePlaybackOutboxDocument.Encode([]);
+            var receipt = await store.WriteAsync(NeteasePlaybackOutboxDocument.Namespace, empty, missing.Fingerprint);
+            await using var runtime = new NativeMusicScriptTestRuntime();
+            await using var app = new MusicNativeApplication(store, runtime, new NoUpstream());
+            await app.InitializeAsync(); await app.Feedback.DrainAsync(); await app.PrepareShutdownAsync();
+            var saved = await store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace);
+            Equal(receipt, saved.Fingerprint);
+            Equal(0, NeteasePlaybackOutboxDocument.Decode(saved).Length);
+            Equal(0, runtime.Calls.Count);
+        });
         yield return Case("assembled sync is native and disabled without account or script IO", async () =>
         {
             await using var store = ServiceStore();

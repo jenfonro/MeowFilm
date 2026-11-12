@@ -6,13 +6,15 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const digest = value => createHash('sha256').update(value).digest('hex');
 
-/** The native client engine is separate from the Node-hosted WASM allowlist. */
+/** Verify the one shared QuickJS source tree before native compilation. */
 export function verifyNativeJavaScript(directory = root) {
-  const manifest = JSON.parse(readFileSync(resolve(directory, 'scripts/quickjs-native.json'), 'utf8'));
-  if (manifest.schemaVersion !== 1 || manifest.project !== 'quickjs-ng/quickjs' ||
-      !/^[a-f0-9]{40}$/.test(manifest.commit) || !/^\d+\.\d+\.\d+$/.test(manifest.version))
+  const policy = JSON.parse(readFileSync(resolve(directory, 'scripts/script-host-native.json'), 'utf8'));
+  const manifest = policy.sources?.quickjs;
+  if (policy.schemaVersion !== 1 || manifest?.version !== '0.18.0' ||
+      manifest.commit !== 'd7215b0ad3fc2c562e8317fd9bca058fd4863804' ||
+      manifest.sourcePath !== 'native/JavaScript/quickjs')
     throw new Error('Invalid native JavaScript source manifest');
-  const base = resolve(directory, 'native/JavaScript/quickjs');
+  const base = resolve(directory, manifest.sourcePath);
   const names = Object.keys(manifest.files).sort();
   if (names.length === 0 || names.join() !== readdirSync(base).sort().join())
     throw new Error('Native JavaScript source inventory differs');
@@ -23,19 +25,23 @@ export function verifyNativeJavaScript(directory = root) {
     if (!stat.isFile() || stat.isSymbolicLink() || digest(readFileSync(path)) !== manifest.files[name])
       throw new Error('Native JavaScript source hash differs: ' + name);
   }
-  const patch = manifest.patch;
-  if (!patch || patch.path !== 'native/JavaScript/patches/regexp-compile-interrupt.patch' ||
-      !/^[a-f0-9]{64}$/.test(patch.sha256) || !patch.upstreamFiles ||
-      Object.keys(patch.upstreamFiles).length === 0 ||
-      Object.entries(patch.upstreamFiles).some(([name, hash]) =>
-        !names.includes(name) || !/^[a-f0-9]{64}$/.test(hash) || hash === manifest.files[name]))
+  const patches = ['native/JavaScript/patches/regexp-compile-interrupt.patch',
+    'packages/script-host/native/task-context.patch',
+    'packages/script-host/native/arraybuffer-ownership.patch'];
+  if (!Array.isArray(policy.patches) || policy.patches.length !== patches.length ||
+      policy.patches.some((patch, index) => patch.path !== patches[index] ||
+        patch.source !== 'quickjs' || !/^[a-f0-9]{64}$/.test(patch.sha256)))
     throw new Error('Invalid native JavaScript patch manifest');
-  const patchPath = resolve(directory, patch.path);
-  if (!lstatSync(patchPath).isFile() || lstatSync(patchPath).isSymbolicLink() ||
-      digest(readFileSync(patchPath)) !== patch.sha256)
-    throw new Error('Native JavaScript patch hash differs');
-  const license = resolve(directory, 'LICENSES/quickjs-native-MIT.txt');
-  if (lstatSync(license).isSymbolicLink() || digest(readFileSync(license)) !== manifest.licenseSha256)
+  for (const patch of policy.patches) {
+    const patchPath = resolve(directory, patch.path);
+    if (!lstatSync(patchPath).isFile() || lstatSync(patchPath).isSymbolicLink() ||
+        digest(readFileSync(patchPath)) !== patch.sha256)
+      throw new Error('Native JavaScript patch hash differs');
+  }
+  if (manifest.license?.path !== 'LICENSES/quickjs-ng-LICENSE.txt')
+    throw new Error('Invalid native JavaScript license manifest');
+  const license = resolve(directory, manifest.license.path);
+  if (lstatSync(license).isSymbolicLink() || digest(readFileSync(license)) !== manifest.license.sha256)
     throw new Error('Native JavaScript license hash differs');
   const unicode = manifest.unicodeLicense;
   if (!unicode || unicode.path !== 'LICENSES/Unicode-3.0.txt' ||
@@ -52,7 +58,7 @@ export function verifyNativeJavaScript(directory = root) {
     .match(/\/\*\n(UNICODE LICENSE V3\n[\s\S]*?)\*\//)?.[1];
   if (!notice || !unicodeBytes.equals(Buffer.from(notice, 'utf8')))
     throw new Error('Native JavaScript Unicode license differs from the source notice');
-  return { project: manifest.project, version: manifest.version, commit: manifest.commit, files: names.length };
+  return { project: 'quickjs-ng/quickjs', version: manifest.version, commit: manifest.commit, files: names.length };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))

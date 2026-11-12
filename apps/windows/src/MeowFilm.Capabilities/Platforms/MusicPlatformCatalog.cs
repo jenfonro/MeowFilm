@@ -9,7 +9,7 @@ using System.Text.Json.Nodes;
 
 namespace MeowFilm.Capabilities.Platforms;
 
-public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
+public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog, IMusicDailyStylePreferences
 {
     private const int MaxResponse = 4 * 1024 * 1024;
     private readonly IMusicPlatformSessionSource sessions;
@@ -21,12 +21,13 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
     private readonly object gate = new();
     private readonly HashSet<Call> active = [];
     private readonly Dictionary<string, Flight> flights = [];
+    private readonly Dictionary<string, long> dailyStyleEpochs = [];
     private readonly Action<MusicPlatformSession>? authenticationFailed;
     private sealed record Flight(Call Call, TaskCompletionSource<JsonElement> Completion);
     private readonly Dictionary<string, CacheEntry> cache = [];
     private int cacheBytes;
     private bool closed;
-    private sealed record CacheEntry(JsonElement Value, DateTimeOffset Expires, int Bytes, string Platform);
+    private sealed record CacheEntry(JsonElement Value, DateTimeOffset Expires, int Bytes, string Platform, string Operation, string Scope);
 
     internal MusicPlatformCatalog(IMusicPlatformSessionSource sessions, MusicPlatformClientContextOwner clients,
         TimeSpan? timeout = null)
@@ -128,22 +129,30 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             request.Headers.TryAddWithoutValidation("kg-tid", "369");
             return Read(request, d => PlatformProtocols.KgSuccess(d, path));
         }
-        internal async Task<T> Xeapi<T>(string path, JsonObject parameters, Func<JsonObject, T> decode)
+        internal async Task<T> Xeapi<T>(string path, JsonObject parameters, Func<JsonObject, T> decode, Action? dispatched = null, Action? rejected = null)
         {
             Auth();
             var bootstrap = PlatformXeapi.KeyRequest(WyClient, Session!);
             var key = await Read(bootstrap.Request,
                 body => PlatformXeapi.ReadKey(PlatformProtocols.WySuccess(body), bootstrap.Nonce));
             return await Read(PlatformXeapi.Request(path, parameters, Session!, WyClient, key),
-                body => decode(PlatformProtocols.WySuccess(body)), xeapi: true);
+                body =>
+                {
+                    if (rejected is not null)
+                        PJ.Require(int.TryParse(PJ.Scalar(body["code"]), out _), "INVALID_RESPONSE");
+                    try { PlatformProtocols.WySuccess(body); }
+                    catch (MusicPlatformException) { rejected?.Invoke(); throw; }
+                    return decode(body);
+                }, xeapi: true, dispatched: dispatched);
         }
-        private async Task<T> Read<T>(HttpRequestMessage request, Func<JsonObject, T> business, bool xeapi = false)
+        private async Task<T> Read<T>(HttpRequestMessage request, Func<JsonObject, T> business, bool xeapi = false, Action? dispatched = null)
         {
-            var dispatched = false;
+            var sent = false;
             try
             {
                 await CheckSessionAsync();
-                dispatched = true;
+                dispatched?.Invoke();
+                sent = true;
                 var result = xeapi ? await Owner.http.SendXeapiAsync(request, Token, MaxResponse, Owner.timeout)
                     : await Owner.http.SendAsync(Platform, request, Token, MaxResponse, Owner.timeout);
                 Guard();
@@ -154,7 +163,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                         Guard, Token).ConfigureAwait(false);
                 Guard(); return body;
             }
-            finally { if (!dispatched) request.Dispose(); }
+            finally { if (!sent) request.Dispose(); }
         }
         internal async Task<byte[]> PublicRead(HttpRequestMessage request)
         {
@@ -239,6 +248,8 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             call.Scope = PJ.Hash(PJ.Node(new object?[] { platform, call.Session?.Scope ?? "anonymous", call.Session?.Generation ?? 0, call.Session?.UserId }));
             var keyInput = JsonSerializer.SerializeToNode(input, PJ.Options)!.AsObject();
             keyInput.Remove("Refresh"); // A successful explicit refresh replaces the ordinary read's cache.
+            if (operation == "daily-style")
+                lock (gate) keyInput["StyleEpoch"] = dailyStyleEpochs.GetValueOrDefault(call.Scope);
             string CacheKey() => PJ.Hash(PJ.Node(new object[] { call.Scope, operation, keyInput,
                 call.Client switch
                 {
@@ -296,7 +307,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             {
                 var bytes = Encoding.UTF8.GetByteCount(result.GetRawText());
                 var ttl = operation is "song" or "playlist" ? TimeSpan.FromHours(1) : TimeSpan.FromMinutes(10);
-                if (operation == "daily" && result.TryGetProperty("expiresAt", out var expiry))
+                if (operation is "daily" or "daily-style" && result.TryGetProperty("expiresAt", out var expiry))
                     ttl = DateTimeOffset.FromUnixTimeMilliseconds(expiry.GetInt64()) - DateTimeOffset.UtcNow;
                 lock (gate)
                 {
@@ -306,7 +317,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                     if (bytes <= 2 * 1024 * 1024)
                     {
                         while (cache.Count >= 64 || cacheBytes + bytes > 2 * 1024 * 1024) Erase(cache.Keys.First());
-                        cache[key] = new(result.Clone(), DateTimeOffset.UtcNow + ttl, bytes, platform); cacheBytes += bytes;
+                        cache[key] = new(result.Clone(), DateTimeOffset.UtcNow + ttl, bytes, platform, operation, call.Scope); cacheBytes += bytes;
                     }
                 }
             }
@@ -346,6 +357,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         lock (gate)
         {
             foreach (var key in cache.Where(e => platform is null || e.Value.Platform == platform).Select(e => e.Key).ToArray()) Erase(key);
+            if (platform is null or "wy") dailyStyleEpochs.Clear();
             retired = active.Where(c => platform is null || c.Platform == platform).ToArray();
             foreach (var call in retired) call.Fence("STALE_SESSION");
             foreach (var key in flights.Where(p => platform is null || p.Value.Call.Platform == platform).Select(p => p.Key).ToArray())
@@ -366,7 +378,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         lock (gate)
         {
             if (closed) return;
-            closed = true; cache.Clear(); flights.Clear(); cacheBytes = 0;
+            closed = true; cache.Clear(); flights.Clear(); dailyStyleEpochs.Clear(); cacheBytes = 0;
             retired = active.ToArray();
             foreach (var call in retired) call.Fence("CLOSED");
         }

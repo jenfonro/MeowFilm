@@ -5,10 +5,5 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
-    <Content Include="../../../../native/JavaScript/build/bin/$(Configuration)/meowfilm_js.dll"
-             Link="meowfilm_js.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
-  <Target Name="BuildNativeJavaScript" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\..\..\scripts\windows\build-native-javascript.ps1&quot; -Configuration $(Configuration)" />
-  </Target>
 </Project>

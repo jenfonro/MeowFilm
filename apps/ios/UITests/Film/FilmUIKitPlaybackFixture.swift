@@ -207,7 +207,7 @@ final class FilmUIKitPlaybackMedia: FilmPlaybackMediaControlling {
         paused += 1; state.paused = true; receive?(.state(state))
         return true
     }
-    func resume(sessionID: UUID, attemptID: String) {
+    func resume(sessionID: UUID, attemptID: String, userInitiated: Bool) {
         guard isCurrent(sessionID: sessionID, attemptID: attemptID), state.paused else { return }
         resumed += 1; state.paused = false; receive?(.state(state))
     }

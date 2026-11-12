@@ -34,6 +34,14 @@ public static class AppLauncher
         Func<ValueTask>? disposeResources = null,
         Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
+        => Run(AppDataPaths.Current, definition, createModules, disposeResources, attachWindow, createPages);
+
+    // Isolated App-host tests use the same launcher without touching the user's data.
+    internal static void Run(AppDataPaths paths, AppDefinition definition,
+        Action<IRuntimeClient, IDocumentStore, ICollection<IDesktopModule>> createModules,
+        Func<ValueTask>? disposeResources = null,
+        Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
+        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
     {
         var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var launchWindow = new Window
@@ -51,7 +59,8 @@ public static class AppLauncher
         var exitWait = false;
         AppShutdown? ownedLifecycle = null;
         Task<StartupOutcome>? starting = null;
-        using var startup = new AppStartup();
+        var startup = new AppStartup();
+        UserDataDirectory? userData = null;
         launchWindow.Closing += (_, args) =>
         {
             if (switched || allowLaunchClose) return;
@@ -60,8 +69,16 @@ public static class AppLauncher
             _ = ExitStartupAsync();
         };
         retry.Click += async (_, _) => { if (exitRequested) await ExitStartupAsync(); else await StartAsync(); };
+        application.SessionEnding += (_, _) => exitRequested = true;
         application.Startup += async (_, _) => { launchWindow.Show(); await StartAsync(); };
-        application.Run();
+        try { application.Run(); }
+        finally
+        {
+            startup.Dispose();
+            // The process owns this lease throughout all generations. OS session
+            // ending may still be draining owners; never release it ahead of them.
+            if (ownedLifecycle is null || ownedLifecycle.IsReleased) userData?.Dispose();
+        }
 
         async Task StartAsync()
         {
@@ -122,6 +139,8 @@ public static class AppLauncher
             IAsyncDisposable? windowAttachment = null;
             ShellWindow? shell = null;
             AppShutdown? shutdown = null;
+            var shellClosed = false;
+            var replacing = false;
             AppShutdown Lifecycle()
             {
                 // Cleanup must not be prevented by malformed assembly output.
@@ -140,7 +159,12 @@ public static class AppLauncher
             }
             try
             {
-                var paths = AppDataPaths.Current;
+                userData ??= new UserDataDirectory(paths.Documents, paths.Caches);
+                // A durable reset request is completed before any store, runtime
+                // or cache owner can read either partially-cleared root. Normal
+                // admission leaves the optional cache directory unopened.
+                await Task.Run(userData.Open, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(paths.Documents);
                 store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
                     definition.NativeCollections, definition.ProtectedNamespaces);
@@ -168,9 +192,12 @@ public static class AppLauncher
                 // The shared runtime starts with the App; starting it executes no script.
                 runtime.Start();
                 var lifecycle = Lifecycle();
+                var reset = new AppUserDataReset(userData.RequestReset, ReleaseForResetAsync,
+                    () => Task.Run(userData.Clear), ReopenAsync);
                 shell = new ShellWindow(modules, createPages?.Invoke(modules) ?? [],
                     lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
-                    appearance, closePreferences, mediaControls: mediaControls) { Title = "meowfilm" };
+                    appearance, closePreferences, mediaControls: mediaControls,
+                    resetUserData: reset.ResetAsync) { Title = "meowfilm" };
                 artwork = new ArtworkService(readTrusted: async (reference, maximumBytes, token) =>
                 {
                     try { return await runtime.ReadImageAsync(reference, maximumBytes, token).ConfigureAwait(false); }
@@ -196,15 +223,49 @@ public static class AppLauncher
                 application.SessionEnding += sessionEnding;
                 shell.Closed += (_, _) =>
                 {
+                    shellClosed = true;
                     application.SessionEnding -= sessionEnding;
                     // User-requested closure awaited cleanup; session ending keeps the OS path.
                     // Never initiate dispatcher shutdown on a failed drain receipt.
-                    if (switched && lifecycle.IsReleased) application.Shutdown();
+                    if (switched && !replacing && lifecycle.IsReleased) application.Shutdown();
                 };
                 shell.Show();
                 switched = true;
-                launchWindow.Close();
+                // Keep the startup/retry surface for an in-process data reset.
+                launchWindow.Hide();
                 return StartupOutcome.Started;
+
+                async Task ReleaseForResetAsync()
+                {
+                    // Revoke system media/hotkey input before any asynchronous
+                    // runtime drain. The lifecycle also owns this participant.
+                    var inputDrain = mediaControls.PrepareShutdownAsync();
+                    _ = inputDrain.ContinueWith(done => { _ = done.Exception; }, CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    await lifecycle.ForceReleaseAsync();
+                }
+
+                async Task ReopenAsync()
+                {
+                    // Closing this retired shell must not shut down the dispatcher.
+                    replacing = true;
+                    try
+                    {
+                        await shell!.AbortAsync();
+                        if (!shellClosed) throw new InvalidOperationException("SHUTDOWN_FAILED");
+                    }
+                    finally { if (!shellClosed) replacing = false; }
+                    if (exitRequested) return;
+                    switched = false;
+                    application.MainWindow = launchWindow;
+                    launchWindow.Show();
+                    startup.Dispose();
+                    startup = new AppStartup();
+                    starting = null;
+                    ownedLifecycle = null;
+                    retry.Content = "重试";
+                    await StartAsync();
+                }
             }
             catch
             {

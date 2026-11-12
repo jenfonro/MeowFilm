@@ -66,15 +66,18 @@ public static class MusicOfficialSelectionTests
         yield return new("Official selection source history is account policy request generation and TTL bound without touching reads", async () =>
         {
             await using var store = new MemoryStore(); var clock = new Clock();
-            var cache = new MusicSourceCache(store, clock);
+            await using var cacheStore = new CacheDocumentStore(store);
+            var cache = new MusicSourceCache(cacheStore, clock);
             var song = SongObject("tx", "FixtureMID");
             string signature = Hash('a'), policy = Hash('b');
             var info = SourceInfo("account", "song", signature, policy, clock.Now);
             info["quality"] = "flac";
             info["recording"] = song["sources"]![0]!.DeepClone();
             await cache.ConfirmAsync("account", "song", signature, info, default);
+            await cacheStore.DrainAsync();
             int writes = store.Writes;
-            var restarted = new MusicSourceCache(store, clock);
+            await using var reopened = new CacheDocumentStore(store);
+            var restarted = new MusicSourceCache(reopened, clock);
             var hit = await restarted.ReadHistoryAsync("account", "song", policy, "auto", 7, default);
             Check(hit is not null && hit["recording"] is not null && hit["confirmedAt"]!.GetValue<long>() == clock.Now);
             Check(hit!["url"] is null && hit["headers"] is null);
@@ -130,13 +133,14 @@ public static class MusicOfficialSelectionTests
             Check(!scene.App.IsOfficialPlaybackCurrent("tx", scope, generation));
             var policy = await scene.Ok("music.quality.settings.get");
             int calls = scene.Handler.Calls, writes = scene.Store.Writes, vkeys = scene.Handler.Vkeys;
-            byte[] cached = scene.Store.Data[MusicSourceCache.Namespace].ToArray();
+            byte[] cached = scene.CacheBacking.Data[MusicSourceCache.Namespace].ToArray();
             var candidates = await scene.Candidates(song, policy, true);
             Check(candidates.GetProperty("candidates").GetArrayLength() == 0 && scene.Handler.Searches == 0);
-            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+            foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
+            await scene.CacheStore.DrainAsync();
             Check(scene.Handler.Calls == calls && scene.Handler.Vkeys == vkeys && scene.Store.Writes == writes);
-            Check(scene.Store.Data[MusicSourceCache.Namespace].SequenceEqual(cached),
+            Check(scene.CacheBacking.Data[MusicSourceCache.Namespace].SequenceEqual(cached),
                 "disabled cache entry points cannot create candidates, authorization or confirmation");
             await scene.Ok("music.officialSources.settings.save",
                 new { ifRevision = 1, enabled = new[] { "wy", "tx", "kg" } });
@@ -189,9 +193,24 @@ public static class MusicOfficialSelectionTests
             }
             finally { scene.Handler.MethodRelease.TrySetResult(); }
             Code(await pending.WaitAsync(TimeSpan.FromSeconds(5)), "CANCELLED");
-            Check(scene.Handler.Vkeys == 1 && !scene.Store.Data.ContainsKey(MusicSourceCache.Namespace));
-            Check(!scene.App.IsOfficialPlaybackCurrent("tx", context.GetProperty("scope").GetString()!,
-                context.GetProperty("generation").GetInt64()), "late native success cannot restore cache access");
+            Check(scene.Handler.Vkeys == 1);
+            string scope = context.GetProperty("scope").GetString()!;
+            long generation = context.GetProperty("generation").GetInt64();
+            string songId = input.song["songId"]!.GetValue<string>();
+            await scene.CacheStore.DrainAsync();
+            await using var reopened = new CacheDocumentStore(scene.CacheBacking);
+            // An empty invalidation may persist as a fence; it must not publish a URL or history.
+            foreach (var cache in new[] { new MusicSourceCache(scene.CacheStore), new MusicSourceCache(reopened) })
+            {
+                Check(await cache.ReadAsync(scope, songId,
+                    context.GetProperty("qualityCacheSignature").GetString()!, default) is null,
+                    "late native success cannot publish a reusable media URL");
+                Check(await cache.ReadHistoryAsync(scope, songId,
+                    context.GetProperty("qualityPolicySignature").GetString()!, "320k", generation, default) is null,
+                    "late native success cannot publish confirmed source history");
+            }
+            Check(!scene.App.IsOfficialPlaybackCurrent("tx", scope, generation),
+                "late native success cannot restore cache access");
             Check(scene.Runtime.Calls == 0);
         });
         yield return new("Unknown official source CAS fails native admission closed until an explicit settings read", async () =>
@@ -211,7 +230,7 @@ public static class MusicOfficialSelectionTests
             Code(await scene.App.ExecuteAsync("music.official.candidates", new {
                 song, quality = "320k", qualityPolicySignature = policy.GetProperty("signature").GetString()
             }), "PENDING_WRITE");
-            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+            foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "PENDING_WRITE");
             Check(scene.Handler.Calls == calls && scene.Store.Writes == writes,
                 "native readers must neither reconcile nor replay an unknown settings write");
@@ -219,26 +238,27 @@ public static class MusicOfficialSelectionTests
             var settings = (await scene.Ok("music.officialSources.settings.get")).GetProperty("settings");
             Check(settings.GetProperty("revision").GetInt64() == 1 &&
                 settings.GetProperty("enabled").EnumerateArray().All(value => value.GetString() != "tx"));
-            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+            foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
             Check(scene.Handler.Calls == calls && scene.Store.Writes == writes && scene.Runtime.Calls == 0);
         });
-        yield return new("Official candidate lookup reports incompatible current cache data without fallback or overwrite", async () =>
+        yield return new("Official candidate lookup treats damaged cache as absent without network fallback", async () =>
         {
             await using var scene = await Scene.CreateAsync();
             await scene.Login();
             var policy = await scene.Ok("music.quality.settings.get");
-            byte[] incompatible = Encoding.UTF8.GetBytes("""{"schema":2,"scopes":{}}""");
-            scene.Store.Data[MusicSourceCache.Namespace] = incompatible.ToArray();
+            byte[] incompatible = "{"u8.ToArray();
+            scene.CacheStore.Save(MusicSourceCache.Namespace, incompatible);
+            await scene.CacheStore.DrainAsync();
             int calls = scene.Handler.Calls, writes = scene.Store.Writes;
             var result = await scene.App.ExecuteAsync("music.official.candidates", new {
                 song = SongObject("wy", "1"), quality = "320k",
                 qualityPolicySignature = policy.GetProperty("signature").GetString()
             });
-            Check(!result.GetProperty("ok").GetBoolean() &&
-                result.GetProperty("code").GetString() == "CACHE_DATA_INCOMPATIBLE");
+            Check(result.GetProperty("ok").GetBoolean());
+            await scene.CacheStore.DrainAsync();
             Check(scene.Handler.Calls == calls && scene.Store.Writes == writes &&
-                scene.Store.Data[MusicSourceCache.Namespace].SequenceEqual(incompatible));
+                scene.CacheBacking.Data[MusicSourceCache.Namespace].SequenceEqual(incompatible));
         });
         yield return new("Shared supplementary matching isolates each requested platform account frame", async () =>
         {
@@ -272,8 +292,9 @@ public static class MusicOfficialSelectionTests
         yield return new("Official confirmed discovered recording survives owner restart without URL reuse or new search", async () =>
         {
             await using var store = new MemoryStore();
+            await using var cacheBacking = new MemoryStore();
             string songId;
-            await using (var scene = await Scene.CreateAsync(store))
+            await using (var scene = await Scene.CreateAsync(store, cacheBacking))
             {
                 await scene.Login();
                 var policy = await scene.Ok("music.quality.settings.get");
@@ -284,10 +305,10 @@ public static class MusicOfficialSelectionTests
                     sourceKey = target.GetProperty("sourceKey").GetString(),
                     qualityPolicySignature = policy.GetProperty("signature").GetString() };
                 await scene.Ok("music.official.resolve", input);
-                Check(store.Root(MusicSourceCache.Namespace)["scopes"]!.AsObject().First().Value!["pointers"]!.AsObject().Count == 0);
+                Check(cacheBacking.Root(MusicSourceCache.Namespace)["scopes"]!.AsObject().First().Value!["pointers"]!.AsObject().Count == 0);
                 await scene.Ok("music.official.confirm", input);
             }
-            await using (var scene = await Scene.CreateAsync(store))
+            await using (var scene = await Scene.CreateAsync(store, cacheBacking))
             {
                 var policy = await scene.Ok("music.quality.settings.get");
                 var plan = await scene.Candidates(SongObject("wy", "1"), policy, false);
@@ -302,7 +323,8 @@ public static class MusicOfficialSelectionTests
         {
             await using var scene = await Scene.CreateAsync();
             var output = new Output();
-            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs());
+            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs(),
+                cacheStore: scene.CacheStore);
             await module.InitializeAsync(default); await scene.Login();
             var original = SongObject("wy", "1");
             await scene.Ok("music.queue.replace", new { songs = new[] { original }, index = 0 });
@@ -331,7 +353,8 @@ public static class MusicOfficialSelectionTests
                 platform = "tx", song = SongObject("tx", "FixtureMID", duration: 180), quality = "320k"
             });
             Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == "RECORDING_MISMATCH");
-            Check(!scene.Store.Data.TryGetValue(MusicSourceCache.Namespace, out var bytes) ||
+            await scene.CacheStore.DrainAsync();
+            Check(!scene.CacheBacking.Data.TryGetValue(MusicSourceCache.Namespace, out var bytes) ||
                 !Encoding.UTF8.GetString(bytes).Contains("vkey="), "rejected recording never becomes a URL candidate");
         });
         yield return new("Official automatic upstream permission denial reaches the user without a local membership gate", () =>
@@ -339,7 +362,8 @@ public static class MusicOfficialSelectionTests
         {
             await using var scene = await Scene.CreateAsync();
             var output = new Output();
-            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs());
+            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs(),
+                cacheStore: scene.CacheStore);
             await module.InitializeAsync(default); await scene.Login();
             scene.Handler.Member = false;
             scene.Handler.DenyMedia = true;
@@ -372,16 +396,18 @@ public static class MusicOfficialSelectionTests
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly MemoryStore Store;
+        internal readonly MemoryStore CacheBacking;
         internal readonly NoRuntime Runtime = new();
         internal readonly Transport Handler = new();
         internal readonly MusicNativeApplication App;
-        private Scene(MemoryStore store)
-        { Store = store; App = new(Store, Runtime, Handler); }
-        internal static async Task<Scene> CreateAsync(MemoryStore? store = null)
+        internal readonly CacheDocumentStore CacheStore;
+        private Scene(MemoryStore store, MemoryStore cacheBacking)
+        { Store = store; CacheBacking = cacheBacking; CacheStore = new(CacheBacking); App = new(Store, Runtime, CacheStore, Handler); }
+        internal static async Task<Scene> CreateAsync(MemoryStore? store = null, MemoryStore? cacheBacking = null)
         {
             store ??= new();
             await MusicClientContextFixture.SeedQqAsync(store);
-            return new(store);
+            return new(store, cacheBacking ?? new());
         }
         internal Task<JsonElement> Login() => Ok("music.accounts.import",
             new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
@@ -390,6 +416,7 @@ public static class MusicOfficialSelectionTests
             var result = await App.ExecuteAsync(method, input);
             Check(result.GetProperty("ok").GetBoolean(), method + ": " +
                 (result.TryGetProperty("code", out var code) ? code.GetString() : "failed"));
+            await CacheStore.DrainAsync();
             return result;
         }
         /// <summary>Built-in candidates of the song; a discovering lookup first completes the
@@ -409,7 +436,11 @@ public static class MusicOfficialSelectionTests
             result["failures"] = failures ?? new JsonArray();
             return JsonSerializer.SerializeToElement(result);
         }
-        public ValueTask DisposeAsync() => App.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        {
+            try { await App.DisposeAsync(); }
+            finally { await CacheStore.DisposeAsync(); }
+        }
     }
     private sealed class NoRuntime : IRuntimeClient
     {

@@ -75,6 +75,7 @@ test('shared runtime may use its own modules and data-only builtins', t => {
   f.write('apps/runtime/bootstrap.mjs', "import './modules/music-script.mjs';");
   f.write('apps/runtime/modules/music-script.mjs', "import { createHash } from 'node:crypto';");
   f.write('apps/runtime/modules/source-candidates.mjs', "import { isUtf8 } from 'node:buffer';");
+  f.write('apps/runtime/modules/source-library.mjs', "import { Readable } from 'node:stream';");
   assert.deepEqual(verifyBoundaries(f.root), { packages: 2 });
 });
 
@@ -103,6 +104,27 @@ test('metadata settings cannot use an undeclared public workspace', t => {
   const f = fixture(t);
   f.write('apps/runtime/modules/metadata/settings.mjs', "import '@meowfilm/script-host';");
   assert.throws(() => verifyBoundaries(f.root), /undeclared shared runtime package/);
+});
+
+test('film assembly consumes its declared public business owner', t => {
+  const f = fixture(t);
+  f.write('packages/film-playback/package.json', { name: '@meowfilm/film-playback' });
+  f.write('apps/runtime/modules/film-playback.mjs',
+    "import { createPlaybackService } from '@meowfilm/film-playback';");
+  assert.deepEqual(verifyBoundaries(f.root), { packages: 3 });
+});
+
+test('source rules use only the declared pure program and public native JSON entry', t => {
+  const f = fixture(t);
+  f.write('packages/novel-rules/package.json', { name: '@meowfilm/novel-rules' });
+  f.write('packages/script-host/package.json', { name: '@meowfilm/script-host' });
+  f.write('apps/runtime/modules/source-rules.mjs', `
+    import '@meowfilm/novel-rules';
+    import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
+  `);
+  assert.deepEqual(verifyBoundaries(f.root), { packages: 4 });
+  f.write('apps/runtime/modules/source-rules.mjs', "import '@meowfilm/script-host/src/native-engine.js';");
+  assert.throws(() => verifyBoundaries(f.root), /shared runtime platform\/private import/);
 });
 
 for (const owner of ['packages/a/src/index.js', 'apps/runtime/modules/cat-script.mjs']) {

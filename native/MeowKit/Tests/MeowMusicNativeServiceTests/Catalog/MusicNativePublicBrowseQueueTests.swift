@@ -8,11 +8,13 @@ private actor MusicNativePublicBrowseQQFixture: MusicPublicBrowseQQProviding {
     var reads = 0
     var pageReads: [Int] = []
     var changed = false
+    var pageError: MusicServiceError?
     let collection = MusicPublicBrowseCollection(platform: .qq, nativeID: "42", title: "Synthetic remote list")
     init(count: Int, pageSize: Int = 30) {
         self.count = count; self.pageSize = pageSize
     }
     func changeFirst() { changed = true }
+    func failPage(_ error: MusicServiceError?) { pageError = error }
     private func tracks() -> [MusicNativeTrackData] {
         (0..<count).map {
             let track = NativeMusicFixture.track(changed && $0 == 0 ? "ChangedMID" : "MID\($0 % 2)")
@@ -30,8 +32,9 @@ private actor MusicNativePublicBrowseQQFixture: MusicPublicBrowseQQProviding {
         return .init(collection: collection, tracks: tracks(),
                      snapshot: String(repeating: changed ? "b" : "a", count: 64), headSignature: "synthetic-head")
     }
-    func publicBrowsePlaylistPage(id: String, offset: Int) -> MusicPublicBrowseNativeCollectionPage {
+    func publicBrowsePlaylistPage(id: String, offset: Int) throws -> MusicPublicBrowseNativeCollectionPage {
         pageReads.append(offset)
+        if let pageError { throw pageError }
         let rows = Array(tracks().dropFirst(offset).prefix(pageSize))
         return .init(collection: collection, tracks: rows, total: count,
                      more: offset + rows.count < count, headSignature: "synthetic-head")
@@ -46,6 +49,31 @@ private actor MusicNativePublicBrowseBlockedHTTP: MusicNativeHTTPTransport {
     }
 }
 final class MusicNativePublicBrowseQueueTests: XCTestCase {
+    @MainActor func testSavedReferenceOpensCurrentRemoteMembersAndReadFailureNeverChangesItsIdentity() async throws {
+        let qq = MusicNativePublicBrowseQQFixture(count: 1), store = NativeMusicMemoryDocument()
+        let service = try await NativeMusicFixture.service(store, qq: qq)
+        let saved = try await service.saveNetworkPlaylist(qq.collection, intent: .init())
+        let beforeReads = await qq.pageReads, completeReads = await qq.reads
+        XCTAssertTrue(beforeReads.isEmpty); XCTAssertEqual(completeReads, 0)
+        let remote = try XCTUnwrap(saved.remoteCollection)
+        let page = MusicPublicBrowseViewModel(service: service, request: .detail(remote))
+        page.setAccess(available: true, generation: UUID()); page.appear(); await page.loadIfNeeded()
+        XCTAssertEqual(page.tracks.first?.sources.first?.nativeId, "MID0")
+        page.disappear(); await qq.changeFirst()
+        page.appear(); await page.loadIfNeeded()
+        XCTAssertEqual(page.tracks.first?.sources.first?.nativeId, "ChangedMID")
+        page.disappear(); await qq.failPage(.upstreamFailed)
+        let checkpoint = store.snapshot()
+        page.appear(); await page.loadIfNeeded()
+        XCTAssertEqual(page.error, .upstreamFailed); XCTAssertEqual(page.request, .detail(remote))
+        let collections = try await service.collections()
+        XCTAssertEqual(collections.first { $0.id == saved.id }, saved)
+        XCTAssertEqual(store.snapshot().0, checkpoint.0); XCTAssertEqual(store.snapshot().2, checkpoint.2)
+        let library = try NativeSyncFixture.document(store).library["library"], afterReads = await qq.reads
+        XCTAssertTrue(library["songs"].fields.isEmpty); XCTAssertEqual(library["collections"].array.count, 1)
+        XCTAssertEqual(afterReads, 0)
+        page.disappear(); await service.close()
+    }
     @MainActor func testQQFirstPageActionRenewalReusesLiveEvidenceWithoutReadingWholeCollection() async throws {
         let qq = MusicNativePublicBrowseQQFixture(count: 35)
         let service = try await NativeMusicFixture.service(qq: qq)

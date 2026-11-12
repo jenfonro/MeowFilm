@@ -1,6 +1,6 @@
 # source CatVod Spider 运行时
 
-本文件描述 `@meowfilm/source-runtime` 中原 portable CatVod adapter 的独立 Spider 输入，由 `source@0.2.0`／`source.runtime.v2` 的 `protocol: cat` 接纳。它与 Reader 共用[来源 capability ABI](source-capability-abi.md)，通用 script-host 为每个 source 创建独立原生线程、一个 QuickJS Runtime 和可信 core/用户 realm 两个 Context；LX 共用原生绑定机制，CatNode 则直接使用 Node Worker。
+本文件描述 `@meowfilm/source-runtime` 中原 portable CatVod adapter 的独立 Spider 输入，由 `source@0.3.0`／`source.runtime.v2` 的 `protocol: cat` 接纳。它与 Reader 共用[来源 capability ABI](source-capability-abi.md)，通用 script-host 为每个 source 创建独立原生线程、一个 QuickJS Runtime 和可信 core/用户 realm 两个 Context；LX 共用原生绑定机制，CatNode 则直接使用 Node Worker。
 
 完整 CatNode 输入属于 [`cat@0.2.0`／`cat.script.v2`](cat-script-runtime.md)：包含有限 Node 兼容、HTTP 服务、direct Spider、私有卷和管理同步。本 source adapter 只执行 Spider；即使两个入口都能调用 Spider 动作，也不能将这里的支持范围冒充为 CatNode，或将 Node 兼容层写成无 Node 可运行。
 

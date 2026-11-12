@@ -37,3 +37,11 @@ public sealed class MusicEntryTitlePaletteConverter : IMultiValueConverter
     }
     public object[] ConvertBack(object value, Type[] types, object parameter, CultureInfo culture) => throw new NotSupportedException();
 }
+
+public sealed class MusicPlayingSongConverter : System.Windows.Data.IMultiValueConverter
+{
+    public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture) =>
+        values.Length == 2 && values[0] is string id && id.Length > 0 && values[1] is string current && id == current;
+    public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) =>
+        throw new NotSupportedException();
+}

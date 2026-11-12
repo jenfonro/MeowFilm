@@ -52,7 +52,6 @@ final class MusicNativeSimilarSession {
     var pending: Task<Void, Never>?
     var pendingID: UUID?
     var pendingTail: String?
-    var liveRecommendations: [String: MJ] = [:]
     var buffered: MusicNativeSimilarModeBatch?
     init(seed: MJ, seedEntryID: String?, returnQueue: MJ, fromHome: Bool, provider: MusicSimilarModeProvider,
          sourceIDs: [String], context: MusicSimilarHeartbeatContext?, scope: String, lease: MusicAccountQueueLease) {
@@ -78,13 +77,11 @@ struct MusicNativeSimilarRuntime {
     var preview: MusicNativeSimilarPreview?
     var queue: MusicNativeQueueRecommendations?
     var navigation = UUID()
+    var modeSelection = UUID()
     var restored = false
     var restoring: UUID?
     var restorationCompletion: MusicNativeOperation<Void>?
     var playing: (attempt: String, occurrence: String)?
-    var playbackEvent: String?
-    var eventOccurrence: String?
-    var randomFetch = false
     var watchers: [UUID: Task<Void, Never>] = [:]
     var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     var timedOut = Set<UUID>()
@@ -101,11 +98,10 @@ final class MusicNativeQueueRecommendations {
     var candidateID = UUID()
     var revision: Int
     var currentEntryID: String
-    var continueEnabled = true
+    var continueEnabled = false
     var lease: MusicAccountQueueLease?
     var songs: [MJ] = []
     var recommendations: [String: MJ] = [:]
-    var liveRecommendations: [String: MJ] = [:]
     var status: MusicSimilarModeSnapshot.Status = .ready
     var exhausted = false
     var error: MusicServiceError?
@@ -117,7 +113,7 @@ final class MusicNativeQueueRecommendations {
     var pendingTail: String?
     init(revision: Int, currentEntryID: String, seed: MJ) {
         self.revision = revision; self.currentEntryID = currentEntryID
-        self.seed = seed; self.continueEnabled = true
+        self.seed = seed
     }
 }
 
@@ -125,23 +121,30 @@ enum MusicNativeSimilarData {
     static func recommendations(_ items: [MusicNativeTrackData]) throws -> [String: MJ] {
         var result: [String: MJ] = [:]
         for item in items {
-            let song = try MJ.parse(item.data, maximum: 64 * 1024), raw = song["_recommendation"]
-            guard raw != .null else { continue }
-            try raw.requireFields(["songId", "alg", "source", "sourceId", "feedbackSource"],
-                                  required: ["songId", "source", "feedbackSource"])
-            let songID = raw["songId"].id, source = raw["source"].string
-            try musicRequire(id(songID) && ["heartbeat", "similar", "moreRcmd"].contains(source), .invalidResponse)
-            _ = try raw["alg"].text(8000, empty: true)
-            try musicRequire(raw["alg"].string.utf16.count <= 2000, .invalidResponse)
-            _ = try raw["feedbackSource"].text(8000, empty: true)
-            try musicRequire(raw["feedbackSource"].string.utf16.count <= 2000 &&
-                item.platform == "wy" && song["songmid"].id == songID, .invalidResponse)
-            if source == "heartbeat" {
-                try musicRequire(id(raw["sourceId"].id) && raw["feedbackSource"].string == "aiMode", .invalidResponse)
-            } else { try musicRequire(raw["sourceId"].string.isEmpty, .invalidResponse) }
+            guard let raw = try recommendation(item) else { continue }
+            let songID = raw["songId"].id
             if result[songID] == nil { result[songID] = raw }
         }
         return result
+    }
+    static func recommendation(_ item: MusicNativeTrackData) throws -> MJ? {
+        let song = try MJ.parse(item.data, maximum: 64 * 1024), raw = song["_recommendation"]
+        guard raw != .null else { return nil }
+        try raw.requireFields(["songId", "alg", "source", "sourceId", "feedbackSource", "feedbackSourceId", "seedId"],
+                              required: ["songId", "source", "feedbackSource"])
+        let songID = raw["songId"].id, source = raw["source"].string
+        try musicRequire(id(songID) && ["heartbeat", "similar", "moreRcmd", "fm", "daily"].contains(source), .invalidResponse)
+        _ = try raw["alg"].text(8000, empty: true)
+        try musicRequire(raw["alg"].string.utf16.count <= 2000, .invalidResponse)
+        _ = try raw["feedbackSource"].text(8000, empty: true)
+        if raw["feedbackSourceId"] != .null { _ = try raw["feedbackSourceId"].text(2048, empty: true) }
+        try musicRequire(raw["feedbackSource"].string.utf16.count <= 2000 &&
+            item.platform == "wy" && song["songmid"].id == songID, .invalidResponse)
+        if source == "heartbeat" {
+            try musicRequire(id(raw["sourceId"].id), .invalidResponse)
+        } else { try musicRequire(raw["sourceId"].string.isEmpty, .invalidResponse) }
+        if raw["seedId"] != .null { try musicRequire(source == "heartbeat" && id(raw["seedId"].id), .invalidResponse) }
+        return raw
     }
     static func id(_ value: String) -> Bool {
         value.range(of: "^[1-9][0-9]{0,17}$", options: .regularExpression) != nil &&

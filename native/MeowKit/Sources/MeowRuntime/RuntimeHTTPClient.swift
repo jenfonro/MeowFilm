@@ -4,22 +4,24 @@ public enum RuntimeHTTPError: Error, Sendable, Equatable {
     case cancelled, timeout, closed, invalidRequest, invalidResponse, remote(String)
 }
 
-/// One HTTP client. Business modules borrow this client; only its
-/// App owner closes it. URLSession owns the actual HTTP tasks and their drain.
+/// One HTTP client with ordinary and rules-only transports. Business modules
+/// borrow it; only its App owner closes and drains the URLSessions.
 public final class RuntimeHTTPClient: @unchecked Sendable {
     private static let protocolName = "runtime.http.v1"
+    private static let neteaseTokenTimeout: TimeInterval = 60
     private let baseURL: URL
     private let timeout: TimeInterval
     private let state = RuntimeHTTPState()
     private let session: URLSession
     private let eventConfiguration: URLSessionConfiguration
+    private let delegateQueue: OperationQueue?
 
     public convenience init(baseURL: URL, timeout: TimeInterval = 30) throws {
         try self.init(baseURL: baseURL, timeout: timeout, configuration: .ephemeral)
     }
 
     init(baseURL: URL, timeout: TimeInterval = 30,
-         configuration: URLSessionConfiguration) throws {
+         configuration: URLSessionConfiguration, delegateQueue: OperationQueue? = nil) throws {
         guard let components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = components.host, !host.isEmpty,
@@ -29,18 +31,34 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
               timeout.isFinite, timeout > 0 else { throw RuntimeHTTPError.invalidRequest }
         self.baseURL = baseURL
         self.timeout = timeout
+        self.delegateQueue = delegateQueue
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
+        // Each read owns its complete deadline so a single call can extend it.
+        configuration.timeoutIntervalForResource = 0
         eventConfiguration = configuration.copy() as! URLSessionConfiguration
         // Events have an idle timeout, but no whole-observation RPC deadline.
         eventConfiguration.timeoutIntervalForResource = 0
         session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
-                             delegateQueue: nil)
+                             delegateQueue: delegateQueue)
+    }
+
+    /// Rule execution starts after an unbounded shared queue wait. Its Node
+    /// owner enforces each execution budget; HTTP must not add a batch timer.
+    private init(rulesFor parent: RuntimeHTTPClient) {
+        baseURL = parent.baseURL
+        timeout = 0
+        delegateQueue = parent.delegateQueue
+        let configuration = parent.eventConfiguration.copy() as! URLSessionConfiguration
+        configuration.timeoutIntervalForRequest = 0
+        configuration.timeoutIntervalForResource = 0
+        eventConfiguration = configuration
+        session = URLSession(configuration: configuration, delegate: RuntimeHTTPDelegate(state: state),
+                             delegateQueue: delegateQueue)
     }
 
     public var isClosed: Bool { state.isClosed }
@@ -60,24 +78,29 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard case .object(let description) = try await describe(),
               description["protocol"] == .string(Self.protocolName),
               description["product"] == .string("aggregate"),
-              case .array(let modules)? = description["modules"], modules.count == 7 else {
+              case .array(let modules)? = description["modules"], modules.count == 8 else {
             throw RuntimeHTTPError.invalidResponse
         }
-        let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.2.0"),
+        let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.3.0"),
                                                    (.pan, "0.1.0"), (.tmdb, "0.1.0"), (.douban, "0.1.0"),
-                                                   (.film, "0.1.0")]
-        for (module, version) in expected {
-            let matches = modules.filter {
-                guard case .object(let fields) = $0 else { return false }
-                return fields["id"] == .string(module.rawValue) &&
-                    fields["version"] == .string(version) && fields["contract"] == .string(module.contract)
+                                                   (.film, "0.1.0"), (.netease, "0.1.0")]
+        for ((module, version), supplied) in zip(expected, modules) {
+            guard case .object(let fields) = supplied,
+                  fields["id"] == .string(module.rawValue),
+                  fields["version"] == .string(version),
+                  fields["contract"] == .string(module.contract) else {
+                throw RuntimeHTTPError.invalidResponse
             }
-            guard matches.count == 1 else { throw RuntimeHTTPError.invalidResponse }
             if module == .tmdb {
-                guard case .object(let fields) = matches[0], case .array(let methods)? = fields["methods"],
+                guard case .array(let methods)? = fields["methods"],
                       methods.count == 3, Set(methods.compactMap {
                           if case .string(let value) = $0 { return value }; return nil
                       }) == ["tmdb.data.request", "tmdb.data.settings.get", "tmdb.data.settings.update"] else {
+                    throw RuntimeHTTPError.invalidResponse
+                }
+            }
+            if module == .netease {
+                guard fields["methods"] == .array([.string("netease.token.get")]) else {
                     throw RuntimeHTTPError.invalidResponse
                 }
             }
@@ -102,6 +125,21 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     public func readMetadataImage(_ reference: URL) async throws -> Data {
         guard reference.baseURL == nil, reference.scheme == nil,
               let provider = Self.metadataImageProvider(reference.absoluteString) else { throw RuntimeHTTPError.invalidRequest }
+        return try await readTrustedImage(reference, provider: provider)
+    }
+
+    public static func sourceImageURL(_ path: String) -> URL? {
+        guard path.range(of: #"^/v1/source/images/[A-Za-z0-9_-]+$"#,
+                         options: .regularExpression)?.upperBound == path.endIndex else { return nil }
+        return URL(string: path)
+    }
+
+    public func readSourceImage(_ reference: String) async throws -> Data {
+        guard let url = Self.sourceImageURL(reference) else { throw RuntimeHTTPError.invalidRequest }
+        return try await readTrustedImage(url, provider: .source)
+    }
+
+    private func readTrustedImage(_ reference: URL, provider: RuntimeModule) async throws -> Data {
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         let requestID = UUID().uuidString.lowercased()
         var request = URLRequest(url: URL(string: reference.absoluteString, relativeTo: baseURL)!.absoluteURL,
@@ -116,7 +154,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                 state.start(continuation: continuation) {
                     let task = session.dataTask(with: outgoing)
                     task.delegate = read
-                    read.install(task, continuation: continuation)
+                    read.install(task, continuation: continuation, timeout: timeout)
                     task.resume()
                 }
             }
@@ -127,15 +165,29 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     public func call(module: RuntimeModule, operation: String,
-                     parameters: RuntimeValue = .object([:])) async throws -> RuntimeValue {
-        guard operation.range(of: #"^[a-z]+(?:\.[a-z]+)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
+                     parameters: RuntimeValue = .object([:]), timeout: TimeInterval? = nil) async throws -> RuntimeValue {
+        if let timeout, !timeout.isFinite || timeout <= 0 { throw RuntimeHTTPError.invalidRequest }
+        guard operation.range(of: #"^[a-z]+(?:\.[a-z][A-Za-z]*)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
             throw RuntimeHTTPError.invalidRequest
+        }
+        if module == .netease {
+            guard operation == "get", parameters == .object([:]) else { throw RuntimeHTTPError.invalidRequest }
         }
         let body: Data
         do { body = try RuntimeJSON.encode(parameters) }
         catch { throw RuntimeHTTPError.invalidRequest }
+        if module == .source, operation == "rules.process" {
+            let transport = try state.rulesClient { RuntimeHTTPClient(rulesFor: self) }
+            let value = try await transport.request(method: "POST", path: "/v1/source/rules.process",
+                                                    body: body, module: .source)
+            guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+            guard !isClosed else { throw RuntimeHTTPError.closed }
+            return value
+        }
         return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
-                                 body: body, module: module)
+                                 body: body, module: module,
+                                 timeout: timeout ?? (module == .netease ? max(self.timeout, Self.neteaseTokenTimeout) : self.timeout),
+                                 preservingAcceptedReceipt: module == .source && operation == "library.image")
     }
 
     /// Observes snapshots without owning the business session or the App runtime.
@@ -184,6 +236,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
 
     public func close() async {
         invalidate()
+        await state.acceptedRulesClient?.close()
         await state.waitForInvalidation()
     }
 
@@ -192,14 +245,16 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     private func request(method: String, path: String, body: Data? = nil, raw: Bool = false,
-                         module: RuntimeModule? = nil) async throws -> RuntimeValue {
+                         module: RuntimeModule? = nil, timeout: TimeInterval? = nil,
+                         preservingAcceptedReceipt: Bool = false) async throws -> RuntimeValue {
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw RuntimeHTTPError.invalidRequest
         }
         let requestID = UUID().uuidString.lowercased()
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+        let deadline = timeout ?? self.timeout
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: deadline)
         request.httpMethod = method
         request.httpBody = body
         request.httpShouldHandleCookies = false
@@ -215,9 +270,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
             try await withCheckedThrowingContinuation { continuation in
                 state.start(continuation: continuation) {
                     let task = session.dataTask(with: outgoingRequest) { data, response, error in
-                        let cancelled = owner.finish()
+                        let cancellation = owner.finish()
                         if state.isClosed { continuation.resume(throwing: RuntimeHTTPError.closed) }
-                        else if cancelled { continuation.resume(throwing: RuntimeHTTPError.cancelled) }
+                        else if let cancellation, !(preservingAcceptedReceipt && cancellation == .cancelled
+                            && error == nil && data != nil && response is HTTPURLResponse) {
+                            continuation.resume(throwing: cancellation)
+                        }
                         else if let error {
                             let code = (error as NSError).code
                             continuation.resume(throwing: code == NSURLErrorTimedOut ? RuntimeHTTPError.timeout
@@ -226,15 +284,17 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                             continuation.resume(returning: (data, response))
                         } else { continuation.resume(throwing: RuntimeHTTPError.invalidResponse) }
                     }
-                    owner.install(task)
+                    owner.install(task, timeout: deadline)
                     task.resume()
                 }
             }
         } onCancel: { owner.cancel() }
-        guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+        // A successfully completed resource-acquisition response transfers a
+        // lease to its owner. Late cancellation must not hide that receipt.
+        guard preservingAcceptedReceipt || !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         let result = Result { try Self.value(data: data, response: response, requestID: requestID, module: module) }
-        guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+        guard preservingAcceptedReceipt || !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         return try result.get()
     }
@@ -271,26 +331,31 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
 private final class RuntimeHTTPRequest: @unchecked Sendable {
     private let lock = NSLock()
     private var task: URLSessionDataTask?
-    private var cancelled = false
-    func install(_ task: URLSessionDataTask) {
+    private var cancellation: RuntimeHTTPError?
+    private var timer: DispatchWorkItem?
+    func install(_ task: URLSessionDataTask, timeout: TimeInterval) {
         lock.lock()
         self.task = task
-        let cancelled = cancelled
+        let timer = timeout > 0 ? DispatchWorkItem { [weak self] in self?.cancel(.timeout) } : nil
+        self.timer = timer
+        let cancelled = cancellation != nil
         lock.unlock()
+        if let timer { DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer) }
         if cancelled { task.cancel() }
     }
-    func cancel() {
+    func cancel(_ reason: RuntimeHTTPError = .cancelled) {
         lock.lock()
-        cancelled = true
+        if cancellation == nil { cancellation = reason }
         let task = task
         lock.unlock()
         task?.cancel()
     }
-    func finish() -> Bool {
+    func finish() -> RuntimeHTTPError? {
         lock.lock()
         defer { lock.unlock() }
+        timer?.cancel(); timer = nil
         task = nil
-        return cancelled
+        return cancellation
     }
 }
 
@@ -301,9 +366,22 @@ private final class RuntimeHTTPState: @unchecked Sendable {
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var closureWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var events: [UUID: RuntimeHTTPEventConnection] = [:]
+    private var rulesTransport: RuntimeHTTPClient?
     var isClosed: Bool {
         lock.lock(); defer { lock.unlock() }
         return closed
+    }
+    var acceptedRulesClient: RuntimeHTTPClient? {
+        lock.lock(); defer { lock.unlock() }
+        return rulesTransport
+    }
+    func rulesClient(create: () -> RuntimeHTTPClient) throws -> RuntimeHTTPClient {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { throw RuntimeHTTPError.closed }
+        if let rulesTransport { return rulesTransport }
+        let client = create()
+        rulesTransport = client
+        return client
     }
     func start<T>(continuation: CheckedContinuation<T, Error>, body: () -> Void) {
         lock.lock()
@@ -318,9 +396,11 @@ private final class RuntimeHTTPState: @unchecked Sendable {
         let pending = Array(closureWaiters.values)
         closureWaiters.removeAll()
         let active = Array(events.values)
+        let rules = rulesTransport
         lock.unlock()
         for waiter in pending { waiter.resume() }
         for connection in active { connection.cancel(.closed) }
+        rules?.invalidate()
         return true
     }
     func waitUntilClosed() async throws {
@@ -380,7 +460,7 @@ private final class RuntimeHTTPState: @unchecked Sendable {
 /// A task delegate on the same owner session: budget and failure stop the read,
 /// but its continuation settles only in didComplete, never at cancel().
 private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private static let maximumBytes = 4 * 1_024 * 1_024
+    private static let maximumMetadataBytes = 4 * 1_024 * 1_024
     private let lock = NSLock()
     private let requestID: String
     private let provider: RuntimeModule
@@ -391,15 +471,27 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     private var bytes = Data()
     private var failure: Error?
     private var cancelled = false
+    private var timer: DispatchWorkItem?
     init(requestID: String, provider: RuntimeModule, state: RuntimeHTTPState) {
         self.requestID = requestID; self.provider = provider; self.state = state
     }
-    func install(_ task: URLSessionDataTask, continuation: CheckedContinuation<Data, Error>) {
+    func install(_ task: URLSessionDataTask, continuation: CheckedContinuation<Data, Error>, timeout: TimeInterval) {
         lock.lock()
         self.task = task; self.continuation = continuation
+        let timer = DispatchWorkItem { [weak self] in self?.expire() }
+        self.timer = timer
         let cancelled = cancelled
         lock.unlock()
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
         if cancelled { task.cancel() }
+    }
+    private func expire() {
+        lock.lock()
+        guard continuation != nil else { lock.unlock(); return }
+        if failure == nil { failure = RuntimeHTTPError.timeout }
+        let task = task
+        lock.unlock()
+        task?.cancel()
     }
     func cancel() {
         lock.lock(); cancelled = true; let task = task; lock.unlock()
@@ -412,7 +504,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
            response.value(forHTTPHeaderField: "X-Meow-Request-Id") == requestID {
             self.response = response
             let type = response.mimeType?.lowercased() ?? ""
-            if response.expectedContentLength > Self.maximumBytes {
+            if provider != .source, response.expectedContentLength > Self.maximumMetadataBytes {
                 failure = URLError(.dataLengthExceedsMaximum)
             } else if response.statusCode == 200 && type.hasPrefix("image/") {
                 // Native ImageIO still validates and decodes the complete image.
@@ -427,7 +519,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
         guard !cancelled, failure == nil else { lock.unlock(); return }
-        if data.count > Self.maximumBytes - bytes.count {
+        if provider != .source, data.count > Self.maximumMetadataBytes - bytes.count {
             failure = URLError(.dataLengthExceedsMaximum)
             lock.unlock(); dataTask.cancel(); return
         }
@@ -438,6 +530,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
         lock.lock()
         guard let continuation else { lock.unlock(); return }
         self.continuation = nil; self.task = nil
+        timer?.cancel(); timer = nil
         let result: Result<Data, Error>
         if state.isClosed { result = .failure(RuntimeHTTPError.closed) }
         else if cancelled { result = .failure(RuntimeHTTPError.cancelled) }

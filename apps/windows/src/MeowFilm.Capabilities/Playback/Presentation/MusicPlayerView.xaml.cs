@@ -6,18 +6,28 @@ using System.Windows.Media;
 using System.Windows.Data;
 using System.ComponentModel;
 using System.Windows.Automation;
+using System.Windows.Threading;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
 public partial class MusicPlayerView : UserControl
 {
+    private static readonly DependencyPropertyDescriptor SourceOpenProperty =
+        DependencyPropertyDescriptor.FromProperty(Popup.IsOpenProperty, typeof(Popup));
+    private readonly NativeMenuLifetime modeLifetime, qualityLifetime;
     private readonly MusicCapability module;
     private string? scrubKey;
     private int qualityRequest;
     private PlayerSurfaceInput? surfaceInput;
     private string fmActionKey = "";
-    private long fmPopupGeneration;
+    private long fmGeneration;
+    private PlayerDialogHost? fmHost;
+    private PlayerMenuInput? menuInput;
+    private readonly List<IDisposable> menuEntries = [];
+    private bool fmOpen;
+    private bool returnModeFocus;
+    private bool openingFm;
     private string modeActionKey = "";
     private long modeMenuGeneration;
     public MusicPlayerView(MusicCapability module, bool showArtwork = true)
@@ -26,15 +36,30 @@ public partial class MusicPlayerView : UserControl
         if (showArtwork)
         {
             var record = new MusicRecordView { Width = 60, Height = 60 };
+            module.AttachPlaybackArtwork(record);
             record.SetBinding(MusicRecordView.AddressProperty, new Binding(nameof(MusicCapability.CurrentArtwork)));
+            record.SetBinding(MusicRecordView.TrackIdentityProperty, new Binding(nameof(MusicCapability.CurrentTrackIdentity)));
             record.SetBinding(MusicRecordView.PlayingProperty, new Binding(nameof(MusicCapability.IsPlaying)));
+            record.ArtworkLoadCompleted += (_, e) => module.ArtworkLoadCompleted(e.Address, e.Succeeded);
             ArtworkButton.Content = record;
         }
         else MetadataPanel.Children.Remove(ArtworkButton);
         this.module = module; DataContext = module;
         QualityMenu.DataContext = module;
         ModeMenu.DataContext = module;
-        PlaybackSourceMenu.DataContext = module;
+        FmPanel.DataContext = module;
+        modeLifetime = new(ModeMenu, () =>
+        {
+            modeActionKey = ""; modeMenuGeneration++;
+            menuInput?.Closed(ModeButton);
+            return Task.CompletedTask;
+        });
+        qualityLifetime = new(QualityMenu, () =>
+        {
+            qualityRequest++;
+            if (!SourcePopup.IsOpen) menuInput?.Closed(QualityButton);
+            return module.DeactivateQualityAsync();
+        });
         Progress.ScrubStarted += (_, _) => BeginProgress();
         Progress.ScrubCancelled += (_, _) => RestoreProgress();
         Progress.ScrubCommitted += async (_, _) =>
@@ -46,46 +71,80 @@ public partial class MusicPlayerView : UserControl
         Loaded += (_, _) =>
         {
             module.PropertyChanged -= OnPlaybackChanged; module.PropertyChanged += OnPlaybackChanged;
+            modeLifetime.Attach(); qualityLifetime.Attach();
+            SourceOpenProperty.RemoveValueChanged(SourcePopup, SourceOpenChanged);
+            SourceOpenProperty.AddValueChanged(SourcePopup, SourceOpenChanged);
             surfaceInput?.Dispose(); surfaceInput = null;
-            if (Window.GetWindow(this) is { } window) surfaceInput = new(window, this, LayersOpen);
+            foreach (var entry in menuEntries) entry.Dispose(); menuEntries.Clear();
+            if (Window.GetWindow(this) is { } window)
+            {
+                surfaceInput = new(window, this, LayersOpen);
+            }
+            menuInput = PlayerMenuInput.For(Window.GetWindow(this) ?? (FrameworkElement)this);
+            RegisterMenus();
         };
-        foreach (var popup in new[] { SourcePopup, PlaylistPopup, VolumePopup, RatePopup, FmPopup })
+        VolumePopup.Closed += VolumeClosed;
+        PlaylistPopup.Closed += PlaylistClosed;
+        RatePopup.Closed += (_, _) => menuInput?.Closed(MoreButton);
+        foreach (var popup in new[] { SourcePopup, PlaylistPopup, VolumePopup, RatePopup })
         {
             popup.Opened += (_, _) => { if (popup.Child is Visual visual) surfaceInput?.Observe(visual); };
             popup.Closed += (_, _) => { surfaceInput?.LayerClosed(); if (popup.Child is Visual visual) surfaceInput?.Forget(visual); };
         }
         QualityMenu.Opened += (_, _) => surfaceInput?.Observe(QualityMenu);
         ModeMenu.Opened += (_, _) => surfaceInput?.Observe(ModeMenu);
-        PlaybackSourceMenu.Opened += (_, _) => surfaceInput?.Observe(PlaybackSourceMenu);
-        PlaybackSourceMenu.Closed += (_, _) => { surfaceInput?.LayerClosed(); surfaceInput?.Forget(PlaybackSourceMenu); };
         IsVisibleChanged += (_, _) => { if (!IsVisible) Deactivate(); };
         Unloaded += (_, _) =>
         {
             module.PropertyChanged -= OnPlaybackChanged;
             Deactivate();
+            modeLifetime.Detach(); qualityLifetime.Detach();
+            SourceOpenProperty.RemoveValueChanged(SourcePopup, SourceOpenChanged);
             surfaceInput?.Dispose(); surfaceInput = null;
+            foreach (var entry in menuEntries) entry.Dispose(); menuEntries.Clear(); menuInput = null;
         };
-        SizeChanged += (_, _) => MetadataText.MaxWidth = Math.Min(200, Math.Max(30, ActualWidth / 2 - 260));
+        SizeChanged += (_, _) => MetadataText.MaxWidth = Math.Min(200, Math.Max(30, ActualWidth / 2 - 262));
     }
     internal void Deactivate()
     {
+        returnModeFocus = false;
+        menuInput?.CancelPress();
         surfaceInput?.Cancel();
-        qualityRequest++;
-        QualityMenu.IsOpen = false;
-        ModeMenu.IsOpen = false;
-        PlaybackSourceMenu.IsOpen = false;
-        modeActionKey = ""; modeMenuGeneration++;
+        // The other footer shares this module: hiding an inactive view must not cancel its work.
+        if (QualityMenu.IsOpen || menuInput?.IsCurrent(QualityButton) == true) qualityLifetime.Close();
+        else qualityRequest++;
+        modeLifetime.Close();
         SourcePopup.IsOpen = false;
         PlaylistPopup.IsOpen = false;
         VolumePopup.IsOpen = false;
         RatePopup.IsOpen = false;
-        FmPopup.IsOpen = false;
-        fmActionKey = "";
+        CloseFm();
+        fmActionKey = ""; fmGeneration++;
         if (MoreButton.ContextMenu is { } menu) menu.IsOpen = false;
+        foreach (var button in new[] { QualityButton, ModeButton, VolumeButton, PlaylistButton, MoreButton }) menuInput?.Closed(button);
         Progress.CancelScrub(); RestoreProgress();
     }
-    private bool LayersOpen() => QualityMenu.IsOpen || ModeMenu.IsOpen || PlaybackSourceMenu.IsOpen || SourcePopup.IsOpen || PlaylistPopup.IsOpen ||
-        VolumePopup.IsOpen || RatePopup.IsOpen || FmPopup.IsOpen || MoreButton.ContextMenu?.IsOpen == true;
+    private bool LayersOpen() => QualityMenu.IsOpen || ModeMenu.IsOpen || SourcePopup.IsOpen || PlaylistPopup.IsOpen ||
+        VolumePopup.IsOpen || RatePopup.IsOpen || fmOpen || MoreButton.ContextMenu?.IsOpen == true;
+    private void RegisterMenus()
+    {
+        void Add(Button button, Func<bool> isOpen, Action open, Action close, bool queue = false) =>
+            menuEntries.Add(menuInput!.Register(button, isOpen, open, close, queue));
+        Add(ModeButton, () => ModeMenu.IsOpen, async () => await OpenModeChoicesAsync(), modeLifetime.Close);
+        Add(QualityButton, () => QualityMenu.IsOpen, async () => await OpenQualityMenuAsync(), () =>
+        { qualityLifetime.Close(); SourcePopup.IsOpen = false; });
+        Add(VolumeButton, () => VolumePopup.IsOpen, () => VolumePopup.IsOpen = true, () => VolumePopup.IsOpen = false);
+        Add(PlaylistButton, () => PlaylistPopup.IsOpen, () => PlaylistPopup.IsOpen = true, () => PlaylistPopup.IsOpen = false);
+        Add(MoreButton, () => MoreButton.ContextMenu?.IsOpen == true || RatePopup.IsOpen, OpenMoreMenu, () =>
+        { if (MoreButton.ContextMenu is { } more) more.IsOpen = false; RatePopup.IsOpen = false; });
+        Add(QueueButton, () => PlayerSurfaceInput.GetQueueOpen(this), async () => await module.OpenPlayQueueAsync(), () => { }, queue: true);
+    }
+    private void VolumeClosed(object? sender, EventArgs e) => menuInput?.Closed(VolumeButton);
+    private void PlaylistClosed(object? sender, EventArgs e) => menuInput?.Closed(PlaylistButton);
+    private void ToggleMenu(Button button)
+    {
+        menuInput?.Toggle(button);
+    }
     private static bool IsBlank(object sender, MouseButtonEventArgs e)
     {
         DependencyObject? node = e.OriginalSource as DependencyObject;
@@ -107,37 +166,34 @@ public partial class MusicPlayerView : UserControl
     private async void Favorite_Click(object sender, RoutedEventArgs e) => await module.ToggleCurrentFavoriteAsync();
     private async void DesktopLyrics_Click(object sender, RoutedEventArgs e) =>
         await module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
-    private void PlaylistMenu_Click(object sender, RoutedEventArgs e) => PlaylistPopup.IsOpen = !PlaylistPopup.IsOpen;
+    private void PlaylistMenu_Click(object sender, RoutedEventArgs e) => ToggleMenu(PlaylistButton);
     private async void AddCurrent_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string id }) { PlaylistPopup.IsOpen = false; await module.AddCurrentToPlaylistAsync(id); }
     }
-    private void Volume_Click(object sender, RoutedEventArgs e) => VolumePopup.IsOpen = !VolumePopup.IsOpen;
+    private void Volume_Click(object sender, RoutedEventArgs e) => ToggleMenu(VolumeButton);
     private async void VolumeCommit_MouseUp(object sender, MouseButtonEventArgs e) => await module.SaveVolumeAsync();
     private async void VolumeCommit_KeyUp(object sender, KeyEventArgs e)
     {
         if (e.Key is Key.Left or Key.Right or Key.Up or Key.Down or Key.Home or Key.End or Key.PageUp or Key.PageDown)
             await module.SaveVolumeAsync();
     }
-    private async void Quality_Click(object sender, RoutedEventArgs e)
-    {
-        if (QualityMenu.IsOpen) { QualityMenu.IsOpen = false; return; }
-        await OpenQualityMenuAsync();
-    }
-    private async void Quality_ContextMenuOpening(object sender, ContextMenuEventArgs e)
-    {
-        e.Handled = true;
-        if (!QualityMenu.IsOpen) await OpenQualityMenuAsync();
-    }
+    private void Quality_Click(object sender, RoutedEventArgs e) => ToggleMenu(QualityButton);
+    private void Quality_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    { e.Handled = true; menuInput?.Show(QualityButton); }
     private async Task OpenQualityMenuAsync()
     {
         int request = ++qualityRequest;
+        await qualityLifetime.Ready;
+        if (!CanOpenQuality(request)) return;
         await module.ActivateQualitySettingsAsync();
-        if (request != qualityRequest || !IsLoaded || !IsVisible || !module.HasQualityButton) return;
+        if (!CanOpenQuality(request)) return;
         ShowQualityMenu();
         QualityMenu.PlacementTarget = QualityButton;
         QualityMenu.IsOpen = true;
     }
+    private bool CanOpenQuality(int request) => request == qualityRequest && IsLoaded && IsVisible &&
+        module.HasQualityButton && menuInput?.IsCurrent(QualityButton) == true;
     private void ShowQualityMenu()
     {
         while (QualityMenu.Items.Count > 2) QualityMenu.Items.RemoveAt(QualityMenu.Items.Count - 1);
@@ -184,9 +240,9 @@ public partial class MusicPlayerView : UserControl
     private void SourceList_Click(object sender, RoutedEventArgs e)
     {
         if (!module.CanSwitchSource) return;
-        QualityMenu.IsOpen = false;
         module.OpenSourceChoices();
         SourcePopup.IsOpen = true;
+        QualityMenu.IsOpen = false;
         CloseSourcesButton.Focus();
     }
     private async void LoadMoreSources_Click(object sender, RoutedEventArgs e) => await module.LoadMoreSourcesAsync();
@@ -197,26 +253,31 @@ public partial class MusicPlayerView : UserControl
         await module.SelectSourceChoiceAsync(choice);
     }
     private void CloseSources_Click(object sender, RoutedEventArgs e) => SourcePopup.IsOpen = false;
+    private void SourceOpenChanged(object? sender, EventArgs e)
+    {
+        if (SourcePopup.IsOpen) return;
+        menuInput?.Closed(QualityButton);
+        module.CloseSourceChoices();
+    }
     private void SourcePopup_Closed(object? sender, EventArgs e)
     {
-        module.CloseSourceChoices();
-        if (IsLoaded && IsVisible) QualityButton.Focus();
+        if (menuInput?.HasCurrent != true && IsLoaded && IsVisible &&
+            Window.GetWindow(this) is not { IsActive: false }) QualityButton.Focus();
     }
-    private async void Quality_Closed(object? sender, RoutedEventArgs e)
+    private void Quality_Closed(object? sender, RoutedEventArgs e)
     {
         surfaceInput?.LayerClosed(); surfaceInput?.Forget(QualityMenu);
-        qualityRequest++;
-        await module.DeactivateQualityAsync();
     }
     /// <summary>The "more" menu keeps playback tools separate from source actions.</summary>
-    private void More_Click(object sender, RoutedEventArgs e)
+    private void More_Click(object sender, RoutedEventArgs e) => ToggleMenu(MoreButton);
+    private void OpenMoreMenu()
     {
         var menu = new ContextMenu { PlacementTarget = MoreButton, Placement = PlacementMode.Top,
             Style = (Style)FindResource("MeowFilm.ContextMenu") };
         menu.Opened += (_, _) => surfaceInput?.Observe(menu);
-        menu.Closed += (_, _) => { surfaceInput?.LayerClosed(); surfaceInput?.Forget(menu); };
+        menu.Closed += (_, _) => { surfaceInput?.LayerClosed(); surfaceInput?.Forget(menu); if (!RatePopup.IsOpen) menuInput?.Closed(MoreButton); };
         var rate = new MenuItem { Header = "播放倍速 · " + module.PlaybackRateText };
-        rate.Click += (_, _) => { menu.IsOpen = false; RatePopup.IsOpen = true; };
+        rate.Click += (_, _) => { RatePopup.IsOpen = true; menu.IsOpen = false; };
         var wrong = new MenuItem { Header = "音源不对", IsEnabled = module.CanSwitchSource };
         wrong.Click += async (_, _) => { menu.IsOpen = false; await module.ReportWrongSourceAsync(); };
         menu.Items.Add(rate); menu.Items.Add(wrong);
@@ -226,87 +287,92 @@ public partial class MusicPlayerView : UserControl
     private async void Play_Click(object sender, RoutedEventArgs e) => await module.TogglePlaybackAsync();
     private async void Previous_Click(object sender, RoutedEventArgs e) => await module.StepAsync(false);
     private async void Next_Click(object sender, RoutedEventArgs e) => await module.StepAsync(true);
-    private void Mode_Click(object sender, RoutedEventArgs e) => OpenModeChoices();
+    private void Mode_Click(object sender, RoutedEventArgs e) => ToggleMenu(ModeButton);
     private void Mode_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    { e.Handled = true; menuInput?.Show(ModeButton); }
+    private async Task OpenModeChoicesAsync()
     {
-        e.Handled = true;
-        if (!ModeMenu.IsOpen && !FmPopup.IsOpen) OpenModeChoices();
-    }
-    private void OpenModeChoices()
-    {
-        if (!module.CanChangePlaybackMode) return;
-        if (ModeMenu.IsOpen) { ModeMenu.IsOpen = false; return; }
+        long generation = ++modeMenuGeneration;
+        await modeLifetime.Ready;
+        if (generation != modeMenuGeneration || menuInput?.IsCurrent(ModeButton) != true) return;
+        if (!IsLoaded || !IsVisible || !module.CanChangePlaybackMode) return;
         modeActionKey = module.PlaybackModeActionKey;
-        modeMenuGeneration++;
         ModeMenu.Items.Clear();
-        ModeMenu.Items.Add(ModeChoice("列表循环", "repeat", 1, module.Mode == 1));
-        ModeMenu.Items.Add(ModeChoice("单曲循环", "single", 3, module.Mode == 3));
-        ModeMenu.Items.Add(ModeChoice("随机播放", "shuffle", 2, module.Mode == 2));
+        string presentationKey = module.PlaybackPresentationKey;
+        if (module.CanReturnRecommendation && (module.HasPlaybackHeartbeat || module.PlaybackSpecialModeIcon == "sparkles"))
+            ModeMenu.Items.Add(ModeAction(module.HasPlaybackHeartbeat ? "退出心动模式" : "退出推荐模式", "return",
+                true, false, module.ReturnRecommendationAsync));
+        if (module.HasActiveRecommendation)
+            ModeMenu.Items.Add(ModeAction(module.PlaybackSpecialModeText, module.PlaybackSpecialModeIcon,
+                module.CanChangeRecommendationContinue, module.RecommendationContinue,
+                () => module.ChangeRecommendationContinueAsync(true)));
+        else
+        {
+            if (module.HasCurrentRecommendationIdentity)
+                ModeMenu.Items.Add(ModeAction("推荐模式", "sparkles", module.CanRecommendCurrent, false,
+                    () => module.RecommendCurrentAsync(presentationKey)));
+            if (module.CanHeartbeatCurrent)
+                ModeMenu.Items.Add(ModeAction("心动模式", "heartbeat", true, false,
+                    () => module.HeartbeatCurrentAsync(presentationKey)));
+        }
+        ModeMenu.Items.Add(ModeChoice("列表循环", "repeat", 1, !(module.HasActiveRecommendation && module.RecommendationContinue) && module.Mode == 1));
+        ModeMenu.Items.Add(ModeChoice("单曲循环", "single", 3, !(module.HasActiveRecommendation && module.RecommendationContinue) && module.Mode == 3));
+        ModeMenu.Items.Add(ModeChoice("随机播放", "shuffle", 2, !(module.HasActiveRecommendation && module.RecommendationContinue) && module.Mode == 2));
+        if (module.HasPlaybackFm)
+            ModeMenu.Items.Add(ModeAction("切换频道", "fm", CanOpenFmChoices, false,
+                () => { OpenFmChoices(); return Task.CompletedTask; }));
+        if (module.CanReconcileRecommendation)
+            ModeMenu.Items.Add(ModeAction("核对保存结果", "", true, false, module.ReconcileRecommendationAsync));
         ModeMenu.PlacementTarget = ModeButton;
         ModeMenu.IsOpen = true;
     }
-    private void PlaybackSource_Click(object sender, RoutedEventArgs e)
+    private bool CanOpenFmChoices => module.HasPlaybackFm && module.CanChangePlaybackMode && !module.CanReconcileRecommendation;
+    private void OpenFmChoices()
     {
-        if (PlaybackSourceMenu.IsOpen) { PlaybackSourceMenu.IsOpen = false; return; }
-        PlaybackSourceMenu.Items.Clear();
-        string actionKey = module.PlaybackSourceActionKey;
-        void Add(string label, bool enabled, Func<Task> action, bool? selected = null)
-        {
-            var item = new MenuItem { Header = label, IsEnabled = enabled,
-                IsCheckable = selected is not null, IsChecked = selected == true, StaysOpenOnClick = true };
-            item.Click += async (_, _) =>
-            {
-                if (!PlaybackSourceMenu.IsOpen || actionKey != module.PlaybackSourceActionKey || !IsLoaded || !IsVisible) return;
-                PlaybackSourceMenu.IsOpen = false;
-                await action();
-            };
-            PlaybackSourceMenu.Items.Add(item);
-        }
-        PlaybackSourceMenu.Items.Add(new MenuItem { Header = module.PlaybackQueueSourceText, IsEnabled = false });
-        if (module.RecommendationLoading)
-            PlaybackSourceMenu.Items.Add(new MenuItem { Header = "正在加载", IsEnabled = false });
-        if (module.CanChangeRecommendationContinue)
-            Add("自动续播", true, () => module.ChangeRecommendationContinueAsync(!module.RecommendationContinue), module.RecommendationContinue);
-        if (module.HasCurrentRecommendationIdentity && !module.HasQueueRecommendations)
-            Add("从当前歌曲进入推荐", module.CanRecommendCurrent, () => module.RecommendCurrentAsync(module.PlaybackPresentationKey));
-        if (module.CanHeartbeatCurrent && !module.HasPlaybackHeartbeat)
-            Add("从当前歌曲进入心动", true, () => module.HeartbeatCurrentAsync(module.PlaybackPresentationKey));
-        if (module.CanReturnRecommendation)
-            Add("返回原队列", true, module.ReturnRecommendationAsync);
-        if (module.CanRetryRecommendation)
-            Add("重试取歌", true, module.RetryRecommendationAsync);
-        if (module.CanReconcileRecommendation)
-            Add("核对保存结果", true, module.ReconcileRecommendationAsync);
-        MusicCapability.ApplyContentMenuStyles(this, PlaybackSourceMenu);
-        PlaybackSourceMenu.PlacementTarget = PlaybackSourceButton;
-        PlaybackSourceMenu.IsOpen = true;
-    }
-    private void FmChannel_Click(object sender, RoutedEventArgs e)
-    {
-        if (!module.HasPlaybackFm || module.CanReconcileRecommendation) return;
-        if (FmPopup.IsOpen) { FmPopup.IsOpen = false; return; }
+        if (!IsLoaded || !IsVisible || !CanOpenFmChoices) return;
+        returnModeFocus = true;
         fmActionKey = module.PlaybackFmActionKey;
-        fmPopupGeneration++;
+        fmGeneration++;
         FmModeChoices.Children.Clear(); FmSceneChoices.Children.Clear();
         foreach (var choice in module.PlaybackFmModes) FmModeChoices.Children.Add(FmChoice(choice, scene: false));
         foreach (var choice in module.CatalogFmScenes) FmSceneChoices.Children.Add(FmChoice(choice, scene: true));
-        FmPopup.IsOpen = true;
+        fmHost = PlayerDialogHost.Find(this);
+        if (fmHost is null) { FmModeChoices.Children.Clear(); FmSceneChoices.Children.Clear(); return; }
+        openingFm = true;
+        menuInput?.CloseCurrent();
+        openingFm = false;
+        FmContent.Content = null;
+        fmOpen = true;
+        fmHost.Show(this, FmPanel, FmClosed);
+        fmHost.UpdateLayout();
+        FocusFm();
+    }
+    private void FocusFm()
+    {
+        if (!IsLoaded || !IsVisible) return;
         var choices = FmModeChoices.Children.OfType<Button>().Concat(FmSceneChoices.Children.OfType<Button>());
-        (choices.FirstOrDefault(button => AutomationProperties.GetItemStatus(button) == "已选中") ?? choices.First()).Focus();
+        var selected = choices.FirstOrDefault(button => AutomationProperties.GetItemStatus(button) == "已选中");
+        if ((selected ?? choices.FirstOrDefault()) is not { } initial) return;
+        FocusManager.SetFocusedElement(FmPanel, initial);
+        if (Window.GetWindow(this) is null or { IsActive: true }) initial.Focus();
+        initial.BringIntoView();
     }
     private MenuItem ModeChoice(string name, string iconKey, int mode, bool selected)
+    {
+        var item = ModeAction(name, iconKey, module.CanChangePlaybackMode, selected, () => module.ChangeModeAsync(mode));
+        item.Tag = mode;
+        return item;
+    }
+    private MenuItem ModeAction(string name, string iconKey, bool enabled, bool selected, Func<Task> action)
     {
         var content = new StackPanel { Orientation = Orientation.Horizontal };
         var icon = new MusicPlaybackIcon { Key = iconKey, Width = 18, Height = 18, Margin = new(0, 0, 10, 0) };
         var label = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center };
-        content.Children.Add(icon);
-        content.Children.Add(label);
-        // Native MenuItem closes on PreviewClick, before Click; keep it open until the guarded handler closes it.
-        var item = new MenuItem { Header = content, StaysOpenOnClick = true, Tag = mode,
+        content.Children.Add(icon); content.Children.Add(label);
+        var item = new MenuItem { Header = content, StaysOpenOnClick = true, IsEnabled = enabled,
             IsChecked = selected, Style = (Style)FindResource("Player.CurrentQualityItem") };
         icon.SetBinding(Control.ForegroundProperty, new Binding(nameof(Foreground)) { Source = item });
         label.SetBinding(TextBlock.ForegroundProperty, new Binding(nameof(Foreground)) { Source = item });
-        item.SetBinding(IsEnabledProperty, new Binding(nameof(MusicCapability.CanChangePlaybackMode)) { Source = module });
         AutomationProperties.SetName(item, name);
         string actionKey = modeActionKey;
         long generation = modeMenuGeneration;
@@ -316,15 +382,53 @@ public partial class MusicPlayerView : UserControl
             if (!ModeMenu.IsOpen || !item.IsEnabled || !IsLoaded || !IsVisible ||
                 generation != modeMenuGeneration || actionKey != module.PlaybackModeActionKey) return;
             ModeMenu.IsOpen = false;
-            await module.ChangeModeAsync(mode);
+            await action();
         };
         return item;
     }
     private void ModeMenu_Closed(object? sender, RoutedEventArgs e)
     {
         surfaceInput?.LayerClosed(); surfaceInput?.Forget(ModeMenu);
-        modeActionKey = ""; modeMenuGeneration++;
-        if (IsLoaded && IsVisible) ModeButton.Focus();
+        if (!openingFm && !fmOpen && menuInput?.HasCurrent != true && IsLoaded && IsVisible &&
+            Window.GetWindow(this) is not { IsActive: false }) ModeButton.Focus();
+    }
+    // Logical dismissal retires actions/work immediately; native Closed only releases the HWND.
+    // Both reusable ContextMenus wait for that same boundary before another open can be admitted.
+    private sealed class NativeMenuLifetime
+    {
+        private static readonly DependencyPropertyDescriptor OpenProperty =
+            DependencyPropertyDescriptor.FromProperty(ContextMenu.IsOpenProperty, typeof(ContextMenu));
+        private readonly ContextMenu menu;
+        private readonly Func<Task> retire;
+        private TaskCompletionSource? nativeClosed;
+        internal Task Ready { get; private set; } = Task.CompletedTask;
+        internal NativeMenuLifetime(ContextMenu menu, Func<Task> retire)
+        {
+            this.menu = menu; this.retire = retire;
+            menu.Closed += (_, _) =>
+            {
+                var completion = nativeClosed; nativeClosed = null;
+                // WPF forbids reopening a Popup inside its Closed callback.
+                menu.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => completion?.TrySetResult()));
+            };
+        }
+        internal void Attach()
+        {
+            OpenProperty.RemoveValueChanged(menu, OpenChanged);
+            OpenProperty.AddValueChanged(menu, OpenChanged);
+        }
+        internal void Detach() => OpenProperty.RemoveValueChanged(menu, OpenChanged);
+        private void OpenChanged(object? sender, EventArgs e)
+        {
+            if (menu.IsOpen) return;
+            nativeClosed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            Ready = Task.WhenAll(nativeClosed.Task, retire());
+        }
+        internal void Close()
+        {
+            if (menu.IsOpen) menu.IsOpen = false;
+            else Ready = Task.WhenAll(Ready, retire());
+        }
     }
     private Button FmChoice(MusicCatalogChoice choice, bool scene)
     {
@@ -332,7 +436,7 @@ public partial class MusicPlayerView : UserControl
             (scene ? module.PlaybackFmMode == "scene" && module.PlaybackFmScene == choice.Key :
                 module.PlaybackFmMode == choice.Key);
         string actionKey = fmActionKey;
-        long generation = fmPopupGeneration;
+        long generation = fmGeneration;
         var button = new Button
         {
             Tag = choice,
@@ -357,21 +461,31 @@ public partial class MusicPlayerView : UserControl
         button.Click += async (_, e) =>
         {
             e.Handled = true;
-            if (!FmPopup.IsOpen || generation != fmPopupGeneration || actionKey != fmActionKey) return;
-            FmPopup.IsOpen = false;
-            if (IsLoaded && IsVisible)
-                await module.ChangePlaybackFmAsync(scene ? "scene" : choice.Key, scene ? choice.Key : "", actionKey);
+            if (!fmOpen || !button.IsEnabled || !IsLoaded || !IsVisible || !CanOpenFmChoices ||
+                generation != fmGeneration || actionKey != module.PlaybackFmActionKey) return;
+            CloseFm();
+            await module.ChangePlaybackFmAsync(scene ? "scene" : choice.Key, scene ? choice.Key : "", actionKey);
         };
         return button;
     }
-    private void FmPopup_Closed(object? sender, EventArgs e)
+    private void FmClosed()
     {
-        fmActionKey = ""; fmPopupGeneration++;
-        if (IsLoaded && IsVisible) FmChannelButton.Focus();
+        fmActionKey = ""; fmGeneration++;
+        FocusManager.SetFocusedElement(FmPanel, null);
+        FmModeChoices.Children.Clear(); FmSceneChoices.Children.Clear();
+        fmOpen = false; fmHost = null;
+        surfaceInput?.LayerClosed();
+        RestoreModeFocus();
     }
-    private void FmPopup_KeyDown(object sender, KeyEventArgs e)
-    { if (e.Key == Key.Escape) { FmPopup.IsOpen = false; e.Handled = true; } }
-    private async void Queue_Click(object sender, RoutedEventArgs e) => await module.OpenPlayQueueAsync();
+    private void RestoreModeFocus()
+    {
+        if (!returnModeFocus || !IsLoaded || !IsVisible || Window.GetWindow(this) is { IsVisible: false }) return;
+        FocusManager.SetFocusedElement(FocusManager.GetFocusScope(ModeButton), ModeButton);
+        if (Window.GetWindow(this) is null or { IsActive: true }) ModeButton.Focus();
+    }
+    private void CloseFm() => fmHost?.Close();
+    private void CloseFm_Click(object sender, RoutedEventArgs e) => CloseFm();
+    private void Queue_Click(object sender, RoutedEventArgs e) => ToggleMenu(QueueButton);
     private async void Rate_MouseUp(object sender, MouseButtonEventArgs e) => await module.ChangePlaybackRateAsync(Math.Round(RateSlider.Value, 1));
     private async void Rate_KeyUp(object sender, KeyEventArgs e)
     {
@@ -383,14 +497,11 @@ public partial class MusicPlayerView : UserControl
     private async void RateReset_Click(object sender, RoutedEventArgs e) => await module.ChangePlaybackRateAsync(1);
     private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (PlaybackSourceMenu.IsOpen && (e.PropertyName == nameof(MusicCapability.PlaybackSourceActionKey) ||
-            !module.CanPlay && !module.HasActiveRecommendation && !module.CanReconcileRecommendation))
-            PlaybackSourceMenu.IsOpen = false;
         if (SourcePopup.IsOpen && !module.HasSourceChoices) SourcePopup.IsOpen = false;
         if (!module.HasQualityButton) QualityMenu.IsOpen = false;
         if (ModeMenu.IsOpen && (modeActionKey != module.PlaybackModeActionKey || !module.CanChangePlaybackMode))
             ModeMenu.IsOpen = false;
-        if (FmPopup.IsOpen && fmActionKey != module.PlaybackFmActionKey) FmPopup.IsOpen = false;
+        if (fmOpen && (fmActionKey != module.PlaybackFmActionKey || !CanOpenFmChoices)) CloseFm();
         if (scrubKey is not null && (scrubKey != module.PlaybackPresentationKey || !module.CanSeek))
         { Progress.CancelScrub(); RestoreProgress(); }
     }

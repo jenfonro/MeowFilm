@@ -42,6 +42,14 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
         .permissionDenied, .invalidResponse, .invalidRequest, .storageFailed, .corruptDocument,
         .storageConflict, .targetChanged, .staleRevision, .staleAccess, .accessUnavailable, .closed, .cancelled]
 
+    private func acquiredRecords(_ song: MJ) -> [String: MusicSourceDiscoveryEntry] {
+        Dictionary(grouping: song["sources"].array, by: { $0["source"].string }).mapValues { rows in
+            .init(checkedAt: 0, sources: rows.map {
+                .init(sourceKey: $0["sourceKey"].string, source: $0["source"].string, musicInfo: $0["musicInfo"].json)
+            }, observations: [])
+        }
+    }
+
     func testCachedDeclarationLocalFailuresKeepAutomaticAndQualityAtSameTier() async throws {
         for failure in local {
             for automatic in [false, true] {
@@ -57,10 +65,22 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
     }
     private func cached(_ failure: MusicServiceError, intent: MusicSourceIntent?, succeeds: Bool) async throws {
         let scripts = DeclarationFailureScripts(), song = try MusicNativeCandidateDiscoveryFixture.song()
+        let librarySong = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321"))
+        let acquired = try MusicModel.mergeSources(song, adding: librarySong["sources"].array)
         let key = song["sources"].array[0]["sourceKey"].string
+        let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeCandidateDiscoveryHTTP()
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
-            scripts: scripts, sourceDiscovery: cache)
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        var document = try MusicDocument(store.read(), runID: "declaration")
+        document.library["library"]["songs"] = .obj([(librarySong["songId"].string, librarySong)])
+        var favorites = document.library["library"]["collections"].array[0]
+        favorites["order"] = .strings([librarySong["songId"].string])
+        document.library["library"]["collections"] = .array([favorites])
+        store.replace(try document.encode(changed: ["library"]))
+        let service = try await NativeMusicFixture.service(store,
+            scripts: scripts, qq: qq, http: http, sourceDiscovery: cache)
+        // Acquired library and queue metadata share facts without inventing a query.
+        _ = try await service.queue()
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         func selection(_ id: String) -> MusicPlaybackSelection {
             .init(installationId: id, generation: 1, siteId: "tx", sourceKey: key, quality: "flac",
@@ -70,6 +90,9 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
             let prepared = try await session.match(intent: .exact(selection(id)))
             await service.discardSource(attemptID: prepared.candidate.attemptId)
         }
+        let recordsBefore = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        XCTAssertEqual(recordsBefore, acquiredRecords(acquired))
+        let stateBefore = try await service.state()
         await scripts.fail(failure)
         do {
             let result = try await session.match(intent: intent ?? .exact(selection("a")))
@@ -84,9 +107,14 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
         let calls = await scripts.calls()
         XCTAssertTrue(calls.requests.isEmpty, "A cached peer must need no new URL request")
         XCTAssertFalse(calls.lookups.contains("b") && !succeeds, "Global/exact failures cannot consume the peer")
+        let searches = await qq.calls(), otherSearches = await http.calls()
         let exclusions = try await service.sourceExclusions(), history = try await service.playedSongs()
         let records = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
-        XCTAssertTrue(exclusions.isEmpty); XCTAssertTrue(history.isEmpty); XCTAssertTrue(records.isEmpty)
+        let state = try await service.state()
+        XCTAssertTrue(searches.isEmpty); XCTAssertTrue(otherSearches.isEmpty)
+        XCTAssertTrue(exclusions.isEmpty); XCTAssertTrue(history.isEmpty)
+        XCTAssertEqual(records, recordsBefore, "Declaration failure cannot erase or rewrite acquired recording facts")
+        XCTAssertEqual(state, stateBefore)
         if succeeds {
             await scripts.fail(nil)
             let retried = try await session.match(intent: .exact(selection("a")))
@@ -109,10 +137,14 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
         await scripts.fail(failure)
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeCandidateDiscoveryHTTP()
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { clock.now() })
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
-            scripts: scripts, accounts: accounts, sourceDiscovery: cache, clock: { clock.now() })
+            scripts: scripts, accounts: accounts, qq: qq, http: http, sourceDiscovery: cache, clock: { clock.now() })
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let recordsBefore = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        XCTAssertEqual(recordsBefore, [:])
+        let stateBefore = try await service.state()
         do {
             let result = try await session.match(intent: .quality("flac"))
             XCTAssertTrue(succeeds)
@@ -126,9 +158,14 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
         let counts = await accounts.counts(), calls = await scripts.calls()
         XCTAssertEqual(counts.resolves, succeeds ? 1 : 0)
         XCTAssertTrue(calls.requests.isEmpty)
+        let searches = await qq.calls(), otherSearches = await http.calls()
         let exclusions = try await service.sourceExclusions(), history = try await service.playedSongs()
         let records = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
-        XCTAssertTrue(exclusions.isEmpty); XCTAssertTrue(history.isEmpty); XCTAssertTrue(records.isEmpty)
+        let state = try await service.state()
+        XCTAssertTrue(searches.isEmpty); XCTAssertTrue(otherSearches.isEmpty)
+        XCTAssertTrue(exclusions.isEmpty); XCTAssertTrue(history.isEmpty)
+        XCTAssertEqual(records, acquiredRecords(song), "Listing imports the known seed without manufacturing a search")
+        XCTAssertEqual(state, stateBefore)
         await service.close()
     }
 }
@@ -209,6 +246,10 @@ extension MusicSourceDeclarationFailureTests {
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts, qq: qq, http: http, sourceDiscovery: cache)
+        _ = try await service.queue()
+        let recordsBefore = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        XCTAssertEqual(recordsBefore, acquiredRecords(song))
+        let stateBefore = try await service.state()
         let exact = entry == .exact || entry == .legacyManual
         let succeeds = !exact && (stage == .audio || failure == .timeout)
         do {
@@ -254,10 +295,13 @@ extension MusicSourceDeclarationFailureTests {
         let searches = await qq.calls(), otherSearches = await http.calls()
         let exclusions = try await service.sourceExclusions(), history = try await service.playedSongs()
         let records = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
-        let rejected = await cache.excluded(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        let rejected = try await service.recordingSourceExclusions(song)
+        let state = try await service.state()
         XCTAssertTrue(searches.isEmpty); XCTAssertTrue(otherSearches.isEmpty)
         XCTAssertTrue(exclusions.isEmpty); XCTAssertTrue(rejected.isEmpty)
-        XCTAssertTrue(history.isEmpty); XCTAssertTrue(records.isEmpty)
+        XCTAssertTrue(history.isEmpty)
+        XCTAssertEqual(records, recordsBefore, "Declaration and audio failures cannot rewrite acquired recording facts")
+        XCTAssertEqual(state, stateBefore)
         await service.close()
     }
 }
@@ -358,6 +402,10 @@ extension MusicSourceDeclarationFailureTests {
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts, qq: qq, http: http, sourceDiscovery: cache)
+        _ = try await service.queue()
+        let recordsBefore = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        XCTAssertEqual(recordsBefore, acquiredRecords(song))
+        let stateBefore = try await service.state()
         var manual: MusicCandidateDiscoveryMode?
         if entry == .legacyManual {
             let discovery = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
@@ -416,10 +464,14 @@ extension MusicSourceDeclarationFailureTests {
         let searches = await qq.calls(), otherSearches = await http.calls()
         let exclusions = try await service.sourceExclusions(), history = try await service.playedSongs()
         let records = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
-        let rejected = await cache.excluded(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        let rejected = try await service.recordingSourceExclusions(song)
+        let state = try await service.state()
         XCTAssertTrue(searches.isEmpty); XCTAssertTrue(otherSearches.isEmpty)
         XCTAssertTrue(exclusions.isEmpty); XCTAssertTrue(rejected.isEmpty)
-        XCTAssertTrue(history.isEmpty); XCTAssertTrue(records.isEmpty)
+        XCTAssertTrue(history.isEmpty)
+        XCTAssertEqual(records, recordsBefore,
+                       "Internal declaration failures cannot create search evidence or unrelated recording facts")
+        XCTAssertEqual(state, stateBefore)
         await service.close(); try await scripts.close(); await runtimeSession.close()
     }
 }

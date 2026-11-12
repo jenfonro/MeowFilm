@@ -158,6 +158,25 @@ public static class MusicLyricAnimationTests
             Near(0, words[2].WordProgress, .001, "backward seek resets the instant word");
             Check(!words.Any(Animated), "paused source boundaries never extrapolate");
         });
+        yield return Case("unbounded final real word highlights at its start and stays highlighted without an animation", async () =>
+        {
+            using var f = Fixture.WithLines([[new("前词", 0, 1), new("末词", 1, 0)]], position: 0);
+            await f.Ready();
+            var words = f.Words.ToArray();
+            Near(0, words[1].WordProgress, .001, "the unbounded word waits for its real start");
+            await Task.Delay(1200); await Drain();
+            if (!AnimationEnabled) f.List.Position = 1;
+            await Drain();
+            Near(1, words[1].WordProgress, .001, "the real start immediately highlights the whole final word");
+            Check(!Animated(words[1]), "no synthetic closing duration creates a word animation");
+            f.List.Position = 179; await Drain();
+            Near(1, words[1].WordProgress, .001, "the final word remains highlighted near the song end");
+            f.List.IsPlaying = false; f.List.Position = .5; await Drain();
+            Near(0, words[1].WordProgress, .001, "a paused seek before the real start clears the final word");
+            f.List.Position = 1; await Drain();
+            Near(1, words[1].WordProgress, .001, "a paused seek to the real start highlights without a clock");
+            Check(!Animated(words[1]), "the unbounded word never owns an interpolation clock");
+        });
         yield return Case("multiword cached pages apply batched samples without rebuilding native glyphs", async () =>
         {
             using var f = Fixture.WithLines(MultiwordLines(), position: 1);
@@ -391,32 +410,29 @@ public static class MusicLyricAnimationTests
         });
         yield return Case("repeated center requests share completion and cancellation retires pending settlement", async () =>
         {
-            var scroll = new ScrollViewer { Content = new Border { Height = 4000, Background = Brushes.Black } };
-            var window = new Window
-            {
-                Content = scroll, Width = 420, Height = 220, ShowInTaskbar = false,
-                WindowStyle = WindowStyle.None, Left = -32000, Top = -32000
-            };
-            try
-            {
-                window.Show(); window.UpdateLayout(); await Drain();
-                var completions = 0;
-                void Settled() => completions++;
-                MusicLyricScroll.Move(scroll, 1500, settled: Settled);
-                await Task.Delay(200);
-                MusicLyricScroll.Move(scroll, 1500, settled: Settled);
-                await Task.Delay(200);
-                MusicLyricScroll.Move(scroll, 1500, settled: Settled);
-                await Task.Delay(150); await Drain();
-                Equal(AnimationEnabled ? 1 : 3, completions);
-                Near(1500, scroll.VerticalOffset, .5, "same target completes from its original start under 200ms requests");
-                var completed = completions;
-                MusicLyricScroll.Move(scroll, 300, settled: Settled);
-                MusicLyricScroll.Stop(scroll);
-                await Task.Delay(550); await Drain();
-                Equal(completed, completions);
-            }
-            finally { window.Close(); }
+            using var f = Fixture.WithLines(MultiwordLines(), position: 1);
+            await f.Ready();
+            var scroll = Visuals(f.List).OfType<ScrollViewer>().First();
+            var presenter = Visuals(f.List).OfType<ItemsPresenter>().First();
+            var translation = new TranslateTransform();
+            presenter.RenderTransform = translation;
+            var completions = 0;
+            void Settled() => completions++;
+            MusicLyricScroll.Move(scroll, 1500, translation, f.List, Settled);
+            await Task.Delay(200);
+            MusicLyricScroll.Move(scroll, 1500, translation, f.List, Settled);
+            await Task.Delay(200);
+            MusicLyricScroll.Move(scroll, 1500, translation, f.List, Settled);
+            await Task.Delay(150); await Drain();
+            Equal(AnimationEnabled ? 1 : 3, completions);
+            Near(1500, scroll.VerticalOffset, .5, "same target completes from its original start under 200ms requests");
+            var completed = completions;
+            MusicLyricScroll.Move(scroll, 300, translation, f.List, Settled);
+            MusicLyricScroll.Stop(scroll);
+            await Task.Delay(550); await Drain();
+            Equal(completed, completions);
+            Near(0, translation.Y, .001, "cancellation retires the presentation transform");
+            Check(!translation.HasAnimatedProperties, "cancellation removes the automatic clock");
         });
     }
 

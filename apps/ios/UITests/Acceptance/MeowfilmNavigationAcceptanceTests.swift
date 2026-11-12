@@ -66,8 +66,23 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertEqual(title.label, "我的")
         assertInsideHeader(title)
         XCTAssertTrue(app.buttons["app.primary.add"].isHittable)
+        let layout = app.buttons["music.library.layout"]
+        XCTAssertTrue(layout.isHittable)
+        XCTAssertGreaterThanOrEqual(layout.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(layout.frame.height, 44)
+        assertHeaderOrder([app.buttons["app.menu"], title, layout, app.buttons["app.primary.add"]])
+        let originalLayoutLabel = layout.label
+        XCTAssertTrue(["切换为列表", "切换为网格"].contains(originalLayoutLabel))
+        let changedLayoutLabel = originalLayoutLabel == "切换为列表" ? "切换为网格" : "切换为列表"
+        layout.tap()
+        XCTAssertTrue(layout.waitForExistence(timeout: 5))
+        let changed = expectation(for: NSPredicate(format: "label == %@", changedLayoutLabel), evaluatedWith: layout)
+        wait(for: [changed], timeout: 5)
+        layout.tap()
+        let restored = expectation(for: NSPredicate(format: "label == %@", originalLayoutLabel), evaluatedWith: layout)
+        wait(for: [restored], timeout: 5)
         assertPrimaryNavigation(selected: "library")
-        assertPageOwnsHeader("library", controls: ["app.menu", "app.primary.title", "app.primary.add"])
+        assertPageOwnsHeader("library", controls: ["app.menu", "app.primary.title", "music.library.layout", "app.primary.add"])
         XCTAssertFalse(app.otherElements["app.page.channels"].exists)
         attach("03-library")
 
@@ -81,6 +96,13 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         assertPrimaryNavigation(selected: "film")
         XCTAssertFalse(app.otherElements["app.page.library"].exists)
         attach("03-film")
+
+        app.buttons["app.primary.novel"].tap()
+        XCTAssertTrue(app.otherElements["novel.home"].waitForExistence(timeout: 5))
+        assertPageOwnsHeader("novel", controls: ["app.menu", "search.open"])
+        assertPrimaryNavigation(selected: "novel")
+        XCTAssertTrue(app.segmentedControls["novel.sections"].exists)
+        attach("03-novel")
 
         app.buttons["app.primary.recommend"].tap()
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
@@ -401,12 +423,13 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
     func testUserDataResetConfirmationCanBeCancelledWithoutLeavingSettings() {
         XCTAssertTrue(app.buttons["app.menu"].waitForExistence(timeout: 30))
         if app.alerts["错误"].exists { app.alerts["错误"].buttons["确定"].tap() }
-        openSettings()
-        let clear = app.buttons["settings.clearUserData"]
+        openSidebar()
+        app.buttons["app.sidebar.settings"].tap()
+        let clear = app.cells["settings.clearUserData"]
         if !clear.isHittable { app.swipeUp() }
         XCTAssertTrue(clear.waitForExistence(timeout: 5))
         clear.tap()
-        let confirmation = app.alerts["清除本机用户数据？"]
+        let confirmation = app.alerts["清空本机数据？"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         XCTAssertTrue(confirmation.buttons["清除并等待重启"].exists)
         attach("settings-clear-user-data-confirmation")
@@ -579,7 +602,6 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             ("settings.search", "搜索设置"),
             ("music.settings.playback", "播放设置"),
             ("music.settings.metadata", "歌词／封面设置"),
-            ("settings.preferences", "偏好设置"),
             ("music.settings.aggregation", "平台账号"),
         ] {
             let destination = app.buttons[identifier]
@@ -593,6 +615,17 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         }
         app.buttons["page.header.back"].tap()
         XCTAssertTrue(app.cells["settings.category.music"].waitForExistence(timeout: 5))
+        app.cells["settings.preferences"].tap()
+        XCTAssertTrue(app.staticTexts["偏好设置"].waitForExistence(timeout: 5))
+        assertInsideHeader(app.buttons["page.header.back"])
+        app.buttons["settings.colors"].tap()
+        XCTAssertTrue(app.staticTexts["配色设置"].waitForExistence(timeout: 5))
+        assertInsideHeader(app.buttons["page.header.back"])
+        attach("23-settings.colors")
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.buttons["settings.colors"].waitForExistence(timeout: 5))
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.cells["settings.category.music"].waitForExistence(timeout: 5))
         app.buttons["page.header.back"].tap()
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
         attach("22-settings-returned")
@@ -601,7 +634,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
     func testInteractiveReturnCancellationAndCompletionKeepThePageUsable() {
         openSettings()
         dragRight(from: 0.25, to: 0.32)
-        XCTAssertTrue(app.staticTexts["设置"].exists)
+        XCTAssertTrue(app.staticTexts["音乐设置"].exists)
         XCTAssertTrue(app.buttons["settings.search"].isHittable)
         assertInsideHeader(app.buttons["page.header.back"])
         attach("24-settings-cancelled-return")
@@ -624,10 +657,10 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         app.buttons["app.sidebar.settings"].tap()
         XCTAssertTrue(app.cells["settings.category.film"].waitForExistence(timeout: 5))
         app.cells["settings.category.film"].tap()
-        XCTAssertTrue(app.cells["film.settings.rules"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.cells["film.settings.search"].waitForExistence(timeout: 5))
         attach("film-settings-category")
         for (identifier, title) in [
-            ("film.settings.rules", "魔法规则"),
+            ("film.settings.search", "搜索净化设置"),
             ("film.settings.cats", "猫源"),
             ("film.settings.videos", "视频源"),
         ] {
@@ -638,27 +671,33 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             app.buttons["page.header.back"].tap()
             XCTAssertTrue(app.cells[identifier].waitForExistence(timeout: 5))
         }
-        app.cells["film.settings.rules"].tap()
-        app.cells["film.rules.episode"].tap()
-        let rule = app.cells["film.rules.episodeClean.0"]
-        XCTAssertTrue(rule.waitForExistence(timeout: 5))
-        rule.tap()
-        let pattern = app.textViews["film.rule.pattern"]
+        app.cells["film.settings.matching"].tap()
+        XCTAssertTrue(app.cells["film.matching.episodeClean"].waitForExistence(timeout: 5))
+        app.cells["film.matching.episodeClean"].tap()
+        let pattern = app.textViews["film.rules.episodeClean.0.pattern"]
         XCTAssertTrue(pattern.waitForExistence(timeout: 5))
         pattern.tap()
         pattern.typeText("UI草稿")
         let draft = pattern.value as? String
         attach("film-rule-draft")
         app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.cells["film.matching.movie"].waitForExistence(timeout: 5))
+        app.cells["film.matching.movie"].tap()
+        XCTAssertTrue(app.textViews["film.rules.movie.0.pattern"].waitForExistence(timeout: 5))
         app.buttons["page.header.back"].tap()
-        app.cells["film.rules.movie"].tap()
+        // Search is a separate direct rule page, outside the matching submenu.
         app.buttons["page.header.back"].tap()
-        app.cells["film.rules.episode"].tap()
-        app.cells["film.rules.episodeClean.0"].tap()
-        XCTAssertEqual(app.textViews["film.rule.pattern"].value as? String, draft)
+        XCTAssertTrue(app.cells["film.settings.search"].waitForExistence(timeout: 5))
+        app.cells["film.settings.search"].tap()
+        XCTAssertTrue(app.textViews["film.rules.search.0.pattern"].waitForExistence(timeout: 5))
+        app.buttons["page.header.back"].tap()
+        app.cells["film.settings.matching"].tap()
+        app.cells["film.matching.episodeClean"].tap()
+        XCTAssertTrue(pattern.waitForExistence(timeout: 5))
+        XCTAssertEqual(pattern.value as? String, draft)
         attach("film-rule-draft-returned")
         // Exit all settings layers; the originating primary page remains in place.
-        for _ in 0..<5 { app.buttons["page.header.back"].tap() }
+        for _ in 0..<4 { app.buttons["page.header.back"].tap() }
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
     }
 
@@ -833,9 +872,9 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             format: "identifier BEGINSWITH %@", "app.primary."
         )).allElementsBoundByIndex.sorted { $0.frame.minX < $1.frame.minX }
         XCTAssertEqual(buttons.map(\.identifier), [
-            "app.primary.recommend", "app.primary.film", "app.primary.library",
+            "app.primary.recommend", "app.primary.film", "app.primary.novel", "app.primary.library",
         ], file: file, line: line)
-        XCTAssertEqual(buttons.map(\.label), ["首页", "影视", "我的"], file: file, line: line)
+        XCTAssertEqual(buttons.map(\.label), ["首页", "影视", "小说", "我的"], file: file, line: line)
         waitSelected(app.buttons["app.primary." + selected])
         for button in buttons {
             if !button.isHittable { acknowledgeMusicContentFailureIfPresent(file: file, line: line) }

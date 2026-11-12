@@ -604,6 +604,7 @@ typedef struct JSMemoryUsage {
     int64_t c_func_count, array_count;
     int64_t fast_array_count, fast_array_elements;
     int64_t binary_object_count, binary_object_size;
+    int64_t array_buffer_count, array_buffer_size;
 } JSMemoryUsage;
 
 JS_EXTERN void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s);
@@ -1283,12 +1284,38 @@ JS_EXTERN JSValue JS_GetModuleNamespace(JSContext *ctx, JSModuleDef *m);
 JS_EXTERN int JS_SetModulePrivateValue(JSContext *ctx, JSModuleDef *m, JSValue val);
 JS_EXTERN JSValue JS_GetModulePrivateValue(JSContext *ctx, JSModuleDef *m);
 
+/* Host task identities are opaque, reference counted and never guest values. */
+typedef struct JSHostTaskContext JSHostTaskContext;
+typedef void JSHostTaskFinalizer(void *opaque);
+JS_EXTERN JSHostTaskContext *JS_NewHostTaskContext(JSRuntime *rt, void *opaque,
+                                                   JSHostTaskFinalizer *finalizer);
+JS_EXTERN JSHostTaskContext *JS_DupHostTaskContext(JSHostTaskContext *task);
+JS_EXTERN void JS_FreeHostTaskContext(JSRuntime *rt, JSHostTaskContext *task);
+JS_EXTERN void *JS_GetHostTaskOpaque(JSHostTaskContext *task);
+JS_EXTERN JSHostTaskContext *JS_GetHostTaskContext(JSRuntime *rt);
+JS_EXTERN void JS_SetHostTaskContext(JSRuntime *rt, JSHostTaskContext *task);
+JS_EXTERN void JS_SetHostExecutionContext(JSRuntime *rt, JSHostTaskContext *task);
+/* Execution ownership is separate from authority and the scheduling context.
+   The selector returns a borrowed owner; generator entry retains and restores it. */
+typedef JSHostTaskContext *JSHostExecutionOwnerSelector(JSHostTaskContext *queued_owner,
+                                                       JSHostTaskContext *resuming_owner);
+JS_EXTERN JSHostTaskContext *JS_GetHostExecutionOwner(JSRuntime *rt);
+JS_EXTERN void JS_SetHostExecutionOwner(JSRuntime *rt, JSHostTaskContext *task);
+JS_EXTERN void JS_SetHostExecutionOwnerSelector(JSRuntime *rt, JSHostExecutionOwnerSelector *selector);
+JS_EXTERN bool JS_HasActiveScriptFrame(JSRuntime *rt);
+
 /* JS Job support */
 
 typedef JSValue JSJobFunc(JSContext *ctx, int argc, JSValueConst *argv);
 JS_EXTERN int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
                             int argc, JSValueConst *argv);
 
+JS_EXTERN JSHostTaskContext *JS_GetPendingJobTaskContext(JSRuntime *rt);
+JS_EXTERN JSHostTaskContext *JS_GetPendingJobExecutionContext(JSRuntime *rt);
+/* Read-only queue inspection; identity and execution trigger stay independent. */
+typedef bool JSHostJobPredicate(JSHostTaskContext *task, JSHostTaskContext *execution_task,
+                                void *opaque);
+JS_EXTERN bool JS_HasPendingJobMatching(JSRuntime *rt, JSHostJobPredicate *predicate, void *opaque);
 JS_EXTERN bool JS_IsJobPending(JSRuntime *rt);
 JS_EXTERN JSContext *JS_GetPendingJobContext(JSRuntime *rt);
 JS_EXTERN int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx);

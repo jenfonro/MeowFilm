@@ -166,7 +166,7 @@ test('API/search bases keep full prefixes and API wrappers receive the entire lo
 test('invalid base URLs and wrapper templates fail with fixed errors', async () => {
   const request = async () => assert.fail('invalid settings must not reach the network');
   const templates = [
-    'https://relay.test/', 'https://relay.test/{url}/{encodedUrl}', 'https://relay.test/{url}/{url}',
+    'https://relay.test/{url}/{encodedUrl}', 'https://relay.test/{url}/{url}',
     'https://relay.test/{other}', 'https://{url}.relay.test/', 'https://relay.test/{url}#fragment',
     'file:///relay/{url}', 'https://relay.test/\r\n{url}',
   ];
@@ -714,5 +714,19 @@ test('cancellation is propagated to the injected request and normalized before a
       after.abort();
       return reply(operation === 'search' ? html({ items: [], total: 0 }) : {});
     }, after.signal), failure('CANCELLED'));
+  }
+});
+test('Douban custom proxy prefixes support nested directories and query wrappers for API and images', async () => {
+  for (const [prefix, expected] of [
+    ['https://relay.test/mount/proxy', 'https://relay.test/mount/proxy/'],
+    ['https://relay.test/mount/proxy/', 'https://relay.test/mount/proxy/'],
+    ['https://relay.test/mount/proxy?url=', 'https://relay.test/mount/proxy?url='],
+  ]) {
+    const config = settings({ apiProxy: prefix, imageProxy: prefix });
+    const fixture = upstream([reply({ id: '1' })]);
+    await requestDouban({ path: '/rexxar/api/v2/movie/1' }, { settings: config, request: fixture.request });
+    assert.equal(fixture.calls[0].url, expected + encodeURIComponent('https://m.douban.com/rexxar/api/v2/movie/1'));
+    assert.equal(doubanImageTarget('/v1/douban/images/view/photo/p1.jpg', config).url,
+      expected + encodeURIComponent('https://img3.doubanio.com/view/photo/p1.jpg'));
   }
 });

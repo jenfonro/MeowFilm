@@ -20,15 +20,22 @@ public sealed class MusicLyricWordView : Control
             (owner, _) => ((MusicLyricWordView)owner).RefreshPosition()));
     public static readonly DependencyProperty HighlightProperty = DependencyProperty.Register(nameof(Highlight),
         typeof(Brush), typeof(MusicLyricWordView), new FrameworkPropertyMetadata(Brushes.Crimson, FrameworkPropertyMetadataOptions.AffectsRender));
+    public static readonly DependencyProperty StrokeProperty = DependencyProperty.Register(nameof(Stroke),
+        typeof(Brush), typeof(MusicLyricWordView), new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+    public static readonly DependencyProperty StrokeThicknessProperty = DependencyProperty.Register(nameof(StrokeThickness),
+        typeof(double), typeof(MusicLyricWordView), new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
     public MusicLyricWord? Word { get => (MusicLyricWord?)GetValue(WordProperty); set => SetValue(WordProperty, value); }
     // A standalone word accepts a static sample. In a MusicLyricList the list owns samples and clocks.
     public double Position { get => (double)GetValue(PositionProperty); set => SetValue(PositionProperty, value); }
     public Brush Highlight { get => (Brush)GetValue(HighlightProperty); set => SetValue(HighlightProperty, value); }
+    public Brush? Stroke { get => (Brush?)GetValue(StrokeProperty); set => SetValue(StrokeProperty, value); }
+    public double StrokeThickness { get => (double)GetValue(StrokeThicknessProperty); set => SetValue(StrokeThicknessProperty, value); }
     public double WordProgress => highlightClip.HasAnimatedProperties && textSize.Width > 0
         ? Math.Clamp(highlightClip.Rect.Width / textSize.Width, 0, 1) : progress;
 
     private readonly RectangleGeometry highlightClip = new();
     private DrawingGroup? normalText, highlightedText;
+    private Geometry? outline;
     private Size textSize;
     private double progress;
     private MusicLyricList? presenter;
@@ -116,6 +123,7 @@ public sealed class MusicLyricWordView : Control
     {
         StopHighlight();
         normalText = highlightedText = null;
+        outline = null;
         InvalidateMeasure();
         InvalidateVisual();
         presenter?.InvalidateViewport();
@@ -183,11 +191,26 @@ public sealed class MusicLyricWordView : Control
         var highContrast = SystemParameters.HighContrast || DesktopTheme.GetIsHighContrast(this);
         Paint(normalText!, highContrast ? SystemColors.WindowTextBrush : Foreground ?? SystemColors.WindowTextBrush);
         Paint(highlightedText!, highContrast ? SystemColors.HighlightBrush : Highlight);
+        if (Stroke is not null && StrokeThickness > 0)
+        {
+            outline ??= Outline(normalText!);
+            drawing.DrawGeometry(null, new Pen(highContrast ? SystemColors.WindowBrush : Stroke, StrokeThickness)
+                { LineJoin = PenLineJoin.Round }, outline);
+        }
         drawing.DrawDrawing(normalText);
         // The mutable clip is retained by WPF. Animation never invalidates this control's text layout.
         drawing.PushClip(highlightClip);
         drawing.DrawDrawing(highlightedText);
         drawing.Pop();
+    }
+    private static Geometry Outline(DrawingGroup drawing)
+    {
+        var geometry = new GeometryGroup { Transform = drawing.Transform };
+        foreach (var child in drawing.Children)
+            if (child is GlyphRunDrawing glyph) geometry.Children.Add(glyph.GlyphRun.BuildGeometry());
+            else if (child is DrawingGroup group) geometry.Children.Add(Outline(group));
+        geometry.Freeze();
+        return geometry;
     }
     protected override AutomationPeer OnCreateAutomationPeer() => new WordPeer(this);
     private sealed class WordPeer(MusicLyricWordView owner) : FrameworkElementAutomationPeer(owner)

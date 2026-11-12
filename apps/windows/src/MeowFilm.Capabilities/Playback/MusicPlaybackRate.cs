@@ -12,8 +12,11 @@ public sealed partial class MusicCapability
     public double PlaybackRate => playbackRate;
     public string PlaybackRateText => playbackRate.ToString("0.0", CultureInfo.InvariantCulture) + "×";
     public bool CanChangePlaybackRate => CanSeek && playback is IMusicPlaybackRate;
+    // A known current-input rate is useful to listening facts even when the
+    // engine rejected the user's requested rate; it is not an accepted intent.
     public double? AcceptedPlaybackRate => OwnsCurrent && playback.HasMedia &&
-        playbackRateReceipt?.Scope.Identity == current?.EntryId ? playbackRateReceipt?.RequestedRate : null;
+        playbackRateReceipt is { } receipt && receipt.Scope.Identity == current?.EntryId &&
+        Math.Abs(receipt.RequestedRate - playbackRate) <= 0.001 ? receipt.RequestedRate : null;
     public bool EffectivePlaybackRateVerified => false;
 
     public Task ChangePlaybackRateAsync(double value)
@@ -28,15 +31,16 @@ public sealed partial class MusicCapability
                 throw new MusicOperationException(PlaybackError.InvalidRate);
             if (!CurrentRateTarget(song, epoch)) return;
             var requested = Math.Round(value, 1, MidpointRounding.AwayFromZero);
-            SampleFeedback(false);
-            MusicPlaybackRate receipt;
-            try { receipt = await ApplyRateToCurrentAsync(song, epoch, requested, lifetime.Token); }
-            catch { SampleFeedback(); throw; }
-            if (!CurrentRateTarget(song, epoch)) return;
-            playbackRate = requested;
-            playbackRateReceipt = receipt;
-            SampleFeedback();
-            PlaybackRateBindings();
+            SuspendFeedback();
+            try
+            {
+                var receipt = await ApplyRateToCurrentAsync(song, epoch, requested, lifetime.Token);
+                if (!CurrentRateTarget(song, epoch)) return;
+                playbackRate = requested;
+                playbackRateReceipt = receipt;
+                PlaybackRateBindings();
+            }
+            finally { ResumeFeedback(epoch); }
         });
     }
 
@@ -55,10 +59,14 @@ public sealed partial class MusicCapability
         if (!CurrentRateTarget(song, epoch) || snapshot is null || snapshot.Scope.OwnerId != Id ||
             snapshot.Scope.Identity != song.EntryId || snapshot.Scope.Generation <= 0)
             throw new OperationCanceledException();
+        playbackRateReceipt = double.IsFinite(snapshot.RequestedRate) && snapshot.RequestedRate > 0 ? snapshot : null;
         var receipt = await port.SetRateAsync(snapshot.Scope, rate, token);
         token.ThrowIfCancellationRequested();
         if (!CurrentRateTarget(song, epoch) || receipt.Scope != snapshot.Scope)
             throw new OperationCanceledException();
+        // A mismatching readback is not success for the requested intent, but
+        // its read-back, current-input value still belongs to listening facts.
+        playbackRateReceipt = double.IsFinite(receipt.RequestedRate) && receipt.RequestedRate > 0 ? receipt : null;
         if (!double.IsFinite(receipt.RequestedRate) || Math.Abs(receipt.RequestedRate - rate) > 0.001)
             throw new MusicOperationException(PlaybackError.RateUnsupported);
         return receipt;
@@ -66,8 +74,9 @@ public sealed partial class MusicCapability
 
     private async Task RestorePlaybackRateAsync(SongRow song, long epoch, CancellationToken token)
     {
-        playbackRateReceipt = null;
         if (playback is not IMusicPlaybackRate || !CurrentRateTarget(song, epoch)) return;
+        SuspendFeedback();
+        playbackRateReceipt = null;
         try
         {
             var receipt = await ApplyRateToCurrentAsync(song, epoch, playbackRate, token);
@@ -80,7 +89,7 @@ public sealed partial class MusicCapability
             // chosen song. Retain intent for the next input, expose this failure.
             if (CurrentRateTarget(song, epoch)) { status = "当前音频未接受播放倍速"; Changed(nameof(Status)); }
         }
-        finally { PlaybackRateBindings(); }
+        finally { ResumeFeedback(epoch); PlaybackRateBindings(); }
     }
 
     private void PlaybackRateBindings()

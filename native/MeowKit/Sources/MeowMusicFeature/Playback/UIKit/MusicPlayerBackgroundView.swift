@@ -10,7 +10,7 @@ class MusicPlayerBackgroundView: UIView {
     private let style: Style
     private var colors: [CGColor] = []
 
-    init(style: Style, palette: PageColorway) {
+    init(style: Style, palette: PagePalette) {
         self.style = style
         super.init(frame: .zero)
         isOpaque = true
@@ -22,10 +22,34 @@ class MusicPlayerBackgroundView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func apply(palette: PageColorway, animated: Bool) {
+    func apply(palette: PagePalette, animated: Bool) {
+        let next = Self.backgroundColors(palette: palette, style: style).map(\.cgColor)
+        guard next != colors else { return }
+        let previous = gradient.presentation()?.colors ?? gradient.colors
+        colors = next
+        backgroundColor = .white
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.removeAnimation(forKey: "player.palette")
+        gradient.colors = next
+        gradient.locations = [0, style == .card ? 0.82 : 1]
+        gradient.startPoint = CGPoint(x: 0.5, y: 0)
+        gradient.endPoint = CGPoint(x: 0.5, y: 1)
+        if animated, let previous, !UIAccessibility.isReduceMotionEnabled {
+            let animation = CABasicAnimation(keyPath: "colors")
+            animation.fromValue = previous
+            animation.toValue = next
+            animation.duration = 0.3
+            animation.beginTime = gradient.convertTime(CACurrentMediaTime(), from: nil)
+            gradient.add(animation, forKey: "player.palette")
+        }
+        CATransaction.commit()
+    }
+
+    static func backgroundColors(palette: PagePalette, style: Style) -> [UIColor] {
         var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0, alpha: CGFloat = 0
         UIColor(palette.lightTop).getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
-        let chroma = palette == .silver ? min(0.06, saturation) : min(0.25, max(0.10, saturation))
+        let chroma = saturation < 0.06 ? saturation : min(0.25, max(0.10, saturation))
         let top = UIColor(hue: hue, saturation: chroma,
                           brightness: min(0.94, max(0.86, brightness)), alpha: 1)
         let pale = UIColor(PageColor(rgb: 0xffffff))
@@ -34,24 +58,17 @@ class MusicPlayerBackgroundView: UIView {
         top.getRed(&r, green: &g, blue: &b, alpha: &alpha)
         let head = UIColor(red: r + (1 - r) * amount, green: g + (1 - g) * amount,
                            blue: b + (1 - b) * amount, alpha: 1)
-        let next = [head.cgColor, pale.cgColor]
-        guard next != colors else { return }
-        if animated, !UIAccessibility.isReduceMotionEnabled {
-            let animation = CABasicAnimation(keyPath: "colors")
-            animation.fromValue = gradient.presentation()?.colors ?? colors
-            animation.toValue = next
-            animation.duration = 0.3
-            gradient.add(animation, forKey: "player.palette")
+        return [head, pale]
+    }
+
+    static func lyricColors(palette: PagePalette, artwork: Bool) -> MusicLyricColors {
+        let backgrounds = backgroundColors(palette: palette, style: .full).map { color -> PageColor in
+            var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+            color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            return PageColor(rgb: UInt32((red * 255).rounded()) << 16 |
+                UInt32((green * 255).rounded()) << 8 | UInt32((blue * 255).rounded()))
         }
-        colors = next
-        backgroundColor = pale
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        gradient.colors = next
-        gradient.locations = [0, style == .card ? 0.82 : 1]
-        gradient.startPoint = CGPoint(x: 0.5, y: 0)
-        gradient.endPoint = CGPoint(x: 0.5, y: 1)
-        CATransaction.commit()
+        return MusicLyricColors(backgrounds: backgrounds, accent: palette.lightAccent, artwork: artwork)
     }
 
     override func layoutSubviews() {

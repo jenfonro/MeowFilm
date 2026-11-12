@@ -6,11 +6,11 @@
   <ItemGroup>
     <Resource Include="Accounts/Presentation/Assets/*.png" />
     <Resource Include="Film/Presentation/Assets/*.jpg" />
-    <EmbeddedResource Include="../../../../packages/film-rules/film-rules.js" LogicalName="MeowFilm.FilmRules.js" />
-    <EmbeddedResource Include="../../../../packages/film-search/film-search.js" LogicalName="MeowFilm.FilmSearch.js" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="ZXing.Net" Version="[0.16.11]" />
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="[3.2.1]" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="[1.0.4314.35]" />
     <ProjectReference Include="../MeowFilm.Desktop/MeowFilm.Desktop.csproj" />
     <ProjectReference Include="../MeowFilm.Platform/MeowFilm.Platform.csproj" />
     <ProjectReference Include="../MeowFilm.Media/MeowFilm.Media.csproj" />

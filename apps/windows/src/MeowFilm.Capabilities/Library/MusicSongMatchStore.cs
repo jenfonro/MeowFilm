@@ -9,128 +9,67 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Library;
 
 /// <summary>Disposable recording facts and scoped observations, separate from local membership and playback data.</summary>
-internal sealed class MusicSongMatchStore(IDocumentStore store)
+internal sealed class MusicSongMatchStore(CacheDocumentStore store)
 {
     internal const string Namespace = "music.song-matches.v1";
     private const int MaximumBytes = 4 * 1024 * 1024;
     private readonly SemaphoreSlim gate = new(1, 1);
-    private sealed record Snapshot(IReadOnlyList<JsonObject> Entries, DocumentFingerprint Fingerprint);
 
     internal async Task<IReadOnlyList<JsonObject>> ReadAsync(CancellationToken cancellationToken)
     {
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var saved = await ReadCurrentAsync(cancellationToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            return saved.Entries;
-        }
-        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
-        { throw MusicPlaybackCacheDataException.FromStore(error); }
-        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
-        { return []; }
-        finally { gate.Release(); }
+        try { return await ReadCurrentAsync(cancellationToken).ConfigureAwait(false); }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return []; }
     }
 
     internal async Task WriteAsync(IReadOnlyList<JsonObject> entries, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(entries);
-        byte[] encoded = Encode(entries, cancellationToken);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        byte[]? encoded = null;
         try
         {
-            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                var before = await ReadCurrentAsync(cancellationToken).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
-                var expected = DocumentFingerprint.FromBytes(encoded);
-                if (before.Fingerprint == expected ||
-                    before.Fingerprint == DocumentFingerprint.Missing && encoded.AsSpan().SequenceEqual("{\"version\":2,\"entries\":[]}"u8))
-                    return;
-                DocumentFingerprint receipt;
-                try
-                {
-                    // After CAS admission, cancellation cannot imply that the write was rolled back.
-                    receipt = await store.WriteAsync(Namespace, encoded, before.Fingerprint, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
-                {
-                    // Validate the durable outcome, then abandon this snapshot rather than replaying it
-                    // over a competing write. A future caller supplies a fresh eligibility snapshot.
-                    _ = await ReadCurrentAsync(CancellationToken.None).ConfigureAwait(false);
-                    return;
-                }
-                if (receipt != expected)
-                {
-                    var actual = await ReadCurrentAsync(CancellationToken.None).ConfigureAwait(false);
-                    if (actual.Fingerprint != expected) throw new MusicPlaybackCacheCommitException();
-                }
-            }
-            catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
-            { throw MusicPlaybackCacheDataException.FromStore(error); }
-            catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
-            { }
-            finally { gate.Release(); }
+            encoded = Encode(entries, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            store.Save(Namespace, encoded);
         }
-        finally { CryptographicOperations.ZeroMemory(encoded); }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
+        finally
+        {
+            if (encoded is not null) CryptographicOperations.ZeroMemory(encoded);
+            gate.Release();
+        }
     }
 
-    private async Task<Snapshot> ReadCurrentAsync(CancellationToken token)
+    private async Task<IReadOnlyList<JsonObject>> ReadCurrentAsync(CancellationToken token)
     {
         var saved = await store.ReadAsync(Namespace, token).ConfigureAwait(false);
         try
         {
-            if (saved.Data is null)
-            {
-                if (saved.Fingerprint != DocumentFingerprint.Missing) throw MusicPlaybackCacheDataException.Corrupt();
-                return new([], saved.Fingerprint);
-            }
-            if (saved.Data.Length == 0 || DocumentFingerprint.FromBytes(saved.Data) != saved.Fingerprint)
-                throw MusicPlaybackCacheDataException.Corrupt();
-            if (saved.Data.Length > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
-            using var document = JsonDocument.Parse(saved.Data, new JsonDocumentOptions { MaxDepth = 32 });
-            var root = document.RootElement;
-            CheckJson(root);
-            Fields(root, "version", "entries");
-            if (root.GetProperty("version").GetRawText() != "2")
-                throw MusicPlaybackCacheDataException.UnsupportedVersion();
-            var entries = root.GetProperty("entries");
-            if (entries.ValueKind != JsonValueKind.Array) throw MusicPlaybackCacheDataException.Corrupt();
-            var keys = new HashSet<string>(StringComparer.Ordinal);
+            if (saved.Data is null || saved.Data.Length > MaximumBytes) return [];
+            using var document = JsonDocument.Parse(saved.Data);
             var result = new List<JsonObject>();
-            foreach (var entry in entries.EnumerateArray())
+            foreach (var entry in document.RootElement.GetProperty("entries").EnumerateArray())
             {
-                string key = ValidateEntry(entry);
-                if (!keys.Add(key)) throw MusicPlaybackCacheDataException.Corrupt();
-                result.Add(JsonNode.Parse(entry.GetRawText())!.AsObject());
+                result.Add(DecodeEntry(entry));
             }
-            return new(result, saved.Fingerprint);
+            return result;
         }
-        catch (MusicPlaybackCacheDataException) { throw; }
-        catch (MusicLibraryException) { throw MusicPlaybackCacheDataException.Corrupt(); }
-        catch (Exception error) when (error is JsonException or InvalidOperationException or
-            ArgumentException or FormatException or OverflowException or KeyNotFoundException)
-        { throw MusicPlaybackCacheDataException.Corrupt(); }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        { return []; }
         finally { if (saved.Data is { } bytes) CryptographicOperations.ZeroMemory(bytes); }
     }
 
     private static byte[] Encode(IReadOnlyList<JsonObject> entries, CancellationToken token)
     {
         var retained = new Queue<byte[]>();
-        long length = "{\"version\":2,\"entries\":[]}"u8.Length;
-        var keys = new HashSet<string>(StringComparer.Ordinal);
+        long length = "{\"entries\":[]}"u8.Length;
         try
         {
             foreach (var entry in entries)
             {
                 token.ThrowIfCancellationRequested();
-                byte[]? bytes = JsonSerializer.SerializeToUtf8Bytes(entry, LJ.Json);
+                byte[]? bytes = JsonSerializer.SerializeToUtf8Bytes(PersistentEntry(entry), LJ.Json);
                 try
                 {
-                    using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 32 });
-                    CheckJson(document.RootElement);
-                    string key = ValidateEntry(document.RootElement);
-                    if (!keys.Add(key)) throw MusicPlaybackCacheDataException.Corrupt();
                     length += bytes.Length + (retained.Count == 0 ? 0 : 1);
                     retained.Enqueue(bytes);
                     bytes = null;
@@ -147,7 +86,6 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
             using (var writer = new Utf8JsonWriter(output))
             {
                 writer.WriteStartObject();
-                writer.WriteNumber("version", 2);
                 writer.WriteStartArray("entries");
                 foreach (byte[] entry in retained) writer.WriteRawValue(entry, skipInputValidation: true);
                 writer.WriteEndArray();
@@ -163,53 +101,82 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
         finally { foreach (byte[] bytes in retained) CryptographicOperations.ZeroMemory(bytes); }
     }
 
-    /// <summary>Lets the owner skip one ineligible derived entry instead of failing every write.</summary>
-    internal static bool Accepts(JsonObject entry)
+    // Project the owner's facts only. Candidates, credentials and request authority are not persisted.
+    private static JsonObject PersistentEntry(JsonObject entry)
     {
-        try
+        var platforms = new JsonObject();
+        foreach (var pair in entry["platforms"]!.AsObject())
         {
-            using var document = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(entry, LJ.Json),
-                new JsonDocumentOptions { MaxDepth = 32 });
-            CheckJson(document.RootElement);
-            _ = ValidateEntry(document.RootElement);
-            return true;
+            var status = new JsonObject();
+            foreach (string field in new[] { "state", "checkedAt", "context", "query", "code", "page", "pages", "limit", "matchedAt" })
+                status[field] = pair.Value![field]?.DeepClone();
+            platforms[pair.Key] = status;
         }
-        catch (Exception error) when (error is MusicPlaybackCacheDataException or MusicLibraryException or JsonException or
-            InvalidOperationException or ArgumentException or FormatException or OverflowException or KeyNotFoundException)
-        { return false; }
+        RejectUrls(JsonSerializer.SerializeToElement(platforms));
+        var song = NativeMusicSong.Normalize(entry["song"]);
+        foreach (var source in song["sources"]!.AsArray())
+        {
+            RejectUrls(JsonSerializer.SerializeToElement(source!["sourceKey"]));
+            foreach (var field in source["musicInfo"]!.AsObject())
+                if (field.Key is not ("img" or "name" or "singer" or "albumName"))
+                    RejectUrls(JsonSerializer.SerializeToElement(field.Value));
+        }
+        return new JsonObject
+        {
+            ["key"] = entry["key"]?.DeepClone(),
+            ["song"] = song,
+            ["platforms"] = platforms,
+            ["excluded"] = entry["excluded"]?.DeepClone()
+        };
     }
 
-    private static string ValidateEntry(JsonElement entry)
+    private static JsonObject DecodeEntry(JsonElement entry)
     {
-        Fields(entry, "key", "song", "platforms", "excluded");
         string key = Text(entry.GetProperty("key"), 16);
         Hash(key);
         var rawSong = entry.GetProperty("song");
         if (rawSong.ValueKind != JsonValueKind.Object) throw MusicPlaybackCacheDataException.Corrupt();
-        var song = JsonNode.Parse(rawSong.GetRawText())!.AsObject();
-        if (!JsonNode.DeepEquals(song, NativeMusicSong.Normalize(song))) throw MusicPlaybackCacheDataException.Corrupt();
+        var songFields = new JsonObject();
+        foreach (string field in new[] { "songId", "title", "artist", "album", "duration", "cover_url" })
+            songFields[field] = JsonNode.Parse(rawSong.GetProperty(field).GetRawText());
+        var decodedSongSources = new JsonArray();
         foreach (var source in rawSong.GetProperty("sources").EnumerateArray())
         {
-            RejectUrls(source.GetProperty("sourceKey"));
-            foreach (var field in source.GetProperty("musicInfo").EnumerateObject())
-                if (field.Name is not ("img" or "name" or "singer" or "albumName")) RejectUrls(field.Value);
+            string platform = source.GetProperty("source").GetString()!;
+            string sourceKey = source.GetProperty("sourceKey").GetString()!;
+            var info = JsonNode.Parse(source.GetProperty("musicInfo").GetRawText())!.AsObject();
+            if (info["source"]?.GetValue<string>() != platform) throw MusicPlaybackCacheDataException.Corrupt();
+            var decodedSource = NativeMusicSong.CreateSource(platform, info,
+                info["name"]?.GetValue<string>() ?? "", info["singer"]?.GetValue<string>() ?? "",
+                info["albumName"]?.GetValue<string>() ?? "", info["duration"]?.GetValue<double>() ?? 0,
+                info["img"]?.GetValue<string>() ?? "");
+            if (decodedSource["sourceKey"]!.GetValue<string>() != sourceKey)
+                throw MusicPlaybackCacheDataException.Corrupt();
+            RejectUrls(JsonSerializer.SerializeToElement(sourceKey));
+            foreach (var field in decodedSource["musicInfo"]!.AsObject())
+                if (field.Key is not ("img" or "name" or "singer" or "albumName"))
+                    RejectUrls(JsonSerializer.SerializeToElement(field.Value));
+            decodedSongSources.Add(decodedSource);
         }
+        songFields["sources"] = decodedSongSources;
+        var song = NativeMusicSong.Normalize(songFields);
         var platforms = entry.GetProperty("platforms");
         if (platforms.ValueKind != JsonValueKind.Object) throw MusicPlaybackCacheDataException.Corrupt();
+        var decodedPlatforms = new JsonObject();
         foreach (var platform in platforms.EnumerateObject())
         {
             if (!NativeMusicSong.Platforms.Contains(platform.Name)) throw MusicPlaybackCacheDataException.Corrupt();
             var status = platform.Value;
-            Fields(status, "state", "checkedAt", "context", "query", "code", "page", "pages", "limit", "matchedAt");
-            if (Text(status.GetProperty("state"), 8) is not ("matched" or "notFound" or "failed"))
+            string state = Text(status.GetProperty("state"), 8);
+            if (state is not ("matched" or "notFound" or "failed"))
                 throw MusicPlaybackCacheDataException.Corrupt();
             var at = status.GetProperty("checkedAt");
             if (at.ValueKind != JsonValueKind.Number || !at.TryGetInt64(out long checkedAt) || checkedAt < 0)
                 throw MusicPlaybackCacheDataException.Corrupt();
             string context = Text(status.GetProperty("context"), 16);
             if (context.Length > 0) Hash(context);
-            _ = Text(status.GetProperty("query"), 256);
-            _ = Text(status.GetProperty("code"), 80);
+            string query = Text(status.GetProperty("query"), 256);
+            string code = Text(status.GetProperty("code"), 80);
             int page = Positive(status.GetProperty("page")), pages = Positive(status.GetProperty("pages"));
             int limit = Positive(status.GetProperty("limit"));
             var paging = MusicSearchPaging.For(platform.Name);
@@ -219,17 +186,24 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
             if (matched.ValueKind != JsonValueKind.Null &&
                 (matched.ValueKind != JsonValueKind.Number || !matched.TryGetInt64(out long matchedAt) ||
                     matchedAt < 0 || matchedAt > checkedAt)) throw MusicPlaybackCacheDataException.Corrupt();
+            decodedPlatforms[platform.Name] = new JsonObject
+            {
+                ["state"] = state, ["checkedAt"] = checkedAt, ["context"] = context,
+                ["query"] = query, ["code"] = code, ["page"] = page, ["pages"] = pages, ["limit"] = limit,
+                ["matchedAt"] = matched.ValueKind == JsonValueKind.Null ? null : JsonValue.Create(matched.GetInt64())
+            };
         }
         var excluded = entry.GetProperty("excluded");
         if (excluded.ValueKind != JsonValueKind.Array) throw MusicPlaybackCacheDataException.Corrupt();
+        var decodedExcluded = new JsonArray();
         var scopes = new HashSet<string>(StringComparer.Ordinal);
         foreach (var scope in excluded.EnumerateArray())
         {
-            Fields(scope, "key", "sources");
             string owner = Text(scope.GetProperty("key"), 16); Hash(owner);
             if (!scopes.Add(owner)) throw MusicPlaybackCacheDataException.Corrupt();
             var sources = scope.GetProperty("sources");
             if (sources.ValueKind != JsonValueKind.Array) throw MusicPlaybackCacheDataException.Corrupt();
+            var decodedSources = new JsonArray();
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var source in sources.EnumerateArray())
             {
@@ -245,28 +219,20 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
                     throw MusicPlaybackCacheDataException.Corrupt();
                 _ = Text(parts[2], 2048);
                 RejectUrls(parts);
+                decodedSources.Add(sourceKey);
             }
+            decodedExcluded.Add(new JsonObject { ["key"] = owner, ["sources"] = decodedSources });
         }
         // Canonical songs already whitelist public artwork locators. Do not confuse those
         // stable metadata URLs with playback URLs or credentials.
-        RejectUrls(platforms);
-        return key;
+        RejectUrls(JsonSerializer.SerializeToElement(decodedPlatforms));
+        return new JsonObject
+        {
+            ["key"] = key, ["song"] = song, ["platforms"] = decodedPlatforms, ["excluded"] = decodedExcluded
+        };
     }
 
-    private static void CheckJson(JsonElement value)
-    {
-        if (value.ValueKind == JsonValueKind.Object)
-        {
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var property in value.EnumerateObject())
-            {
-                if (!seen.Add(property.Name)) throw MusicPlaybackCacheDataException.Corrupt();
-                CheckJson(property.Value);
-            }
-        }
-        else if (value.ValueKind == JsonValueKind.Array)
-            foreach (var item in value.EnumerateArray()) CheckJson(item);
-    }
+
 
     private static void RejectUrls(JsonElement value)
     {
@@ -284,13 +250,7 @@ internal sealed class MusicSongMatchStore(IDocumentStore store)
             foreach (var item in value.EnumerateArray()) RejectUrls(item);
     }
 
-    private static void Fields(JsonElement value, params string[] fields)
-    {
-        if (value.ValueKind != JsonValueKind.Object) throw MusicPlaybackCacheDataException.Corrupt();
-        var names = value.EnumerateObject().Select(property => property.Name).ToArray();
-        if (names.Length != fields.Length || fields.Any(field => !names.Contains(field, StringComparer.Ordinal)))
-            throw MusicPlaybackCacheDataException.Corrupt();
-    }
+
 
     private static string Text(JsonElement value, int maximum)
     {

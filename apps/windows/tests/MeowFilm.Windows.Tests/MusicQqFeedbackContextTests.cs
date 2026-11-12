@@ -122,11 +122,11 @@ public static class MusicQqFeedbackContextTests
             var document = await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace);
             var raw = JsonNode.Parse(document.Data!)!.AsObject(); CryptographicOperations.ZeroMemory(document.Data!);
             var entries = raw["entries"]!.AsArray();
-            Check(entries.Count == 2 && entries.Single(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("tx"))!["value"]!.AsObject().Count == 6);
+            Check(entries.Count == 1 && entries.Single(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("tx"))!["value"]!.AsObject().Count == 6);
             var accounts = AccountDocument.Decode(await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace));
-            var details = accounts.GetDetails("tx");
-            Check(details is not null && details.BelongsTo(accounts.Get("tx")) &&
-                details.Rights.Membership.Vip == false, "Login rights remain bound alongside the feedback device");
+            var details = await f.Owner.ReadDetailsAsync("tx");
+            Check(details.Generation == accounts.Get("tx").Generation && details.Profile?.UserId == accounts.Get("tx").Profile?.UserId &&
+                details.Membership.Vip == false, "Login display rights remain bound independently of the feedback device");
             foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             {
                 byte[] bytes = await File.ReadAllBytesAsync(file);

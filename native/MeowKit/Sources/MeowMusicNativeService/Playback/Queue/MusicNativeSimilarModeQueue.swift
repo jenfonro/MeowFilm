@@ -11,7 +11,7 @@ extension NativeMusicService {
         do { return try transaction(areas, change) }
         catch MusicServiceError.commitUnconfirmed {
             clearFMPlayback(); clearSimilarRuntime()
-            invalidatePlayback()
+            invalidatePlayback(reason: .interrupt)
             throw MusicServiceError.commitUnconfirmed
         }
     }
@@ -22,6 +22,7 @@ extension NativeMusicService {
         try lease.authorization.check()
         guard item.status == .ready, !item.songs.isEmpty else { throw item.error ?? MusicServiceError.notFound }
         if let candidateIndex { try musicRequire(item.songs.indices.contains(candidateIndex)) }
+        else { try musicRequire(item.enterAfter, .targetChanged) }
         let before = try read()
         try musicRequire(similarEntranceIsCurrent(item, before), .targetChanged)
         var seed = item.fromHome ? nil : before.queue["entries"].array.first { $0["id"].string == item.entryID }
@@ -35,13 +36,15 @@ extension NativeMusicService {
         let session = MusicNativeSimilarSession(seed: item.seed, seedEntryID: seed?["id"].string,
             returnQueue: returnQueue, fromHome: item.fromHome, provider: item.provider,
             sourceIDs: item.sourceIDs, context: item.context, scope: item.scope, lease: lease)
-        session.continueEnabled = item.provider != .heartbeat
+        session.continueEnabled = candidateIndex == nil
         session.offset = item.offset
         session.exhausted = item.exhausted
         let batchID = UUID().uuidString.lowercased()
+        var live: [String: MJ] = [:]
         let state = try lease.authorization.perform {
             try similarQueueTransaction(["queue", "playback", "history"]) { d in
                 try musicRequire(similarEntranceIsCurrent(item, d), .targetChanged)
+                if session.continueEnabled { selectContinuationMode(&d) }
                 let old = d.queue
                 let title = item.fromHome && item.provider == .heartbeat ? "心动模式" :
                     "根据 \(MusicNativeSimilarData.display(item.seed).title) 推荐"
@@ -76,7 +79,7 @@ extension NativeMusicService {
                 session.batches = [MusicNativeSimilarData.batch(batchID, basedOn: item.seed, provider: item.provider, rows: rows)]
                 for row in rows {
                     if let id = MusicNativeSimilarData.nativeID(row["song"]), let value = item.recommendations[id] {
-                        session.liveRecommendations[row["id"].string] = value
+                        live[row["id"].string] = value
                     }
                 }
                 d.queue["similar"] = session.saved
@@ -85,6 +88,9 @@ extension NativeMusicService {
                 return stateDTO(d)
             }
         }
+        retainQueueFeedbackOrigins(live, authorization: lease.authorization,
+            action: item.context.map { .heartbeatSong(songID: $0.seedID) },
+            seedIDs: item.context.map { [$0.seedID] } ?? item.sourceIDs)
         // Transfer the original lease/observer, without revoking its fence.
         similarMode.preview = nil
         if let old = similarMode.active {
@@ -93,12 +99,11 @@ extension NativeMusicService {
         discardQueueRecommendations()
         clearFMPlayback()
         similarMode.active = session; similarMode.restored = true
-        playbackFeedbackAdmission = nil
         similarMode.navigation = UUID()
         let play = item.fromHome || candidateIndex != nil
         if play {
-            similarMode.playing = nil; similarMode.playbackEvent = nil; similarMode.eventOccurrence = nil
-            invalidatePlayback()
+            similarMode.playing = nil
+            invalidatePlayback(reason: .ui)
         }
         emitSimilar()
         if !play { try? similarBoundary() }
@@ -137,7 +142,7 @@ extension NativeMusicService {
         let playing = similarMode.playing
         clearSimilarRuntime(); similarMode.restored = true
         if keep { similarMode.playing = playing }
-        else { invalidatePlayback() }
+        else { invalidatePlayback(reason: .ui) }
         return .init(state: state, action: keep ? .keepCurrent : .restoreOnly)
     }
 
@@ -168,26 +173,29 @@ extension NativeMusicService {
         return true
     }
 
-    /// Fetching is independent of navigation. Only a real new play event draws
-    /// the shuffle decision; pause/resume, progress and UI reads reuse it.
+    /// Only actual playback of the queue tail can trigger continuation.
     func continuationIsDue(_ d: MusicDocument) -> Bool {
-        guard hasCurrentPlayback(d) else { return false }
-        if d.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue { return similarMode.randomFetch }
-        return d.queue["entries"].array.last?["id"] == d.queue["currentId"]
+        hasCurrentPlayback(d) && d.playback["mode"].int == MusicPlaybackMode.loop.rawValue &&
+            d.queue["entries"].array.last?["id"] == d.queue["currentId"]
     }
 
     func similarBoundary(retry: Bool = false) throws {
-        guard let session = similarMode.active, session.provider != .heartbeat,
+        guard let session = similarMode.active,
               session.continueEnabled, session.pending == nil, !session.exhausted else { return }
         try check(); try session.lease.authorization.check()
         let d = try read()
-        let event = d.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue ? similarMode.playbackEvent ?? "" :
-            d.queue["currentId"].string + ":" + String(session.offset)
+        let event = d.queue["currentId"].string + ":" + String(session.offset)
         guard retry || (session.buffered != nil || !session.attempted.contains(event)) && continuationIsDue(d) else { return }
         session.attempted.insert(event)
         let request: MusicNativeSimilarModeRequest
         switch session.provider {
-        case .heartbeat: return
+        case .heartbeat:
+            guard let context = session.context,
+                  let tail = d.queue["entries"].array.last,
+                  let lastID = MusicNativeSimilarData.nativeID(tail["song"]) else {
+                throw MusicServiceError.sourceUnavailable
+            }
+            request = .heartbeat(lastID: lastID, fromHome: session.fromHome, context: context)
         case .songRoaming: request = .songRoaming(sourceIDs: session.sourceIDs)
         case .artistRoaming: request = .artistRoaming(sourceIDs: session.sourceIDs)
         case .queueRecommendations:
@@ -224,6 +232,9 @@ extension NativeMusicService {
             try await owner.checkAccountQueue(lease)
             try check(own); try lease.authorization.check()
             guard similarMode.active === session, session.pendingID == requestID else { return }
+            if session.provider == .heartbeat {
+                try musicRequire(response.heartbeatContext == session.context, .targetChanged)
+            }
             let incoming = try MusicNativeSimilarData.songs(response)
             let offset: Int
             if session.provider == .queueRecommendations {
@@ -249,6 +260,10 @@ extension NativeMusicService {
                                               ("provider", .string(session.provider.rawValue))]))
                         ]))
                         for i in rows.indices {
+                            if session.provider == .heartbeat {
+                                rows[i]["context"]["platform"] = .string("wy")
+                                rows[i]["context"]["sourceId"] = .string("favorites")
+                            }
                             if let id = MusicNativeSimilarData.nativeID(rows[i]["song"]), let value = recommendations[id] {
                                 rows[i]["context"]["recommendation"] = value; live[rows[i]["id"].string] = value
                             }
@@ -268,7 +283,9 @@ extension NativeMusicService {
             if let batch { session.batches.append(batch) }
             session.buffered = nil
             session.offset = offset
-            session.liveRecommendations.merge(live) { _, new in new }
+            retainQueueFeedbackOrigins(live, authorization: session.lease.authorization,
+                action: session.context.map { .heartbeatSong(songID: $0.seedID) },
+                seedIDs: session.context.map { [$0.seedID] } ?? session.sourceIDs)
             session.status = .ready; session.exhausted = exhausted
         } catch {
             guard similarMode.active === session, session.pendingID == requestID else { return }
@@ -301,7 +318,6 @@ extension NativeMusicService {
     func similarDidChangeQueue(_ change: MusicNativeSimilarQueueChange) {
         if change == .replace || change == .clear {
             clearFMPlayback(); clearSimilarRuntime(); similarMode.restored = true
-            similarMode.playbackEvent = nil; similarMode.eventOccurrence = nil
             return
         }
         guard let d = try? read() else { return }
@@ -310,7 +326,7 @@ extension NativeMusicService {
         }
         discardSimilarPreview()
         if change == .select {
-            similarMode.playing = nil; similarMode.playbackEvent = nil; similarMode.eventOccurrence = nil
+            similarMode.playing = nil
         }
         if let item = similarMode.queue {
             if change == .append && !item.active { discardQueueRecommendations() }
@@ -332,14 +348,10 @@ extension NativeMusicService {
         if direction == .next, before.queue["priority"].array.isEmpty,
            let item = similarMode.queue, !item.active, !item.songs.isEmpty, item.status == .ready,
            before.queue["entries"].array.last?["id"] == before.queue["currentId"],
-           reason == .manual || (item.continueEnabled && before.playback["mode"].int != MusicPlaybackMode.single.rawValue) {
-            if reason == .ended, before.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue {
-                let state = try appendQueueRecommendations(item)
-                return (state.revision, nil)
-            }
+           item.continueEnabled, before.playback["mode"].int == MusicPlaybackMode.loop.rawValue {
             let state = try appendQueueRecommendations(item, selectedIndex: 0)
             if reason == .ended { attempt?.endedConsumed = true }
-            invalidatePlayback(); similarDidChangeQueue(.select)
+            invalidatePlayback(reason: reason == .ended ? .playend : .ui); similarDidChangeQueue(.select)
             return (state.revision, .init(state: state, selectedId: state.currentId))
         }
         return (expectedRevision, nil)

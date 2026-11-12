@@ -8,11 +8,13 @@
     "node": "^18.20.4 || ^22.0.0 || ^24.0.0"
   },
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./metadata-query": "./src/metadata-query.js"
   },
   "files": ["src"],
   "dependencies": {
     "@meowfilm/film-rules": "0.1.0",
+    "@meowfilm/film-search": "0.1.0",
     "@meowfilm/script-host": "0.3.0"
   }
 }

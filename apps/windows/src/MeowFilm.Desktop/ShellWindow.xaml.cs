@@ -58,15 +58,15 @@ public sealed partial class ShellWindow : Window
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
-        IDesktopMediaControlSettings? mediaControls = null)
+        IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
         : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance,
-            closePreferences, mediaControls: mediaControls) { }
+            closePreferences, mediaControls: mediaControls, resetUserData: resetUserData) { }
 
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
         Func<Window, Action, Action, Action, IDesktopTrayIcon>? trayIconFactory = null,
-        IDesktopMediaControlSettings? mediaControls = null)
+        IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
         _timeProvider = timeProvider;
@@ -88,13 +88,18 @@ public sealed partial class ShellWindow : Window
         _forceShutdown = forceShutdown;
         _cancelShutdown = cancelShutdown;
         _shutdown = shutdown;
+        _resetUserData = resetUserData;
         MediaControls = mediaControls;
         _closePreferences = closePreferences;
         _trayIconFactory = trayIconFactory;
         InitializeComponent();
+        ChannelDialogHost.Attach(this);
         InitializeGeneralSettings(appearance, closePreferences);
         CloseDialog.ChoiceRequested += OnCloseChoiceRequested;
         CloseDialog.CancelRequested += CancelCloseChoice;
+        ResetDialog.ConfirmRequested += OnUserDataResetConfirmed;
+        ResetDialog.CancelRequested += CancelUserDataReset;
+        ResetDialog.ExitRequested += OnUserDataResetExit;
         AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
         {
             Notices.Show(e.Outlet, e.Message);
@@ -278,6 +283,13 @@ public sealed partial class ShellWindow : Window
         ApplyModuleAccent(current);
         ApplyHeaderPresentation(current);
         ApplyGlobalSurfacePresentation(current);
+        bool immersive = _currentPage is null && !current.IsSettingsOpen &&
+            current.Module is IDesktopImmersiveSource { IsImmersive: true };
+        RootLayout.ColumnDefinitions[0].Width = new(immersive ? 0 : 203);
+        PageHeaderHost.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
+        SidebarBackground.Visibility = Brand.Visibility = SidebarScroll.Visibility =
+            immersive ? Visibility.Collapsed : Visibility.Visible;
+        if (immersive) PlayerFrame.Visibility = Visibility.Collapsed;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
             current.IsSettingsOpen || _returnPage is not null || _history.Count > 1;
         ApplySearchPresentation();
@@ -617,8 +629,16 @@ public sealed partial class ShellWindow : Window
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (CloseDialog.IsOpen) return; // The close dialog owns keyboard navigation and Escape.
+        if (CloseDialog.IsOpen || ResetDialog.IsOpen) return; // The active dialog owns keyboard navigation and Escape.
         if (_isClosing) return;
+        if (ChannelDialogHost.IsOpen)
+        {
+            if (!ChannelDialogHost.HandleEscape(e)) ProtectChannelKeyboard(e);
+            if (e.Key == Key.F && e.KeyboardDevice.Modifiers == ModifierKeys.Control ||
+                (e.Key == Key.Left || e.SystemKey == Key.Left) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
+                e.Handled = true;
+            return;
+        }
         // Let a native range editor cancel its own gesture before Escape closes
         // the full player. The shell must not depend on a music-specific type.
         if (e.Key == Key.Escape && (Mouse.Captured is Slider || Keyboard.FocusedElement is Slider)) return;
@@ -645,6 +665,30 @@ public sealed partial class ShellWindow : Window
             e.Handled = true;
             RunUiAction(GoBackAsync);
         }
+    }
+
+    private void ProtectChannelKeyboard(KeyEventArgs e)
+    {
+        // Only controls within the active channel keep their own keyboard input.
+        if (e.OriginalSource is not DependencyObject target ||
+            !ChannelDialogHost.IsAncestorOf(target)) e.Handled = true;
+    }
+
+    private void OnPreviewKeyUp(object sender, KeyEventArgs e)
+    {
+        if (!CloseDialog.IsOpen && !ResetDialog.IsOpen && ChannelDialogHost.IsOpen)
+            ProtectChannelKeyboard(e);
+    }
+
+    private void OnChannelHeaderPointer(object sender, MouseButtonEventArgs e)
+    {
+        if (CloseDialog.IsOpen || ResetDialog.IsOpen || !ChannelDialogHost.IsOpen) return;
+        bool In(FrameworkElement control) => e.OriginalSource is DependencyObject target &&
+            (ReferenceEquals(target, control) || control.IsAncestorOf(target));
+        if (ChannelDialogHost.HasOutsidePress || In(SearchChrome) || In(SettingsButton) || In(PlayerDetailBackButton) ||
+            In(PageHeaderHost) && e.OriginalSource is IInputElement node &&
+            System.Windows.Shell.WindowChrome.GetIsHitTestVisibleInChrome(node))
+            ChannelDialogHost.HandleOutsidePointer(e, RootLayout);
     }
 
     private async Task RunRequestAsync(RequestPlan plan, CancellationToken cancellationToken = default, bool reportOutcome = false)
@@ -898,7 +942,7 @@ public sealed partial class ShellWindow : Window
         base.OnClosing(e);
         if (_allowClose || _sessionEnding || e.Cancel) return;
         e.Cancel = true;
-        if (_isClosing) return;
+        if (_isClosing || ResetDialog.IsOpen) return;
         if (_closePreferences is not null)
         {
             QueueCloseChoice();
@@ -909,7 +953,11 @@ public sealed partial class ShellWindow : Window
 
     private void BeginShutdown()
     {
-        if (_isClosing || _isClosed) return;
+        if (_isClosed || (_isClosing && !(_userDataResetStarted && _sessionEnding)) ||
+            (ResetDialog.IsOpen && !_sessionEnding)) return;
+        // OS session ending retains its existing best-effort shutdown path.
+        // Ordinary close/tray exit cannot compete with a confirmed reset.
+        if (_sessionEnding) ResetDialog.Visibility = Visibility.Collapsed;
         DismissCloseChoice(restoreFocus: false);
         _isClosing = true;
         _state.IsInteractive = false;
@@ -1054,8 +1102,10 @@ public sealed partial class ShellWindow : Window
         DisposeGlobalSurfaces();
         _nativeCaption?.Dispose();
         _nativeCaption = null;
-        // Covers forced closure as well; it shares the once-only attempt used by normal Closing.
-        _ = EnsureShutdownAsync();
+        // A confirmed reset is already released by the App's abort/replacement path.
+        // Only ordinary/OS closure shares the once-only normal shutdown attempt.
+        if (!_userDataResetStarted || _sessionEnding) _ = EnsureShutdownAsync();
+        else _shutdownCompletion.TrySetResult();
         base.OnClosed(e);
     }
 }

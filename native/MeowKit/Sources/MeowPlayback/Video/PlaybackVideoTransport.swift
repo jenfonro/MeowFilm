@@ -5,6 +5,7 @@ import MeowVideoKernel
 
 @MainActor
 final class PlaybackVideoTransport {
+    var systemRelease: Task<NativePlaybackError?, Never>?
     let media: PlaybackVideoMediaLease
     let title: String
     let kernel: VideoSession

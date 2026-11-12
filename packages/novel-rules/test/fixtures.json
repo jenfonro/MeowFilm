@@ -1,0 +1,93 @@
+[
+  {
+    "name": "purification precedes display conversion without changing image metadata",
+    "input": {
+      "operation": "transform",
+      "title": "广告·图书",
+      "blocks": [
+        { "type": "text", "text": "第一段" },
+        { "type": "text", "text": "广告第二段小说" },
+        { "type": "image", "src": "https://fixture.test/图书.png", "alt": "图书" },
+        { "type": "text", "text": "读书广告" }
+      ],
+      "book": { "name": "雨夜来信", "author": "林舟" },
+      "source": { "sourceUrl": "https://fixture.test" },
+      "rules": [
+        {
+          "id": "join", "name": "跨段处理", "order": 1,
+          "pattern": "第一段\\n广告", "replacement": "",
+          "isRegex": true, "isEnabled": true,
+          "scopeTitle": false, "scopeContent": true, "timeoutMillisecond": 3000
+        },
+        {
+          "id": "remove", "name": "删除广告", "order": 2,
+          "pattern": "广告", "replacement": "",
+          "isRegex": false, "isEnabled": true,
+          "scopeTitle": true, "scopeContent": true, "timeoutMillisecond": 3000
+        }
+      ],
+      "conversion": "traditional"
+    },
+    "expected": {
+      "title": "·圖書",
+      "blocks": [
+        { "type": "text", "text": "第二段小說" },
+        { "type": "image", "src": "https://fixture.test/图书.png", "alt": "图书" },
+        { "type": "text", "text": "讀書" }
+      ]
+    }
+  },
+  {
+    "name": "scope exclusion and title-only replacement are identical on both platforms",
+    "input": {
+      "operation": "transform",
+      "title": "章节12",
+      "blocks": [{ "type": "text", "text": "广告章节12" }],
+      "book": { "name": "雨夜来信", "author": "林舟" },
+      "source": { "sourceUrl": "https://fixture.test" },
+      "rules": [
+        {
+          "id": "excluded", "order": 0,
+          "pattern": "广告", "replacement": "",
+          "isRegex": false, "isEnabled": true,
+          "scope": "《雨夜来信》", "excludeScope": "https://fixture.test",
+          "scopeTitle": true, "scopeContent": true, "timeoutMillisecond": 3000
+        },
+        {
+          "id": "title", "order": 1,
+          "pattern": "章节(\\d+)", "replacement": "第$1章",
+          "isRegex": true, "isEnabled": true,
+          "scopeTitle": true, "scopeContent": false, "timeoutMillisecond": 3000
+        }
+      ],
+      "conversion": "none"
+    },
+    "expected": {
+      "title": "第12章",
+      "blocks": [{ "type": "text", "text": "广告章节12" }]
+    }
+  },
+  {
+    "name": "empty replacement removes all text while preserving an empty chapter",
+    "input": {
+      "operation": "transform",
+      "title": "广告",
+      "blocks": [{ "type": "text", "text": "广告" }],
+      "book": { "name": "雨夜来信" },
+      "source": { "sourceUrl": "https://fixture.test" },
+      "rules": [
+        {
+          "id": "all", "order": 0,
+          "pattern": "广告", "replacement": "",
+          "isRegex": false, "isEnabled": true,
+          "scopeTitle": true, "scopeContent": true, "timeoutMillisecond": 3000
+        }
+      ],
+      "conversion": "none"
+    },
+    "expected": {
+      "title": "",
+      "blocks": [{ "type": "text", "text": "" }]
+    }
+  }
+]

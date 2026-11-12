@@ -33,7 +33,7 @@ public static class MusicNativeRecommendationTests
         yield return Case("narrow-prepare-drains-fm-preference-read-without-dispatching-retired-start", FmPreferenceReadDrain);
         yield return Case("narrow-prepare-drains-admitted-fm-preference-cas", FmPreferenceWriteDrain);
         yield return Case("similar-replaces-queue-and-has-no-checkpoint", SimilarReturn);
-        yield return Case("heartbeat-has-no-unverified-continuation", Heartbeat);
+        yield return Case("heartbeat-tail-continuation-keeps-native-context-without-another-favorites-read", Heartbeat);
         yield return Case("heartbeat-current-retains-native-occurrence-and-returns-original-queue", HeartbeatCurrent);
         yield return Case("heartbeat-browser-seed-from-empty-queue-restores-empty-checkpoint", () => HeartbeatBrowser(false));
         yield return Case("heartbeat-browser-seed-from-other-current-restores-original-checkpoint", () => HeartbeatBrowser(true));
@@ -50,7 +50,7 @@ public static class MusicNativeRecommendationTests
         }
         yield return Case("queue-replacement-fences-inflight-recommendation-before-final-commit", ReplaceDuringRead);
         yield return Case("queue-clear-and-history-restore-retire-recommendation", ClearAndHistory);
-        yield return Case("catalog-prepare-does-not-retire-save-shares-lane-play-fences-final-cas", CatalogCommit);
+        yield return Case("catalog-reference-save-skips-members-preserves-recommendation-and-selection-play-fences-final-cas", CatalogCommit);
         yield return Case("catalog-next-preserves-active-queue-and-persistence-fences-late-recommendation", () => NextDuringRecommendation(true));
         yield return Case("ordinary-next-append-preserves-active-queue-and-persistence-fences-late-recommendation", () => NextDuringRecommendation(false));
         foreach (int read in new[] { 1, 2 })
@@ -69,10 +69,25 @@ public static class MusicNativeRecommendationTests
         yield return Case("anonymous-auth-does-not-prove-login-or-dispatch-http", Anonymous);
         yield return Case("admitted-queue-cas-drains-before-application-library-preparation", CasDrain);
         yield return Case("unknown-cas-reconcile-does-not-retry-or-start-late-media", UnknownCommit);
+        foreach (int outcome in new[] { 1, 2 })
+        {
+            int result = outcome;
+            yield return Case("unknown-settled-cas-" + result + "-prepare-and-dispose-fail-but-abort-releases", () => UnknownAbort(result));
+        }
+        foreach (string boundary in new[] { "http", "cas", "media" })
+        {
+            string owner = boundary;
+            yield return Case("abort-waits-for-noncooperative-" + owner, () => AbortDrain(owner));
+        }
         yield return Case("unknown-applied-cas-full-close-failure-cancel-reconcile-reopens-controls", () => UnknownCloseRecovery(true, 2));
         yield return Case("unknown-not-applied-cas-narrow-close-failure-cancel-reconcile-reopens-controls", () => UnknownCloseRecovery(false, 1));
         yield return Case("fresh-narrow-close-fences-late-unknown-reconciliation-resume", ReconcileCloseFence);
         yield return Case("full-prepare-resume-and-cold-reopen-do-not-revive-live-session", Reopen);
+        foreach (int mode in new[] { 1, 2, 3 })
+        {
+            int ordinary = mode;
+            yield return Case("cold-reopen-retains-ordinary-mode-" + mode + "-without-live-continuation", () => ColdOrdinaryMode(ordinary));
+        }
         yield return Case("immediate-full-prepare-and-resume-settle-without-mutual-wait", ImmediateResume);
         yield return Case("changed-observer-synchronous-close-does-not-wait-own-notification", ObserverClose);
     }
@@ -86,9 +101,9 @@ public static class MusicNativeRecommendationTests
     private static long N(JsonElement value, string name) => value.GetProperty(name).GetInt64();
     private static bool B(JsonElement value, string name) => value.GetProperty(name).GetBoolean();
     private static JsonElement J(object? value) => JsonSerializer.SerializeToElement(value);
-    private static JsonElement Okay(JsonElement value)
+    private static JsonElement Okay(JsonElement value, string method)
     {
-        Check(B(value, "ok"), "Command rejected: " + (value.TryGetProperty("code", out var c) ? c.GetString() : "INVALID_RESPONSE"));
+        Check(B(value, "ok"), method + " rejected: " + (value.TryGetProperty("code", out var c) ? c.GetString() : "INVALID_RESPONSE"));
         Check(!value.GetRawText().Contains("synthetic-account-key", StringComparison.Ordinal), "Credential escaped DTO");
         return value;
     }
@@ -128,6 +143,8 @@ public static class MusicNativeRecommendationTests
     private sealed class Runtime : IRuntimeSession
     {
         public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Image requests are not part of this fixture.");
+        public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("Image requests are not part of this fixture.");
 
         internal int Calls, Disposals;
@@ -270,7 +287,7 @@ public static class MusicNativeRecommendationTests
                     : Enumerable.Range(start + 1, 3).Select(WireSong).ToArray();
                 result = path switch
                 {
-                    "/eapi/playmode/intelligence/list" => new { code = 200, data = songs.Select(song => new { songInfo = song }).ToArray() },
+                    "/eapi/playmode/intelligence/list" => new { code = 200, data = songs.Select(song => new { songInfo = song, source = "aiMode" }).ToArray() },
                     "/eapi/homepage/scene/more/rcmd/song" => new { code = 200, data = new { songList = songs,
                         sourceMap = Enumerable.Range(start + 1, 3).ToDictionary(id => id.ToString(), id => "native-source-" + id),
                         offset = start / 100 * 15, hasMore = true } },
@@ -331,7 +348,7 @@ public static class MusicNativeRecommendationTests
                 return callback is null ? true : await callback(selection, token);
             });
         }
-        internal async Task<JsonElement> Call(string method, object? input = null) => Okay(await App.ExecuteAsync(method, input));
+        internal async Task<JsonElement> Call(string method, object? input = null) => Okay(await App.ExecuteAsync(method, input), method);
         internal Task<JsonElement> Queue() => Call("music.queue.get", new { offset = 0, limit = 100 });
         internal Task<JsonElement> State() => Call("music.recommendations.get");
         internal async Task<JsonElement> Start(object? input = null)
@@ -456,7 +473,7 @@ public static class MusicNativeRecommendationTests
             f.Store.Writes.GetValueOrDefault(MusicFmPreferences.DocumentNamespace) == 1);
         await f.App.CancelShutdownPreparationAsync();
         var restored = await f.Start();
-        Check(S(restored, "mode") == "scene" && S(restored, "submode") == "ELECTRONIC" && N(await f.Queue(), "mode") == 3,
+        Check(S(restored, "mode") == "scene" && S(restored, "submode") == "ELECTRONIC" && N(await f.Queue(), "mode") == 1,
             "an admitted successful preference CAS remains valid after narrow shutdown resumes");
     }
     private static async Task FmMemory()
@@ -475,7 +492,7 @@ public static class MusicNativeRecommendationTests
         await using (var reopened = await Fixture.Create(account: false, root: root))
         {
             var restored = await reopened.Start();
-            Check(S(restored, "mode") == "scene" && S(restored, "submode") == "ELECTRONIC" && N(await reopened.Queue(), "mode") == 3);
+            Check(S(restored, "mode") == "scene" && S(restored, "submode") == "ELECTRONIC" && N(await reopened.Queue(), "mode") == 1);
         }
         await using (var other = await Fixture.Create(account: false, root: root))
         {
@@ -518,7 +535,7 @@ public static class MusicNativeRecommendationTests
         var original = await f.Queue();
         var started = await f.Start(new { kind = "similar", platform = "wy", sourceIds = new[] { "9" }, sourceType = "artist" });
         Check(B(started, "active") && !B(started, "canReturn") && B(started, "continue"));
-        Check(N(await f.Queue(), "mode") == 3 && Fixture.Current(await f.Queue()) != Fixture.Current(original));
+        Check(N(await f.Queue(), "mode") == 1 && Fixture.Current(await f.Queue()) != Fixture.Current(original));
         Error(await f.App.ExecuteAsync("music.recommendations.return", new { id = S(started, "id") }), "CHECKPOINT_NOT_FOUND");
         Check(f.Selections.Count == 1 && f.Handler.Paths.Count == 1);
     }
@@ -527,15 +544,16 @@ public static class MusicNativeRecommendationTests
     {
         await using var f = await Fixture.Create();
         var start = await f.Start(new { kind = "heartbeat", platform = "wy", entry = "favorites", songId = "501" });
-        Check(B(start, "active") && !B(start, "continue") && N(await f.Queue(), "total") == 5);
+        Check(B(start, "active") && B(start, "continue") && N(await f.Queue(), "total") == 5);
         Check(MusicSongFixture.NativeId((await f.Queue()).GetProperty("current").GetProperty("song")) == "501");
         Check(f.Source.GetFeedback(Fixture.Current(await f.Queue())) is { FromHome: true, FeedbackSource: "aiMode", SourceId: "77" });
         string tail = await f.Tail(); await f.Source.OnPlaybackAsync(new(tail, true, true, true));
-        Error(await f.App.ExecuteAsync("music.recommendations.continue", new { id = S(start, "id"), enabled = true }), "UNSUPPORTED");
+        Check(N(await f.Queue(), "total") == 9 && Fixture.Current(await f.Queue()) == tail && f.Selections.Count == 1);
+        Check(f.Handler.Paths.Count(p => p == "/weapi/user/playlist") == 1);
         await f.Call("music.queue.mode", new { mode = 2 });
-        Check(B(await f.State(), "active") && N(await f.Queue(), "mode") == 2);
+        Check(B(await f.State(), "active") && !B(await f.State(), "continue") && N(await f.Queue(), "mode") == 2);
         Check(!f.Handler.Paths.Contains("/eapi/homepage/scene/more/rcmd/song") &&
-            f.Handler.Paths.Count(p => p == "/eapi/playmode/intelligence/list") == 1);
+            f.Handler.Paths.Count(p => p == "/eapi/playmode/intelligence/list") == 2);
     }
 
     private static async Task HeartbeatCurrent()
@@ -562,7 +580,7 @@ public static class MusicNativeRecommendationTests
         var before = await f.Queue();
         var start = await f.Start(new { kind = "heartbeat", platform = "wy", entry = "current", songId = "501", playlistId = "77" });
         var after = await f.Queue();
-        Check(S(start, "error") == "" && B(start, "canReturn") && !B(start, "continue") &&
+        Check(S(start, "error") == "" && B(start, "canReturn") && B(start, "continue") &&
             N(after, "total") == 5 && Fixture.Current(after) != Fixture.Current(before));
         Check(f.Selections.Single() is { Play: true, Automatic: false } &&
             f.Source.GetFeedback(Fixture.Current(after)) is { FromHome: false, FeedbackSource: "aiMode", SourceId: "77" });
@@ -599,7 +617,7 @@ public static class MusicNativeRecommendationTests
                 queueSource = new { id = "search", title = "Original search", kind = "search", platform = "wy" } } });
         var before = await f.Queue(); int writes = f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace);
         var preview = await f.Start(new { kind = "queue", platform = "wy" });
-        Check(preview.GetProperty("candidates").GetArrayLength() == 3 && B(preview, "continue") && N(await f.Queue(), "total") == 1 &&
+        Check(preview.GetProperty("candidates").GetArrayLength() == 3 && !B(preview, "continue") && N(await f.Queue(), "total") == 1 &&
             f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == writes && f.Selections.IsEmpty);
         Check(f.Source.GetFeedback(Fixture.Current(before)) is null);
         await f.Call("music.recommendations.choose", new { id = S(preview, "id"), candidateId = S(preview.GetProperty("candidates")[1], "id") });
@@ -610,6 +628,9 @@ public static class MusicNativeRecommendationTests
         Check(f.Selections.Single() is { Play: true, Automatic: false } &&
             f.Source.GetFeedback(Fixture.Current(chosen)) is { Kind: "queue", Provider: "queue-recommendations", FeedbackSource: "native-source-102" });
         string tail = await f.Tail(); await f.Source.OnPlaybackAsync(new(tail, true, true, true));
+        Check(N(await f.Queue(), "total") == 4 && !B(await f.State(), "continue") &&
+            f.Handler.Paths.Count(p => p == "/eapi/homepage/scene/more/rcmd/song") == 1);
+        await f.Call("music.recommendations.continue", new { id = S(preview, "id"), enabled = true });
         Check(f.Handler.Paths.Count(p => p == "/eapi/homepage/scene/more/rcmd/song") == 2);
         Check(N(await f.Queue(), "total") == 7 && Fixture.Current(await f.Queue()) == tail && f.Selections.Count == 1 &&
             f.Handler.Paths.Count(p => p == "/eapi/homepage/scene/more/rcmd/song") == 2);
@@ -706,14 +727,27 @@ public static class MusicNativeRecommendationTests
     private static async Task CatalogCommit()
     {
         await using var f = await Fixture.Create(); await f.Start(); var old = f.Selections.Last();
+        var before = await f.Queue(); var state = await f.State();
+        int requests = f.Handler.Paths.Count, selections = f.Selections.Count;
+        var saved = await f.Call("music.catalog.playlist.save", new { platform = "wy", id = "77", name = "Complete fixture" });
+        var reference = saved.GetProperty("collection");
+        Check(B(saved, "localSaved") && S(reference, "kind") == "network" && S(reference, "platform") == "wy" &&
+            S(reference, "remoteId") == "77" && S(reference, "name") == "Complete fixture");
+        Check(f.Handler.Paths.Count == requests, "Saving a network reference must not read playlist members");
+        var after = await f.State();
+        Check(old.IsCurrent() && B(after, "active") && S(after, "id") == S(state, "id") &&
+            N(before, "total") == 3 && (await f.Queue()).GetRawText() == before.GetRawText() && f.Selections.Count == selections,
+            "Saving a network reference must preserve the recommendation, queue and current media selection");
         var stage = await f.Call("music.catalog.playlist.prepare", new { platform = "wy", id = "77" });
         Check(old.IsCurrent() && B(await f.State(), "active"));
-        await f.Call("music.catalog.playlist.commit", new { token = S(stage, "token"), action = "save" });
-        Check(old.IsCurrent() && B(await f.State(), "active") && N(await f.Queue(), "total") == 3);
-        stage = await f.Call("music.catalog.playlist.prepare", new { platform = "wy", id = "77" });
         var hold = f.Store.HoldWrite(MusicLibraryOwner.DocumentNamespace); long version = N(await f.Queue(), "version");
         var commit = f.Call("music.catalog.playlist.commit", new { token = S(stage, "token"), action = "play", index = 1, expectedVersion = version });
-        await Wait(hold.Entered.Task); Check(!old.IsCurrent(), "Final catalog CAS bypassed queue lane"); hold.Release.TrySetResult();
+        try
+        {
+            await Wait(hold.Entered.Task);
+            Check(!old.IsCurrent(), "Final catalog CAS bypassed queue lane");
+        }
+        finally { hold.Release.TrySetResult(); }
         await commit; Check(N(await f.Queue(), "total") == 3 && !B(await f.State(), "active"));
     }
     private static async Task NextDuringRecommendation(bool catalog)
@@ -897,6 +931,63 @@ public static class MusicNativeRecommendationTests
         Check(!B(result, "requiresReconcile") && f.Selections.IsEmpty && f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes);
         Check(N(await f.Queue(), "total") == 3);
     }
+    private static async Task UnknownAbort(int outcome)
+    {
+        var f = await Fixture.Create();
+        try
+        {
+            f.Store.UnknownLibraryWrite = outcome;
+            Check(B(await f.Start(), "requiresReconcile"));
+            int writes = f.Store.Writes[MusicLibraryOwner.DocumentNamespace];
+            string persisted = await f.Store.RawLibrary();
+            foreach (var close in new Func<Task>[] { () => f.App.PrepareShutdownAsync(), () => f.App.DisposeAsync().AsTask() })
+            {
+                try { await Wait(close()); throw new InvalidOperationException("Unknown commit must fail ordinary close"); }
+                catch (Exception error) when (error.Message == "COMMIT_UNKNOWN") { }
+            }
+            await Wait(f.App.AbortAsync());
+            await Wait(f.App.AbortAsync());
+            Check(f.Handler.Disposals == 1 && f.Store.Disposals == 0 && f.Runtime.Disposals == 0);
+            Check(f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes &&
+                await f.Store.RawLibrary() == persisted && f.Selections.IsEmpty,
+                "Abort must neither retry nor reconcile the unknown write or select media");
+            Error(await f.App.ExecuteAsync("music.recommendations.get"), "CLOSED");
+        }
+        finally
+        {
+            f.Binding?.Dispose();
+            await f.App.AbortAsync();
+            await f.Store.DisposeAsync();
+        }
+    }
+    private static async Task AbortDrain(string boundary)
+    {
+        await using var f = await Fixture.Create();
+        var hold = boundary switch
+        {
+            "cas" => f.Store.HoldWrite(MusicLibraryOwner.DocumentNamespace),
+            "media" => f.HoldMedia(),
+            _ => f.Handler.Hold()
+        };
+        var start = f.Start();
+        try
+        {
+            await Wait(hold.Entered.Task);
+            using var waiter = new CancellationTokenSource();
+            var cancelled = f.App.AbortAsync(waiter.Token);
+            await Pending(cancelled);
+            waiter.Cancel(); await Cancelled(cancelled);
+            var abort = f.App.AbortAsync();
+            await Pending(abort); await Pending(start);
+            Check(f.Handler.Disposals == 0 && f.Store.Disposals == 0,
+                "Cancellation of an abort waiter must not release owners before physical settlement");
+            hold.Release.TrySetResult();
+            await Wait(abort); await Wait(start);
+            Check(f.Handler.Disposals == 1 && f.Store.Disposals == 0 && f.Runtime.Disposals == 0);
+            Error(await f.App.ExecuteAsync("music.recommendations.get"), "CLOSED");
+        }
+        finally { hold.Release.TrySetResult(); }
+    }
     private static async Task Reopen()
     {
         string root;
@@ -911,6 +1002,21 @@ public static class MusicNativeRecommendationTests
         await using var reopened = await Fixture.Create(account: false, root: root);
         Check(!B(await reopened.State(), "active") && reopened.Handler.Paths.IsEmpty && N(await reopened.Queue(), "total") == 3);
         Check(reopened.Source.GetFeedback(Fixture.Current(await reopened.Queue())) is null);
+    }
+    private static async Task ColdOrdinaryMode(int mode)
+    {
+        string root, entries;
+        await using (var f = await Fixture.Create())
+        {
+            root = f.Root; await f.Start();
+            await f.Call("music.queue.mode", new { mode });
+            var queue = await f.Queue(); entries = queue.GetProperty("entries").GetRawText();
+            Check(!B(await f.State(), "continue") && N(queue, "mode") == mode);
+        }
+        await using var restored = await Fixture.Create(account: false, root: root);
+        var actual = await restored.Queue(); var state = await restored.State();
+        Check(N(actual, "mode") == mode && actual.GetProperty("entries").GetRawText() == entries &&
+            !B(state, "continue") && !B(state, "active") && S(state, "id") == "" && restored.Handler.Paths.IsEmpty);
     }
     private static async Task UnknownCloseRecovery(bool full, int outcome)
     {

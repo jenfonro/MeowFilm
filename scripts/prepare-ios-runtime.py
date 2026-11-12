@@ -10,12 +10,14 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "scripts/ios-node-mobile.json"
 NODE_MOBILE = ROOT / ".cache/nodejs-mobile"
+SHARED_DOWNLOADS = (Path("E:/Developer") if os.name == "nt" else Path.home() / "Developer") / "cache/downloads"
 FRAMEWORK = "NodeMobile.xcframework"
 
 
@@ -84,6 +86,27 @@ def verify_extraction(directory, package, members):
             raise ValueError("Modified Node Mobile input: " + name)
 
 
+def shared_node_archive(pinned):
+    expected = pinned["archive"]["sha256"]
+    archive = SHARED_DOWNLOADS / expected
+    SHARED_DOWNLOADS.mkdir(parents=True, exist_ok=True)
+    if not archive.exists():
+        with tempfile.TemporaryDirectory(prefix="node-mobile-", dir=SHARED_DOWNLOADS) as temporary:
+            partial = Path(temporary) / "archive"
+            with urllib.request.urlopen(pinned["archive"]["url"], timeout=120) as source, partial.open("wb") as sink:
+                shutil.copyfileobj(source, sink)
+            if sha256(partial) != expected:
+                raise ValueError("Unexpected Node Mobile archive SHA-256")
+            try:
+                os.link(partial, archive)
+            except FileExistsError:
+                # Another workspace may have completed the same download.
+                pass
+    if archive.is_symlink() or sha256(archive) != expected:
+        raise ValueError("Unexpected Node Mobile archive SHA-256")
+    return archive
+
+
 def node_mobile(pinned):
     archive = NODE_MOBILE / PurePosixPath(pinned["archive"]["url"]).name
     directory = NODE_MOBILE / "ios"
@@ -91,13 +114,14 @@ def node_mobile(pinned):
     if NODE_MOBILE.is_symlink() or archive.is_symlink() or directory.is_symlink():
         raise ValueError("Linked Node Mobile cache")
     if not archive.exists():
-        partial = archive.with_suffix(".download")
-        try:
-            with urllib.request.urlopen(pinned["archive"]["url"], timeout=120) as source, partial.open("xb") as sink:
-                shutil.copyfileobj(source, sink)
-            partial.replace(archive)
-        finally:
-            partial.unlink(missing_ok=True)
+        shared = shared_node_archive(pinned)
+        with tempfile.TemporaryDirectory(prefix="download-", dir=NODE_MOBILE) as temporary:
+            partial = Path(temporary) / "archive"
+            shutil.copyfile(shared, partial)
+            try:
+                os.link(partial, archive)
+            except FileExistsError:
+                pass
     if sha256(archive) != pinned["archive"]["sha256"]:
         raise ValueError("Unexpected Node Mobile archive SHA-256: " + archive.name)
     with zipfile.ZipFile(archive) as package:
@@ -162,13 +186,13 @@ def payload(node, selected):
     if staging.exists() or previous.exists() or runtime.is_symlink():
         raise ValueError("Unfinished or linked iOS runtime preparation")
     try:
-        subprocess.run([node, str(ROOT / "scripts/package-ios-runtime.mjs"), "--product", "aggregate",
+        subprocess.run([node, str(ROOT / "scripts/ios/package-runtime.mjs"), "--product", "aggregate",
                         "--sdk", selected["sdk"], "--arch", selected["arch"], "--output", str(staging)], check=True, cwd=ROOT)
         manifest = json.loads((staging / "runtime-manifest.json").read_text(encoding="utf-8"))
         if (manifest.get("status") != "complete" or manifest.get("platform") != "ios"
                 or manifest.get("assemblyProfile") != "common-native" or manifest.get("target") != selected
                 or manifest.get("transport") != "runtime.http.v1"
-                or manifest.get("modules") != ["music", "cat", "source", "pan", "tmdb", "douban", "film"]
+                or manifest.get("modules") != ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"]
                 or len(manifest.get("trustedNative", [])) != 1):
             raise ValueError("The iOS runtime payload is not complete")
         if runtime.exists():

@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { iosArtifacts, iosTarget } from '../scripts/quickjs/ios-target.mjs';
-import { packageIOSRuntime } from '../scripts/package-ios-runtime.mjs';
+import { packageIOSRuntime } from '../scripts/ios/package-runtime.mjs';
 
 export const repository = fileURLToPath(new URL('../', import.meta.url));
 export const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -32,9 +32,12 @@ export function fixture(t) {
       receipt.artifact.path, receipt.sdk.path, receipt.catWebValues.path, receipt.catWebValues.license.path,
       receipt.frameworkInfo.path, receipt.exports.path,
       ...receipt.inputs.map(input => input.path)])) copy(path);
-    for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime', 'film-rules', 'film-playback']) {
+    for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
+      'film-rules', 'film-search', 'film-playback', 'netease-token', 'novel-rules']) {
       copy(`packages/${name}/package.json`);
-      copy(`packages/${name}/${name === 'film-rules' ? 'film-rules.js' : 'src'}`);
+      for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
+        : name === 'film-search' ? ['film-search.js']
+        : name === 'novel-rules' ? ['index.js', 'novel-rules.js'] : ['src']) copy(`packages/${name}/${file}`);
       const installed = join(root, 'node_modules/@meowfilm', name);
       mkdirSync(dirname(installed), { recursive: true });
       symlinkSync(join(root, 'packages', name), installed, process.platform === 'win32' ? 'junction' : 'dir');
@@ -43,7 +46,7 @@ export function fixture(t) {
       if (path.includes('node_modules/') && !entry.link && !entry.dev && existsSync(join(repository, path))) copy(path);
     }
     copy('apps/runtime'); copy('apps/ios/runtime');
-    copy('LICENSES/NOTICE.md');
+    for (const name of ['NOTICE.md', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt']) copy(`LICENSES/${name}`);
     workspace = { root, output: join(area, 'payload'), area };
     // This one fixture is shared serially; each case restores all mutations.
     process.once('exit', () => rmSync(area, { recursive: true, force: true }));

@@ -5,7 +5,8 @@ import {
   countDomNodes, DocumentRegistry, domHTML, htmlToText, isDomNode, parseMarkup,
 } from './dom.js';
 import {
-  sourceClone, sourceFault, sourceIdentifier, sourceObject, sourceRequire, sourceSafeError,
+  sourceClone, sourceFault, sourceIdentifier, sourceObject, sourcePreprocessError,
+  sourceRequire, sourceSafeError,
 } from './errors.js';
 import { SourceHttpClient, trustedCapabilityContext } from './http.js';
 import { normalizeSourceDefinition } from './importers.js';
@@ -25,7 +26,6 @@ const defaults = Object.freeze({
   requestTimeoutMs: 30_000,
   maximumDocuments: 64,
   maximumNodes: 20_000,
-  maximumPages: 32,
   maximumExternalScripts: 8,
   maximumSourceCandidates: 8,
   cleanupTimeoutMs: 2_000,
@@ -160,13 +160,14 @@ function operationSignal(parents, timeoutMs) {
 
 class SessionKernel {
   constructor({
-    source, protocol, capabilities, createSandbox, profile, capabilityScope,
+    source, protocol, capabilities, createSandbox, preprocess, profile, capabilityScope,
     metadata, limits, onDiagnostic, signal,
   }) {
     Object.assign(this, {
       source, protocol, capabilities, createSandbox, profile, capabilityScope,
       metadata, limits, onDiagnostic, signal,
     });
+    this.runPreprocessor = preprocess;
     this.http = new SourceHttpClient({
       capabilities, profile, scope: capabilityScope,
     });
@@ -178,6 +179,9 @@ class SessionKernel {
     this.registeredVirtualRoutes = new Set();
     this.nextRoute = 0;
     this.adapterTasks = new Set();
+    this.invocations = new Map();
+    this.sourceValues = {};
+    this.sourceFlush = Promise.resolve();
   }
 
   createRegistry() {
@@ -195,14 +199,22 @@ class SessionKernel {
     this.initialDocument = value;
   }
 
-  beginInvocation(id) {
+  beginInvocation(id, payload) {
     sourceRequire(!this.registries.has(id));
+    const variables = new Map();
+    for (let value of [payload.book?.variable, payload.chapter?.variable]) {
+      if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
+      const entries = Array.isArray(value) ? value : value && typeof value === 'object' ? Object.entries(value) : [];
+      for (const [key, item] of entries) variables.set(String(key), item ?? '');
+    }
     this.registries.set(id, this.createRegistry());
+    this.invocations.set(id, { variables, sourceWrites: new Map(), sourceVariable: undefined });
   }
 
   endInvocation(id) {
     this.registries.get(id)?.close();
     this.registries.delete(id);
+    this.invocations.delete(id);
   }
 
   registry(context = {}) {
@@ -237,12 +249,57 @@ class SessionKernel {
     return promise;
   }
 
-  ruleVariableGet(key) {
-    return this.state.get('rule', key, '');
+  ruleVariableGet(key, id, fallback = '') {
+    const variables = this.invocations.get(id)?.variables;
+    return variables ? sourceClone(variables.get(String(key)) ?? fallback) : this.state.get('rule', key, fallback);
   }
 
-  ruleVariableSet(key, value) {
-    return this.state.set('rule', key, value);
+  ruleVariableSet(key, value, id) {
+    const variables = this.invocations.get(id)?.variables;
+    if (!variables) return this.state.set('rule', key, value);
+    variables.set(String(key), sourceClone(value ?? ''));
+    return value;
+  }
+
+  variableValue(id) {
+    const values = this.invocations.get(id)?.variables;
+    return values?.size ? JSON.stringify(Object.fromEntries(values)) : null;
+  }
+
+  async restoreSourceValues() {
+    let saved = await this.capabilities.call('storage.get', {
+      version: hostApiVersion, profile: `${this.profile}:storage`, key: 'reader.source.values',
+    }, this.startupContext());
+    if (typeof saved === 'string') {
+      try { saved = JSON.parse(saved); } catch { throw sourceFault('STORAGE_ERROR'); }
+    }
+    if (saved !== null && saved !== undefined) {
+      sourceRequire(saved && typeof saved === 'object' && !Array.isArray(saved) &&
+        saved.values && typeof saved.values === 'object' && !Array.isArray(saved.values) &&
+        typeof saved.variable === 'string', 'STORAGE_ERROR');
+      this.sourceValues = saved.values;
+      this.source.variable = saved.variable;
+    }
+  }
+
+  flushSourceValues(invocation) {
+    const entry = this.invocations.get(invocation.id);
+    if (!entry.sourceWrites.size && entry.sourceVariable === undefined) return Promise.resolve();
+    const work = this.sourceFlush.then(async () => {
+      sourceRequire(!invocation.signal.aborted, 'CANCELLED');
+      const values = { ...this.sourceValues, ...Object.fromEntries(entry.sourceWrites) };
+      const variable = entry.sourceVariable ?? String(this.source.variable ?? this.source.bookSourceVariable ?? '');
+      if (this.metadata.persistentSource) {
+        await this.capabilities.call('storage.set', {
+          version: hostApiVersion, profile: `${this.profile}:storage`, key: 'reader.source.values',
+          value: JSON.stringify({ values, variable }),
+        }, this.capabilityContext(this.invocationContext(invocation)));
+      }
+      this.sourceValues = values;
+      this.source.variable = variable;
+    });
+    this.sourceFlush = work.catch(() => {});
+    return work;
   }
 
   async loadSandbox(kind, code, metadata) {
@@ -271,14 +328,18 @@ class SessionKernel {
     return hostValue(result, this.limits.maximumNodes, this.limits.maximumParseBytes);
   }
 
+  preprocess(operation) {
+    try { return this.runPreprocessor(operation); }
+    catch (error) { throw sourcePreprocessError(error); }
+  }
+
   async evaluateScript(source, bindings, invocation, {
     returnLastExpression = true,
     transform = {},
   } = {}) {
-    const transformed = transformCapabilityScript(String(source), {
-      ...transform,
-      returnLastExpression,
-    });
+    const text = String(source);
+    const options = { ...transform, returnLastExpression };
+    const transformed = this.preprocess(() => transformCapabilityScript(text, options));
     const result = await this.sandbox.evaluate(transformed, guestValue(bindings), {
       signal: invocation.signal,
       timeoutMs: invocation.timeoutMs,
@@ -321,29 +382,33 @@ class SessionKernel {
           platform: String(this.metadata.platform ?? 'unknown'),
         };
       case 'legado.variableSet':
-        this.state.set('rule', input.key, input.value);
+        this.ruleVariableSet(input.key, input.value, context.invocationId);
         return true;
       case 'legado.variableGet':
-        return this.state.get('rule', input.key, null);
-      case 'legado.sourceGet':
-        return this.state.get('source', input.key, null);
+        return this.ruleVariableGet(input.key, context.invocationId, null);
+      case 'legado.sourceGet': {
+        const writes = this.invocations.get(context.invocationId)?.sourceWrites;
+        if (writes?.has(input.key)) return writes.get(input.key);
+        return Object.hasOwn(this.sourceValues, input.key) ? this.sourceValues[input.key] : null;
+      }
       case 'legado.sourceSet':
-        this.state.set('source', input.key, input.value);
+        sourceRequire(this.invocations.has(context.invocationId), 'PERMISSION_DENIED');
+        this.invocations.get(context.invocationId).sourceWrites.set(input.key, sourceClone(input.value));
         return true;
       case 'legado.sourceVariableGet':
-        return String(this.source.variable ?? this.source.bookSourceVariable ?? '');
+        return this.invocations.get(context.invocationId)?.sourceVariable ??
+          String(this.source.variable ?? this.source.bookSourceVariable ?? '');
       case 'legado.sourceVariableSet': {
         const value = String(input.value ?? '');
-        this.source.variable = value;
+        sourceRequire(this.invocations.has(context.invocationId), 'PERMISSION_DENIED');
+        this.invocations.get(context.invocationId).sourceVariable = value;
         return value;
       }
       case 'legado.bookVariableGet': {
-        const key = JSON.stringify([context.bookIdentity ?? '', String(input.key ?? 'custom')]);
-        return this.state.get('book', key, null);
+        return this.ruleVariableGet(input.key ?? 'custom', context.invocationId);
       }
       case 'legado.bookVariableSet': {
-        const key = JSON.stringify([context.bookIdentity ?? '', String(input.key ?? 'custom')]);
-        return this.state.set('book', key, input.value);
+        return this.ruleVariableSet(input.key ?? 'custom', input.value, context.invocationId);
       }
       case 'common.url': {
         let url;
@@ -762,6 +827,7 @@ export class SourceSession {
     protocol,
     capabilities,
     createSandbox,
+    preprocess = operation => operation(),
     metadata = {},
     limits = {},
     onDiagnostic,
@@ -770,6 +836,7 @@ export class SourceSession {
     sourceRequire(Number.isSafeInteger(generation) && generation > 0);
     sourceRequire(capabilities?.version === hostApiVersion && typeof capabilities.call === 'function');
     sourceRequire(typeof createSandbox === 'function');
+    sourceRequire(typeof preprocess === 'function');
     sourceObject(metadata);
     sourceObject(limits);
     sourceRequire(Object.keys(limits).every(key => Object.hasOwn(defaults, key)));
@@ -779,6 +846,7 @@ export class SourceSession {
     this.requestedProtocol = protocol;
     this.capabilitiesClient = capabilities;
     this.createSandbox = createSandbox;
+    this.preprocess = preprocess;
     this.metadata = sourceClone(metadata);
     this.limits = Object.freeze({ ...defaults, ...limits });
     for (const value of Object.values(this.limits)) sourceRequire(Number.isSafeInteger(value) && value > 0);
@@ -805,6 +873,7 @@ export class SourceSession {
         protocol: this.protocol,
         capabilities: this.capabilitiesClient,
         createSandbox: this.createSandbox,
+        preprocess: this.preprocess,
         profile: `source:${this.installationId}:${this.generation}`,
         capabilityScope: {
           installationId: this.installationId,
@@ -876,14 +945,26 @@ export class SourceSession {
           action,
           signal: operation.signal,
           timeoutMs,
-          bookIdentity: String(payload.bookUrl ?? payload.tocUrl ?? payload.url ?? ''),
+          bookIdentity: String(payload.bookUrl ?? payload.book?.bookUrl ?? payload.book?.url ??
+            payload.tocUrl ?? payload.url ?? ''),
         };
-        this.kernel.beginInvocation(id);
+        const captured = sourceClone(payload);
+        if (this.protocol !== 'cat') {
+          for (const [key, value] of [
+            ['bookUrl', captured.book?.bookUrl ?? captured.book?.url],
+            ['tocUrl', captured.book?.tocUrl],
+            ['chapterUrl', captured.chapter?.chapterUrl ?? captured.chapter?.url],
+          ]) {
+            if (captured[key] == null && value != null) captured[key] = value;
+          }
+        }
+        this.kernel.beginInvocation(id, captured);
         try {
-          const value = await this.adapter.invoke(action, sourceClone(payload), invocation);
+          const value = await this.adapter.invoke(action, captured, invocation);
           if (operation.timedOut()) throw sourceFault('TIMEOUT');
           const cancelled = aborted(operation.signal);
           if (cancelled) throw cancelled;
+          await this.kernel.flushSourceValues(invocation);
           return sourceClone(value ?? null);
         } finally { this.kernel.endInvocation(id); }
       })();

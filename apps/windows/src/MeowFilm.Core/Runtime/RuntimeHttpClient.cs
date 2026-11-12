@@ -29,7 +29,15 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
     }
 
     public Task<JsonElement> CallAsync(string method, object? parameters = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        CallAsyncCore(method, parameters, null, cancellationToken);
+
+    public Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        CallAsyncCore(method, parameters, timeout, cancellationToken);
+
+    private Task<JsonElement> CallAsyncCore(string method, object? parameters, TimeSpan? timeout,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         foreach (var (id, contract) in RuntimeHttpProtocol.Modules)
@@ -37,15 +45,16 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             if (method is null || !method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;
             var operation = method[contract.Prefix.Length..];
             if (!contract.Operations.Contains(operation, StringComparer.Ordinal)) break;
-            return SendJsonAsync($"/v1/{id}/{operation}", parameters ?? new { }, contract, cancellationToken);
+            return SendJsonAsync($"/v1/{id}/{operation}", parameters ?? new { }, contract, timeout, cancellationToken);
         }
         throw new BridgeException("METHOD_UNAVAILABLE");
     }
     private async Task<JsonElement> SendJsonAsync(string path, object parameters,
-        RuntimeHttpProtocol.ModuleContract contract, CancellationToken token)
+        RuntimeHttpProtocol.ModuleContract contract, TimeSpan? timeout, CancellationToken token)
     {
         var bytes = BridgeCodec.EncodeJSONValue(parameters);
-        try { return await RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, contract.Codes, token).ConfigureAwait(false); }
+        try { return await RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, contract.Codes, token,
+            timeout: timeout ?? (contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60) : null)).ConfigureAwait(false); }
         finally { Clear(bytes); }
     }
 
@@ -72,12 +81,22 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
     public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (maximumBytes <= 0) throw new BridgeException("INVALID_REQUEST");
+        return RequestImageAsync(reference, (response, token) => ReadImageBodyAsync(response, maximumBytes, token), cancellationToken);
+    }
+
+    public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
+        RequestImageAsync(reference, ReadImageBodyAsync, cancellationToken);
+
+    private Task<byte[]> RequestImageAsync(string reference,
+        Func<HttpResponseMessage, CancellationToken, Task<byte[]>> readBody, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         var provider = RuntimeHttpProtocol.ImageProvider(reference);
-        if (provider is null || maximumBytes <= 0)
-            throw new BridgeException("INVALID_REQUEST");
+        if (provider is null) throw new BridgeException("INVALID_REQUEST");
         return ExchangeAsync(HttpMethod.Get, reference, default, false, async (response, token) =>
         {
-            var bytes = await ReadImageBodyAsync(response, maximumBytes, token).ConfigureAwait(false);
+            var bytes = await readBody(response, token).ConfigureAwait(false);
             try
             {
                 if (response.StatusCode != HttpStatusCode.OK)
@@ -96,6 +115,33 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             }
             catch { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); throw; }
         }, cancellationToken, Clear);
+    }
+
+    private static async Task<byte[]> ReadImageBodyAsync(HttpResponseMessage response, CancellationToken token)
+    {
+        if (response.Content.Headers.ContentEncoding.Count != 0) throw new BridgeException("INVALID_RESPONSE");
+        long? expected = response.Content.Headers.ContentLength;
+        await using var source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+        using var bytes = new MemoryStream();
+        byte[] buffer = new byte[32768];
+        try
+        {
+            for (;;)
+            {
+                int count = await source.ReadAsync(buffer, token).ConfigureAwait(false);
+                if (count == 0) break;
+                bytes.Write(buffer, 0, count);
+            }
+            token.ThrowIfCancellationRequested();
+            if (bytes.Length == 0 || expected is { } length && bytes.Length != length)
+                throw new BridgeException("INVALID_RESPONSE");
+            return bytes.ToArray();
+        }
+        finally
+        {
+            Clear(buffer);
+            if (bytes.TryGetBuffer(out var view)) System.Security.Cryptography.CryptographicOperations.ZeroMemory(view);
+        }
     }
 
     private static async Task<byte[]> ReadImageBodyAsync(HttpResponseMessage response, int maximumBytes, CancellationToken token)
@@ -145,7 +191,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
     }
 
     private Task<JsonElement> RequestAsync(HttpMethod method, string path, ReadOnlyMemory<byte> body,
-        bool raw, string contract, IReadOnlySet<string> codes, CancellationToken cancellationToken)
+        bool raw, string contract, IReadOnlySet<string> codes, CancellationToken cancellationToken, TimeSpan? timeout = null)
         => ExchangeAsync(method, path, body, raw, async (response, token) =>
         {
             if (response.Content.Headers.ContentType?.ToString() != "application/json"
@@ -160,11 +206,11 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                 return result;
             }
             finally { Clear(bytes); }
-        }, cancellationToken);
+        }, cancellationToken, timeout: timeout);
 
     private async Task<T> ExchangeAsync<T>(HttpMethod method, string path, ReadOnlyMemory<byte> body,
         bool raw, Func<HttpResponseMessage, CancellationToken, Task<T>> read, CancellationToken cancellationToken,
-        Action<T>? discard = null)
+        Action<T>? discard = null, TimeSpan? timeout = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var owner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -178,7 +224,11 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         using (deadline)
         try
         {
-            deadline.CancelAfter(TimeSpan.FromSeconds(30));
+            // One rules batch may contain many independently budgeted calls.
+            // Its owner and connection tokens retire the exchange; Node applies
+            // each rule's execution budget without a shorter HTTP batch timer.
+            if (path != "/v1/source/rules.process")
+                deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(30));
             using var request = new HttpRequestMessage(method, new Uri(endpoint, path))
             {
                 Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact

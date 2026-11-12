@@ -18,6 +18,9 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     public const string DocumentNamespace = "music.accounts.v1";
     public const string Version = "1.3.0";
     private readonly IDocumentStore store;
+    private readonly CacheDocumentStore detailsCacheStore;
+    private readonly bool ownsDetailsCacheStore;
+    public const string DetailsCacheNamespace = "music.account-details.v1";
     private readonly IMusicAccountProtocol protocol;
     private readonly MusicPlatformClientContextOwner clients;
     private readonly MusicPlatformClientProtocol clientProtocol;
@@ -35,13 +38,17 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     public event Action<string>? SessionChanged;
 
     internal MusicAccountOwner(IDocumentStore store, IMusicAccountProtocol protocol,
-        MusicPlatformClientContextOwner clients, MusicPlatformClientProtocol clientProtocol, TimeProvider? clock = null)
+        MusicPlatformClientContextOwner clients, MusicPlatformClientProtocol clientProtocol, TimeProvider? clock = null,
+        IDocumentStore? detailsCacheStore = null)
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
         this.protocol = protocol ?? throw new ArgumentNullException(nameof(protocol));
         this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
         this.clientProtocol = clientProtocol ?? throw new ArgumentNullException(nameof(clientProtocol));
         this.clock = clock ?? TimeProvider.System;
+        this.detailsCacheStore = detailsCacheStore as CacheDocumentStore ??
+            (detailsCacheStore is null ? new CacheDocumentStore() : new CacheDocumentStore(detailsCacheStore));
+        ownsDetailsCacheStore = detailsCacheStore is not CacheDocumentStore;
         clients.ContextChanged += ClientContextChanged;
     }
     private sealed class State
@@ -347,7 +354,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             Guard(op);
             if (kgDevice is not null)
                 AccountRules.Require(clients.IsCurrent(kgDevice), "STORAGE_CONFLICT");
-            byte[] bytes = document.Replace(op.Platform, before, next, observation);
+            byte[] bytes = document.Replace(op.Platform, before, next);
             try
             {
                 lock (gate)
@@ -386,6 +393,11 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 state.Uncertain = false; state.Revoked = false; state.Current = null;
                 state.Verified = cookie is null ? null : committed;
             }
+            if (observation is not null)
+                SaveDetailsCache(op.Platform, new(committed.Generation, committed.Scope!, committed.ValueFingerprint!,
+                    observation.Profile.UserId, observation.Profile, observation.ProfileFetchedAt,
+                    observation.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, observation.Entitlements), () => Guard(op));
+            Guard(op);
             Notify(op.Platform);
             return committed;
         }
@@ -588,6 +600,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             if (!closed)
             {
                 closed = true;
+                try { transferLifetime.Cancel(); } catch { /* Still fence every platform and drain physical work. */ }
                 foreach (var platform in AccountRules.Platforms)
                 {
                     // Even a broken protocol must not prevent fencing other platforms.
@@ -609,7 +622,9 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     private async Task DisposeCore()
     {
         await PrepareCloseAsync().ConfigureAwait(false);
+        if (ownsDetailsCacheStore) await detailsCacheStore.DisposeAsync().ConfigureAwait(false);
         await protocol.DisposeAsync().ConfigureAwait(false);
+        transferLifetime.Dispose();
         clients.ContextChanged -= ClientContextChanged;
         qqContextSerial.Dispose();
         // The App owns the shared DPAPI store and disposes it only after every owner drained.

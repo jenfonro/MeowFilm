@@ -25,12 +25,13 @@ const sources = [
   'NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt', 'KuGouMusicApi-MIT.txt',
   'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt', 'node-LICENSE.txt', 'qr-code-generator-LICENSE.txt',
   'quickjs-ng-LICENSE.txt', 'openssl-LICENSE.txt', 'zlib-LICENSE.txt',
-  'quickjs-native-MIT.txt', 'Unicode-3.0.txt', 'catpawrunner-MIT.txt',
+  'Unicode-3.0.txt', 'catpawrunner-MIT.txt',
   'npm-node-compat-BSD-3-Clause.txt', 'npm-node-compat-ISC.txt', 'npm-node-compat-MIT.txt',
   'SkiaSharp-MIT.txt', 'SkiaSharp-THIRD-PARTY-NOTICES.txt',
   'GPL-2.0-only.txt', 'LGPL-2.1-only.txt', 'FFmpeg-LICENSE.md', 'libxml2-MIT.txt',
   'GCC-Runtime-Library-Exception-3.1.txt',
   'MinGW-w64-runtime-NOTICE.txt', 'winpthreads-LICENSE.txt',
+  'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt',
 ].map(name => ({ source: `LICENSES/${name}`, path: name }));
 function boundedPath(path) {
   const rel = relative(temporary, path);

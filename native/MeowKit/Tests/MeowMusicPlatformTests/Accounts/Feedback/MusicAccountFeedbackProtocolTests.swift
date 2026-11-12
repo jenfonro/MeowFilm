@@ -2,10 +2,11 @@ import Foundation
 import XCTest
 import MeowAccounts
 import MeowMusicFeature
+import MeowStorage
 @testable import MeowMusicPlatform
 
-// Wire baseline: read-only meowmusic cc22a7ee, platform/{qq,netease}/feedback.go.
-// No running reference program, upstream connection or real account is involved.
+// QQ retains its existing wire fixture; NetEase uses the confirmed NCBLv3 file channel.
+// Synthetic peers only; no upstream connection or real account is involved.
 @MainActor final class MusicAccountFeedbackProtocolTests: XCTestCase {
     func testQQVIPTrackStillUsesExactVkeyAndOneGzippedDurationReport() async throws {
         let f = try MusicNativeFixture()
@@ -66,54 +67,60 @@ import MeowMusicFeature
         _ = await f.service.close()
     }
 
-    func testNeteaseUsesSingleEAPIWeblogPerPhaseAndNeverImportsFeedbackCookiesOrReplaysBadAck() async throws {
-        let f = try MusicNeteaseNativeFixture()
-        try await f.enable(); _ = try await f.service.validate(platform: .netease)
+    private func neteaseFeedbackFixture() async throws -> MusicNeteaseNativeFixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let f = try MusicNeteaseNativeFixture(feedbackOutboxStoreFactory: {
+            try DocumentStore(baseURL: root, namespace: "feedback-protocol")
+        })
+        try await f.enable()
+        try await f.service.configurePlaybackFeedback(.init(revision: 1,
+            platforms: [.netease: .init(enabled: true, generation: 1)]))
+        _ = try await f.service.validate(platform: .netease)
+        await f.service.flushPendingPlaybackFeedback()
+        return f
+    }
+
+    func testNeteaseUsesSingleMultipartPerPhaseAndNeverImportsFeedbackCookiesOrReplaysBadAck() async throws {
+        let f = try await neteaseFeedbackFixture()
         let baseline = await f.http.recorded(), stored = f.store.peek(f.identity)
         let writes = f.store.calls().filter { $0 == "write" }.count
-        let path = "/eapi/feedback/weblog"
-        await f.http.replies(path, [try MusicNeteaseFixture.response(["code": 200],
-            headers: ["set-cookie": "MUSIC_U=synthetic-feedback-replacement; Path=/; HttpOnly"])])
+        let path = "/api/clientlog/encrypt/upload"
         let lease = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init()), instance = UUID()
         let start = MusicAccountFeedbackFixture.report(.start, platform: .netease, instance: instance)
         let end = MusicAccountFeedbackFixture.report(.end, platform: .netease, instance: instance)
-        let started = try await lease.report(start), finished = try await lease.report(end)
+        let started = try await lease.report(start)
+        f.clock.advance(2)
+        let finished = try await lease.report(end)
         let duplicate = try await lease.report(end)
-        XCTAssertEqual(started, .confirmed); XCTAssertEqual(finished, .confirmed); XCTAssertEqual(duplicate, .confirmed)
+        XCTAssertEqual(started, .registered); XCTAssertEqual(finished, .registered); XCTAssertEqual(duplicate, .registered)
+        await f.service.flushPendingPlaybackFeedback()
         let records = Array((await f.http.recorded()).dropFirst(baseline.count))
         XCTAssertEqual(records.count, 2)
-        for (index, record) in records.enumerated() {
-            XCTAssertEqual(record.request.url.absoluteString, "https://clientlog.music.163.com/eapi/feedback/weblog")
+        for record in records {
+            XCTAssertEqual(record.request.url.absoluteString,
+                "https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true")
             XCTAssertEqual(record.request.method, "POST"); XCTAssertEqual(record.request.maximumBytes, 65536)
             XCTAssertEqual(record.request.headers["Cache-Control"], "no-store")
             XCTAssertTrue(record.request.headers["Cookie"]?.contains("MUSIC_U=synthetic-user-42") == true)
             XCTAssertFalse(record.request.headers["Cookie"]?.contains("synthetic-feedback-replacement") == true)
-            // Existing peer independently decrypts EAPI AES and verifies the
-            // embedded /api path + MD5, not production eapi() as its oracle.
-            let payload = try MusicQQWire.decode(XCTUnwrap(record.payload))
-            XCTAssertEqual(payload["e_r"] as? Bool, false)
-            let logs = try XCTUnwrap(payload["logs"] as? String)
-            let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(logs.utf8)) as? [[String: Any]])
-            XCTAssertEqual(rows.count, 1)
-            let row = try XCTUnwrap(rows.first), fields = try XCTUnwrap(row["json"] as? [String: Any])
-            XCTAssertEqual(row["action"] as? String, index == 0 ? "startplay" : "play")
-            XCTAssertEqual(fields["id"] as? String, "101"); XCTAssertEqual(fields["type"] as? String, "song")
-            XCTAssertEqual(fields["source"] as? String, "list"); XCTAssertEqual(fields["sourceId"] as? String, "501")
-            XCTAssertEqual(fields["alg"] as? String, "synthetic-alg")
-            if index == 0 { XCTAssertNil(fields["time"]); XCTAssertNil(fields["end"]) }
-            else {
-                XCTAssertEqual(fields["time"] as? Int, 1); XCTAssertEqual(fields["end"] as? String, "ui")
-                XCTAssertEqual(fields["download"] as? Int, 0); XCTAssertEqual(fields["wifi"] as? Int, 0)
-            }
+            XCTAssertEqual(record.request.headers["User-Agent"], "Meowfilm")
+            let bytes = try XCTUnwrap(record.request.body), header = try XCTUnwrap(bytes.range(of: Data("\r\n\r\n".utf8)))
+            XCTAssertEqual(Data(bytes[header.upperBound..<(header.upperBound + 4)]), Data("NCBL".utf8))
         }
+        XCTAssertNotEqual(try MusicAccountFeedbackFixture.uploadFilename(records[0].request),
+                          try MusicAccountFeedbackFixture.uploadFilename(records[1].request))
         await f.http.replies(path, [try MusicNeteaseFixture.response(["code": false])])
         let bad = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init()), badID = UUID()
         let badStart = MusicAccountFeedbackFixture.report(.start, platform: .netease, instance: badID)
-        do { _ = try await bad.report(badStart); XCTFail("Boolean is not an acknowledgement code") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+        let admitted = try await bad.report(badStart)
+        XCTAssertEqual(admitted, .registered, "Local storage admission does not claim a remote ACK")
+        await f.service.flushPendingPlaybackFeedback()
         let repeated = try await bad.report(badStart)
         let absentEnd = try await bad.report(MusicAccountFeedbackFixture.report(.end, platform: .netease, instance: badID))
-        XCTAssertEqual(repeated, .unconfirmed); XCTAssertEqual(absentEnd, .unconfirmed)
+        XCTAssertEqual(repeated, .registered); XCTAssertEqual(absentEnd, .unconfirmed)
+        await f.service.flushPendingPlaybackFeedback()
         let after = Array((await f.http.recorded()).dropFirst(baseline.count))
         XCTAssertEqual(after.map { $0.request.url.path }, [path, path, path])
         XCTAssertEqual(f.store.peek(f.identity)?.revision, stored?.revision)
@@ -127,7 +134,7 @@ import MeowMusicFeature
             ("http://d.kugou.com/v3/qrydid", "POST"), ("http://d.kugou.com/v2/gen", "GET"),
             ("http://d.kugou.com/v2/post", "POST"), ("http://d.kugou.com:80/v2/post", "POST"),
             ("https://stat6.y.qq.com/android/fcgi-bin/imusic_tj", "POST"),
-            ("https://clientlog.music.163.com/eapi/feedback/weblog", "POST")
+            ("https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true", "POST")
         ]
         for (url, method) in accepted {
             let request = MusicAccountHTTPRequest(url: try XCTUnwrap(URL(string: url)), method: method)
@@ -143,7 +150,8 @@ import MeowMusicFeature
             ("http://stat6.y.qq.com/android/fcgi-bin/imusic_tj", "POST"),
             ("https://stat6.y.qq.com/android/fcgi-bin/imusic_tj", "GET"),
             ("https://music.163.com/eapi/feedback/weblog", "POST"),
-            ("https://clientlog.music.163.com/api/feedback/weblog", "POST")
+            ("https://clientlog.music.163.com/api/feedback/weblog", "POST"),
+            ("https://clientlog.music.163.com/eapi/feedback/weblog", "POST")
         ]
         for (url, method) in rejected {
             let request = MusicAccountHTTPRequest(url: try XCTUnwrap(URL(string: url)), method: method)
@@ -196,45 +204,53 @@ import MeowMusicFeature
         XCTAssertThrowsError(try MusicAccountFeedbackKugouWire.ack(MusicKugouFixture.response(["status": 1], status: 201)))
     }
 
-    func testNeteaseRecommendationWireRequiresLiveProofAndPreservesPerSongSource() async throws {
-        let f = try MusicNeteaseNativeFixture()
-        try await f.enable(); _ = try await f.service.validate(platform: .netease)
+    func testNeteaseRecommendationWireRequiresProofAtAdmissionAndPreservesFrozenSourceAfterRetirement() async throws {
+        let f = try await neteaseFeedbackFixture()
         let baseline = await f.http.recorded()
-        let path = "/eapi/feedback/weblog"
-        await f.http.replies(path, [try MusicNeteaseFixture.response(["code": 200])])
-        for source in ["aiMode", "moreRcmd", "sourceMap-synthetic"] {
+        let path = "/api/clientlog/encrypt/upload"
+        for source in ["synthetic-heart-source", "moreRcmd", "sourceMap-synthetic"] {
             let authorization = MusicQueueAuthorization()
-            let sourceID = source == "aiMode" ? "501" : ""
+            let sourceID = source == "synthetic-heart-source" ? "actual-source-id" : ""
             let proof = MusicPlaybackRecommendationProof(occurrenceID: "entry-1", nativeID: "101",
                 source: source, sourceID: sourceID, algorithm: "synthetic-alg", authorization: authorization)
             let target = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
                 source: source, sourceID: sourceID, algorithm: "synthetic-alg", recommendationProof: proof)
-            let report = MusicPlaybackFeedbackReport(instanceID: UUID(), target: target, event: .start,
-                duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1)
+            let instance = UUID()
+            let report = MusicPlaybackFeedbackReport(instanceID: instance, target: target, event: .start,
+                duration: 0, listened: 0, mediaListened: 0, position: 0, rate: 1,
+                startedAt: 1_800_000_000, occurredAt: 1_800_000_000)
             let lease = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init())
             let receipt = try await lease.report(report)
-            XCTAssertEqual(receipt, .confirmed)
-            let requests = await f.http.recorded()
-            let record = try XCTUnwrap(requests.last)
-            let payload = try MusicQQWire.decode(XCTUnwrap(record.payload))
-            let logs = try XCTUnwrap(payload["logs"] as? String)
-            let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(logs.utf8)) as? [[String: Any]])
-            let fields = try XCTUnwrap(rows.first?["json"] as? [String: Any])
-            XCTAssertEqual(fields["id"] as? String, "101")
-            XCTAssertEqual(fields["source"] as? String, source)
-            XCTAssertEqual(fields["sourceId"] as? String, sourceID)
-            XCTAssertEqual(fields["alg"] as? String, "synthetic-alg")
+            XCTAssertEqual(receipt, .registered)
+            await f.service.flushPendingPlaybackFeedback()
             authorization.revoke()
-            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(report))
+            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(report), "Retired proof cannot admit a new listen")
+            let end = MusicPlaybackFeedbackReport(instanceID: instance, target: target, event: .end,
+                duration: 0, listened: 4, mediaListened: 8, position: 8, rate: 2, reason: .interrupt,
+                startedAt: report.startedAt, occurredAt: 1_800_000_004)
+            f.clock.advance(4)
+            let finished = try await lease.report(end)
+            XCTAssertEqual(finished, .registered)
+            await f.service.flushPendingPlaybackFeedback()
+            for value in [report, end] {
+                let line = String(decoding: try MusicAccountFeedbackNeteaseWire.records(value), as: UTF8.self)
+                let json = try XCTUnwrap(line.split(separator: "\u{1}").last)
+                let fields = try MusicQQWire.decode(Data(json.utf8))
+                XCTAssertEqual(fields["id"] as? Int, 101)
+                XCTAssertEqual(fields["source"] as? String, source)
+                XCTAssertEqual(fields["sourceId"] as? String, sourceID.isEmpty ? nil : sourceID)
+                XCTAssertEqual(fields["alg"] as? String, "synthetic-alg")
+                XCTAssertEqual(fields["_logTime"] as? Int64, value.event == .start ? 1_800_000_000_000 : 1_800_000_004_000)
+            }
             lease.revoke()
-
             let forged = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
                 source: source, sourceID: sourceID, algorithm: "synthetic-alg")
             XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(.init(instanceID: UUID(),
-                target: forged, event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1)))
+                target: forged, event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1,
+                startedAt: 1_800_000_000, occurredAt: 1_800_000_000)))
         }
         let records = Array((await f.http.recorded()).dropFirst(baseline.count))
-        XCTAssertEqual(records.map { $0.request.url.path }, [path, path, path])
+        XCTAssertEqual(records.map { $0.request.url.path }, Array(repeating: path, count: 6))
         _ = await f.service.close()
     }
 
@@ -251,7 +267,8 @@ import MeowMusicFeature
                 algorithm: "changed", recommendationProof: proof)
         ] {
             XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(.init(instanceID: UUID(), target: target,
-                event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1)))
+                event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1,
+                startedAt: 1_800_000_000, occurredAt: 1_800_000_000)))
         }
     }
 }

@@ -11,18 +11,14 @@ function storageFailure(error) {
   return error instanceof ScriptHostError ? error : fault('STORAGE_ERROR');
 }
 function regularFile(path) {
-  const state = fs.lstatSync(path);
-  requireValue(state.isFile() && !state.isSymbolicLink() && state.nlink === 1, 'PERMISSION_DENIED');
-}
-function plainDirectory(path) {
-  const state = fs.lstatSync(path);
-  requireValue(state.isDirectory() && !state.isSymbolicLink(), 'PERMISSION_DENIED');
+  requireValue(fs.statSync(path).isFile(), 'STORAGE_ERROR');
 }
 
 /**
  * One owner's private documents below the host data root: `<dataRoot>/<area>/<name>`
- * with at most one sub-folder. Links, other file types and traversal are rejected;
- * writes replace a whole file atomically. Formats belong to the business owner.
+ * with at most one sub-folder. The App owns the storage location; document names
+ * follow the internal naming contract and writes replace a whole file atomically.
+ * Formats belong to the business owner. This is not a guest filesystem.
  */
 export class PrivateDocuments {
   #root;
@@ -38,38 +34,22 @@ export class PrivateDocuments {
     return resolve(this.#root, ...name.split('/'));
   }
 
-  #existing(path) {
-    if (!fs.existsSync(this.#root)) return false;
-    plainDirectory(this.#root);
-    const parent = resolve(path, '..');
-    if (parent !== this.#root) {
-      if (!fs.existsSync(parent)) return false;
-      plainDirectory(parent);
-    }
-    return fs.existsSync(path);
-  }
-
   /** The stored bytes, or null when the document does not exist. */
   read(name) {
     const path = this.#path(name);
     try {
-      if (!this.#existing(path)) return null;
       regularFile(path);
       return fs.readFileSync(path);
-    } catch (error) { throw storageFailure(error); }
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw storageFailure(error);
+    }
   }
 
   write(name, bytes) {
     const path = this.#path(name);
     requireValue(Buffer.isBuffer(bytes) || bytes instanceof Uint8Array);
     try {
-      fs.mkdirSync(this.#root, { recursive: true });
-      plainDirectory(this.#root);
-      const parent = resolve(path, '..');
-      if (parent !== this.#root) {
-        if (!fs.existsSync(parent)) fs.mkdirSync(parent);
-        plainDirectory(parent);
-      }
       atomicWrite(path, bytes);
     } catch (error) { throw storageFailure(error); }
   }
@@ -78,11 +58,12 @@ export class PrivateDocuments {
   remove(name) {
     const path = this.#path(name);
     try {
-      if (!this.#existing(path)) return false;
-      regularFile(path);
       fs.unlinkSync(path);
       return true;
-    } catch (error) { throw storageFailure(error); }
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw storageFailure(error);
+    }
   }
 
   /** Document names directly inside one sub-folder. */
@@ -90,11 +71,13 @@ export class PrivateDocuments {
     requireValue(typeof folder === 'string' && folderName.test(folder));
     const path = resolve(this.#root, folder);
     try {
-      if (!this.#existing(path)) return [];
-      plainDirectory(path);
       return fs.readdirSync(path, { withFileTypes: true })
-        .filter(entry => entry.isFile() && folderName.test(entry.name))
+        .filter(entry => folderName.test(entry.name) && (entry.isFile() ||
+          entry.isSymbolicLink() && fs.statSync(resolve(path, entry.name), { throwIfNoEntry: false })?.isFile()))
         .map(entry => `${folder}/${entry.name}`);
-    } catch (error) { throw storageFailure(error); }
+    } catch (error) {
+      if (error.code === 'ENOENT') return [];
+      throw storageFailure(error);
+    }
   }
 }

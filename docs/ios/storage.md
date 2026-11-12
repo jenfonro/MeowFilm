@@ -5,7 +5,8 @@
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
 | 曲库、队列、历史、设置（`music.library.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
-| 影视规则与视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.magic-rules.v1`、`film.video-sources.v1`，参与备份 |
+| 影视规则 | Node 私有文档 | `meowfilm/script-runtime/film-rules/rules.json`，原生仅保编辑草稿／展示快照 |
+| 视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.video-sources.v1`，参与备份 |
 | 音乐脚本安装、源码与私有数据 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music`，参与备份 |
 | 播放展示、来源发现、首页快照、账号 URL 与副歌点缓存 | 普通文档 | Caches 下 `meowfilm/documents` |
 | 客户端设备会话（`music.client-context.<平台>.v1`）、QQ 设备身份（`music.qq-public.v1`） | 加密文档 | Application Support 下 `meowfilm/encrypted-documents-v1`，排除备份 |
@@ -66,7 +67,7 @@
 
 ## 清除本机用户数据
 
-- 设置 → 本机数据 → 清除本机用户数据。二次确认说明不可撤销、清除范围以及需关闭并重新打开 App；取消不产生请求。
+- 设置首页最底部独立分组 → 清空本机数据。二次确认说明不可撤销、清除范围以及需关闭并重新打开 App；取消不产生请求。
 - 确认后只持久写入 Application Support 下独立的 `meowfilm-reset.pending`（排除备份），停止播放、同步、脚本和业务访问，并切换为待重启界面。此时尚未清理；不会强制退出或在原进程热重建服务，前后台切换也不会执行清理。内嵌 Node 每进程只能启动一次。App 等待规则／来源 owner 取消排空、音乐模块终态、共享 bridge 和 Node 线程实际结束；仍需新进程才进行删除。
 - 下次冷启动由 `MeowfilmLaunchController` 在创建 `MeowfilmAssembly` 前执行清理。清除 Application Support/meowfilm、Caches/meowfilm、Caches/meowfilm.music.audio-cache.v1、临时目录下的 meowfilm（运行器回退位置），以及当前 App UserDefaults domain、App Cookie 与 URL 缓存。
 - Keychain 按稳定产品 ID `dev.meowfilm.aggregate` 下的精确 service 清除：账号凭据、网易云／酷狗客户端设备、QQ 设备，以及旧版曲库、播放展示、来源发现、账号 URL 缓存密钥。只删除本地 data-protection generic-password 项，不枚举整个 access group、不按 class 全删，不先读取或验证旧项保护属性。侧载后的偏好域使用实际 bundle ID，Keychain service 仍使用稳定产品 ID。
@@ -85,4 +86,4 @@ Cat 继续使用 `meowfilm/script-runtime/cat`，客户端视频选项、排序�
 
 ## 影视设置
 
-`film.magic-rules.v1/rules` 保存共享 JS 的四组文档；`film.video-sources.v1/catalog` 保存客户端视频映射、排序、四选项、检测结果、猫源管理元数据及 tombstone。均以 DocumentStore CAS 写入后发布状态，不存脚本源码、运行端口或 generation。Node 在 `meowfilm/script-runtime` 保存自身安装和私有卷，不拥有客户端视频选项。详细身份、删除恢复与调用边界见[影视设置](film-settings.md)。
+Node 在 `meowfilm/script-runtime/film-rules/rules.json` 唯一保存四组规则，通过 `film.rules.*` 读写；客户端不保存或回灌规则文档，不兼容旧客户端数据。`film.video-sources.v1/catalog` 仍由 DocumentStore CAS 保存客户端视频映射、排序、四选项、检测结果、猫源管理元数据及 tombstone，不存脚本源码、运行端口或 generation。Node 同目录树中的脚本安装和私有卷不等于拥有客户端视频选项。详细身份、删除恢复与调用边界见[影视设置](film-settings.md)。

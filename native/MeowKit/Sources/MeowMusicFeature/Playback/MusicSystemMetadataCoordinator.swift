@@ -7,8 +7,8 @@ import MeowPlayback
 
 // Product-lifetime projection of playback state into system media metadata.
 // Reference: iWebPlus b900c259 static/utils.js:424-440. The ORIGINAL lyric is
-// the title; the favorite-marked song title becomes artist. Translation and
-// player/background visibility preferences do not affect system metadata.
+// the title; the favorite-marked song and artist become the second line.
+// Translation and player/background visibility do not affect system metadata.
 @MainActor public final class MusicSystemMetadataCoordinator {
     private let model: MusicViewModel
     private let playback: PlaybackController
@@ -117,7 +117,8 @@ import MeowPlayback
         appearance.selectSystemArtwork(model.displayTrack ?? entry.track)
 
         let value = Self.metadata(
-            track: model.displayTrack ?? entry.track, lines: model.lyricLines, position: model.position,
+            track: model.displayTrack ?? entry.track,
+            lines: model.metadataOccurrenceID == entry.id ? model.lyricLines : [], position: model.position,
             preferences: appearance.preferences,
             favorite: favorites.loaded && favorites.isFavorite(entry.track),
             artwork: appearance.displayedArtwork
@@ -132,7 +133,8 @@ import MeowPlayback
                          preferences: MusicAppearancePreferences, favorite: Bool,
                          artwork: MusicDisplayedArtwork?) -> PlaybackNowPlayingMetadata {
         let lyric = MusicLyricTimeline.activeIndex(lines: lines, at: position).map { lines[$0].text }
-        let text = preferences.lockScreenMetadata(songTitle: track.title, lyric: lyric, isFavorite: favorite)
+        let text = preferences.lockScreenMetadata(songTitle: track.title, songArtist: track.artist,
+                                                  lyric: lyric, isFavorite: favorite)
         let image = artwork.flatMap { $0.matches(track) ? PlaybackNowPlayingArtwork(data: $0.data) : nil }
         return .init(title: text.title, artist: text.artist, album: text.album, artwork: image)
     }

@@ -8,7 +8,8 @@
         FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="Auto"
-        Loaded="OnLoaded" PreviewKeyDown="OnPreviewKeyDown"
+        Loaded="OnLoaded" PreviewKeyDown="OnPreviewKeyDown" PreviewKeyUp="OnPreviewKeyUp"
+        PreviewMouseDown="OnChannelHeaderPointer" PreviewMouseUp="OnChannelHeaderPointer"
         local:PlayerSurfaceInput.DismissRequested="OnQueueDismissClick"
         AutomationProperties.Name="meowfilm">
     <Window.Resources>
@@ -55,6 +56,8 @@
             </Style>
         </Border.Style>
         <Grid x:Name="PresentationSurface" ClipToBounds="True" SizeChanged="OnPresentationSizeChanged">
+        <Border x:Name="ApplicationBackground" IsHitTestVisible="False"
+                Background="{Binding Background, ElementName=WindowFrame}" />
         <Grid x:Name="RootLayout" KeyboardNavigation.TabNavigation="Cycle">
             <Grid.RowDefinitions>
                 <RowDefinition Height="64" />
@@ -66,10 +69,9 @@
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
-            <Border x:Name="SidebarBackground" Grid.RowSpan="2">
+            <Border x:Name="SidebarBackground" Grid.RowSpan="2" ClipToBounds="True" IsHitTestVisible="False">
                 <Border.Style>
                     <Style TargetType="Border">
-                        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Sidebar}" />
                         <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.SidebarBorder}" />
                         <Setter Property="BorderThickness" Value="0,0,1,0" />
                         <Style.Triggers>
@@ -81,6 +83,19 @@
                         </Style.Triggers>
                     </Style>
                 </Border.Style>
+                <local:SidebarBackdrop x:Name="SidebarMaterial" Source="{Binding ElementName=ApplicationBackground}">
+                    <local:SidebarBackdrop.Style>
+                        <Style TargetType="local:SidebarBackdrop">
+                            <Setter Property="Effect"><Setter.Value><BlurEffect Radius="12" RenderingBias="Performance" /></Setter.Value></Setter>
+                            <Style.Triggers>
+                                <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Setter Property="Effect" Value="{x:Null}" />
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </local:SidebarBackdrop.Style>
+                </local:SidebarBackdrop>
             </Border>
             <StackPanel x:Name="Brand" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,16,0"
                         IsHitTestVisible="False">
@@ -296,6 +311,8 @@
                                 VerticalContentAlignment="Stretch" Focusable="False" IsTabStop="False" SizeChanged="OnQueueHostSizeChanged" />
             </Border>
 
+            <local:PlayerDialogHost x:Name="ChannelDialogHost" Grid.Row="1" Grid.RowSpan="2" Grid.ColumnSpan="2" Panel.ZIndex="40"/>
+
             <!-- Auto-sized layout row, never an overlay on scrolling content. No player is created by the shell. -->
             <Border x:Name="PlayerFrame" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed">
                 <ContentControl x:Name="PlayerHost" IsEnabled="{Binding IsInteractive}"
@@ -305,6 +322,8 @@
         </Grid>
         <local:CloseWindowDialog x:Name="CloseDialog" Panel.ZIndex="90" Visibility="Collapsed"
                                  shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
+        <local:UserDataResetDialog x:Name="ResetDialog" Panel.ZIndex="110" Visibility="Collapsed"
+                                   shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
         <StackPanel x:Name="NotificationOverlay" Panel.ZIndex="100" HorizontalAlignment="Center" VerticalAlignment="Top" MaxWidth="560" Margin="24,76,24,12">
                 <Border x:Name="StatusPanel" Margin="0,0,0,8">
                     <Border.Style>

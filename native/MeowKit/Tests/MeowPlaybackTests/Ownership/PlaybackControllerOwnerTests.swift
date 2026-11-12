@@ -54,7 +54,15 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             XCTAssertEqual(events.first?.snapshot, controller.snapshot)
             XCTAssertEqual(events.first?.error as? PlaybackNetworkError, .headersOnLocalFile)
             XCTAssertNil(controller.player.currentItem)
-            XCTAssertFalse(controller.pause(attempt: attempt))
+            let failedSnapshot = controller.snapshot
+            for _ in 0..<2 {
+                XCTAssertTrue(controller.pause(attempt: attempt))
+                XCTAssertEqual(controller.snapshot, failedSnapshot)
+                XCTAssertEqual(controller.currentAttempt, attempt)
+                XCTAssertEqual(controller.lastError as? PlaybackNetworkError, .headersOnLocalFile)
+                XCTAssertNil(controller.player.currentItem)
+                XCTAssertEqual(events.map(\.kind), [.failed])
+            }
             XCTAssertFalse(controller.resume(attempt: attempt))
             XCTAssertFalse(controller.seek(to: 20, attempt: attempt))
             XCTAssertTrue(controller.stop(attempt: attempt))

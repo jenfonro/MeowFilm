@@ -52,7 +52,7 @@
 - `PlaybackException` 只公开 `PlaybackError` 中的固定代码；不暴露 URI、路径、请求头、凭据、响应正文或原生日志。
 - 非当前离线归档和损坏输入明确失败且不被改写。
 
-当前私有 native DLL 已有独立构建证据，但七模块／VideoKernel 合并后的 Media C#、整 App 与真实媒体帧、ClearKey、seek、撤权排空仍无本轮有效平台通过结论；单独 DLL、旧音频测试或 UI 状态不能替代这些证据。影视业务及端侧接缝分别见[共同运行器契约](../runtime/film-playback.md)和[影视播放页](film-playback.md)。
+当前私有 native DLL 已有独立构建证据，但八模块／VideoKernel 合并后的 Media C#、整 App 与真实媒体帧、ClearKey、seek、撤权排空仍无本轮有效平台通过结论；单独 DLL、旧音频测试或 UI 状态不能替代这些证据。影视业务及端侧接缝分别见[共同运行器契约](../runtime/film-playback.md)和[影视播放页](film-playback.md)。
 
 ## 相关契约
 

@@ -85,7 +85,7 @@ final class MusicNativePublicBrowseTests: XCTestCase {
         XCTAssertEqual(unavailable.total, 1); XCTAssertEqual(unavailable.consumed, 1)
         XCTAssertNil(unavailable.cursor)
         let changed = NativeMusicHTTPFixture([head, .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song()]))]),
-            MusicNativePublicBrowseFixture.head(version: 2)])
+            MusicNativePublicBrowseFixture.head(ids: ["17"], version: 2)])
         let second = try await NativeMusicFixture.service(http: changed)
         let displayed = try await second.publicDetail(MusicNativePublicBrowseFixture.collection, cursor: nil)
         do {
@@ -93,6 +93,49 @@ final class MusicNativePublicBrowseTests: XCTestCase {
             XCTFail("changed snapshot")
         }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+        await service.close(); await second.close()
+    }
+    func testWYRefreshClocksAndSummaryDoNotInvalidateUnchangedPlaylistPlayback() async throws {
+        let ids = ["17", MusicNativePublicBrowseFixture.id]
+        var first = MusicNativePublicBrowseFixture.head(ids: ids)
+        first["playlist"]["updateTime"] = .n(1)
+        first["playlist"]["tracks"] = .array(ids.map { MusicNativePublicBrowseFixture.song($0) })
+        var refreshed = MusicNativePublicBrowseFixture.head(ids: ids, version: 2)
+        refreshed["playlist"]["updateTime"] = .n(2)
+        refreshed["playlist"]["name"] = .string("Refreshed radar")
+        refreshed["playlist"]["creator"]["nickname"] = .string("Refreshed display name")
+        let http = NativeMusicHTTPFixture([first, refreshed])
+        let service = try await NativeMusicFixture.service(http: http)
+        let displayed = try await service.publicDetail(MusicNativePublicBrowseFixture.collection, cursor: nil)
+        let source = try await service.openPublicQueue(.init(collection: displayed.collection, snapshot: displayed.snapshot))
+        let page = try await service.remoteQueuePage(source, cursor: nil)
+        XCTAssertEqual(page.items.map { $0.sources[0].nativeId }, ids)
+        let state = try await service.replaceRemoteQueue(source, start: .init(index: 0, track: XCTUnwrap(page.items.first)),
+            expectedRevision: 0, intent: .init())
+        XCTAssertEqual(state.total, 2)
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries.map { $0.track.sources[0].nativeId }, ids)
+        let calls = await http.calls()
+        XCTAssertEqual(calls.map(\.url.path), ["/eapi/v6/playlist/detail", "/eapi/v6/playlist/detail"])
+        await source.close(); await service.close()
+    }
+    func testWYRealMemberChangesRemainRejectedEvenWithoutClockChanges() async throws {
+        let ids = ["17", "18"]
+        for changed in [["18", "17"], ["17", "19"], ["17"], ["17", "18", "19"]] {
+            var head = MusicNativePublicBrowseFixture.head(ids: ids)
+            head["playlist"]["tracks"] = .array(ids.map { MusicNativePublicBrowseFixture.song($0) })
+            let http = NativeMusicHTTPFixture([head, MusicNativePublicBrowseFixture.head(ids: changed)])
+            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, http: http)
+            let displayed = try await service.publicDetail(MusicNativePublicBrowseFixture.collection, cursor: nil)
+            do {
+                _ = try await service.openPublicQueue(.init(collection: displayed.collection, snapshot: displayed.snapshot))
+                XCTFail("Changed ordered members authorized playback")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+            XCTAssertEqual(store.snapshot().2, 0)
+            let sources = await service.publicQueueSources.count
+            XCTAssertEqual(sources, 0)
+            await service.close()
+        }
     }
     func testWYEmptyVisiblePageAdvancesOnlyOneRawPageAndReusesMetadataForExplicitQueue() async throws {
         let ids = (1...31).map(String.init), head = MusicNativePublicBrowseFixture.head(ids: ids)
@@ -110,16 +153,22 @@ final class MusicNativePublicBrowseTests: XCTestCase {
         let rows = try await source.completeTracks(intent: MusicQueueAuthorization())
         XCTAssertEqual(rows.count, 1)
         let beforeSave = store.snapshot()
-        do {
-            _ = try await service.saveRemoteCollection(source: source, name: "Incomplete", intent: .init())
-            XCTFail("Visible subset saved as a complete collection")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .contentUnavailable) }
+        let saved = try await service.saveRemoteCollection(source: source, name: "Incomplete", intent: .init())
+        XCTAssertEqual(saved.networkReference, .init(platform: .netease, remoteID: first.collection.nativeID,
+            creator: first.collection.creator))
+        XCTAssertEqual(saved.count, 31)
         let afterSave = store.snapshot()
-        XCTAssertEqual(afterSave.0, beforeSave.0); XCTAssertEqual(afterSave.2, beforeSave.2)
+        XCTAssertEqual(afterSave.2, beforeSave.2 + 1)
+        let beforeDocument = try MusicDocument(beforeSave.0, runID: "fixture")
+        let afterDocument = try MusicDocument(afterSave.0, runID: "fixture")
+        XCTAssertEqual(afterDocument.library["library"]["songs"], beforeDocument.library["library"]["songs"])
+        XCTAssertEqual(afterDocument.library["library"]["collections"], beforeDocument.library["library"]["collections"])
+        XCTAssertEqual(afterDocument.queue, beforeDocument.queue)
+        XCTAssertEqual(afterDocument.playback, beforeDocument.playback)
         calls = await http.calls()
         XCTAssertEqual(calls.map(\.url.path), ["/eapi/v6/playlist/detail", "/weapi/v3/song/detail",
                                              "/weapi/v3/song/detail", "/eapi/v6/playlist/detail"])
-        await source.close()
+        await source.close(); await service.close()
     }
     func testWYAllUnavailableQueueIsNotInventedPermissionErrorAndRefreshInvalidatesCaches() async throws {
         let head = MusicNativePublicBrowseFixture.head()

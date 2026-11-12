@@ -10,7 +10,7 @@ struct MusicNativeCandidateDiscoverySeed: Sendable {
     var cacheRecovery: MusicNativeCacheRecoveryPin? = nil
 }
 
-/// Queued callbacks and a synchronous CAS share the same close fence.
+/// Queued callbacks and owner admission share the same close fence.
 final class MusicNativeCandidateDiscoveryLifetime: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var closed = false
@@ -24,6 +24,29 @@ final class MusicNativeCandidateDiscoveryLifetime: @unchecked Sendable {
 }
 
 extension NativeMusicService: MusicCandidateDiscoveryServing {
+    /// Current business decisions filter additions, never the owner's existing sources.
+    func filteringRecordingSourceAdditions(_ song: MJ, existing: [MJ], playback: MJ) -> MJ {
+        let descriptor = MusicModel.descriptor(song)
+        let excluded = Set(playback["recordingSourceExclusions"].array.filter {
+            $0["fingerprint"].string == descriptor.fingerprint &&
+                descriptor.isCompatible(with: .init(title: "", artist: "", duration: $0["duration"].number), sameNative: true)
+        }.map { $0["sourceKey"].string })
+        guard !excluded.isEmpty else { return song }
+        let retained = Set(existing.map { $0["sourceKey"].string })
+        var rows = song["sources"].array.filter {
+            retained.contains($0["sourceKey"].string) || !excluded.contains($0["sourceKey"].string)
+        }
+        if let primary = song["sources"].array.first?["sourceKey"],
+           !rows.contains(where: { $0["sourceKey"] == primary }),
+           let original = existing.first?["sourceKey"],
+           let index = rows.firstIndex(where: { $0["sourceKey"] == original }) {
+            rows.insert(rows.remove(at: index), at: 0)
+        }
+        var filtered = song
+        filtered["sources"] = .array(MusicModel.orderedSources(rows))
+        return filtered
+    }
+
     public func beginCandidateDiscovery(occurrenceID: String, expectedQueueRevision: Int) async throws -> any MusicCandidateDiscoverySession {
         try candidateDiscoverySession(occurrenceID: occurrenceID, expectedQueueRevision: expectedQueueRevision)
     }
@@ -83,47 +106,6 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         }
     }
 
-    func candidateCommit(_ seed: MusicNativeCandidateDiscoverySeed, staged: MJ) throws -> MusicNativeCandidateDiscoverySeed {
-        try candidateCheck(seed)
-        if staged == seed.song { return seed }
-        let clean = try MusicModel.cleanSong(staged)
-        try MusicModel.rejectSecrets(clean)
-        try musicRequire(clean["songId"] == seed.song["songId"] &&
-            MusicModel.compatible(seed.song, clean), .songIDConflict)
-        _ = try MusicModel.sources(clean)
-        let commit = { [self] in try seed.lifetime.perform { try transaction(["queue"]) { d in
-            try musicRequire(d.queue["revision"].int == seed.state.revision &&
-                d.playback["revision"].int == seed.state.settingsRevision, .staleRevision)
-            guard d.queue["currentId"].string == seed.occurrenceID,
-                  let index = d.queue["entries"].array.firstIndex(where: { $0["id"].string == seed.occurrenceID }) else {
-                throw MusicServiceError.targetChanged
-            }
-            try musicRequire(try MusicModel.cleanSong(d.queue["entries"].array[index]["song"]) == seed.song, .targetChanged)
-            // No alias table is invented. Existing library/queue evidence may
-            // veto a reused native ID, but discovery never rewrites those owners.
-            let knownSongs = d.library["library"]["songs"].fields.map(\.1) + d.queue["entries"].array.map { $0["song"] }
-            for proposed in clean["sources"].array {
-                for known in knownSongs {
-                    for source in known["sources"].array
-                        where source["sourceKey"] == proposed["sourceKey"] {
-                        try musicRequire(MusicModel.compatible(source, proposed), .nativeIDConflict)
-                    }
-                }
-            }
-            try musicRequire(d.queue["revision"].int < 9_007_199_254_740_991, .limit)
-            var entries = d.queue["entries"].array
-            entries[index]["song"] = clean
-            d.queue["entries"] = .array(entries)
-            d.queue["revision"] = .n(d.queue["revision"].int + 1)
-            // Same occurrence and recording: no queue reselection, seek reset,
-            // library identity replacement or remote mutation.
-            return MusicNativeCandidateDiscoverySeed(occurrenceID: seed.occurrenceID, song: clean,
-                state: stateDTO(d), epoch: seed.epoch, lifetime: seed.lifetime, cacheRecovery: seed.cacheRecovery)
-        } } }
-        if let recovery = seed.cacheRecovery { return try recovery.authorization.perform(commit) }
-        return try commit()
-    }
-
     func candidateCancelWork(_ label: String) { cancelWork(label) }
 
     /// Automatic discovery searches only platforms whose rows can become a
@@ -166,10 +148,10 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     let owner: NativeMusicService
     let timing: MusicCandidateDiscoveryTiming
     let label = "candidate:" + UUID().uuidString.lowercased()
-    var seed: MusicNativeCandidateDiscoverySeed
+    let seed: MusicNativeCandidateDiscoverySeed
     var staged: MJ
     var searchIssues: [MusicCandidateDiscoveryIssue] = []
-    var searched = false, discovering = false, resolving = false, committing = false, closed = false
+    var searched = false, discovering = false, resolving = false, closed = false
     /// Platforms whose known targets failed in this session, by failure kind.
     var contentFailed = Set<String>(), otherFailed = Set<String>()
     var ownedAttempt: String?
@@ -188,14 +170,14 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
         try check()
         try await owner.candidateCheck(seed)
         try check()
+        let cache = try await owner.sourceDiscoveryState(seed.song)
+        let cached = cache.current(window: MusicSourceDiscoveryWindow.playback)
+        staged = await owner.mergeSourceDiscoveryCache(staged, entries: cached)
+        try check(); try await owner.candidateCheck(seed); try check()
         if discover, force || !searched {
             guard !discovering else { throw MusicServiceError.busy }
             discovering = true
             defer { discovering = false }
-            let cache = await owner.sourceDiscoveryState(seed.song)
-            let cached = cache.current(window: MusicSourceDiscoveryWindow.playback)
-            staged = await owner.mergeSourceDiscoveryCache(seed.song, entries: cached)
-            try check(); try await owner.candidateCheck(seed); try check()
             // Refresh keeps every enabled platform; automatic playback only its target platforms.
             let scope: Set<String>?
             if force { scope = nil }
@@ -250,28 +232,19 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
                 searched = results.contains(where: { $0.page != nil })
             }
         }
-        let song = discover ? staged : seed.song, captured = seed
+        let song = staged, captured = seed
         let options = try await owner.candidateOptions(song: song, seed: captured, label: label, timing: timing)
         try check(); try await owner.candidateCheck(seed); try check()
         return .init(track: try MusicModel.track(song, .init(kind: .queue, id: seed.occurrenceID)), state: seed.state,
             options: options.rows, issues: (discover ? searchIssues : []) + options.issues,
             scriptState: options.scriptState, searched: discover && searched)
     }
-    func commitDiscovery() async throws {
-        try check()
-        guard !resolving, !committing, !discovering else { throw MusicServiceError.busy }
-        committing = true
-        defer { committing = false }
-        let next = try await owner.candidateCommit(seed, staged: staged)
-        seed = next
-        try check()
-    }
     func resolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String) async throws -> MusicPlaybackCandidate {
         try check()
-        guard !resolving, !committing else { throw MusicServiceError.busy }
+        guard !resolving, !discovering else { throw MusicServiceError.busy }
         resolving = true; ownedAttempt = attemptID; resolvingID = attemptID
-        let owner = owner, captured = seed, label = label
-        let task = Task { try await owner.candidateResolve(target, attemptID: attemptID, seed: captured, label: label) }
+        let owner = owner, captured = seed, recording = staged, label = label
+        let task = Task { try await owner.candidateResolve(target, attemptID: attemptID, seed: captured, recording: recording, label: label) }
         resolutionTask = task
         defer {
             if resolvingID == attemptID { resolving = false; resolvingID = nil; resolutionTask = nil }

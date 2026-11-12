@@ -1,4 +1,5 @@
 import Foundation
+import MeowRuntime
 import XCTest
 @testable import MeowFilmFeature
 
@@ -26,12 +27,18 @@ final class FilmHomeModelTests: XCTestCase {
         XCTAssertEqual(model.sections, sections)
         XCTAssertNil(model.error)
         XCTAssertFalse(model.isLoading)
-        XCTAssertNil(model.loadIfNeeded())
+        let reentry = try XCTUnwrap(model.loadIfNeeded())
+        XCTAssertEqual(model.sections, sections)
+        await source.waitForCalls(2)
+        await source.complete(2, with: .success(sections))
+        await reentry.value
         let finalCount = await source.numberOfCalls
-        XCTAssertEqual(finalCount, 1)
+        XCTAssertEqual(finalCount, 2)
+        let refreshes = await source.refreshes
+        XCTAssertEqual(refreshes, [false, false])
     }
 
-    func testFailureRequiresExplicitRetryAndEmptySuccessEndsLoading() async throws {
+    func testFailureAndEmptySnapshotStillConsultOwnerOnEntryAndExplicitRefreshIsForwarded() async throws {
         let source = ControlledFilmSource(id: "first")
         let model = FilmHomeModel(sources: [source])
         let failed = try XCTUnwrap(model.loadIfNeeded())
@@ -41,21 +48,30 @@ final class FilmHomeModelTests: XCTestCase {
         XCTAssertEqual(model.error, .upstream(statusCode: 503))
         XCTAssertTrue(model.sections.isEmpty)
         XCTAssertFalse(model.isLoading)
-        XCTAssertNil(model.loadIfNeeded(), "Re-entering a failed page must not retry implicitly.")
+        let reentry = try XCTUnwrap(model.loadIfNeeded())
+        await source.waitForCalls(2)
+        await source.complete(2, with: .failure(FilmHomeError.network))
+        await reentry.value
 
         let retry = try XCTUnwrap(model.refresh())
         XCTAssertTrue(model.isLoading)
         XCTAssertNil(model.error)
-        await source.waitForCalls(2)
+        await source.waitForCalls(3)
         let empty = [FilmHomeSection(id: "movie", title: "热门电影", items: [])]
-        await source.complete(2, with: .success(empty))
+        await source.complete(3, with: .success(empty))
         await retry.value
         XCTAssertEqual(model.sections, empty)
         XCTAssertNil(model.error)
         XCTAssertFalse(model.isLoading)
-        XCTAssertNil(model.loadIfNeeded(), "An empty success is still a completed snapshot.")
+        let emptyReentry = try XCTUnwrap(model.loadIfNeeded())
+        XCTAssertEqual(model.sections, empty)
+        await source.waitForCalls(4)
+        await source.complete(4, with: .success(empty))
+        await emptyReentry.value
         let count = await source.numberOfCalls
-        XCTAssertEqual(count, 2)
+        XCTAssertEqual(count, 4)
+        let refreshes = await source.refreshes
+        XCTAssertEqual(refreshes, [false, false, true, false])
     }
 
     func testSourceSwitchRejectsLateSuccessAndFailureAndRestoresCompletedSnapshots() async throws {
@@ -91,10 +107,13 @@ final class FilmHomeModelTests: XCTestCase {
             await firstSource.waitForCalls(2)
             await firstSource.complete(2, with: .success(home(sourceID: "first", title: "重新加载")))
             await reload.value
-            XCTAssertNil(model.selectSource(id: "second"))
+            let secondReentry = try XCTUnwrap(model.selectSource(id: "second"))
             XCTAssertEqual(model.sections, secondHome)
+            await secondSource.waitForCalls(2)
+            await secondSource.complete(2, with: .success(secondHome))
+            await secondReentry.value
             let secondCount = await secondSource.numberOfCalls
-            XCTAssertEqual(secondCount, 1, "Returning to a completed source reuses its snapshot.")
+            XCTAssertEqual(secondCount, 2, "A visible snapshot cannot skip the owner's cache check.")
         }
     }
 
@@ -151,6 +170,42 @@ final class FilmHomeModelTests: XCTestCase {
         XCTAssertNil(model.selectSource(id: "first"))
     }
 
+    func testRefreshFailureAndStaleEntryKeepContentAndRecoveryClearsTheNotification() async throws {
+        let source = ControlledFilmSource(id: "first")
+        let model = FilmHomeModel(sources: [source])
+        let seed = home(sourceID: "first", title: "旧内容")
+        let initial = try XCTUnwrap(model.loadIfNeeded())
+        await source.waitForCalls(1)
+        await source.complete(1, with: .success(seed))
+        await initial.value
+        let failed = try XCTUnwrap(model.refresh())
+        XCTAssertEqual(model.sections, seed)
+        await source.waitForCalls(2)
+        await source.complete(2, with: .failure(RuntimeHTTPError.remote("NETWORK_ERROR")))
+        await failed.value
+        XCTAssertEqual(model.sections, seed)
+        XCTAssertEqual(model.error, .runtime(code: "NETWORK_ERROR"))
+
+        let staleCache = try FilmMetadataCache(value: .object([
+            "status": .string("stale"), "error": .object(["code": .string("UPSTREAM_HTTP")]),
+            "components": .object(["items": .object(["state": .string("ready")])])
+        ]))
+        let stale = [FilmHomeSection(id: "movie", title: "热门电影", items: seed[0].items, cache: staleCache)]
+        let check = try XCTUnwrap(model.loadIfNeeded())
+        await source.waitForCalls(3)
+        await source.complete(3, with: .success(stale))
+        await check.value
+        XCTAssertEqual(model.sections.first?.items, seed[0].items)
+        XCTAssertEqual(model.sections.first?.cache?.status, .stale)
+        XCTAssertEqual(model.error, .runtime(code: "UPSTREAM_HTTP"))
+        let recovered = try XCTUnwrap(model.refresh())
+        await source.waitForCalls(4)
+        await source.complete(4, with: .success(seed))
+        await recovered.value
+        XCTAssertEqual(model.sections, seed)
+        XCTAssertNil(model.error)
+    }
+
     func testCancelDuringRefreshRetainsLastCompletedSnapshot() async throws {
         let source = ControlledFilmSource(id: "first")
         let model = FilmHomeModel(sources: [source])
@@ -166,7 +221,10 @@ final class FilmHomeModelTests: XCTestCase {
         await refresh.value
         XCTAssertEqual(model.sections, seed)
         XCTAssertNil(model.error)
-        XCTAssertNil(model.loadIfNeeded())
+        let reentry = try XCTUnwrap(model.loadIfNeeded())
+        await source.waitForCalls(3)
+        await source.complete(3, with: .success(seed))
+        await reentry.value
     }
 
     func testReleasingPageModelCancelsWithoutWaitingForUncooperativeSource() async throws {
@@ -192,6 +250,7 @@ final class FilmHomeModelTests: XCTestCase {
 private actor ControlledFilmSource: FilmSource {
     nonisolated let descriptor: FilmSourceDescriptor
     private(set) var numberOfCalls = 0
+    private(set) var refreshes: [Bool] = []
     private(set) var cancelledSettlements: [Int] = []
     private var pending: [Int: CheckedContinuation<[FilmHomeSection], Error>] = [:]
     private var arrivals: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
@@ -200,7 +259,8 @@ private actor ControlledFilmSource: FilmSource {
         descriptor = FilmSourceDescriptor(id: id, title: id)
     }
 
-    func loadHome() async throws -> [FilmHomeSection] {
+    func loadHome(refresh: Bool) async throws -> [FilmHomeSection] {
+        refreshes.append(refresh)
         numberOfCalls += 1
         let call = numberOfCalls
         defer {

@@ -1,16 +1,16 @@
 import { PrivateDocuments } from '@meowfilm/script-host';
 import { isUtf8 } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 export const metadataFailure = code => Object.assign(new Error(code), { code });
 export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const defaults = {
-  tmdb: { apiBase: 'https://api.themoviedb.org', imageBase: 'https://image.tmdb.org/t/p',
-    apiKey: '', accessToken: '' },
+  tmdb: { apiBase: 'https://api.themoviedb.org/3', imageBase: 'https://image.tmdb.org',
+    apiKey: '', accessToken: '', language: 'zh-CN', region: 'CN', includeAdult: false },
   douban: { apiBase: 'https://m.douban.com', searchBase: 'https://search.douban.com',
     imageBase: 'https://img3.doubanio.com', apiProxy: '', imageProxy: '', cookie: '' },
 };
-const secrets = { tmdb: ['apiKey', 'accessToken'], douban: ['cookie'] };
+const textFields = { tmdb: ['apiKey', 'accessToken', 'language', 'region'], douban: ['cookie'] };
 
 function endpoint(value, template = false) {
   if (template && value === '') return value;
@@ -19,29 +19,31 @@ function endpoint(value, template = false) {
     throw metadataFailure('INVALID_REQUEST');
   }
   const slots = value.match(/\{(?:url|encodedUrl)\}/g) ?? [];
-  if (template ? slots.length !== 1 : slots.length !== 0) throw metadataFailure('INVALID_REQUEST');
-  const substituted = template ? value.replace(slots[0], 'https%3A%2F%2Fexample.invalid%2F') : value;
+  if (template ? slots.length > 1 : slots.length !== 0) throw metadataFailure('INVALID_REQUEST');
+  const substituted = slots.length ? value.replace(slots[0], 'https%3A%2F%2Fexample.invalid%2F') : value;
   let url;
   try { url = new URL(substituted); } catch { throw metadataFailure('INVALID_REQUEST'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.hash ||
       (!template && url.search) || /[{}]/.test(substituted) ||
-      template && !value.slice(value.indexOf('://') + 3).match(/^[^/?#{}]+[/?]/)) {
+      slots.length && !value.slice(value.indexOf('://') + 3).match(/^[^/?#{}]+[/?]/)) {
     throw metadataFailure('INVALID_REQUEST');
   }
   return template ? value.replace(/^https?:\/\//i, scheme => scheme.toLowerCase()) : url.href.replace(/\/+$/, '');
 }
 
 function validate(id, value) {
-  if (!object(value) || Object.keys(value).length !== Object.keys(defaults[id]).length ||
-      Object.keys(value).some(key => !Object.hasOwn(defaults[id], key))) {
+  if (!object(value) || Object.keys(value).some(key => !Object.hasOwn(defaults[id], key))) {
     throw metadataFailure('INVALID_REQUEST');
   }
   const result = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (secrets[id].includes(key)) {
+  for (const [key, item] of Object.entries({ ...defaults[id], ...value })) {
+    if (key === 'includeAdult') {
+      if (typeof item !== 'boolean') throw metadataFailure('INVALID_REQUEST');
+      result[key] = item;
+    } else if (textFields[id].includes(key)) {
       if (typeof item !== 'string' || /[\u0000-\u001f\u007f]/.test(item)) throw metadataFailure('INVALID_REQUEST');
       result[key] = item.trim();
-    } else result[key] = endpoint(item, key.endsWith('Proxy'));
+    } else result[key] = endpoint(id === 'tmdb' && item === '' ? defaults[id][key] : item, key.endsWith('Proxy'));
   }
   return result;
 }
@@ -50,7 +52,9 @@ function validate(id, value) {
  * not a second settings database. PrivateDocuments is atomic, not encryption. */
 export function createMetadataSettings(dataRoot, id) {
   const documents = new PrivateDocuments(dataRoot, id);
-  let snapshot, reload = false, revision = randomUUID();
+  let snapshot, reload = false;
+  const revision = value => createHash('sha256').update(JSON.stringify([id,
+    Object.keys(defaults[id]).map(key => [key, value[key]])])).digest('hex');
   const same = (left, right) => Object.keys(defaults[id]).every(key => left[key] === right[key]);
   function load() {
     try {
@@ -73,18 +77,12 @@ export function createMetadataSettings(dataRoot, id) {
   function read() {
     if (snapshot !== undefined && !reload) return snapshot;
     const value = load();
-    if (snapshot !== undefined && !same(snapshot, value)) revision = randomUUID();
     snapshot = value;
     reload = false;
     return snapshot;
   }
   function visible(value) {
-    const result = { ...value, revision };
-    for (const key of secrets[id]) {
-      delete result[key];
-      result[`${key}Configured`] = value[key].length > 0;
-    }
-    return result;
+    return { ...value, revision: revision(value) };
   }
   return {
     read,
@@ -105,7 +103,6 @@ export function createMetadataSettings(dataRoot, id) {
         throw metadataFailure('STORAGE_ERROR');
       }
       snapshot = value;
-      revision = randomUUID();
       return visible(value);
     },
   };

@@ -22,8 +22,10 @@ internal static class MusicLyricScroll
         internal Action? Settled;
     }
 
+    // Virtualized reflow can shrink the range while the manual destination is still in flight.
     internal static double ManualTarget(ScrollViewer viewer) =>
-        State(viewer) is { Moving: true, Manual: true, Target: { } target } ? target : PresentedOffset(viewer);
+        State(viewer) is { Moving: true, Manual: true, Target: { } target }
+            ? Math.Clamp(target, 0, viewer.ScrollableHeight) : PresentedOffset(viewer);
 
     private static double PresentedOffset(ScrollViewer viewer) =>
         viewer.VerticalOffset - (State(viewer).Presentation?.Y ?? 0);
@@ -62,8 +64,14 @@ internal static class MusicLyricScroll
         viewer.SetValue(OffsetProperty, offset);
     }
 
-    internal static void Move(ScrollViewer viewer, double target, bool manual = false, Action? settled = null,
-        TranslateTransform? presentation = null, MusicLyricList? list = null)
+    internal static void Move(ScrollViewer viewer, double target, TranslateTransform presentation,
+        MusicLyricList list, Action? settled = null) => MoveCore(viewer, target, presentation, list, settled);
+
+    internal static void MoveManual(ScrollViewer viewer, double target, Action? settled = null) =>
+        MoveCore(viewer, target, null, null, settled);
+
+    private static void MoveCore(ScrollViewer viewer, double target, TranslateTransform? presentation,
+        MusicLyricList? list, Action? settled)
     {
         target = Math.Clamp(target, 0, viewer.ScrollableHeight);
         var state = State(viewer);
@@ -76,7 +84,7 @@ internal static class MusicLyricScroll
         var from = PresentedOffset(viewer);
         Stop(viewer);
         state.Target = target;
-        state.Manual = manual;
+        state.Manual = presentation is null;
         state.Settled = settled;
         viewer.SetValue(OffsetProperty, target);
         if (!SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast || Math.Abs(from - target) < .5)
@@ -114,7 +122,7 @@ internal static class MusicLyricScroll
             presentation.BeginAnimation(TranslateTransform.YProperty, translation, HandoffBehavior.SnapshotAndReplace);
             return;
         }
-        var animation = new DoubleAnimation(from, target, TimeSpan.FromMilliseconds(manual ? 180 : 420))
+        var animation = new DoubleAnimation(from, target, TimeSpan.FromMilliseconds(180))
         {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
             FillBehavior = FillBehavior.Stop

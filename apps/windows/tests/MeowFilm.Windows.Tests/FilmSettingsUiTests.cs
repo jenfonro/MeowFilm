@@ -15,9 +15,7 @@ using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
-using MeowFilm.Core.Scripting;
 using MeowFilm.Desktop;
-using MeowFilm.Platform.Scripting;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -30,7 +28,7 @@ public static class FilmSettingsUiTests
     {
         yield return Case("draft testing passes all four groups and query without saving", DraftTesting);
         yield return Case("row save add delete and section restore preserve whole panel scope", RuleEditing);
-        yield return Case("native new-rule inputs share JavaScript whitespace semantics through the loaded view", NativeRuleInputs);
+        yield return Case("new-rule inputs reach the Node normalizer without native whitespace or regex interpretation", NativeRuleInputs);
         yield return Case("rule cancellation and errors cannot publish into a hidden view", RuleLifetime);
         yield return Case("local scripts preserve valid UTF8 bytes and reject invalid UTF8", LocalScriptEncoding);
         yield return Case("cat edits toggles restart and bulk deletion reach the source owner", CatManagement);
@@ -40,6 +38,10 @@ public static class FilmSettingsUiTests
         yield return Case("failed source operations restore switches and notify with retry", SourceFailure);
         yield return Case("native keyboard scrolling high contrast and screenshots cover both window sizes", Layout);
         yield return Case("empty source pages keep their actions and columns", Empty);
+        yield return Case("data sources echo one token and cookie and save server proxy options independently", DataSources);
+        yield return Case("site clean lives under matching and playback uses half-width shared order lists", PlaybackLayout);
+        yield return Case("playback management separates counted target groups from bounded source tables and empty states", PlaybackManagement);
+        yield return Case("cache controls invalidate exact domains and drain both providers on failure", MetadataCache);
     }
 
     private static TestCase Case(string name, Func<Task> body) =>
@@ -67,8 +69,8 @@ public static class FilmSettingsUiTests
         movie.Rows[0].Replace = "draft-movie";
         scene.Box("SearchInput").Text = "作品2 更新";
         scene.Box("SearchQuery").Text = "作品2";
-        int writes = scene.Store.Writes;
-        scene.Engine.Result = new()
+        int writes = scene.RulesRuntime.Writes;
+        scene.RulesRuntime.Result = new()
         {
             Section = FilmRuleSection.Search, Type = "success", Text = "净化后：作品2",
             InputText = "作品2 更新", ProcessedText = "作品2", GroupKey = "作品2",
@@ -76,12 +78,12 @@ public static class FilmSettingsUiTests
         };
         Click(Button(scene.View, "测试搜索列表净化"));
         await Until(() => !scene.View.RulesBusy);
-        var call = scene.Engine.Requests.Last(request => request.GetProperty("operation").GetString() == "process");
+        var call = scene.RulesRuntime.Requests.Last(request => request.Method == "film.rules.preview").Input;
         Check(call.GetProperty("request").GetProperty("query").GetString() == "作品2", "query tail context reaches the service");
         Check(call.GetProperty("rules").GetProperty("episodeRules")[0].GetProperty("pattern").GetString() == "draft-episode" &&
             call.GetProperty("rules").GetProperty("movieRules")[0].GetProperty("replace").GetString() == "draft-movie",
             "test consumes the current entire draft");
-        Check(scene.Store.Writes == writes && scene.Rules.GetSavedSnapshot().EpisodeRules[0].Pattern == "episode",
+        Check(scene.RulesRuntime.Writes == writes && scene.Rules.GetSavedSnapshot().EpisodeRules[0].Pattern == "episode",
             "testing neither writes nor changes the saved owner snapshot");
         var result = scene.Element<StackPanel>("SearchResults");
         Check(Texts(result).Contains("聚合 Key：作品2") && Texts(result).Contains("搜索尾号保护：2"),
@@ -90,7 +92,7 @@ public static class FilmSettingsUiTests
         movie.Rows[0].Pattern = "next-draft";
         Check(result.Children.Count == 0, "changing a draft clears stale results");
         await scene.Select("cats"); await scene.Select("rules");
-        Check(movie.Rows[0].Pattern == "next-draft" && scene.Store.Writes == writes,
+        Check(movie.Rows[0].Pattern == "next-draft" && scene.RulesRuntime.Writes == writes,
             "switching settings pages preserves unsaved draft without saving it");
     }
 
@@ -103,7 +105,7 @@ public static class FilmSettingsUiTests
         await Until(() => !scene.View.RulesBusy);
         Check(scene.Rules.GetSavedSnapshot().EpisodeCleanRegexRules.SequenceEqual(["clean-draft"]) &&
             scene.Rules.GetSavedSnapshot().MovieRules[0].Replace == "movie-draft", "a row save persists every group's draft");
-        Check(!scene.Engine.Requests.Any(request => request.GetProperty("operation").GetString() is "newClean" or "newMatch"),
+        Check(!scene.RulesRuntime.Requests.Any(request => request.Method == "film.rules.normalize"),
             "existing-row edits do not use new-rule parsing");
         var editor = scene.Editor("MovieEditor");
         ((TextBox)editor.FindName("NewPattern")).Text = "/added/gi";
@@ -150,119 +152,67 @@ public static class FilmSettingsUiTests
 
     private static async Task NativeRuleInputs()
     {
-        await using var store = new MemoryStore();
-        await using var rules = new FilmRuleService(new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
-        await using var sources = new FilmSourceService(new RecordingRuntime(0), store);
-        await rules.SaveAsync(new FilmRuleSet
+        await using var scene = await Scene.Create();
+        foreach (string name in new[] { "MovieEditor", "EpisodeEditor" })
         {
-            EpisodeCleanRegexRules = ["^never$"],
-            EpisodeRules = [new("^never$", "unused")],
-            MovieRules = [new("^never$", "unused")],
-            AggregateRegexRules = ["^never$"]
-        });
-        var view = new FilmSettingsView(rules, sources);
-        var window = new Window { Content = view, Width = 1248, Height = 820, Left = -10000, Top = -10000,
-            WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false };
-        var notices = new List<string>();
-        window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
-        {
-            if (args.Message.Length > 0) notices.Add(args.Message);
-        }));
-        try
-        {
-            window.Show();
-            await Until(() => view.RulesLoaded && !view.RulesBusy);
-            foreach (var (name, section) in new[]
-            {
-                ("MovieEditor", FilmRuleSection.Movie), ("EpisodeEditor", FilmRuleSection.Episode)
-            })
-            {
-                var editor = (FilmSettingsRuleEditor)view.FindName(name);
-                var pattern = (TextBox)editor.FindName("NewPattern");
-                var replace = (TextBox)editor.FindName("NewReplace");
-                var add = (Button)editor.FindName("AddButton");
-                async Task InvokeAdd()
-                {
-                    add.BringIntoView(); view.UpdateLayout(); await Drain();
-                    Check(add.IsEnabled && add.IsLoaded && add.IsVisible, "real new-rule button accepts input");
-                    ((IInvokeProvider)new ButtonAutomationPeer(add).GetPattern(PatternInterface.Invoke)).Invoke();
-                }
-                pattern.Text = "\u0085"; replace.Text = "X";
-                Check(pattern.Text == "\u0085", "WPF preserves the NEL input");
-                int writes = store.Writes;
-                await InvokeAdd();
-                await Until(() => store.Writes > writes && !view.RulesBusy);
-                var saved = rules.GetSavedSnapshot();
-                var matches = section == FilmRuleSection.Movie ? saved.MovieRules : saved.EpisodeRules;
-                Check(matches[^1].Pattern == "\u0085" && matches[^1].Replace == "X",
-                    "the native normalizer accepts NEL and saves the same rule");
-                var request = new FilmRuleRequest(section, "a\u0085b");
-                Check((await rules.ProcessAsync(request)).OutputText == "aXb" &&
-                    (await rules.ProcessAsync(request, saved)).OutputText == "aXb",
-                    "saved and draft consumers share the native rule result");
-
-                pattern.Text = "b"; replace.Text = "Y";
-                writes = store.Writes;
-                await InvokeAdd();
-                await Until(() => store.Writes > writes && !view.RulesBusy);
-                Check((await rules.ProcessAsync(new(section, "ab"))).OutputText == "aY",
-                    "ordinary rule input remains functional");
-
-                pattern.Text = " \t\uFEFF"; replace.Text = "invalid";
-                writes = store.Writes;
-                int count = editor.Rows.Count, noticeCount = notices.Count;
-                await InvokeAdd();
-                await Until(() => notices.Count > noticeCount && !view.RulesBusy);
-                Check(notices[^1].Contains("请输入正则", StringComparison.Ordinal) &&
-                    store.Writes == writes && editor.Rows.Count == count,
-                    "JavaScript whitespace reaches the shared normalizer and cannot be saved");
-            }
-            await using var reopened = new FilmRuleService(
-                new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
-            await reopened.InitializeAsync();
-            foreach (var section in new[] { FilmRuleSection.Movie, FilmRuleSection.Episode })
-                Check((await reopened.ProcessAsync(new(section, "a\u0085b"))).OutputText == "aXb",
-                    "both NEL rules survive reopening the saved document");
+            var editor = scene.Editor(name);
+            var pattern = (TextBox)editor.FindName("NewPattern");
+            var replace = (TextBox)editor.FindName("NewReplace");
+            pattern.Text = "\u0085"; replace.Text = "X";
+            scene.RulesRuntime.Normalize = new FilmMatchRule("\u0085", "X");
+            Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
+            var call = scene.RulesRuntime.Requests.Last(request => request.Method == "film.rules.normalize");
+            var saved = scene.Rules.GetSavedSnapshot();
+            Check(call.Input.GetProperty("kind").GetString() == "match" && call.Input.GetProperty("pattern").GetString() == "\u0085" &&
+                (name == "MovieEditor" ? saved.MovieRules : saved.EpisodeRules)[^1] == new FilmMatchRule("\u0085", "X"),
+                "each editor sends the exact WPF NEL input to Node and saves its receipt without native trimming");
+            pattern.Text = " \t\uFEFF"; replace.Text = "invalid"; scene.RulesRuntime.Normalize = null;
+            int count = editor.Rows.Count, writes = scene.RulesRuntime.Writes, notices = scene.Notices.Count;
+            Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
+            Check(scene.RulesRuntime.Requests.Last(request => request.Method == "film.rules.normalize").Input.GetProperty("pattern").GetString() == " \t\uFEFF" &&
+                editor.Rows.Count == count && scene.RulesRuntime.Writes == writes && scene.Notices.Count > notices && scene.Notices[^1].Contains("请输入正则", StringComparison.Ordinal),
+                "Node's empty normalization receipt prevents save and reports the existing UI error");
         }
-        finally
-        {
-            window.Content = null; window.Close(); await Drain();
-        }
+        await using var reopened = new FilmRuleService(scene.RulesRuntime);
+        await reopened.InitializeAsync();
+        Check(reopened.GetSavedSnapshot().MovieRules[^1].Pattern == "\u0085" &&
+            reopened.GetSavedSnapshot().EpisodeRules[^1].Pattern == "\u0085",
+            "a new settings consumer reads both acknowledged Node rule groups");
     }
 
     private static async Task RuleLifetime()
     {
         await using var scene = await Scene.Create();
         scene.Box("EpisodeInput").Text = "一集";
-        scene.Engine.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        scene.RulesRuntime.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Click(Button(scene.View, "测试列表净化与集数匹配"));
-        await Until(() => scene.Engine.ProcessEntered);
+        await Until(() => scene.RulesRuntime.ProcessEntered);
         Check(scene.View.RulesBusy && !scene.Element<StackPanel>("RuleSections").IsEnabled, "busy rules remain legible but cannot mutate");
         Capture(scene.View, "film-settings-rules-busy.png");
         await scene.Select("cats");
-        scene.Engine.HoldProcess.SetResult();
+        scene.RulesRuntime.HoldProcess.SetResult();
         await Until(() => !scene.View.RulesBusy);
-        Check(scene.Engine.ProcessCancelled && scene.Element<StackPanel>("EpisodeResults").Children.Count == 0,
+        Check(scene.RulesRuntime.ProcessCancelled && scene.Element<StackPanel>("EpisodeResults").Children.Count == 0,
             "a noncooperative late result cannot publish after the page was hidden");
-        scene.Engine.HoldProcess = null;
+        scene.RulesRuntime.HoldProcess = null;
         await scene.Select("rules");
-        scene.Engine.FailProcess = true;
+        scene.RulesRuntime.FailProcess = true;
         Click(Button(scene.View, "测试列表净化与集数匹配")); await Until(() => !scene.View.RulesBusy);
-        Check(scene.Notices.Any(message => message.Contains("fixture engine failure", StringComparison.Ordinal)) &&
-            scene.View.CanEditRules, "engine failure uses the existing notice route and releases busy state");
-        scene.Engine.FailProcess = false;
-        scene.Engine.Result = new() { Section = FilmRuleSection.Episode, Type = "success", Text = "命中第 1 条",
+        Check(scene.Notices.Any(message => message.Contains("fixture rule service failure", StringComparison.Ordinal)) &&
+            scene.View.CanEditRules, "rule service failure uses the existing notice route and releases busy state");
+        scene.RulesRuntime.FailProcess = false;
+        scene.RulesRuntime.Result = new() { Section = FilmRuleSection.Episode, Type = "success", Text = "命中第 1 条",
             InputText = "一集", ProcessedText = "一集", Matched = true, MatchedRuleIndex = 1, RewrittenText = "E1" };
         Click(Button(scene.View, "测试列表净化与集数匹配")); await Until(() => !scene.View.RulesBusy);
         Check(Texts(scene.Element<StackPanel>("EpisodeResults")).Contains("改写结果：E1"), "testing can recover after failure");
         scene.Box("EpisodeInput").Text = "离页输入";
-        scene.Engine.ProcessEntered = scene.Engine.ProcessCancelled = false;
-        scene.Engine.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        scene.RulesRuntime.ProcessEntered = scene.RulesRuntime.ProcessCancelled = false;
+        scene.RulesRuntime.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Click(Button(scene.View, "测试列表净化与集数匹配"));
-        await Until(() => scene.Engine.ProcessEntered);
+        await Until(() => scene.RulesRuntime.ProcessEntered);
         scene.Window.Content = null; await Drain();
-        scene.Engine.HoldProcess.SetResult(); await Until(() => !scene.View.RulesBusy);
-        Check(scene.Engine.ProcessCancelled && scene.Element<StackPanel>("EpisodeResults").Children.Count == 0,
+        scene.RulesRuntime.HoldProcess.SetResult(); await Until(() => !scene.View.RulesBusy);
+        Check(scene.RulesRuntime.ProcessCancelled && scene.Element<StackPanel>("EpisodeResults").Children.Count == 0,
             "unloading cancels the request and rejects a noncooperative completion");
     }
 
@@ -333,14 +283,14 @@ public static class FilmSettingsUiTests
 
         var restore = Button(scene.View, "恢复列表净化默认规则");
         string original = scene.Editor("EpisodeCleanEditor").Rows[0].Pattern;
-        int restores = scene.Engine.Requests.Count(request => request.GetProperty("operation").GetString() == "restore");
+        int restores = scene.RulesRuntime.Requests.Count(request => request.Method == "film.rules.restore");
         Click(restore); await Drain();
         scene.Window.Width = 1050; scene.Window.Height = 650;
         scene.Window.UpdateLayout(); await Drain();
         AssertCentered();
         Click(scene.Element<Button>("PopupCancel")); await Drain();
         Check(!popup.IsOpen && scene.Editor("EpisodeCleanEditor").Rows[0].Pattern == original &&
-            scene.Engine.Requests.Count(request => request.GetProperty("operation").GetString() == "restore") == restores &&
+            scene.RulesRuntime.Requests.Count(request => request.Method == "film.rules.restore") == restores &&
             scene.Store.Writes == writes, "resized restore confirmation can be cancelled without changing rules or writing");
 
         await scene.Select("cats");
@@ -580,21 +530,264 @@ public static class FilmSettingsUiTests
         }
     }
 
+    private static async Task DataSources()
+    {
+        await using var scene = await Scene.Create(dataSettings: true);
+        var data = scene.Data!;
+        await scene.Select("metadata");
+        await Until(() => scene.View.CanEditMetadata);
+        Check(scene.Box("MetadataApiToken").Text == "synthetic.v4.token" &&
+            scene.Box("DoubanCookie").Text == "synthetic_cookie=initial", "settings echo their actual plain values");
+        Check(!Visuals(scene.View).OfType<PasswordBox>().Any(), "no secret-mask controls or second token editor");
+        Check(scene.Notices.Count == 0 && !data.Calls.Any(call => call.Method.EndsWith(".update", StringComparison.Ordinal)),
+            "reading a settings section does not save or claim a successful save");
+        HeadingSave(scene.View, "豆瓣配置", "保存豆瓣设置");
+        HeadingSave(scene.View, "TMDB 设置", "保存 TMDB 设置");
+        scene.Box("MetadataApiToken").Text = "synthetic-v3-key";
+        scene.Box("MetadataApiBase").Text = "https://fixture.invalid/pan/tmdb/3";
+        scene.Box("MetadataImageBase").Text = "https://fixture.invalid/pan/tmdb-img";
+        scene.Box("MetadataLanguage").Text = "en-US"; scene.Box("MetadataRegion").Text = "US";
+        scene.Element<CheckBox>("MetadataIncludeAdult").IsChecked = true;
+        Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "tmdb")));
+        await Until(() => !scene.View.MetadataBusy);
+        var saved = data.Calls.Last(call => call.Method == "tmdb.data.settings.update").Input;
+        Check(saved.GetProperty("apiKey").GetString() == "synthetic-v3-key" && saved.GetProperty("accessToken").GetString() == "" &&
+            saved.GetProperty("language").GetString() == "en-US" && saved.GetProperty("region").GetString() == "US" &&
+            saved.GetProperty("includeAdult").GetBoolean(), "single token replaces prior auth and all query options reach the runtime");
+        Check(scene.Box("MetadataApiToken").Text == "synthetic-v3-key", "successful save stays editable without a configured placeholder");
+        await Drain();
+        int notices = scene.Notices.Count, writes = data.Calls.Count(call => call.Method.EndsWith(".update", StringComparison.Ordinal));
+        scene.View.Visibility = Visibility.Collapsed; await Drain();
+        scene.View.Visibility = Visibility.Visible; await Until(() => scene.View.CanEditMetadata);
+        Check(scene.Notices.Count == notices && data.Calls.Count(call => call.Method.EndsWith(".update", StringComparison.Ordinal)) == writes,
+            "returning from another module does not replay a save notice or repeat the save");
+        scene.Element<ComboBox>("DoubanDataProxy").SelectedValue = "custom";
+        scene.Element<ComboBox>("DoubanImageProxy").SelectedValue = "cdn-tx";
+        scene.Box("DoubanDataAddress").Text = "https://fixture.invalid/nested/";
+        scene.Box("DoubanCookie").Text = "";
+        Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "douban")));
+        await Until(() => !scene.View.MetadataBusy);
+        saved = data.Calls.Last(call => call.Method == "douban.data.settings.update").Input;
+        Check(saved.GetProperty("apiProxy").GetString() == "https://fixture.invalid/nested/" &&
+            saved.GetProperty("searchBase").GetString() == "https://search.douban.com" &&
+            saved.GetProperty("imageBase").GetString() == "https://img.doubanio.cmliussss.net" &&
+            saved.GetProperty("cookie").GetString() == "", "independent proxy choices and empty-cookie clear use the same save");
+        data.FailWrite = true;
+        scene.Box("MetadataApiToken").Text = "unsaved";
+        Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "tmdb")));
+        await Until(() => !scene.View.MetadataBusy);
+        Check(scene.Box("MetadataApiToken").Text == "unsaved" &&
+            data.Tmdb["apiKey"]?.ToString() == "synthetic-v3-key" && scene.Notices.Contains("数据源设置操作失败"),
+            "a failed save keeps the draft and the prior runtime receipt");
+        foreach (var width in new[] { 1248, 620 })
+        {
+            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            Check(scene.Box("MetadataApiToken").ActualWidth > 200, "single-line fields remain usable in both window widths");
+            Capture(scene.View, $"film-settings-data-sources-{width}.png");
+        }
+    }
+
+    private static async Task PlaybackLayout()
+    {
+        await using var scene = await Scene.Create(dataSettings: true);
+        var cleanHost = scene.Element<ContentControl>("SiteCleanHost");
+        var playback = (FilmPlaybackSettingsView)cleanHost.Content;
+        await Until(() => playback.Idle && ((TextBox)playback.FindName("CleanKeywords")).Text == "直播,预告");
+        Check(((Border)playback.FindName("CleanForm")).IsVisible, "matching includes its site-clean editor");
+        HeadingSave(playback, "站点净化设置", "保存站点净化");
+        ((TextBox)playback.FindName("CleanKeywords")).Text = " 广告,，直播, ";
+        Click(Button(playback, "保存站点净化")); await Until(() => playback.Idle);
+        Check(FilmPreferences.Read(scene.Data!.Preferences).SiteCleanKeywords.SequenceEqual(["广告", "直播"]),
+            "the single line preserves order and ignores only empty comma-separated entries");
+        await scene.Select("preferences"); await Until(() => playback.Idle && playback.ManualGroups.Count == 1);
+        var navigation = scene.Element<StackPanel>("BusinessNavigation").Children.OfType<RadioButton>().ToArray();
+        Check(navigation.Length == 1 && Equals(navigation[0].Content, "智能播放设置"), "history and favorites are not settings destinations");
+        Check(cleanHost.Content is null && scene.Element<Grid>("BusinessPage").Children.Contains(playback),
+            "only one settings consumer is reparented to the current area");
+        var order = (SettingsPriorityList)playback.FindName("RuleOrder");
+        playback.UpdateLayout();
+        Check(!order.ShowToggle && !Visuals(order).OfType<CheckBox>().Any(box => box.IsVisible) &&
+            order.ActualWidth > 150 && order.ActualWidth < playback.ActualWidth * .6,
+            "film reuses the music order control without an enable flag or a full-width list");
+        Check(playback.ManualGroups.Single().Rows.Single().DetailId == "0" &&
+            playback.BlockGroups.Single().Rows.Single().Pan == "0", "both management lists retain typed source identity");
+        HeadingSave(playback, "关键字匹配规则", "保存关键字匹配规则");
+        Check(Visuals(playback).OfType<Button>().Where(button => button.IsVisible).Count(button => Equals(button.Content, "保存")) == 1 &&
+            !Visuals(playback).OfType<Button>().Any(button => button.IsVisible && Equals(button.Content, "刷新")) &&
+            !Button(playback, "重新读取智能播放设置").IsVisible,
+            "the healthy page has one explicit keyword save and no refresh or order save");
+        foreach (int width in new[] { 1248, 600 })
+        {
+            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            var pan = (SettingsPriorityList)playback.FindName("PanOrder");
+            var left = new Rect(order.TranslatePoint(new(), playback), order.RenderSize);
+            var right = new Rect(pan.TranslatePoint(new(), playback), pan.RenderSize);
+            Check(width == 1248 ? Math.Abs(left.Top - right.Top) < 1 && Math.Abs(left.Width - right.Width) <= 1 &&
+                Math.Abs(right.Left - left.Right - 24) <= 1 : right.Top >= left.Bottom && Math.Abs(left.Left - right.Left) < 1,
+                "the two ordering panels are equal columns on desktop and stack in a narrow window");
+            foreach (var priority in new[] { order, pan })
+            {
+                Check(!priority.ShowTitle && Visuals(playback).OfType<TextBlock>().Count(text => text.IsVisible && text.Text == priority.Title) == 1,
+                    "only the larger section heading is visible while the list keeps its accessible title");
+                var list = (ListBox)priority.FindName("PriorityItems");
+                Check(AutomationProperties.GetName(list) == priority.Title, "hiding the duplicate caption does not remove the accessible name");
+                foreach (var item in list.Items)
+                {
+                    var row = (ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(item);
+                    var grip = Visuals(row).OfType<Thumb>().Single();
+                    Check(row.ActualHeight == 52 && grip.ActualWidth == 36 && grip.ActualHeight == 36,
+                        "film uses the same music row and drag handle dimensions");
+                }
+            }
+            Capture(scene.View, $"film-settings-smart-playback-{width}.png");
+        }
+        await scene.Select("rules"); await Until(() => playback.Idle && ((Border)playback.FindName("CleanForm")).IsVisible);
+        Check(ReferenceEquals(cleanHost.Content, playback) && scene.Element<Grid>("BusinessPage").Children.Count == 0,
+            "returning to matching cannot leave a second copy or a stale management form");
+    }
+
+    private static async Task PlaybackManagement()
+    {
+        await using var scene = await Scene.Create(dataSettings: true);
+        const string longSource = "完整站源名称-abcdefghijklmnopqrstuvwxyz-0123456789";
+        scene.Data!.Library = FilmJson.Encode(new
+        {
+            manual = new object[]
+            {
+                new { id = "a1", targetId = "tmdb:tv:7", title = "仙逆(tv:7)", sourceKey = longSource, detailId = "detail-1", enabled = true },
+                new { id = "a2", targetId = "tmdb:tv:7", title = "仙逆(tv:7)", sourceKey = "站源二", detailId = "detail-2", enabled = false },
+                new { id = "b1", targetId = "tmdb:tv:8", title = "第二组", sourceKey = "站源三", detailId = 0, enabled = true }
+            },
+            blocks = new object[]
+            {
+                new { targetId = "tmdb:tv:7", title = "仙逆", sourceKey = longSource, detailId = "detail-1", lineId = "百度网盘-完整线路标识" },
+                new { targetId = "tmdb:tv:8", title = "第二组", sourceKey = "站源二", detailId = 0, lineId = 0 }
+            }
+        });
+        await scene.Select("preferences");
+        var playback = (FilmPlaybackSettingsView)scene.Element<Grid>("BusinessPage").Children[0];
+        await Until(() => playback.Idle && playback.ManualGroups.Count == 2);
+        foreach (int width in new[] { 1248, 600 })
+        {
+            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            foreach (var (targetsName, rowsName, title) in new[]
+            { ("ManualTargets", "ManualRows", "TMDB 数据"), ("BlockTargets", "BlockRows", "禁用数据") })
+            {
+                var targets = (ListBox)playback.FindName(targetsName);
+                var grid = (DataGrid)playback.FindName(rowsName);
+                var right = (Grid)grid.Parent; var split = (Grid)right.Parent; var surface = (Border)split.Parent;
+                surface.BringIntoView(); await Drain(); playback.UpdateLayout();
+                Check(surface.BorderThickness == new Thickness(1) && surface.BorderBrush is not null &&
+                    surface.CornerRadius.TopLeft > 0 && ((Border)split.Children[0]).BorderThickness.Right == 1,
+                    "each manager has a real shared surface and a separate sidebar boundary");
+                Check(Visuals(surface).OfType<TextBlock>().Any(text => text.IsVisible && text.Text == title) &&
+                    grid.HeadersVisibility == DataGridHeadersVisibility.Column && grid.GridLinesVisibility == DataGridGridLinesVisibility.Horizontal,
+                    "target group and table column headers remain legible inside the frame");
+                targets.SelectedIndex = 0; playback.UpdateLayout();
+                var first = (ListBoxItem)targets.ItemContainerGenerator.ContainerFromIndex(0);
+                var group = (FilmSettingGroup)targets.SelectedItem;
+                Check(Visuals(first).OfType<TextBlock>().Any(text => text.Text == group.Title) &&
+                    Visuals(first).OfType<TextBlock>().Any(text => text.Text == group.Rows.Count.ToString(CultureInfo.InvariantCulture)),
+                    "the selected target exposes its name and exact row count");
+                Check(first.IsSelected && ((SolidColorBrush)first.Background).Color ==
+                    ((SolidColorBrush)playback.FindResource("Settings.Brush.Selected")).Color, "the current group has a visible selected state");
+                Check(grid.Items.Count == group.Rows.Count, "the selected group owns only its source rows");
+                var source = Visuals(grid).OfType<TextBlock>().First(text => text.Text == longSource);
+                Check(Equals(source.ToolTip, longSource), "truncated source values remain fully available");
+                var scroll = Visuals(grid).OfType<ScrollViewer>().First();
+                Check((width != 600 || scroll.ExtentWidth > scroll.ViewportWidth) &&
+                    scroll.HorizontalScrollBarVisibility == ScrollBarVisibility.Auto && grid.ActualWidth < playback.ActualWidth &&
+                    surface.ActualWidth <= playback.ActualWidth, "long tables scroll inside the frame rather than widening the page");
+                Capture(surface, $"film-settings-{targetsName}-{width}.png");
+                targets.SelectedIndex = 1; playback.UpdateLayout();
+                Check(grid.Items.Count == 1 && ReferenceEquals(grid.Items[0], ((FilmSettingGroup)targets.SelectedItem).Rows[0]),
+                    "switching groups replaces only the visible detail rows");
+                DesktopTheme.SetIsHighContrast(playback, true); playback.UpdateLayout();
+                var selected = (ListBoxItem)targets.ItemContainerGenerator.ContainerFromIndex(1);
+                Check(selected.Background == SystemColors.HighlightBrush && selected.Foreground == SystemColors.HighlightTextBrush &&
+                    surface.BorderBrush == SystemColors.WindowTextBrush && ((Border)split.Children[0]).BorderBrush == SystemColors.WindowTextBrush,
+                    "high contrast keeps selected groups and both boundaries distinct");
+                DesktopTheme.SetIsHighContrast(playback, false);
+            }
+        }
+        scene.Data.Library = FilmJson.Encode(new { manual = Array.Empty<object>(), blocks = Array.Empty<object>() });
+        await scene.Select("rules"); await scene.Select("preferences");
+        await Until(() => playback.Idle && playback.ManualGroups.Count == 0);
+        foreach (var (name, empty) in new[] { ("ManualRows", "暂无人工匹配源"), ("BlockRows", "暂无禁用片源") })
+        {
+            var grid = (DataGrid)playback.FindName(name);
+            var right = (Grid)grid.Parent; var surface = (Border)((Grid)right.Parent).Parent;
+            Check(grid.Items.Count == 0 && grid.HeadersVisibility == DataGridHeadersVisibility.Column &&
+                surface.BorderThickness == new Thickness(1) && Visuals(right).OfType<TextBlock>().Any(text => text.IsVisible && text.Text == empty),
+                "empty collections keep the structural frame and table header with a clear empty state");
+            Capture(surface, $"film-settings-{name}-empty.png");
+        }
+    }
+
+    private static void HeadingSave(FrameworkElement root, string title, string action)
+    {
+        var heading = Visuals(root).OfType<TextBlock>().Single(text => text.IsVisible && text.Text == title);
+        var button = Button(root, action);
+        var a = new Rect(heading.TranslatePoint(new(), root), heading.RenderSize);
+        var b = new Rect(button.TranslatePoint(new(), root), button.RenderSize);
+        Check(b.Left >= a.Right && b.Left - a.Right <= 16 && Math.Abs((a.Top + a.Bottom) / 2 - (b.Top + b.Bottom) / 2) < 1,
+            action + " is beside its heading instead of at the form footer");
+    }
+
+    private static async Task MetadataCache()
+    {
+        await using var scene = await Scene.Create(dataSettings: true);
+        var data = scene.Data!;
+        var cache = new FilmMetadataCacheSettingsView(scene.Metadata!);
+        scene.Window.Content = cache; await Drain();
+        foreach (var (tag, domains) in new[] { ("douban", new[] { "douban" }), ("tmdb", new[] { "tmdb" }), ("both", new[] { "douban", "tmdb" }) })
+        {
+            int before = data.Calls.Count;
+            Click(Visuals(cache).OfType<Button>().Single(button => Equals(button.Tag, tag)));
+            await Until(() => ((WrapPanel)cache.FindName("Actions")).IsEnabled);
+            var calls = data.Calls.Skip(before).ToArray();
+            Check(calls.Select(call => call.Method).All(method => method == "film.data.invalidate") &&
+                calls.Select(call => call.Input.GetProperty("domain").GetString()).SequenceEqual(domains),
+                "cache buttons issue only the exact provider invalidations");
+        }
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        data.HeldInvalidation = gate.Task; data.FailDomain = "douban";
+        try
+        {
+            Click(Visuals(cache).OfType<Button>().Single(button => Equals(button.Tag, "both")));
+            var drain = scene.Metadata!.PrepareShutdownAsync();
+            Check(!drain.IsCompleted && !((WrapPanel)cache.FindName("Actions")).IsEnabled &&
+                !data.InvalidationToken.IsCancellationRequested, "the second admitted invalidation drains even after the first failed");
+            gate.SetResult(); await drain; await Drain();
+            Check(scene.Notices.Contains("缓存清理失败") && data.Tmdb["apiKey"]?.ToString() == "synthetic-key" &&
+                FilmPreferences.Read(data.Preferences).SiteCleanKeywords.SequenceEqual(["直播", "预告"]),
+                "partial failure is not success and does not clear settings or preferences");
+        }
+        finally { gate.TrySetResult(); }
+    }
+
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly MemoryStore Store = new();
-        internal readonly RecordingEngine Engine = new();
+        internal readonly RecordingRules RulesRuntime = new();
         internal readonly RecordingRuntime Runtime;
         internal readonly FilmRuleService Rules;
         internal readonly FilmSourceService Sources;
         internal readonly FilmSettingsView View;
         internal readonly Window Window;
         internal readonly List<string> Notices = [];
-        private Scene(int cats)
+        internal readonly DataSettingsRuntime? Data;
+        internal readonly FilmMetadataService? Metadata;
+        private Scene(int cats, bool dataSettings)
         {
             Runtime = new(cats);
-            Rules = new(Engine, Store); Sources = new(Runtime, Store);
-            View = new(Rules, Sources);
+            Rules = new(RulesRuntime); Sources = new(Runtime, Store);
+            if (dataSettings)
+            {
+                Data = new(); Metadata = new(Data);
+                View = new(Rules, Sources, new FilmPlaybackSettings(Data), () => null, Metadata);
+            }
+            else View = new(Rules, Sources);
             Window = new() { Content = View, Width = 1248, Height = 820, Left = -10000, Top = -10000,
                 WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false };
             Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
@@ -602,9 +795,9 @@ public static class FilmSettingsUiTests
                 if (args.Message.Length > 0) Notices.Add(args.Message);
             }));
         }
-        internal static async Task<Scene> Create(int cats = 2)
+        internal static async Task<Scene> Create(int cats = 2, bool dataSettings = false)
         {
-            var scene = new Scene(cats);
+            var scene = new Scene(cats, dataSettings);
             try
             {
                 await scene.Sources.RefreshAsync();
@@ -620,7 +813,8 @@ public static class FilmSettingsUiTests
         internal TextBox Box(string name) => Element<TextBox>(name);
         internal async Task Select(string page)
         {
-            var nav = Element<StackPanel>("SettingsNavigation").Children.OfType<RadioButton>().Single(button => Equals(button.Tag, page));
+            var nav = Element<StackPanel>("SettingsNavigation").Children.OfType<RadioButton>()
+                .Concat(Element<StackPanel>("BusinessNavigation").Children.OfType<RadioButton>()).Single(button => Equals(button.Tag, page));
             nav.IsChecked = true;
             await Until(() => !View.SourcesBusy && (page != "rules" || !View.RulesBusy));
             View.UpdateLayout(); await Drain();
@@ -635,54 +829,114 @@ public static class FilmSettingsUiTests
         }
         public async ValueTask DisposeAsync()
         {
-            Engine.HoldProcess?.TrySetResult();
+            RulesRuntime.HoldProcess?.TrySetResult();
+            await View.PreparePlaybackSettingsShutdownAsync();
+            if (Metadata is not null) await Metadata.DisposeAsync();
             Window.Content = null; Window.Close(); await Drain();
             await Rules.DisposeAsync(); await Sources.DisposeAsync(); await Store.DisposeAsync();
         }
     }
 
-    // These ports test UI/service wiring. Rule engine semantics are covered by FilmRulesTests.
-    private sealed class RecordingEngine : IJavaScriptJsonEngine
+    private sealed class DataSettingsRuntime : IRuntimeClient
     {
-        internal readonly List<JsonElement> Requests = [];
+        internal readonly List<(string Method, JsonElement Input)> Calls = [];
+        internal Dictionary<string, object?> Tmdb = new()
+        {
+            ["apiBase"] = "https://api.themoviedb.org/3", ["imageBase"] = "https://image.tmdb.org",
+            ["apiKey"] = "synthetic-key", ["accessToken"] = "synthetic.v4.token",
+            ["language"] = "zh-CN", ["region"] = "CN", ["includeAdult"] = false
+        };
+        private Dictionary<string, object?> douban = new()
+        {
+            ["apiBase"] = "https://m.douban.com", ["searchBase"] = "https://search.douban.com",
+            ["imageBase"] = "https://img3.doubanio.com", ["apiProxy"] = "", ["imageProxy"] = "", ["cookie"] = "synthetic_cookie=initial"
+        };
+        internal JsonElement Preferences = FilmJson.Encode(FilmPreferences.Defaults with { SiteCleanKeywords = ["直播", "预告"] });
+        internal JsonElement Library = FilmJson.Encode(new
+        {
+            manual = new[] { new { id = "manual", targetId = "tmdb:tv:7", title = "管理样例", sourceKey = "source", detailId = 0, enabled = true } },
+            blocks = new[] { new { targetId = "tmdb:tv:7", sourceKey = "source", detailId = 0, lineId = 0 } }
+        });
+        internal bool FailWrite;
+        internal string? FailDomain;
+        internal Task? HeldInvalidation;
+        internal CancellationToken InvalidationToken;
+        public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var input = FilmJson.Encode(parameters ?? new { }); Calls.Add((method, input));
+            if (method == "film.data.invalidate")
+            {
+                InvalidationToken = cancellationToken;
+                if (FilmJson.Text(input, "domain") == FailDomain) return FilmRuntimeProbe.Failure("STORAGE_ERROR");
+                if (HeldInvalidation is not null) await HeldInvalidation;
+                return FilmRuntimeProbe.Ok(FilmJson.Encode(new { }));
+            }
+            if (method == "film.settings.get") return FilmRuntimeProbe.Ok(Preferences);
+            if (method == "film.settings.set") { Preferences = input.Clone(); return FilmRuntimeProbe.Ok(Preferences); }
+            if (method == "film.library.get") return FilmRuntimeProbe.Ok(Library);
+            bool tmdb = method.StartsWith("tmdb.", StringComparison.Ordinal);
+            var values = tmdb ? Tmdb : douban;
+            Check(method.EndsWith(".settings.get", StringComparison.Ordinal) || method.EndsWith(".settings.update", StringComparison.Ordinal),
+                "settings must not fetch data or restart a runtime");
+            if (method.EndsWith(".update", StringComparison.Ordinal))
+            {
+                if (FailWrite) return FilmRuntimeProbe.Failure("STORAGE_ERROR");
+                foreach (var item in input.EnumerateObject()) values[item.Name] = item.Value.Clone();
+            }
+            return FilmRuntimeProbe.Ok(FilmJson.Encode(values));
+        }
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Settings do not upload scripts.");
+    }
+
+    // Wire receipts test UI/service wiring. Actual rule semantics belong to the shared runtime suite.
+    private sealed class RecordingRules : IRuntimeClient
+    {
+        internal readonly List<(string Method, JsonElement Input)> Requests = [];
         internal TaskCompletionSource? HoldProcess;
         internal bool ProcessEntered, ProcessCancelled, FailProcess;
+        internal int Writes;
+        internal FilmMatchRule? Normalize = new("added", "$1", "gi");
         internal FilmRuleResult Result = new() { Section = FilmRuleSection.Episode, Type = "success", Text = "命中第 1 条" };
-        private static FilmRuleSet Seed => new()
+        private FilmRuleSet saved = new()
         {
             EpisodeCleanRegexRules = ["clean"], EpisodeRules = [new("episode", "E$1", "i")],
             MovieRules = [new("movie", "", "i")], AggregateRegexRules = ["search"]
         };
-        public async Task<JsonElement> InvokeAsync(object request, CancellationToken cancellationToken = default)
+        public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
-            var value = JsonSerializer.SerializeToElement(request, Json); Requests.Add(value);
-            string operation = value.GetProperty("operation").GetString()!;
-            if (operation == "process")
+            var value = FilmJson.Encode(parameters ?? new { }); Requests.Add((method, value));
+            JsonElement reply;
+            if (method == "film.rules.preview")
             {
                 ProcessEntered = true;
                 using var registration = cancellationToken.Register(() => ProcessCancelled = true);
-                if (HoldProcess is not null) await HoldProcess.Task; // Deliberately late, to exercise the view fence.
-                if (FailProcess) throw new InvalidOperationException("fixture engine failure");
-                return JsonSerializer.SerializeToElement(Result, Json);
+                if (HoldProcess is not null) await HoldProcess.Task;
+                if (FailProcess) throw new InvalidOperationException("fixture rule service failure");
+                reply = JsonSerializer.SerializeToElement(Result, FilmRuleService.Json);
             }
-            if (operation == "newMatch") return JsonSerializer.SerializeToElement(new FilmMatchRule("added", "$1", "gi"), Json);
-            if (operation == "newClean") return JsonSerializer.SerializeToElement("added-clean", Json);
-            var rules = operation == "initialize" ? Seed : value.GetProperty("rules").Deserialize<FilmRuleSet>(Json)!;
-            if (operation == "restore")
-                rules = rules with { EpisodeCleanRegexRules = ["restored-clean"], EpisodeRules = [new("restored-episode", "E$1", "i")] };
-            return JsonSerializer.SerializeToElement(new
+            else if (method == "film.rules.normalize")
+                reply = value.GetProperty("kind").GetString() == "match"
+                    ? JsonSerializer.SerializeToElement(Normalize, FilmRuleService.Json) : FilmJson.Encode("added-clean");
+            else
             {
-                changed = false, rules,
-                document = new
+                if (method == "film.rules.set") { saved = value.GetProperty("rules").Deserialize<FilmRuleSet>(Json)!; Writes++; }
+                else if (method == "film.rules.restore")
                 {
-                    rules.EpisodeCleanRegexRules,
-                    episodeRules = rules.EpisodeRules.Select(rule => JsonSerializer.Serialize(rule, Json)).ToArray(),
-                    movieRules = rules.MovieRules.Select(rule => JsonSerializer.Serialize(rule, Json)).ToArray(),
-                    rules.AggregateRegexRules
+                    saved = value.GetProperty("rules").Deserialize<FilmRuleSet>(Json)! with
+                    { EpisodeCleanRegexRules = ["restored-clean"], EpisodeRules = [new("restored-episode", "E$1", "i")] };
+                    Writes++;
                 }
-            }, Json);
+                else if (method != "film.rules.get") throw new InvalidOperationException(method);
+                reply = FilmRuleConsumerRuntime.Snapshot(saved, "acknowledged-" + Writes);
+            }
+            return FilmSearchConsumerRuntime.Success(reply);
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Rules do not upload source.");
     }
 
     private sealed class MemoryStore : IDocumentStore
@@ -805,7 +1059,13 @@ public static class FilmSettingsUiTests
         element.UpdateLayout();
         var bitmap = new RenderTargetBitmap((int)Math.Ceiling(element.ActualWidth), (int)Math.Ceiling(element.ActualHeight),
             96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(element);
+        var visual = new DrawingVisual();
+        using (var drawing = visual.RenderOpen())
+        {
+            drawing.DrawRectangle(SystemColors.WindowBrush, null, new Rect(element.RenderSize));
+            drawing.DrawRectangle(new VisualBrush(element), null, new Rect(element.RenderSize));
+        }
+        bitmap.Render(visual);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var output = File.Create(Path.Combine(root, name)); encoder.Save(output);
     }

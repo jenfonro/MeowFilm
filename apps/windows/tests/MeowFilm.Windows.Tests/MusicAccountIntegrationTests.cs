@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -30,6 +31,8 @@ public static class MusicAccountIntegrationTests
                 await f.Module.BeginAccountQrAsync();
                 Check(f.Module.HasAccountQr && f.Module.AccountQrImage is { IsFrozen: true });
                 Check(f.Module.AccountStatus == "等待扫码");
+                await f.Calls.CompleteInternalAccountReadAsync(f.Module, "tx");
+                Check(f.Module.AccountStatus == "等待扫码" && f.Module.HasAccountQr);
                 await f.Module.CheckAccountQrAsync();
                 Check(f.Module.AccountStatus == "等待扫码");
                 await f.Configure(new { qrStatus = 802 });
@@ -45,10 +48,12 @@ public static class MusicAccountIntegrationTests
                 var document = await f.Store.ReadAsync("music.accounts.v1");
                 Check(document.Fingerprint.Exists);
                 var accounts = AccountDocument.Decode(document);
-                var details = accounts.GetDetails("wy");
-                Check(details is not null && details.BelongsTo(accounts.Get("wy")) &&
-                    details.Rights.Membership.Vip == false);
-                foreach (var file in Directory.EnumerateFiles(data, "*", SearchOption.AllDirectories))
+                var details = await f.Application.ReadDetailsAsync("wy");
+                Check(details.Generation == accounts.Get("wy").Generation && details.Profile?.UserId == accounts.Get("wy").Profile?.UserId &&
+                    details.Membership.Vip == false);
+                string lockFile = Path.Combine(data, ".documents.lock");
+                foreach (var file in Directory.EnumerateFiles(data, "*", SearchOption.AllDirectories)
+                    .Where(file => !string.Equals(file, lockFile, StringComparison.OrdinalIgnoreCase)))
                     Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_SESSION", StringComparison.Ordinal));
             }
             await using var reopened = await Fixture.Create(data);
@@ -106,8 +111,11 @@ public static class MusicAccountIntegrationTests
             await f.Module.CheckAccountQrAsync();
             Check(!f.Module.HasAccountQr);
             Check(f.Module.AccountStatus == "会话无效或已过期");
+            await f.Calls.CompleteInternalAccountReadAsync(f.Module, "tx");
+            Check(f.Module.AccountStatus == "会话无效或已过期" && !f.Module.HasAccountQr);
             await f.Module.ReadAccountsAsync();
             Check(f.Module.SelectedAccount!.State == "none");
+            Check(f.Module.AccountStatus == "");
         });
         yield return Case("local QR raster is bounded, frozen and includes white quiet zone", () =>
         {
@@ -158,16 +166,14 @@ public static class MusicAccountIntegrationTests
                 int before = f.Transport.Requests;
                 ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 await Task.Delay(2300);
-                Check(f.Transport.Requests == before && f.Module.HasAccountQr,
-                    $"SMS mode: requests {before}->{f.Transport.Requests}, QR {f.Module.HasAccountQr}, popup {((Popup)view.FindName("LoginPopup")).IsOpen}, platform {f.Module.SelectedAccount?.Platform}");
+                Check(f.Transport.Requests == before && f.Module.HasAccountQr);
                 ((Button)view.FindName("QrModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                 while (f.Transport.Requests == before || f.Module.AccountBusy) await Task.Delay(20, deadline.Token);
                 ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 int polled = f.Transport.Requests;
                 await Task.Delay(2300);
-                Check(polled > before && f.Transport.Requests == polled && !f.Module.SelectedAccount!.HasSession,
-                    $"After QR resume: requests {before}->{polled}->{f.Transport.Requests}, state {f.Module.SelectedAccount?.State}, QR {f.Module.HasAccountQr}");
+                Check(polled > before && f.Transport.Requests == polled && !f.Module.SelectedAccount!.HasSession);
             }
             finally { window.Close(); }
         });
@@ -227,24 +233,33 @@ public static class MusicAccountIntegrationTests
         });
         yield return Case("actual catalog authentication failure revokes original lease and clears anonymous cache", async () =>
         {
-            await using var f = await Fixture.Create();
+            await using var f = await Fixture.Create(nativeOnly: true);
             var args = new { platform = "wy" };
-            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean());
-            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean());
-            Check(f.Transport.CatalogRequests == 1);
+            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
+                "initial anonymous catalog request must succeed");
+            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
+                "repeated anonymous catalog request must succeed from cache");
+            Check(f.Transport.CatalogRequests == 1, $"anonymous catalog cache: {f.Transport.CatalogRequests} requests");
             Check((await f.Application.ExecuteAsync("music.accounts.import",
-                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_SESSION" })).GetProperty("ok").GetBoolean());
+                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_SESSION" })).GetProperty("ok").GetBoolean(),
+                "account import must establish the lease under test");
             f.Transport.CatalogStatus = 401;
             var failed = await f.Application.ExecuteAsync("music.catalog.home", args);
-            Check(failed.GetProperty("code").GetString() == "AUTH_REQUIRED");
-            Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == "revoked");
+            string? failureCode = failed.GetProperty("code").GetString();
+            Check(!failed.GetProperty("ok").GetBoolean() && failureCode == "AUTH_REQUIRED",
+                $"catalog authentication failure must remain AUTH_REQUIRED: {failureCode}");
+            Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == "revoked",
+                "catalog authentication failure must revoke the original lease");
+            Check(f.Transport.CatalogRequests == 2, $"authenticated catalog rejection: {f.Transport.CatalogRequests} requests");
             f.Transport.CatalogStatus = 200;
-            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean());
-            Check(f.Transport.CatalogRequests == 3); // No resurrected pre-login guest cache.
+            Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
+                "anonymous catalog remains available after account revocation");
+            Check(f.Transport.CatalogRequests == 3,
+                $"revoked lookup must not resurrect pre-login guest cache: {f.Transport.CatalogRequests} requests");
         });
         yield return Case("late catalog authentication error never revokes replacement account generation", async () =>
         {
-            await using var f = await Fixture.Create();
+            await using var f = await Fixture.Create(nativeOnly: true);
             Check((await f.Application.ExecuteAsync("music.accounts.import",
                 new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_OLD" })).GetProperty("ok").GetBoolean());
             f.Transport.CatalogStatus = 401; f.Transport.HoldCatalog = true;
@@ -335,8 +350,10 @@ public static class MusicAccountIntegrationTests
         catch (Exception error) when (error.Message == "COMMIT_UNKNOWN") { }
     }
     private static TestCase Case(string name, Func<Task> body) => new("music-account-chain: " + name, () => Sta(body));
-    private static void Check(bool condition, string message = "Account integration assertion")
-    { if (!condition) throw new InvalidOperationException(message); }
+    private static void Check(bool condition,
+        [CallerArgumentExpression(nameof(condition))] string expression = "",
+        [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
+    { if (!condition) throw new InvalidOperationException($"Account integration assertion at {member}:{line}: {expression}"); }
     private static async Task WaitForEditable(MusicCapability module)
     {
         // Admit the posted resume refresh before observing actual idle state.
@@ -376,14 +393,16 @@ public static class MusicAccountIntegrationTests
         public ControlledStore Store { get; }
         public string Data { get; }
         public MusicNativeApplication Application { get; }
+        public MusicAccountFixtureApplication Calls { get; }
         public MusicCapability Module { get; }
         private Fixture(string data, ControlledStore store)
         {
             Data = data; Store = store;
             Application = new(store, Runtime, Transport);
-            Module = new(Application, store, new Output(), new Dialogs());
+            Calls = new(Application);
+            Module = new(Calls, store, new Output(), new Dialogs());
         }
-        public static async Task<Fixture> Create(string? data = null)
+        public static async Task<Fixture> Create(string? data = null, bool nativeOnly = false)
         {
             data ??= Path.Combine(Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT")
                 ?? throw new InvalidOperationException("Isolated data required"), "account-" + Guid.NewGuid().ToString("N"));
@@ -392,7 +411,14 @@ public static class MusicAccountIntegrationTests
             var result = new Fixture(data, store);
             try
             {
-                await result.Module.InitializeAsync(default);
+                if (nativeOnly)
+                    // Catalog-owner cases do not mount a home presentation or its recovery requests.
+                    await result.Application.InitializeAsync();
+                else
+                {
+                    await result.Module.InitializeAsync(default);
+                    await result.Module.NavigateAsync("favorites", default);
+                }
                 Check(!result.Runtime.HasStarted && result.Transport.Requests == 0);
                 return result;
             }
@@ -526,5 +552,58 @@ public static class MusicAccountIntegrationTests
         public Task ResumeAsync() => Task.CompletedTask;
         public Task StopAsync() => Task.CompletedTask;
         public Task SeekAsync(double value) => Task.CompletedTask;
+    }
+}
+
+internal sealed class MusicAccountFixtureApplication(IMusicApplication inner) : MusicApplicationForwarder(inner)
+{
+    internal readonly List<string> AccountCalls = [];
+    private AccountReadHold? nextRead;
+
+    internal async Task CompleteInternalAccountReadAsync(MusicCapability module, string invalidatedPlatform)
+    {
+        await module.ActivatePlatformSettingsAsync();
+        using var read = new AccountReadHold();
+        nextRead = read;
+        try
+        {
+            // A different platform's real account invalidation refreshes the shared
+            // snapshot without cancelling the selected login or publishing a UI notice.
+            var cancelled = await ExecuteAsync("music.accounts.cancel", new { platform = invalidatedPlatform });
+            if (!cancelled.GetProperty("ok").GetBoolean())
+                throw new InvalidOperationException("Fixture account invalidation failed");
+            var activation = module.ActivatePlatformSettingsAsync();
+            await read.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (activation.IsCompleted)
+                throw new InvalidOperationException("Fixture activation did not join the held account read");
+            read.Release.TrySetResult();
+            await activation.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally { if (ReferenceEquals(nextRead, read)) nextRead = null; }
+    }
+
+    public override Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (method.StartsWith("music.accounts.", StringComparison.Ordinal)) AccountCalls.Add(method);
+        var read = method == "music.accounts.list" ? nextRead : null;
+        if (read is not null) nextRead = null;
+        var result = base.ExecuteAsync(method, parameters, cancellationToken);
+        return read is null ? result : Hold(result, read, cancellationToken);
+
+        static async Task<JsonElement> Hold(Task<JsonElement> result, AccountReadHold read, CancellationToken token)
+        {
+            var reply = await result;
+            read.Arrived.TrySetResult();
+            await read.Release.Task.WaitAsync(token);
+            return reply;
+        }
+    }
+
+    private sealed class AccountReadHold : IDisposable
+    {
+        internal readonly TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void Dispose() => Release.TrySetResult();
     }
 }

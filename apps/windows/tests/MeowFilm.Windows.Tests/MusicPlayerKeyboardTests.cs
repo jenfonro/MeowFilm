@@ -18,6 +18,161 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> PlayerKeyboardCases()
     {
+        foreach (bool reset in new[] { false, true })
+            yield return Case("player channel Escape preserves the channel below " + (reset ? "reset confirmation" : "close confirmation"), () =>
+                WithPlayerKeyboard(async (f, detail, source) =>
+                {
+                    var shell = (ShellWindow)Window.GetWindow(detail);
+                    var host = (PlayerDialogHost)shell.FindName("ChannelDialogHost");
+                    var target = new ContentControl { Focusable = true };
+                    host.Show(detail, new Border { Child = target, Width = 368, Height = 200 }, () => { });
+                    Control confirmation;
+                    if (reset)
+                    {
+                        var dialog = (UserDataResetDialog)shell.FindName("ResetDialog");
+                        dialog.Open(); confirmation = dialog;
+                    }
+                    else
+                    {
+                        var dialog = (CloseWindowDialog)shell.FindName("CloseDialog");
+                        dialog.Open(); confirmation = dialog;
+                    }
+                    Render((FrameworkElement)source.RootVisual, 1110, 800); await Drain();
+                    var escape = new KeyEventArgs(new PlayerKeyboardProbe(), source, Environment.TickCount, Key.Escape)
+                        { RoutedEvent = Keyboard.PreviewKeyDownEvent };
+                    ((UIElement)confirmation.FindName("CancelChoice")).RaiseEvent(escape);
+                    await Drain();
+                    True(escape.Handled && !confirmation.IsVisible, "only the top confirmation handles Escape and closes");
+                    True(host.IsOpen && detail.IsVisible && f.Module.IsLyrics, "channel and full player stay open");
+                    Equal(0, f.Playback.Pauses); Equal(0, f.Playback.Resumes);
+                }, keepShellOwner: true));
+
+        yield return Case("player channel keyboard blocks underlying search navigation and stale Space focus", () =>
+            WithPlayerKeyboard(async (f, detail, source) =>
+            {
+                var shell = (ShellWindow)Window.GetWindow(detail);
+                var host = (PlayerDialogHost)shell.FindName("ChannelDialogHost");
+                var target = new TextBox { Text = "频道", Width = 160 };
+                host.Show(detail, new Border { Child = target, Width = 368, Height = 200 }, () => { });
+                Render((FrameworkElement)source.RootVisual, 1110, 800); await Drain();
+                var search = (TextBox)shell.FindName("SearchBox");
+                True(search.IsVisible && search.IsEnabled, "the underlying search entry is available to the shell shortcut");
+                search.Text = "header-search"; search.Select(2, 0);
+                FocusManager.SetFocusedElement(host, target);
+                var focus = Keyboard.FocusedElement;
+                var find = new KeyEventArgs(new PlayerKeyboardProbe(ModifierKeys.Control), source, Environment.TickCount, Key.F)
+                    { RoutedEvent = Keyboard.PreviewKeyDownEvent };
+                target.RaiseEvent(find);
+                True(find.Handled && ReferenceEquals(focus, Keyboard.FocusedElement) &&
+                    ReferenceEquals(target, FocusManager.GetFocusedElement(host)), "Ctrl+F cannot move channel focus to SearchBox");
+                Equal(2, search.SelectionStart); Equal(0, search.SelectionLength);
+                var back = new KeyEventArgs(new PlayerKeyboardProbe(ModifierKeys.Alt), source, Environment.TickCount, Key.Left)
+                    { RoutedEvent = Keyboard.PreviewKeyDownEvent };
+                target.RaiseEvent(back); await Drain();
+                True(back.Handled && host.IsOpen && f.Module.IsLyrics, "Alt+Left cannot navigate below the channel");
+                var play = (Button)((MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content).FindName("PlayButton");
+                var keyboard = new PlayerKeyboardProbe();
+                True(PlayerKey(play, source, keyboard, down: true).Handled, "stale underlying focus cannot arm Space");
+                True(PlayerKey(play, source, keyboard, down: false).Handled, "its release is also blocked");
+                await Drain(); Equal(0, f.Playback.Pauses); Equal(0, f.Playback.Resumes);
+                host.Close();
+            }, keepShellOwner: true));
+
+        yield return Case("player channel header pointer consumes application controls but admits system chrome", () =>
+            WithPlayerKeyboard(async (f, detail, source) =>
+            {
+                var shell = Window.GetWindow(f.Module.PlayerView);
+                var host = (PlayerDialogHost)shell.FindName("ChannelDialogHost");
+                var root = (FrameworkElement)source.RootVisual;
+                var footer = (FrameworkElement)f.Module.PlayerView;
+                using var pointer = new PlaybackPointer(root, source);
+                var back = (Button)shell.FindName("BackButton");
+                back.IsEnabled = true;
+                var search = (TextBox)shell.FindName("SearchBox");
+                var settings = (Button)shell.FindName("SettingsButton");
+                int clicks = 0;
+                back.Click += (_, _) => clicks++;
+                settings.Click += (_, _) => clicks++;
+                void Open()
+                {
+                    host.Show(footer, new Border { Width = 368, Height = 200 }, () => { });
+                    Render(root, 1110, 800);
+                }
+                foreach (var control in new FrameworkElement[] { search, back, settings })
+                {
+                    Open();
+                    var point = pointer.Center(control);
+                    True(pointer.Hit(point) is DependencyObject hit &&
+                        (ReferenceEquals(control, hit) || control.IsAncestorOf(hit)), "the real root hits the exposed application header control");
+                    var focus = Keyboard.FocusedElement;
+                    True(pointer.Button(point, true) && host.IsOpen, "header Down is consumed without removing the barrier");
+                    True(ReferenceEquals(focus, Keyboard.FocusedElement), "header Down cannot move focus below the channel");
+                    True(pointer.Button(point, false), "matching header Up is consumed");
+                    await Drain();
+                    True(!host.IsOpen, "only the channel closes after the complete header gesture");
+                    Equal(0, clicks);
+                }
+                Open();
+                var maximize = (Button)shell.FindName("MaximizeButton");
+                int admitted = 0;
+                MouseButtonEventHandler probe = (_, e) =>
+                {
+                    True(!e.Handled, "the shell leaves system caption input available");
+                    admitted++;
+                    e.Handled = true; // Observe admission without issuing an OS window command from this hidden fixture.
+                };
+                maximize.PreviewMouseDown += probe; maximize.PreviewMouseUp += probe;
+                try
+                {
+                    var point = pointer.Center(maximize);
+                    True(pointer.Hit(point) is DependencyObject hit &&
+                        (ReferenceEquals(maximize, hit) || maximize.IsAncestorOf(hit)), "root hit-test reaches the real system caption button");
+                    pointer.Click(point); await Drain();
+                    Equal(2, admitted);
+                    True(host.IsOpen && !host.HasOutsidePress, "system chrome neither dismisses the channel nor starts its capture");
+                }
+                finally { maximize.PreviewMouseDown -= probe; maximize.PreviewMouseUp -= probe; host.Close(); }
+                await f.Module.OpenPlayerDetailAsync();
+                await Until(() => f.Module.IsLyrics && detail.IsVisible);
+                var detailFooter = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
+                host.Show(detailFooter, new Border { Width = 368, Height = 200 }, () => { });
+                Render(root, 1110, 800); await Drain();
+                var collapse = (Button)shell.FindName("PlayerDetailBackButton");
+                var collapsePoint = pointer.Center(collapse);
+                True(pointer.Hit(collapsePoint) is DependencyObject collapseHit &&
+                    (ReferenceEquals(collapse, collapseHit) || collapse.IsAncestorOf(collapseHit)), "full-player header back participates in the root hit-test");
+                True(pointer.Button(collapsePoint, true) && host.IsOpen, "full-player header Down keeps the channel barrier");
+                True(pointer.Button(collapsePoint, false), "full-player header Up is consumed"); await Drain();
+                True(!host.IsOpen && detail.IsVisible && f.Module.IsLyrics, "full-player header click only dismisses the channel");
+            }, keepShellOwner: true, openDetail: false));
+
+        yield return Case("player channel keyboard owns Space and Escape above queue and full player", () =>
+            WithPlayerKeyboard(async (f, detail, source) =>
+            {
+                var shell = (ShellWindow)Window.GetWindow(detail);
+                var host = (PlayerDialogHost)shell.FindName("ChannelDialogHost");
+                var footer = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
+                await f.Module.OpenPlayQueueAsync(); await Drain();
+                var queue = (FrameworkElement)shell.FindName("QueueSurface");
+                True(queue.IsVisible && detail.IsVisible, "both underlying player surfaces are open");
+                var target = new ContentControl { Content = "频道", Focusable = true };
+                var panel = new Border { Child = target, Width = 368, Height = 200 };
+                int closes = 0;
+                host.Show(footer, panel, () => closes++);
+                Render((FrameworkElement)source.RootVisual, 1110, 800); await Drain();
+                var keyboard = new PlayerKeyboardProbe();
+                True(!PlayerKey(target, source, keyboard, down: true).Handled, "channel content keeps its Space press");
+                PlayerKey(target, source, keyboard, down: false); await Drain();
+                Equal(0, f.Playback.Pauses); Equal(0, f.Playback.Resumes);
+                True(!MediaShortcutInput.AllowsLocal(shell, source, target), "the channel also protects the shell media-shortcut route");
+                var escape = new KeyEventArgs(keyboard, source, Environment.TickCount, Key.Escape)
+                    { RoutedEvent = Keyboard.PreviewKeyDownEvent };
+                target.RaiseEvent(escape); await Drain();
+                True(escape.Handled && !host.IsOpen, "Escape retires the highest layer");
+                Equal(1, closes);
+                True(queue.IsVisible && detail.IsVisible && f.Module.IsLyrics, "the same Escape cannot close queue or full player");
+            }, keepShellOwner: true));
+
         yield return Case("player keyboard Space toggles through the visible detail route only", () =>
             WithPlayerKeyboard(async (f, detail, source) =>
             {
@@ -257,7 +412,8 @@ public static partial class MusicUiTests
     }
 
     private static async Task WithPlayerKeyboard(
-        Func<Fixture, MusicPlayerDetailView, HwndSource, Task> body, bool withCurrent = true)
+        Func<Fixture, MusicPlayerDetailView, HwndSource, Task> body, bool withCurrent = true, bool keepShellOwner = false,
+        bool openDetail = true)
     {
         await using var f = await Fixture.Create();
         if (withCurrent)
@@ -269,7 +425,8 @@ public static partial class MusicUiTests
         try
         {
             shell.PrepareForRender();
-            var root = (Border)shell.Content; shell.Content = null;
+            var root = (Border)shell.Content;
+            if (!keepShellOwner) shell.Content = null;
             root.Resources.MergedDictionaries.Add(shell.Resources); root.DataContext = shell.DataContext;
             using var source = PlayerKeyboardSource("player-keyboard-detail-fixture");
             source.RootVisual = root;
@@ -277,8 +434,11 @@ public static partial class MusicUiTests
             {
                 Render(root, 1110, 800); await Drain();
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-                await f.Module.OpenPlayerDetailAsync();
-                await Until(() => f.Module.IsLyrics && detail.IsVisible);
+                if (openDetail)
+                {
+                    await f.Module.OpenPlayerDetailAsync();
+                    await Until(() => f.Module.IsLyrics && detail.IsVisible);
+                }
                 await body(f, detail, source);
             }
             finally { source.RootVisual = null; }

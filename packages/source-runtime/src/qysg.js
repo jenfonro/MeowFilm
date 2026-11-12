@@ -3,6 +3,8 @@ import {
   sourceFault, sourceObject, sourceRequire, sourceSafeError,
 } from './errors.js';
 import { normalizeBook } from './rules.js';
+import { contentBlocks } from './content.js';
+import { base64ToBytes } from './capabilities.js';
 
 const textEncoder = new TextEncoder();
 const standardActions = Object.freeze([
@@ -15,6 +17,7 @@ const standardActions = Object.freeze([
   'loginStatus',
   'login',
   'image',
+  'payAction',
 ]);
 const guestEntries = Object.freeze([
   'search', 'info', 'chapter', 'content', 'getfinds', 'find',
@@ -88,6 +91,10 @@ function chapterValue(value, index, baseUrl) {
     isVip: Boolean(input.isVip),
     isVolume: Boolean(input.isVolume),
     tag: String(input.tag ?? ''),
+    title: String(input.title ?? input.name ?? ''),
+    url: absolute(input.chapterUrl ?? input.chapterId ?? input.url, baseUrl),
+    updateTime: String(input.updateTime ?? input.time ?? ''),
+    variable: input.variable ?? null,
   };
 }
 
@@ -272,6 +279,7 @@ export class QysgAdapter {
       loginStatus: true,
       login: this.available.has('login') || Boolean(this.source.login),
       image: true,
+      payAction: this.available.has('pay'),
     };
     this.actions = Object.freeze(standardActions.filter(action => supported[action]));
   }
@@ -338,10 +346,18 @@ export class QysgAdapter {
 
   async content(payload, invocation) {
     const value = parseValue(await this.guest('content', payload, invocation));
+    const chapter = { ...(payload.chapter ?? {}) };
+    const baseUrl = String(payload.chapterUrl ?? chapter.chapterUrl ?? payload.url ?? '');
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-      return { ...value, content: String(value.content ?? value.data ?? '') };
+      const content = String(value.content ?? value.data ?? '');
+      const title = String(value.title ?? chapter.title ?? chapter.name ?? '');
+      return { ...value, title, chapter: { ...chapter, ...value.chapter, title, name: title },
+        content, blocks: contentBlocks(content, { ...this.limits, baseUrl }),
+        imageStyle: String(value.imageStyle ?? '') };
     }
-    return { content: String(value ?? '') };
+    const content = String(value ?? '');
+    return { title: String(chapter.title ?? chapter.name ?? ''), chapter, content,
+      blocks: contentBlocks(content, { ...this.limits, baseUrl }), imageStyle: '' };
   }
 
   async loginStatus(_payload, invocation) {
@@ -366,13 +382,37 @@ export class QysgAdapter {
   }
 
   async image(payload, invocation) {
+    const data = /^data:image\/[A-Za-z0-9.+-]+;base64,([\s\S]*)$/.exec(String(payload.url ?? ''));
+    if (payload.body === undefined && data) payload = { ...payload, body: base64ToBytes(data[1]) };
+    if (payload.body === undefined && payload.url) {
+      const response = await this.kernel.http.request({
+        url: payload.url, baseUrl: payload.bookUrl ?? this.baseUrl,
+        headers: this.source.header ?? {},
+      }, this.kernel.invocationContext(invocation));
+      sourceRequire(response.statusCode >= 200 && response.statusCode < 300, 'HTTP_ERROR');
+      payload = { ...payload, body: response.body, url: response.url };
+    }
     if (!this.available.has('imagedecrypt')) {
       return { url: String(payload.url ?? ''), body: payload.body ?? '' };
     }
+    let body = await this.guest('imagedecrypt', payload, invocation);
+    if (payload.kind && typeof body === 'string' && /^https?:\/\//i.test(body)) {
+      const response = await this.kernel.http.request({ url: body, baseUrl: payload.url,
+        headers: this.source.header ?? {} }, this.kernel.invocationContext(invocation));
+      sourceRequire(response.statusCode >= 200 && response.statusCode < 300, 'HTTP_ERROR');
+      body = response.body;
+    }
     return {
       url: String(payload.url ?? ''),
-      body: await this.guest('imagedecrypt', payload, invocation),
+      body,
     };
+  }
+
+  async payAction(payload, invocation) {
+    sourceRequire(payload.bookUrl && (payload.chapterUrl || payload.chapter?.chapterUrl || payload.chapter?.url));
+    return { value: await this.guest('pay', {
+      ...payload, url: payload.chapterUrl ?? payload.chapter?.chapterUrl ?? payload.chapter?.url,
+    }, invocation) };
   }
 
   invoke(action, payload, invocation) {

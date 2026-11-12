@@ -13,7 +13,7 @@ public final class FilmCategoryModel: ObservableObject {
 
     private let source: any FilmCategorySource
     private var offset = 0
-    private var started = false
+    private var lastLoadedOffset = 0
     private var closed = false
     private var requestID: UUID?
     private var task: Task<Void, Never>?
@@ -26,8 +26,9 @@ public final class FilmCategoryModel: ObservableObject {
 
     @discardableResult
     public func loadIfNeeded() -> Task<Void, Never>? {
-        guard !started else { return task }
-        return loadMore()
+        guard !closed else { return nil }
+        if let task { return task }
+        return loadPage(offset: 0, replacing: true, refresh: false)
     }
 
     @discardableResult
@@ -35,41 +36,66 @@ public final class FilmCategoryModel: ObservableObject {
         guard !closed, filters[id] != value,
               filterRows.first(where: { $0.id == id })?.options.contains(where: { $0.id == value }) == true
         else { return nil }
+        retireRequest()
         filters[id] = value
-        return refresh()
+        items = []
+        offset = 0
+        lastLoadedOffset = 0
+        hasMore = true
+        return loadPage(offset: 0, replacing: true, refresh: false)
     }
 
     @discardableResult
     public func refresh() -> Task<Void, Never>? {
         guard !closed else { return nil }
         retireRequest()
-        items = []
-        offset = 0
-        hasMore = true
-        return loadMore()
+        return loadPage(offset: 0, replacing: true, refresh: true)
     }
 
     @discardableResult
     public func loadMore() -> Task<Void, Never>? {
         guard !closed, hasMore else { return nil }
         if let task { return task }
-        started = true
+        return loadPage(offset: offset, replacing: false, refresh: false)
+    }
+
+    private func loadPage(offset: Int, replacing: Bool, refresh: Bool) -> Task<Void, Never> {
         error = nil
         isLoading = true
         let id = UUID()
         requestID = id
-        let source = source, category = category, filters = filters, offset = offset
+        let source = source, category = category, filters = filters
+        let loadedThrough = lastLoadedOffset
         let task = Task { [weak self] in
             do {
-                try Task.checkCancellation()
-                let page = try await source.loadCategory(category, filters: filters, offset: offset)
-                try Task.checkCancellation()
+                var pageOffset = offset
+                var items: [FilmItem] = []
+                var seen = Set<FilmItemIdentity>()
+                var nextOffset: Int?
+                var cacheError: FilmHomeError?
+                while true {
+                    try Task.checkCancellation()
+                    let page = try await source.loadCategory(category, filters: filters, offset: pageOffset, refresh: refresh)
+                    try Task.checkCancellation()
+                    guard self?.requestID == id else { return }
+                    if let next = page.nextOffset, next <= pageOffset { throw FilmHomeError.invalidResponse }
+                    items.append(contentsOf: page.items.filter { seen.insert($0.identity).inserted })
+                    if cacheError == nil { cacheError = page.cache?.errorCode.map { .runtime(code: $0) } }
+                    nextOffset = page.nextOffset
+                    guard replacing, pageOffset < loadedThrough, let next = nextOffset else { break }
+                    pageOffset = next
+                }
                 guard let self, !self.closed, self.requestID == id else { return }
-                if let next = page.nextOffset, next <= offset { throw FilmHomeError.invalidResponse }
-                var seen = Set(self.items.map(\.identity))
-                self.items.append(contentsOf: page.items.filter { seen.insert($0.identity).inserted })
-                self.hasMore = page.nextOffset != nil
-                self.offset = page.nextOffset ?? offset
+                if replacing {
+                    self.items = items
+                } else {
+                    let existing = Set(self.items.map(\.identity))
+                    self.items.append(contentsOf: items.filter { !existing.contains($0.identity) })
+                }
+                self.lastLoadedOffset = pageOffset
+                self.hasMore = nextOffset != nil
+                self.offset = nextOffset ?? pageOffset
+                self.error = cacheError
                 self.finish(id)
             } catch {
                 guard let self, !self.closed, self.requestID == id else { return }
@@ -85,6 +111,10 @@ public final class FilmCategoryModel: ObservableObject {
 
     public func close() {
         closed = true
+        cancel()
+    }
+
+    public func cancel() {
         retireRequest()
     }
 

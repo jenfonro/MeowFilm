@@ -281,7 +281,7 @@ public static partial class MusicUiTests
                 Equal("打开桌面歌词", AutomationProperties.GetName(button));
             }));
 
-        yield return Case("desktop lyrics footer keeps source FM quality and desktop controls inside both widths", () =>
+        yield return Case("desktop lyrics footer keeps unified mode quality and desktop controls inside both widths", () =>
             WithDesktopLyrics((f, _) =>
             {
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
@@ -290,35 +290,39 @@ public static partial class MusicUiTests
                 {
                     FrameworkElement surface = ReferenceEquals(player, detailFooter) ? detail : player;
                     // Render owns this viewport; the shown anchor Window must not re-layout the surface.
-                    var source = (Button)player.FindName("PlaybackSourceButton");
-                    // Exercise the widest visible source/FM/quality chrome without requiring an online account.
-                    ((StackPanel)source.Content).Children.OfType<TextBlock>().Last().Text = new string('宽', 24);
-                    ((Button)player.FindName("FmChannelButton")).Visibility = Visibility.Visible;
+                    var mode = (Button)player.FindName("ModeButton");
+                    var transport = (StackPanel)player.FindName("TransportPanel");
+                    Equal(0, transport.Children.IndexOf(mode));
+                    // Exercise the widest right-hand chrome without requiring an online account.
                     ((Button)player.FindName("QualityButton")).Visibility = Visibility.Visible;
                     foreach (int width in new[] { 1110, 860 })
                     {
                         Render(surface, width, ReferenceEquals(player, detailFooter) ? 600 : 80);
                         True(Math.Abs(player.ActualWidth - width) < .5, "the actual footer spans the requested viewport");
+                        True(mode.Visibility == Visibility.Visible && mode.IsEnabled,
+                            "the unified mode entry remains available in the detached render fixture");
                         AssertPlayerBounds(player, width);
-                        var transport = (FrameworkElement)player.FindName("TransportPanel");
                         var transportRight = transport.TranslatePoint(new(transport.ActualWidth, 0), player).X;
                         var progress = (FrameworkElement)player.FindName("Progress");
                         var progressBottom = progress.TranslatePoint(new(0, progress.ActualHeight), player).Y;
-                        var names = new[] { "PlaybackSourceButton", "FmChannelButton", "QualityButton",
+                        var names = new[] { "QualityButton",
                             "PlaylistButton", "DesktopLyricsButton", "VolumeButton", "MoreButton" };
-                        var bounds = names.Select(name => (FrameworkElement)player.FindName(name))
+                        var options = names.Select(name => (FrameworkElement)player.FindName(name))
                             .Select(control => new Rect(control.TranslatePoint(new(), player), control.RenderSize)).ToArray();
+                        foreach (var rect in options)
+                            True(rect.Left >= transportRight - .5, "right controls do not overlap the centered transport");
+                        var bounds = new[] { new Rect(mode.TranslatePoint(new(), player), mode.RenderSize) }
+                            .Concat(options).ToArray();
                         foreach (var rect in bounds)
                         {
-                            True(rect.Width > 0 && rect.Height > 0, "all right controls have a measured hit area");
-                            True(rect.Left >= transportRight - .5, "right controls do not overlap the centered transport");
-                            True(rect.Top >= progressBottom - .5, "right controls remain below the seek hit area");
+                            True(rect.Width > 0 && rect.Height > 0, "all controls have a measured hit area");
+                            True(rect.Top >= progressBottom - .5, "controls remain below the seek hit area");
                         }
                         for (int i = 0; i < bounds.Length; i++)
                             for (int j = i + 1; j < bounds.Length; j++)
                                 True(bounds[i].Right <= bounds[j].Left + .5 || bounds[j].Right <= bounds[i].Left + .5 ||
                                     bounds[i].Bottom <= bounds[j].Top + .5 || bounds[j].Bottom <= bounds[i].Top + .5,
-                                    "source FM quality and desktop controls have distinct hit areas");
+                                    "infinity quality and desktop controls have distinct hit areas");
                         GeneralAppearanceTests.SavePreview(player,
                             "media-control-footer-max-" + (ReferenceEquals(player, detailFooter) ? "detail-" : "ordinary-") + width,
                             width, 80);
@@ -333,15 +337,17 @@ public static partial class MusicUiTests
                 await SaveDesktopLyricFixture(f);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 var window = f.Module.DesktopLyricsWindow!;
-                var original = (TextBlock)window.FindName("CurrentLine");
-                var translation = (TextBlock)window.FindName("CurrentTranslation");
+                var line = (MusicDesktopLyricLineView)window.FindName("TopLine");
+                var original = (MusicDesktopLyricTextView)line.FindName("PlainText");
+                var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
                 Equal("第一行原文", original.Text); Equal("first source translation", translation.Text);
                 f.Playback.Tick(6); await Drain();
                 Equal("第二行原文", original.Text); Equal("second source translation", translation.Text);
                 var rows = f.Module.Lyrics.ToArray();
                 f.Module.PreviewLyric(rows[0]);
                 Equal("第二行原文", f.Module.DesktopLyricText);
-                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "media-control-desktop-lyrics", 720, 112);
+                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "media-control-desktop-lyrics",
+                    (int)window.ActualWidth, (int)window.ActualHeight);
 
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 owner.Content = detail;
@@ -376,8 +382,9 @@ public static partial class MusicUiTests
                 await SaveDesktopLyricFixture(f);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 var window = f.Module.DesktopLyricsWindow!;
-                var original = (TextBlock)window.FindName("CurrentLine");
-                var translation = (TextBlock)window.FindName("CurrentTranslation");
+                var line = (MusicDesktopLyricLineView)window.FindName("TopLine");
+                var original = (MusicDesktopLyricTextView)line.FindName("PlainText");
+                var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 owner.Content = detail;
                 await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
@@ -429,7 +436,8 @@ public static partial class MusicUiTests
             {
                 await SaveDesktopLyricFixture(f, translated: false);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
-                var translation = (TextBlock)f.Module.DesktopLyricsWindow!.FindName("CurrentTranslation");
+                var line = (MusicDesktopLyricLineView)f.Module.DesktopLyricsWindow!.FindName("TopLine");
+                var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
                 True(!translation.IsVisible, "a source without translation leaves no empty second row");
                 int calls = f.Calls.Log.Count;
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
@@ -607,17 +615,28 @@ public static partial class MusicUiTests
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
                 var prior = f.Module.DesktopLyricsWindow!;
+                prior.Left += 29; prior.Top += 17;
+                prior.SetLocked(true); await Drain();
+                var state = prior.CapturePresentationState();
+                var unlockHandle = new WindowInteropHelper(prior.UnlockWindow!).Handle;
                 int closed = 0; prior.Closed += (_, _) => closed++;
                 await f.Module.PrepareShutdownAsync();
                 Equal(1, closed);
                 True(!f.Module.IsDesktopLyricsOpen && !f.Module.CanToggleDesktopLyrics && prior.DataContext is null,
                     "preparation releases the actual window without disposing the playback owner");
+                True(!DesktopLyricNative.IsWindow(unlockHandle) && !prior.IsPointerObserverRunning,
+                    "shutdown preparation also releases independent unlock and pointer observation");
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 True(!f.Module.IsDesktopLyricsOpen, "sealed media admission stays sealed");
                 await f.Module.CancelShutdownPreparationAsync();
                 True(f.Module.IsDesktopLyricsOpen && !ReferenceEquals(prior, f.Module.DesktopLyricsWindow),
                     "cancel preparation creates a new window rather than reopening the closed resource");
                 True(!f.Module.ShowLyricTranslation, "session display preference survives preparation");
+                await Drain();
+                var restored = f.Module.DesktopLyricsWindow!;
+                Equal(state, restored.CapturePresentationState());
+                True(restored.UnlockWindow is { IsVisible: true } && !restored.IsPointerObserverRunning,
+                    "cancelled exit restores position and locking with a fresh usable unlock HWND");
                 await f.Module.PrepareShutdownAsync();
                 owner.Close();
                 await f.Module.CancelShutdownPreparationAsync();

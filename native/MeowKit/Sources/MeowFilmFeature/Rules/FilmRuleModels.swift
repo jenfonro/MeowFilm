@@ -4,6 +4,27 @@ public enum FilmRuleSection: String, Codable, CaseIterable, Sendable {
     case episode, movie, search
 }
 
+public enum FilmRuleGroup: String, Codable, CaseIterable, Sendable {
+    case episodeClean, episode, movie, search
+
+    public var isClean: Bool { self == .episodeClean || self == .search }
+    public var section: FilmRuleSection {
+        switch self {
+        case .episodeClean, .episode: return .episode
+        case .movie: return .movie
+        case .search: return .search
+        }
+    }
+    public var title: String {
+        switch self {
+        case .episodeClean: return "剧集列表净化规则"
+        case .episode: return "集数匹配规则"
+        case .movie: return "电影匹配规则"
+        case .search: return "搜索净化设置"
+        }
+    }
+}
+
 public struct FilmMatchRule: Codable, Equatable, Sendable {
     public var pattern: String
     public var replace: String
@@ -16,7 +37,7 @@ public struct FilmMatchRule: Codable, Equatable, Sendable {
     }
 }
 
-/// A value snapshot also used as the editor's complete, unsaved draft.
+/// A value snapshot acknowledged by the Node owner.
 public struct FilmRuleSet: Codable, Equatable, Sendable {
     public var episodeCleanRegexRules: [String]
     public var episodeRules: [FilmMatchRule]
@@ -29,6 +50,26 @@ public struct FilmRuleSet: Codable, Equatable, Sendable {
         self.episodeRules = episodeRules
         self.movieRules = movieRules
         self.aggregateRegexRules = aggregateRegexRules
+    }
+}
+
+extension FilmRuleSet {
+    public func rules(in group: FilmRuleGroup) -> [FilmMatchRule] {
+        switch group {
+        case .episodeClean: return episodeCleanRegexRules.map { .init(pattern: $0) }
+        case .episode: return episodeRules
+        case .movie: return movieRules
+        case .search: return aggregateRegexRules.map { .init(pattern: $0) }
+        }
+    }
+
+    public mutating func replace(_ group: FilmRuleGroup, with rules: [FilmMatchRule]) {
+        switch group {
+        case .episodeClean: episodeCleanRegexRules = rules.map(\.pattern)
+        case .episode: episodeRules = rules
+        case .movie: movieRules = rules
+        case .search: aggregateRegexRules = rules.map(\.pattern)
+        }
     }
 }
 
@@ -74,8 +115,7 @@ public enum FilmRuleServiceError: Error, Equatable, Sendable {
     case closed
     case shuttingDown
     case notInitialized
-    case corruptDocument
-    case invalidEngineResponse
+    case invalidResponse
 }
 
 extension FilmRuleServiceError: LocalizedError {
@@ -84,8 +124,7 @@ extension FilmRuleServiceError: LocalizedError {
         case .closed: return "规则服务已关闭"
         case .shuttingDown: return "规则服务正在停止"
         case .notInitialized: return "规则尚未加载"
-        case .corruptDocument: return "规则文档已损坏"
-        case .invalidEngineResponse: return "规则引擎返回无效结果"
+        case .invalidResponse: return "规则服务返回无效结果"
         }
     }
 }

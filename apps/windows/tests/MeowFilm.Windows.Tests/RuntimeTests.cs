@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Files;
@@ -62,6 +63,28 @@ public static class RuntimeTests
                     await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync(method, new { }));
             }
             AssertExited(pid);
+        });
+        yield return new("native-runtime: eight-module App keeps provider Film and token routes independent without starting the SDK", async () =>
+        {
+            var modules = Modules;
+            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
+            await using var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData());
+            var token = await runtime.CallAsync("netease.token.get", new { unexpected = true });
+            BridgeTests.Equal(false, token.GetProperty("ok").GetBoolean());
+            BridgeTests.Equal("netease.token.v1", token.GetProperty("contract").GetString());
+            BridgeTests.Equal("INVALID_REQUEST", token.GetProperty("code").GetString());
+            foreach (var (method, contract) in new[]
+            {
+                ("pan.providers", "pan.runtime.v1"), ("tmdb.data.settings.get", "tmdb.data.v1"),
+                ("douban.data.settings.get", "douban.data.v1"), ("film.settings.get", "film.playback.v1"),
+                ("music.script.sources.list", "music.script.v3")
+            })
+            {
+                var reply = await runtime.CallAsync(method, new { });
+                BridgeTests.Equal(true, reply.GetProperty("ok").GetBoolean());
+                BridgeTests.Equal(contract, reply.GetProperty("contract").GetString());
+            }
+            BridgeTests.Equal(true, runtime.IsConnected);
         });
         yield return new("native-runtime: native music queue survives script process restart through DPAPI", async () =>
         {
@@ -290,6 +313,27 @@ public static class RuntimeTests
             BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(extra.Root, Identity, Modules));
             return Task.CompletedTask;
         });
+        foreach (var assembly in new[] { "old five-module", "old seven-module", "reordered eight-module" })
+            yield return new("native-runtime: verified App bundle rejects " + assembly + " manifest", () =>
+            {
+                var fixture = CreateFixture("normal");
+                var path = Path.Combine(fixture.Root, "runtime-manifest.json");
+                var manifest = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+                var modules = manifest["modules"]!.AsArray();
+                if (assembly == "old five-module")
+                {
+                    modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
+                }
+                else if (assembly == "old seven-module") modules.RemoveAt(7);
+                else
+                {
+                    var first = modules[0]!.DeepClone();
+                    modules[0] = modules[1]!.DeepClone(); modules[1] = first;
+                }
+                File.WriteAllText(path, manifest.ToJsonString());
+                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity, Modules));
+                return Task.CompletedTask;
+            });
         yield return new("native-runtime: wrong identity, module, version and remote data roots fail closed", async () =>
         {
             var description = BridgeCodec.Value(new { protocol = "runtime.http.v1", product = Identity,

@@ -11,13 +11,17 @@ public partial class GeneralSettingsView : UserControl
 {
     private readonly IDesktopAppearance appearance;
     private readonly IDesktopClosePreferences? closePreferences;
+    private readonly Action? resetUserData;
     public static IValueConverter StatusVisibility { get; } = new StatusConverter();
     public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources,
-        IDesktopClosePreferences? closePreferences = null, IDesktopMediaControlSettings? mediaControls = null)
+        IDesktopClosePreferences? closePreferences = null, IDesktopMediaControlSettings? mediaControls = null,
+        Action? resetUserData = null)
     {
         this.appearance = appearance;
         this.closePreferences = closePreferences;
+        this.resetUserData = resetUserData;
         InitializeComponent();
+        UserDataSection.Visibility = resetUserData is null ? Visibility.Collapsed : Visibility.Visible;
         ThemeSelection.Presets = [new(AppearanceColors.DefaultColor, "浅蓝", AppearanceColors.DefaultColor)];
         WindowBehaviorPage.DataContext = closePreferences;
         if (closePreferences is null)
@@ -35,9 +39,9 @@ public partial class GeneralSettingsView : UserControl
         else Areas.Children.Remove(ShortcutsArea);
         foreach (var source in sources)
         {
-            AppearanceContributions.Children.Add(source.AppearanceSettingsView);
-            HomeSourceContributions.Children.Add(source.HomeSourceSettingsView);
-            CacheContributions.Children.Add(source.CacheSettingsView);
+            if (source.AppearanceSettingsView is { } appearanceView) AppearanceContributions.Children.Add(appearanceView);
+            if (source.HomeSourceSettingsView is { } homeView) HomeSourceContributions.Children.Add(homeView);
+            if (source.CacheSettingsView is { } cacheView) CacheContributions.Children.Add(cacheView);
         }
     }
     private void Area_Checked(object sender, RoutedEventArgs e)
@@ -45,7 +49,7 @@ public partial class GeneralSettingsView : UserControl
         if (!IsInitialized || sender is not RadioButton { Tag: string area }) return;
         AppearancePage.Visibility = area == "appearance" ? Visibility.Visible : Visibility.Collapsed;
         HomeSourceContributions.Visibility = area == "sources" ? Visibility.Visible : Visibility.Collapsed;
-        CacheContributions.Visibility = area == "cache" ? Visibility.Visible : Visibility.Collapsed;
+        CachePage.Visibility = area == "cache" ? Visibility.Visible : Visibility.Collapsed;
         WindowBehaviorPage.Visibility = area == "window" ? Visibility.Visible : Visibility.Collapsed;
         ShortcutsPage.Visibility = area == "shortcuts" ? Visibility.Visible : Visibility.Collapsed;
         SettingsScroller.ScrollToTop();
@@ -71,6 +75,7 @@ public partial class GeneralSettingsView : UserControl
     {
         if (closePreferences is not null) await closePreferences.LoadAsync();
     }
+    private void ClearUserData_Click(object sender, RoutedEventArgs e) => resetUserData?.Invoke();
     private async void CloseBehavior_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (closePreferences is null || CloseBehaviorSelection.SelectedValue is not WindowCloseBehavior behavior ||

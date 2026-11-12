@@ -311,8 +311,22 @@
          <ProgressBar Style="{StaticResource Film.PlayerStage}" Minimum="0" Maximum="1" Value="{Binding PlayerStageProgress,Mode=OneWay}" MaxWidth="520" Margin="0,12,0,0"
                       Visibility="{Binding PlayerBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
         </StackPanel>
-        <Button Content="重连" Click="Reconnect_Click" Style="{StaticResource Film.PlayerTextButton}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,100,0,0"
-                Visibility="{Binding ConnectionFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,100,0,0">
+         <Button Content="重连" Click="Reconnect_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="4,0"
+                 Visibility="{Binding ConnectionFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+         <Button x:Name="RetryMediaRecoveryButton" Content="重新取址" Click="RetryMedia_Click" Margin="4,0" AutomationProperties.Name="重试当前媒体地址">
+          <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Film.PlayerTextButton}">
+           <Setter Property="Visibility" Value="Collapsed"/>
+           <Style.Triggers><MultiDataTrigger>
+            <MultiDataTrigger.Conditions>
+             <Condition Binding="{Binding NoOutput}" Value="True"/>
+             <Condition Binding="{Binding CanRetryMedia}" Value="True"/>
+            </MultiDataTrigger.Conditions>
+            <Setter Property="Visibility" Value="Visible"/>
+           </MultiDataTrigger></Style.Triggers>
+          </Style></Button.Style>
+         </Button>
+        </StackPanel>
         <Path x:Name="BufferSpinner" Width="62" Height="62" Data="M31,4 A27,27 0 1 1 4,31" Stroke="#F2FFFFFF" StrokeThickness="4"
               StrokeStartLineCap="Round" StrokeEndLineCap="Round" HorizontalAlignment="Center" VerticalAlignment="Center"
               Visibility="Collapsed" IsHitTestVisible="False" RenderTransformOrigin=".5,.5">
@@ -367,6 +381,8 @@
            <ListBox x:Name="AspectBox" Style="{StaticResource Film.PlayerOptions}" ItemContainerStyle="{StaticResource Film.PlayerOption}" SelectionChanged="Aspect_Changed" IsEnabled="{Binding HasOutput}" AutomationProperties.Name="画面比例">
             <ListBoxItem Content="默认" Tag=""/><ListBoxItem Content="16:9" Tag="16:9"/><ListBoxItem Content="4:3" Tag="4:3"/>
            </ListBox>
+           <Button x:Name="RetryMediaButton" Content="重新取址" Click="RetryMedia_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,12,0,0"
+                   HorizontalAlignment="Left" IsEnabled="{Binding CanRetryMedia}" AutomationProperties.Name="重试当前媒体地址"/>
           </StackPanel>
           </ScrollViewer>
          </Border>
@@ -382,7 +398,7 @@
          <Setter Property="Visibility" Value="Collapsed"/>
         </Trigger></Style.Triggers>
        </Style></Grid.Style>
-       <local:FilmPlaybackPoster x:Name="Backdrop" Address="{Binding Poster}" IsBackdrop="True"
+       <local:FilmPlaybackPoster x:Name="Backdrop" Address="{Binding Backdrop}" IsBackdrop="True"
                                  IsHitTestVisible="False"/>
        <Border x:Name="MetadataWash" Background="{DynamicResource MeowFilm.Brush.Window}">
         <Border.OpacityMask>
@@ -477,6 +493,7 @@
      <DockPanel Margin="0,0,0,10">
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
        <CheckBox Content="点映" IsChecked="{Binding PreviewEpisodes,Mode=OneWay}" Click="Preview_Click" Margin="0,0,16,0" VerticalAlignment="Center" AutomationProperties.Name="显示点映剧集"/>
+       <Button x:Name="RefreshBrowsingButton" Content="刷新" Click="RefreshBrowsing_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" IsEnabled="{Binding CanRefreshBrowsing}" AutomationProperties.Name="刷新当前资料或目录"/>
        <Button x:Name="RawDirectory" Content="查看原始列表" Click="Directory_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" Visibility="{Binding CanBrowseRaw,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
        <Button Content="加载更多" Click="SearchMore_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" IsEnabled="{Binding CanSearchMore}" AutomationProperties.Name="继续搜索未完成来源"/>
       </StackPanel>

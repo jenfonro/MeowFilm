@@ -3,11 +3,18 @@
 ## 所有权与装配
 
 `packages/film-playback` 是 App 本地的影视业务 owner。它借用已经装配的
-CatNode／source／pan／TMDB／豆瓣模块，负责匹配、候选排序、会话、数据缓存、
+CatNode／source／pan／TMDB／豆瓣模块，负责规则、搜索聚合、匹配、候选排序、会话、数据缓存、
 历史、人工匹配、错误片源屏蔽和偏好。业务不连接 meowfilm-server 的登录、
-数据库或播放 API。收藏与识别规则仍由现有客户端 owner 保存，不建立第二份资料。
+数据库或播放 API。收藏仍由现有客户端 owner 保存；规则在 Node 保存，客户端仅持编辑草稿与展示快照。
 
-双端 aggregate entry 显式装配七个模块；通用 `createRuntime` 未显式启用
+本地资料库与规则文档分别位于 `<dataRoot>/film-playback/library.json` 和
+`<dataRoot>/film-rules/rules.json`。App 提供 `dataRoot`，owner 按正常文件系统路径语义访问，
+支持根、祖先及模块目录别名和文档链接，按需创建目录。保存通过同目录独占临时文件、
+fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留原内容。
+保存前比对已提交文档内容，外部改写返回 `STORAGE_CHANGED`；格式损坏与真实 I/O 失败
+分别返回 `CORRUPT_STORAGE`、`STORAGE_ERROR`，失败不发布新快照。
+
+双端 aggregate entry 显式装配八个模块；通用 `createRuntime` 未显式启用
 pan／metadata／film 时保持原默认三个模块。`connectFilmPlayback` 在 provider
 变更前后比较真实 generation／revision，再通知数据、会话及媒体 owner 撤权。
 失败回执不证明磁盘变更回滚；仅展示名称变化不使有效媒体失效。
@@ -31,7 +38,7 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 
 | operation | 输入与结果 |
 | --- | --- |
-| `session.open` | `{platform,target,sources,query?,results?,resultHints?,search?,metadata?,cacheEntries?,rules?}` → 当前 snapshot |
+| `session.open` | `{platform,target,sources,query?,results?,resultHints?,search?,metadata?,cacheEntries?,searchReference?,resumeTarget?}` → 当前 snapshot；规则由 Node 捕获 |
 | `session.command` | `{sessionId,action,...}` → 受理后的 snapshot，后续由事件推进 |
 | `session.snapshot` | `{sessionId}` → 当前 snapshot |
 | `session.attempt` | `{sessionId,attemptId}` → 私有媒体 receipt |
@@ -41,11 +48,61 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 | `library.get` | 读取本地历史、人工匹配、屏蔽、点映选择 |
 | `library.remove` | `{kind:'history'\|'blocks',id?,block?}`，省略或 null 清空对应集合，否则准确删除 |
 | `manual.update` | `{action:'save',item}` 或 `{action:'remove',id}` |
-| `data.search` | `{source,query,page?}` → 完整单页、页号和 `hasMore` |
-| `data.detail` | `{source,detailId}` → 所选来源的真实线路／文件 |
-| `data.metadata` | `{provider,path,query?,imageSize?}` → 原 provider 数据 |
+| `rules.get` | `{}` → `{rules,revision}` |
+| `rules.set` | `{rules}` → 保存并返回新快照 |
+| `rules.group.set` | `{group,rules}` → 只归一化指定组，在 owner 写队列中原子合并最新已保存配置，返回 `{rules,revision}` |
+| `rules.group.defaults` | `{group}` → 该组默认行数组；不初始化或写入文档 |
+| `rules.group.preview` | `{group,rules,request}` → 此组草稿＋关联组最新已保存配置执行预览；不写入 |
+| `rules.restore` | `{section:'episode'\|'movie'\|'search',rules?}` → 恢复所选段默认值并保存 |
+| `rules.preview` | `{request,rules?}` → 规则预览；可用草稿，不写入 |
+| `rules.normalize` | `{kind:'match'\|'clean',pattern,replace?}` → 新规则输入标准化结果 |
+| `rules.clear` | `{}` → 清除新规则文档并返回默认快照，不扫描旧客户端数据 |
+| `search.open` | `{query,sources}` → 搜索 snapshot，并按每源完整一页启动首轮 |
+| `search.snapshot` | `{sessionId}` → 最新完整搜索 snapshot |
+| `search.command` | `{sessionId,action:'more'\|'stop'\|'resume'}` → 受理后的 snapshot |
+| `search.release` | `{sessionId}` → 释放搜索消费者与会话 |
+| `search.handoff` | `{sessionId,selectionId,sources}` → Node 生成的准确目标、来源、已取得事实、游标及 `searchReference` |
+| `data.catalog` | `{source,action:'home'\|'category',payload?,refresh?}` → 来源原始目录数据 |
+| `data.search` | `{source,query,page?,refresh?}` → 完整单页、页号和 `hasMore` |
+| `data.detail` | `{source,detailId,refresh?}` → 所选来源的真实线路／文件 |
+| `data.metadata` | `{provider,path,query?,imageSize?,refresh?}` → 原 provider 数据；失败不以旧值冒充成功 |
+| `data.metadata.entry` | 同 metadata 输入 → 原始 `value`、身份、成功时间、完整度及 `cache` 状态；刷新失败可返回同身份旧成功值 |
 | `data.cache.entry` | 缓存请求身份 → 带原始时间、完整度的有效记录，未命中为 null |
 | `data.invalidate` | `{domain}` → 撤指定来源、账号或 metadata 域并等待排空 |
+
+### 规则与搜索
+
+规则文档由 `createFilmRulesService` 唯一读写；默认初始化、保存、恢复及清除均通过同一 owner。
+分组接口的 `group` 为 `episodeClean`／`episode`／`movie`／`search`，分别对应
+`episodeCleanRegexRules`／`episodeRules`／`movieRules`／`aggregateRegexRules`。
+净化组 `rules` 是字符串数组，匹配组是 `{pattern,replace,flags}` 数组。空数组表示清空该组。
+组预览的 `request.section` 须与组一致（`episodeClean` 对应 `episode`）；关联的另一剧集组
+只取 Node 已保存配置，客户端其他组草稿不参与。分组保存仅归一化本组，其他组原样保留；
+写入失败不发布新快照。`rules.set`／`rules.restore` 保留 Windows 使用的整份提交语义。
+iOS 页面新增、编辑、删除和恢复默认只修改本组草稿，唯一页头保存提交本组；失败保留草稿。
+保存一旦交给稳定草稿 owner，其 Task 会等待实际落盘回执并更新本组草稿；离页或取消页面
+等待者不取消该写入，也不丢弃归一化结果。页内测试随页面隐藏或失活取消，旧结果不再发布；
+服务保留取消任务直到调用结束，Node 原生程序先停止并排空实际计算再结束取消。
+`revision` 包含共享 QuickJS-NG 0.18.0／Unicode 身份与实际规则内容。搜索和播放持不可变快照，
+保存新规则不改变旧任务、不清原始数据缓存，也不打断媒体。设置预览与播放识别使用独立于第三方
+脚本的 Runtime/Context；纯计算可中断并排空，失败后下次调用重建同一内核，不回退到 Node vm。
+
+搜索 snapshot 同时含 `cards/rawCards`、原始 `siteItems/tmdbItems`、TMDB 资料、
+查询、页轮次及通道状态。客户端只选视图，不排序、聚合、再跑正则或重取同页。
+事件复用 `/v1/film/events/{sessionId}` 的 `snapshot`，`sequence/revision` 单调递增；
+重连发送最新完整快照，断流只撤观察者。`stop` 撤发布与后续调度，已接纳的有限网络 producer
+仍可完成入缓存；`resume` 仅继续未结算工作，失败页只在显式 `more` 时重试。
+具体排序、原始身份、完整页和导航要求见[共同搜索契约](../common/film/search.md)。
+
+搜索导航携带 `searchReference:{sessionId,selectionId}`，装配层重读 Node 会话，交接原查询、
+准确目标及固定规则；不把客户端卡片重新解释成权威数据。重进时显式 `resumeTarget` 保留用户当前
+选中的元数据、季集及准确源文件；仍从搜索 owner 复用结果与游标，不退回初始卡片目标。
+交接顶层的 `selectionMembers:[{sourceKey,detailId}]` 保留该选择的完整 typed 成员，
+不随晚到 TMDB 将卡片改为 movie/tv 而丢失；当前 group 仅据此补成员，不重新匹配整页结果。
+该事实由装配层直接传给播放 owner，客户端同名字段不作为成员依据。
+晚到 `search.update` 同样重读，
+只补成员或可靠资料，不替换已准备／正在播放文件。没有搜索 reference 的首页、历史及明确站源
+入口仍使用原有 open 契约，由 Node 规则 owner 捕获快照。
 
 ### 身份与缓存交接
 
@@ -83,15 +140,31 @@ metadata: provider, path, query?, imageSize?, settings:{revision}
 
 请求身份、配置代次和原始时间必须来自实际 data owner。`data.cache.entry` 导出同一
 记录，不重置 TTL、不请求上游内容。旧代次／过期记录不成为新命中，partial 不冒充
-full。一个 32 MiB 有界缓存拥有数据、完整度、过期时间和 in-flight 合并；超预算
-结果完整返回但不保留，不截断业务页。站点数据、盘列表、stored、短效 URL、
-metadata 分别按准确来源／账号／模式／配置隔离；资料持久库不随缓存淘汰。
+full。一个 32 MiB 有界内存缓存拥有数据、完整度、过期时间和 in-flight 合并；超预算
+结果完整返回但不在内存保留，不截断业务页。站点数据、盘列表、stored、短效 URL
+随进程，仍分别按真实来源／账号／模式与短效期限失效。TMDB／豆瓣业务元数据另以
+`<dataRoot>/film-metadata/<provider>/<身份散列>.json` 原子持久，复用相同缓存owner；
+请求身份不以明文文件名或持久请求对象泄露凭据。历史／人工匹配／屏蔽属于独立资料库。
+
+元数据状态是组件级的 `ready/empty/missing/failed`；正常空值和未公布排期是成功数据，
+摘要不能冒充详情，季度概要不能冒充逐集响应。`metadata.entry.cache` 包含
+`status:'fresh'|'stale'`、可选 `error:{code}` 及 `components`；各成功组件保留各自
+`fetchedAt`，读取、搜索摘要或只补演员／图片不会续期整份详情。有效完整响应的空字段和
+删除季集覆盖旧值，失败不清已有成功内容，不把旧值标为新鲜。
+
+电影稳定详情十四天；TV先判断所需详情／季度组件，再按 Ended、下一播出日或未知状态
+选择十四天、北京时间播出日边界或一天。season结合真实集数、父季度声明及排期，
+只对当前请求补全；未来总集数不是已播证据。父详情的相关季集／状态／排期改变后重新判断
+该季，常驻页面与全库不轮询。搜索结果六小时，豆瓣热门列表一小时。
+显式 `refresh:true` 只绕过准确请求的有效期／当天成功抑制，不清全局；默认请求复用有效数据。
+页面停止等待不取消已接纳producer；来源／账号／配置失效和真正关闭则撤代次并排空，
+旧在途不能回写内存或持久文件。
 
 搜索与播放均使用 `film.data.search/metadata`。TMDB 搜索请求为
-`/3/search/multi`、`{query,page:1,language:'zh-CN'}`、`imageSize:'w500'`；
+`/3/search/multi`、`{query,page:1}`、`imageSize:'w500'`；
 完整详情为 `/3/{movie|tv}/{id}`、
-`{language:'zh-CN',append_to_response:'credits,similar,images'}`、
-`imageSize:'original'`。查询字段和图片尺寸属于缓存身份，不从展示快照伪造完整记录。
+`{append_to_response:'credits,similar,images'}`、
+`imageSize:'original'`。运行器按当前设置补充语言、地区和成人选项；有效查询字段和图片尺寸属于缓存身份，不从展示快照伪造完整记录。
 原生不再拥有独立的成功详情缓存或跨请求合并；当前页面仍可持有展示快照。
 
 来源结果、完成页与来源缓存的交接还须证明来自同一个运行器 owner；Cat 的
@@ -109,9 +182,11 @@ group 仅移除已经不可授权的成员，仍可使用原范围内其余有�
 
 ### 晚到搜索交接
 
-`search.update` 命令携带
-`{selectionId,revision,sources,results,resultHints?,search,cacheEntries?,metadataTarget?,metadata?}`。
-selectionId 是初始 target.id，revision 为该原生搜索 context 的单调发布代次；
+搜索页的 `search.update` 命令携带 `searchReference` 与当前 `sources`；
+装配层从 Node 搜索 owner 重读
+`{selectionId,revision,selectionMembers,sources,results,resultHints?,search,cacheEntries?,metadataTarget?,metadata?}`，
+而非采用客户端上传的同名事实。
+selectionId 是初始 target.id，revision 为 Node 搜索会话的单调发布代次；
 只接受同一选择、原 scope 和 generation，不能追加授权来源。
 跨 owner 仍降 hints，不传旧游标和来源 seed。已停止／释放的会话不产生新请求。
 
@@ -138,10 +213,17 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
 - `browse.metadata {metadataSourceId,keepSource?}` 只能选择已证明关联；
   `keepSource:true` 保留当前站点／线路，只切分季资料。关联查询不阻塞主资料匹配。
   `browse.season {season}` 按需真实分季；映射无证据时不造季或集。
+- `browse.refresh {refresh?}` 默认显式刷新当前元数据及所看季、或准确站点详情／线路目录。
+  `refresh:false` 用于普通页面恢复，仅让owner判定是否过期／缺资料，不强刷。
+  保留旧成功展示并报告刷新错误，不更换当前播放文件、目标坐标或媒体lease。
+  snapshot 的 `metadataCache` 报告资料/当前季刷新状态；`metadataSupplement` 仅在豆瓣
+  与唯一TMDB可靠关联时提供原TMDB资料供图文／演职员／相似作品填缺，不改主身份或季集。
 - `select.episode {episode}` 选择真实 metadata 坐标；
   `select.candidate {candidateId}` 选择准确源文件。`next/previous` 使用真实列表。
   同集换源保进度和暂停意图，新集从正确起点，替代失败保留可用旧流。
   旧流结束只负责其历史与释放，不能覆盖后发的选集／换源意图。
+  当前尾部无下一集或所选季缺失时先让owner检查相关资料／目录，仍无真实记录则结束／报错，
+  不凭总集数造下一地址，也不全站重新搜索。
   Windows 原始来源续播按已保存的稳定候选身份恢复文件；文件已不存在时不把旧进度套给其他文件。
 - `pan {provider}` 固定标准盘族；`quality {quality}` 固定质量并保持另一维偏好。
   `switch` 临时排除准确当前文件；`block {attemptId}` 持久保存目标＋站点详情＋线路后续选，
@@ -152,6 +234,9 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   才临时解开文件／线路锁。raw 仍限原 source／detail，group 仍限原范围；
   无可靠映射则 `NO_MATCH`，不能拿另一集补位。普通重开始终要求保存的准确
   candidateId；替代失败保旧输出与恢复目标，成功后才保存新文件身份。
+- `media.retry {attemptId?}` 定向撤掉准确 pending/current（或最近失败候选）的短效地址，
+  重新取同一文件，不变成换源搜索，保同集进度／暂停意图。传入旧 attemptId 则拒绝。
+  `media.failed` 同样使失败地址失效，随后仍按既有暂时排除和换源逻辑续选，不永久屏蔽目录。
 - `preview {enabled}` 只切未播集显示／选择范围并按内容持久；不凭目录最大集号
   推已播。`shortvideo {enabled}` 准备已知相邻地址，预取下一集真实有限媒体字节。
   提升预取项为正式播放复用同 lease，只取消预取任务、不撤正式媒体。
@@ -221,6 +306,9 @@ Range／206／416／HEAD、背压与清单子引用由媒体 owner 管；不经�
 媒体控制文档、路由表及预取有独立资源预算：registry 16 MiB，控制输入 8 MiB、
 重写输出 32 MiB／累计 64 MiB，预取每 lease 32 MiB／pool 64 MiB；普通二进制尾流
 不因这些预算截断。实际预取无法完成时明确报错，不以 URL 或清单成功冒充媒体命中。
+前台只复用已完成的缓存，不等待同资源的在途预取；缺失字节直接按前台请求读取。
+媒体传输合计最多 64 个活动请求，预取准入为前台保留最后一个额度；额度不足时
+预取报 `MEDIA_BUSY`，不排队阻塞前台，也不增加总资源上限。
 运行器关闭结果来自真实 drain，失败不返回 `cleanupComplete:true`。
 二进制缓存续读优先以强 ETag 作 `If-Range`，否则使用有效 `Last-Modified`；
 弱 ETag 不升级为强校验，也不作为缓存206的条件。无可用校验器时仍只读缺失范围，

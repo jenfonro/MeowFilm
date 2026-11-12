@@ -1,6 +1,7 @@
 // Reference: iWebPlus b900c259 app-colors.js, player-lyric-controls.test.cjs.
 // Deterministic native tests only; no account, network, script or player fixture.
 import XCTest
+import MeowUI
 @testable import MeowMusicFeature
 
 @MainActor final class MusicAppearancePreferencesTests: XCTestCase {
@@ -14,11 +15,50 @@ import XCTest
     private let green: [UInt8] = [40, 220, 120, 255]
     private func song(_ id: String) -> MusicAppearanceSongIdentity { .init(platform: "wy", musicID: id) }
 
+    func testCustomColorPreviewDoesNotPersistAndCancellationRestoresTheSavedPalette() throws {
+        try isolated { defaults in
+            let store = MusicAppearancePreferencesStore(defaults: defaults)
+            store.selectFixedPalette(.preset(.mint))
+            let saved = defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey)
+            store.previewFixedColor(0xff0077)
+            XCTAssertEqual(store.pagePalette, .custom(0xff0077))
+            XCTAssertEqual(store.preferences.colorPalette, .preset(.mint))
+            XCTAssertEqual(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey), saved)
+            XCTAssertEqual(MusicAppearancePreferencesStore(defaults: defaults).pagePalette, .preset(.mint))
+            store.endColorPreview()
+            XCTAssertEqual(store.pagePalette, .preset(.mint))
+            store.previewFixedColor(0x40ab93)
+            XCTAssertTrue(store.selectFixedPalette(.custom(0x40ab93)))
+            store.endColorPreview()
+            XCTAssertEqual(store.pagePalette, .custom(0x40ab93))
+            let reopened = MusicAppearancePreferencesStore(defaults: defaults)
+            XCTAssertEqual(reopened.preferences.colorPalette, .custom(0x40ab93))
+            XCTAssertEqual(reopened.pagePalette, .custom(0x40ab93))
+            let bytes = try XCTUnwrap(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey))
+            XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("#40AB93"))
+        }
+    }
+
+    func testSongModeStillUsesItsOwnCacheAfterCustomColorAndLateCoverCannotOverwriteFixedColor() throws {
+        try isolated { defaults in
+            let store = MusicAppearancePreferencesStore(defaults: defaults)
+            store.selectSong(song("custom-roundtrip"))
+            let pending = try XCTUnwrap(store.beginCover(for: song("custom-roundtrip"), artworkID: "cover"))
+            XCTAssertTrue(store.applyCover(rgba: green, ticket: pending))
+            store.selectFixedPalette(.custom(0x2143aa))
+            XCTAssertFalse(store.applyCover(rgba: red, ticket: pending))
+            store.set(\.colorMode, .song)
+            XCTAssertEqual(store.pagePalette, .preset(.mint))
+            store.set(\.colorMode, .fixed)
+            XCTAssertEqual(store.pagePalette, .custom(0x2143aa))
+        }
+    }
+
     func testDefaultsMatchReferenceAndDoNotNeedAMusicService() {
         isolated { defaults in
             let store = MusicAppearancePreferencesStore(defaults: defaults)
             XCTAssertEqual(store.preferences, .init())
-            XCTAssertEqual(store.effectivePalette, .lilac)
+            XCTAssertEqual(store.effectivePalette, .preset(.lilac))
             XCTAssertEqual(MusicPlayerAppearance.allCases, [.starlight])
             XCTAssertEqual(store.preferences.playlistView, .grid)
             XCTAssertTrue(store.preferences.lockLyric)
@@ -32,15 +72,15 @@ import XCTest
         isolated { defaults in
             let store = MusicAppearancePreferencesStore(defaults: defaults)
             store.set(\.playlistView, .list)
-            store.selectFixedPalette(.mint)
+            store.selectFixedPalette(.preset(.mint))
             store.set(\.lockLyric, false)
             store.set(\.lyricTranslation, false)
             store.set(\.lyricBackground, false)
             let reopened = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertEqual(reopened.preferences, .init(playlistView: .list, colorMode: .fixed, colorPalette: .mint,
+            XCTAssertEqual(reopened.preferences, .init(playlistView: .list, colorMode: .fixed, colorPalette: .preset(.mint),
                                                        lockLyric: false, lyricTranslation: false, lyricBackground: false))
             XCTAssertNil(defaults.string(forKey: "unrelated.setting"))
-            XCTAssertEqual(reopened.effectivePalette, .mint)
+            XCTAssertEqual(reopened.effectivePalette, .preset(.mint))
             defaults.set("grid", forKey: "unrelated.setting")
             reopened.reload()
             XCTAssertEqual(reopened.preferences.playlistView, .list)
@@ -54,12 +94,12 @@ import XCTest
             let first = MusicAppearancePreferencesStore(defaults: defaults)
             let second = MusicAppearancePreferencesStore(defaults: defaults)
             first.set(\.lyricBackground, false)
-            second.selectFixedPalette(.rose)
+            second.selectFixedPalette(.preset(.rose))
             first.set(\.lockLyric, false)
             let reopened = MusicAppearancePreferencesStore(defaults: defaults)
             XCTAssertFalse(reopened.preferences.lockLyric)
             XCTAssertFalse(reopened.preferences.lyricBackground)
-            XCTAssertEqual(reopened.effectivePalette, .rose)
+            XCTAssertEqual(reopened.effectivePalette, .preset(.rose))
         }
     }
 
@@ -103,7 +143,7 @@ import XCTest
         XCTAssertEqual(preferences.playlistView, .grid)
         XCTAssertEqual(preferences.playerTheme, .starlight)
         XCTAssertEqual(preferences.colorMode, .song)
-        XCTAssertEqual(preferences.colorPalette, .lilac)
+        XCTAssertEqual(preferences.colorPalette, .preset(.lilac))
         XCTAssertFalse(preferences.lockLyric)
         XCTAssertFalse(preferences.lyricBackground)
         XCTAssertTrue(preferences.lyricTranslation)
@@ -121,14 +161,14 @@ import XCTest
             let second = try XCTUnwrap(store.beginCover(for: song("b"), artworkID: "display-cover"))
             XCTAssertFalse(store.applyCover(rgba: red, ticket: first))
             XCTAssertTrue(store.applyCover(rgba: green, ticket: second))
-            XCTAssertEqual(store.effectivePalette, .mint)
+            XCTAssertEqual(store.effectivePalette, .preset(.mint))
             let pending = try XCTUnwrap(store.beginCover(for: song("b"), artworkID: "late"))
-            store.selectFixedPalette(.lemon)
+            store.selectFixedPalette(.preset(.lemon))
             XCTAssertFalse(store.applyCover(rgba: red, ticket: pending))
             XCTAssertNil(store.beginCover(for: song("b"), artworkID: "fixed"))
-            XCTAssertEqual(store.effectivePalette, .lemon)
+            XCTAssertEqual(store.effectivePalette, .preset(.lemon))
             store.set(\.colorMode, .song)
-            XCTAssertEqual(store.effectivePalette, .mint)
+            XCTAssertEqual(store.effectivePalette, .preset(.mint))
         }
     }
 
@@ -154,22 +194,22 @@ import XCTest
         try isolated { defaults in
             let store = MusicAppearancePreferencesStore(defaults: defaults)
             for index in 0..<130 { store.primeCover(rgba: green, for: song("\(index)")) }
-            XCTAssertEqual(store.effectivePalette, .lilac)
+            XCTAssertEqual(store.effectivePalette, .preset(.lilac))
             let bytes = try XCTUnwrap(defaults.data(forKey: MusicAppearancePreferencesStore.songColorsKey))
             let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bytes) as? [String: Any])
             let colors = try XCTUnwrap(json["colors"] as? [[String]])
             XCTAssertEqual(colors.count, 128)
             XCTAssertEqual(colors.first, ["wy:2", "mint"])
             store.selectSong(song("2")) // A cache hit does not reorder the Map.
-            XCTAssertEqual(store.effectivePalette, .mint)
+            XCTAssertEqual(store.effectivePalette, .preset(.mint))
             store.primeCover(rgba: red, for: song("2")) // A changed sample DOES.
-            XCTAssertEqual(store.effectivePalette, .mint)
+            XCTAssertEqual(store.effectivePalette, .preset(.mint))
             let reopened = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertEqual(reopened.effectivePalette, .mint)
+            XCTAssertEqual(reopened.effectivePalette, .preset(.mint))
             reopened.selectSong(song("2"))
-            XCTAssertEqual(reopened.effectivePalette, .coral)
+            XCTAssertEqual(reopened.effectivePalette, .preset(.coral))
             reopened.selectSong(nil)
-            XCTAssertEqual(reopened.effectivePalette, .coral)
+            XCTAssertEqual(reopened.effectivePalette, .preset(.coral))
         }
     }
 
@@ -178,9 +218,9 @@ import XCTest
             let key = MusicAppearancePreferencesStore.songColorsKey
             defaults.set(Data(#"{"version":1,"last":"missing","colors":[["wy:a","mint"],["wy:a","rose"],["wy:b","missing"],["bad"],4]}"#.utf8), forKey: key)
             let store = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertEqual(store.effectivePalette, .lilac)
+            XCTAssertEqual(store.effectivePalette, .preset(.lilac))
             store.selectSong(song("a"))
-            XCTAssertEqual(store.effectivePalette, .rose)
+            XCTAssertEqual(store.effectivePalette, .preset(.rose))
             store.primeCover(rgba: green, for: song(String(repeating: "x", count: 2050)))
             XCTAssertNil(defaults.object(forKey: MusicAppearancePreferencesStore.preferencesKey))
             XCTAssertEqual(store.preferences, .init())
@@ -206,15 +246,30 @@ import XCTest
 
     func testLockScreenLyricsPreserveSongAndFavoriteTitleAndRestoreImmediatelyWhenDisabled() {
         var preferences = MusicAppearancePreferences()
-        let lyric = preferences.lockScreenMetadata(songTitle: "Song", lyric: "Original line", isFavorite: true)
+        let lyric = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "Artist",
+                                                   lyric: "Original line", isFavorite: true)
         XCTAssertEqual(lyric.title, "Original line")
-        XCTAssertEqual(lyric.artist, "Song ♡︎")
+        XCTAssertEqual(lyric.artist, "Song ♡︎ / Artist")
         XCTAssertEqual(lyric.album, "我的曲库")
         preferences.lockLyric = false
-        let plain = preferences.lockScreenMetadata(songTitle: "Song", lyric: "Original line", isFavorite: true)
+        let plain = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "Artist",
+                                                   lyric: "Original line", isFavorite: true)
         XCTAssertEqual(plain.title, "Song ♡︎")
-        XCTAssertEqual(plain.artist, "meowfilm")
+        XCTAssertEqual(plain.artist, "Artist")
         preferences.lockLyric = true
-        XCTAssertEqual(preferences.lockScreenMetadata(songTitle: "Song", lyric: "", isFavorite: false).title, "Song")
+        let empty = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "Artist", lyric: "", isFavorite: false)
+        XCTAssertEqual(empty.title, "Song")
+        XCTAssertEqual(empty.artist, "Artist")
+    }
+
+    func testLockScreenMetadataDoesNotAddASeparatorWhenArtistIsMissing() {
+        let preferences = MusicAppearancePreferences()
+        let lyric = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "",
+                                                   lyric: "Original line", isFavorite: true)
+        XCTAssertEqual(lyric.title, "Original line")
+        XCTAssertEqual(lyric.artist, "Song ♡︎")
+        let plain = preferences.lockScreenMetadata(songTitle: "Song", songArtist: "", lyric: nil, isFavorite: false)
+        XCTAssertEqual(plain.title, "Song")
+        XCTAssertEqual(plain.artist, "")
     }
 }

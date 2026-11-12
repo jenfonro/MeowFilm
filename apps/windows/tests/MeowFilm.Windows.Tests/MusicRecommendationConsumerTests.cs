@@ -1,10 +1,14 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Controls;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
@@ -178,21 +182,40 @@ public static partial class MusicUiTests
             Equal("77", MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")));
             Equal(0, f.Playback.Opens.Count);
         });
-        yield return Case("recommendation real WPF source menu separates continuation from loop and FM channels", async () =>
+        yield return Case("recommendation real WPF mode menu makes special continuation and ordinary list exclusive", async () =>
         {
             await using var f = await RecommendationScene.Create(); await f.EnableScript(); await f.Start("similar");
             var footer = (MusicPlayerView)f.Module.PlayerView;
             using var surface = RecommendationPlayerSurface(footer);
             await Drain();
-            var sourceButton = (Button)footer.FindName("PlaybackSourceButton");
-            sourceButton.RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
-            var menu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
-            var toggle = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "自动续播"));
-            True(toggle.IsEnabled && toggle.IsChecked, "new similar session enables continuation");
-            True(!menu.Items.OfType<MenuItem>().Any(item => Equals(item.Header, "返回原队列")), "similar has no return checkpoint");
-            toggle.RaiseEvent(new(MenuItem.ClickEvent)); await RecommendationUntil(() => !f.Module.RecommendationContinue);
+            var modeButton = (Button)footer.FindName("ModeButton");
+            modeButton.RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+            var menu = (ContextMenu)footer.FindName("ModeMenu");
+            Equal("相似模式,列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<MenuItem>().Select(AutomationProperties.GetName)));
+            var special = menu.Items.OfType<MenuItem>().Single(item => AutomationProperties.GetName(item) == "相似模式");
+            True(special.IsEnabled && special.IsChecked && f.Module.RecommendationContinue, "similar has one selected special mode, no return or FM channel");
+            Equal("fm", ((MusicPlaybackIcon)modeButton.Content).Key);
+            var ordinary = menu.Items.OfType<MenuItem>().Single(item => AutomationProperties.GetName(item) == "列表循环");
+            ordinary.RaiseEvent(new(MenuItem.ClickEvent));
+            await RecommendationStateUntil(f.Module, () => !f.Module.RecommendationContinue &&
+                f.Module.Mode == 1 && f.Module.CanChangePlaybackMode);
             Equal("repeat", f.Module.PlaybackModeIcon);
-            True(((Button)footer.FindName("FmChannelButton")).Visibility != System.Windows.Visibility.Visible, "only private FM exposes channels");
+            var reopened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnReopened(object? sender, System.Windows.RoutedEventArgs args) => reopened.TrySetResult();
+            menu.Opened += OnReopened;
+            try
+            {
+                modeButton.RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+                await reopened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            finally { menu.Opened -= OnReopened; }
+            Equal("列表循环", AutomationProperties.GetName(menu.Items.OfType<MenuItem>().Single(item => item.IsChecked)));
+            menu.Items.OfType<MenuItem>().Single(item => AutomationProperties.GetName(item) == "相似模式").RaiseEvent(new(MenuItem.ClickEvent));
+            await RecommendationStateUntil(f.Module, () => f.Module.RecommendationContinue &&
+                f.Module.Mode == 1 && f.Module.CanChangePlaybackMode && f.Module.CanChangeRecommendationContinue);
+            Equal("相似模式", f.Module.PlaybackModeText);
+            Equal("fm", f.Module.PlaybackModeIcon);
+            Equal(1, (await f.Queue()).GetProperty("mode").GetInt32());
             menu.IsOpen = false; surface.RootVisual = null;
         });
         yield return Case("recommendation feedback carries live native provenance but never resurrects it from durable queue", async () =>
@@ -203,6 +226,11 @@ public static partial class MusicUiTests
             await RecommendationUntil(() => f.Reports.Starts.Count == 1);
             var start = f.Reports.Starts.Single();
             Equal("userfm", start.Source); Equal("playFm", start.Mode); Equal("native-recommendation-alg", start.Algorithm);
+            True(start.Recommendation is { Context: { } context, Metadata: { } metadata } &&
+                context.GetProperty("mode").GetString() == "DEFAULT" &&
+                metadata.GetProperty("id").GetString() == start.Recording.Id &&
+                metadata.GetProperty("alg").GetString() == "native-recommendation-alg",
+                "actual native batch context and per-recording metadata reach the playback protocol");
             await f.Module.CancelRecommendationAsync();
             await f.Module.StepAsync(true); f.Playback.Start();
             await RecommendationUntil(() => f.Reports.Starts.Count == 2);
@@ -239,11 +267,11 @@ public static partial class MusicUiTests
                 var footer = (MusicPlayerView)f.Module.PlayerView;
                 using var surface = RecommendationPlayerSurface(footer);
                 await Drain();
-                ((Button)footer.FindName("PlaybackSourceButton")).RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
-                var menu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
-                var reconcile = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "核对保存结果"));
-                True(reconcile.IsEnabled, "source menu keeps reconciliation reachable after failed close");
-                reconcile.RaiseEvent(new(MenuItem.ClickEvent));
+                ((Button)footer.FindName("ModeButton")).RaiseEvent(new(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+                var menu = (ContextMenu)footer.FindName("ModeMenu");
+                var reconcile = menu.Items.OfType<MenuItem>().Single(item => AutomationProperties.GetName(item) == "核对保存结果");
+                True(reconcile.IsEnabled, "unified mode menu keeps reconciliation reachable after failed close");
+                ((IInvokeProvider)new MenuItemAutomationPeer(reconcile).GetPattern(PatternInterface.Invoke)).Invoke();
                 await RecommendationUntil(() => !f.Module.CanReconcileRecommendation);
                 Equal(persisted ? 3 : 0, (await f.Queue()).GetProperty("total").GetInt32());
                 Equal(batches, f.Http.Batches); Equal(writes, f.Store.LibraryWrites);
@@ -260,6 +288,21 @@ public static partial class MusicUiTests
             PositionX = -32000, PositionY = -32000, Width = 1110, Height = 100 });
         surface.RootVisual = footer; Render(footer, 1110, 100);
         return surface;
+    }
+    private static async Task RecommendationStateUntil(MusicCapability module, Func<bool> done)
+    {
+        var settled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void CheckState(object? sender, PropertyChangedEventArgs args)
+        {
+            if (done()) settled.TrySetResult();
+        }
+        module.PropertyChanged += CheckState;
+        try
+        {
+            if (done()) settled.TrySetResult();
+            await settled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally { module.PropertyChanged -= CheckState; }
     }
     private static async Task RecommendationUntil(Func<bool> done)
     {

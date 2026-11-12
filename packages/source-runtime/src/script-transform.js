@@ -1,5 +1,5 @@
 import { parse } from 'acorn';
-import { sourceFault, sourceRequire } from './errors.js';
+import { sourceFault, sourcePreprocessError, sourceRequire } from './errors.js';
 
 const functionTypes = new Set([
   'FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression',
@@ -38,7 +38,7 @@ function parseProgram(source) {
       allowAwaitOutsideFunction: true,
       allowReturnOutsideFunction: true,
     });
-  } catch { throw sourceFault('SCRIPT_PROTOCOL_ERROR'); }
+  } catch (error) { throw sourcePreprocessError(error); }
 }
 
 function isAlreadyAwaited(node, parentByNode) {

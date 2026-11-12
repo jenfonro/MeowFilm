@@ -192,9 +192,14 @@ public sealed partial class MusicAccountProtocol
         var values = new Dictionary<string, string> { ["musicid"] = id, ["str_musicid"] = id,
             ["encrypt_uin"] = euin, ["login_type"] = "2", ["musickey"] = musicKey };
         foreach (string key in new[] { "openid", "refresh_token", "access_token", "unionid", "refresh_key" })
-            if (data[key] is { } value && Text(value).Length > 0) values[key] = Text(value);
+            if (data[key] is { } value) values[key] = Text(value);
+        foreach (string key in new[] { "expired_at", "musickey_create_time", "key_expires_in" })
+            if (data[key] is { } value)
+            {
+                values[key] = AccountRules.QqNumber(Scalar(value), "INVALID_RESPONSE");
+            }
         foreach (var value in values.Values)
-            AccountRules.Require(value.Length is > 0 and <= 8192 && value.All(c => c is >= '!' and <= '~' &&
+            AccountRules.Require(value.Length <= 8192 && value.All(c => c is >= '!' and <= '~' &&
                 c is not (';' or ',' or '"' or '\\')), "INVALID_RESPONSE");
         string cookie = string.Join("; ", values.Select(p => p.Key + "=" + p.Value));
         _ = AccountRules.Cookies(cookie); return cookie;

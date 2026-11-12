@@ -44,7 +44,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
                             force: Bool, contentFailed: Set<String> = [], recheckOnly: Bool = false)
         async throws -> (song: MJ, searched: Set<String>) {
         try inspectionCheck(seed)
-        let state = await sourceDiscoveryState(seed.song)
+        let state = try await sourceDiscoveryState(seed.song)
         try inspectionCheck(seed)
         let cache = state.current(window: MusicSourceDiscoveryWindow.playback)
         let staged = mergeSourceDiscoveryCache(seed.song, entries: cache)
@@ -119,7 +119,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
     func inspectionOptions(_ seed: MusicSourceInspectionSeed, staged: MJ, label: String,
                            receive: @escaping @Sendable ([MusicPlaybackOption]) async -> Void) async throws {
         try inspectionCheck(seed)
-        let excluded = await sourceDiscoveryExcluded(seed.song)
+        let excluded = try recordingSourceExclusions(seed.song)
         try inspectionCheck(seed)
         let rows = try MusicModel.sources(staged).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         try await withThrowingTaskGroup(of: [MusicPlaybackOption].self) { group in
@@ -195,7 +195,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try requirePlatform(source.platform)
         try musicRequire(source.platform == selection.siteId, .targetChanged)
         try admitSource(seed.song, selection: selection)
-        let excluded = await sourceDiscoveryExcluded(seed.song)
+        let excluded = try recordingSourceExclusions(seed.song)
         try inspectionCheck(seed)
         try musicRequire(!excluded.contains(source.sourceKey), .sourceUnavailable)
         let values: [MusicPlaybackOption]
@@ -283,7 +283,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
 
     func inspectionAdopt(_ seed: MusicSourceInspectionSeed, staged: MJ, option: MusicPlaybackOption,
                          quality: String, occurrenceID: String, expectedRevision: Int,
-                         label: String) async throws -> MusicSourceInspectionSeed {
+                         label: String) async throws {
         try inspectionCheck(seed)
         try musicRequire(seed.ref.kind == .queue && seed.ref.id == occurrenceID &&
             seed.state.revision == expectedRevision, .targetChanged)
@@ -310,10 +310,6 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         }
         try await admitRecordingSource(seed.song, sourceKey: option.sourceKey)
         try inspectionCheck(seed)
-        let next = try candidateCommit(.init(occurrenceID: occurrenceID, song: seed.song,
-            state: seed.state, epoch: seed.epoch, lifetime: seed.lifetime), staged: staged)
-        return .init(ref: seed.ref, song: next.song, state: next.state, playback: seed.playback,
-                     epoch: seed.epoch, lifetime: seed.lifetime)
     }
 
     /// Records "this recording -> sourceKey" as a confirmed mismatch, then removes
@@ -325,16 +321,28 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try musicRequire(seed.ref.kind == .queue && seed.ref.id == occurrenceID &&
             seed.state.revision == expectedRevision, .targetChanged)
         try musicRequire(seed.song["sources"].array.first?["sourceKey"].string != sourceKey, .invalidRequest)
-        await excludeSourceDiscovery(seed.song, sourceKey: sourceKey)
+        try await excludeRecordingSource(seed.song, sourceKey: sourceKey)
         try inspectionCheck(seed)
         let rows = seed.song["sources"].array
         guard rows.contains(where: { $0["sourceKey"].string == sourceKey }) else { return seed }
-        var staged = seed.song
-        staged["sources"] = .array(rows.filter { $0["sourceKey"].string != sourceKey })
-        let next = try candidateCommit(.init(occurrenceID: occurrenceID, song: seed.song,
-            state: seed.state, epoch: seed.epoch, lifetime: seed.lifetime), staged: staged)
-        return .init(ref: seed.ref, song: next.song, state: next.state, playback: seed.playback,
-                     epoch: seed.epoch, lifetime: seed.lifetime)
+        return try seed.lifetime.perform { try transaction(["queue"]) { d in
+            try musicRequire(d.queue["revision"].int == seed.state.revision &&
+                d.playback["revision"].int == seed.state.settingsRevision, .staleRevision)
+            guard d.queue["currentId"].string == occurrenceID,
+                  let index = d.queue["entries"].array.firstIndex(where: { $0["id"].string == occurrenceID }),
+                  try MusicModel.cleanSong(d.queue["entries"].array[index]["song"]) == seed.song else {
+                throw MusicServiceError.targetChanged
+            }
+            var song = seed.song
+            song["sources"] = .array(rows.filter { $0["sourceKey"].string != sourceKey })
+            var entries = d.queue["entries"].array
+            entries[index]["song"] = song
+            d.queue["entries"] = .array(entries)
+            try musicRequire(d.queue["revision"].int < 9_007_199_254_740_991, .limit)
+            d.queue["revision"] = .n(d.queue["revision"].int + 1)
+            return .init(ref: seed.ref, song: song, state: stateDTO(d), playback: seed.playback,
+                         epoch: seed.epoch, lifetime: seed.lifetime)
+        } }
     }
 }
 

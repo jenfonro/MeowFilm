@@ -1,4 +1,5 @@
 import UIKit
+import Combine
 import MeowUI
 import MeowMusicFeature
 
@@ -91,8 +92,10 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
             self?.openMenu()
         })
         switch page {
-        case .recommend, .film:
+        case .recommend, .film, .novel:
             let search = makeSearchField()
+            if page == .novel { search.configuration?.title = "搜索小说" }
+            if page == .film { search.configuration?.title = "搜索影视" }
             header.setTitleView(search)
             if page == .recommend {
                 header.setTrailing([Self.iconButton(.recognize, label: "更多功能", identifier: "app.feature")])
@@ -128,7 +131,20 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
             title.accessibilityIdentifier = "app.primary.title"
             title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             header.setTitleView(title)
-            header.setTrailing([Self.iconButton(.plus, label: "新建歌单", identifier: "app.primary.add") {
+            let layout = Self.iconButton(.list, label: "切换为列表", identifier: "music.library.layout") {
+                [weak self] in self?.library?.togglePlaylistAppearance()
+            }
+            if let library = content as? MusicLibraryViewController {
+                let update: (MusicPlaylistAppearance) -> Void = { [weak layout] value in
+                    layout?.setImage(PageIcon.image(value == .grid ? .list : .grid), for: .normal)
+                    layout?.accessibilityLabel = value == .grid ? "切换为列表" : "切换为网格"
+                    layout?.accessibilityValue = value == .grid ? "当前为网格" : "当前为列表"
+                }
+                update(library.appearance.preferences.playlistView)
+                primary.observe(library.appearance.$preferences.map(\.playlistView).removeDuplicates().eraseToAnyPublisher(),
+                                update: update)
+            }
+            header.setTrailing([layout, Self.iconButton(.plus, label: "新建歌单", identifier: "app.primary.add") {
                 [weak self] in self?.library?.requestCreatePlaylist()
             }])
             primary.themeHeader = { theme in title.setTitleColor(UIColor(theme.ink), for: .normal) }

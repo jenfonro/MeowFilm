@@ -109,7 +109,7 @@ test('capabilities expose ordinary QR/list/prepare and independent TV modes', as
     assert.equal(provider.list, true);
     assert.equal(provider.prepare, true);
     assert.equal(provider.login, true);
-    assert.equal(provider.refresh, false);
+    assert.equal(provider.refresh, true);
     assert.deepEqual(provider.credentialFields, ['cookie']);
     assert.deepEqual(provider.modes, ['streaming', 'download']);
   }
@@ -843,7 +843,9 @@ for (const config of tv) {
       data = { status, errno, error_info: 'refresh token无效', access_token: '', refresh_token: '', expires_in: 0 };
       await assert.rejects(service.invoke('refresh', { provider: config.id }), { code: 'AUTH_FAILED' });
       assert.deepEqual(await readFile(path), before);
-      assert.deepEqual(await service.invoke('settings.get'), settings);
+      assert.deepEqual(await service.invoke('settings.get'), {
+        accounts: settings.accounts.map(item => item.provider === config.id ? { ...item, status: 'expired' } : item),
+      });
     }
     assert.equal(requests.length, 2);
   });

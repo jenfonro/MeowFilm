@@ -57,8 +57,10 @@ public static class FilmPlaybackTests
         int calls = scene.Source.Calls;
         Check(calls > 0 && module.Sections.All(section => section.Items.Count == 12),
             "the explicitly isolated home fixture supplies its full requested range");
+        var homeCards = module.Sections.Select(section => section.Items[0]).ToArray();
         foreach (string key in new[] { "movie", "tv" })
         {
+            calls = scene.Source.Calls;
             var item = module.Sections.Single(section => section.Key == key).Items[0];
             await module.OpenPlaybackAsync(item);
             await Drain();
@@ -84,9 +86,12 @@ public static class FilmPlaybackTests
                 { Title: "播放页", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
                 "the shell receives the playback heading and retains the film search entry");
             await module.RestoreNavigationAsync(FilmCapability.HomeRoute, default);
+            Check(scene.Source.Calls == calls + 4,
+                "home restoration checks every section through its owner rather than treating the display snapshot as fresh");
         }
-        Check(scene.Source.Calls == calls && scene.Native.Commits == 0,
-            "navigation reuses the home results and fixtures do not pretend to play media");
+        Check(module.Sections.Select(section => section.Items[0]).Zip(homeCards)
+            .All(pair => ReferenceEquals(pair.First, pair.Second)) && scene.Native.Commits == 0,
+            "unchanged owner responses retain the original home cards and fixtures do not pretend to play media");
     }
 
     private static async Task EpisodeInteraction()
@@ -280,7 +285,8 @@ public static class FilmPlaybackTests
         Check(scene.Page.Request.Target.Id == original.Request.Target.Id && !scene.Page.IsListLayout,
             "the original location remains restorable without retaining an old layout");
         CheckSelection(scene, chosen);
-        Check(scene.Source.Calls == calls, "native navigation never reloads the settled home source");
+        Check(scene.Source.Calls == calls + 4,
+            "only the actual home restoration revalidates its four sections; playback navigation does not reload the catalog");
     }
 
     private static async Task FlatTiles()
@@ -698,6 +704,20 @@ public static class FilmPlaybackTests
             "the ambient tint stays fixed while the page scrolls");
 
         var recommendation = scene.Page.Recommendations.First(item => item.Poster != scene.Page.Poster);
+        // This layout fixture returns a successful detail with its explicit poster.
+        // A successful empty poster now intentionally clears the card baseline.
+        scene.Runtime.Intercept = (method, input, _) =>
+        {
+            if (method == "film.session.open" &&
+                FilmJson.Target(FilmJson.Member(input, "target")).Id == recommendation.PlaybackContext!.Target.Id)
+            {
+                var response = System.Text.Json.Nodes.JsonNode.Parse(input.GetRawText())!.AsObject();
+                response["metadata"] = System.Text.Json.Nodes.JsonNode.Parse(
+                    FilmPlaybackFixture.Metadata(recommendation.PlaybackContext.Target, recommendation.Poster).GetRawText());
+                input = System.Text.Json.JsonSerializer.SerializeToElement(response);
+            }
+            return Task.FromResult(scene.Runtime.Handle(method, input));
+        };
         Click(Visuals(Named<ItemsControl>(view, "RelatedItems")).OfType<Button>()
             .Single(button => ReferenceEquals(button.Tag, recommendation)));
         await Drain();

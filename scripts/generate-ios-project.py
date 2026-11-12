@@ -12,7 +12,7 @@ NODE_MOBILE_FRAMEWORK = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework"
 RUNTIME_PAYLOAD = "../../.cache/ios-runtime/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/Runtime"
 SCRIPT_HOST_FRAMEWORK = "../../.cache/ios-native/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/MeowScriptHost.framework"
 NODE_MOBILE_LICENSE = "../../LICENSES/nodejs-mobile-LICENSE.txt"
-NATIVE_JAVASCRIPT_LICENSE = "../../LICENSES/quickjs-native-MIT.txt"
+NATIVE_JAVASCRIPT_LICENSE = "../../LICENSES/quickjs-ng-LICENSE.txt"
 NATIVE_UNICODE_LICENSE = "../../LICENSES/Unicode-3.0.txt"
 PROJECT_NOTICES = "../../LICENSES/NOTICE.md"
 PROJECT_LICENSE = "../../LICENSES/GPL-3.0-only.txt"
@@ -58,7 +58,8 @@ def generate():
     test_sources = source_paths(ROOT, ("UITests",))
     runtime_test_sources = source_paths(ROOT, ("RuntimeTests",))
     all_sources = {p.relative_to(ROOT / "apps/ios").as_posix()
-                   for p in (ROOT / "apps/ios").rglob("*.swift")}
+                   for p in (ROOT / "apps/ios").rglob("*.swift")
+                   if p.relative_to(ROOT / "apps/ios").parts[0] != ".cache"}
     if all_sources != set(app_sources + test_sources + runtime_test_sources):
         raise ValueError("App Swift sources must belong to an application responsibility or a test directory")
     bundle_identifier = "dev.meowfilm.aggregate"
@@ -89,7 +90,7 @@ def generate():
         "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
     ]})
     libraries = ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowAccounts", "MeowUI", "MeowRuntime",
-                 "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature"]
+                 "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature", "MeowNovelFeature"]
     objects = []
     def obj(key, content):
         objects.append(f"\t\t{ids[key]} = {{ {content} }};")
@@ -120,7 +121,7 @@ def generate():
     obj("runtimePayload", f'isa = PBXFileReference; lastKnownFileType = folder; name = Runtime; path = {quoted(RUNTIME_PAYLOAD)}; sourceTree = "<group>";')
     obj("runtimePayloadBuild", f"isa = PBXBuildFile; fileRef = {ids['runtimePayload']};")
     obj("nodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = nodejs-mobile-LICENSE.txt; path = {quoted(NODE_MOBILE_LICENSE)}; sourceTree = "<group>";')
-    obj("javascriptLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = quickjs-native-MIT.txt; path = {quoted(NATIVE_JAVASCRIPT_LICENSE)}; sourceTree = "<group>";')
+    obj("javascriptLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = quickjs-ng-LICENSE.txt; path = {quoted(NATIVE_JAVASCRIPT_LICENSE)}; sourceTree = "<group>";')
     obj("javascriptLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['javascriptLicense']};")
     obj("unicodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = Unicode-3.0.txt; path = {quoted(NATIVE_UNICODE_LICENSE)}; sourceTree = "<group>";')
     obj("unicodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['unicodeLicense']};")
@@ -241,6 +242,7 @@ def generate():
     runtime_test_settings = (
         f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier}.runtime-tests; PRODUCT_NAME = {runtime_test_name}; '
         'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TARGETED_DEVICE_FAMILY = 1; '
+        'INFOPLIST_KEY_NSPrincipalClass = MeowfilmRuntimeTestBundle; '
         'SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; CODE_SIGN_STYLE = Automatic; '
         # The test shares the App's products directory, so the host and its
         # processed NodeMobile.framework are both found under BUILT_PRODUCTS_DIR.
@@ -294,7 +296,7 @@ def generate():
     )
     acceptance_scheme = acceptance_scheme.replace("  <LaunchAction", test_action + "  <LaunchAction")
     write_lf(scheme_dir / "MeowfilmAcceptance.xcscheme", acceptance_scheme)
-    print(f"Generated {name}: meowfilm, enabled capabilities music, film")
+    print(f"Generated {name}: meowfilm, enabled capabilities music, film, novel")
 
 
 if __name__ == "__main__":

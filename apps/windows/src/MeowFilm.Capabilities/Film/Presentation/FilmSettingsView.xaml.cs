@@ -14,6 +14,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private readonly FilmRuleService rules;
     private readonly FilmSourceService sources;
     private readonly FilmMetadataService? metadata;
+    private readonly PanAccounts panAccounts;
     private readonly FilmPlaybackSettingsView? playbackSettings;
     private string section = "rules";
     private bool initialized, observingSources;
@@ -22,20 +23,22 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private FrameworkElement? popupAnchor;
 
     public FilmSettingsView(FilmRuleService rules, FilmSourceService sources, FilmMetadataService? metadata = null)
-        : this(rules, sources, null, null, () => null, metadata) { }
+        : this(rules, sources, null, () => null, metadata) { }
 
     internal FilmSettingsView(FilmRuleService rules, FilmSourceService sources,
-        FilmPlaybackSettings? business, FilmLibrary? favorites, Func<FilmPlaybackTarget?> target,
+        FilmPlaybackSettings? business, Func<FilmPlaybackTarget?> target,
         FilmMetadataService? metadata = null)
     {
         this.rules = rules ?? throw new ArgumentNullException(nameof(rules));
         this.sources = sources ?? throw new ArgumentNullException(nameof(sources));
         this.metadata = metadata;
+        panAccounts = new(sources.Runtime);
         InitializeComponent();
+        PanPage.DataContext = panAccounts;
         if (business is not null)
         {
-            playbackSettings = new(business, favorites, target);
-            BusinessPage.Children.Add(playbackSettings);
+            playbackSettings = new(business, target, "clean");
+            SiteCleanHost.Content = playbackSettings;
             BusinessNavigation.Visibility = Visibility.Visible;
         }
         DataContext = this;
@@ -82,24 +85,30 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         playbackSettings?.Deactivate();
         ClosePopup(restoreFocus: false);
     }
-    internal Task PreparePlaybackSettingsShutdownAsync() =>
-        playbackSettings?.PrepareShutdownAsync() ?? Task.CompletedTask;
-    internal void ResumePlaybackSettings() => playbackSettings?.Resume();
+    internal Task PreparePlaybackSettingsShutdownAsync() => Task.WhenAll(
+        playbackSettings?.PrepareShutdownAsync() ?? Task.CompletedTask, panAccounts.PrepareShutdownAsync());
+    internal void ResumePlaybackSettings()
+    {
+        playbackSettings?.Resume();
+        panAccounts.Resume();
+    }
 
     private async Task ActivateCurrentAsync()
     {
         if (!Active) return;
-        if (section == "rules")
+        if (section == "pan") await panAccounts.ActivateAsync();
+        else if (section == "rules")
         {
             if ((!RulesLoaded || rulesReloadPending) && !RulesBusy && !RulesFailed) await LoadRulesAsync();
+            if (Active && section == "rules") await PresentPlaybackSettingsAsync("clean");
         }
-        else if (section == "tmdb")
+        else if (section == "metadata")
         {
             if (!MetadataLoaded && !MetadataBusy && !MetadataFailed) await LoadMetadataAsync();
         }
         else if (section is not ("cats" or "videos"))
         {
-            if (playbackSettings is not null) await playbackSettings.ShowAsync(section);
+            await PresentPlaybackSettingsAsync("preferences");
         }
         else if (!SourcesBusy && !SourcesFailed)
         {
@@ -107,6 +116,20 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
                 await LoadSourcesAsync(refresh: section == "cats");
             else SynchronizeSources();
         }
+    }
+    private async Task PresentPlaybackSettingsAsync(string area)
+    {
+        if (playbackSettings is null) return;
+        bool clean = area == "clean";
+        if (clean && SiteCleanHost.Content is null || !clean && BusinessPage.Children.Count == 0)
+        {
+            SiteCleanHost.Content = null;
+            BusinessPage.Children.Clear();
+            playbackSettings.SelectSection(area);
+            if (clean) SiteCleanHost.Content = playbackSettings;
+            else BusinessPage.Children.Add(playbackSettings);
+        }
+        await playbackSettings.ShowAsync(area);
     }
 
     private async void Section_Checked(object sender, RoutedEventArgs e)
@@ -117,8 +140,9 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         RulesPage.Visibility = key == "rules" ? Visibility.Visible : Visibility.Collapsed;
         CatsPage.Visibility = key == "cats" ? Visibility.Visible : Visibility.Collapsed;
         VideosPage.Visibility = key == "videos" ? Visibility.Visible : Visibility.Collapsed;
-        MetadataPage.Visibility = key == "tmdb" ? Visibility.Visible : Visibility.Collapsed;
-        BusinessPage.Visibility = key is "rules" or "cats" or "videos" or "tmdb" ? Visibility.Collapsed : Visibility.Visible;
+        MetadataPage.Visibility = key == "metadata" ? Visibility.Visible : Visibility.Collapsed;
+        PanPage.Visibility = key == "pan" ? Visibility.Visible : Visibility.Collapsed;
+        BusinessPage.Visibility = key is "rules" or "cats" or "videos" or "metadata" or "pan" ? Visibility.Collapsed : Visibility.Visible;
         anchor.Focus(); anchor.BringIntoView();
         await ActivateCurrentAsync();
     }

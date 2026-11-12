@@ -18,8 +18,15 @@ public static class ArtworkScope
     private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs _) { if (value is ArtworkImage image) image.Restart(); }
 }
 
+public sealed class ArtworkLoadEventArgs(string address, bool succeeded) : EventArgs
+{
+    public string Address { get; } = address;
+    public bool Succeeded { get; } = succeeded;
+}
+
 public sealed class ArtworkImage : Grid
 {
+    public event EventHandler<ArtworkLoadEventArgs>? LoadCompleted;
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(nameof(Address), typeof(string),
         typeof(ArtworkImage), new PropertyMetadata("", (value, _) => ((ArtworkImage)value).Restart()));
     public static readonly DependencyProperty StretchProperty = DependencyProperty.Register(nameof(Stretch), typeof(Stretch),
@@ -230,7 +237,9 @@ public sealed class ArtworkImage : Grid
         if (attempted || string.IsNullOrWhiteSpace(Address) || ArtworkScope.GetLoader(this) is not { } loader) return;
         attempted = true; var stamp = epoch; string address = Address;
         var current = new CancellationTokenSource(); request = current;
-        requestTask = ReadAsync();
+        var work = ReadAsync();
+        // A synchronous completion may select another address through a consumer.
+        if (ReferenceEquals(request, current)) requestTask = work;
         async Task ReadAsync()
         {
             IArtworkLease? acquired = null;
@@ -245,6 +254,7 @@ public sealed class ArtworkImage : Grid
                 SetValue(PaletteBrushPropertyKey, palettes.Palette);
                 SetValue(TopPaletteBrushPropertyKey, palettes.Top);
                 SetValue(HasTopPalettePropertyKey, palettes.HasTopPalette);
+                LoadCompleted?.Invoke(this, new(address, true));
             }
             catch (OperationCanceledException) { }
             catch (Exception error)
@@ -266,6 +276,7 @@ public sealed class ArtworkImage : Grid
                     };
                     ToolTip = message; AutomationProperties.SetHelpText(this, message);
                     UpdateRetryVisibility();
+                    LoadCompleted?.Invoke(this, new(address, false));
                 }
             }
             finally

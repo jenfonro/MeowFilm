@@ -32,6 +32,13 @@ private actor SyncOwnerProvider: MusicAccountSyncProvider {
         try await authorization.check()
         return .init(accountID: try nativeID(credential), collections: [], revision: "synthetic")
     }
+    func syncReadSubscriptions(credential: AccountCredential,
+                               guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncSnapshot {
+        if let gate { await gate.wait() }
+        try await authorization.check()
+        return .init(accountID: try nativeID(credential), collections: [],
+            subscriptions: [.init(remoteID: "900", relationID: "900", name: "Synthetic")], revision: "synthetic")
+    }
     func syncWrite(_ mutation: MusicLibrarySyncMutation, credential: AccountCredential,
                    guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncWriteResult {
         if let gate { await gate.wait() }
@@ -75,6 +82,8 @@ private actor SyncOwnerProvider: MusicAccountSyncProvider {
         try await owner.checkLibrarySync(session)
         let snapshot = try await owner.readLibrarySync(session, kinds: [.favorites])
         XCTAssertEqual(snapshot.accountID, session.accountID)
+        let subscriptions = try await owner.readLibrarySubscriptions(session)
+        XCTAssertTrue(subscriptions.collections.isEmpty); XCTAssertEqual(subscriptions.subscriptions.map(\.remoteID), ["900"])
         let result = try await owner.writeLibrarySync(session, mutation: .init(action: .create, name: "Synthetic"))
         if case .acknowledged(let id, _) = result { XCTAssertEqual(id, "501") }
         else { XCTFail("the authorized mutation must be acknowledged") }
@@ -148,6 +157,25 @@ private actor SyncOwnerProvider: MusicAccountSyncProvider {
             XCTAssertEqual(store.counts().writes, writes); XCTAssertEqual(store.counts().removes, removes)
             _ = await owner.close()
         }
+    }
+
+    func testDedicatedSubscriptionDirectoryCannotPublishAfterAccountLogout() async throws {
+        let store = MusicUpdateStore(), identity = try MusicAccountFixture.identity()
+        store.seed(try MusicUpdateProvider.credential(), for: identity)
+        let accounts = AccountSessionCoordinator(store: store), provider = SyncOwnerProvider()
+        let owner = NativeMusicAccountService(accounts: accounts, scopes: [.qq: identity], providers: [.qq: provider])
+        _ = try await owner.setAccess(available: true, generation: 1)
+        let session = try await owner.beginLibrarySync(platform: .qq), gate = MusicAccountTestGate()
+        await provider.hold(gate)
+        let task = Task { try await owner.readLibrarySubscriptions(session) }
+        await gate.started()
+        try await owner.logout(platform: .qq)
+        await gate.release()
+        do { _ = try await task.value; XCTFail("obsolete subscription directory") }
+        catch { XCTAssertNotNil(error as? MusicServiceError) }
+        let writes = await provider.writes()
+        XCTAssertEqual(writes, 0)
+        _ = await owner.close()
     }
 
     func testLogoutLockReloginValidationAndEndRevokeLateWriteAuthorization() async throws {

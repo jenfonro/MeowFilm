@@ -23,6 +23,7 @@ public final class PlaybackVideoLease {
     }
 
     private let controller: PlaybackController
+    let willCommit: @MainActor () -> (@MainActor () -> Void)?
     private let onEvent: @MainActor (PlaybackVideoEvent) -> Void
     private var binding: PlaybackOwnerLease?
     private var pending: PlaybackVideoTransport?
@@ -31,21 +32,30 @@ public final class PlaybackVideoLease {
     private var retiringCandidates: [ObjectIdentifier: Task<Void, Error>] = [:]
     private var candidateReleaseFailure: PlaybackVideoError?
     private var systemReleaseFailure: PlaybackVideoError?
+    private var systemReleases: [UUID: Task<Void, Never>] = [:]
     private let now: @MainActor () -> ContinuousClock.Instant
     private var revision = UUID()
     private var closed = false
 
     init(controller: PlaybackController, owner: String,
          now: @escaping @MainActor () -> ContinuousClock.Instant = { ContinuousClock.now },
+         willCommit: @escaping @MainActor () -> (@MainActor () -> Void)? = { nil },
          onEvent: @escaping @MainActor (PlaybackVideoEvent) -> Void) {
-        self.controller = controller; self.owner = owner; self.now = now; self.onEvent = onEvent
+        self.controller = controller; self.owner = owner; self.now = now
+        self.willCommit = willCommit; self.onEvent = onEvent
     }
 
     func bind(commands: PlaybackNavigationCommands) throws {
         binding = try controller.bind(owner: owner, commands: commands,
             onPlayPause: { [weak self] attempt, command in
                 guard let self, self.currentAttempt == attempt else { return false }
-                return command == .play ? self.controller.resume(attempt: attempt) : self.controller.pause(attempt: attempt)
+                switch command {
+                case .play: return self.controller.resume(attempt: attempt)
+                case .pause: return self.controller.pause(attempt: attempt)
+                case .toggle(let wantsPlayback):
+                    return wantsPlayback
+                        ? self.controller.pause(attempt: attempt) : self.controller.resume(attempt: attempt)
+                }
             }, onEvent: { [weak self] event in self?.receive(event) })
     }
 
@@ -113,6 +123,15 @@ public final class PlaybackVideoLease {
                     try check(operation, admission: admission, candidate: candidate)
                     try checkDeadline(deadline)
                     guard canCommit() else { continue commitAdmission }
+                    #if os(iOS)
+                    try await controller.prepareVideoAudio(admission: admission, owner: owner,
+                        paused: preservePosition && currentAttempt != nil ? controller.videoReplacementPaused : paused)
+                    try check(operation, admission: admission, candidate: candidate)
+                    try checkDeadline(deadline)
+                    guard canCommit() else { continue commitAdmission }
+                    guard controller.hasVideoAudioAdmission(paused:
+                        preservePosition && currentAttempt != nil ? controller.videoReplacementPaused : paused) else { continue }
+                    #endif
                     if !preservePosition || currentAttempt == nil ||
                         abs(candidate.position - controller.videoReplacementPosition) <= 0.25 { break commitAdmission }
                 }
@@ -127,7 +146,7 @@ public final class PlaybackVideoLease {
             return attempt
         } catch {
             var failure = Self.error(error)
-            do { try await retire(candidate).value } catch { failure = .resourceReleaseFailed }
+            do { try await retire(candidate).value } catch { failure = Self.error(error) }
             if revision == operation, !closed, failure != .cancelled, failure != .staleAttempt {
                 emit(.failed, transport: candidate, wantsPlayback: false, error: failure)
             }
@@ -154,6 +173,7 @@ public final class PlaybackVideoLease {
         var failure: Error?
         do { try await drainCandidates() } catch { failure = error }
         do { try await controller.drainVideo() } catch { if failure == nil { failure = error } }
+        for release in Array(systemReleases.values) { await release.value }
         if active === stopped { active = nil }
         if let id = stopped?.attempt?.id { departing[id] = nil }
         if failure == nil { failure = systemReleaseFailure }
@@ -209,19 +229,36 @@ public final class PlaybackVideoLease {
 
     func activate(_ transport: PlaybackVideoTransport) { active = transport }
 
-    func recordSystemRelease(_ error: NativePlaybackError?) {
-        // Only the controller's exact retired lease receives this immutable
-        // failure. A later Music owner must never be stopped by this lease.
-        if error == .audioSessionDeactivationFailed { systemReleaseFailure = .outputFailed }
+    func recordSystemRelease(_ release: Task<NativePlaybackError?, Never>) {
+        // Retain the exact retired owner's result across a successor's audio
+        // activation. stop/close join it without delaying the pause event.
+        let id = UUID()
+        systemReleases[id] = Task { [weak self] in
+            let failure = await release.value
+            guard let self else { return }
+            if failure == .audioSessionDeactivationFailed { self.systemReleaseFailure = .outputFailed }
+            self.systemReleases[id] = nil
+        }
     }
 
     private func retire(_ candidate: PlaybackVideoTransport) -> Task<Void, Error> {
         if pending === candidate { pending = nil }
+        controller.cancelVideoAdmission(candidate: candidate)
+        let release = candidate.systemRelease
+        if let release { recordSystemRelease(release); candidate.systemRelease = nil }
         candidate.cancel()
         #if os(iOS)
         surface.remove(candidate.output.presentationLayer)
         #endif
-        return retirement(for: candidate) { try await candidate.close() }
+        return retirement(for: candidate) {
+            // Join both operations even if decoder/receipt release fails. A
+            // failed or cancelled play cannot leave acquired audio behind.
+            var failure: Error?
+            do { try await candidate.close() } catch { failure = error }
+            let audioFailure = await release?.value
+            if let failure { throw failure }
+            if audioFailure != nil { throw PlaybackVideoError.outputFailed }
+        }
     }
 
     private func retirement(for resource: AnyObject,
@@ -232,8 +269,10 @@ public final class PlaybackVideoLease {
             defer { self?.retiringCandidates[id] = nil }
             do { try await release() }
             catch {
-                self?.candidateReleaseFailure = .resourceReleaseFailed
-                throw PlaybackVideoError.resourceReleaseFailed
+                let failure: PlaybackVideoError = error as? PlaybackVideoError == .outputFailed
+                    ? .outputFailed : .resourceReleaseFailed
+                self?.candidateReleaseFailure = failure
+                throw failure
             }
         }
         retiringCandidates[id] = task

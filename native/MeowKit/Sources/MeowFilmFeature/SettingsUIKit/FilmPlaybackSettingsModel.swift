@@ -73,16 +73,29 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         if library != nil { library?.manual = saved }
     }
 
-    public func removeHistory(targetID: String? = nil) async throws {
-        var fields: RuntimeObject = ["kind": .string("history")]
-        fields["id"] = targetID.map(RuntimeValue.string)
-        try await remove(fields)
-    }
-
     public func removeBlock(_ block: FilmPlaybackBlock? = nil) async throws {
         var fields: RuntimeObject = ["kind": .string("blocks")]
         fields["block"] = block.map { .object($0.value) }
         try await remove(fields)
+    }
+
+    public func clearMetadataCache(_ scope: FilmMetadataCacheScope) async throws {
+        try begin(); defer { busy = false }
+        // Both invalidations settle before this operation publishes a result.
+        let results = await withTaskGroup(of: Result<Void, Error>.self) { group in
+            for provider in scope.providers {
+                group.addTask { [transport] in
+                    do {
+                        _ = try await transport.call("data.invalidate", parameters: .object(["domain": .string(provider)]))
+                        return .success(())
+                    } catch { return .failure(error) }
+                }
+            }
+            var results: [Result<Void, Error>] = []
+            for await result in group { results.append(result) }
+            return results
+        }
+        for result in results { try result.get() }
     }
 
     private func remove(_ fields: RuntimeObject) async throws {
@@ -94,4 +107,16 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         guard !busy else { throw FilmPlaybackError(code: "BUSY") }
         busy = true
     }
+}
+
+public enum FilmMetadataCacheScope: String, CaseIterable, Sendable {
+    case douban, tmdb, both
+    public var title: String {
+        switch self {
+        case .douban: return "清空豆瓣缓存"
+        case .tmdb: return "清空 TMDB 缓存"
+        case .both: return "清空豆瓣与 TMDB 缓存"
+        }
+    }
+    var providers: [String] { self == .both ? ["douban", "tmdb"] : [rawValue] }
 }

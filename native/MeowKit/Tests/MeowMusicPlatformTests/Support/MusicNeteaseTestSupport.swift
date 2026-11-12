@@ -3,10 +3,11 @@ import CommonCrypto
 import CryptoKit
 import MeowAccounts
 import MeowMusicFeature
+import MeowStorage
 @testable import MeowMusicPlatform
 
 // Synthetic HTTP peer, no platform connection, user credential or reference
-// execution. Decrypts actual EAPI/XEAPI bytes rather than mocking the provider.
+// execution. Decrypts actual EAPI/XEAPI bytes and opt-in WEAPI payloads rather than mocking the provider.
 enum MusicNeteaseFixture {
     static let uid = "42"
     static func credential(_ uid: String = "42") throws -> AccountCredential {
@@ -35,7 +36,8 @@ enum MusicNeteaseFixture {
     static func audio(level: String = "lossless", id: Int = 101, trial: Any? = nil,
                       url: String = "https://m801.music.126.net/synthetic.flac") -> [String: Any] {
         var row: [String: Any] = ["id": id, "code": 200, "url": url, "level": level, "expi": 3600,
-                                  "freeTrialInfo": NSNull(),
+                                  "freeTrialInfo": NSNull(), "type": "mp3",
+                                  "br": level == "standard" ? 128000 : 0,
                                   "freeTrialPrivilege": ["resConsumable": false, "userConsumable": false]]
         if let trial { row["freeTrialPrivilege"] = trial }
         return ["code": 200, "data": [row]]
@@ -124,17 +126,35 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
     struct Record: Sendable { let request: MusicAccountHTTPRequest; let payload: Data? }
     let clock: MusicAccountTestClock
     let peer = try! Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 7, count: 32))
+    private let weapiSecret: String?
     private var records: [Record] = []
     private var overrides: [String: [MusicAccountHTTPResponse]] = [:]
     private var block: (String, MusicAccountTestGate)?
     private var numericHandshakeTimestamp = true
-    init(clock: MusicAccountTestClock) { self.clock = clock }
+    init(clock: MusicAccountTestClock, weapiSecret: String? = nil) {
+        self.clock = clock; self.weapiSecret = weapiSecret
+    }
     func useNumericHandshakeTimestamp(_ value: Bool) { numericHandshakeTimestamp = value }
     func replies(_ path: String, _ responses: [MusicAccountHTTPResponse]) { overrides[path] = responses }
     func hold(_ path: String, _ gate: MusicAccountTestGate) { block = (path, gate) }
     func recorded() -> [Record] { records }
     func send(_ request: MusicAccountHTTPRequest) async throws -> MusicAccountHTTPResponse {
-        let path = request.url.path, form = try MusicNeteaseFixture.form(request.body)
+        let path = request.url.path
+        if request.url == MusicAccountFeedbackNeteaseWire.uploadURL {
+            guard request.method == "POST", request.headers["Cache-Control"] == "no-store" else {
+                throw MusicServiceError.invalidRequest
+            }
+            records.append(.init(request: request, payload: nil))
+            if let block, block.0 == path { await block.1.wait() }
+            if var values = overrides[path], !values.isEmpty {
+                let response = values.count == 1 ? values[0] : values.removeFirst()
+                overrides[path] = values; return response
+            }
+            return try MusicNeteaseFixture.response(["code": 200,
+                "data": ["successfiles": [MusicAccountFeedbackFixture.uploadFilename(request)]]],
+                headers: ["set-cookie": "MUSIC_U=synthetic-feedback-replacement; Path=/; HttpOnly"])
+        }
+        let form = try MusicNeteaseFixture.form(request.body)
         guard request.method == "POST", request.headers["Cache-Control"] == "no-store" else { throw MusicServiceError.invalidRequest }
         var payload: [String: Any] = [:]
         if path.hasPrefix("/eapi/") {
@@ -148,7 +168,15 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
         } else if path.hasPrefix("/xeapi/") {
             payload = try MusicNeteaseFixture.xeapi(form, peer: peer)
         } else if path.hasPrefix("/weapi/") {
-            guard form["encSecKey"]?.count == 256, form["params"]?.isEmpty == false else { throw MusicServiceError.invalidRequest }
+            guard form["encSecKey"]?.count == 256, let params = form["params"], !params.isEmpty else { throw MusicServiceError.invalidRequest }
+            if let weapiSecret {
+                let iv = Data("0102030405060708".utf8)
+                let middle = try MusicNeteaseFixture.aes(MusicNeteaseFixture.base64(params), key: Data(weapiSecret.utf8), iv: iv)
+                let plain = try MusicNeteaseFixture.aes(
+                    MusicNeteaseFixture.base64(String(decoding: middle, as: UTF8.self)),
+                    key: Data("0CoJUm6Qyw8W8jud".utf8), iv: iv)
+                payload = try MusicQQWire.decode(plain)
+            }
         } else { payload = form }
         records.append(.init(request: request, payload: try MusicQQWire.json(payload)))
         if let block, block.0 == path { await block.1.wait() }
@@ -167,8 +195,6 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
             return try MusicNeteaseFixture.response(["code": 200, "data": ["timestamp": replyTime,
                 "signature": MusicNeteaseFixture.sign(timestamp, nonce),
                 "encryptedData": MusicNeteaseFixture.aes(data, key: MusicNeteaseFixture.staticKey, encrypt: true).base64EncodedString()]])
-        case "/xeapi/register/anonimous":
-            return try MusicNeteaseFixture.response(["code": 200], headers: ["set-cookie": "MUSIC_A=synthetic-visitor; Path=/; HttpOnly"])
         case "/eapi/login/qrcode/unikey":
             return try MusicNeteaseFixture.response(["code": 200, "unikey": "synthetic-qr-key"])
         case "/eapi/login/qrcode/client/login":
@@ -195,6 +221,11 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
             var row: [String: Any] = ["songId": payload["songId"] ?? "101"]
             for key in ["l", "m", "h", "sq", "hr", "je", "db", "sk", "jm", "vi"] { row[key] = ["size": 123] }
             return try MusicNeteaseFixture.response(["code": 200, "data": row])
+        case "/eapi/song/enhance/player/url":
+            guard payload["ids"] as? String == "[101]", (payload["br"] as? NSNumber)?.intValue == 128000 else {
+                throw MusicServiceError.invalidRequest
+            }
+            return try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "standard"))
         case "/xeapi/song/enhance/player/url/v1":
             return try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: payload["level"] as? String ?? ""),
                 headers: ["x-encr-ssid": "synthetic-session",
@@ -211,10 +242,11 @@ struct MusicNeteaseNativeFixture {
     let http: MusicNeteaseTestHTTP
     let accounts: AccountSessionCoordinator
     let service: NativeMusicAccountService
-    init(restored: Bool = true) throws {
+    init(restored: Bool = true, urlCacheStore: DocumentStore? = nil,
+         feedbackOutboxStoreFactory: (@Sendable () throws -> DocumentStore)? = nil) throws {
         http = MusicNeteaseTestHTTP(clock: clock); accounts = AccountSessionCoordinator(store: store)
         service = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],
-                                            transport: http, clock: { [clock] in clock.now() })
+                                            transport: http, urlCacheStore: urlCacheStore, feedbackOutboxStoreFactory: feedbackOutboxStoreFactory, clock: { [clock] in clock.now() })
         if restored { try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity) }
     }
     func enable() async throws { _ = try await service.setAccess(available: true, generation: 1) }

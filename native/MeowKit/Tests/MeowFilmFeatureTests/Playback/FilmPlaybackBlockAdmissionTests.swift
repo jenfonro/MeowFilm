@@ -145,7 +145,7 @@ final class FilmPlaybackBlockAdmissionTests: XCTestCase {
     }
 
     private func makeModel(_ server: FilmPlaybackWireServer, _ media: FilmPlaybackTestMedia) -> FilmPlaybackModel {
-        .init(transport: server.transport, media: media, openExternalURL: { _ in false },
+        .init(transport: server.transport, media: media,
               request: { FilmPlaybackFixture.request() })
     }
 }

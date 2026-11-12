@@ -57,6 +57,7 @@ struct PlaybackStateMachine {
     private(set) var wantsPlayback = false
     private(set) var isReady = false
     private(set) var isInterrupted = false
+    private(set) var requestsAudioAdmission = false
     private(set) var pendingSeek: Seek?
     private(set) var activeSeek: Seek?
     private(set) var seekableRanges: [TimeRange] = []
@@ -66,6 +67,7 @@ struct PlaybackStateMachine {
     private var lastReportedTransport: Transport?
     private var lastProgress: (position: TimeInterval, duration: TimeInterval?)?
     private var hasEndedNaturally = false
+    private var acceptedRate = 1.0
 
     var generation: UUID? { attempt?.id }
     var commandContext: PlaybackCommandContext {
@@ -91,7 +93,7 @@ struct PlaybackStateMachine {
     }
 
     var shouldPlay: Bool {
-        isPlayable && isReady && wantsPlayback && !isInterrupted
+        isPlayable && isReady && wantsPlayback && !isInterrupted && !requestsAudioAdmission
             && pendingSeek == nil && activeSeek == nil && snapshot.phase != .ended
     }
 
@@ -137,11 +139,13 @@ struct PlaybackStateMachine {
         wantsPlayback = autoplay
         isReady = false
         hasEndedNaturally = false
+        acceptedRate = 1
         lastReportedTransport = nil
         lastProgress = nil
         seekableRanges = []
         pendingSeek = nil
         activeSeek = nil
+        requestsAudioAdmission = false
         // An interruption applies to the audio session, not just the old item.
         // Keep it active across a switch, but never transfer automatic-resume
         // permission from the old resource to the new one.
@@ -179,6 +183,7 @@ struct PlaybackStateMachine {
     mutating func pause() {
         guard isPlayable else { return }
         wantsPlayback = false
+        requestsAudioAdmission = false
         interruptedGeneration = nil
         lastReportedTransport = .paused
         if snapshot.phase != .ended, snapshot.phase != .paused {
@@ -188,7 +193,7 @@ struct PlaybackStateMachine {
     }
 
     @discardableResult
-    mutating func resume() -> Bool {
+    mutating func resume(userInitiated: Bool = false) -> Bool {
         guard isPlayable, let token = generation else { return false }
         let needsTransition = !wantsPlayback || snapshot.phase == .ended
         if snapshot.phase == .ended {
@@ -198,20 +203,47 @@ struct PlaybackStateMachine {
             snapshot.phase = .paused
         }
         wantsPlayback = true
+        if userInitiated, isInterrupted {
+            requestsAudioAdmission = true
+        }
+        if (error as? NativePlaybackError) == .audioSessionUnavailable {
+            error = nil; snapshot.error = nil
+        }
         if isInterrupted { interruptedGeneration = token }
         if needsTransition { updatePendingPhase() }
         return true
     }
 
+    mutating func audioSessionActivated(generation token: UUID) {
+        guard accepts(token), wantsPlayback else { return }
+        if requestsAudioAdmission {
+            requestsAudioAdmission = false
+            isInterrupted = false
+            interruptedGeneration = nil
+            updatePendingPhase()
+        }
+    }
+
+    mutating func audioSessionUnavailable(generation token: UUID) {
+        guard accepts(token) else { return }
+        error = NativePlaybackError.audioSessionUnavailable
+        snapshot.error = error?.localizedDescription
+        let alreadyPaused = snapshot.phase == .paused
+        pause()
+        if alreadyPaused { record(.paused) }
+    }
+
     @discardableResult
     mutating func requestSeek(to position: TimeInterval) -> Bool {
         guard isPlayable, let token = generation, position.isFinite, position >= 0 else { return false }
+        let wasPlaying = snapshot.phase == .playing
         // Invalidates the preceding seek before the adapter cancels it.
         finishOutstandingSeek(.superseded)
         pendingSeek = Seek(generation: token, id: UUID(), position: position)
         activeSeek = nil
         if snapshot.phase == .ended { snapshot.phase = .paused }
         updatePendingPhase()
+        if wasPlaying { record(.progress, discontinuity: true) }
         return true
     }
 
@@ -265,7 +297,7 @@ struct PlaybackStateMachine {
         } else {
             updatePendingPhase()
         }
-        recordProgress()
+        recordProgress(discontinuity: true)
     }
 
     mutating func seekTimedOut(generation token: UUID, id: UUID) {
@@ -290,7 +322,7 @@ struct PlaybackStateMachine {
 
     /// Also observes transport operations made by AVKit's own controls. Adapter
     /// pauses during preparation/seek/interruption do not overwrite user intent.
-    mutating func transport(generation token: UUID, state: Transport) {
+    mutating func transport(generation token: UUID, state: Transport, rate: Double = 1) {
         guard accepts(token), isReady, outstandingSeek == nil,
               !isInterrupted, snapshot.phase != .ended else { return }
         switch state {
@@ -304,6 +336,8 @@ struct PlaybackStateMachine {
             snapshot.phase = .buffering
             if changed { recordProgress(force: true) }
         case .playing:
+            guard rate.isFinite, rate > 0 else { return }
+            acceptedRate = rate
             wantsPlayback = true
             snapshot.phase = .playing
             if lastReportedTransport != .playing { record(.played) }
@@ -322,8 +356,25 @@ struct PlaybackStateMachine {
         recordProgress(force: true)
     }
 
+    /// Rate and timeline jumps are observations, never permission to start.
+    mutating func rateChanged(generation token: UUID, rate: Double, position: TimeInterval) {
+        guard accepts(token), isReady, outstandingSeek == nil,
+              rate.isFinite, rate > 0, rate != acceptedRate,
+              position.isFinite, position >= 0 else { return }
+        snapshot.position = boundedPosition(position)
+        acceptedRate = rate
+        recordProgress(discontinuity: true)
+    }
+
+    mutating func timeJumped(generation token: UUID, position: TimeInterval) {
+        guard accepts(token), isReady, outstandingSeek == nil,
+              position.isFinite, position >= 0 else { return }
+        snapshot.position = boundedPosition(position)
+        recordProgress(discontinuity: true)
+    }
 
     mutating func interruptionBegan() {
+        requestsAudioAdmission = false
         guard !isInterrupted else { return }
         isInterrupted = true
         interruptedGeneration = wantsPlayback && isPlayable ? generation : nil
@@ -336,7 +387,8 @@ struct PlaybackStateMachine {
 
     mutating func interruptionEnded(shouldResume: Bool) {
         guard isInterrupted else { return }
-        let mayResume = shouldResume && wantsPlayback && interruptedGeneration == generation
+        let mayResume = wantsPlayback &&
+            (requestsAudioAdmission || shouldResume && interruptedGeneration == generation)
         isInterrupted = false
         interruptedGeneration = nil
         if isPlayable {
@@ -346,6 +398,7 @@ struct PlaybackStateMachine {
     }
 
     mutating func mediaServicesReset() {
+        requestsAudioAdmission = false
         isInterrupted = false
         interruptedGeneration = nil
         if let token = generation, isPlayable {
@@ -357,16 +410,19 @@ struct PlaybackStateMachine {
     mutating func end(generation token: UUID, naturally: Bool = true) -> Bool {
         guard accepts(token), outstandingSeek == nil, snapshot.phase != .ended else { return false }
         wantsPlayback = false
+        requestsAudioAdmission = false
         interruptedGeneration = nil
         lastReportedTransport = .paused
         snapshot.phase = .ended
-        if let duration = snapshot.duration { snapshot.position = duration }
         if naturally, !hasEndedNaturally {
             // Latch before publication: an end handler can synchronously play
             // a different item, replay, stop or remove its own registration.
             hasEndedNaturally = true
             record(.ended)
         }
+        // The UI may settle at the end, but its immutable event retains the
+        // actually observed media position, not a synthesized full duration.
+        if let duration = snapshot.duration { snapshot.position = duration }
         return true
     }
 
@@ -377,6 +433,7 @@ struct PlaybackStateMachine {
         snapshot.error = failure.localizedDescription
         snapshot.phase = .failed
         wantsPlayback = false
+        requestsAudioAdmission = false
         isReady = false
         pendingSeek = nil
         activeSeek = nil
@@ -398,6 +455,7 @@ struct PlaybackStateMachine {
         title = ""
         error = nil
         wantsPlayback = false
+        requestsAudioAdmission = false
         isReady = false
         pendingSeek = nil
         activeSeek = nil
@@ -407,13 +465,15 @@ struct PlaybackStateMachine {
         lastReportedTransport = nil
         lastProgress = nil
         hasEndedNaturally = false
+        acceptedRate = 1
         return true
     }
 
-    private mutating func record(_ kind: PlaybackEvent.Kind) {
+    private mutating func record(_ kind: PlaybackEvent.Kind, discontinuity: Bool = false) {
         guard let attempt else { return }
         events.append(PlaybackEvent(attempt: attempt, kind: kind, snapshot: snapshot,
-                                    wantsPlayback: wantsPlayback, error: error))
+                                    wantsPlayback: wantsPlayback, error: error,
+                                    rate: acceptedRate, discontinuity: discontinuity))
     }
 
     private mutating func finishOutstandingSeek(
@@ -428,11 +488,11 @@ struct PlaybackStateMachine {
         ))
     }
 
-    private mutating func recordProgress(force: Bool = false) {
-        if !force, let lastProgress, lastProgress.position == snapshot.position,
+    private mutating func recordProgress(force: Bool = false, discontinuity: Bool = false) {
+        if !force, !discontinuity, let lastProgress, lastProgress.position == snapshot.position,
            lastProgress.duration == snapshot.duration { return }
         lastProgress = (snapshot.position, snapshot.duration)
-        record(.progress)
+        record(.progress, discontinuity: discontinuity)
     }
 
     private static func validDuration(_ value: TimeInterval?) -> TimeInterval? {

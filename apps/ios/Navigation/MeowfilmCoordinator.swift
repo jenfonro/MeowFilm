@@ -3,6 +3,7 @@ import Combine
 import MeowUI
 import MeowMusicFeature
 import MeowFilmFeature
+import MeowNovelFeature
 
 @MainActor
 final class MeowfilmCoordinator: NSObject, MusicUIRouting {
@@ -17,6 +18,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private var surface: MusicPlayerSurface?
     private var playerContent: MusicPlayerContentModel?
     private var pendingPresentation: (destination: MusicPlaybackDestination, access: UUID, occurrence: String?)?
+    private weak var novelHome: NovelHomeViewController?
     private weak var player: MusicPlayerViewController?
     private var accessGeneration: UUID?
     private var presentedError: String?
@@ -42,6 +44,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             guard let self else { return }
             let primary = page === self.main
             self.root.setRootVisible(primary, animated: animated)
+            self.root.setReadingVisible(page is NovelReaderViewController || self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
         }
         navigation.didShowPage = { [weak self] page in
             guard let self else { return }
@@ -49,6 +52,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             if !(page is FilmDetailViewController), self.filmPlayer == nil {
                 self.activateFilmPage(page)
             }
+            self.root.setReadingVisible(self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
             self.showPendingError()
         }
         root.onSelectPage = { [weak self] page in
@@ -61,6 +65,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         window.makeKeyAndVisible()
         assembly.$music.receive(on: RunLoop.main).sink { [weak self] model in
             if let model { self?.install(model) }
+        }.store(in: &observations)
+        assembly.$novel.receive(on: RunLoop.main).sink { [weak self] feature in
+            guard let self, let feature else { return }
+            feature.web.present = { [weak self, rules = feature.rules] request in
+                guard let self, UIApplication.shared.applicationState == .active else { throw CancellationError() }
+                let page = NovelWebViewController(request: request, rules: rules, themeProvider: assembly.appearance)
+                return try await page.result(from: presenter())
+            }
         }.store(in: &observations)
         assembly.$startupFailed.receive(on: RunLoop.main).sink { [weak self] failed in
             guard let self, failed, self.main == nil else { return }
@@ -102,15 +114,19 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         guard let model = assembly.music, let service = assembly.filmSearch else { return }
         let category = MeowfilmSearchComposition.category(service: service, images: assembly.filmImages,
             themeProvider: assembly.appearance) { [weak self] in self?.showFilmSearchResult($0) }
+        var categories = [category]
+        if let novel = assembly.novel {
+            categories.append(MeowfilmSearchComposition.novelCategory(feature: novel, themeProvider: assembly.appearance) { [weak self] in self?.showNovel($0) })
+        }
         navigation.pushViewController(MusicSearchViewController(
             model: model, appearance: assembly.appearance, router: self,
-            primaryTarget: MeowfilmSearchComposition.music, additionalCategory: category,
+            primaryTarget: MeowfilmSearchComposition.music, additionalCategories: categories,
             initialTargetID: MeowfilmSearchComposition.defaultTarget(on: main?.selectedPage ?? .recommend)
         ), animated: true)
     }
 
     func showSettings() {
-        let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance)
+        let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance, resetUserData: resetUserData)
         page.openMusic = { [weak self, weak page] in
             guard let self else { return }
             guard let model = assembly.music else {
@@ -118,7 +134,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 return
             }
             navigation.pushViewController(MusicSettingsViewController(
-                model: model, appearance: assembly.appearance, router: self, resetUserData: resetUserData
+                model: model, appearance: assembly.appearance, router: self
             ), animated: true)
         }
         page.openFilm = { [weak self, weak page] in
@@ -130,6 +146,35 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             navigation.pushViewController(FilmSettingsViewController(
                 model: settings, themeProvider: assembly.appearance
             ), animated: true)
+        }
+        page.openPreferences = { [weak self] in
+            guard let self else { return }
+            navigation.pushViewController(MusicAppearanceSettingsViewController(store: assembly.appearance), animated: true)
+        }
+        page.openCache = { [weak self, weak page] in
+            guard let self else { return }
+            guard let owner = assembly.filmSettings?.playback else {
+                page?.showError("缓存管理暂不可用")
+                return
+            }
+            navigation.pushViewController(FilmMetadataCacheSettingsViewController(
+                owner: owner, themeProvider: assembly.appearance), animated: true)
+        }
+        page.openNovel = { [weak self, weak page] in
+            guard let self else { return }
+            guard let novel = assembly.novel else { page?.showError("小说设置暂不可用"); return }
+            navigation.pushViewController(NovelSettingsViewController(feature: novel, themeProvider: assembly.appearance), animated: true)
+        }
+        navigation.pushViewController(page, animated: true)
+    }
+
+    private func showNovel(_ book: NovelBook) {
+        guard let novel = assembly.novel else { return }
+        let page = NovelDetailViewController(book: book, feature: novel, themeProvider: assembly.appearance)
+        page.onRead = { [weak self, weak novel] book in
+            guard let self, let novel else { return }
+            let session = novel.makeReader(book: book)
+            navigation.pushViewController(NovelReaderViewController(session: session, themeProvider: assembly.appearance), animated: true)
         }
         navigation.pushViewController(page, animated: true)
     }
@@ -144,6 +189,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
 
     func showPublicBrowse(_ request: MusicPublicBrowseRequest, title: String) {
         guard let model = assembly.music else { return }
+        if request.dailyPlatform != nil, let browser = model.publicBrowser {
+            navigation.pushViewController(MusicCollectionViewController(
+                model: model, recommendation: request, browser: browser,
+                appearance: assembly.appearance, router: self
+            ), animated: true)
+            return
+        }
         navigation.pushViewController(MusicBrowseViewController(
             title: title, model: model, browser: model.publicBrowser, request: request,
             appearance: assembly.appearance, router: self
@@ -284,7 +336,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             self.filmPlayer = nil
             if let top = self.navigation.topViewController { self.activateFilmPage(top) }
         }
-        root.present(page, animated: true, completion: completion)
+        page.present(from: root, completion: completion)
         return true
     }
 
@@ -327,6 +379,12 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 return page
             },
             { [weak self] in
+                guard let self, let novel = self.assembly.novel else { return UIViewController() }
+                let page = NovelHomeViewController(feature: novel, themeProvider: appearance)
+                page.onSelect = { [weak self] in self?.showNovel($0) }
+                self.novelHome = page; return page
+            },
+            { [weak self] in
                 guard let self else { return UIViewController() }
                 return MusicLibraryViewController(model: model, appearance: appearance, router: self)
             }
@@ -335,9 +393,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             pageFactories: factories, themeProvider: appearance,
             openMenu: { [weak self] in
                 guard let self, let main = self.main else { return }
-                let content: MeowfilmSidebarContent = main.selectedPage == .film
-                    ? .film(home: filmHome, settings: self.assembly.filmSettings)
-                    : .music(source: MusicHomeSourceSettingsModel(model: model), selectedPage: main.selectedPage)
+                let content: MeowfilmSidebarContent
+                switch main.selectedPage {
+                case .film: content = .film(home: filmHome, settings: self.assembly.filmSettings)
+                case .novel: content = .novel(home: { [weak self] in self?.novelHome?.showHome() },
+                                            shelf: { [weak self] in self?.novelHome?.showShelf() })
+                default: content = .music(source: MusicHomeSourceSettingsModel(model: model), selectedPage: main.selectedPage)
+                }
                 self.root.showSidebar(content: content)
             },
             openSearch: { [weak self] in self?.showSearch() }

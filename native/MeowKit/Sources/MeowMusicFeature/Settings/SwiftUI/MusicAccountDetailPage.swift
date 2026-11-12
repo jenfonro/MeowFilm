@@ -23,14 +23,14 @@ final class MusicAccountDetailViewController: MusicSettingsPageViewController<Mu
         self.platform = platform
         self.actions = actions
         super.init(appearance: appearance, content: MusicAccountDetailContent(
-            state: state, platform: platform, theme: PageTheme(palette: appearance.pageColorway), actions: actions
+            state: state, platform: platform, theme: PageTheme(colors: appearance.pagePalette), actions: actions
         ))
         pageTitle = platform.title
         modalPresentationStyle = .overFullScreen
         modalTransitionStyle = .crossDissolve
     }
 
-    override func loadView() { view = MusicAccountFloatingBackdrop() }
+    override func loadView() { view = AccountFloatingBackdrop() }
     override var usesPageHeader: Bool { false }
 
     override func viewDidLoad() {
@@ -56,7 +56,7 @@ struct MusicAccountDetailContent: View {
 
     var body: some View {
         let summary = state.rows.first { $0.id == platform }
-        MusicAccountFloatingCard(theme: theme) {
+        AccountFloatingCard(theme: theme) {
             VStack(alignment: .leading, spacing: 0) {
                 MusicAccountCardHeader(platform: platform, title: platform.title, theme: theme, close: actions.close) {
                     if let summary, let accounts = state.accounts {
@@ -103,9 +103,9 @@ struct MusicAccountDetailContent: View {
         .accessibilityElement(children: .combine)
         .padding(.top, 16)
         .padding(.bottom, 18)
-        Rectangle().fill(Color(uiColor: UIColor(theme.border))).frame(height: 1)
+        Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(height: 1)
         HStack {
-            Text("会员有效期").foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+            Text("会员有效期").foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
             Spacer(minLength: 8)
             Text(membership.expiry).monospacedDigit()
         }
@@ -118,10 +118,10 @@ struct MusicAccountDetailContent: View {
         }
         HStack(spacing: 12) {
             Button("刷新资料") { actions.perform(.refreshProfile) }
-                .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
                 .disabled(!signedIn || pending || state.accounts?.supportsProfileRefresh != true)
             Button("退出登录", action: actions.logout)
-                .buttonStyle(MusicAccountDestructiveButtonStyle(theme: theme))
+                .buttonStyle(AccountDestructiveButtonStyle(theme: theme))
                 .disabled(pending)
         }
         .padding(.top, 20)
@@ -129,8 +129,8 @@ struct MusicAccountDetailContent: View {
 
     private func color(_ tone: MusicAccountSettingsMembership.Tone) -> Color {
         switch tone {
-        case .accent: return Color(uiColor: UIColor(theme.accent))
-        case .muted: return Color(uiColor: UIColor(theme.muted))
+        case .accent: return Color(uiColor: UIColor(theme.settings.accent))
+        case .muted: return Color(uiColor: UIColor(theme.settings.muted))
         case .danger: return theme.settingsDanger
         }
     }
@@ -146,10 +146,10 @@ private struct MusicAccountAvatar: View {
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
             } else {
-                Color(uiColor: UIColor(theme.chip))
+                Color(uiColor: UIColor(theme.settings.input))
                 Image(systemName: "person.fill")
                     .font(.title2)
-                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
             }
         }
         .frame(width: 60, height: 60)
@@ -182,7 +182,7 @@ private struct MusicAccountSyncSection: View {
                 .padding(.bottom, 4)
             Toggle("收藏歌曲", isOn: Binding(get: { selection.favorites }, set: { perform(.favorites($0)) }))
                 .frame(minHeight: 48)
-            Rectangle().fill(Color(uiColor: UIColor(theme.border))).frame(height: 1)
+            Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(height: 1)
             Toggle("歌单", isOn: Binding(get: { selection.playlists }, set: { perform(.playlists($0)) }))
                 .frame(minHeight: 48)
         }
@@ -228,7 +228,7 @@ private struct MusicAccountMoreMenu: View {
         } label: {
             Image(systemName: "ellipsis.circle")
                 .font(.body.weight(.semibold))
-                .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }

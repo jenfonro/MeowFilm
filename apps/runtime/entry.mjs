@@ -8,6 +8,7 @@ import { createFilmPlaybackModule } from './modules/film-playback.mjs';
 
 export { createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule };
 export { createPanRuntime, startPanRuntime } from './pan-entry.mjs';
+export { createNeteaseTokenModule } from './modules/netease-token.mjs';
 export { createTMDBDataModule, createDoubanDataModule, createFilmPlaybackModule };
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
@@ -46,7 +47,7 @@ export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, pan
     try {
       modules.push(createMusicScriptModule({ ...music, dataRoot }));
       modules.push(createCatScriptModule({ ...cat, dataRoot }));
-      modules.push(createSourceRuntimeModule(source));
+      modules.push(createSourceRuntimeModule({ ...source, dataRoot }));
       if (pan !== undefined) modules.push(createPanRuntimeModule({ ...pan, dataRoot }));
       if (tmdb !== undefined) modules.push(createTMDBDataModule({ ...tmdb, dataRoot }));
       if (douban !== undefined) modules.push(createDoubanDataModule({ ...douban, dataRoot }));

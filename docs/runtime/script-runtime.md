@@ -23,6 +23,8 @@ packages/pan-runtime/、apps/runtime/pan-entry.mjs
   显式装配的内置网盘能力，不加载脚本引擎或额外 Worker
 packages/film-playback/
   影视会话、唯一业务数据缓存、新增本地播放资料及受控媒体流
+packages/netease-token/、apps/runtime/modules/netease-token.mjs
+  原生订阅按需借用的独立 token 模块、官方 SDK Worker 与锁定 jsdom
 ```
 
 通用运行器不依赖平台目录。音乐官方账号、目录、曲库、歌词、播放等原生业务由调用方管理；脚本安装、源码、来源地址和私有数据由运行器持久管理。客户端可保存来源列表、检测结果等供原生界面直接读取的快照，不形成第二套安装管理或脚本存储。通用 `createRuntime()` 默认入口描述 `aggregate`，装配以下三个模块：
@@ -31,11 +33,11 @@ packages/film-playback/
 | --- | --- | --- |
 | `music@0.8.0` | `music.script.v3` | 原始 LX 音源 |
 | `cat@0.2.0` | `cat.script.v2` | CatNode、HTTP 服务、direct Spider、私有卷和管理同步 |
-| `source@0.2.0` | `source.runtime.v2` | Legado、异次元、轻悦时光、独立 CatVod Spider |
+| `source@0.3.0` | `source.runtime.v2` | Legado、异次元、轻悦时光、独立 CatVod Spider |
 
 受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)、`tmdb@0.1.0/tmdb.data.v1` 与 `douban@0.1.0/douban.data.v1` 的[元数据能力](metadata-data.md)，以及 `film@0.1.0/film.playback.v1` 的[影视播放业务](film-playback.md)。这些是 Node 内置业务，不是新的脚本执行所有者；通用默认三模块不变。
 
-iOS 与 Windows 的正式 App entry 在同一 HTTP 会话中按 `music,cat,source,pan,tmdb,douban,film` 顺序装配七模块。`connectFilmPlayback` 复用前六个 provider owner 并连接变更撤权，不另建来源或账号实例。film 持有智能播放会话、业务缓存及新增本地播放资料；原生收藏、客户端规则与图片缓存仍由原 owner 管理。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。模块装配不等于原生导航／搜索交接、实际媒体输出或设备验证已完成；搜索交接规则只见[共同契约](../common/film/search.md)，不据此声明 Android 已接入。
+iOS 与 Windows 的正式 App entry 在同一 HTTP 会话中按 `music,cat,source,pan,tmdb,douban,film,netease` 顺序装配八模块。`connectFilmPlayback` 复用前六个 provider owner 并连接变更撤权，不另建来源或账号实例；[网易实时 token 模块](netease-token.md)最后追加，原生订阅按需取用，不改变默认三模块。film 持有智能播放会话、业务缓存及新增本地播放资料；原生收藏、客户端规则与图片缓存仍由原 owner 管理。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。模块装配不等于原生导航／搜索交接、实际媒体输出或设备验证已完成；搜索交接规则只见[共同契约](../common/film/search.md)，不据此声明 Android 已接入。
 
 ## 三类执行所有者
 

@@ -8,6 +8,7 @@ using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.MusicOfficialAudioTests;
@@ -18,7 +19,7 @@ public static class MusicOfficialStandardTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("WY online-only file cache reauthorizes exact recording and fails closed on real permission loss", () =>
+        yield return new("WY healthy cached file plays without another online permission request", () =>
             MusicQualityConsumerTests.Sta(async () =>
         {
             await using var f = new MusicPlaybackCacheTests.Fixture();
@@ -26,7 +27,7 @@ public static class MusicOfficialStandardTests
             var handler = new StandardHandler { DurationMs = 1000, MediaSize = f.Bytes.Length };
             var app = new MusicNativeApplication(f.Store, new NoNode(), handler);
             await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            await using var module = new MusicCapability(app, f.Store, player, playbackCacheRoot: f.Root);
+            await using var module = new MusicCapability(app, f.Store, player, playbackCacheRoot: f.Root, cacheStore: f.CacheStore);
             await module.InitializeAsync(default);
             await module.ActivateQualitySettingsAsync();
             await module.SetPlaybackQualityRequestAsync("128k");
@@ -39,6 +40,9 @@ public static class MusicOfficialStandardTests
                 signature = result.GetProperty("qualityCacheSignature").GetString()!;
             await f.Cache.StorePlayedAsync(scope, id, signature, JsonSerializer.SerializeToElement(receipt), () => true, default);
             Check(await f.Cache.ReadInfoAsync(scope, id, signature, default) is not null);
+            // Isolate complete audio reuse from the independent chorus metadata request.
+            await new MusicChorusCache(f.CacheStore).PutAsync(
+                MusicChorusCache.Key(scope, id, "wy", "1", 1), 1, 0, 0.5, default);
             await app.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 });
             await module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             var queueRow = module.QueueSurfaceRows.Single();
@@ -48,11 +52,10 @@ public static class MusicOfficialStandardTests
             await module.PlayQueueSurfaceItemAsync(queueRow);
             Check(player.HasMedia, module.Status);
             await started.Task.WaitAsync(TimeSpan.FromSeconds(5)); await player.PauseAsync();
-            Check(handler.Calls > before, "online-only bytes require a new exact platform authorization");
+            Check(handler.Calls == before, "healthy bytes must not request another URL");
             handler.Problem = "trial";
             await module.PlayQueueSurfaceItemAsync(module.QueueSurfaceRows.Single());
-            Check(!player.HasMedia && module.Status == "当前歌曲暂无完整播放权限",
-                "existing bytes cannot bypass a new trial-only response: " + module.Status);
+            Check(player.HasMedia && handler.Calls == before, "a changed online response cannot invalidate complete cached bytes: " + module.Status);
             module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         }));
         yield return new("WY standard guest candidate and native resolve require neither login nor Node and grant no offline license", async () =>
@@ -72,15 +75,12 @@ public static class MusicOfficialStandardTests
             var result = await app.ExecuteAsync("music.official.resolve", input);
             Check(result.GetProperty("ok").GetBoolean(), result.GetRawText());
             Check(result.GetProperty("actualQuality").GetString() == "128k");
-            Check(!result.GetProperty("offlineAllowed").GetBoolean() &&
-                result.GetProperty("licenseExpiresAt").ValueKind == JsonValueKind.Null);
             string scope = result.GetProperty("scope").GetString()!;
             long generation = result.GetProperty("generation").GetInt64();
             Check(app.IsOfficialPlaybackCurrent("wy", scope, generation));
             Check(!store.Data.ContainsKey(MusicAccountOwner.DocumentNamespace), "guest must not manufacture an account");
             Check((await app.ExecuteAsync("music.official.confirm", input)).GetProperty("ok").GetBoolean());
-            Check((await app.ExecuteAsync("music.official.authorize", input)).GetProperty("ok").GetBoolean());
-            Check(transport.Calls == 2, "completed file authorization rechecks platform");
+            Check(transport.Calls == 1, "confirmation does not fetch a second URL");
             Check((await app.ExecuteAsync("music.accounts.logout", new { platform = "wy" })).GetProperty("ok").GetBoolean());
             Check(!app.IsOfficialPlaybackCurrent("wy", scope, generation));
         });

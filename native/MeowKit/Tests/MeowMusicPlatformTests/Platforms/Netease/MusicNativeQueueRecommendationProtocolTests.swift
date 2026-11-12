@@ -32,16 +32,16 @@ import MeowMusicFeature
             for song in songs {
                 let attribution = try MusicQQWire.object(song["_recommendation"])
                 let id = try MusicQQWire.string(song["songmid"]), mapped = index < 2 && id == "101"
-                feedbackSources[id] = try MusicQQWire.string(attribution["feedbackSource"])
+                feedbackSources[id] = try MusicQQWire.string(attribution["feedbackSource"], empty: true)
                 XCTAssertEqual(attribution["source"] as? String, "moreRcmd")
                 XCTAssertEqual(attribution["sourceId"] as? String, "")
-                XCTAssertEqual(attribution["feedbackSource"] as? String, mapped ? "synthetic-source-101" : "moreRcmd")
+                XCTAssertEqual(attribution["feedbackSource"] as? String, mapped ? "synthetic-source-101" : "")
                 XCTAssertEqual(attribution["alg"] as? String, mapped ? "alg-101" : "")
             }
             if index < 2 {
-                XCTAssertEqual(feedbackSources["102"], "moreRcmd", "null map entry")
-                XCTAssertEqual(feedbackSources["103"], "moreRcmd", "empty map entry")
-                XCTAssertEqual(feedbackSources["104"], "moreRcmd", "missing map entry")
+                XCTAssertEqual(feedbackSources["102"], "", "null map entry")
+                XCTAssertEqual(feedbackSources["103"], "", "empty map entry")
+                XCTAssertEqual(feedbackSources["104"], "", "missing map entry")
             }
         }
         let records = await f.http.recorded()
@@ -113,7 +113,7 @@ import MeowMusicFeature
         XCTAssertTrue(songs.allSatisfy { $0["singer"] as? String == "合成歌手" })
         let first = try MusicQQWire.object(XCTUnwrap(songs.first)["_recommendation"])
         let last = try MusicQQWire.object(XCTUnwrap(songs.last)["_recommendation"])
-        XCTAssertEqual(first["alg"] as? String, "first-alg"); XCTAssertEqual(first["feedbackSource"] as? String, "moreRcmd")
+        XCTAssertEqual(first["alg"] as? String, "first-alg"); XCTAssertEqual(first["feedbackSource"] as? String, "")
         XCTAssertEqual(last["alg"] as? String, "last-alg"); XCTAssertEqual(last["feedbackSource"] as? String, "synthetic-source")
         XCTAssertEqual(batch.hasMore, true)
         let records = await f.http.recorded()

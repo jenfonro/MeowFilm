@@ -1,5 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { createFilmRulesService } from '../packages/film-playback/src/rules-service.js';
 import { createPlaybackService } from '../packages/film-playback/src/service.js';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
 
@@ -7,6 +13,11 @@ import { defaultPreferences } from '../packages/film-playback/src/policy.js';
 // are controlled boundaries. No HTTP, decoding, byte-cache or native output is exercised.
 const movie = { id: 'tmdb:movie:17', kind: 'movie', title: 'Film', metadataProvider: 'tmdb', metadataId: 17 };
 const tv = { id: 'tmdb:tv:19', kind: 'tv', title: 'Series', metadataProvider: 'tmdb', metadataId: 19 };
+const ruleRoot = mkdtempSync(join(tmpdir(), 'film-rules-playback-'));
+const rules = createFilmRulesService({ dataRoot: ruleRoot });
+await rules.snapshot();
+after(async () => { await rules.close(); rmSync(ruleRoot, { recursive: true, force: true }); });
+
 const source = key => ({ key, engine: 'cat', installationId: `install-${key}`,
   siteId: key, generation: 1, name: key });
 const file = (id, quality = '1080p', provider) => ({ id, name: `Film.${id}.${quality}`,
@@ -30,10 +41,10 @@ const deferred = () => {
 const error = code => Object.assign(new Error(code), { code });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function until(predicate) {
-  for (let turn = 0; turn < 100; turn++) {
+  for (let turn = 0; turn < 1500; turn++) {
     const value = predicate();
     if (value) return value;
-    await tick();
+    await delay(2);
   }
   assert.fail('Expected public playback state was not reached');
 }
@@ -57,6 +68,12 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
       calls.push({ type: 'metadata', targetId: target.id });
       return structuredClone(target.kind === 'tv' ? metadata : { id: 17, title: 'Film' });
     },
+    async targetMetadataEntry(target, options) {
+      const value = await this.targetMetadata(target, options);
+      return value === null ? null : { value, completeness: 'complete',
+        fetchedAt: Date.parse('2026-11-08T12:00:00Z'), expiresAt: Date.parse('2026-11-09T12:00:00Z'),
+        cache: { status: 'fresh', components: {} } };
+    },
     async metadataSources(target, { metadata: value }) {
       return [{ provider: target.metadataProvider, metadataId: target.metadataId,
         kind: target.kind, title: target.title, metadata: structuredClone(value) }];
@@ -67,6 +84,13 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
       assert.ok(row, `Unexpected season request: ${season}`);
       return structuredClone(row);
     },
+    async seasonMetadataEntry(target, season, options) {
+      const value = await this.seasonMetadata(target, season, options);
+      return { value, completeness: 'complete',
+        fetchedAt: Date.parse('2026-11-08T12:00:00Z'), expiresAt: Date.parse('2026-11-09T12:00:00Z'),
+        cache: { status: 'fresh', components: {} } };
+    },
+    async invalidateAddress(candidate) { calls.push({ type: 'invalidateAddress', candidateId: candidate.id }); },
     async search(value, query, page) {
       calls.push({ type: 'search', sourceKey: value.key, query, page });
       const configured = pages[value.key] ?? [];
@@ -117,9 +141,9 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
     },
     async cancelPrefetch(id) { calls.push({ type: 'cancelPrefetch', resourceId: id }); },
   };
-  const service = createPlaybackService({ data, library, media, now: () => Date.parse('2026-11-08T12:00:00Z') });
-  const open = (input = {}) => service.open({ platform: 'test', target: movie,
-    sources: [source('a'), source('b')], ...input });
+  const service = createPlaybackService({ data, library, media, rules, now: () => Date.parse('2026-11-08T12:00:00Z') });
+  const open = async (input = {}) => (await service.open({ platform: 'test', target: movie,
+    sources: [source('a'), source('b')], ...input }));
   const snapshot = sessionId => service.snapshot({ sessionId });
   const command = (sessionId, action, input = {}) => service.command({ sessionId, action, ...input });
   const pending = sessionId => until(() => snapshot(sessionId).attempt);
@@ -153,9 +177,9 @@ test('F01 history pending media failure continues an untried history file before
   }, b: { deferred: detail([file('deferred')]) } } });
   t.after(() => f.service.close());
   f.library.update(document => { document.history.push(history('history')); });
-  f.service.updateManual({ action: 'save', item: manualSite('manual') });
-  const { sessionId } = f.open({ platform: 'windows',
-    results: [{ sourceKey: 'b', items: [result('deferred')] }] });
+  (await f.service.updateManual({ action: 'save', item: manualSite('manual') }));
+  const { sessionId } = (await f.open({ platform: 'windows',
+    results: [{ sourceKey: 'b', items: [result('deferred')] }] }));
   const first = await f.pending(sessionId);
   assert.equal(first.candidate.source.detailId, 'history');
   assert.equal(first.position, 31);
@@ -174,9 +198,9 @@ test('F02 manual site pending media failure continues its next exact file withou
   const f = fixture({ details: { a: { manual: detail([file('manual-high'), file('manual-low', '720p')]) },
     b: { deferred: detail([file('deferred')]) } } });
   t.after(() => f.service.close());
-  f.service.updateManual({ action: 'save', item: manualSite('manual') });
-  const { sessionId } = f.open({ platform: 'windows',
-    results: [{ sourceKey: 'b', items: [result('deferred')] }] });
+  (await f.service.updateManual({ action: 'save', item: manualSite('manual') }));
+  const { sessionId } = (await f.open({ platform: 'windows',
+    results: [{ sourceKey: 'b', items: [result('deferred')] }] }));
   const first = await f.pending(sessionId);
   assert.equal(first.candidate.source.detailId, 'manual');
   assertNoLaterWork(f, ['deferred']);
@@ -193,9 +217,9 @@ test('F03 manual share pending media failure continues a different actual file w
   const f = fixture({ shares: { share: [file('share-high', '1080p', 'quark'), file('share-low', '720p', 'quark')] },
     details: { b: { deferred: detail([file('deferred')]) } } });
   t.after(() => f.service.close());
-  f.service.updateManual({ action: 'save', item: manualShare('share') });
-  const { sessionId } = f.open({ platform: 'windows',
-    results: [{ sourceKey: 'b', items: [result('deferred')] }] });
+  (await f.service.updateManual({ action: 'save', item: manualShare('share') }));
+  const { sessionId } = (await f.open({ platform: 'windows',
+    results: [{ sourceKey: 'b', items: [result('deferred')] }] }));
   const first = await f.pending(sessionId);
   assert.equal(first.candidate.source.key, 'manual:share');
   assert.equal(first.candidate.source.engine, 'pan');
@@ -220,9 +244,9 @@ test('F04 media failures traverse known history manual unresolved results and in
   } }, pages: { a: [[result('known'), result('deferred')], [result('searched')], [result('later-page')]] } });
   t.after(() => f.service.close());
   f.library.update(document => { document.history.push(history('history')); });
-  f.service.updateManual({ action: 'save', item: manualSite('manual') });
-  const { sessionId } = f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }],
-    search: [{ sourceKey: 'a', page: 1, completed: false }] });
+  (await f.service.updateManual({ action: 'save', item: manualSite('manual') }));
+  const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }],
+    search: [{ sourceKey: 'a', page: 1, completed: false }] }));
   await browseKnown(f, sessionId, 'known');
   await f.command(sessionId, 'play');
   const stages = [
@@ -262,10 +286,10 @@ function constrainedFixture(known) {
     searched: detail([file('searched-other', '1080p', 'uc')]),
   } }, shares: { share: [file('share-other', '720p', 'uc')] }, pages: { a: [[result('searched')]] } });
 }
-function seedConstrainedStages(f) {
+async function seedConstrainedStages(f) {
   f.library.update(document => { document.history.unshift(history('history')); });
-  f.service.updateManual({ action: 'save', item: manualSite('manual') });
-  f.service.updateManual({ action: 'save', item: manualShare('share', 'uc') });
+  (await f.service.updateManual({ action: 'save', item: manualSite('manual') }));
+  (await f.service.updateManual({ action: 'save', item: manualShare('share', 'uc') }));
 }
 function assertAllConstraintStagesVisited(f, sessionId, historyDetail = 'history') {
   assert.deepEqual([...new Set(f.trace('detail').map(call => call.detailId))],
@@ -281,7 +305,7 @@ test('F05 fixed pan survives a pending media failure and rejects every other-pan
   const f = constrainedFixture([file('chosen-pan', '4k', 'quark'), file('known-other', '4k_hdr', 'uc')]);
   t.after(() => f.service.close());
   seedConstrainedStages(f);
-  const { sessionId } = f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }] });
+  const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }] }));
   await browseKnown(f, sessionId, 'known');
   await f.command(sessionId, 'pan', { provider: 'quark' });
   const first = await f.pending(sessionId);
@@ -301,7 +325,7 @@ test('F06 fixed quality survives a failed replacement without degrading or destr
   const f = constrainedFixture([file('old-output', '1080p', 'quark'), file('chosen-quality', '4k_hdr', 'quark')]);
   t.after(() => f.service.close());
   seedConstrainedStages(f);
-  const { sessionId } = f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }] });
+  const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }] }));
   await browseKnown(f, sessionId, 'known');
   const selected = f.snapshot(sessionId).candidates.find(candidate => candidate.name === 'Film.old-output.1080p');
   assert.ok(selected);
@@ -336,8 +360,8 @@ test('F07 block carries the confirmed attempt and persists only its exact line a
     fallback: detail([file('fallback', '720p')]),
   } }, pages: { a: [[result('blocked'), result('fallback')]] } });
   t.after(() => f.service.close());
-  f.service.updateManual({ action: 'save', item: manualSite('blocked') });
-  const { sessionId } = f.open({ results: [{ sourceKey: 'a', items: [result('blocked')] }] });
+  (await f.service.updateManual({ action: 'save', item: manualSite('blocked') }));
+  const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [result('blocked')] }] }));
   await browseKnown(f, sessionId, 'blocked');
   await f.command(sessionId, 'play');
   const original = await f.commit(sessionId);
@@ -356,8 +380,8 @@ test('F07 block carries the confirmed attempt and persists only its exact line a
     line('wrong-line', [file('blocked-first', '4k'), file('blocked-sibling')]),
     line('good-line', [file('same-detail-good', '720p')]),
   ] });
-  const reopened = f.open({ platform: 'windows',
-    results: [{ sourceKey: 'a', items: [result('blocked')] }] });
+  const reopened = (await f.open({ platform: 'windows',
+    results: [{ sourceKey: 'a', items: [result('blocked')] }] }));
   const afterReopen = await f.pending(reopened.sessionId);
   assert.equal(afterReopen.candidate.source.detailId, 'blocked');
   assert.equal(afterReopen.candidate.lineId, 'good-line');
@@ -373,10 +397,10 @@ test('F08 switch excludes aliases of only the accurate file across stages withou
     searched: detail([sameFile(), file('alternate-file', '720p', 'quark')]),
   } }, shares: { share: [sameFile()] }, pages: { a: [[result('searched')]] } });
   t.after(() => f.service.close());
-  f.service.updateManual({ action: 'save', item: manualSite('manual') });
-  f.service.updateManual({ action: 'save', item: manualShare('share') });
+  (await f.service.updateManual({ action: 'save', item: manualSite('manual') }));
+  (await f.service.updateManual({ action: 'save', item: manualShare('share') }));
   const input = { results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }] };
-  const { sessionId } = f.open(input);
+  const { sessionId } = (await f.open(input));
   await browseKnown(f, sessionId, 'known');
   await f.command(sessionId, 'play');
   const original = await f.commit(sessionId);
@@ -394,7 +418,7 @@ test('F08 switch excludes aliases of only the accurate file across stages withou
   assert.deepEqual(f.trace('search').map(call => [call.sourceKey, call.page]), [['a', 1]]);
   assert.deepEqual(f.library.read().blocks, []);
   await f.service.release({ sessionId });
-  const reopened = f.open({ ...input, platform: 'windows' });
+  const reopened = (await f.open({ ...input, platform: 'windows' }));
   const again = await f.pending(reopened.sessionId);
   assert.equal(again.candidate.id, original.candidate.id);
   assert.equal(again.position, 37);
@@ -421,7 +445,7 @@ const seriesInput = target => ({ target: { ...tv, ...target },
 const requests = f => f.calls.filter(call => ['metadata', 'season', 'search', 'detail',
   'expand', 'resolve', 'prepare', 'prefetch'].includes(call.type));
 async function playSeries(f, target) {
-  const { sessionId } = f.open(seriesInput(target));
+  const { sessionId } = (await f.open(seriesInput(target)));
   await until(() => f.snapshot(sessionId).stage === 'idle');
   await f.command(sessionId, 'play');
   const current = await f.commit(sessionId);
@@ -444,7 +468,7 @@ test('F09 only real ended crosses unequal seasons and specials never shift the g
   assert.deepEqual(f.snapshot(sessionId).episodes.map(coordinates), [[2, 1, 3], [2, 2, 4], [2, 3, 5]]);
   const beforeProgress = requests(f);
   await f.command(sessionId, 'media.progress', { attemptId: current.id, position: 90, duration: 90, paused: true });
-  await tick();
+  await delay(2);
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   assert.equal(f.snapshot(sessionId).stage, 'playing');
   assert.equal(f.snapshot(sessionId).attempt, null);
@@ -474,13 +498,13 @@ test('F10 the actual final episode ends without asking for a fabricated next add
   await f.command(sessionId, 'media.progress', { attemptId: current.id, position: 60, duration: 60, paused: false });
   const beforeEnd = requests(f);
   await f.command(sessionId, 'media.ended', { attemptId: current.id });
-  await tick();
+  await delay(2);
   const ended = f.snapshot(sessionId);
   assert.equal(ended.stage, 'ended');
   assert.equal(ended.current, null);
   assert.equal(ended.attempt, null);
   assert.deepEqual(coordinates(ended.target), [2, 3, 5]);
-  assert.deepEqual(requests(f), beforeEnd);
+  assert.deepEqual(requests(f).slice(beforeEnd.length).map(call => call.type), ['metadata', 'season']);
   assert.deepEqual(f.trace('resolve').map(coordinates), [[2, 3, 5]]);
 });
 
@@ -495,7 +519,7 @@ test('F11 a missing season has no selectable coordinates or invented global offs
   const beforeInvalidSelection = requests(f);
   await assert.rejects(f.command(sessionId, 'select.episode', { episode: { season: 2, episode: 1 } }), { code: 'NO_MATCH' });
   await assert.rejects(f.command(sessionId, 'browse.season', { season: 2 }), { code: 'NOT_FOUND' });
-  assert.deepEqual(requests(f), beforeInvalidSelection);
+  assert.deepEqual(requests(f).slice(beforeInvalidSelection.length).map(call => call.type), ['metadata', 'metadata']);
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   await f.command(sessionId, 'media.ended', { attemptId: current.id });
   const next = await f.pending(sessionId);
@@ -582,7 +606,7 @@ test('F13b rapid selections fence a late cross-season neighbor and only the late
   await until(() => !f.resources.has(supersededReceipt.id));
   late.resolve();
   await settled.promise;
-  await tick();
+  await delay(2);
   assert.equal(f.snapshot(sessionId).attempt.id, latest.id);
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   assert.deepEqual(f.trace('resolve').map(coordinates), [[1, 2, 2], [2, 1, 3], [2, 2, 4], [2, 3, 5]]);

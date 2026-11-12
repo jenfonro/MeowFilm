@@ -8,7 +8,7 @@ import { inflateSync } from 'node:zlib';
 import { rootCertificates } from 'node:tls';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync,
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync,
   writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { networkInterfaces, tmpdir, totalmem, cpus, hostname } from 'node:os';
@@ -8183,7 +8183,7 @@ test('Cat management accepts the public 189 provider name', async () => {
   });
 });
 
-test('Cat rejects a hard-linked settings authority', { timeout: 30000 }, async t => {
+test('Cat restores a hard-linked settings authority and atomically saves its own file', { timeout: 30000 }, async t => {
   const root = rootFor(t);
   const runtime = await installed(t, root);
   const settings = (await runtime.status()).settingsPath;
@@ -8192,10 +8192,14 @@ test('Cat rejects a hard-linked settings authority', { timeout: 30000 }, async t
   linkSync(settings + '.original', settings);
   const reopened = createCatRuntime({ dataRoot: root });
   t.after(() => reopened.close());
-  await assert.rejects(reopened.start(), { code: 'CORRUPT_STORAGE' });
+  await reopened.start();
+  await waitForState(reopened, 'fixture-a', 'ready');
+  await reopened.setEnabled('fixture-a', false);
+  assert.equal(JSON.parse(readFileSync(settings, 'utf8')).scripts[0].enabled, false);
+  assert.equal(JSON.parse(readFileSync(settings + '.original', 'utf8')).scripts[0].enabled, true);
 });
 
-test('Cat rejects hard-linked source files within the affected instance', { timeout: 30000 }, async t => {
+test('Cat restores hard-linked source files and uninstalls only its own reference', { timeout: 30000 }, async t => {
   const root = rootFor(t);
   const runtime = await installed(t, root);
   const status = await runtime.status();
@@ -8207,19 +8211,66 @@ test('Cat rejects hard-linked source files within the affected instance', { time
   const reopened = createCatRuntime({ dataRoot: root });
   t.after(() => reopened.close());
   await reopened.start();
-  await waitForState(reopened, 'fixture-a', 'failed');
-  assert.equal(reopened.instance('fixture-a').error, 'CORRUPT_STORAGE');
+  await waitForState(reopened, 'fixture-a', 'ready');
   assert.ok(reopened.server.listening);
+  await reopened.uninstall('fixture-a');
+  assert.equal(existsSync(path), false);
+  assert.equal(readFileSync(path + '.original', 'utf8'), source);
 });
 
-test('Cat normalizes a missing live source directory to CORRUPT_STORAGE', { timeout: 30000 }, async t => {
+test('Cat recreates a missing live source directory for a new installation', { timeout: 30000 }, async t => {
   const root = rootFor(t);
   const runtime = await installed(t, root);
   rmSync(join(root, 'sources'), { recursive: true, force: true });
-  await assert.rejects(runtime.install({
+  const item = await runtime.install({
     installationId: 'fixture-next', source, config: { id: 'site-next', protocol: 'old' },
     version: '1', enabled: false,
-  }), { code: 'CORRUPT_STORAGE' });
+  });
+  assert.equal(item.installationId, 'fixture-next');
+  assert.equal(readFileSync(join(root, 'sources', item.sourceHash + '.js'), 'utf8'), source);
+});
+
+test('Cat starts and restores scripts through App root and source directory aliases', { timeout: 30000 }, async t => {
+  const base = rootFor(t), actual = join(base, 'actual'), alias = join(base, 'alias');
+  mkdirSync(actual);
+  symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const root = alias;
+  const sourceRoot = join(base, 'source-files');
+  mkdirSync(sourceRoot);
+  symlinkSync(sourceRoot, join(root, 'sources'), process.platform === 'win32' ? 'junction' : 'dir');
+  const runtime = await installed(t, root);
+  assert.equal((await runtime.status()).settingsPath, join(root, 'settings.json'));
+  await runtime.close();
+  const reopened = createCatRuntime({ dataRoot: root });
+  t.after(() => reopened.close());
+  await reopened.start();
+  await waitForState(reopened, 'fixture-a', 'ready');
+  await reopened.uninstall('fixture-a');
+  assert.equal(existsSync(join(root, 'volumes', 'fixture-a')), false);
+  assert.equal(fs.readdirSync(sourceRoot).length, 0);
+});
+
+test('Cat rejects malformed settings and a non-file source without replacing them', { timeout: 30000 }, async t => {
+  const root = rootFor(t), runtime = await installed(t, root);
+  const settings = (await runtime.status()).settingsPath;
+  const original = readFileSync(settings, 'utf8');
+  const sourceHash = JSON.parse(original).scripts[0].sourceHash;
+  await runtime.close();
+  writeFileSync(settings, '{');
+  const corrupt = createCatRuntime({ dataRoot: root });
+  t.after(() => corrupt.close());
+  await assert.rejects(corrupt.start(), { code: 'CORRUPT_STORAGE' });
+  assert.equal(readFileSync(settings, 'utf8'), '{');
+  writeFileSync(settings, original);
+  const path = join(root, 'sources', sourceHash + '.js');
+  rmSync(path);
+  mkdirSync(path);
+  const reopened = createCatRuntime({ dataRoot: root });
+  t.after(() => reopened.close());
+  await reopened.start();
+  await waitForState(reopened, 'fixture-a', 'failed');
+  assert.equal(reopened.instance('fixture-a').error, 'CORRUPT_STORAGE');
+  assert.equal(fs.statSync(path).isDirectory(), true);
 });
 
 test('Cat applies the persisted JSON config shape and rejects oversized versions before installation',

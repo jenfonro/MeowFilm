@@ -17,7 +17,7 @@ public static partial class MusicNativeSyncTests
     {
         yield return new("Music sync KG cloud delete encrypted request and success", () => CloudRoundTrip("/v2/delete_list"));
         yield return new("Music sync KG cloud order encrypted request and success", () => CloudRoundTrip("/v1/modify_song_sort"));
-        yield return new("Music sync KG cloud encrypted business errors remain classified", CloudBusinessErrors);
+        yield return new("Music sync KG cloud encrypted business errors consume final duplicate fields", CloudBusinessErrors);
         yield return new("Music sync KG cloud only order accepts explicit plaintext response", CloudPlaintext);
         yield return new("Music sync KG cloud corrupt ciphertext is never successful", CloudCorrupt);
         yield return new("Music sync KG cloud response limits zero owned buffers", CloudResponseLimits);
@@ -128,6 +128,7 @@ public static partial class MusicNativeSyncTests
                 ("""{"status":0,"error_code":20018}""", "AUTH_REQUIRED"),
                 ("""{"status":0,"error_code":20028}""", "VERIFICATION_REQUIRED"),
                 ("""{"status":0,"error_code":5}""", "UPSTREAM_ERROR"),
+                ("""{"status":1,"status":0}""", "UPSTREAM_ERROR"),
                 ("""{"status":1,"error_code":0,"ssaCode":"synthetic"}""", "VERIFICATION_REQUIRED") })
             {
                 byte[] bytes = CloudCipher(json); int calls = 0;
@@ -161,7 +162,7 @@ public static partial class MusicNativeSyncTests
     }
     private static async Task CloudJson()
     {
-        foreach (byte[] plain in new[] { Encoding.UTF8.GetBytes("""{"status":1,"status":0}"""), new byte[] { 255 },
+        foreach (byte[] plain in new[] { new byte[] { 255 },
             Encoding.UTF8.GetBytes("[]"), Encoding.UTF8.GetBytes("""{"status":1,"error_code":""") })
             await CloudFailure("INVALID_RESPONSE", () => CloudCall("/v2/delete_list", (_, _) => Task.FromResult(CloudCipher(plain))));
     }
@@ -237,7 +238,7 @@ public static partial class MusicNativeSyncTests
         }, nativeEntropy: true);
     }
     private static async Task InstallCloud(Fixture f, Func<HttpRequestMessage, CancellationToken, Task<byte[]>> transport)
-    { await f.Sync.DisposeAsync(); f.Sync = new(f.Owner, f.Sessions, f.Http, f.Clients.Owner, transport); }
+    { await f.Sync.DisposeAsync(); f.Sync = new(f.Owner, f.Sessions, f.Http, f.Clients.Owner, f.Tokens, transport); }
     private static async Task CloudOrder()
     {
         await using var f = new Fixture("kg"); await Reorder(f); int writes = 0;

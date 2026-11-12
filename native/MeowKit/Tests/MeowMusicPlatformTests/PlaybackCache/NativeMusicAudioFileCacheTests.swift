@@ -7,6 +7,65 @@ import MeowMusicFeature
 /// These are deterministic injected-I/O tests, NOT evidence of an upstream
 /// account grant, actual CDN transfer, or native codec support.
 final class NativeMusicAudioFileCacheTests: XCTestCase {
+    func testSequentialPrefixSeekWaitsAndReadCancellationDoesNotChangeDownload() async throws {
+        let f = try AudioCacheTestFixture()
+        defer { f.cleanup() }
+        let gate = AudioCacheTestGate(), transport = PrefixCacheTransport(gate: gate)
+        let cache = f.cache(transport: transport), request = f.request()
+        let source = try await cache.preparePlayback(.init(identity: request.identity, audio: request.audio,
+            expectedDuration: request.expectedDuration, authorization: request.authorization,
+            playbackAuthorization: request.playbackAuthorization))
+        await fulfillment(of: [gate.entered], timeout: 3)
+        let information = try await source.information()
+        XCTAssertEqual(information.length, 80)
+        XCTAssertEqual(source.progress.received, 20)
+        let beginning = try await source.read(offset: 0, count: 10)
+        XCTAssertEqual(beginning, Data((0..<10).map(UInt8.init)))
+        let reached = expectation(description: "uncached target must wait")
+        reached.isInverted = true
+        let pending = Task {
+            let data = try await source.read(offset: 60, count: 10)
+            reached.fulfill(); return data
+        }
+        await fulfillment(of: [reached], timeout: 0.05)
+        pending.cancel()
+        do { _ = try await pending.value; XCTFail("Cancelled read completed") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let back = try await source.read(offset: 5, count: 10)
+        XCTAssertEqual(back, Data((5..<15).map(UInt8.init)))
+        XCTAssertEqual(source.progress.received, 20)
+        let calls = await transport.count
+        XCTAssertEqual(calls, 1)
+        await gate.release()
+        let forward = try await source.read(offset: 60, count: 10)
+        XCTAssertEqual(forward, Data((60..<70).map(UInt8.init)))
+        source.confirmPlayback(at: f.clock.now())
+        let version = await source.result()
+        XCTAssertNotNil(version); XCTAssertTrue(source.progress.complete)
+        let afterPublication = try await source.read(offset: 0, count: 10)
+        XCTAssertEqual(afterPublication, beginning)
+        source.retire(); await cache.close()
+    }
+
+    func testClearKeepsCurrentSequentialReadButPreventsItsPublication() async throws {
+        let f = try AudioCacheTestFixture()
+        defer { f.cleanup() }
+        let gate = AudioCacheTestGate(), transport = PrefixCacheTransport(gate: gate)
+        let cache = f.cache(transport: transport), request = f.request()
+        let source = try await cache.preparePlayback(.init(identity: request.identity, audio: request.audio,
+            expectedDuration: request.expectedDuration, authorization: request.authorization,
+            playbackAuthorization: request.playbackAuthorization))
+        await fulfillment(of: [gate.entered], timeout: 3)
+        await cache.clear()
+        await gate.release()
+        let bytes = try await source.read(offset: 60, count: 10)
+        XCTAssertEqual(bytes.count, 10)
+        source.confirmPlayback(at: f.clock.now())
+        let version = await source.result(), hit = await f.hit(cache)
+        XCTAssertNil(version); XCTAssertNil(hit); XCTAssertFalse(source.progress.complete)
+        source.retire(); await cache.close()
+    }
+
     func testFailedNewMarkerPreparationRollsBackOnlyTheNewlyCreatedFile() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
@@ -311,21 +370,25 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
     func testAllStrongCancellationsFenceLateValidationAndPublication() async throws {
         for action in ["cancel", "clear", "close", "revoke", "parent", "caller"] {
             let f = try AudioCacheTestFixture()
-            let gate = AudioCacheTestGate(), cache = f.cache(inspector: AudioCacheTestInspector(gate: gate))
+            let cancellation = ["cancel", "close"].contains(action) ? expectation(description: "producer cancellation") : nil
+            let gate = AudioCacheTestGate()
+            let cache = f.cache(inspector: AudioCacheTestInspector(gate: gate, cancellation: cancellation))
             let parent = MusicQueueAuthorization(), authorization = MusicQueueAuthorization(parent: parent)
             let task = Task { await cache.storeAfterPlayback(f.request(authorization: authorization)) }
             await fulfillment(of: [gate.entered], timeout: 3)
+            var drain: Task<Void, Never>?
             switch action {
-            case "cancel": await cache.cancelPending()
+            case "cancel": drain = Task { await cache.cancelPending() }
             case "clear": await cache.clear()
-            case "close": await cache.close()
+            case "close": drain = Task { await cache.close() }
             case "revoke": authorization.revoke()
             case "parent": parent.revoke()
             default: task.cancel()
             }
+            if let cancellation { await fulfillment(of: [cancellation], timeout: 3) }
             // The intentionally uncooperative inspector returns success after
             // cancellation. The publication boundary must independently refuse.
-            await gate.release(); await task.value
+            await gate.release(); await drain?.value; await task.value
             await cache.close()
             let reopened = f.cache(), hit = await f.hit(reopened)
             XCTAssertNil(hit, action)
@@ -572,12 +635,16 @@ actor AudioCacheTestTransport: NativeMusicAudioCacheTransport {
 struct AudioCacheTestInspector: NativeMusicAudioCacheInspecting {
     let gate: AudioCacheTestGate?
     let result: NativeMusicAudioCacheInspection
-    init(gate: AudioCacheTestGate? = nil, result: NativeMusicAudioCacheInspection = AudioCacheTestFixture.measurement()) {
-        self.gate = gate; self.result = result
+    let cancellation: XCTestExpectation?
+    init(gate: AudioCacheTestGate? = nil, result: NativeMusicAudioCacheInspection = AudioCacheTestFixture.measurement(),
+         cancellation: XCTestExpectation? = nil) {
+        self.gate = gate; self.result = result; self.cancellation = cancellation
     }
     func inspect(_ file: NativeMusicAudioCacheFile, expectedDuration: Double) async throws -> NativeMusicAudioCacheInspection {
-        await gate?.hold()
-        return result // Intentionally ignores cancellation to test final fencing.
+        await withTaskCancellationHandler {
+            await gate?.hold()
+            return result // Intentionally ignores cancellation to test final fencing.
+        } onCancel: { cancellation?.fulfill() }
     }
 }
 
@@ -626,5 +693,19 @@ struct AudioCacheTestFixture: Sendable {
         .init(container: container, codec: codec, duration: duration, decodedFrames: Int64(duration * 44_100),
               sampleRate: 44_100, channels: 2, bitrate: bitrate, bitDepth: depth,
               lossless: lossless, complete: complete, protectedContent: protected)
+    }
+}
+
+private actor PrefixCacheTransport: NativeMusicAudioCacheTransport {
+    let gate: AudioCacheTestGate
+    var count = 0
+    init(gate: AudioCacheTestGate) { self.gate = gate }
+    func transfer(_ request: NativeMusicAudioCacheHTTPRequest, into sink: NativeMusicAudioCacheSink) async throws {
+        count += 1
+        try await sink.accept(.init(url: request.url, status: 200, headers: ["Content-Length": "80", "Content-Type": "audio/wav"]))
+        try sink.write(Data((0..<20).map(UInt8.init)))
+        await gate.hold()
+        try sink.write(Data((20..<80).map(UInt8.init)))
+        try sink.finishBody()
     }
 }

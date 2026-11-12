@@ -42,8 +42,6 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     private string Code(Exception error) => error switch
     {
         MusicLibraryException e => e.Code,
-        MusicPlaybackCacheDataException => "CACHE_DATA_INCOMPATIBLE",
-        MusicPlaybackCacheCommitException => "CACHE_COMMIT_UNKNOWN",
         // A closed transport while this owner is open: the script service, not the request, is unavailable.
         BridgeException { Code: "CLOSED" } when !closed => "SCRIPT_RUNTIME_UNAVAILABLE",
         BridgeException when !closed && runtime is IRuntimeRecovery

@@ -75,8 +75,9 @@ extension NeteaseMusicAccountAdapter: MusicAccountDailyStyleProvider {
         try await authorize(); try check(own)
         let body = root["data"] as? [String: Any] ?? [:]
         let actual = try MusicNeteaseDailyStyle.selection(body["tags"])
-        let raw = try MusicNeteaseWire.rows(body["dailySongs"], maximum: 1000)
-        let rows = try await homeActionRows(raw, context: context, own: own, authorize: authorize)
+        let raw = try MusicNeteaseWire.rows(body["dailySongs"], maximum: 1000).map(Self.homeActionSong)
+        let rows = try await homeActionRows(raw, action: .daily(branch: .style),
+                                          context: context, own: own, authorize: authorize)
         let changed = actual.category != selection.category || Set(actual.tags.map(\.id)) != Set(selection.tags.map(\.id))
         return .init(songs: .init(rows: rows, nextPage: nil, expiresAt: now().addingTimeInterval(60), dailyStyle: actual),
                      saveConfirmed: confirmed, selectionChanged: changed)

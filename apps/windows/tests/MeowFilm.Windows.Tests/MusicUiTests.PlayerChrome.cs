@@ -51,7 +51,7 @@ public static partial class MusicUiTests
 
     private static IEnumerable<TestCase> PlayerChromeCases()
     {
-        yield return Case("player FM popup dismissal cannot open detail and releases its input hook", async () =>
+        yield return Case("player mode dismissal cannot open detail and releases its input hook", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var player = (MusicPlayerView)f.Module.PlayerView;
@@ -69,7 +69,6 @@ public static partial class MusicUiTests
             int requests = 0;
             f.Module.GlobalSurfaceRequested += (_, args) =>
             { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
-            var popup = (System.Windows.Controls.Primitives.Popup)player.FindName("FmPopup");
             try
             {
                 // A logical Window supplies ownership without Show/Activate or physical input.
@@ -84,18 +83,8 @@ public static partial class MusicUiTests
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
                 var sources = (System.Collections.IDictionary)sourcesField.GetValue(input)!;
                 Equal(0, sources.Count);
-                popup.IsOpen = true; await Drain();
-                True(popup.IsOpen && PresentationSource.FromVisual(popup.Child) is HwndSource,
-                    "FM layer owns a real offscreen popup source");
-                Equal(1, sources.Count);
                 var blank = (Grid)player.Content;
                 void Input(RoutedEvent routed) => ProcessBlankInput(blank, routed, (_, _) => { });
-                Input(Mouse.PreviewMouseDownEvent);
-                popup.IsOpen = false;
-                Input(Mouse.PreviewMouseUpEvent); await Drain();
-                Equal(0, requests); Equal(0, sources.Count);
-                Input(Mouse.PreviewMouseDownEvent); Input(Mouse.PreviewMouseUpEvent); await Drain();
-                Equal(1, requests);
                 var menu = (ContextMenu)player.FindName("ModeMenu");
                 ((Button)player.FindName("ModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
                 True(menu.IsOpen, "ordinary mode uses the same observed floating input boundary");
@@ -105,7 +94,7 @@ public static partial class MusicUiTests
                 Input(Mouse.PreviewMouseDownEvent); menu.IsOpen = false;
                 Input(Mouse.PreviewMouseUpEvent);
                 await closed.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
-                Equal(1, requests); Equal(0, sources.Count);
+                Equal(0, requests); Equal(0, sources.Count);
                 surface.RootVisual = null; window.Content = null; await Drain();
                 True(inputField.GetValue(player) is null, "unload releases the input owner");
                 Equal(0, sources.Count);
@@ -173,7 +162,8 @@ public static partial class MusicUiTests
                         before.bubbleUp + 1, before.viewDown + 1, before.viewUp + 1),
                         (previewDown, bubbleDown, previewUp, bubbleUp, viewDown, viewUp));
                 }
-                foreach (string name in new[] { "VolumePopup", "PlaylistPopup", "RatePopup", "SourcePopup", "QualityMenu", "MoreMenu" })
+                foreach (string name in new[] { "VolumePopup", "PlaylistPopup", "RatePopup", "SourcePopup", "QualityMenu", "MoreMenu",
+                    "ModeMenu" })
                 {
                     phase = name + "/open"; routeTrace.Clear();
                     System.Windows.Controls.Primitives.Popup? popup = null;
@@ -187,6 +177,11 @@ public static partial class MusicUiTests
                     {
                         var more = (Button)player.FindName("MoreButton");
                         more.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); menu = more.ContextMenu;
+                    }
+                    else if (name == "ModeMenu")
+                    {
+                        ((Button)player.FindName("ModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                        menu = (ContextMenu)player.FindName(name);
                     }
                     else
                     {
@@ -385,13 +380,25 @@ public static partial class MusicUiTests
             source.RootVisual = footer; Render(footer, 1000, 100); await Drain();
             var mode = (Button)footer.FindName("ModeButton");
             var menu = (ContextMenu)footer.FindName("ModeMenu");
-            var popup = (System.Windows.Controls.Primitives.Popup)footer.FindName("FmPopup");
+            async Task OpenMode()
+            {
+                var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnOpened(object? sender, RoutedEventArgs args) => opened.TrySetResult();
+                menu.Opened += OnOpened;
+                try
+                {
+                    mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+                    await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                finally { menu.Opened -= OnOpened; }
+                await Drain();
+                True(menu.IsOpen, "the ordinary menu really reopens after native teardown");
+            }
             Equal(f.Module.ModeText, System.Windows.Automation.AutomationProperties.GetName(mode));
             True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "no active recording implies no current-song heartbeat");
-            mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
-            await Drain();
+            await OpenMode();
             Equal(0, f.Calls.Count("music.queue.mode"));
-            True(menu.IsOpen && !popup.IsOpen, "opening ordinary choices does not change the queue");
+            True(menu.IsOpen, "opening ordinary choices does not change the queue");
             Equal("列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<MenuItem>()
                 .Select(System.Windows.Automation.AutomationProperties.GetName)));
             True(menu.Items.OfType<MenuItem>().All(item => item.IsEnabled),
@@ -400,8 +407,8 @@ public static partial class MusicUiTests
             ((IInvokeProvider)new MenuItemAutomationPeer(random).GetPattern(PatternInterface.Invoke)).Invoke();
             await Until(() => f.Calls.Count("music.queue.mode") == 1 && !f.Module.Busy);
             Equal(2, f.Module.Mode);
-            True(!menu.IsOpen && !popup.IsOpen, "choosing a mode closes its menu");
-            mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+            True(!menu.IsOpen, "choosing a mode closes its menu");
+            await OpenMode();
             True(menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).IsChecked, "saved random mode is selected");
             random.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
             Equal(1, f.Calls.Count("music.queue.mode"));
@@ -409,14 +416,13 @@ public static partial class MusicUiTests
             await Until(() => f.Module.Mode == 3 && !f.Module.Busy);
             await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "local recording is never sent to WY heartbeat");
-            var sourceButton = (Button)footer.FindName("PlaybackSourceButton");
-            sourceButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
-            var sourceMenu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+            await OpenMode();
+            var sourceMenu = (ContextMenu)footer.FindName("ModeMenu");
             True(sourceMenu.IsOpen && sourceMenu.Items.OfType<MenuItem>().All(item =>
-                !Equals(item.Header, "从当前歌曲进入心动") && !Equals(item.Header, "从当前歌曲进入推荐")),
-                "the separate source menu hides unsupported local-recording entries");
+                System.Windows.Automation.AutomationProperties.GetName(item) is not ("心动模式" or "推荐模式")),
+                "the unified mode menu hides unsupported local-recording entries");
             sourceMenu.IsOpen = false;
-            mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent)); await Drain();
+            await OpenMode();
             var retired = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 1));
             source.RootVisual = null; await Drain();
             True(!menu.IsOpen, "unload closes the ordinary mode menu");

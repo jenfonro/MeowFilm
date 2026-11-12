@@ -13,14 +13,14 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     private let images: ArtworkImages
     private var theme: PageTheme
     private var observation: AnyCancellable?
-    private let modes = UISegmentedControl(items: ["聚合", "原始列表"])
+    private var errorObservation: AnyCancellable?
+    private let rawSwitch = UISwitch(), rawLabel = UILabel()
     private let more = UIButton(type: .system), cancelButton = UIButton(type: .system)
     private let activity = UIActivityIndicatorView(style: .medium)
     private let empty = UILabel(), metadataStatus = UILabel()
     private var raw = false
     private var cards: [Data: FilmSearchCard] = [:]
     private var shownSessionError: UUID?
-    private var shownMetadataError: UUID?
     private var offsets: [Bool: CGPoint] = [:]
     private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
@@ -36,15 +36,21 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         super.viewDidLoad()
         view.backgroundColor = .clear
         view.accessibilityIdentifier = "film.search.results"
-        modes.selectedSegmentIndex = 0
-        modes.accessibilityIdentifier = "film.search.mode"
-        modes.addAction(UIAction { [weak self] _ in
+        rawSwitch.accessibilityIdentifier = "film.search.mode"
+        rawSwitch.accessibilityLabel = "原始列表"
+        rawSwitch.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             self.offsets[self.raw] = self.collection.contentOffset
-            self.raw = self.modes.selectedSegmentIndex == 1
+            self.raw = self.rawSwitch.isOn
             self.render(restoringOffset: self.offsets[self.raw] ?? .zero)
         }, for: .valueChanged)
+        rawLabel.text = "原始列表"
+        rawLabel.font = .preferredFont(forTextStyle: .subheadline)
+        rawLabel.adjustsFontForContentSizeCategory = true
+        rawLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        rawSwitch.setContentCompressionResistancePriority(.required, for: .horizontal)
         metadataStatus.font = .systemFont(ofSize: 12)
+        metadataStatus.lineBreakMode = .byTruncatingTail
         metadataStatus.accessibilityIdentifier = "film.search.metadata.status"
         collection.backgroundColor = .clear
         collection.alwaysBounceVertical = true
@@ -68,7 +74,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         cancelButton.accessibilityIdentifier = "film.search.cancel"
         cancelButton.setTitle("取消", for: .normal)
         cancelButton.addAction(UIAction { [weak self] _ in self?.session?.cancel() }, for: .touchUpInside)
-        let controls = UIStackView(arrangedSubviews: [modes, metadataStatus])
+        let controls = UIStackView(arrangedSubviews: [metadataStatus, UIView(), rawLabel, rawSwitch])
         controls.axis = .horizontal; controls.alignment = .center; controls.spacing = 12
         let footer = UIStackView(arrangedSubviews: [activity, cancelButton, more])
         footer.axis = .horizontal; footer.alignment = .center; footer.distribution = .equalCentering
@@ -78,8 +84,8 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         NSLayoutConstraint.activate([
             controls.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
             controls.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            controls.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            controls.heightAnchor.constraint(equalToConstant: 36),
+            controls.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            controls.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
             collection.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 8),
             collection.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             collection.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
@@ -99,13 +105,14 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
             guard session !== next || observation == nil else { return }
             let changed = session !== next
             observation?.cancel()
+            errorObservation?.cancel()
             session = next
             if changed {
                 offsets.removeAll()
                 shownSessionError = nil
-                shownMetadataError = nil
             }
             observation = next.$snapshot.receive(on: RunLoop.main).sink { [weak self] _ in self?.render() }
+            errorObservation = next.$error.receive(on: RunLoop.main).sink { [weak self] _ in self?.render() }
             if changed, isViewLoaded { collection.setContentOffset(.zero, animated: false) }
             render()
         } catch { presentError("影视搜索不可用") }
@@ -115,6 +122,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     public func close() {
         if let session { service.release(session) }
         observation?.cancel(); observation = nil
+        errorObservation?.cancel(); errorObservation = nil
     }
     public func applyTheme(_ theme: PageTheme) {
         self.theme = theme
@@ -123,7 +131,8 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         metadataStatus.textColor = UIColor(theme.muted)
         more.tintColor = UIColor(theme.accent); cancelButton.tintColor = UIColor(theme.ink)
         activity.color = UIColor(theme.muted)
-        modes.selectedSegmentTintColor = UIColor(theme.chip)
+        rawLabel.textColor = UIColor(theme.ink)
+        rawSwitch.onTintColor = UIColor(theme.accent)
         var snapshot = dataSource.snapshot()
         snapshot.reconfigureItems(snapshot.itemIdentifiers)
         dataSource.apply(snapshot, animatingDifferences: false)
@@ -147,22 +156,22 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
             self.collection.layoutIfNeeded()
             self.collection.setContentOffset(restoringOffset, animated: false)
         }
-        modes.isHidden = state.siteItems.isEmpty
-        empty.isHidden = !visible.isEmpty || state.loading || state.failed
+        empty.isHidden = !visible.isEmpty || state.loading || state.failed || session?.error != nil
         let cancelled = state.siteState == .cancelled || state.metadataState == .cancelled
         empty.text = cancelled ? "已取消" : state.noSources ? "尚未启用可搜索来源" : "未找到影片"
         more.isHidden = !state.hasMore
         more.isEnabled = !state.loading && state.hasMore
+        more.setTitle(state.metadataState == .failed ? "重试" : "加载更多", for: .normal)
         cancelButton.isHidden = !state.loading
         if state.loading { activity.startAnimating() } else { activity.stopAnimating() }
         switch state.metadataState {
         case .unavailable: metadataStatus.text = "TMDB 不可用"
+        case .failed: metadataStatus.text = "TMDB 请求失败"
+        case .loading: metadataStatus.text = "TMDB 加载中…"
         default: metadataStatus.text = nil
         }
-        if state.failed, shownSessionError != state.sessionID {
-            if presentError("影视搜索不可用") { shownSessionError = state.sessionID }
-        } else if state.metadataState == .failed, shownMetadataError != state.sessionID {
-            if presentError("TMDB 搜索失败") { shownMetadataError = state.sessionID }
+        if state.failed || session?.error != nil, shownSessionError != state.sessionID {
+            if presentError(session?.error?.localizedDescription ?? "影视搜索失败") { shownSessionError = state.sessionID }
         }
     }
 

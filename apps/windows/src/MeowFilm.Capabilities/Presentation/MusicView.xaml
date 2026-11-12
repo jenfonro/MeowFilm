@@ -7,6 +7,13 @@
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <BooleanToVisibilityConverter x:Key="Visible"/>
+  <local:MusicPlayingSongConverter x:Key="PlayingSong"/>
+  <Style x:Key="Playlist.SongTitle" TargetType="TextBlock">
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+   <Style.Triggers><DataTrigger Value="True"><DataTrigger.Binding><MultiBinding Converter="{StaticResource PlayingSong}"><Binding Path="Id"/><Binding Path="DataContext.CurrentSongId" RelativeSource="{RelativeSource AncestorType=local:MusicView}"/></MultiBinding></DataTrigger.Binding><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Accent}"/></DataTrigger>
+    <DataTrigger Binding="{Binding Path=(desktop:DesktopTheme.IsHighContrast),RelativeSource={RelativeSource Self}}" Value="True"><Setter Property="Foreground" Value="{Binding Foreground,RelativeSource={RelativeSource AncestorType=DataGridRow}}"/></DataTrigger>
+   </Style.Triggers>
+  </Style>
   <Style x:Key="Playlist.Grid" TargetType="DataGrid" BasedOn="{StaticResource {x:Type DataGrid}}">
    <Setter Property="Background" Value="Transparent"/>
    <Setter Property="BorderThickness" Value="0"/>
@@ -30,13 +37,16 @@
    <Setter Property="BorderThickness" Value="0"/>
    <Setter Property="Margin" Value="0,1"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="DataGridRow">
-    <Border x:Name="RowSurface" Background="{TemplateBinding Background}" CornerRadius="8">
+    <Border x:Name="RowSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8">
      <DataGridCellsPresenter/>
     </Border>
    </ControlTemplate></Setter.Value></Setter>
    <Style.Triggers>
-    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/></Trigger>
-    <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/></Trigger>
+    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="White"/></Trigger>
+    <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#E9F0F6"/><Setter Property="BorderBrush" Value="#9AAEBF"/><Setter Property="BorderThickness" Value="1"/></Trigger>
+    <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Text}"/><Setter Property="BorderThickness" Value="1"/></Trigger>
+    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+    <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsSelected" Value="True"/></MultiTrigger.Conditions><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/></MultiTrigger>
    </Style.Triggers>
   </Style>
   <Style x:Key="Playlist.Cell" TargetType="DataGridCell" BasedOn="{StaticResource {x:Type DataGridCell}}">
@@ -201,7 +211,8 @@
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="SemiBold"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
-      <StackPanel Grid.Row="2" Orientation="Horizontal">
+      <TextBlock Grid.Row="1" Text="{Binding DetailSubtitle}" Margin="0,14,0,0" Style="{StaticResource Capability.Muted}" TextTrimming="CharacterEllipsis"/>
+      <WrapPanel Grid.Row="2">
        <Button x:Name="PlayAllButton" Click="PlayContentDetail_Click" IsEnabled="{Binding CanPlayContentDetail}"
                Style="{StaticResource Playlist.PlayAllButton}"
                AutomationProperties.Name="播放全部">
@@ -211,7 +222,16 @@
          <TextBlock Text="播放全部" Margin="7,0,0,0"/>
         </StackPanel>
        </Button>
-      </StackPanel>
+       <StackPanel Orientation="Horizontal" Visibility="{Binding IsCatalogDaily,Converter={StaticResource Visible}}">
+        <Button x:Name="DailyBranchButton" Content="{Binding DailyOtherBranchTitle}" Tag="{Binding DailyOtherBranch}" Click="DailyBranch_Click" Margin="8,0,0,0"/>
+        <Button Content="···" Click="DailyMore_Click" Margin="8,0,0,0" AutomationProperties.Name="每日推荐更多操作"/>
+       </StackPanel>
+       <Button x:Name="NetworkPlaylistButton" Content="{Binding NetworkPlaylistActionText}"
+               Click="NetworkPlaylist_Click" Margin="10,0,0,0"
+               Visibility="{Binding ShowsNetworkPlaylistAction,Converter={StaticResource Visible}}"
+               IsEnabled="{Binding CanToggleNetworkPlaylist}"
+               AutomationProperties.Name="{Binding NetworkPlaylistActionText}"/>
+      </WrapPanel>
      </Grid>
     </Grid>
     <StackPanel Visibility="{Binding IsHistory,Converter={StaticResource Visible}}" HorizontalAlignment="Left">
@@ -220,6 +240,34 @@
     </StackPanel>
    </Grid>
    <StackPanel Grid.Row="1">
+    <StackPanel Visibility="{Binding IsDailyStyle,Converter={StaticResource Visible}}" Margin="0,0,0,16">
+     <Button x:Name="DailyStyleButton" Content="{Binding DailyStyleSelectionText}" Click="DailyStyleOpen_Click" HorizontalAlignment="Left" IsEnabled="{Binding CanEditDailyStyle}">
+      <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Music.FilterTag}"><Setter Property="Width" Value="Auto"/><Setter Property="MaxWidth" Value="500"/><Setter Property="Padding" Value="14,2"/><Setter Property="Margin" Value="0"/></Style></Button.Style>
+     </Button>
+     <Popup x:Name="DailyStylePopup" PlacementTarget="{Binding ElementName=DailyStyleButton}" Placement="Bottom" StaysOpen="False" AllowsTransparency="True" IsOpen="{Binding IsDailyStyleEditorOpen,Mode=OneWay}" Opened="DailyStylePopup_Opened" Closed="DailyStylePopup_Closed">
+     <Border x:Name="DailyStylePanel" Focusable="True" Style="{StaticResource MeowFilm.Surface}" Width="540" Padding="16" Margin="0,6,0,0" PreviewKeyDown="DailyStylePanel_KeyDown">
+      <StackPanel>
+       <ScrollViewer MaxHeight="230" VerticalScrollBarVisibility="Auto">
+        <ItemsControl ItemsSource="{Binding DailyStyleGroups}"><ItemsControl.ItemTemplate><DataTemplate>
+         <StackPanel Margin="0,0,0,12"><TextBlock Text="{Binding Id}" Margin="0,0,0,8"/>
+          <ItemsControl ItemsSource="{Binding Items}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+           <ItemsControl.ItemTemplate><DataTemplate><Button Content="{Binding Name}" Tag="{Binding}" Click="DailyStyleTag_Click">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Music.FilterTag}"><Style.Triggers><DataTrigger Binding="{Binding Selected}" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Accent}"/><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/></DataTrigger></Style.Triggers></Style></Button.Style>
+           </Button></DataTemplate></ItemsControl.ItemTemplate>
+          </ItemsControl>
+         </StackPanel>
+        </DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+       </ScrollViewer>
+       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="取消" Click="DailyStyleCancel_Click" IsEnabled="{Binding CanEditDailyStyle}"/><Button Content="确认" Click="DailyStyleConfirm_Click" IsEnabled="{Binding CanConfirmDailyStyle}"/></StackPanel>
+      </StackPanel>
+     </Border>
+     </Popup>
+    </StackPanel>
+    <StackPanel Visibility="{Binding ShowDetailSkeleton,Converter={StaticResource Visible}}" IsHitTestVisible="False">
+     <desktop:LoadingSkeleton Height="34" Margin="0,8" CornerRadius="8" IsActive="True"/>
+     <desktop:LoadingSkeleton Height="34" Margin="0,8" CornerRadius="8" IsActive="True"/>
+     <desktop:LoadingSkeleton Height="34" Margin="0,8" CornerRadius="8" IsActive="True"/>
+    </StackPanel>
    <DockPanel Margin="0,0,0,10" Visibility="{Binding IsContentDetailPage,Converter={StaticResource Visible}}">
     <StackPanel Orientation="Horizontal">
      <TextBlock Text="{Binding DetailSectionTitle}" FontSize="18" FontWeight="SemiBold"/>
@@ -279,7 +327,7 @@
          </Grid>
         </Border>
         <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14"/>
+         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14" Style="{StaticResource Playlist.SongTitle}"/>
          <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12"
                     Foreground="{DynamicResource MeowFilm.Brush.Muted}" Margin="0,2,0,0"/>
         </StackPanel>
@@ -377,7 +425,7 @@
          </Grid>
         </Border>
         <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14"/>
+         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14" Style="{StaticResource Playlist.SongTitle}"/>
          <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12"
                     Foreground="{DynamicResource MeowFilm.Brush.Muted}" Margin="0,2,0,0"/>
         </StackPanel>

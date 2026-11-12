@@ -139,34 +139,14 @@
     </ControlTemplate.Triggers>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
-  <Style x:Key="Catalog.ChannelTag" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
-   <Setter Property="Width" Value="78"/>
-   <Setter Property="Height" Value="31"/>
-   <Setter Property="MinHeight" Value="0"/>
-   <Setter Property="Margin" Value="0,0,12,14"/>
-   <Setter Property="Padding" Value="8,2"/>
-   <Setter Property="FontSize" Value="13"/>
-   <Setter Property="Foreground" Value="#495164"/>
-   <Setter Property="Background" Value="#F4F5F7"/>
-   <Setter Property="BorderBrush" Value="#E3E5E9"/>
-   <Setter Property="BorderThickness" Value="1"/>
-   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-    <Border x:Name="Pill" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="16" Padding="{TemplateBinding Padding}">
-     <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-    </Border>
-    <ControlTemplate.Triggers>
-     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Pill" Property="Background" Value="#EAECF0"/></Trigger>
-     <Trigger Property="IsPressed" Value="True"><Setter TargetName="Pill" Property="Background" Value="#DFE2E7"/></Trigger>
-     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".45"/></Trigger>
-    </ControlTemplate.Triggers>
-   </ControlTemplate></Setter.Value></Setter>
-  </Style>
+  <Style x:Key="Catalog.ChannelTag" TargetType="Button" BasedOn="{StaticResource Music.FilterTag}"/>
   <Style x:Key="Catalog.CoverPlay" TargetType="Button" BasedOn="{StaticResource Catalog.Flat}">
+   <Setter Property="Width" Value="44"/><Setter Property="Height" Value="44"/>
+   <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="VerticalAlignment" Value="Center"/>
    <Setter Property="MinHeight" Value="0"/><Setter Property="IsEnabled" Value="{Binding CanPlay}"/>
    <Setter Property="AutomationProperties.Name" Value="{Binding Title,StringFormat=播放 {0}}"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-    <Border Background="{StaticResource Card.CoverHover}"><local:CardPlayGlyph IsBusy="{Binding IsPreparing}" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+    <Border Background="Transparent"><local:CardPlayGlyph IsBusy="{Binding IsPreparing}" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
    </ControlTemplate></Setter.Value></Setter>
    <Style.Triggers>
     <Trigger Property="Opacity" Value="0"><Setter Property="IsHitTestVisible" Value="False"/></Trigger>
@@ -182,6 +162,7 @@
     <StackPanel>
      <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="8">
       <art:ArtworkImage Address="{Binding Cover}"/>
+      <Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=PlaylistHost}"/>
       <Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=PlaylistHost}"/>
      </Grid>
      <Grid Margin="0,8,0,0">
@@ -205,6 +186,7 @@
                 FontSize="16" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap">
       <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}"><Setter Property="Foreground" Value="#30394D"/><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
      </TextBlock>
+     <Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankCoverHost}"/>
      <Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankCoverHost}"/>
     </Grid>
    </Button>
@@ -253,7 +235,7 @@
     <Border Background="{DynamicResource MeowFilm.Brush.Surface}" CornerRadius="12" Padding="20" Height="154">
      <StackPanel><DockPanel Margin="0,0,0,14"><TextBlock DockPanel.Dock="Right" Text="{Binding UpdateFrequency}" Style="{StaticResource Capability.Muted}" FontSize="11"/><TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="16" TextTrimming="CharacterEllipsis"/></DockPanel>
       <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="96"/><ColumnDefinition/></Grid.ColumnDefinitions>
-       <Grid Width="80" Height="80" HorizontalAlignment="Left"><art:ArtworkImage Address="{Binding ThirdPreviewCover}" Margin="12,12,-10,-4" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding SecondPreviewCover}" Margin="6,6,-5,-2" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding FirstPreviewCover}" local:CardClip.Radius="4"/><Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" local:CardClip.Radius="4" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/></Grid>
+       <Grid Width="80" Height="80" HorizontalAlignment="Left"><art:ArtworkImage Address="{Binding ThirdPreviewCover}" Margin="12,12,-10,-4" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding SecondPreviewCover}" Margin="6,6,-5,-2" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding FirstPreviewCover}" local:CardClip.Radius="4"/><Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/><Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" local:CardClip.Radius="4" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/></Grid>
        <ItemsControl Grid.Column="1" ItemsSource="{Binding PreviewSongs}"><ItemsControl.ItemTemplate><DataTemplate><Grid Height="27"><Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition/><ColumnDefinition Width="20"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Rank}" Style="{StaticResource Capability.Muted}"/><TextBlock Grid.Column="1" TextTrimming="CharacterEllipsis"><Run Text="{Binding Title}"/><Run Text=" − "/><Run Text="{Binding Artist}" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/></TextBlock><TextBlock Grid.Column="2" Text="{Binding Movement}" Foreground="{DynamicResource MeowFilm.Brush.Accent}" HorizontalAlignment="Right"/></Grid></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
       </Grid>
      </StackPanel>
@@ -496,9 +478,6 @@
    <ComboBox ItemsSource="{Binding CatalogPersonalKinds}" DisplayMemberPath="Name" SelectedValuePath="Key"
     SelectedValue="{Binding CatalogPersonalKind}" SelectionChanged="Options_Changed" Width="130" Margin="0,0,12,8"
     Visibility="{Binding IsCatalogPersonal,Converter={StaticResource Visible}}" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="个人歌单类型"/>
-   <ComboBox ItemsSource="{Binding CatalogDailyBranches}" DisplayMemberPath="Name" SelectedValuePath="Key"
-    SelectedValue="{Binding CatalogDailyBranch}" SelectionChanged="Options_Changed" Width="130" Margin="0,0,12,8"
-    Visibility="{Binding IsCatalogDaily,Converter={StaticResource Visible}}" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="每日推荐类型"/>
    <ComboBox ItemsSource="{Binding CatalogSearchKinds}" SelectedItem="{Binding CatalogSearchKind}" Width="96"
     SelectionChanged="Kind_Changed" Margin="0,0,12,8" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="搜索类型"/>
    <Button Content="上一页" Tag="-1" Click="Page_Click" IsEnabled="{Binding CanCatalogPrevious}"/>
@@ -550,9 +529,12 @@
     </DataTemplate></ItemsControl.ItemTemplate>
   </ItemsControl>
   <Grid>
-   <ScrollViewer x:Name="HomeScroll" local:MusicCatalogSurface.IsHome="True" local:MusicCatalogSurface.IsLanding="True" Visibility="{Binding IsCatalogHome,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
-    <ItemsControl ItemsSource="{Binding HomeSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="40,0,40,24" MaxWidth="1490"/>
-   </ScrollViewer>
+   <Grid x:Name="HomeContent" Visibility="{Binding IsCatalogHome,Converter={StaticResource Visible}}">
+    <ScrollViewer x:Name="HomeScroll" local:MusicCatalogSurface.IsHome="True" local:MusicCatalogSurface.IsLanding="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
+     <ItemsControl ItemsSource="{Binding HomeSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="40,0,40,24" MaxWidth="1490"/>
+    </ScrollViewer>
+    <Image x:Name="HomeRefreshOverlay" IsHitTestVisible="False" Focusable="False" Stretch="Fill" Visibility="Collapsed"/>
+   </Grid>
    <ScrollViewer x:Name="SearchOverviewScroll" local:MusicCatalogSurface.IsOverview="True" Visibility="{Binding IsSearchOverview,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
     <ItemsControl ItemsSource="{Binding SearchOverviewSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="0,0,0,24" MaxWidth="1490"/>
    </ScrollViewer>

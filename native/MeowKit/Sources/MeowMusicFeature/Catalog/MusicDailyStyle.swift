@@ -10,7 +10,6 @@ public struct MusicDailyStyleCategory: Sendable, Equatable, Identifiable {
     public let id: String
     public let name: String
     public let tags: [MusicDailyStyleTag]
-    public var maximum: Int { id == "3000" ? 1 : 5 }
     public init(id: String, name: String, tags: [MusicDailyStyleTag]) {
         self.id = id; self.name = name; self.tags = tags
     }
@@ -21,7 +20,7 @@ public struct MusicDailyStyleSelection: Sendable, Equatable {
     public init(category: String, tags: [MusicDailyStyleTag]) { self.category = category; self.tags = tags }
     public func validate(in categories: [MusicDailyStyleCategory]) throws {
         guard let value = categories.first(where: { $0.id == category }), !tags.isEmpty,
-              tags.count <= value.maximum, Set(tags.map(\.id)).count == tags.count,
+              Set(tags.map(\.id)).count == tags.count,
               tags.allSatisfy({ tag in value.tags.contains { $0.id == tag.id } }) else {
             throw MusicServiceError.invalidRequest
         }

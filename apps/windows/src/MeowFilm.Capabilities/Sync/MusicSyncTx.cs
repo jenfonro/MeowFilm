@@ -10,29 +10,39 @@ internal sealed class MusicSyncTx(MusicPlatformSession session, MusicPlatformHtt
     Func<Task> guard, Action accountGuard, CancellationToken token)
     : MusicSyncAdapter(session, http, clients, client, guard, accountGuard, token)
 {
-    private sealed record Entry(string Id, string DirId, string Owner, string Name, bool Writable, string Kind);
+    private sealed record Entry(string Id, string DirId, string Owner, string Name, bool Writable, string Kind, string Cover = "", long Count = 0);
+    private sealed record DirectorySnapshot(List<Entry> Entries, HashSet<string> OwnedIds);
+    private HashSet<string>? subscriptionOwnedIds;
     private Entry Favorites => new("favorites", "201", AccountId, "我喜欢", true, "favorites");
     private string Euin
     {
         get { var c = Cookies; string value = PJ.Cookie(c, "encrypt_uin", PJ.Cookie(c, "encryptUin"));
             Require(value.Length > 0 && (!c.TryGetValue("encryptUin", out var alias) || alias == value), "INVALID_CREDENTIALS"); return value; }
     }
-    private async Task<List<Entry>> Directory()
+    private async Task<DirectorySnapshot> Directory()
     {
         Require(PJ.Cookie(Cookies, "musicid") == AccountId, "INVALID_CREDENTIALS");
         var data = await Tx("music.musicasset.PlaylistBaseRead", "GetPlaylistByUin", O(("uin", AccountId)));
         var rows = Rows(data["v_playlist"]); Require(LJ.B(data["bFinish"]) && Count(data["total"]) == rows.Count);
         var result = new List<Entry>(); var seen = new HashSet<string>(); var subscribed = new HashSet<string>();
+        var ownedIds = new HashSet<string>(StringComparer.Ordinal);
         Entry Parse(JsonObject r, bool owned)
         {
             string id = Id(r["tid"] ?? r["dissid"] ?? r["id"]), dir = Id(r["dirid"]), owner = Id(r["uin"]);
             Require(!owned || owner == AccountId && r["invalid"] is not null && !LJ.B(r["invalid"]), "IDENTITY_MISMATCH");
-            return new(id, dir, owner, Name(r["dirName"] ?? r["title"] ?? r["dissname"]), owned, "playlist");
+            return new(id, dir, owner, Name(r["dirName"] ?? r["title"] ?? r["dissname"]), owned, "playlist",
+                NativeMusicSong.PublicUrl(r["picurl"] ?? r["cover"]), r["songnum"] is { } count ? Count(count) : 0);
         }
         foreach (var row in rows)
         {
-            if (PJ.Scalar(row["dirid"]) == "201") { Require(Id(row["uin"]) == AccountId, "IDENTITY_MISMATCH"); continue; }
-            var entry = Parse(row, true); Require(seen.Add(entry.Id), "PAGINATION_STALLED"); result.Add(entry);
+            if (PJ.Scalar(row["dirid"]) == "201")
+            {
+                Require(Id(row["uin"]) == AccountId, "IDENTITY_MISMATCH");
+                if ((row["tid"] ?? row["dissid"] ?? row["id"]) is { } favoriteId) ownedIds.Add(Id(favoriteId));
+                continue;
+            }
+            var entry = Parse(row, true); Require(seen.Add(entry.Id), "PAGINATION_STALLED");
+            ownedIds.Add(entry.Id); result.Add(entry);
         }
         long? total = null; int received = 0;
         for (long page = 0; ; page = checked(page + 1))
@@ -47,7 +57,7 @@ internal sealed class MusicSyncTx(MusicPlatformSession session, MusicPlatformHtt
                 if (seen.Add(entry.Id)) result.Add(entry);
                 else Require(result.Any(e => e.Id == entry.Id && e.Writable && e.Owner == entry.Owner), "IDENTITY_MISMATCH");
             }
-            if (more == 0) { Require(received == total); return result; }
+            if (more == 0) { Require(received == total); return new(result, ownedIds); }
             Require(items.Count == 100 && received < total, "PAGINATION_STALLED");
         }
     }
@@ -83,21 +93,52 @@ internal sealed class MusicSyncTx(MusicPlatformSession session, MusicPlatformHtt
         }
         return new(entry.Id, entry.Name, entry.Kind, entry.Writable, entry.Owner, after, O(("dirId", entry.DirId)));
     }
-    private static string Signature(List<Entry> entries) => System.Text.Json.JsonSerializer.Serialize(entries.OrderBy(e => e.Id, StringComparer.Ordinal));
+    private static string Signature(DirectorySnapshot snapshot) => System.Text.Json.JsonSerializer.Serialize(new
+    {
+        entries = snapshot.Entries.OrderBy(e => e.Id, StringComparer.Ordinal),
+        ownedIds = snapshot.OwnedIds.Order(StringComparer.Ordinal)
+    });
     internal override async Task<SyncDirectory> ReadAsync(string[] kinds)
     {
-        var before = kinds.Contains("playlist") ? await Directory() : []; var result = new List<SyncRemote>();
+        var before = kinds.Contains("playlist") ? await Directory() : new DirectorySnapshot([], []); var result = new List<SyncRemote>();
         if (kinds.Contains("favorites")) result.Add(await ReadEntry(Favorites));
-        foreach (var entry in before) result.Add(await ReadEntry(entry));
+        foreach (var entry in before.Entries.Where(entry => entry.Writable && entry.Owner == AccountId)) result.Add(await ReadEntry(entry));
         if (kinds.Contains("playlist")) Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED");
-        return new(AccountId, result);
+        return new(AccountId, result, Subscriptions(before.Entries));
     }
     internal override async Task<SyncRemote?> ReadCollectionAsync(string id)
     {
         if (id == "favorites") return await ReadEntry(Favorites);
-        var before = await Directory(); var entry = before.FirstOrDefault(e => e.Id == id); var result = entry is null ? null : await ReadEntry(entry);
+        var before = await Directory(); var entry = before.Entries.FirstOrDefault(e => e.Id == id && e.Writable && e.Owner == AccountId);
+        var result = entry is null ? null : await ReadEntry(entry);
         Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED"); return result;
     }
+    private static List<SyncSubscription> Subscriptions(IEnumerable<Entry> entries) => entries.Where(entry => !entry.Writable)
+        .Select(entry => new SyncSubscription(entry.Id, entry.Name, entry.Cover, entry.Count, new())).ToList();
+    internal override async Task<IReadOnlyList<SyncSubscription>> ReadSubscriptionsAsync()
+    {
+        subscriptionOwnedIds = null;
+        var before = await Directory(); var subscriptions = Subscriptions(before.Entries);
+        Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED");
+        subscriptionOwnedIds = before.OwnedIds;
+        return subscriptions;
+    }
+    internal override Task<SyncSubscription> SubscriptionTargetAsync(string id, string name, string cover, long count)
+    {
+        Require(subscriptionOwnedIds is not null, "SNAPSHOT_CHANGED");
+        Require(!subscriptionOwnedIds!.Contains(id), "READ_ONLY");
+        return base.SubscriptionTargetAsync(id, name, cover, count);
+    }
+    private async Task ChangeSubscription(SyncSubscription target, bool present)
+    {
+        _ = MusicLibraryOwner.NetworkPlaylistId("tx", target.Id);
+        var result = await Tx("music.musicasset.PlaylistFavWrite", present ? "FavPlaylist" : "CancelFavPlaylist",
+            O(("uin", Euin), ("v_playlistId", new JsonArray(JsonNode.Parse(target.Id)))));
+        Require(PJ.Scalar(result["result"]) == "0" && result["v_failedPlaylistId"] is null or JsonArray, "WRITE_UNCONFIRMED");
+        Require(result["v_failedPlaylistId"] is not JsonArray failed || !failed.Any(id => Id(id) == target.Id), "WRITE_UNCONFIRMED");
+    }
+    internal override Task SubscribeAsync(SyncSubscription target) => ChangeSubscription(target, true);
+    internal override Task UnsubscribeAsync(SyncSubscription subscription) => ChangeSubscription(subscription, false);
     internal override async Task CreateAsync(string name) => _ = await Tx("music.musicasset.PlaylistBaseWrite", "AddPlaylist", O(("dirName", name)));
     internal override async Task DeleteAsync(SyncRemote remote)
     {

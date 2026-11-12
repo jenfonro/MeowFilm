@@ -15,16 +15,17 @@ test('Windows input inventory covers shared packaging, locked configuration and 
   for (const path of [
     'scripts/package-runtime.mjs', 'scripts/test-root.mjs', 'scripts/windows/test.ps1',
     'scripts/script-host-native.json', 'apps/runtime/modules/music-script.mjs',
-    'scripts/quickjs-native.json', 'native/JavaScript/CMakeLists.txt',
-    'native/JavaScript/meowfilm_js.c', 'native/JavaScript/quickjs/quickjs.c',
-    'packages/film-rules/film-rules.js', 'packages/film-search/film-search.js', 'LICENSES/quickjs-native-MIT.txt',
+    'native/JavaScript/patches/regexp-compile-interrupt.patch', 'native/JavaScript/quickjs/quickjs.c',
+    'packages/film-rules/film-rules.js', 'packages/film-rules/playback-rules.js', 'packages/film-search/film-search.js',
+    'packages/novel-rules/novel-rules.js',
     'scripts/quickjs/build-native.mjs', 'scripts/quickjs/build-source-sdk.mjs',
     'scripts/windows/ensure-runtime-native.mjs', 'packages/script-host/native/task-context.patch',
     'packages/script-host/native/script_host_native.cc', 'packages/script-host/binding.gyp',
     'apps/runtime/bootstrap.mjs', 'apps/runtime/entry.mjs', 'apps/runtime/client.mjs', 'apps/runtime/contracts.mjs',
     'apps/runtime/modules/source-candidates.mjs', ...metadataFiles,
     'apps/runtime/modules/cat-script.mjs',
-    'apps/runtime/modules/source-runtime.mjs', 'packages/source-runtime/src/index.js',
+    'apps/runtime/modules/source-runtime.mjs', 'apps/runtime/modules/source-library.mjs',
+    'apps/runtime/modules/source-web.mjs', 'apps/runtime/modules/source-rules.mjs', 'packages/source-runtime/src/index.js',
     'apps/windows/NuGet.Config', 'apps/windows/global.json',
     'LICENSES/node-LICENSE.txt',
     'LICENSES/NOTICE.md',
@@ -40,12 +41,33 @@ test('Windows input inventory covers shared packaging, locked configuration and 
     'apps/windows/src/MeowFilm.Media/IMPLEMENTATION.md',
     'apps/ios/MeowFilm/App.swift', '.local/test-results/native.log',
     'native/MeowKit/Package.swift', 'scripts/generate-ios-project.py',
-    'scripts/package-ios-runtime.mjs', 'scripts/prepare-ios-runtime.py',
+    'scripts/ios/package-runtime.mjs', 'scripts/prepare-ios-runtime.py',
     'scripts/ios-node-preflight/probe.mjs', 'scripts/ios-node-mobile.json',
     'scripts/tests/test_source_scope.py', 'tests/ios-runtime.test.mjs', 'tests/ios-runtime-support.mjs',
     'LICENSES/nodejs-mobile-LICENSE.txt',
-    'build/meowfilm.exe', 'tmp/test-results/native.log', 'tmp/working/项目工作记录.md'
+    'build/meowfilm.exe', 'tmp/test-results/native.log', 'tmp/working/项目工作记录.md',
+    'apps/windows/app/bin/Release/meowfilm.exe', 'apps/windows/app/obj/generated.cs',
+    'packages/script-host/build/Release/source-sdk.js', 'packages/script-host/node_modules/example/index.js'
   ]) assert.equal(isWindowsBuildInput(path), false, path);
+});
+
+test('new shared Node helpers participate in the fingerprint without registration', () => {
+  mkdirSync(temporaryRoot, { recursive: true });
+  const root = mkdtempSync(join(temporaryRoot, 'meowfilm-inputs-'));
+  try {
+    const entry = 'scripts/windows/tool.mjs', helper = 'scripts/fresh-helper.mjs';
+    mkdirSync(dirname(join(root, entry)), { recursive: true });
+    writeFileSync(join(root, entry), "import '../fresh-helper.mjs';");
+    const before = fingerprintInputs(root, [entry]);
+    writeFileSync(join(root, helper), 'export const value = 1;');
+    const included = fingerprintInputs(root, [entry, helper]);
+    assert.notEqual(included, before);
+    writeFileSync(join(root, helper), 'export const value = 2;');
+    assert.notEqual(fingerprintInputs(root, [entry, helper]), included);
+  } finally {
+    assertOwnedPath(temporaryRoot, root);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('Windows fingerprint binds bytes and paths; inventory order and duplicates are irrelevant', () => {

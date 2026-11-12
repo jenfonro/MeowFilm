@@ -7,7 +7,7 @@ public struct PageGradientStop: Equatable, Sendable {
 
 public struct PageTheme: Equatable, Sendable {
     public static let scrim = PageColor(rgb: 0x000000, alpha: 82)
-    public let palette: PageColorway
+    public let palette: PagePalette
     public let dark: Bool
     public let top, bottom, mid, ink, muted, accent, surface, border, chip, headerDark: PageColor
     public var headerMuted: PageColor { ink.mixed(with: top, ratio: 0.2) }
@@ -18,16 +18,20 @@ public struct PageTheme: Equatable, Sendable {
     public var panel: PageColor { .init(rgb: 0xffffff, alpha: dark ? 6 : 61) }
 
     public init(palette: PageColorway = .lilac, dark: Bool = false) {
+        self.init(colors: .preset(palette), dark: dark)
+    }
+
+    public init(colors palette: PagePalette, dark: Bool = false) {
         self.palette = palette; self.dark = dark
-        top = dark ? .hsl(palette.hue, saturation: 25, lightness: 18) : palette.lightTop
-        bottom = dark ? .hsl(palette.hue, saturation: 20, lightness: 11) : .init(rgb: 0xf6fbfe)
+        top = dark ? .hsl(palette.hue, saturation: palette.darkSaturation, lightness: 18) : palette.lightTop
+        bottom = dark ? .hsl(palette.hue, saturation: palette.darkSaturation * 0.8, lightness: 11) : .init(rgb: 0xf6fbfe)
         mid = top.mixed(with: bottom, ratio: 0.68)
         accent = dark ? palette.lightAccent.mixed(with: .init(rgb: 0xffffff), ratio: 0.55) : palette.lightAccent
         ink = .init(rgb: dark ? 0xf3f1f8 : 0x39343e); muted = .init(rgb: dark ? 0xb4b2c0 : 0x7f7a7d)
         surface = top.mixed(with: .init(rgb: 0xffffff), ratio: dark ? 0.045 : 0.89)
         border = top.mixed(with: .init(rgb: dark ? 0xffffff : 0x75737d), ratio: dark ? 0.17 : 0.15)
         chip = dark ? top.mixed(with: .init(rgb: 0xffffff), ratio: 0.04) : top.mixed(with: bottom, ratio: 0.48)
-        headerDark = .hsl(palette.hue, saturation: 28, lightness: 27)
+        headerDark = .hsl(palette.hue, saturation: min(28, palette.darkSaturation * 1.12), lightness: 27)
     }
 
     /// app-colors.js replaces the CSS bootstrap's 32%/56% three-stop gradient.

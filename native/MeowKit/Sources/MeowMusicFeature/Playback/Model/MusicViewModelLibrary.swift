@@ -60,7 +60,7 @@ extension MusicViewModel {
             let service = try requireService(), before = try await service.state()
             try check(epoch)
             let restored = try await service.restoreHistory(id: playlist.id, expectedRevision: before.revision)
-            try check(epoch); stopFM(); invalidateSelection(stopMedia: true); playbackState.state = restored; notices.queueNotice = nil
+            try check(epoch); stopFM(); invalidateSelection(stopMedia: true, reason: .ui); playbackState.state = restored; notices.queueNotice = nil
             try await refreshQueue(service, epoch: epoch)
             // History restore, like app restore, does not auto-sound.
         } catch { report(error, epoch: epoch, operation: "恢复历史队列", kind: .queue) }
@@ -132,21 +132,34 @@ extension MusicViewModel {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
         guard !isChangingQueue, !isNavigating else { return }
+        let navigation = navigationID
+        var token = selectionID
         playbackState.isChangingQueue = true
-        defer { if lifecycle == epoch { playbackState.isChangingQueue = false } }
+        defer {
+            if lifecycle == epoch, navigationID == navigation { playbackState.isChangingQueue = false }
+        }
+        func checkRequest() throws {
+            try check(epoch)
+            guard navigationID == navigation, selectionID == token else { throw MusicServiceError.cancelled }
+        }
         do {
             guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
-            await flushPlaybackFacts(); try check(epoch)
+            await flushPlaybackFacts(); try checkRequest()
             let service = try requireService(), before = try await service.state()
-            try check(epoch)
+            try checkRequest()
             let restored = try await provider.restoreHistory(detail: detail, startIndex: startIndex,
                                                             expectedRevision: before.revision)
-            try check(epoch)
+            try checkRequest()
             try await (service as? any MusicSimilarModeServing)?.cancelSimilarMode()
-            try check(epoch); stopFM(); invalidateSelection(stopMedia: true); playbackState.state = restored; notices.queueNotice = nil
-            try await refreshQueue(service, epoch: epoch)
+            try checkRequest(); stopFM(); invalidateSelection(stopMedia: true, reason: .ui); token = selectionID
+            playbackState.state = restored; notices.queueNotice = nil
+            try await refreshQueue(service, epoch: epoch, selection: token)
+            try checkRequest()
             await prepareCurrent()
-        } catch { report(error, epoch: epoch, operation: "继续播放历史歌单") }
+        } catch {
+            guard lifecycle == epoch, navigationID == navigation, selectionID == token else { return }
+            report(error, epoch: epoch, operation: "继续播放历史歌单")
+        }
     }
 
 }

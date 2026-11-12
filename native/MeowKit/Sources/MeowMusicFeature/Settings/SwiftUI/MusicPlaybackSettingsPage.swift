@@ -10,7 +10,7 @@ final class MusicPlaybackSettingsViewController: MusicSettingsPageViewController
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         self.model = model
         super.init(appearance: appearance, content: MusicPlaybackSettingsContent(
-            theme: PageTheme(palette: appearance.pageColorway)
+            theme: PageTheme(colors: appearance.pagePalette)
         ))
         pageTitle = "播放设置"
     }
@@ -61,7 +61,7 @@ final class MusicQualitySettingsViewController: MusicSettingsPageViewController<
         self.spatial = spatial
         state = MusicQualitySettingsState(model: model)
         super.init(appearance: appearance, content: MusicQualitySettingsContent(
-            state: state, spatial: spatial, theme: PageTheme(palette: appearance.pageColorway)
+            state: state, spatial: spatial, theme: PageTheme(colors: appearance.pagePalette)
         ))
         pageTitle = spatial ? "空间／全景音频设置" : "音质设置"
     }
@@ -144,7 +144,7 @@ private struct MusicQualityRowLabel: View {
                 Spacer(minLength: 8)
                 Text(symbol)
                     .font(.subheadline)
-                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                     .lineLimit(1)
                     .accessibilityHidden(true)
             }

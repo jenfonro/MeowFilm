@@ -44,50 +44,71 @@ final class MusicNativeFMTests: XCTestCase {
         await source.close(); await service.close()
     }
 
-    func testSingleAndListFetchWhenTailStartsAndLateBatchNeverTakesOverCurrent() async throws {
-        for mode in [MusicPlaybackMode.single, .loop] {
+    func testSpecialTailFetchAppendsWithoutTakingOverAfterNaturalEnd() async throws {
+        let service = try await NativeMusicFixture.service(scripts: NativeMusicScriptFixture())
+        let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A"), NativeMusicFixture.track("B")], [NativeMusicFixture.track("C")]])
+        let source = MusicAccountQueueFixture.source(loader, kind: .fm)
+        let start = try await MusicAccountQueueFixture.start(service, source)
+        _ = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
+        _ = try await playing(service)
+        let noFetch = await loader.events(); XCTAssertEqual(noFetch, ["root"])
+        let queue = try await service.queue()
+        _ = try await service.changeQueue(.select(queue.entries[1].id), expectedRevision: queue.revision)
+        let gate = NativeMusicGate(); await loader.hold("root", gate: gate)
+        let audio = try await playing(service); await gate.started()
+        let pending = await service.fmPlayback?.pending
+        _ = try await service.recordSimilarPlaybackFact(fact(audio, .ended))
+        let state = try await service.state()
+        let next = try await service.advanceFM(source, direction: .next, reason: .ended, expectedRevision: state.revision, intent: .init())
+        XCTAssertEqual(next.selectedId, queue.entries[0].id)
+        await gate.release(); await pending?.value
+        let appended = try await service.queue()
+        XCTAssertEqual(appended.entries.count, 3); XCTAssertEqual(appended.currentId, next.selectedId)
+        XCTAssertEqual(next.state.mode, .loop)
+        await source.close(); await service.close()
+    }
+
+    func testEveryOrdinaryModeIncludingSameLoopStopsFMUntilSpecialReselection() async throws {
+        for mode in [MusicPlaybackMode.loop, .single, .shuffle] {
             let service = try await NativeMusicFixture.service(scripts: NativeMusicScriptFixture())
-            let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A"), NativeMusicFixture.track("B")], [NativeMusicFixture.track("C")]])
+            let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A")], [NativeMusicFixture.track("B")]])
             let source = MusicAccountQueueFixture.source(loader, kind: .fm)
             let start = try await MusicAccountQueueFixture.start(service, source)
             let initial = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
             _ = try await service.updateSettings(.init(ifRevision: initial.settingsRevision, mode: mode))
-            _ = try await playing(service)
-            let noFetch = await loader.events(); XCTAssertEqual(noFetch, ["root"])
-            let queue = try await service.queue()
-            _ = try await service.changeQueue(.select(queue.entries[1].id), expectedRevision: queue.revision)
-            let gate = NativeMusicGate(); await loader.hold("root", gate: gate)
-            let audio = try await playing(service); await gate.started()
-            let pending = await service.fmPlayback?.pending
-            _ = try await service.recordSimilarPlaybackFact(fact(audio, .ended))
-            let state = try await service.state()
-            let next = try await service.advanceFM(source, direction: .next, reason: .ended, expectedRevision: state.revision, intent: .init())
-            XCTAssertEqual(next.selectedId, mode == .single ? queue.entries[1].id : queue.entries[0].id)
-            await gate.release(); await pending?.value
-            let appended = try await service.queue()
-            XCTAssertEqual(appended.entries.count, 3); XCTAssertEqual(appended.currentId, next.selectedId)
-            XCTAssertEqual(next.state.mode, mode)
+            let audio = try await playing(service)
+            let calls = await loader.events(); XCTAssertEqual(calls, ["root"])
+            let ordinary = try await service.fmPlaybackSnapshot()
+            XCTAssertFalse(try XCTUnwrap(ordinary).continueEnabled)
+            XCTAssertEqual(ordinary?.id, source.id)
+            try await service.setFMContinue(true, sessionID: source.id)
+            let pending = await service.fmPlayback?.pending; await pending?.value
+            let special = try await service.fmPlaybackSnapshot(), state = try await service.state()
+            XCTAssertTrue(try XCTUnwrap(special).continueEnabled)
+            XCTAssertEqual(state.mode, .loop); XCTAssertEqual(state.total, 2)
+            XCTAssertEqual(state.currentId, audio.occurrenceId)
+            let attempt = await service.attempt?.id; XCTAssertEqual(attempt, audio.attemptId)
             await source.close(); await service.close()
         }
     }
 
-    func testDisableKeepsInFlightBatchAndChannelSwitchAppendsAndPreservesGlobalChoices() async throws {
+    func testOrdinaryChoiceBuffersInFlightBatchAndChannelSwitchPreservesPlaybackMode() async throws {
         let service = try await NativeMusicFixture.service(scripts: NativeMusicScriptFixture())
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A")], [NativeMusicFixture.track("B")]])
         let source = MusicAccountQueueFixture.source(loader, kind: .fm)
         let start = try await MusicAccountQueueFixture.start(service, source)
         let initial = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
-        _ = try await service.updateSettings(.init(ifRevision: initial.settingsRevision, mode: .single))
         let gate = NativeMusicGate(); await loader.hold("root", gate: gate)
         _ = try await playing(service); await gate.started()
         let pending = await service.fmPlayback?.pending
-        try await service.setFMContinue(false, sessionID: source.id)
+        _ = try await service.updateSettings(.init(ifRevision: initial.settingsRevision, mode: .single))
         await gate.release(); await pending?.value
         let disabled = try await service.queue(); XCTAssertEqual(disabled.entries.count, 1)
         try await service.setFMContinue(true, sessionID: source.id)
         let retained = try await service.queue(); XCTAssertEqual(retained.entries.count, 2)
         let calls = await loader.events(); XCTAssertEqual(calls, ["root", "root"])
-        try await service.setFMContinue(false, sessionID: source.id)
+        let beforeSwitch = try await service.state()
+        _ = try await service.updateSettings(.init(ifRevision: beforeSwitch.settingsRevision, mode: .single))
         let nextLoader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("C"), NativeMusicFixture.track("D")]])
         let nextSource = MusicAccountQueueFixture.source(nextLoader, kind: .fm)
         let nextStart = try await MusicAccountQueueFixture.start(service, nextSource)

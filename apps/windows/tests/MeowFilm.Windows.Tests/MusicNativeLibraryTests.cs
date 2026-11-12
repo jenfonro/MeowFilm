@@ -57,7 +57,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music word LRC absolute relative tags and trailing markers", LyricsMarkers);
         yield return new("Native music word LRC preserves sub-50ms and zero intervals", LyricsShortMarkers);
         yield return new("Native music word LRC negative offsets retain elapsed word progress", LyricsNegativeMarkers);
-        yield return new("Native music word LRC trailing words use next line and song boundaries", LyricsTrailingWords);
+        yield return new("Native music word LRC uses real next-line boundaries and song length only for rows", LyricsTrailingWords);
         yield return new("Native music word LRC without end boundary keeps timestamps and zero trailing duration", LyricsUnboundedTrailingWords);
         yield return new("Native music QRC XML entity decode never interprets markup", LyricsXml);
         yield return new("Native music translation exact timestamps only no nearest matching", LyricsTranslation);
@@ -160,14 +160,15 @@ public static partial class MusicNativeLibraryTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly Store Store = new();
+        internal readonly LyricCacheStore Cache = new();
         private readonly List<MusicLibraryOwner> owners = [];
         internal MusicLibraryOwner Owner(IDocumentStore? store = null, string scope = "local")
-        { var owner = new MusicLibraryOwner(store ?? Store, scope); owners.Add(owner); return owner; }
+        { var owner = new MusicLibraryOwner(store ?? Store, scope, Cache); owners.Add(owner); return owner; }
         public async ValueTask DisposeAsync() { foreach (var o in owners) await o.AbortAsync(); await Store.DisposeAsync(); }
     }
     private static Task Contract()
     {
-        Check(MusicLibraryOwner.ContractVersion == "0.6.0" && MusicLibraryOwner.DocumentNamespace == "music.library.v1");
+        Check(MusicLibraryOwner.ContractVersion == "0.7.0" && MusicLibraryOwner.DocumentNamespace == "music.library.v1");
         return Task.CompletedTask;
     }
     private static async Task Initial()
@@ -197,7 +198,7 @@ public static partial class MusicNativeLibraryTests
         await Ok(o, "music.library.removeSong", new { id, ifRevision = 3, songId = "library:local:b" });
         await Ok(o, "music.library.edit", new { id, ifRevision = 4, name = "Renamed", order = new[] { "library:local:c", "library:local:a" } });
         var library = f.Store.State("library")["library"]!;
-        Check(library["collections"]![1]!["intents"]!["library:local:b"]!["present"]!.GetValue<bool>() == false);
+        Check(!library["collections"]![1]!["intents"]!.AsObject().ContainsKey("library:local:b"));
         await Ok(o, "music.library.remove", new { id, ifRevision = 5 });
         Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 1);
         Check(f.Store.State("library")["library"]!["collections"]![1]!["deleted"]!.GetValue<bool>());
@@ -208,8 +209,17 @@ public static partial class MusicNativeLibraryTests
         await Error(o, "music.library.remove", new { id = "favorites", ifRevision = 0 }, "FAVORITES_PROTECTED");
         await Error(o, "music.library.edit", new { id = "favorites", ifRevision = 0, name = "Name" }, "INVALID_NAME");
         await Ok(o, "music.library.addSongs", new { id = "favorites", ifRevision = 0, songs = new[] { Song() } });
+        var added = f.Store.State("library")["library"]!["collections"]![0]!["intents"]!["library:local:a"]!;
+        Check(added["present"]!.GetValue<bool>() && added["pending"]!.GetValue<bool>());
         await Ok(o, "music.library.removeSong", new { id = "favorites", ifRevision = 1, songId = "library:local:a" });
-        Check(f.Store.State("library")["library"]!["collections"]![0]!["intents"]!["library:local:a"]!["pending"]!.GetValue<bool>());
+        Check(f.Store.State("library")["library"]!["collections"]![0]!["intents"]!.AsObject().Count == 0);
+        await o.DisposeAsync();
+        var cold = f.Owner();
+        var detail = await Ok(cold, "music.library.detail", new { id = "favorites" });
+        Check(detail.GetProperty("songs").GetArrayLength() == 0);
+        await Ok(cold, "music.library.addSongs", new { id = "favorites", ifRevision = 2, songs = new[] { Song() } });
+        var readded = f.Store.State("library")["library"]!["collections"]![0]!["intents"]!["library:local:a"]!;
+        Check(readded["present"]!.GetValue<bool>() && readded["pending"]!.GetValue<bool>());
     }
     private static async Task Paging()
     {
@@ -486,17 +496,18 @@ public static partial class MusicNativeLibraryTests
         var songs = new JsonObject { [songId] = Song() };
         var library = new JsonObject
         {
-            ["version"] = 1,
+            ["version"] = 2,
             ["ownerId"] = "local",
             ["revision"] = 0,
             ["nextId"] = 1,
             ["collections"] = new JsonArray(favorite),
             ["songs"] = songs,
-            ["accounts"] = new JsonObject()
+            ["accounts"] = new JsonObject(),
+            ["networkPlaylists"] = new JsonArray()
         };
         return new JsonObject
         {
-            ["schema"] = 1,
+            ["schema"] = 2,
             ["scope"] = "local",
             ["revision"] = 0,
             ["library"] = library
@@ -782,13 +793,15 @@ public static partial class MusicNativeLibraryTests
             Math.Abs(lines[0].GetProperty("words")[1].GetProperty("duration").GetDouble() - .98) < 1e-12);
         Check(lines[1].GetProperty("text").GetString() == "整句" && lines[1].GetProperty("words").GetArrayLength() == 0 &&
             lines[1].GetProperty("end").GetDouble() == 3);
-        Check(lines[2].GetProperty("end").GetDouble() == 4 && lines[2].GetProperty("words")[0].GetProperty("duration").GetDouble() == 1);
+        Check(lines[2].GetProperty("end").GetDouble() == 4 && lines[2].GetProperty("words")[0].GetProperty("duration").GetDouble() == 0);
         var shifted = MusicLyricTiming.Parse("[offset:-2500]\n[00:01]<00:01.000>A\n[00:02]整句\n[00:03]<00:03.000>C", duration: 4);
         Check(shifted[0].GetProperty("time").GetDouble() == 0 && shifted[0].GetProperty("end").GetDouble() == 0 &&
             shifted[0].GetProperty("words")[0].GetProperty("time").GetDouble() == -1.5 &&
             shifted[0].GetProperty("words")[0].GetProperty("duration").GetDouble() == 1);
         Check(shifted[1].GetProperty("time").GetDouble() == 0 && shifted[1].GetProperty("end").GetDouble() == .5 &&
             shifted[1].GetProperty("words").GetArrayLength() == 0);
+        Check(shifted[2].GetProperty("end").GetDouble() == 4 &&
+            shifted[2].GetProperty("words")[0].GetProperty("duration").GetDouble() == 0);
         return Task.CompletedTask;
     }
     private static Task LyricsUnboundedTrailingWords()
@@ -806,6 +819,10 @@ public static partial class MusicNativeLibraryTests
             Check(words[1].GetProperty("time").GetDouble() == last && words[1].GetProperty("duration").GetDouble() == 0);
             Check(MusicLyricTiming.Progress(last, words[1].GetProperty("duration").GetDouble(), last - .01) == 0 &&
                 MusicLyricTiming.Progress(last, words[1].GetProperty("duration").GetDouble(), last) == 1);
+            var boundedLine = MusicLyricTiming.Parse(text, duration: 180)[0];
+            Check(boundedLine.GetProperty("end").GetDouble() == 180 &&
+                boundedLine.GetProperty("words")[1].GetProperty("duration").GetDouble() == 0);
+            Check(MusicLyricTiming.Progress(last, 0, 179) == 1);
         }
         var single = MusicLyricTiming.Parse("[offset:-1500]\n[00:01]<00:01.000>A")[0];
         Check(single.GetProperty("end").GetDouble() == 0 && single.GetProperty("words")[0].GetProperty("time").GetDouble() == -.5 &&

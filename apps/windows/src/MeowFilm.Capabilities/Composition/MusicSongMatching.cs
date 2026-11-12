@@ -28,13 +28,7 @@ public sealed partial class MusicNativeApplication
         songMatcher.Invalidate(platform);
     }
 
-    private async Task PrepareSongFactsAsync(CancellationToken token)
-    {
-        try { await songMatcher.InitializeAsync(token).ConfigureAwait(false); }
-        // Library/catalog acquisition remains available when optional derived data is incompatible.
-        // Matching itself still reports the current store's format error; there is no migration path.
-        catch (MusicPlaybackCacheDataException) { }
-    }
+    private Task PrepareSongFactsAsync(CancellationToken token) => songMatcher.InitializeAsync(token);
 
     /// <summary>
     /// Supplements missing recordings, or rechecks an old mapping after content failure.
@@ -89,17 +83,13 @@ public sealed partial class MusicNativeApplication
         catch (MusicLibraryException e) { return Failed(e.Code); }
         catch (MusicAccountException e) { return Failed(e.Code); }
         catch (MusicPlatformException e) { return Failed(e.Code); }
-        catch (MusicPlaybackCacheDataException) { return Failed("CACHE_DATA_INCOMPATIBLE"); }
         catch (JsonException) { return Failed("INVALID_REQUEST"); }
     }
 
     private async Task SaveSongMatchesAsync(CancellationToken token)
     {
         try { await songMatcher.PersistAsync(token).ConfigureAwait(false); }
-        // Optional derived data must never turn an authoritative library commit into
-        // a failed receipt. Incompatible cache data is retained and playback reports it.
-        catch (MusicPlaybackCacheDataException) { }
-        catch (MusicPlaybackCacheCommitException) { }
+        // Optional derived persistence never changes an authoritative library receipt.
         catch (MusicLibraryException) { }
         catch (DocumentStoreException) { }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }

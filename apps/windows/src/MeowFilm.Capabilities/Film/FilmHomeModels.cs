@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
 
@@ -11,6 +12,7 @@ internal sealed record FilmSectionDefinition(
     string Category,
     string Type)
 {
+    internal bool Refresh { get; init; }
     internal static IReadOnlyList<FilmSectionDefinition> Home { get; } =
     [
         new("movie", "热门电影", "movie", "热门", "全部"),
@@ -228,6 +230,23 @@ public sealed record FilmCardItem(string Id, string Title, string Poster, string
     public bool HasSubtitle => Subtitle.Length > 0;
     public FilmSearchContext? SearchContext { get; init; }
     public FilmPlaybackRequest? PlaybackContext { get; init; }
+
+    internal bool HasSameContent(FilmCardItem other)
+    {
+        if (this == other) return true;
+        return Id == other.Id && Title == other.Title && Poster == other.Poster && Score == other.Score &&
+            TextBadge == other.TextBadge && Subtitle == other.Subtitle && SearchContext == other.SearchContext &&
+            SameRequest(PlaybackContext, other.PlaybackContext);
+
+        static bool SameRequest(FilmPlaybackRequest? left, FilmPlaybackRequest? right) =>
+            left == right || left is not null && right is not null &&
+            left.Target == right.Target && left.Sources == right.Sources && left.Query == right.Query &&
+            left.DataOwner == right.DataOwner && SameJson(left.Results, right.Results) &&
+            SameJson(left.Search, right.Search) && SameJson(left.Metadata, right.Metadata) &&
+            SameJson(left.CacheEntries, right.CacheEntries);
+        static bool SameJson(JsonElement? left, JsonElement? right) =>
+            left is { } value && right is { } other ? JsonElement.DeepEquals(value, other) : left is null && right is null;
+    }
 }
 
 internal enum FilmHomeSectionState
@@ -248,9 +267,8 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
 
     internal FilmSectionDefinition Definition { get; }
     internal FilmHomeSectionState State => state;
-    internal bool LoadsOnEntry => state is FilmHomeSectionState.Pending or FilmHomeSectionState.Loading
-        or FilmHomeSectionState.Cancelled;
     internal double HorizontalOffset { get; set; }
+    internal FilmMetadataCache? Cache { get; private set; }
 
     public string Key => Definition.Key;
     public string Title => Definition.Title;
@@ -259,6 +277,7 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
     public bool ShowSkeleton => !HasItems && state is FilmHomeSectionState.Pending or FilmHomeSectionState.Loading;
     public bool ShowStatus => !HasItems && !ShowSkeleton;
     public bool CanRetry => state is FilmHomeSectionState.Failed or FilmHomeSectionState.Cancelled;
+    public bool CanRefresh => state != FilmHomeSectionState.Loading;
     public string StatusText => state switch
     {
         FilmHomeSectionState.Pending or FilmHomeSectionState.Loading => "加载中…",
@@ -273,29 +292,30 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
     internal void Begin()
     {
         state = FilmHomeSectionState.Loading;
-        Items.Clear();
         PublishState();
     }
 
     internal void Complete(IReadOnlyList<FilmCardItem> items)
     {
         ArgumentNullException.ThrowIfNull(items);
-        Items.Clear();
-        foreach (var item in items) Items.Add(item);
+        if (Items.Count != items.Count || Items.Where((item, index) => !item.HasSameContent(items[index])).Any())
+        {
+            Items.Clear();
+            foreach (var item in items) Items.Add(item);
+        }
+        Cache = (items as FilmHomePage)?.Cache;
         state = FilmHomeSectionState.Ready;
         PublishState();
     }
 
     internal void Fail()
     {
-        Items.Clear();
         state = FilmHomeSectionState.Failed;
         PublishState();
     }
 
     internal void Cancel()
     {
-        Items.Clear();
         state = FilmHomeSectionState.Cancelled;
         PublishState();
     }
@@ -306,6 +326,7 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
         Changed(nameof(ShowStatus));
         Changed(nameof(ShowSkeleton));
         Changed(nameof(CanRetry));
+        Changed(nameof(CanRefresh));
         Changed(nameof(StatusText));
     }
 
@@ -341,10 +362,10 @@ public sealed class FilmDataSection : INotifyPropertyChanged
 
     internal FilmSectionDefinition Definition => definition;
     internal FilmDataSectionState State => state;
-    internal bool LoadsOnEntry => state is FilmDataSectionState.Pending or FilmDataSectionState.Loading
-        or FilmDataSectionState.Cancelled;
     internal int NextStart => nextStart;
     internal bool CanSeedFromHome => definition == homeDefinition;
+    internal FilmMetadataCache? Cache { get; private set; }
+    internal bool ReloadPending { get; private set; }
 
     public string Key => homeDefinition.Key;
     public string Title => homeDefinition.Title;
@@ -354,9 +375,10 @@ public sealed class FilmDataSection : INotifyPropertyChanged
     public bool ShowSkeleton => !HasItems && state is FilmDataSectionState.Pending or FilmDataSectionState.Loading;
     public bool ShowStatus => !HasItems && !ShowSkeleton;
     public bool CanRetry => !HasItems && state is FilmDataSectionState.Failed or FilmDataSectionState.Cancelled;
+    public bool CanRefresh => state != FilmDataSectionState.Loading;
     public bool ShowPageAction => HasItems &&
         (hasMore || state is FilmDataSectionState.Loading or FilmDataSectionState.Failed or FilmDataSectionState.Cancelled);
-    public bool CanPage => HasItems && hasMore &&
+    public bool CanPage => HasItems && (hasMore || ReloadPending) &&
         state is FilmDataSectionState.Ready or FilmDataSectionState.Failed or FilmDataSectionState.Cancelled;
     public string PageActionText => state switch
     {
@@ -386,6 +408,8 @@ public sealed class FilmDataSection : INotifyPropertyChanged
         if (!row.Select(option)) return false;
         definition = FilmDataFilters.BuildRequest(homeDefinition, FilterRows);
         Items.Clear();
+        Cache = null;
+        ReloadPending = false;
         nextStart = 0;
         hasMore = true;
         state = FilmDataSectionState.Pending;
@@ -405,8 +429,9 @@ public sealed class FilmDataSection : INotifyPropertyChanged
         PublishState();
     }
 
-    internal void Begin()
+    internal void Begin(bool replace = false)
     {
+        ReloadPending = replace;
         state = FilmDataSectionState.Loading;
         PublishState();
     }
@@ -421,7 +446,25 @@ public sealed class FilmDataSection : INotifyPropertyChanged
             if (known.Add(item.Id))
                 Items.Add(item);
         nextStart = checked(start + items.Count);
-        hasMore = items.Count == requestedLimit;
+        hasMore = items.Count >= requestedLimit;
+        Cache = (items as FilmHomePage)?.Cache;
+        ReloadPending = false;
+        state = FilmDataSectionState.Ready;
+        PublishState();
+    }
+
+    internal void Replace(IReadOnlyList<FilmCardItem> items, int next, bool more, FilmMetadataCache? cache)
+    {
+        var unique = items.DistinctBy(item => item.Id).ToArray();
+        if (Items.Count != unique.Length || Items.Where((item, index) => !item.HasSameContent(unique[index])).Any())
+        {
+            Items.Clear();
+            foreach (var item in unique) Items.Add(item);
+        }
+        nextStart = next;
+        hasMore = more;
+        Cache = cache;
+        ReloadPending = false;
         state = FilmDataSectionState.Ready;
         PublishState();
     }
@@ -444,6 +487,7 @@ public sealed class FilmDataSection : INotifyPropertyChanged
         Changed(nameof(ShowStatus));
         Changed(nameof(ShowSkeleton));
         Changed(nameof(CanRetry));
+        Changed(nameof(CanRefresh));
         Changed(nameof(ShowPageAction));
         Changed(nameof(CanPage));
         Changed(nameof(PageActionText));

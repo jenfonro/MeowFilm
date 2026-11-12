@@ -18,6 +18,7 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
     private var targets: [FilmCatSource] = []
     private var busy = false
     private var reading: Task<Void, Never>?
+    private var saveVisibilityGeneration = UUID()
     var onSaved: (() -> Void)?
 
     init(service: FilmSourceService, mode: Mode, themeProvider: any PageThemeProviding) {
@@ -49,7 +50,7 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
     private var importing: Bool { if case .importSource = mode { return true }; return false }
     override func render() {
         name.isEnabled = !busy; sourceURL.isEnabled = !busy
-        name.textColor = UIColor(theme.ink); sourceURL.textColor = UIColor(theme.ink)
+        name.textColor = UIColor(theme.settings.ink); sourceURL.textColor = UIColor(theme.settings.ink)
         if case .updateLocal = mode { sections = [] }
         else { sections = [.init(title: "名称", rows: [.init(title: "", id: "", content: name)])] }
         if !local { sections.append(.init(title: "URL", rows: [.init(title: "", id: "", content: sourceURL)])) }
@@ -106,6 +107,7 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
             reading.cancel(); self.reading = nil; busy = false; render()
         }
     }
+    override func pageDidBecomeHidden() { saveVisibilityGeneration = UUID() }
     private func chooseTarget() {
         guard canPresentPageAlert else { return }
         let alert = UIAlertController(title: "安装", message: nil, preferredStyle: .actionSheet)
@@ -133,8 +135,14 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
         guard !busy else { return }
         view.endEditing(true); busy = true; render()
         let name = name.text ?? "", url = sourceURL.text ?? "", source = file?.source, target = installationId
+        let visibility = saveVisibilityGeneration
         Task { [weak self] in
             guard let self else { return }
+            defer {
+                // A retry may save again, but must not revive a batch whose
+                // accepted save crossed a visibility boundary.
+                if visibility != saveVisibilityGeneration { onSaved = nil }
+            }
             do {
                 switch mode {
                 case .importSource(let local):
@@ -144,7 +152,7 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
                 case .updateLocal(let cat): _ = try await service.updateCat(cat.installationId, source: source)
                 }
                 busy = false; render()
-                if let onSaved { onSaved() }
+                if visibility == saveVisibilityGeneration, let onSaved { onSaved() }
                 else { notice("已保存") }
             } catch {
                 busy = false; render(); failure(error, retry: { [weak self] in self?.save() })

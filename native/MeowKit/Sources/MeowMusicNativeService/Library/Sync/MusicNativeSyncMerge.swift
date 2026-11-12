@@ -7,15 +7,15 @@ import MeowMusicFeature
 extension NativeMusicService {
     func syncMerge(_ round: inout MusicNativeSyncRound) throws {
         var lib = round.library, collections = lib["collections"].array
+        var firstBindings = Set<String>()
         for selection in round.request.selections {
             let platform = selection.platform.rawValue, session = round.sessions[platform]!, snapshot = round.snapshots[platform]!
-            lib["accounts"][platform] = .string(session.accountID); round.ledger.scopes[platform] = session.scope
             for index in collections.indices {
                 var c = collections[index]
                 guard selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!) else { continue }
                 let missing = c["bindings"].array.filter { binding in
                     binding["platform"].string == platform && binding["accountId"].string == session.accountID &&
-                    binding["writable"].bool && !snapshot.collections.contains(where: { remote in remote.id == binding["id"].string })
+                    !snapshot.collections.contains(where: { remote in remote.id == binding["id"].string })
                 }
                 if c["kind"].string == "playlist", !missing.isEmpty,
                    !round.ledger.fences.contains(where: { $0.localID == c["id"].string }) {
@@ -47,15 +47,16 @@ extension NativeMusicService {
                     if matches.count == 1 { index = matches[0] }
                 }
                 if index == nil {
-                    try musicRequire(collections.count < 2000, .limit)
+                    try musicRequire(collections.count + lib["networkReferences"].array.count < 2000, .limit)
                     collections.append(MusicModel.freshCollection("playlist:\(lib["nextId"].int)", remote.name))
                     lib["nextId"] = .n(lib["nextId"].int + 1); index = collections.count - 1
                 }
                 var c = collections[index!], bindings = c["bindings"].array
                 if !bindings.contains(where: { $0["platform"].string == platform && $0["accountId"].string == session.accountID && $0["id"].string == remote.id }) {
-                    bindings.append(.obj([("platform", .string(platform)), ("accountId", .string(session.accountID)),
+                    let binding = MJ.obj([("platform", .string(platform)), ("accountId", .string(session.accountID)),
                         ("id", .string(remote.id)), ("writable", .bool(remote.writable)), ("baseline", .array([])),
-                        ("map", .obj()), ("name", .string(remote.name))]))
+                        ("map", .obj()), ("name", .string(remote.name))])
+                    bindings.append(binding); firstBindings.insert(MusicNativeSyncLogic.bindingKey(binding))
                 }
                 c["bindings"] = .array(bindings); collections[index!] = c
             }
@@ -63,7 +64,7 @@ extension NativeMusicService {
         for index in collections.indices {
             var c = collections[index], bindings = c["bindings"].array
             let oldOrder = c["order"].strings
-            var removed = Set<String>(), added = Set<String>(), sequences: [[String]] = []
+            var removed = Set<String>(), added = Set<String>(), firstImported = Set<String>(), sequences: [[String]] = []
             for bIndex in bindings.indices {
                 var b = bindings[bIndex]
                 guard let selection = round.request.selections.first(where: { $0.platform.rawValue == b["platform"].string }),
@@ -76,6 +77,7 @@ extension NativeMusicService {
                     let id = try upsert([normalized], library: &lib)[0]
                     mapping[member.occurrenceID] = .string(id); sequence.append(id); actualSongs.insert(id)
                 }
+                if firstBindings.contains(MusicNativeSyncLogic.bindingKey(b)) { firstImported.formUnion(actualSongs) }
                 let known = !oldMap.fields.isEmpty, previous = Set(b["baseline"].strings)
                 func observable(_ id: String) -> Bool {
                     let intent = c["intents"][id]
@@ -100,6 +102,11 @@ extension NativeMusicService {
             for id in removed.union(added) {
                 c["intents"][id] = .obj([("present", .bool(!removed.contains(id))), ("pending", .bool(true)), ("origin", .string("remote"))])
             }
+            // A new binding's actual members win this round's older cancellations,
+            // including remote deletions collected from other bindings in either order.
+            for id in firstImported where c["intents"][id]["present"] == .bool(false) {
+                c["intents"][id] = .obj([("present", .bool(true)), ("pending", .bool(true)), ("origin", .string("remote"))])
+            }
             var order = oldOrder
             if !c["manualOrder"].bool, !sequences.isEmpty {
                 order = MusicNativeSyncLogic.mergeOrder(sequences.reduce([], MusicNativeSyncLogic.mergeOrder), order)
@@ -111,6 +118,7 @@ extension NativeMusicService {
             collections[index] = c
         }
         lib["collections"] = .array(collections); round.library = lib
+        try syncMergeSubscriptions(&round)
     }
 
     func syncMapMissing(_ round: inout MusicNativeSyncRound) async throws {
@@ -122,10 +130,6 @@ extension NativeMusicService {
         for c in round.library["collections"].array where !c["deleted"].bool {
             for selection in round.request.selections where selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!) {
                 let platform = selection.platform.rawValue
-                let bindings = c["bindings"].array.filter { $0["platform"].string == platform }
-                if !bindings.isEmpty && bindings.allSatisfy({ !$0["writable"].bool }) { continue }
-                if bindings.isEmpty, !c["locallyCreated"].bool, !c["bindings"].array.isEmpty,
-                   c["bindings"].array.allSatisfy({ !$0["writable"].bool }) { continue }
                 for id in c["order"].strings {
                     let original = round.library["songs"][id]
                     let projected = try await projectSongMetadata([original])
@@ -143,7 +147,7 @@ extension NativeMusicService {
                         continue
                     }
                     // Sync rechecks an empty platform after 30 days, not every round.
-                    let state = await sourceDiscoveryState(song)
+                    let state = try await sourceDiscoveryState(song)
                     let cache = state.current(window: MusicSourceDiscoveryWindow.librarySync)
                     try await syncCurrent(round)
                     if let cached = cache[platform], !cached.sources.isEmpty {
@@ -179,8 +183,9 @@ extension NativeMusicService {
                         }
                         try await syncCurrent(round)
                         try musicRequire(result.total >= 0 && result.items.allSatisfy({ $0.platform == platform }), .upstreamInvalid)
+                        let excluded = try recordingSourceExclusions(song)
                         let matches = try result.items.map(MusicModel.normalize).filter { candidate in
-                            !state.excluded.contains(candidate["sources"].array.first?["sourceKey"].string ?? "") &&
+                            !excluded.contains(candidate["sources"].array.first?["sourceKey"].string ?? "") &&
                                 MusicModel.compatible(song, candidate) && song["sources"].array.allSatisfy { MusicModel.compatible($0, candidate) }
                         }
                         await recordSourceDiscovery(song, platform: platform, page: result,

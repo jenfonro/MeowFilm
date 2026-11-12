@@ -81,7 +81,7 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
             occurrenceId: candidate.occurrenceId, resourceId: candidate.resourceId, kind: .playing, position: 1))
         let preview = try await service.previewQueueRecommendations()
         XCTAssertEqual(preview?.candidates.map(\.song.title), ["Song 301"])
-        XCTAssertTrue(try XCTUnwrap(preview).continueEnabled)
+        XCTAssertFalse(try XCTUnwrap(preview).continueEnabled)
         let requests = await owner.requests
         XCTAssertEqual(requests, [.songRecommendations(seedID: "102", offset: 0)])
         let unchanged = try await service.queue()

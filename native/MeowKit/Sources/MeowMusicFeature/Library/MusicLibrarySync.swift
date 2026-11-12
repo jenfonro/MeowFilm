@@ -155,26 +155,50 @@ public struct MusicLibrarySyncCollection: Codable, Sendable, Equatable {
 public struct MusicLibrarySyncSnapshot: Sendable {
     public let accountID: String
     public let collections: [MusicLibrarySyncCollection]
+    public let subscriptions: [MusicLibrarySyncSubscription]
     public let revision: String
-    public init(accountID: String, collections: [MusicLibrarySyncCollection], revision: String) {
-        self.accountID = accountID; self.collections = collections; self.revision = revision
+    public init(accountID: String, collections: [MusicLibrarySyncCollection],
+                subscriptions: [MusicLibrarySyncSubscription] = [], revision: String) {
+        self.accountID = accountID; self.collections = collections
+        self.subscriptions = subscriptions; self.revision = revision
+    }
+}
+/// A subscribed/read-only directory entry, never a collection member snapshot.
+/// remoteID opens the public playlist; relationID locates this account's subscription
+/// (KG type:listid). Those identities are not interchangeable.
+public struct MusicLibrarySyncSubscription: Codable, Sendable, Equatable {
+    public let remoteID: String
+    public let relationID: String
+    public let name: String
+    public let creator: String
+    public let artwork: String
+    public let count: Int?
+    public init(remoteID: String, relationID: String, name: String, creator: String = "",
+                artwork: String = "", count: Int? = nil) {
+        self.remoteID = remoteID; self.relationID = relationID; self.name = name
+        self.creator = creator; self.artwork = artwork; self.count = count
     }
 }
 public struct MusicLibrarySyncMutation: Codable, Sendable, Equatable {
-    public enum Action: String, Codable, Sendable { case create, delete, rename, add, remove, order }
+    public enum Action: String, Codable, Sendable {
+        case create, delete, rename, add, remove, order, subscribe, unsubscribe
+        public var isSubscription: Bool { self == .subscribe || self == .unsubscribe }
+    }
     public let id: UUID
     public let action: Action
     public let collectionID: String?
     public let name: String?
     public let before: MusicLibrarySyncCollection?
+    public let beforeSubscription: MusicLibrarySyncSubscription?
     public let directoryRevision: String
     /// add/remove: recording IDs; order: the full ordered occurrence IDs.
     public let members: [MusicLibrarySyncMember]
     public init(id: UUID = UUID(), action: Action, collectionID: String? = nil, name: String? = nil,
                 before: MusicLibrarySyncCollection? = nil, directoryRevision: String = "",
-                members: [MusicLibrarySyncMember] = []) {
+                members: [MusicLibrarySyncMember] = [], beforeSubscription: MusicLibrarySyncSubscription? = nil) {
         self.id = id; self.action = action; self.collectionID = collectionID; self.name = name
-        self.before = before; self.directoryRevision = directoryRevision; self.members = members
+        self.before = before; self.beforeSubscription = beforeSubscription
+        self.directoryRevision = directoryRevision; self.members = members
     }
 }
 public enum MusicLibrarySyncWriteResult: Sendable {

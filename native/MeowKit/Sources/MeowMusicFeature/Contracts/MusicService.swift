@@ -233,10 +233,18 @@ public struct MusicCollection: Codable, Equatable, Sendable, Identifiable {
     public let count: Int
     public let revision: Int
     public let artwork: URL?
+    public let networkReference: MusicNetworkPlaylistReference?
+    public var canEdit: Bool { networkReference == nil && ["playlist", "favorites"].contains(kind) }
+    public var remoteCollection: MusicPublicBrowseCollection? {
+        networkReference.map {
+            .init(platform: $0.platform, nativeID: $0.remoteID, title: title,
+                  creator: $0.creator, artwork: artwork, count: count)
+        }
+    }
     public init(id: String, title: String, kind: String = "playlist", count: Int = 0, revision: Int = 0,
-                artwork: URL? = nil) {
+                artwork: URL? = nil, networkReference: MusicNetworkPlaylistReference? = nil) {
         self.id = id; self.title = title; self.kind = kind; self.count = count; self.revision = revision
-        self.artwork = artwork
+        self.artwork = artwork; self.networkReference = networkReference
     }
 }
 
@@ -368,18 +376,21 @@ public struct MusicPlaybackCandidate: Sendable {
     public let fileAuthorization: MusicQueueAuthorization?
     public let playbackAuthorization: MusicQueueAuthorization?
     public let delivery: MusicAudioDelivery?
+    public let byteSource: (any PlaybackByteSource)?
     public var isCachedAudio: Bool { fileAuthorization != nil }
     public init(attemptId: String, occurrenceId: String, resourceId: String, url: URL, headers: [String: String] = [:],
                 title: String, startPosition: Double = 0, requestedQuality: String,
                 resolvedSelection: MusicPlaybackSelection, expiresAt: Double? = nil,
                 fileAuthorization: MusicQueueAuthorization? = nil, delivery: MusicAudioDelivery? = nil,
-                playbackAuthorization: MusicQueueAuthorization? = nil) {
+                playbackAuthorization: MusicQueueAuthorization? = nil,
+                byteSource: (any PlaybackByteSource)? = nil) {
         self.attemptId = attemptId; self.occurrenceId = occurrenceId; self.resourceId = resourceId; self.url = url
         self.headers = headers; self.title = title; self.startPosition = startPosition
         self.requestedQuality = requestedQuality; self.expiresAt = expiresAt
         self.resolvedSelection = resolvedSelection
         self.fileAuthorization = fileAuthorization
         self.delivery = delivery; self.playbackAuthorization = playbackAuthorization
+        self.byteSource = byteSource
     }
     func validateResolvedSelection(for requested: MusicPlaybackSelection) throws {
         let resolved = resolvedSelection, official = requested.installationId.hasPrefix("official:")
@@ -398,7 +409,8 @@ public struct MusicPlaybackCandidate: Sendable {
     public func resource() throws -> PlaybackResource {
         try fileAuthorization?.check()
         try playbackAuthorization?.check()
-        return try PlaybackResource(id: resourceId, url: url, title: title, headers: headers, startPosition: startPosition)
+        return try PlaybackResource(id: resourceId, url: url, title: title, headers: headers, startPosition: startPosition,
+                                    byteSource: byteSource)
     }
 }
 public struct MusicPlaybackFact: Sendable {
@@ -417,23 +429,27 @@ public struct MusicPlaybackFact: Sendable {
 
 public struct MusicLyricWord: Codable, Equatable, Sendable {
     public let time: Double
+    /// Source duration, or the interval to a subsequent real lyric marker.
+    /// Zero highlights immediately at `time` and holds until the line leaves.
     public let duration: Double
     public let text: String
     public init(time: Double, duration: Double, text: String) { self.time = time; self.duration = duration; self.text = text }
 }
 public struct MusicLyricLine: Codable, Equatable, Sendable, Identifiable {
     public let index: Int
+    /// Nonnegative line seek position; source word times may precede zero.
     public let time: Double
+    /// Line display boundary; never a substitute for a word's missing end marker.
     public let end: Double
     public let text: String
     public let translation: String
-    public let timing: String
+    /// Empty for line-only lyrics. Entries require real source timestamps.
     public let words: [MusicLyricWord]
     public var id: Int { index }
     public init(index: Int, time: Double, end: Double, text: String, translation: String = "",
-                timing: String = "estimated", words: [MusicLyricWord] = []) {
+                words: [MusicLyricWord] = []) {
         self.index = index; self.time = time; self.end = end; self.text = text; self.translation = translation
-        self.timing = timing; self.words = words
+        self.words = words
     }
 }
 public struct MusicLyricsSnapshot: Sendable {

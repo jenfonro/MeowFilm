@@ -5,7 +5,7 @@ import MeowMusicFeature
 final class NativeMusicImportModelTests: XCTestCase {
     // Synthetic current-library vectors specified independently of the implementation.
     private let collectionsJSON = #"""
-    [{"id":"favorites","kind":"favorites","name":"Favorites","order":["2"],"revision":3,"manualOrder":false,"bindings":[],"intents":{}},{"id":"playlist:1","kind":"playlist","name":"Saved","order":["10","2"],"revision":4,"manualOrder":true,"locallyCreated":true,"bindings":[{"platform":"wy","accountId":"fixture-owner","id":"fixture-list","writable":false,"baseline":["77"],"map":{"77":"2"},"name":"Saved"}],"intents":{"2":{"present":true,"pending":true,"origin":"local","acknowledged":["[\"wy\",\"fixture-owner\",\"fixture-list\"]"]}}},{"id":"playlist:2","kind":"playlist","name":"Removed","order":[],"revision":1,"manualOrder":true,"deleted":true,"bindings":[],"intents":{}}]
+    [{"id":"favorites","kind":"favorites","name":"Favorites","order":["2"],"revision":3,"manualOrder":false,"bindings":[],"intents":{}},{"id":"playlist:1","kind":"playlist","name":"Saved","order":["10","2"],"revision":4,"manualOrder":true,"locallyCreated":true,"bindings":[{"platform":"wy","accountId":"fixture-owner","id":"fixture-list","writable":true,"baseline":["77"],"map":{"77":"2"},"name":"Saved"}],"intents":{"2":{"present":true,"pending":true,"origin":"local","acknowledged":["[\"wy\",\"fixture-owner\",\"fixture-list\"]"]}}},{"id":"playlist:2","kind":"playlist","name":"Removed","order":[],"revision":1,"manualOrder":true,"deleted":true,"bindings":[],"intents":{}}]
     """#
     private let expectedOnline = #"""
     {"songId":"2","title":"Frozen track","artist":"Fixture","album":"","duration":180,"cover_url":"","sources":[{"sourceKey":"[\"wy\",\"77\",\"\"]","source":"wy","musicInfo":{"source":"wy","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180,"types":[{"type":"320k","hash":"ABC","size":100}]}}]}
@@ -15,15 +15,16 @@ final class NativeMusicImportModelTests: XCTestCase {
     """#
     private func fixture() throws -> MJ {
         let songs = MJ.obj([("10", try MJ.parse(Data(expectedLocal.utf8))), ("2", try MJ.parse(Data(expectedOnline.utf8)))])
-        return .obj([("version", .n(1)), ("ownerId", .string("frozen-owner")), ("revision", .n(7)), ("nextId", .n(3)),
+        return .obj([("version", .n(2)), ("ownerId", .string("frozen-owner")), ("revision", .n(7)), ("nextId", .n(3)),
             ("songs", songs), ("accounts", .obj([("wy", .string("fixture-owner"))])),
             ("collections", try MJ.parse(Data(collectionsJSON.utf8))),
+            ("networkReferences", .array([])),
             ("status", .obj([("phase", .string("synced")), ("at", .n(42)), ("issues", .array([]))]))])
     }
     /// The fixture library as the persisted device document's library area.
     private func stored(_ library: MJ) -> Data {
         var library = library; library["ownerId"] = .string("device")
-        let area = MJ.obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(1)), ("library", library)])
+        let area = MJ.obj([("schema", .n(2)), ("scope", .string("device")), ("revision", .n(1)), ("library", library)])
         return MJ.obj([("version", .n(1)), ("scope", .string("device")), ("revision", .n(1)),
             ("records", .obj([(MusicModel.key("library"), area)]))]).bytes
     }

@@ -2,7 +2,7 @@
 
 ## 契约与影响
 
-- `IRuntimeRecovery` / `IRuntimeRecoveryScope` 是进程内生命周期契约；真实 `NodeRuntime.IsConnected` 报告实际连接。连接使用 `aggregate` 身份，按序核对 `music@0.8.0`、`cat@0.2.0`、`source@0.2.0`、`pan@0.1.0`、`tmdb@0.1.0`、`douban@0.1.0`、`film@0.1.0`；业务响应分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`、`pan.runtime.v1`、`tmdb.data.v1`、`douban.data.v1`、`film.playback.v1`。连接恢复重建进程和 HTTP 会话，不自动恢复旧影视 attempt 的授权；影视恢复与媒体资源生命周期见[影视播放契约](../runtime/film-playback.md)。LX/source 的逐实例原生 QuickJS 线程与 Cat 的逐实例 Node Worker 由公共宿主管理。
+- `IRuntimeRecovery` / `IRuntimeRecoveryScope` 是进程内生命周期契约；真实 `NodeRuntime.IsConnected` 报告实际连接。连接使用 `aggregate` 身份，按序核对 `music@0.8.0`、`cat@0.2.0`、`source@0.3.0`、`pan@0.1.0`、`tmdb@0.1.0`、`douban@0.1.0`、`film@0.1.0`、`netease@0.1.0`；业务响应分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`、`pan.runtime.v1`、`tmdb.data.v1`、`douban.data.v1`、`film.playback.v1`、`netease.token.v1`。连接恢复重建进程和 HTTP 会话，不自动恢复旧影视 attempt 的授权；影视恢复与媒体资源生命周期见[影视播放契约](../runtime/film-playback.md)。LX/source 的逐实例原生 QuickJS 线程、Cat 的逐实例 Node Worker 和按需 token Worker 由公共宿主管理。
 - 当前只有唯一 App、AppHost/Core 和脚本运行时适配器。既有原生音乐账号、曲库、固定 API 和播放不以连接为前置条件；不向 Node 开放普通文档权限。Cat 的设置和私有卷由稳定 dataRoot 持久化，进程恢复后从当前文件重新读取，不靠再次同步账号恢复状态。
 - 首个脚本请求前显式注册 scope，最多 32 个，重复/迟到注册拒绝。无全局事件总线、全局当前源或跨 App 进程共享。
 

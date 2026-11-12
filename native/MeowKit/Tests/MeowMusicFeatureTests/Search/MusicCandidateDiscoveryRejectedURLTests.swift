@@ -8,7 +8,7 @@ private actor RejectedURLDiscoverySession: MusicCandidateDiscoverySession {
     let urls: [String: URL]
     let failures: [String: MusicServiceError]
     private var targets: [MusicCandidateDiscoveryTarget] = []
-    private var snapshots = 0, commits = 0
+    private var snapshots = 0
     private var cancellations: [String] = []
     private var retained: String?
     init(options: [MusicCandidateDiscoveryOption], discovered: [MusicCandidateDiscoveryOption]? = nil,
@@ -21,7 +21,6 @@ private actor RejectedURLDiscoverySession: MusicCandidateDiscoverySession {
         snapshots += 1
         return discover ? discovered : known
     }
-    func commitDiscovery() { commits += 1 }
     func resolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String) throws -> MusicPlaybackCandidate {
         targets.append(target)
         let installation = target.selection.installationId
@@ -32,9 +31,9 @@ private actor RejectedURLDiscoverySession: MusicCandidateDiscoverySession {
     }
     func cancel(attemptID: String) { cancellations.append(attemptID) }
     func close(retainingAttemptID: String?) { retained = retainingAttemptID }
-    func facts() -> (targets: [MusicCandidateDiscoveryTarget], snapshots: Int, commits: Int,
+    func facts() -> (targets: [MusicCandidateDiscoveryTarget], snapshots: Int,
                      cancellations: [String], retained: String?) {
-        (targets, snapshots, commits, cancellations, retained)
+        (targets, snapshots, cancellations, retained)
     }
 }
 
@@ -83,7 +82,7 @@ final class MusicCandidateDiscoveryRejectedURLTests: XCTestCase {
         } catch { XCTAssertEqual(error as? MusicServiceError, .invalidMediaCandidate) }
         let facts = await session.facts()
         XCTAssertEqual(facts.targets, [a.target(quality: "flac")])
-        XCTAssertEqual(facts.snapshots, 0); XCTAssertEqual(facts.commits, 0)
+        XCTAssertEqual(facts.snapshots, 0)
         XCTAssertEqual(facts.cancellations.count, 1); XCTAssertNil(facts.retained)
     }
 
@@ -98,7 +97,7 @@ final class MusicCandidateDiscoveryRejectedURLTests: XCTestCase {
         XCTAssertEqual(value.attempts, 2); XCTAssertEqual(value.candidate.url, replacement)
         let facts = await session.facts()
         XCTAssertEqual(facts.targets.map(\.selection.installationId), ["a", "b"])
-        XCTAssertEqual(facts.commits, 1); XCTAssertEqual(facts.cancellations.count, 1)
+        XCTAssertEqual(facts.cancellations.count, 1)
     }
 
     func testRepeatedRejectedURLsExhaustAllCandidatesOnceAndReleaseEveryAttempt() async throws {

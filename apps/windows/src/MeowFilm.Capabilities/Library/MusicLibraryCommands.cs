@@ -13,6 +13,8 @@ public sealed partial class MusicLibraryOwner
     {
         if (method.StartsWith("music.queue.recommendation.", StringComparison.Ordinal))
             return await RecommendationCommandAsync(method, parameters, document, cancellationToken).ConfigureAwait(false);
+        if (method.StartsWith("music.library.network.", StringComparison.Ordinal))
+            return NetworkPlaylistCommand(method, parameters, document);
         if (method.StartsWith("music.library.", StringComparison.Ordinal))
             return CollectionCommand(method, parameters, document, full);
         if (method.StartsWith("music.queue.", StringComparison.Ordinal))
@@ -33,6 +35,8 @@ public sealed partial class MusicLibraryOwner
             return await AppearanceCommand(method, parameters, document, cancellationToken).ConfigureAwait(false);
         if (method.StartsWith("music.device.settings.", StringComparison.Ordinal))
             return DeviceSettingsCommand(method, parameters, document);
+        if (method.StartsWith("music.lyrics.desktop.settings.", StringComparison.Ordinal))
+            return DesktopLyricSettingsCommand(method, parameters, document);
         if (method.StartsWith("music.sourceExclusions.", StringComparison.Ordinal))
             return SourceExclusionsCommand(method, parameters, document);
         if (method.StartsWith("music.search.settings.", StringComparison.Ordinal) ||
@@ -40,8 +44,6 @@ public sealed partial class MusicLibraryOwner
             return SearchCommand(method, parameters, document);
         if (method.StartsWith("music.lyrics.local.", StringComparison.Ordinal))
             return LocalLyricsCommand(method, parameters, document);
-        if (method.StartsWith("music.lyrics.display.", StringComparison.Ordinal))
-            return LyricDisplayCommand(method, parameters, document);
         if (method == "music.online.song")
         {
             LJ.Fields(parameters, "platform musicInfo title artist album duration", "platform musicInfo title");

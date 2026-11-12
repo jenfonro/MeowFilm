@@ -26,11 +26,12 @@ struct MusicNowPlayingArtworkRequest: Hashable {
     }
 }
 
-/// View-scoped admission state, not an image loader/cache. Unit-testable without
-/// constructing a UI, requesting a URL or starting a player.
+/// Admission for the product's loaded image and foreground rendering, not an
+/// image loader/cache. System-image tickets outlive foreground render revisions.
 @MainActor final class MusicNowPlayingArtworkState: ObservableObject {
     @Published private(set) var isReady = false
     @Published private(set) var samplingRevision = UUID()
+    private(set) var artworkRevision = UUID()
     private var active = false
     private var rendering = false
     private var sampled = false
@@ -44,12 +45,13 @@ struct MusicNowPlayingArtworkRequest: Hashable {
     private var displayTicket: MusicDisplayedArtworkTicket?
 
     @discardableResult func activate(_ request: MusicNowPlayingArtworkRequest,
-                                    appearance: MusicAppearancePreferencesStore?) -> Bool {
+                                    appearance: MusicAppearancePreferencesStore?,
+                                    rendering: Bool = true) -> Bool {
         guard !active || self.request != request || self.appearance !== appearance else { return false }
-        active = true; rendering = true; self.request = request; self.appearance = appearance
+        active = true; self.rendering = rendering; self.request = request; self.appearance = appearance
         deliveredImage = false; hasAdmittedArtworkImage = false
         capturedDisplay = false; replacedImage = false
-        sampled = false; ticket = nil; samplingRevision = UUID()
+        sampled = false; ticket = nil; samplingRevision = UUID(); artworkRevision = UUID()
         appearance?.selectSong(request.identity) // Same identity is a store-level no-op.
         refreshTicket()
         refreshDisplayTicket()
@@ -86,21 +88,21 @@ struct MusicNowPlayingArtworkRequest: Hashable {
         guard active else { return }
         replacedImage = replacedImage || deliveredImage || hasAdmittedArtworkImage
         deliveredImage = false; sampled = false; capturedDisplay = false
-        samplingRevision = UUID()
+        samplingRevision = UUID(); artworkRevision = UUID()
     }
     func artworkContextChanged() {
-        guard active, hasAdmittedArtworkImage else { return }
-        // Only a success delivered BEFORE the scope change can be re-used.
-        // An in-flight old AsyncImage retains its original (revoked) ticket.
+        guard active else { return }
+        // New consumers capture this revision before reading. A callback from
+        // the preceding playback/account scope cannot acquire the new ticket.
         refreshDisplayTicket()
-        samplingRevision = UUID()
+        samplingRevision = UUID(); artworkRevision = UUID()
     }
 
     func deactivate() {
         active = false; rendering = false; ticket = nil; sampled = false; deliveredImage = false; isReady = false
         hasAdmittedArtworkImage = false
         displayTicket = nil
-        samplingRevision = UUID()
+        samplingRevision = UUID(); artworkRevision = UUID()
         // Do not cancel the shared store's cover: another visible surface may
         // still own the same ticket. This view's callbacks are locally rejected.
     }
@@ -115,7 +117,7 @@ struct MusicNowPlayingArtworkRequest: Hashable {
         active && rendering && isReady && revision == samplingRevision && !capturedDisplay
     }
     func needsArtwork(revision: UUID) -> Bool {
-        guard active, rendering, isReady, revision == samplingRevision, let appearance, let displayTicket,
+        guard active, isReady, revision == artworkRevision, let appearance, let displayTicket,
               appearance.acceptsDisplayedArtwork(displayTicket) else { return false }
         return replacedImage || appearance.displayedArtwork?.ticket != displayTicket
     }
@@ -139,7 +141,7 @@ struct MusicNowPlayingArtworkRequest: Hashable {
     }
 
     @discardableResult func captureArtwork(revision: UUID, encode: () -> Data?) -> Bool {
-        guard active, rendering, isReady, revision == samplingRevision,
+        guard active, isReady, revision == artworkRevision,
               let appearance, let displayTicket,
               appearance.acceptsDisplayedArtwork(displayTicket) else { return false }
         hasAdmittedArtworkImage = true

@@ -21,6 +21,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private readonly GrantedMediaFiles files;
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
+    private readonly CacheDocumentStore cacheStore;
+    private readonly bool ownsCacheStore;
     private readonly CancellationTokenSource lifetime = new();
     internal MusicPresentation Presentation { get; }
     private readonly MusicPlaybackPresentation playbackPresentation;
@@ -37,33 +39,37 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
     private string? openedEntry;
 
-    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, NativePlayback playback, string? playbackCacheRoot = null)
-        : this(new MusicNativeApplication(store, runtime), store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot) { }
+    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, NativePlayback playback, string? playbackCacheRoot = null,
+        CacheDocumentStore? cacheStore = null)
+        : this(cacheStore is null ? new MusicNativeApplication(store, runtime) : new MusicNativeApplication(store, runtime, cacheStore),
+            store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot, cacheStore: cacheStore) { }
 
     public MusicCapability(IMusicApplication application, IDocumentStore store, NativePlayback playback,
-        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
-        : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot) { }
+        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)
+        : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot, cacheStore) { }
 
     public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicPlayback playback,
         IMusicDialogs? dialogs = null)
         : this(new MusicNativeApplication(store, runtime), store, playback, dialogs) { }
 
     public MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
-        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
-        : this(application, store, playback,
-            playbackCacheRoot is null ? null : new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, store),
-            dialogs) { }
+        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)
+        : this(application, store, playback, null, dialogs, cacheStore, playbackCacheRoot) { }
 
     internal MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
-        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null)
+        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null,
+        CacheDocumentStore? cacheStore = null, string? playbackCacheRoot = null)
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
         Presentation = new(this);
         playbackPresentation = new(this, property => Changed(property));
-        audioFileCache = playbackCache;
-        persistentChorus = new(store);
-        homeSnapshotStore = new(store);
+        this.cacheStore = cacheStore ?? new CacheDocumentStore();
+        ownsCacheStore = cacheStore is null;
+        audioFileCache = playbackCache ?? (playbackCacheRoot is null ? null :
+            new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, this.cacheStore));
+        persistentChorus = new(this.cacheStore);
+        homeSnapshotStore = new(this.cacheStore);
         files = new(store, "music.files.v1", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Lyrics.CollectionChanged += OnLyricRowsChanged;
         InitializeLibrarySync();
@@ -82,6 +88,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public string Version => "0.4.0";
     public ObservableCollection<NavigationItem> Navigation { get; } = [];
     public ObservableCollection<PlaylistRow> Playlists { get; } = [];
+    public ObservableCollection<PlaylistRow> NetworkPlaylists { get; } = [];
     private readonly ObservableCollection<SongRow> searchSongs = [], catalogSongs = [];
     public ObservableCollection<SongRow> Songs => IsSearchPage ? searchSongs : catalogSongs;
     public ObservableCollection<SongRow> SearchSongsSource => searchSongs;
@@ -124,7 +131,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public string CollectionArtwork => IsCollectionPage ? Songs.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "" : "";
     public bool CanPlayCollection => CanEdit && IsCollectionPage && total > 0;
     public string DetailArtwork => IsCatalogDetailPage ? catalogArtwork : CollectionArtwork;
-    public string DetailCountText => IsContentDetailPage ? total.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
+    public string DetailCountText => IsCatalogDetailPage ? catalogSummaryCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "" :
+        IsContentDetailPage ? total.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
     public string DetailSectionTitle => IsCatalogArtist ? "热门歌曲" : "歌曲";
     public string DetailArtworkName => IsCatalogArtist ? "歌手头像" : "歌单封面";
     public bool CanPlayContentDetail => IsCatalogDetailPage ? CanPlayCatalogPlaylist : CanPlayCollection;
@@ -159,6 +167,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public bool CanReorderPlaylist => CanEdit && HasCollection && IsSongList;
     public bool CanLoadMoreCollection => CanEdit && IsCollectionPage && Songs.Count < total &&
         collectionPageCancellation is null;
+    public string CurrentSongId => current?.Id ?? "";
     public string CurrentTitle => current?.Title ?? "未在播放";
     public string CurrentArtist => current?.Artist ?? "";
     public string CurrentAlbum => current?.Album ?? "";
@@ -174,6 +183,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         (CanEdit || OwnsCurrent && (playback.HasMedia || musicRecovery?.Recovering == true));
     private bool OwnsCurrent => current is not null && playback.OwnerId == Id && playback.Identity == current.EntryId;
     public string PlaybackPresentationKey => (current?.EntryId ?? "") + ":" + playbackEpoch;
+    public string CurrentTrackIdentity => current is null ? "" : (current.EntryId ?? "") + "\0" + current.Id;
     public bool CanSeek => CanPlay && OwnsCurrent && playback.HasMedia;
     public string PlayGlyph => OwnsCurrent && playback.IsPlaying ? "Ⅱ" : "▶";
     public double PositionSeconds => OwnsCurrent ? playback.PositionSeconds : 0;
@@ -200,12 +210,13 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             nameof(CanImportLocalLyrics), nameof(CanRemoveLocalLyrics), nameof(CanEditFeedback), nameof(CanEditSearchPreferences),
             nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText), nameof(CollectionArtwork),
             nameof(CanPlayCollection), nameof(DetailArtwork), nameof(DetailCountText),
-            nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail), nameof(CurrentTitle),
+            nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail), nameof(CurrentSongId), nameof(CurrentTitle),
             nameof(CurrentArtist), nameof(CurrentAlbum), nameof(HasCurrent), nameof(CurrentArtwork), nameof(CanPlay), nameof(Mode), nameof(ModeText),
-            nameof(PlaybackPresentationKey),
+            nameof(PlaybackPresentationKey), nameof(CurrentTrackIdentity),
             nameof(PlaybackRateText), nameof(CanSwitchSource) })
             Changed(name);
         OnlineBindings();
+        DesktopLyricSettingsBindings();
         CatalogSourceBindings();
         AccountBindings();
         CatalogBindings();
@@ -310,6 +321,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         MusicOperationException { Code: "CAPABILITY_UNAVAILABLE" } => "当前音源不支持此操作或音质",
         MusicOperationException { Code: "PERMISSION_DENIED" } => "音源权限未授权",
         MusicOperationException { Code: "AUTH_REQUIRED" } => "当前内容需要平台登录",
+        MusicOperationException { Code: "SDK_FAILURE" or "SDK_CLEANUP" } => "网易云订阅验证失败",
         MusicOperationException { Code: "AUTH_CHANGED" or "AUTH_EXPIRED" } => "平台登录状态已失效",
         MusicOperationException { Code: "VIP_REQUIRED" } => "当前官方音源需要有效会员",
         MusicOperationException { Code: "TRIAL_ONLY" or "PLAYBACK_RESTRICTED" } => "当前歌曲暂无完整播放权限",
@@ -326,9 +338,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         MusicOperationException { Code: "SCRIPT_INTEGRITY" } => "音源脚本内容已变化",
         MusicOperationException { Code: "ROLLBACK_UNAVAILABLE" } => "没有可回退的音源版本",
         MusicOperationException { Code: "SCRIPT_EXCEPTION" or "SCRIPT_PROTOCOL_ERROR" } => "音源执行失败",
-        PlaybackCache.MusicPlaybackCacheCommitException => "保存结果未确认",
-        MusicOperationException { Code: "CACHE_DATA_INCOMPATIBLE" } or
-            PlaybackCache.MusicPlaybackCacheDataException => "播放缓存数据格式不兼容",
         SelectedLyricSnapshotException { Error: SelectedLyricSnapshotError.InvalidEncoding } => "歌词文本编码无效",
         SelectedLyricSnapshotException { Error: SelectedLyricSnapshotError.TooLarge } => "歌词文件超过大小限制",
         SelectedScriptSnapshotException or SelectedLyricSnapshotException => "所选文件不可用",
@@ -354,7 +363,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         requested(this, new(destination)); // Shell owns route history and back.
         return Task.CompletedTask;
     }
-    public Task OpenPlaylistAsync(string id) => RequestNavigationAsync(id == "favorites" ? "favorites" : "playlist/" + id);
+    public Task OpenPlaylistAsync(string id) => RequestNavigationAsync(NetworkPlaylists.FirstOrDefault(p => p.Id == id)?.Route
+        ?? (id == "favorites" ? "favorites" : "playlist/" + id));
     public Task RefreshAsync()
     {
         if (IsDiscovery) return RefreshDiscoveryAsync();
@@ -491,7 +501,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         var origin = loadGeneration;
         return RunAsync(async () =>
         {
-            if (song is null) return;
+            if (song is null || IsDailyStyle && !Songs.Any(row => ReferenceEquals(row, song))) return;
             var favorite = await Call("music.library.detail", new { id = "favorites", limit = 1 }, lifetime.Token);
             await Call("music.library.addSongs", new { id = "favorites", ifRevision = MusicDto.Integer(favorite.GetProperty("collection"), "revision"),
                 songs = new[] { song.Raw } }, lifetime.Token);
@@ -505,7 +515,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         var queueContext = CaptureFeedbackContext();
         return RunAsync(async () =>
         {
-            if (song is null) return;
+            if (song is null || IsDailyStyle && !Songs.Any(row => ReferenceEquals(row, song))) return;
             await QueueCall("music.queue.append", new { songs = new[] { song.Raw }, next = true, context = queueContext });
             await ReadQueue(lifetime.Token);
             InvalidateQueueSurface();
@@ -699,9 +709,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         {
             if (epoch != playbackEpoch || playback.OwnerId != Id || !playback.HasMedia) return;
             // Explicit discontinuity: never count a short seek as a listened interval.
-            SampleFeedback(false);
-            await playback.SeekAsync(seconds);
-            SampleFeedback(playback.IsPlaying);
+            SuspendFeedback();
+            try { await playback.SeekAsync(seconds); }
+            finally { ResumeFeedback(epoch); }
         });
     }
     private async Task<JsonElement> QueueCall(string method, object? parameters = null)
@@ -764,6 +774,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             state = state with { Current = current };
         var changedCurrent = !ReferenceEquals(current, state.Current);
         current = state.Current; queueSource = state.Source; mode = state.Mode; queueSaved = state.Saved;
+        RefreshCurrentArtwork();
         currentFeedbackContext = state.FeedbackContext; UpdateFeedbackSelection();
         UpdateRecordingCandidates(); UpdateLyricSources(); RefreshQueueSurfaceCurrent(); RefreshBindings();
         if (changedCurrent) { PublishFavorite(false); _ = RefreshCurrentFavoriteAsync(); }
@@ -829,6 +840,14 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void PlaybackChanged(object? sender, PropertyChangedEventArgs args)
     {
         if (stopping) return;
+        if (string.IsNullOrEmpty(args.PropertyName) ||
+            args.PropertyName is nameof(IMusicPlayback.DurationSeconds) or nameof(IMusicPlayback.HasMedia))
+            CheckMediaDuration();
+        if (string.IsNullOrEmpty(args.PropertyName) ||
+            args.PropertyName is nameof(IMusicPlayback.PositionSeconds) or nameof(IMusicPlayback.DurationSeconds) or
+            nameof(IMusicPlayback.IsPlaying) or nameof(IMusicPlayback.HasMedia) or
+            nameof(IMusicPlayback.OwnerId) or nameof(IMusicPlayback.Identity))
+            SampleFeedback();
         if (!OwnsCurrent || !playback.HasMedia) playbackRateReceipt = null;
         if ((!OwnsCurrent || !playback.HasMedia) && musicRecovery is not { Opening: true } ||
             args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId is not null && playback.OwnerId != Id)
@@ -836,7 +855,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId != Id &&
             musicRecovery is { Opening: false })
             TrackMusicRecovery(RetireMusicRecovery());
-        SampleFeedback();
         ObserveRecommendationPlayback();
         ObserveMusicPreload();
         if (args.PropertyName == nameof(IMusicPlayback.PositionSeconds))
@@ -844,7 +862,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         else
         {
             if (args.PropertyName != nameof(IMusicPlayback.Volume)) SyncChorus();
-            if (args.PropertyName == nameof(IMusicPlayback.DurationSeconds)) CheckMediaDuration();
             playbackPresentation.Refresh();
             DesktopLyricBindings();
             Changed(nameof(CanHeartbeatCurrent));
@@ -869,29 +886,28 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void AcceptPlaybackStarted(MusicRecovery? state)
     {
         if (state is not null && !CurrentRecovery(state)) return;
+        CheckMediaDuration();
+        if (state?.PendingFailure == "RECORDING_MISMATCH") return;
         if (recorded)
         {
             if (state is { ConfirmSourceOnStart: true })
             {
                 state.ConfirmSourceOnStart = false;
-                bool restartFeedback = state.RestartFeedbackOnStart;
-                state.RestartFeedbackOnStart = false;
                 ConfirmOfficialPlayback();
                 ConfirmPlaybackFileCache();
-                if (restartFeedback) StartFeedback();
+                StartFeedback(); SampleFeedback();
             }
             return;
         }
         if (state is not null)
         {
             state.ConfirmSourceOnStart = false;
-            state.RestartFeedbackOnStart = false;
         }
         var entry = openedEntry; var epoch = playbackEpoch; var stamp = statusEpoch;
         recorded = true; playbackEvent++;
         ConfirmOfficialPlayback();
         ConfirmPlaybackFileCache();
-        StartFeedback();
+        StartFeedback(observedStart: true);
         ObserveRecommendationPlayback();
         if (searchRecommendationStart is { } searchPreview)
             _ = TrackRecommendation(StartQueueRecommendationPreviewAsync(searchPreview));
@@ -982,13 +998,15 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         loadCancellation?.Cancel(); // Only reads: never cancel admitted mutations/history writes.
         catalogSourceReadCancellation?.Cancel(); // The shared startup source read is independent of its waiters.
         startupCancellation?.Cancel();
-        accountReadCancellation?.Cancel();
+        // Cancellation settlement owns its confirming read. Cancelling that
+        // read here would turn an ordinary page exit into an unknown receipt.
+        if (accountSettlement.IsCompleted) accountReadCancellation?.Cancel();
         collectionPageCancellation?.Cancel();
         // Resolution may be a network read; cancel it before waiting for commandTail.
         onlineCancellation?.Cancel(); RetireLyrics(); CancelMusicPreload();
         RefreshBindings();
         Exception? settingsFailure = null;
-        try { await DeactivateSettingsAsync(); }
+        try { await RetireAccountTransferAsync(); await DeactivateSettingsAsync(); }
         catch (Exception error) { settingsFailure = error; }
         try { await DeactivateCatalogSourceSettingsAsync(); }
         catch (Exception error) { settingsFailure ??= error; }
@@ -1007,6 +1025,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         catch (Exception error) { failure ??= error; }
         try { await application.PrepareShutdownAsync(); }
         catch (Exception error) { failure ??= error; }
+        await cacheStore.DrainAsync();
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
     public ValueTask DisposeAsync()
@@ -1070,6 +1089,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
         try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await application.AbortAsync(); } catch (Exception error) { failure ??= error; }
+        if (ownsCacheStore) await cacheStore.DisposeAsync();
         UnsubscribeSearch();
         UnsubscribeDiscovery();
         ReleaseRecommendations();
@@ -1101,6 +1121,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             catch (Exception error) { failure ??= error; }
             try { await application.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
+            if (ownsCacheStore) await cacheStore.DisposeAsync();
             // The capability owns its application. Runtime, store and playback remain App-owned.
         }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();

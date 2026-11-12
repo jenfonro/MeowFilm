@@ -16,7 +16,7 @@ public sealed class MusicLibrarySyncSnapshot
 
 public sealed partial class MusicLibraryOwner
 {
-    public const string LibrarySyncContractVersion = "1.0.0";
+    public const string LibrarySyncContractVersion = "1.1.0";
     private const string LibrarySyncArea = "library-sync";
     internal static readonly string[] SyncPlatforms = ["wy", "tx", "kg"];
     private static readonly HashSet<string> ConfirmationCodes =
@@ -25,7 +25,7 @@ public sealed partial class MusicLibraryOwner
     {
         var platforms = new JsonObject();
         foreach (string platform in SyncPlatforms) platforms[platform] = LJ.Obj(("favorites", false), ("playlists", false), ("accountId", ""));
-        return LJ.Obj(("schema", 1), ("revision", 0), ("platforms", platforms), ("pending", null),
+        return LJ.Obj(("schema", 2), ("revision", 0), ("platforms", platforms), ("pending", null),
             ("confirmation", null), ("approved", null), ("status", LJ.Obj(("phase", "idle"), ("code", ""), ("at", 0), ("issues", new JsonArray()))));
     }
     private JsonObject LibrarySync(JsonObject doc) => HasValue(doc, LibrarySyncArea)
@@ -35,7 +35,7 @@ public sealed partial class MusicLibraryOwner
         try
         {
             LJ.Fields(s, "schema revision platforms pending confirmation approved status", "schema revision platforms pending confirmation approved status");
-            LJ.Require(LJ.I(s["schema"]) == 1); _ = Revision(s);
+            LJ.Require(LJ.I(s["schema"]) == 2); _ = Revision(s);
             var platforms = LJ.Object(s["platforms"]); LJ.Fields(platforms, "wy tx kg", "wy tx kg");
             foreach (var platform in SyncPlatforms)
             {
@@ -48,19 +48,36 @@ public sealed partial class MusicLibraryOwner
             }
             if (s["pending"] is JsonObject w)
             {
-                LJ.Fields(w, "platform accountId collectionId remoteId operation before desired ids name directory", "platform accountId collectionId remoteId operation before desired ids name directory");
                 LJ.Require(SyncPlatforms.Contains(LJ.S(w["platform"])) && LJ.Id(LJ.S(w["accountId"]), 64) && LJ.Id(LJ.S(w["collectionId"])));
                 string operation = LJ.S(w["operation"]);
-                LJ.Require(operation is "create" or "delete" or "add" or "remove" or "order");
-                foreach (string field in new[] { "before", "desired", "ids", "directory" })
+                if (operation is "subscribe" or "unsubscribe")
                 {
-                    var values = LJ.Array(w[field]);
-                    LJ.Require((field != "directory" || values.Count <= 10000) && values.All(value =>
-                        value is JsonValue scalar && scalar.TryGetValue<string>(out string? id) && LJ.Id(id)));
+                    LJ.Fields(w, "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name",
+                        "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name");
+                    LJ.Require(LJ.IsBool(w["beforePresent"]) && LJ.IsBool(w["desiredPresent"]) &&
+                        LJ.B(w["beforePresent"]) != LJ.B(w["desiredPresent"]) && LJ.B(w["desiredPresent"]) == (operation == "subscribe") &&
+                        LJ.S(w["collectionId"]) == NetworkPlaylistId(LJ.S(w["platform"]), LJ.S(w["remoteId"])));
+                    var locator = LJ.Object(w["locator"]);
+                    string fields = LJ.S(w["platform"]) == "kg" ? operation == "subscribe" ? "creatorId creatorListId" : "listId" : "";
+                    LJ.Fields(locator, fields, fields);
+                    foreach (string field in fields.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                        LJ.Require(System.Text.RegularExpressions.Regex.IsMatch(LJ.Text(locator[field], 20), "^[1-9][0-9]{0,19}$"));
                 }
-                string remoteId = LJ.S(w["remoteId"]);
-                LJ.Require(LJ.Id(LJ.S(w["name"]), 200) &&
-                    (operation == "create" ? remoteId.Length == 0 : LJ.Id(remoteId, 240)));
+                else
+                {
+                    LJ.Fields(w, "platform accountId collectionId remoteId operation before desired ids name directory",
+                        "platform accountId collectionId remoteId operation before desired ids name directory");
+                    LJ.Require(operation is "create" or "delete" or "add" or "remove" or "order");
+                    foreach (string field in new[] { "before", "desired", "ids", "directory" })
+                    {
+                        var values = LJ.Array(w[field]);
+                        LJ.Require((field != "directory" || values.Count <= 10000) && values.All(value =>
+                            value is JsonValue scalar && scalar.TryGetValue<string>(out string? id) && LJ.Id(id)));
+                    }
+                    string remoteId = LJ.S(w["remoteId"]);
+                    LJ.Require(operation == "create" ? remoteId.Length == 0 : LJ.Id(remoteId, 240));
+                }
+                LJ.Require(LJ.Id(LJ.S(w["name"]), 200));
             }
             else LJ.Require(s["pending"] is null);
             foreach (string field in new[] { "confirmation", "approved" })
@@ -107,45 +124,55 @@ public sealed partial class MusicLibraryOwner
         {
             var collections = LJ.Array(library["collections"]).OfType<JsonObject>()
                 .ToDictionary(collection => LJ.S(collection["id"]), StringComparer.Ordinal);
+            var references = NetworkPlaylists(library).OfType<JsonObject>()
+                .ToDictionary(reference => LJ.S(reference["id"]), StringComparer.Ordinal);
             if (state["pending"] is JsonObject pending)
             {
                 string collectionId = LJ.S(pending["collectionId"]);
-                LJ.Require(collections.TryGetValue(collectionId, out var collection));
                 string platform = LJ.S(pending["platform"]), account = LJ.S(pending["accountId"]),
                     operation = LJ.S(pending["operation"]), remote = LJ.S(pending["remoteId"]);
-                string[] before = LJ.Array(pending["before"]).Select(value => LJ.S(value)).ToArray();
-                string[] desired = LJ.Array(pending["desired"]).Select(value => LJ.S(value)).ToArray();
-                string[] ids = LJ.Array(pending["ids"]).Select(value => LJ.S(value)).ToArray();
-                string[] directory = LJ.Array(pending["directory"]).Select(value => LJ.S(value)).ToArray();
                 LJ.Require(LJ.S(state["platforms"]![platform]!["accountId"]) == account &&
-                    LJ.S(library["accounts"]![platform]) == account &&
-                    ids.Distinct(StringComparer.Ordinal).Count() == ids.Length &&
-                    directory.Distinct(StringComparer.Ordinal).Count() == directory.Length);
-                LJ.Require(operation switch
+                    LJ.S(library["accounts"]![platform]) == account);
+                if (operation is "subscribe" or "unsubscribe")
                 {
-                    "create" => LJ.S(collection!["kind"]) == "playlist" && remote.Length == 0 &&
-                        before.Length == 0 && desired.Length == 0 && ids.Length == 0,
-                    "delete" => remote.Length > 0 && desired.Length == 0 && ids.Length == 0 && directory.Length == 0,
-                    "add" => remote.Length > 0 && ids.Length > 0 && directory.Length == 0 &&
-                        ids.All(id => !before.Contains(id, StringComparer.Ordinal)) &&
-                        desired.SequenceEqual(before.Concat(ids), StringComparer.Ordinal),
-                    "remove" => remote.Length > 0 && ids.Length > 0 && directory.Length == 0 &&
-                        ids.All(id => before.Contains(id, StringComparer.Ordinal)) &&
-                        desired.SequenceEqual(before.Where(id => !ids.Contains(id, StringComparer.Ordinal)), StringComparer.Ordinal),
-                    "order" => remote.Length > 0 && ids.Length == 0 && directory.Length == 0 &&
-                        !desired.SequenceEqual(before, StringComparer.Ordinal) &&
-                        desired.OrderBy(id => id, StringComparer.Ordinal)
-                            .SequenceEqual(before.OrderBy(id => id, StringComparer.Ordinal), StringComparer.Ordinal),
-                    _ => false
-                });
-                var accountBindings = LJ.Array(collection!["bindings"]).OfType<JsonObject>().Where(binding =>
-                    LJ.S(binding["platform"]) == platform && LJ.S(binding["accountId"]) == account).ToArray();
-                LJ.Require(operation == "create"
-                    ? accountBindings.Length == 0
-                    : accountBindings.Count(binding => LJ.S(binding["id"]) == remote) == 1);
+                    LJ.Require(references.TryGetValue(collectionId, out var reference) &&
+                        LJ.S(reference["platform"]) == platform && LJ.S(reference["remoteId"]) == remote);
+                }
+                else
+                {
+                    LJ.Require(collections.TryGetValue(collectionId, out var collection));
+                    string[] before = LJ.Array(pending["before"]).Select(value => LJ.S(value)).ToArray();
+                    string[] desired = LJ.Array(pending["desired"]).Select(value => LJ.S(value)).ToArray();
+                    string[] ids = LJ.Array(pending["ids"]).Select(value => LJ.S(value)).ToArray();
+                    string[] directory = LJ.Array(pending["directory"]).Select(value => LJ.S(value)).ToArray();
+                    LJ.Require(ids.Distinct(StringComparer.Ordinal).Count() == ids.Length &&
+                        directory.Distinct(StringComparer.Ordinal).Count() == directory.Length);
+                    LJ.Require(operation switch
+                    {
+                        "create" => LJ.S(collection!["kind"]) == "playlist" && remote.Length == 0 &&
+                            before.Length == 0 && desired.Length == 0 && ids.Length == 0,
+                        "delete" => remote.Length > 0 && desired.Length == 0 && ids.Length == 0 && directory.Length == 0,
+                        "add" => remote.Length > 0 && ids.Length > 0 && directory.Length == 0 &&
+                            ids.All(id => !before.Contains(id, StringComparer.Ordinal)) &&
+                            desired.SequenceEqual(before.Concat(ids), StringComparer.Ordinal),
+                        "remove" => remote.Length > 0 && ids.Length > 0 && directory.Length == 0 &&
+                            ids.All(id => before.Contains(id, StringComparer.Ordinal)) &&
+                            desired.SequenceEqual(before.Where(id => !ids.Contains(id, StringComparer.Ordinal)), StringComparer.Ordinal),
+                        "order" => remote.Length > 0 && ids.Length == 0 && directory.Length == 0 &&
+                            !desired.SequenceEqual(before, StringComparer.Ordinal) &&
+                            desired.OrderBy(id => id, StringComparer.Ordinal)
+                                .SequenceEqual(before.OrderBy(id => id, StringComparer.Ordinal), StringComparer.Ordinal),
+                        _ => false
+                    });
+                    var accountBindings = LJ.Array(collection!["bindings"]).OfType<JsonObject>().Where(binding =>
+                        LJ.S(binding["platform"]) == platform && LJ.S(binding["accountId"]) == account).ToArray();
+                    LJ.Require(operation == "create"
+                        ? accountBindings.Length == 0
+                        : accountBindings.Count(binding => LJ.S(binding["id"]) == remote) == 1);
+                }
             }
             foreach (var issue in LJ.Array(state["status"]!["issues"]).OfType<JsonObject>())
-                LJ.Require(collections.ContainsKey(LJ.S(issue["collectionId"])));
+                LJ.Require(collections.ContainsKey(LJ.S(issue["collectionId"])) || references.ContainsKey(LJ.S(issue["collectionId"])));
         }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_SYNC"); }
     }

@@ -13,10 +13,12 @@ actor MusicAccountAccessGate {
     /// Credentials stay readable after first unlock, so locked playback can still
     /// renew an account URL. They remain encrypted, device-only and unsynchronized.
     init(bundleIdentifier: String, urlCacheStore: DocumentStore?,
+         feedbackOutboxStoreFactory: @escaping @Sendable () throws -> DocumentStore,
          audioCache: (any MusicAudioFileCaching)?,
          displayCache: (any MusicPlaybackDisplayCaching)?,
          clientContexts: NativeMusicClientService,
-         qqClient: NativeMusicQQPublicService) throws {
+         qqClient: NativeMusicQQPublicService,
+         neteaseTokenProvider: any MusicNeteaseTokenProviding) throws {
         let store = try KeychainCredentialStore(
             service: bundleIdentifier + ".music.accounts.v1",
             accessibility: .afterFirstUnlockThisDeviceOnly
@@ -36,7 +38,7 @@ actor MusicAccountAccessGate {
             )
         }
         service = NativeMusicAccountService(accounts: coordinator, scopes: scopes,
-            urlCacheStore: urlCacheStore, cacheLifecycle: { event in
+            urlCacheStore: urlCacheStore, feedbackOutboxStoreFactory: feedbackOutboxStoreFactory, cacheLifecycle: { event in
                 switch event {
                 case .accountChanged:
                     await audioCache?.clearOfficial()
@@ -44,7 +46,7 @@ actor MusicAccountAccessGate {
                 case .accessChanged, .closed:
                     await audioCache?.cancelPending()
                 }
-            }, clientContexts: clientContexts, qqClient: qqClient)
+            }, clientContexts: clientContexts, qqClient: qqClient, neteaseTokenProvider: neteaseTokenProvider)
     }
 
     /// Product assembly admits the account service once per process.

@@ -43,14 +43,14 @@ test('pan-only HTTP describes exact methods, rejects upload and accepts external
       body: JSON.stringify({ provider: 'baidu', credentials: { cookie: 'synthetic-external-cookie' } }) }).response;
   assert.equal(external.status, 200);
   assert.deepEqual(external.value, { ok: true, contract: 'pan.runtime.v1',
-    value: { provider: 'baidu', revision: 1, configured: true, fields: ['cookie'] } });
+    value: { provider: 'baidu', revision: 1, configured: true, fields: ['cookie'], status: 'signedIn' } });
   assert.equal(external.headers['access-control-allow-origin'], '*');
   assert.match(external.headers['x-meow-request-id'], /^[0-9a-f-]{36}$/);
   assert.equal((await client.call('pan.settings.get')).value.accounts.find(item => item.provider === 'baidu').configured, true);
   const changed = await client.call('pan.settings.set', { provider: 'baidu',
     credentials: { cookie: 'synthetic-cookie' } });
   assert.deepEqual(changed, { ok: true, contract: 'pan.runtime.v1',
-    value: { provider: 'baidu', revision: 2, configured: true, fields: ['cookie'] } });
+    value: { provider: 'baidu', revision: 2, configured: true, fields: ['cookie'], status: 'signedIn' } });
   await assert.rejects(client.upload('pan', 'not-a-script', 1, Buffer.from('anything')),
     { code: 'METHOD_NOT_FOUND' });
   const upload = await rawRequest(runtime.baseUrl, identity,

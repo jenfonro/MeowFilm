@@ -20,6 +20,17 @@ public struct PageColor: Equatable, Sendable {
         return .init(rgba: blend(red, other.red) << 24 | blend(green, other.green) << 16 |
                      blend(blue, other.blue) << 8 | blend(alpha, other.alpha))
     }
+    public func contrastRatio(with other: Self) -> Double {
+        func luminance(_ color: Self) -> Double {
+            func linear(_ value: UInt8) -> Double {
+                let s = Double(value) / 255
+                return s <= 0.04045 ? s / 12.92 : pow((s + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
+        }
+        let a = luminance(self), b = luminance(other)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
     static func hsl(_ hue: Double, saturation: Double, lightness: Double) -> Self {
         let s = saturation / 100, l = lightness / 100, a = s * min(l, 1 - l)
         func component(_ n: Double) -> UInt32 {

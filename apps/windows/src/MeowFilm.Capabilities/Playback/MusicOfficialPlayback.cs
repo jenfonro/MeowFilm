@@ -21,8 +21,8 @@ public sealed partial class MusicCapability
     {
         if (initial && useCache && audioFileCache is not null)
         {
-            // Current local account identity + protected offline license, not a copied display snapshot.
-            // No URL or membership renewal is required while this complete-file license is still valid.
+            // Local recording/account identity, not a copied display snapshot.
+            // Complete files outlive signed URLs and membership dates.
             var authority = await QualityCall("music.official.cacheContext", OfficialInput(song, target, true, false), token);
             string scope = MusicDto.Text(authority, "scope"), signature = MusicDto.Text(authority, "qualityCacheSignature");
             if (!cacheOnly && preparedAudio is { } pending && (preparedEntry != song.EntryId || !pending.Matches(scope, song.Id, signature)))
@@ -34,18 +34,10 @@ public sealed partial class MusicCapability
                 : await audioFileCache.ReadInfoAsync(scope, song.Id, signature, token);
             if (info is not null)
             {
-                long? license = info["licenseExpiresAt"]?.GetValue<long>();
                 if (info["full"]?.GetValue<bool>() != true)
                 {
                     if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
                     CancelPreparedAudio();
-                    return await ResolveOfficialTarget(song, target, token, initial: true, useCache: false);
-                }
-                bool offlineAllowed = info["offlineAllowed"]?.GetValue<bool>() == true;
-                if (offlineAllowed &&
-                    (license is null || license <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
-                {
-                    if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
                     return await ResolveOfficialTarget(song, target, token, initial: true, useCache: false);
                 }
                 var cachedTarget = target with { AccountScope = scope, Generation = MusicDto.Integer(authority, "generation"),

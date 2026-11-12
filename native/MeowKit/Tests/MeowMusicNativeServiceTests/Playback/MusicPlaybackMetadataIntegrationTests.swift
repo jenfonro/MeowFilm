@@ -49,39 +49,61 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
         XCTAssertEqual(after.entries[0].displayIdentity, before.entries[0].displayIdentity)
         XCTAssertEqual(Set(after.entries[0].track.sources.map(\.platform)), ["wy", "tx"])
         XCTAssertEqual(document.queue["entries"].array[0]["song"], original)
-        let metadata = await service.sourceDiscoveryState(original), calls = await qq.calls()
+        let metadata = try await service.sourceDiscoveryState(original), calls = await qq.calls()
         XCTAssertEqual(metadata.entries["tx"]?.checkedAt, 0)
         XCTAssertEqual(metadata.entries["tx"]?.observations, [])
         XCTAssertEqual(calls, 0)
         await service.close()
     }
-    func testFullRemoteQueueAndCollectionAdoptUnseenRowsButKeepRawStartIdentity() async throws {
-        for saveCollection in [false, true] {
-            let original = try seed(), qq = PlaybackMetadataQQ()
-            let service = try await NativeMusicFixture.service(
-                MusicNativeCandidateDiscoveryFixture.store(song: original), qq: qq)
-            _ = try await service.queue()
-            var rows = (0..<30).map { MusicRemoteCollectionActionsFixture.track("row-\($0)") }
-            rows.append(MusicNativeCandidateDiscoveryFixture.track(id: "mapped"))
-            let source = MusicRemoteCollectionActionsFixture.source(MusicRemoteCollectionActionsFixture.pages(rows))
-            let preview = try await service.remoteQueuePage(source, cursor: nil)
-            XCTAssertEqual(preview.items.count, 30)
-            if saveCollection {
-                _ = try await service.saveRemoteCollection(source: source, name: "Acquired", intent: .init())
-            } else {
-                _ = try await service.replaceRemoteQueue(source,
-                    start: .init(index: 0, track: preview.items[0]), expectedRevision: 1, intent: .init())
-                let document = try await service.read()
-                XCTAssertEqual(document.queue["entries"].array.last?["song"]["sources"].array.count, 1,
-                               "Shared display metadata cannot rewrite the source snapshot")
-            }
-            let shared = try await service.sharedSongMetadata(original), calls = await qq.calls()
-            XCTAssertEqual(Set(shared["sources"].array.map { $0["source"].string }), ["wy", "tx"])
-            XCTAssertEqual(calls, 0, "Full acquired rows are imported, never title-searched")
-            await source.close(); await service.close()
-        }
+    func testFullRemoteQueueAdoptsUnseenRowsButKeepsRawStartIdentity() async throws {
+        let original = try seed(), qq = PlaybackMetadataQQ()
+        let service = try await NativeMusicFixture.service(
+            MusicNativeCandidateDiscoveryFixture.store(song: original), qq: qq)
+        _ = try await service.queue()
+        var rows = (0..<30).map { MusicRemoteCollectionActionsFixture.track("row-\($0)") }
+        rows.append(MusicNativeCandidateDiscoveryFixture.track(id: "mapped"))
+        let source = MusicRemoteCollectionActionsFixture.source(MusicRemoteCollectionActionsFixture.pages(rows))
+        let preview = try await service.remoteQueuePage(source, cursor: nil)
+        XCTAssertEqual(preview.items.count, 30)
+        _ = try await service.replaceRemoteQueue(source,
+            start: .init(index: 0, track: preview.items[0]), expectedRevision: 1, intent: .init())
+        let document = try await service.read()
+        XCTAssertEqual(document.queue["entries"].array.last?["song"]["sources"].array.count, 1,
+                       "Shared display metadata cannot rewrite the source snapshot")
+        let shared = try await service.sharedSongMetadata(original), calls = await qq.calls()
+        XCTAssertEqual(Set(shared["sources"].array.map { $0["source"].string }), ["wy", "tx"])
+        XCTAssertEqual(calls, 0, "Full acquired rows are imported, never title-searched")
+        await source.close(); await service.close()
     }
-    @MainActor func testCurrentDiscoveryMayProjectFactsIntoOtherOccurrencesWithoutCancellingPlayback() async throws {
+    func testSavingPreviewedRemoteCollectionDoesNotImportUnseenMetadataOrChangeQueue() async throws {
+        let original = try seed(), qq = PlaybackMetadataQQ()
+        let service = try await NativeMusicFixture.service(
+            MusicNativeCandidateDiscoveryFixture.store(song: original), qq: qq)
+        _ = try await service.queue()
+        var rows = (0..<30).map { MusicRemoteCollectionActionsFixture.track("row-\($0)") }
+        rows.append(MusicNativeCandidateDiscoveryFixture.track(id: "mapped"))
+        let pages = MusicRemoteCollectionActionsFixture.pages(rows)
+        let source = MusicRemoteCollectionActionsFixture.source(pages)
+        let preview = try await service.remoteQueuePage(source, cursor: nil)
+        XCTAssertEqual(preview.items.count, 30)
+        let before = try await service.read()
+        let saved = try await service.saveRemoteCollection(source: source, name: "Acquired", intent: .init())
+        XCTAssertEqual(saved.kind, "network")
+        XCTAssertEqual(saved.networkReference, .init(platform: .qq, remoteID: "501"))
+        XCTAssertFalse(saved.canEdit)
+        let collections = try await service.collections()
+        XCTAssertEqual(collections.filter { $0.networkReference != nil }, [saved])
+        let after = try await service.read()
+        XCTAssertEqual(after.queue, before.queue)
+        XCTAssertEqual(after.playback, before.playback)
+        let shared = try await service.sharedSongMetadata(original)
+        XCTAssertEqual(shared, original, "Saving a reference cannot import metadata from unseen members")
+        let reads = await pages.events(), calls = await qq.calls()
+        XCTAssertEqual(reads, ["root"], "Saving a previewed reference must not read additional members")
+        XCTAssertEqual(calls, 0, "Saving a reference does not search for song metadata")
+        await source.close(); await service.close()
+    }
+    @MainActor func testCurrentDiscoveryKeepsFeatureQueueStableAndProjectsMetadataOnExplicitRead() async throws {
         let original = try seed(), store = try MusicNativeCandidateDiscoveryFixture.store(song: original)
         var document = try MusicDocument(store.read(), runID: "metadata-consumer")
         document.queue["entries"] = .array(document.queue["entries"].array + [
@@ -94,7 +116,9 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
         XCTAssertEqual(model.queue[1].track.sources.map(\.platform), ["wy"])
         await model.prepareCurrent()
         XCTAssertNotNil(model.activeResourceID); XCTAssertNil(model.error); XCTAssertEqual(player.resources.count, 1)
-        XCTAssertEqual(Set(model.queue[1].track.sources.map(\.platform)), ["wy", "tx"])
+        XCTAssertEqual(model.queue[1].track.sources.map(\.platform), ["wy"])
+        let projected = try await service.queue()
+        XCTAssertEqual(Set(projected.entries[1].track.sources.map(\.platform)), ["wy", "tx"])
         let raw = try await service.read()
         XCTAssertEqual(raw.queue["entries"].array[1]["song"], original)
         await model.close(); await service.close()
@@ -117,7 +141,7 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
                 for try await value in await inspection.updates() where !value.isLoading { return }
                 throw MusicServiceError.closed
             }
-            let metadata = await service.sourceDiscoveryState(original)
+            let metadata = try await service.sourceDiscoveryState(original)
             let observation = try XCTUnwrap(metadata.entries["tx"]?.observations.first)
             XCTAssertEqual(observation.startedAt, NativeMusicFixture.date.timeIntervalSince1970 * 1000)
             XCTAssertEqual(observation.checkedAt, clock.now().timeIntervalSince1970 * 1000)
@@ -127,7 +151,7 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
             XCTAssertEqual(observation.outcome, failure == nil ? .found : .failed)
             clock.advance(60)
             _ = try await service.queue()
-            let reread = await service.sourceDiscoveryState(original)
+            let reread = try await service.sourceDiscoveryState(original)
             XCTAssertEqual(reread.entries["tx"]?.observations.first, observation,
                            "Projection cannot manufacture a newer search check")
             await inspection.close(); await service.close()

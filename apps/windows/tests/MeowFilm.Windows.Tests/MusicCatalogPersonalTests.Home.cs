@@ -1,7 +1,10 @@
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -34,6 +37,12 @@ public static partial class MusicCatalogPersonalTests
             yield return Case("home first page replaces old tail and retains successful continuation" + (failTail ? " after failure" : " through completion"),
                 () => HomeRefreshPages(failTail));
         yield return Case("home network failure preserves display durable snapshot and account", HomeNetworkFailure);
+        foreach (string failure in new[] { "read", "write", "slow-write" })
+            yield return Case("home optional cache " + failure + " never replaces successful upstream status",
+                () => HomeOptionalCache(failure));
+        foreach (bool cached in new[] { false, true })
+            yield return Case("home replacement fades existing content and releases its visual snapshot cached=" + cached,
+                () => HomeRefreshTransition(cached));
         foreach (bool settings in new[] { false, true })
             yield return Case("home cards survive " + (settings ? "settings activation and return" : "first explicit account read without blocking play"),
                 () => HomeAfterAccountSettings(settings));
@@ -55,10 +64,14 @@ public static partial class MusicCatalogPersonalTests
         var source = await f.App.Library.ExecuteAsync("music.catalogSource.settings.save",
             new { ifRevision = 0, platform = "kg" });
         Check(source.GetProperty("ok").GetBoolean());
-        await new MusicHomeSnapshotStore(f.Store).SaveAsync(new("kg", [HomePage("801", platform: "kg")]));
-        var before = await f.Store.ReadAsync(MusicHomeSnapshotStore.Namespace);
+        await using (var seed = new CacheDocumentStore(f.Store.CacheBacking))
+        {
+            await new MusicHomeSnapshotStore(seed).SaveAsync(new("kg", [HomePage("801", platform: "kg")]));
+            await seed.DrainAsync();
+        }
+        var before = await f.Store.CacheBacking.ReadAsync(MusicHomeSnapshotStore.Namespace);
         int writes = f.Store.LibraryWrites;
-        f.Store.Reads.Clear();
+        f.Store.CacheBacking.Reads.Clear();
 
         await f.Module.PrepareStartupAsync();
         await f.Module.PrepareStartupAsync();
@@ -71,9 +84,9 @@ public static partial class MusicCatalogPersonalTests
         Equal(0, f.Platform.Requests.Count);
         Equal("kg", f.Module.CatalogSourcePlatform);
         Equal("verified", f.Module.Accounts.Single(account => account.Platform == "wy").State);
-        Equal(1, f.Store.Reads.Count(ns => ns == MusicHomeSnapshotStore.Namespace));
+        Equal(1, f.Store.CacheBacking.Reads.Count(ns => ns == MusicHomeSnapshotStore.Namespace));
         Equal(writes, f.Store.LibraryWrites);
-        var after = await f.Store.ReadAsync(MusicHomeSnapshotStore.Namespace);
+        var after = await f.Cache.ReadAsync(MusicHomeSnapshotStore.Namespace);
         Check(before.Data!.SequenceEqual(after.Data!), "preparation reads the saved display without rewriting it");
         Equal(0, f.Output.Opens);
     }
@@ -390,7 +403,7 @@ public static partial class MusicCatalogPersonalTests
         first.Release();
         await second.Arrived.Task.WaitAsync(HomeGuard);
         Equal("歌单 901", HomeTitles(f));
-        Equal("歌单 901", await SavedHomeTitles(f.Store));
+        Equal("歌单 901", await SavedHomeTitles(f));
         Check(!refresh.IsCompleted, "full refresh includes the continuation");
 
         f.App.TransformNext("music.catalog.home", _ => failTail ? HomeError("NETWORK_ERROR") : HomePage("903"));
@@ -398,13 +411,13 @@ public static partial class MusicCatalogPersonalTests
         second.Release();
         await third.Arrived.Task.WaitAsync(HomeGuard);
         Equal("歌单 901,歌单 902", HomeTitles(f));
-        Equal("歌单 901,歌单 902", await SavedHomeTitles(f.Store));
+        Equal("歌单 901,歌单 902", await SavedHomeTitles(f));
         third.Release();
         await refresh.WaitAsync(HomeGuard);
         await f.Module.HomeInitialization.WaitAsync(HomeGuard);
         string expected = failTail ? "歌单 901,歌单 902" : "歌单 901,歌单 902,歌单 903";
         Equal(expected, HomeTitles(f));
-        Equal(expected, await SavedHomeTitles(f.Store));
+        Equal(expected, await SavedHomeTitles(f));
         await Drain();
         var reads = f.App.Log.Where(call => call.Method == "music.catalog.home").ToArray();
         Equal(3, reads.Length);
@@ -419,10 +432,45 @@ public static partial class MusicCatalogPersonalTests
         AssertNoHomeCommit(f);
     }
 
+    private static async Task HomeOptionalCache(string failure)
+    {
+        await using var f = await Fixture.Create(initialize: false);
+        var backing = f.Store.CacheBacking;
+        backing.FailReads = failure == "read";
+        backing.FailWrites = failure == "write";
+        backing.HoldWrites = failure == "slow-write";
+        try
+        {
+            await f.Module.InitializeAsync(default).WaitAsync(HomeGuard);
+            f.App.TransformNext("music.catalog.home", _ => HomePage("901"));
+            await f.Module.NavigateAsync("catalog-home", default).WaitAsync(HomeGuard);
+            await f.Module.HomeRefresh.WaitAsync(HomeGuard);
+            await f.Module.HomeInitialization.WaitAsync(HomeGuard);
+            Equal("歌单 901", HomeTitles(f));
+            Equal("", f.Module.Status);
+            Equal(0, f.Store.LibraryWrites);
+            Check(f.App.Authenticated, "optional cache failure cannot revoke the account");
+            var snapshot = await new MusicHomeSnapshotStore(f.Cache).ReadAsync();
+            Check(snapshot is not null && snapshot.Pages.Length == 1,
+                "successful upstream content remains available in cache memory");
+            if (failure == "slow-write")
+            {
+                await backing.WriteEntered.Task.WaitAsync(HomeGuard);
+                var physical = f.Cache.DrainAsync();
+                Check(!physical.IsCompleted, "home refresh completed while physical cache write is still held");
+                backing.ReleaseWrite.TrySetResult();
+                await physical.WaitAsync(HomeGuard);
+            }
+            else await f.Cache.DrainAsync().WaitAsync(HomeGuard);
+            Equal("", f.Module.Status);
+        }
+        finally { backing.ReleaseWrite.TrySetResult(); }
+    }
+
     private static async Task HomeNetworkFailure()
     {
         await using var f = await Fixture.Create(store: await SavedHome(HomePage("801"), HomePage("802")));
-        var before = await f.Store.ReadAsync(MusicHomeSnapshotStore.Namespace);
+        var before = await f.Cache.ReadAsync(MusicHomeSnapshotStore.Namespace);
         f.App.TransformNext("music.catalog.home", _ => HomeError("NETWORK_ERROR"));
         var held = f.App.HoldNext("music.catalog.home");
         await f.Module.NavigateAsync("catalog-home", default).WaitAsync(HomeGuard);
@@ -432,7 +480,7 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.HomeRefresh.WaitAsync(HomeGuard);
         Equal("歌单 801,歌单 802", HomeTitles(f));
         Equal("平台网络请求失败", f.Module.Status);
-        var after = await f.Store.ReadAsync(MusicHomeSnapshotStore.Namespace);
+        var after = await f.Cache.ReadAsync(MusicHomeSnapshotStore.Namespace);
         Check(before.Data!.SequenceEqual(after.Data!), "network failure cannot save an empty or error display");
         Equal("verified", f.Module.Accounts.Single(account => account.Platform == "wy").State);
         Check(f.App.Authenticated);
@@ -440,6 +488,40 @@ public static partial class MusicCatalogPersonalTests
         Equal(1, Calls(f, "music.catalog.home"));
         Equal(1, Calls(f, "music.accounts.list"));
         AssertNoHomeCommit(f);
+    }
+
+    private static async Task HomeRefreshTransition(bool cached)
+    {
+        await using var f = await Fixture.Create(store: cached ? await SavedHome(HomePage("801")) : null);
+        f.App.TransformNext("music.catalog.home", _ => HomePage("901"));
+        var first = f.App.HoldNext("music.catalog.home");
+        var navigation = f.Module.NavigateAsync("catalog-home", default);
+        await first.Arrived.Task.WaitAsync(HomeGuard);
+        using var mount = new HomeNoticeMount(f.Module.View);
+        await Drain();
+        Layout(f.Module.View);
+        var view = Visuals<MusicCatalogView>(f.Module.View).Single();
+        var overlay = (Image)view.FindName("HomeRefreshOverlay");
+        var scroll = (ScrollViewer)view.FindName("HomeScroll");
+        Check(overlay.Source is null && scroll.Opacity == 1,
+            "initial presentation and a pending background read do not fade or clear existing content");
+        bool observedPublication = false;
+        f.Module.HomeSections.CollectionChanged += (_, _) =>
+        {
+            observedPublication = true;
+            bool animate = cached && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast;
+            Check((overlay.Source is BitmapSource) == animate,
+                "successful replacement retains the previous visible frame only when animation is appropriate");
+            Check(!overlay.IsHitTestVisible, "the transition does not intercept the newly published cards");
+        };
+        first.Release();
+        await navigation.WaitAsync(HomeGuard);
+        await f.Module.HomeRefresh.WaitAsync(HomeGuard);
+        Check(observedPublication && HomeTitles(f) == "歌单 901");
+        await Until(() => overlay.Source is null && scroll.Opacity == 1);
+        Check(overlay.Visibility == Visibility.Collapsed, "completed transitions release the temporary bitmap");
+        f.Module.View.Visibility = Visibility.Collapsed;
+        Check(overlay.Source is null && scroll.Opacity == 1);
     }
 
     private static async Task HomeAfterAccountSettings(bool settings)
@@ -557,7 +639,7 @@ public static partial class MusicCatalogPersonalTests
         await oldRefresh.WaitAsync(HomeGuard);
         await Drain();
         Equal("歌单 990", HomeTitles(f));
-        Equal("歌单 990", await SavedHomeTitles(f.Store));
+        Equal("歌单 990", await SavedHomeTitles(f));
         Equal(status, f.Module.Status);
         Equal(2, Calls(f, "music.catalog.home"));
         Equal(2, Calls(f, "music.accounts.list"));
@@ -658,7 +740,7 @@ public static partial class MusicCatalogPersonalTests
         await using var f = await Fixture.Create(initialize: false, store: await SavedHome(HomePage("801")));
         f.App.Authenticated = false;
         await f.Module.InitializeAsync(default);
-        var before = await f.Store.ReadAsync(MusicHomeSnapshotStore.Namespace);
+        var before = await f.Cache.ReadAsync(MusicHomeSnapshotStore.Namespace);
         f.App.TransformNext("music.catalog.home", _ => HomeError(code));
         var held = f.App.HoldNext("music.catalog.home");
         await f.Module.NavigateAsync("catalog-home", default).WaitAsync(HomeGuard);
@@ -675,7 +757,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(1, Calls(f, "music.accounts.list"));
         Equal("none", f.Module.Accounts.Single(account => account.Platform == "wy").State);
         Check(f.App.Log.Where(call => call.Method == "music.catalog.home").All(call => !call.Authenticated));
-        var after = await f.Store.ReadAsync(MusicHomeSnapshotStore.Namespace);
+        var after = await f.Cache.ReadAsync(MusicHomeSnapshotStore.Namespace);
         Check(before.Data!.SequenceEqual(after.Data!), "failed guest recovery cannot erase durable display");
         AssertNoHomeCommit(f);
     }
@@ -724,12 +806,16 @@ public static partial class MusicCatalogPersonalTests
     private static async Task<Store> SavedHome(params JsonElement[] pages)
     {
         var store = new Store();
-        await new MusicHomeSnapshotStore(store).SaveAsync(new("wy", pages));
+        await using var cache = new CacheDocumentStore(store.CacheBacking);
+        await new MusicHomeSnapshotStore(cache).SaveAsync(new("wy", pages));
+        await cache.DrainAsync();
         return store;
     }
-    private static async Task<string> SavedHomeTitles(Store store)
+    private static async Task<string> SavedHomeTitles(Fixture fixture)
     {
-        var snapshot = await new MusicHomeSnapshotStore(store).ReadAsync();
+        await fixture.Cache.DrainAsync();
+        await using var restored = new CacheDocumentStore(fixture.Store.CacheBacking);
+        var snapshot = await new MusicHomeSnapshotStore(restored).ReadAsync();
         Check(snapshot is not null && snapshot.Platform == "wy", "successful display is persisted with its platform");
         return string.Join(',', snapshot!.Pages.SelectMany(page => page.GetProperty("items").EnumerateArray())
             .Select(item => S(item, "name")));

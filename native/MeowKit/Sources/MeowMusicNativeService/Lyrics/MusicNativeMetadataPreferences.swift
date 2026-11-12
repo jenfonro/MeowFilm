@@ -102,7 +102,7 @@ extension NativeMusicService {
         try musicRequire(!occurrenceID.isEmpty)
         try musicRequire(musicSame(d.queue["currentId"].string, occurrenceID), .targetChanged)
         let ref = MusicReference(kind: .queue, id: occurrenceID)
-        let song = try self.song(ref, d), track = try MusicModel.track(song, ref)
+        let song = try await sharedSongMetadata(playbackSong(ref, d)), track = try MusicModel.track(song, ref)
         let prefs = try NativeMetadataPreferences(d.playback)
             .visible(revision: d.playback["revision"].int, available: enabledPlatforms)
         let sources = try MusicModel.sources(song)
@@ -126,18 +126,17 @@ extension NativeMusicService {
                 candidates.append(.init(source: source, artwork: artwork))
             }
         }
-        // Exclude transient discovery timestamps and occurrence identity, while
-        // retaining every source's public locator.
-        let fields = ["songId", "title", "artist", "album", "duration", "cover_url"]
-        let sourceFields = ["sourceKey", "source", "musicInfo"]
-        var identity = MJ.obj(fields.filter(song.contains).map { ($0, song[$0]) })
-        identity["sources"] = .array(song["sources"].array.map { row in
-            .obj(sourceFields.filter(row.contains).map { ($0, row[$0]) })
-        })
+        // Recording identity does not change when metadata discovery adds a
+        // locator, renews an artwork URL, or the queue creates a new occurrence.
+        let identity = MJ.array([song["songId"], song["duration"]])
         let result = MusicMetadataCandidates(occurrenceID: occurrenceID, queueRevision: d.queue["revision"].int,
             preferences: prefs, track: track, contentRevision: nil,
             contentFingerprint: identity.stable.digest, candidates: candidates)
         try check(own)
+        let latest = try read()
+        try musicRequire(latest.queue["currentId"].string == occurrenceID &&
+            latest.queue["revision"] == d.queue["revision"] &&
+            latest.playback["revision"] == d.playback["revision"], .staleRevision)
         return result
     }
 }

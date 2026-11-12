@@ -20,10 +20,10 @@ extension MusicViewModel {
     }
     public func artworkFailed(_ url: URL?) { playbackMetadata.artworkFailed(url) }
     public func capturedArtwork(_ data: Data, url: URL?) { playbackMetadata.capturedArtwork(data, url: url) }
-    func beginPlaybackMetadata(restoreOnly: Bool = false, force: Bool = false) {
+    func beginPlaybackMetadata(restoreOnly: Bool = false, force: Bool = false, refreshSources: Bool = false) {
         guard let current else { playbackMetadata.clearSelection(); return }
         playbackMetadata.select(current, lyricsEnabled: state.lyricsEnabled, restoreOnly: restoreOnly,
-                                force: force)
+                                force: force, refreshSources: refreshSources)
     }
     public func metadataPreferencesChanged() async {
         let own = lifecycle

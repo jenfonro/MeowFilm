@@ -135,7 +135,14 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
         await service.discardSource(attemptID: allowed.candidate.attemptId)
         let reused = await scripts.requests()
         XCTAssertEqual(reused.resolutions, before.resolutions, "Legal histories remain reusable")
+        let stateBeforeRestore = try await service.state(), historyBeforeRestore = try await service.playedSongs()
         try await service.restoreSourceExclusion(id: exclusion.id)
+        let afterRestore = await scripts.requests(), stateAfterRestore = try await service.state()
+        let historyAfterRestore = try await service.playedSongs()
+        XCTAssertEqual(afterRestore, reused, "Restoring the exclusion must not request another URL")
+        XCTAssertEqual(stateAfterRestore, stateBeforeRestore)
+        XCTAssertEqual(historyAfterRestore.map(\.id), historyBeforeRestore.map(\.id),
+                       "Restoring the exclusion must not create a listening fact")
         let restored = try await fresh.match(intent: .exact(a))
         XCTAssertEqual(restored.selection, a)
         try await service.activateSource(attemptID: restored.candidate.attemptId)
@@ -239,16 +246,38 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
         let progress = try await service.record(.init(attemptId: donor.candidate.attemptId, occurrenceId: "entry-1",
             resourceId: donor.candidate.resourceId, kind: .progress, position: 24, duration: 180))
         XCTAssertTrue(progress, "Excluding B must preserve A's admitted fact owner")
+        let stateBeforeRestore = try await service.state(), historyBeforeRestore = try await service.playedSongs()
+        XCTAssertEqual(historyBeforeRestore.map { $0.track.songId }, [queue.entries[0].track.songId])
         try await service.restoreSourceExclusion(id: exclusion.id)
         let afterRestore = await scripts.base.requests()
-        XCTAssertEqual(afterRestore, afterInspect, "Restore itself neither resolves nor plays")
+        let visibleAfterRestore = try await ExclusionTestFixture.snapshot(session)
+        let stateAfterRestore = try await service.state(), historyAfterRestore = try await service.playedSongs()
+        let remaining = try await service.sourceExclusions()
+        XCTAssertEqual(afterRestore, afterInspect, "Restore itself must not request another URL")
+        XCTAssertEqual(visibleAfterRestore.sources, inspected.sources, "Restoration leaves obtained results intact")
+        XCTAssertEqual(stateAfterRestore, stateBeforeRestore)
+        XCTAssertEqual(historyAfterRestore.map(\.id), historyBeforeRestore.map(\.id))
+        XCTAssertTrue(remaining.isEmpty)
         let restored = try await ExclusionTestFixture.load(session)
         XCTAssertTrue(restored.sources.contains { $0.selection == a })
-        XCTAssertTrue(restored.sources.contains { $0.selection == b }, "Explicit exploration may resolve B again")
+        XCTAssertTrue(restored.sources.contains { $0.selection == b }, "B is available after explicit exploration")
         let afterExploration = await scripts.base.requests()
-        XCTAssertEqual(afterExploration.resolutions, afterRestore.resolutions + 1)
+        if rejected {
+            XCTAssertEqual(afterExploration.resolutions, afterRestore.resolutions + 1,
+                           "Exploration may resolve the result withdrawn by the matching exclusion")
+        } else {
+            XCTAssertEqual(afterExploration.resolutions, afterRestore.resolutions,
+                           "An unrelated exclusion must keep the successful B reusable")
+            XCTAssertEqual(restored.sources, inspected.sources)
+        }
+        let stateAfterExploration = try await service.state()
+        XCTAssertEqual(stateAfterExploration, stateBeforeRestore)
         let history = try await service.playedSongs()
         XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history.map(\.id), historyBeforeRestore.map(\.id))
+        let continued = try await service.record(.init(attemptId: donor.candidate.attemptId, occurrenceId: "entry-1",
+            resourceId: donor.candidate.resourceId, kind: .progress, position: 25, duration: 180))
+        XCTAssertTrue(continued, "Restoration and exploration must preserve A's admitted fact owner")
         await lease.close(); await service.close()
     }
 
@@ -271,9 +300,9 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
         let pending = Task { try await session.match(intent: .exact(b)) }
         await notification.started(1)
         // B's return reads: pre-declaration inspectionCheck, post-declaration
-        // inspectionCheck, provider admission, then the session's owner check.
-        // Notify only in the last read, after inspectionResolve has returned.
-        document.arm(afterReads: 4) {
+        // inspectionCheck, recording admission and provider admission, then
+        // the session's owner check. Notify only in the last read, after resolve.
+        document.arm(afterReads: 6) {
             let completed = DispatchSemaphore(value: 0)
             Task.detached {
                 await native.exclusionsChanged(songID: queue.entries[0].track.songId,

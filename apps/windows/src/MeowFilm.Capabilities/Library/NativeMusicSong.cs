@@ -86,7 +86,7 @@ internal static partial class NativeMusicSong
         foreach (string key in LocatorFields.Split(' '))
             if (value[key] is JsonValue v && !v.TryGetValue<string>(out _)) _ = LJ.I(value[key], -LJ.MaxInteger);
     }
-    private static string PublicUrl(JsonNode? n)
+    internal static string PublicUrl(JsonNode? n)
     {
         string s = LJ.S(n);
         return s.Length <= 4096 && !s.Contains('?') && !s.Contains('#') &&

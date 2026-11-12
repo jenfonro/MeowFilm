@@ -113,25 +113,32 @@ extension MusicViewModel {
         guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations else {
             report(MusicServiceError.busy, epoch: epoch, operation: "更新播放队列", kind: .queue); return
         }
+        let navigation = navigationID
+        var token = selectionID
         playbackState.isChangingQueue = true
         defer {
-            if lifecycle == epoch {
+            if lifecycle == epoch, navigationID == navigation {
                 playbackState.isChangingQueue = false
                 requestRecommendationRefresh()
             }
         }
-        let token = selectionID
+        func checkRequest() throws {
+            try check(epoch); try collectionTicket?.check(self)
+            guard navigationID == navigation, selectionID == token else { throw MusicServiceError.cancelled }
+        }
         do {
             await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
-            await flushPlaybackFacts(); try check(epoch); try collectionTicket?.check(self)
+            try checkRequest()
+            await flushPlaybackFacts(); try checkRequest()
             let service = try requireService(), before = try await service.state()
-            try check(epoch); try collectionTicket?.check(self); guard token == selectionID else { return }
+            try checkRequest()
             if let expectedQueueRevision, before.revision != expectedQueueRevision {
                 let latest = try await service.queue()
-                try check(epoch)
-                guard token == selectionID else { return }
+                try checkRequest()
                 if latest.revision == before.revision, latest.currentId == before.currentId {
-                    if before.currentId != state.currentId { invalidateSelection(stopMedia: true) }
+                    if before.currentId != state.currentId {
+                        invalidateSelection(stopMedia: true); token = selectionID
+                    }
                     playbackState.state = before; playbackState.queue = latest.entries
                 }
                 throw MusicServiceError.revisionConflict
@@ -142,16 +149,18 @@ extension MusicViewModel {
                 next = try await provider.changeCollectionQueue(collection: ticket.collection, refs: refs,
                     index: index, expectedRevision: before.revision)
             } else { next = try await service.changeQueue(change, expectedRevision: before.revision) }
-            try check(epoch); try collectionTicket?.check(self); guard token == selectionID else { return }
+            try checkRequest()
             switch change {
             case .replace, .collection, .clear: stopFM(); notices.queueNotice = nil
             default: if next.total == 0 { stopFM() }
             }
-            if startPlayback || next.currentId != before.currentId { invalidateSelection(stopMedia: true) }
-            playbackState.state = next; try await refreshQueue(service, epoch: epoch)
-            try collectionTicket?.check(self)
+            if startPlayback || next.currentId != before.currentId { invalidateSelection(stopMedia: true, reason: .ui) }
+            token = selectionID
+            playbackState.state = next; try await refreshQueue(service, epoch: epoch, selection: token)
+            try checkRequest()
             if startPlayback { await prepareCurrent() }
         } catch {
+            guard lifecycle == epoch, navigationID == navigation, selectionID == token else { return }
             if let collectionTicket, !collectionTicket.binding.matches(self) { return }
             report(error, epoch: epoch, operation: "更新播放队列", kind: startPlayback ? .playback : .queue)
         }

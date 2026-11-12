@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { installIOSFailureBoundary, parseIOSConfiguration, parseIOSLaunchArguments } from '../apps/ios/runtime/bootstrap.mjs';
 import { connect, contract, load, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-support.mjs';
 import { verifyPanAndDoubanAssembly, verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
+import { seedSourceLibrary, verifyRecoveredSourceLibrary } from './source-library-assembly-support.mjs';
 
 const entry = join(root, 'apps/ios/runtime/entries/aggregate.mjs');
 
@@ -176,9 +177,10 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   assert.equal(described.product, 'aggregate');
   assert.equal(described.protocol, 'runtime.http.v1');
   assert.deepEqual(described.modules.map(module => [module.id, module.version, module.contract]), [
-    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.2.0', 'source.runtime.v2'],
+    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.3.0', 'source.runtime.v2'],
     ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
     ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
+    ['netease', '0.1.0', 'netease.token.v1'],
   ]);
   for (const method of ['music.script.sources.list', 'music.script.resolve', 'music.script.invoke'])
     assert.ok(described.modules[0].methods.includes(method), method);
@@ -186,6 +188,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   assert.deepEqual(described.modules.find(module => module.id === 'tmdb').methods, [
     'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
   ]);
+  assert.deepEqual(described.modules[7].methods, ['netease.token.get']);
   await verifyTMDBAssembly(t, { client, baseUrl });
   await verifyPanAndDoubanAssembly(client);
   for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
@@ -219,12 +222,16 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   const result = okay(await client.call('source.runtime.invoke', { installationId: reader.installationId,
     revision: reader.revision, generation: reader.generation, action: 'search', payload: { keyword: '猫' } }), 'source.runtime.v2');
   assert.deepEqual(result, { list: [{ vod_id: '猫', vod_name: '猫' }] });
+  assert.deepEqual(okay(await client.call('source.runtime.rules.process', {
+    request: { operation: 'identity', book: { name: '《测试书》', author: '作者：甲' } },
+  }), 'source.runtime.v2'),
+  { name: '测试书', author: '甲', key: JSON.stringify(['book', '测试书', '甲']) });
   // A single module close never closes the shared listener or another module.
   okay(await client.call('music.script.close'), contract);
   okay(await client.call('source.runtime.status'), 'source.runtime.v2');
   okay(await client.call('cat.script.status'), 'cat.script.v2');
   okay(await client.shutdown(), 'runtime.http.v1');
-  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 7);
+  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 8);
   runtime.channel.end();
   await closed;
   await client.close();
@@ -249,6 +256,30 @@ test('owner EOF drains a running guest before the embedded executor returns', { 
   assert.equal(runtime.output().stderr, '');
 });
 
+test('iOS App entry restores its novel source library and private state in a new process', { timeout: 30000 }, async t => {
+  const first = spawnRuntime(t, { entry });
+  const connection = await connect(first);
+  t.after(() => connection.client.close());
+  const source = await seedSourceLibrary(connection.client);
+  okay(await connection.client.shutdown(), 'runtime.http.v1');
+  first.channel.end();
+  await connection.closed;
+  await connection.client.close();
+  assert.deepEqual(await first.exited, { code: 0, signal: null });
+  assert.equal(first.output().stderr, '');
+
+  const second = spawnRuntime(t, { entry, configuration: { dataRoot: first.configuration.dataRoot } });
+  const recovered = await connect(second);
+  try {
+    await verifyRecoveredSourceLibrary(recovered.client, source);
+    okay(await recovered.client.shutdown(), 'runtime.http.v1');
+    second.channel.end();
+    await recovered.closed;
+    assert.deepEqual(await second.exited, { code: 0, signal: null });
+    assert.equal(second.output().stderr, '');
+  } finally { await recovered.client.close(); }
+});
+
 test('an escaped runtime failure closes HTTP and the bootstrap without killing the App host', { timeout: 30000 }, async t => {
   const runtime = spawnRuntime(t, { entry, preload: `${simulatedIOS}
     process.on('SIGUSR2', () => setImmediate(() => { throw new Error('private escaped failure'); }));` });
@@ -263,21 +294,144 @@ test('an escaped runtime failure closes HTTP and the bootstrap without killing t
   assert.equal(runtime.output().stdout, '');
 });
 
-test('invalid launch and private configuration report only a fixed safe code', { timeout: 30000 }, async t => {
-  for (const options of [{ argv: ['--meow-bootstrap-fd', 'invalid'] },
-    { configuration: { sessionId: 'invalid' } }]) {
+test('invalid launch and private configuration identify only their static stage and category', { timeout: 30000 }, async t => {
+  for (const [stage, options] of [
+    ['arguments', { argv: ['--meow-bootstrap-fd', 'invalid-private-argument'] }],
+    ['configuration', { configuration: { sessionId: 'invalid-private-session' } }],
+  ]) {
     const runtime = spawnRuntime(t, { entry, ...options });
     assert.deepEqual(await runtime.exited, { code: 1, signal: null });
-    assert.equal(runtime.output().stderr, 'IOS_RUNTIME_START_FAILED\n');
+    assert.equal(runtime.output().stderr, `IOS_RUNTIME_START_FAILED stage=${stage} category=INVALID_REQUEST\n`);
     assert.equal(runtime.output().stdout, '');
   }
 });
+
+test('startup diagnostics never serialize unknown errors, paths, credentials or arbitrary stages',
+  { timeout: 30000 }, async t => {
+    const runtime = spawnRuntime(t, { sendConfiguration: false, fixture: `
+      import { reportIOSRuntimeStartFailure } from ${JSON.stringify(new URL('../apps/ios/runtime/bootstrap.mjs', import.meta.url).href)};
+      const secret = '/private/var/user-data?cookie=fixture-private-token';
+      for (const code of ['STORAGE_ERROR', 'CORRUPT_STORAGE', 'ERR_DLOPEN_FAILED', 'EACCES', secret]) {
+        reportIOSRuntimeStartFailure(Object.assign(new Error(secret), {
+          code, path: secret, stack: secret, cause: { credentials: secret },
+        }), 'pan');
+      }
+      for (const error of [undefined, null, secret, { code: { toString() { throw new Error(secret); } } },
+        Object.defineProperty({}, 'code', { get() { throw new Error(secret); } })]) {
+        reportIOSRuntimeStartFailure(error, 'pan');
+      }
+      reportIOSRuntimeStartFailure({ code: 'STORAGE_ERROR' }, secret);
+    ` });
+    assert.deepEqual(await runtime.exited, { code: 1, signal: null });
+    const categories = ['STORAGE_ERROR', 'CORRUPT_STORAGE', 'ERR_DLOPEN_FAILED', 'EACCES',
+      'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'];
+    assert.equal(runtime.output().stderr, categories.map(category =>
+      `IOS_RUNTIME_START_FAILED stage=pan category=${category}\n`).join('') +
+      'IOS_RUNTIME_START_FAILED stage=unknown category=STORAGE_ERROR\n');
+    assert.equal(runtime.output().stdout, '');
+  });
+
+test('bootstrap native, channel, listener and endpoint failures retain ownership and report their stage',
+  { timeout: 30000 }, async t => {
+    for (const [mode, category] of [
+      ['native-binding', 'DESCRIPTOR_UNAVAILABLE'], ['bootstrap-channel', 'ERR_INVALID_FD_TYPE'],
+      ['listen', 'EADDRINUSE'], ['endpoint', 'EPIPE'],
+    ]) {
+      const runtime = spawnRuntime(t, {
+        sendConfiguration: mode === 'listen' || mode === 'endpoint',
+        fixture: `${descriptorProbe}
+          import http from 'node:http';
+          const { reportIOSRuntimeStartFailure } = await import(${JSON.stringify(new URL('../apps/ios/runtime/bootstrap.mjs', import.meta.url).href)});
+          const mode = ${JSON.stringify(mode)}, failure = Object.assign(
+            new Error('/private/var/fixture?token=private-startup-error'), { code: ${JSON.stringify(category)} });
+          const original = mode === 'bootstrap-channel'
+            ? fs.openSync(new URL('./original', import.meta.url), 'w+') : 3;
+          if (mode === 'native-binding') {
+            binding.duplicateBootstrapDescriptor = () => nativeDuplicate(0x7fffffff);
+          }
+          if (mode === 'listen') http.Server.prototype.listen = () => { throw failure; };
+          const write = net.Socket.prototype.write;
+          net.Socket.prototype.write = function(...args) {
+            if (mode === 'endpoint' && this === channel) {
+              queueMicrotask(() => args.at(-1)(failure));
+              return true;
+            }
+            return Reflect.apply(write, this, args);
+          };
+          let stage, closes = 0;
+          try {
+            await startIOSAppRuntime({
+              product: 'aggregate', argv: ['--meow-bootstrap-fd', String(original)],
+              onStage: value => { stage = value; },
+              assemble: () => [{ id: 'music', version: '0.8.0', contract: 'music.script.v3',
+                methods: {}, upload() {}, close() { closes++; } }],
+            });
+            assert.fail('startup must reject');
+          } catch (error) {
+            if (mode === 'listen' || mode === 'endpoint') assert.equal(error, failure);
+            reportIOSRuntimeStartFailure(error, stage);
+          }
+          if (channelClosed) await channelClosed;
+          assert.equal(closes, mode === 'listen' || mode === 'endpoint' ? 1 : 0);
+          assert.equal(fs.fstatSync(3).isSocket(), true);
+          if (mode === 'bootstrap-channel') nativeClose(original);
+          process.stdout.write('BOOTSTRAP_DIAGNOSTIC_OK\\n');
+        `,
+      });
+      await runtime.closed;
+      assert.deepEqual(await runtime.exited, { code: 1, signal: null }, JSON.stringify(runtime.output()));
+      assert.equal(runtime.output().stderr, `IOS_RUNTIME_START_FAILED stage=${mode} category=${category}\n`);
+      assert.equal(runtime.output().stdout, 'BOOTSTRAP_DIAGNOSTIC_OK\n');
+    }
+  });
+
+test('the iOS entry reports each module initialization failure and closes previously assembled owners',
+  { timeout: 30000 }, async t => {
+    const stages = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease'];
+    const replacements = [
+      ['../apps/runtime/modules/music-script.mjs', [['createMusicScriptModule', 'music']]],
+      ['../apps/runtime/modules/cat-script.mjs', [['createCatScriptModule', 'cat']]],
+      ['../apps/runtime/modules/source-runtime.mjs', [['createSourceRuntimeModule', 'source']]],
+      ['../apps/runtime/modules/pan-runtime.mjs', [['createPanRuntimeModule', 'pan']]],
+      ['../apps/runtime/modules/metadata-data.mjs', [['createTMDBDataModule', 'tmdb'], ['createDoubanDataModule', 'douban']]],
+      ['../apps/runtime/modules/netease-token.mjs', [['createNeteaseTokenModule', 'netease']]],
+    ].map(([path, exports]) => [new URL(path, import.meta.url).href, exports.map(([name, stage]) =>
+      `export function ${name}() { return globalThis.fixtureModule(${JSON.stringify(stage)}); }`).join('\n')]);
+    replacements.push([new URL('../apps/runtime/entry.mjs', import.meta.url).href,
+      `export function connectFilmPlayback(modules) { modules.push(globalThis.fixtureModule('film')); }`]);
+    for (const [stage, code, category] of [
+      ...stages.map(stage => [stage, 'STORAGE_ERROR', 'STORAGE_ERROR']),
+      ['pan', '/private/var?cookie=unknown-private-code', 'UNKNOWN'],
+      ['assembly', undefined, 'INVALID_REQUEST'],
+    ]) {
+      const runtime = spawnRuntime(t, { fixture: `
+        import { registerHooks } from 'node:module';
+        const replacements = new Map(${JSON.stringify(replacements)});
+        globalThis.fixtureModule = stage => {
+          if (stage === ${JSON.stringify(stage)}) throw Object.assign(
+            new Error('/private/var/accounts?token=private-module-error'), { code: ${JSON.stringify(code)} });
+          return { close() { process.stdout.write('CLOSED ' + stage + '\\n'); } };
+        };
+        registerHooks({ load(url, context, next) {
+          if (replacements.has(url)) return { format: 'module', shortCircuit: true, source: replacements.get(url) };
+          return next(url, context);
+        } });
+        await import(${JSON.stringify(new URL('../apps/ios/runtime/entries/aggregate.mjs', import.meta.url).href)});
+      ` });
+      await runtime.closed;
+      assert.deepEqual(await runtime.exited, { code: 1, signal: null }, JSON.stringify(runtime.output()));
+      assert.equal(runtime.output().stderr, `IOS_RUNTIME_START_FAILED stage=${stage} category=${category}\n`);
+      const previous = stage === 'assembly' ? stages : stages.slice(0, stages.indexOf(stage));
+      assert.equal(runtime.output().stdout, previous.map(stage => `CLOSED ${stage}\n`).join(''));
+      await assert.rejects(runtime.endpoint, { message: 'BOOTSTRAP_CLOSED' });
+    }
+  });
 
 test('owner EOF before configuration completes cancels startup and releases the executor', { timeout: 30000 }, async t => {
   const runtime = spawnRuntime(t, { entry, sendConfiguration: false });
   runtime.channel.end();
   await runtime.closed;
   assert.deepEqual(await runtime.exited, { code: 1, signal: null });
-  assert.equal(runtime.output().stderr, 'IOS_RUNTIME_START_FAILED\n');
+  assert.equal(runtime.output().stderr, 'IOS_RUNTIME_START_FAILED stage=configuration category=CLOSED\n');
   assert.equal(runtime.output().stdout, '');
 });

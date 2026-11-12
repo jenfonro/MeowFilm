@@ -2,133 +2,84 @@
 import UIKit
 import MeowUI
 
+/// One rule's fields stay together inside the page, including at accessibility sizes.
 @MainActor
-final class FilmRuleEditorController: FilmSettingsListController, UITextViewDelegate {
-    override var avoidsKeyboard: Bool { true }
-    let owner: FilmRulesDraft
-    let group: FilmRuleGroup
-    private(set) var ruleIndex: Int?
-    let pattern = filmTextView("正则表达式", id: "film.rule.pattern")
-    let replacement = filmTextField("替换", id: "film.rule.replace")
-    let flags = filmTextField("flags", id: "film.rule.flags")
-    private var writing = false
-    private var removedFromDraft = false
-    private var finished = false
+final class FilmRuleEditorView: UIStackView, UITextViewDelegate {
+    let pattern = UITextView()
+    let replacement: UITextField
+    let flags: UITextField
+    let delete = UIButton(type: .system)
+    private let options = UIStackView()
+    private var flagsWidth: NSLayoutConstraint?
+    var change: ((FilmMatchRule) -> Void)?
+    var resize: (() -> Void)?
 
-    init(owner: FilmRulesDraft, group: FilmRuleGroup, index: Int?, themeProvider: any PageThemeProviding) {
-        self.owner = owner; self.group = group; ruleIndex = index
-        super.init(themeProvider: themeProvider)
-        pageTitle = index == nil ? "添加规则" : "编辑规则"
-        if let index {
-            let rule = owner.rules(group)[index]
-            pattern.text = rule.pattern; replacement.text = rule.replace; flags.text = rule.flags
-        }
-    }
-    override func viewDidLoad() {
-        super.viewDidLoad()
+    init(rule: FilmMatchRule, group: FilmRuleGroup, index: Int, theme: PageTheme) {
+        let id = "film.rules.\(group.rawValue).\(index)"
+        replacement = filmTextField("replace", id: id + ".replace", value: rule.replace)
+        flags = filmTextField("flags", id: id + ".flags", value: rule.flags)
+        super.init(frame: .zero)
+        axis = .vertical; spacing = 8
+        let patternLabel = UILabel()
+        patternLabel.text = "pattern"; patternLabel.font = .preferredFont(forTextStyle: .caption1)
+        patternLabel.adjustsFontForContentSizeCategory = true; patternLabel.textColor = UIColor(theme.settings.muted)
+        addArrangedSubview(patternLabel)
+        pattern.text = rule.pattern
+        pattern.accessibilityLabel = "pattern"; pattern.accessibilityIdentifier = id + ".pattern"
+        pattern.font = .preferredFont(forTextStyle: .body)
+        pattern.adjustsFontForContentSizeCategory = true
+        pattern.isScrollEnabled = false; pattern.backgroundColor = .clear
+        pattern.autocorrectionType = .no; pattern.autocapitalizationType = .none
+        pattern.smartQuotesType = .no; pattern.smartDashesType = .no
+        pattern.heightAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         pattern.delegate = self
-        for field in [replacement, flags] {
-            field.addAction(UIAction { [weak self] _ in self?.updateDraft() }, for: .editingChanged)
-        }
-        render()
-    }
-    func textViewDidChange(_ textView: UITextView) { updateDraft() }
-    func updateDraft() {
-        guard !finished, let ruleIndex else { return }
-        owner.edit(group, index: ruleIndex, rule: currentRule)
-    }
-    private var currentRule: FilmMatchRule {
-        .init(pattern: pattern.text, replace: replacement.text ?? "", flags: flags.text ?? "")
-    }
-    override func render() {
-        if finished {
-            sections = []
-            super.render()
-            return
-        }
-        if removedFromDraft {
-            sections = [.init(title: "", rows: [
-                .init(title: writing ? "保存中" : "保存删除", id: "film.rule.save", enabled: !writing,
-                      action: { [weak self] in self?.retryDeletedDraft() }),
-            ])]
-            super.render()
-            return
-        }
-        pattern.isEditable = !writing; replacement.isEnabled = !writing; flags.isEnabled = !writing
-        pattern.textColor = UIColor(theme.ink); replacement.textColor = UIColor(theme.ink); flags.textColor = UIColor(theme.ink)
-        sections = [.init(title: "正则表达式", rows: [.init(title: "", id: "", content: pattern)])]
+        pattern.textColor = UIColor(theme.settings.ink)
+        addArrangedSubview(pattern)
         if !group.isClean {
-            sections.append(.init(title: "替换", rows: [.init(title: "", id: "", content: replacement)]))
-            sections.append(.init(title: "flags", rows: [.init(title: "", id: "", content: flags)]))
-        }
-        var actions: [FilmSettingsRow] = [
-            .init(title: writing ? "保存中" : "保存", id: "film.rule.save", enabled: !writing && !owner.busy,
-                  action: { [weak self] in self?.save() }),
-        ]
-        if ruleIndex != nil {
-            actions.append(.init(title: "删除", id: "film.rule.delete", enabled: !writing && !owner.busy,
-                action: { [weak self] in self?.confirm("删除规则？") { [weak self] in self?.deleteRule() } }))
-        }
-        sections.append(.init(title: "", rows: actions)); super.render()
-    }
-    func save() {
-        guard !finished, !writing, !owner.busy else { return }
-        updateDraft(); view.endEditing(true)
-        writing = true; render()
-        let value = currentRule
-        Task { [weak self] in
-            guard let self else { return }
-            let count = owner.rules(group).count
-            do {
-                if ruleIndex == nil {
-                    try await owner.add(group, rule: value)
-                } else { try await owner.save() }
-                finishEditing()
-            } catch {
-                // Add has already joined the shared draft even when persistence fails.
-                if ruleIndex == nil, owner.rules(group).count > count { ruleIndex = count }
-                writing = false; render()
-                failure(error, retry: { [weak self] in self?.save() })
+            options.spacing = 12; options.distribution = .fill
+            for (name, field) in [("replace", replacement), ("flags", flags)] {
+                field.textColor = UIColor(theme.settings.ink)
+                field.addAction(UIAction { [weak self] _ in self?.changed() }, for: .editingChanged)
+                let label = UILabel()
+                label.text = name; label.font = .preferredFont(forTextStyle: .caption1)
+                label.adjustsFontForContentSizeCategory = true; label.textColor = UIColor(theme.settings.muted)
+                let stack = UIStackView(arrangedSubviews: [label, field])
+                stack.axis = .vertical; stack.spacing = 4
+                if name == "flags" {
+                    flagsWidth = stack.widthAnchor.constraint(equalToConstant: 72)
+                    flagsWidth?.isActive = true
+                } else {
+                    stack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                }
+                options.addArrangedSubview(stack)
             }
+            addArrangedSubview(options)
         }
+        delete.setTitle("删除", for: .normal)
+        delete.tintColor = UIColor(theme.settings.danger)
+        delete.accessibilityIdentifier = id + ".delete"
+        delete.titleLabel?.font = .preferredFont(forTextStyle: .body)
+        delete.titleLabel?.adjustsFontForContentSizeCategory = true
+        delete.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        addArrangedSubview(delete)
     }
-    func deleteRule() {
-        guard !finished, let index = ruleIndex, !writing, !owner.busy else { return }
-        writing = true; render()
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await owner.delete(group, index: index)
-                finishEditing()
-            } catch {
-                // Retry commits the complete draft; it must not delete the next row.
-                removedFromDraft = true; writing = false; render()
-                failure(error, retry: { [weak self] in self?.retryDeletedDraft() })
-            }
+    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layoutSubviews() {
+        let axis: NSLayoutConstraint.Axis = bounds.width < 300 || traitCollection.preferredContentSizeCategory.isAccessibilityCategory
+            ? .vertical : .horizontal
+        if options.axis != axis {
+            flagsWidth?.isActive = axis == .horizontal
+            options.axis = axis
         }
+        super.layoutSubviews()
     }
-    private func retryDeletedDraft() {
-        guard !writing else { return }
-        writing = true; render()
-        Task { [weak self] in
-            guard let self else { return }
-            do { try await owner.save(); finishEditing() }
-            catch {
-                writing = false; render()
-                failure(error, retry: { [weak self] in self?.retryDeletedDraft() })
-            }
-        }
+    func textViewDidChange(_ textView: UITextView) { changed(); resize?() }
+    private func changed() {
+        change?(.init(pattern: pattern.text, replace: replacement.text ?? "", flags: flags.text ?? ""))
     }
-    private func finishEditing() {
-        // Saving normalizes all groups and can remove this row or earlier rows.
-        // The submitted editor is over; a new editor must use the new snapshot.
-        finished = true; writing = false; ruleIndex = nil
-        pattern.delegate = nil
-        pattern.isEditable = false; replacement.isEnabled = false; flags.isEnabled = false
-        view.endEditing(true); render()
-        if navigationController?.topViewController === self {
-            navigationController?.popViewController(animated: true)
-        }
+    func setEnabled(_ enabled: Bool) {
+        pattern.isEditable = enabled; replacement.isEnabled = enabled; flags.isEnabled = enabled; delete.isEnabled = enabled
     }
 }
 #endif

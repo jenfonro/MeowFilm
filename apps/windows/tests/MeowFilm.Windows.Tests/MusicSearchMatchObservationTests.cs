@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Search;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -213,11 +214,12 @@ public static class MusicSearchMatchObservationTests
 
     private static async Task KnownEmpty()
     {
-        await using var f = new Fixture();
         await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var cacheStore = new CacheDocumentStore(store);
         await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(store);
+        await using var f = new Fixture();
         int supplements = 0;
-        var facts = new MeowFilm.Capabilities.Library.MusicSongMatcher(library, new(store), (request, _) =>
+        var facts = new MeowFilm.Capabilities.Library.MusicSongMatcher(library, new(cacheStore), (request, _) =>
         { supplements++; return Task.FromResult(Page(request, [])); }, f.Clock);
         var song = MusicSongFixture.Online("wy", "known", "Focused", "Artist", duration: 180);
         await facts.KnownAsync(song, default);
@@ -234,10 +236,11 @@ public static class MusicSearchMatchObservationTests
 
     private static async Task KnownProjection()
     {
-        await using var f = new Fixture();
         await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var cacheStore = new CacheDocumentStore(store);
         await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(store);
-        var facts = new MeowFilm.Capabilities.Library.MusicSongMatcher(library, new(store), (_, _) =>
+        await using var f = new Fixture();
+        var facts = new MeowFilm.Capabilities.Library.MusicSongMatcher(library, new(cacheStore), (_, _) =>
             throw new InvalidOperationException("search projection cannot supplement"), f.Clock);
         var wy = MusicSongFixture.Online("wy", "original", "Synthetic recording", "Artist", duration: 180);
         var tx = MusicSongFixture.Online("tx", "known-mapping", "Synthetic recording", "Artist", duration: 180);

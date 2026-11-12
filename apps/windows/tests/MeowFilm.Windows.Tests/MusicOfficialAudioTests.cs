@@ -25,7 +25,7 @@ public static class MusicOfficialAudioTests
             await using var f = new MusicPlaybackCacheTests.Fixture();
             f.Clock.Now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var runtime = new NoRuntime(); int vkeys = 0, offlineRequests = 0; bool offline = false;
-            var app = new MusicNativeApplication(f.Store, runtime, new Handler(async request =>
+            var app = new MusicNativeApplication(f.Store, runtime, f.CacheStore, new Handler(async request =>
             {
                 if (offline) { offlineRequests++; throw new HttpRequestException("Synthetic offline"); }
                 if (request.Content is null) return new(HttpStatusCode.ServiceUnavailable);
@@ -46,7 +46,8 @@ public static class MusicOfficialAudioTests
                 }
             }));
             await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            await using var module = new MusicCapability(app, f.Store, new NativeMusicPlayback(player), new CacheDialogs(), playbackCacheRoot: f.Root);
+            await using var module = new MusicCapability(app, f.Store, new NativeMusicPlayback(player), new CacheDialogs(),
+                playbackCacheRoot: f.Root, cacheStore: f.CacheStore);
             await module.InitializeAsync(default);
             await module.ActivateQualitySettingsAsync();
             await module.SetPlaybackQualityRequestAsync("320k");
@@ -87,8 +88,9 @@ public static class MusicOfficialAudioTests
         yield return new("Official native owner resolves and caches exact QQ recording then revokes on logout without Node", async () =>
         {
             await using var store = new MemoryStore(); var runtime = new NoRuntime();
+            await using var cacheStore = new CacheDocumentStore(store);
             int vkeys = 0;
-            await using var app = new MusicNativeApplication(store, runtime, new Handler(async request =>
+            await using var app = new MusicNativeApplication(store, runtime, cacheStore, new Handler(async request =>
             {
                 var input = JsonNode.Parse(await request.Content!.ReadAsStringAsync())!;
                 string method = input["req_0"]!["method"]!.GetValue<string>();
@@ -120,6 +122,7 @@ public static class MusicOfficialAudioTests
             long generation = resolved.GetProperty("generation").GetInt64();
             Check(app.IsOfficialPlaybackCurrent("tx", scope, generation));
             await app.ExecuteAsync("music.official.confirm", input);
+            await cacheStore.DrainAsync();
             Check(store.Root(MusicSourceCache.Namespace)["scopes"]![scope]!["pointers"]!.AsObject().Count == 1);
             var logout = await app.ExecuteAsync("music.accounts.logout", new { platform = "tx" });
             Check(logout.GetProperty("ok").GetBoolean());
@@ -127,7 +130,7 @@ public static class MusicOfficialAudioTests
             var revoked = await app.ExecuteAsync("music.official.resolve", input);
             Check(!revoked.GetProperty("ok").GetBoolean() && runtime.Calls == 0 && vkeys == 1);
         });
-        yield return new("Official native cache-only resolve is local on a miss and returns a hit only after current rights", async () =>
+        yield return new("Official native cache-only resolve is local and reuses its admitted URL without membership requests", async () =>
         {
             await using var store = new MemoryStore(); var runtime = new NoRuntime();
             int calls = 0, vkeys = 0, rights = 0;
@@ -161,7 +164,7 @@ public static class MusicOfficialAudioTests
             var hit = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k", cacheOnly = true });
             Check(hit.GetProperty("ok").GetBoolean() && vkeys == 1 &&
                 hit.GetProperty("url").GetString() == resolved.GetProperty("url").GetString(), "a valid receipt is reused: " + hit.GetRawText());
-            Check(rights > checks, "a cached URL is still returned only after the current rights check");
+            Check(rights == checks, "an admitted URL needs no membership-derived rights check");
             var invalid = await app.ExecuteAsync("music.official.resolve",
                 new { platform = "tx", song, quality = "320k", cacheOnly = true, refresh = true });
             Check(!invalid.GetProperty("ok").GetBoolean() && invalid.GetProperty("code").GetString() == "INVALID_REQUEST");
@@ -270,138 +273,113 @@ public static class MusicOfficialAudioTests
             }
             Check(runtime.Calls == 0);
         });
-        yield return new("Music source cache separates candidate and confirmed history and preserves restart TTL", async () =>
+        yield return new("Music source and chorus caches roundtrip current facts and honor identity and TTL", async () =>
         {
-            await using var store = new MemoryStore(); var clock = new Clock();
+            await using var backing = new MemoryStore();
+            await using var store = new CacheDocumentStore(backing);
+            var clock = new Clock();
             var cache = new MusicSourceCache(store, clock);
             string signature = Hash('a'), policy = Hash('b');
             var info = SourceInfo("scope", "song", signature, policy, clock.Now);
             await cache.PutAsync("scope", "song", signature, info, default);
-            Check(store.Root(MusicSourceCache.Namespace)["scopes"]!["scope"]!["pointers"]!.AsObject().Count == 0);
-            var hit = await new MusicSourceCache(store, clock).ReadAsync("scope", "song", signature, default);
-            Check(hit is not null && await cache.ReadAsync("scope", "song", Hash('c'), default) is null);
+            Check(await cache.ReadHistoryAsync("scope", "song", policy, "auto", 7, default) is null);
+            Check(await cache.ReadAsync("scope", "song", signature, default) is not null);
+            Check(await cache.ReadAsync("scope", "song", Hash('c'), default) is null);
             info["recording"] = Recording();
             await cache.ConfirmAsync("scope", "song", signature, info, default);
-            var pointer = store.Root(MusicSourceCache.Namespace)["scopes"]!["scope"]!["pointers"]!["song"]!;
-            Check(pointer["info"]!["url"] is null);
+            var history = await cache.ReadHistoryAsync("scope", "song", policy, "auto", 7, default);
+            Check(history is not null && history["url"] is null && history["headers"] is null);
+            Check(await cache.ReadHistoryAsync("scope", "song", policy, "auto", 8, default) is null);
+            string key = MusicChorusCache.Key("account", "song", "wy", "1", 100);
+            var chorus = new MusicChorusCache(store, clock);
+            await chorus.PutAsync(key, 100, 20, 30, default);
+            Check(await chorus.ReadAsync(key, 100, default) == (20d, 30d));
+            Check(await chorus.ReadAsync(key, 25, default) is null);
+            Check(await chorus.ReadAsync(MusicChorusCache.Key("other", "song", "wy", "1", 100), 100, default) is null);
+            Check(await chorus.ReadAsync(MusicChorusCache.Key("account", "song", "wy", "2", 100), 100, default) is null);
+            await store.DrainAsync();
+            await using var reopened = new CacheDocumentStore(backing);
+            Check(await new MusicSourceCache(reopened, clock).ReadAsync("scope", "song", signature, default) is not null);
             clock.Now += 51000;
             Check(await cache.ReadAsync("scope", "song", signature, default) is null);
-            Check(store.Root(MusicSourceCache.Namespace)["scopes"]!["scope"]!["pointers"]!.AsObject().Count == 1);
+            Check(await cache.ReadHistoryAsync("scope", "song", policy, "auto", 7, default) is not null);
+            clock.Now += MusicSourceCache.HistoryTtl;
+            Check(await cache.ReadHistoryAsync("scope", "song", policy, "auto", 7, default) is null);
+            Check(await chorus.ReadAsync(key, 100, default) is null);
         });
-        yield return new("Music source cache failures are misses and do not overwrite library documents", async () =>
+        yield return new("Music source and chorus cache damaged content or storage failures miss and rebuild", async () =>
         {
-            await using var store = new MemoryStore { Fail = true };
-            var cache = new MusicSourceCache(store);
-            string signature = Hash('a');
-            Check(await cache.ReadAsync("scope", "song", signature, default) is null);
-            await cache.PutAsync("scope", "song", signature,
-                SourceInfo("scope", "song", signature, Hash('b'), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), default);
-            Check(store.Data.Count == 0);
-        });
-        yield return new("Music local cache data failure is explicit across source and chorus owners", async () =>
-        {
-            await using var store = new MemoryStore { Failure = DocumentStoreError.Protection };
-            Check(await CacheDataError(() => new MusicSourceCache(store).ReadAsync(
-                "scope", "song", Hash('a'), default)) == DocumentStoreError.Protection);
-            Check(await CacheDataError(async () => _ = await new MusicChorusCache(store).ReadAsync(
-                Hash('b'), 100, default)) == DocumentStoreError.Protection);
-            Check(store.Writes == 0);
-        });
-        yield return new("Music source cache rejects every non-current document entry without side effects", async () =>
-        {
-            long now = new Clock().Now;
-            string signature = Hash('a'), policy = Hash('b');
-            var candidate = SourceInfo("scope", "song", signature, policy, now);
-            var history = (JsonObject)candidate.DeepClone();
-            history["recording"] = Recording();
-            var current = SourceDocument(candidate, history, now);
-            var malformedInfo = JsonNode.Parse(current)!.AsObject();
-            malformedInfo["scopes"]!["scope"]!["urls"]!["song"]!["info"]!["extra"] = true;
-            var missingInfo = JsonNode.Parse(current)!.AsObject();
-            missingInfo["scopes"]!["scope"]!["urls"]!["song"]!["info"]!.AsObject().Remove("delivery");
-            var nonCanonicalGeneration = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(current)
-                .Replace("\"generation\":7", "\"generation\":7.0", StringComparison.Ordinal));
-            foreach (var item in new (byte[] Bytes, DocumentStoreError Error)[]
+            foreach (var error in new DocumentStoreError?[] { null, DocumentStoreError.Protection, DocumentStoreError.Storage })
             {
-                (Encoding.UTF8.GetBytes("""{"schema":2,"scopes":{}}"""), DocumentStoreError.UnsupportedVersion),
-                (Encoding.UTF8.GetBytes("""{"schema":1.0,"scopes":{}}"""), DocumentStoreError.UnsupportedVersion),
-                (Encoding.UTF8.GetBytes("""{"schema":1,"schema":1,"scopes":{}}"""), DocumentStoreError.Corrupt),
-                (Encoding.UTF8.GetBytes("""{"schema":1,"scopes":{"scope":{"at":1.0,"urls":{},"pointers":{}}}}"""), DocumentStoreError.Corrupt),
-                (JsonSerializer.SerializeToUtf8Bytes(malformedInfo), DocumentStoreError.Corrupt),
-                (JsonSerializer.SerializeToUtf8Bytes(missingInfo), DocumentStoreError.Corrupt),
-                (nonCanonicalGeneration, DocumentStoreError.Corrupt),
-            })
-                await RejectSourceDocument(item.Bytes, item.Error, candidate, history);
+                await using var backing = new MemoryStore { Failure = error };
+                backing.Data[MusicSourceCache.Namespace] = "{"u8.ToArray();
+                backing.Data[MusicChorusCache.Namespace] = "{\"entries\":null}"u8.ToArray();
+                backing.Data["music.library.v1"] = "business"u8.ToArray();
+                await using var store = new CacheDocumentStore(backing);
+                var clock = new Clock();
+                var source = new MusicSourceCache(store, clock);
+                var chorus = new MusicChorusCache(store, clock);
+                Check(await source.ReadAsync("scope", "song", Hash('a'), default) is null);
+                Check(await chorus.ReadAsync(Hash('b'), 100, default) is null);
+                await source.PutAsync("scope", "song", Hash('a'), SourceInfo("scope", "song", Hash('a'), Hash('b'), clock.Now), default);
+                await chorus.PutAsync(Hash('b'), 100, 20, 30, default);
+                Check(await source.ReadAsync("scope", "song", Hash('a'), default) is not null);
+                Check(await chorus.ReadAsync(Hash('b'), 100, default) == (20d, 30d));
+                await store.DrainAsync();
+                Check(Encoding.UTF8.GetString(backing.Data["music.library.v1"]) == "business");
+            }
         });
-        yield return new("Music source cache rejects non-current producer shapes instead of sanitizing them", async () =>
+        yield return new("Music source and chorus saves never wait for initial disk read or slow persistence", async () =>
         {
-            await using var store = new MemoryStore();
-            string signature = Hash('a');
-            var candidate = SourceInfo("scope", "song", signature, Hash('b'), new Clock().Now);
-            candidate["extra"] = true;
-            Check(await CacheDataError(() => new MusicSourceCache(store).PutAsync(
-                "scope", "song", signature, candidate, default)) == DocumentStoreError.Corrupt);
-            var confirmation = SourceInfo("scope", "song", signature, Hash('b'), new Clock().Now);
-            confirmation["recording"] = Recording();
-            confirmation["recording"]!["cookie"] = "must-not-be-silently-removed";
-            Check(await CacheDataError(() => new MusicSourceCache(store).ConfirmAsync(
-                "scope", "song", signature, confirmation, default)) == DocumentStoreError.Corrupt);
-            Check(store.Writes == 0 && store.Data.Count == 0);
-        });
-        yield return new("Music chorus cache preserves exact recording duration account and thirty day boundary", async () =>
-        {
-            await using var store = new MemoryStore(); var clock = new Clock();
-            string key = MusicChorusCache.Key("account", "song", "wy", "1", 100);
-            var cache = new MusicChorusCache(store, clock);
-            await cache.PutAsync(key, 100, 20, 30, default);
-            Check(await new MusicChorusCache(store, clock).ReadAsync(key, 100, default) == (20d, 30d));
-            Check(await cache.ReadAsync(MusicChorusCache.Key("other", "song", "wy", "1", 100), 100, default) is null);
-            Check(await cache.ReadAsync(MusicChorusCache.Key("account", "song", "wy", "2", 100), 100, default) is null);
-            Check(await cache.ReadAsync(key, 25, default) is null);
-            clock.Now += 30L * 86400000;
-            Check(await cache.ReadAsync(key, 100, default) is null);
-        });
-        yield return new("Music chorus cache rejects every non-current document entry without side effects", async () =>
-        {
-            string key = Hash('a');
-            foreach (var item in new (byte[] Bytes, DocumentStoreError Error)[]
+            var held = new HeldCacheStore();
+            await using var store = new CacheDocumentStore(held);
+            var clock = new Clock();
+            var source = new MusicSourceCache(store, clock);
+            var chorus = new MusicChorusCache(store, clock);
+            var reading = source.ReadAsync("scope", "song", Hash('a'), default);
+            await held.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            try
             {
-                (Encoding.UTF8.GetBytes("""{"schema":2,"entries":{}}"""), DocumentStoreError.UnsupportedVersion),
-                (Encoding.UTF8.GetBytes("""{"schema":1.0,"entries":{}}"""), DocumentStoreError.UnsupportedVersion),
-                (Encoding.UTF8.GetBytes("""{"schema":1,"schema":1,"entries":{}}"""), DocumentStoreError.Corrupt),
-                (ChorusDocument(key, """{"at":1.0,"start":20,"end":30}"""), DocumentStoreError.Corrupt),
-                (ChorusDocument(key, """{"at":1,"start":20.0,"end":30}"""), DocumentStoreError.Corrupt),
-                (ChorusDocument(key, """{"at":1,"start":20}"""), DocumentStoreError.Corrupt),
-                (ChorusDocument(key, """{"at":1,"start":20,"end":30,"extra":true}"""), DocumentStoreError.Corrupt),
-            })
-                await RejectChorusDocument(item.Bytes, item.Error, key);
+                await source.PutAsync("scope", "song", Hash('a'), SourceInfo("scope", "song", Hash('a'), Hash('b'), clock.Now), default)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+                await chorus.PutAsync(Hash('b'), 100, 20, 30, default).WaitAsync(TimeSpan.FromSeconds(2));
+                Check(await chorus.ReadAsync(Hash('b'), 100, default) == (20d, 30d));
+                Check(!reading.IsCompleted);
+            }
+            finally { held.Release.TrySetResult(); }
+            Check(await reading is not null, "late disk read must not replace a newer memory save");
+            await store.DrainAsync();
         });
-        yield return new("Music local cache owners reject unknown write receipts without retrying or inventing success", async () =>
+        yield return new("Music source invalidation and recording rejection fence delayed initial disk reads", async () =>
         {
-            string signature = Hash('a');
-            await using (var store = new MemoryStore
-            {
-                SkipWrite = true,
-                WriteReceipt = new DocumentFingerprint(true, 1, new string('0', 64))
-            })
+            foreach (bool reject in new[] { false, true })
             {
                 var clock = new Clock();
-                var error = await CacheDataError(() => new MusicSourceCache(store, clock).PutAsync(
-                    "scope", "song", signature,
-                    SourceInfo("scope", "song", signature, Hash('b'), clock.Now), default));
-                Check(error == DocumentStoreError.Storage && store.Writes == 1 &&
-                    !store.Data.ContainsKey(MusicSourceCache.Namespace));
-            }
-            await using (var store = new MemoryStore
-            {
-                SkipWrite = true,
-                WriteReceipt = new DocumentFingerprint(true, 1, new string('0', 64))
-            })
-            {
-                var error = await CacheDataError(() =>
-                    new MusicChorusCache(store).PutAsync(Hash('c'), 100, 20, 30, default));
-                Check(error == DocumentStoreError.Storage && store.Writes == 1 &&
-                    !store.Data.ContainsKey(MusicChorusCache.Namespace));
+                var info = SourceInfo("scope", "song", Hash('a'), Hash('b'), clock.Now);
+                await using var seed = new CacheDocumentStore();
+                var seeded = new MusicSourceCache(seed, clock);
+                await seeded.PutAsync("scope", "song", Hash('a'), info, default);
+                info["recording"] = Recording();
+                await seeded.ConfirmAsync("scope", "song", Hash('a'), info, default);
+                var held = new HeldCacheStore { Initial = seed.ReadMemory(MusicSourceCache.Namespace).Data };
+                await using var store = new CacheDocumentStore(held);
+                var cache = new MusicSourceCache(store, clock);
+                var reading = cache.ReadAsync("scope", "song", Hash('a'), default);
+                var history = cache.ReadHistoryAsync("scope", "song", Hash('b'), "auto", 7, default);
+                await held.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                try
+                {
+                    Task invalidating = reject
+                        ? cache.RejectRecordingAsync("scope", "song", info["sourceKey"]!.GetValue<string>(), default)
+                        : cache.InvalidateAsync("scope", "song", default);
+                    await invalidating.WaitAsync(TimeSpan.FromSeconds(2));
+                    Check(store.ReadMemory(MusicSourceCache.Namespace).Data is not null,
+                        "an empty invalidation still publishes its fence without waiting for disk");
+                }
+                finally { held.Release.TrySetResult(); }
+                Check(await reading is null && await history is null);
+                Check(await cache.ReadAsync("scope", "song", Hash('a'), default) is null);
+                await store.DrainAsync();
             }
         });
         yield return new("Music playback cache complete structure rejects truncated WAV and protected MP4", () =>
@@ -442,7 +420,6 @@ public static class MusicOfficialAudioTests
         string platform = "tx")
     {
         var recording = Recording(platform);
-        long license = now + 3600000;
         return new JsonObject
         {
             ["ok"] = true,
@@ -465,96 +442,27 @@ public static class MusicOfficialAudioTests
             ["duration"] = 100d,
             ["size"] = 120L,
             ["full"] = true,
-            ["licenseExpiresAt"] = license,
             ["delivery"] = platform + "-official",
-            ["offlineAllowed"] = true,
-            ["authorizationExpiresAt"] = license
         };
     }
-    private static byte[] SourceDocument(JsonObject candidate, JsonObject confirmation, long at)
+    private sealed class HeldCacheStore : IDocumentStore
     {
-        var history = new JsonObject
+        internal byte[]? Initial;
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
-            ["platform"] = confirmation["platform"]!.DeepClone(),
-            ["songId"] = "song",
-            ["sourceKey"] = confirmation["sourceKey"]!.DeepClone(),
-            ["scope"] = "scope",
-            ["generation"] = confirmation["generation"]!.DeepClone(),
-            ["quality"] = confirmation["quality"]!.DeepClone(),
-            ["actualQuality"] = confirmation["actualQuality"]?.DeepClone(),
-            ["qualityVerified"] = confirmation["qualityVerified"]!.DeepClone(),
-            ["duration"] = confirmation["duration"]?.DeepClone(),
-            ["delivery"] = confirmation["delivery"]?.DeepClone(),
-            ["requestedQuality"] = confirmation["requestedQuality"]!.DeepClone(),
-            ["qualityPolicySignature"] = confirmation["qualityPolicySignature"]!.DeepClone(),
-            ["recording"] = confirmation["recording"]!.DeepClone()
-        };
-        var root = new JsonObject
+            Entered.TrySetResult(); await Release.Task.WaitAsync(token);
+            return new(Initial?.ToArray(), Initial is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Initial));
+        }
+        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
+            DocumentFingerprint expected, CancellationToken token = default)
         {
-            ["schema"] = 1,
-            ["scopes"] = new JsonObject
-            {
-                ["scope"] = new JsonObject
-                {
-                    ["at"] = at,
-                    ["urls"] = new JsonObject
-                    {
-                        ["song"] = new JsonObject
-                        {
-                            ["signature"] = candidate["qualityCacheSignature"]!.DeepClone(),
-                            ["at"] = at,
-                            ["until"] = at + 50000,
-                            ["info"] = candidate.DeepClone()
-                        }
-                    },
-                    ["pointers"] = new JsonObject
-                    {
-                        ["song"] = new JsonObject
-                        {
-                            ["signature"] = candidate["qualityCacheSignature"]!.DeepClone(),
-                            ["at"] = at,
-                            ["info"] = history
-                        }
-                    }
-                }
-            }
-        };
-        return JsonSerializer.SerializeToUtf8Bytes(root);
+            await Release.Task.WaitAsync(token);
+            return DocumentFingerprint.FromBytes(data.Span);
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
-    private static async Task RejectSourceDocument(byte[] bytes, DocumentStoreError expected,
-        JsonObject candidate, JsonObject confirmation)
-    {
-        await using var store = new MemoryStore();
-        store.Data[MusicSourceCache.Namespace] = bytes.ToArray();
-        byte[] original = store.Data[MusicSourceCache.Namespace].ToArray();
-        var cache = new MusicSourceCache(store, new Clock());
-        string signature = candidate["qualityCacheSignature"]!.GetValue<string>();
-        string policy = confirmation["qualityPolicySignature"]!.GetValue<string>();
-        foreach (Func<Task> operation in new Func<Task>[]
-        {
-            async () => _ = await cache.ReadAsync("scope", "song", signature, default),
-            async () => _ = await cache.ReadHistoryAsync("scope", "song", policy, "auto", 7, default),
-            () => cache.PutAsync("scope", "song", signature, (JsonObject)candidate.DeepClone(), default),
-            () => cache.ConfirmAsync("scope", "song", signature, (JsonObject)confirmation.DeepClone(), default),
-            () => cache.InvalidateAsync("scope", "song", default)
-        })
-            Check(await CacheDataError(operation) == expected);
-        Check(store.Writes == 0 && store.Data[MusicSourceCache.Namespace].SequenceEqual(original));
-    }
-    private static async Task RejectChorusDocument(byte[] bytes, DocumentStoreError expected, string key)
-    {
-        await using var store = new MemoryStore();
-        store.Data[MusicChorusCache.Namespace] = bytes.ToArray();
-        byte[] original = store.Data[MusicChorusCache.Namespace].ToArray();
-        var cache = new MusicChorusCache(store, new Clock());
-        Check(await CacheDataError(async () => _ = await cache.ReadAsync(key, 100, default)) == expected);
-        Check(await CacheDataError(() => cache.PutAsync(key, 100, 20, 30, default)) == expected);
-        Check(store.Writes == 0 && store.Data[MusicChorusCache.Namespace].SequenceEqual(original));
-    }
-    private static byte[] ChorusDocument(string key, string value) => Encoding.UTF8.GetBytes(
-        """{"schema":1,"entries":{"__KEY__":__VALUE__}}"""
-            .Replace("__KEY__", key, StringComparison.Ordinal)
-            .Replace("__VALUE__", value, StringComparison.Ordinal));
     internal static JsonObject Song(string platform, string id = "1", string? title = null, double duration = 100)
     {
         var native = new JsonObject();
@@ -564,13 +472,6 @@ public static class MusicOfficialAudioTests
     }
     internal static void Check(bool value, string message = "Official audio assertion")
     { if (!value) throw new InvalidOperationException(message); }
-    private static async Task<DocumentStoreError> CacheDataError(Func<Task> operation)
-    {
-        try { await operation(); }
-        catch (MusicPlaybackCacheDataException error) { return error.Error; }
-        catch (MusicPlaybackCacheCommitException) { return DocumentStoreError.Storage; }
-        throw new InvalidOperationException("Cache document was accepted");
-    }
     private static MusicPlatformSession Session(string platform) => new(platform, new string('a', 64), 1, "123",
         platform switch { "tx" => "musicid=123; musickey=synthetic", "kg" => "userid=123; token=synthetic; KUGOU_API_MID=123456", _ => "MUSIC_U=synthetic; deviceId=fixture" });
     private static HttpResponseMessage Qq(object value) => Json(new { code = 0, req_0 = new { code = 0, data = value } });
@@ -583,15 +484,13 @@ public static class MusicOfficialAudioTests
     internal sealed class MemoryStore : IDocumentStore
     {
         internal readonly Dictionary<string, byte[]> Data = [];
-        internal bool Fail; internal DocumentStoreError? Failure; internal int Writes;
+        internal DocumentStoreError? Failure; internal int Writes;
         internal DocumentFingerprint? WriteReceipt;
-        internal bool SkipWrite;
         internal JsonObject Root(string ns) => JsonNode.Parse(Data[ns])!.AsObject();
         public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
             if (Failure is { } failure) throw new DocumentStoreException(failure);
-            if (Fail) throw new DocumentStoreException(DocumentStoreError.Storage);
             lock (Data) return Task.FromResult(Data.TryGetValue(ns, out var bytes)
                 ? new DocumentSnapshot(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes))
                 : new(null, DocumentFingerprint.Missing));
@@ -600,13 +499,12 @@ public static class MusicOfficialAudioTests
         {
             token.ThrowIfCancellationRequested();
             if (Failure is { } failure) throw new DocumentStoreException(failure);
-            if (Fail) throw new DocumentStoreException(DocumentStoreError.Storage);
             lock (Data)
             {
                 var before = Data.TryGetValue(ns, out var old) ? DocumentFingerprint.FromBytes(old) : DocumentFingerprint.Missing;
                 if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 Writes++;
-                if (!SkipWrite) Data[ns] = bytes.ToArray();
+                Data[ns] = bytes.ToArray();
                 return Task.FromResult(WriteReceipt ?? DocumentFingerprint.FromBytes(bytes.Span));
             }
         }

@@ -4,7 +4,7 @@ import MeowUI
 
 @MainActor
 final class FilmPlaybackLibraryController: FilmSettingsListController {
-    enum Area { case history, manual, blocks }
+    enum Area { case manual, blocks }
     private let owner: FilmPlaybackSettingsModel
     private let area: Area
     private var task: Task<Void, Never>?
@@ -13,9 +13,8 @@ final class FilmPlaybackLibraryController: FilmSettingsListController {
         self.owner = owner; self.area = area
         super.init(themeProvider: themeProvider)
         switch area {
-        case .history: pageTitle = "播放历史"
-        case .manual: pageTitle = "人工匹配"
-        case .blocks: pageTitle = "片源屏蔽"
+        case .manual: pageTitle = "Manual 匹配源管理"
+        case .blocks: pageTitle = "匹配禁用管理"
         }
     }
 
@@ -37,17 +36,6 @@ final class FilmPlaybackLibraryController: FilmSettingsListController {
         }
         let rows: [FilmSettingsRow]
         switch area {
-        case .history:
-            rows = library.history.map { item in
-                .init(title: item.title, detail: time(item.position) + (item.duration.map { " / " + time($0) } ?? ""),
-                      id: "film.history.\(item.targetID)", enabled: !owner.busy, disclosure: true,
-                      action: { [weak self] in
-                          guard let self else { return }
-                          confirm("删除播放历史", message: item.title) { [weak self, owner] in
-                              self?.run { try await owner.removeHistory(targetID: item.targetID) }
-                          }
-                      })
-            }
         case .manual:
             rows = library.manual.map { item in
                 .init(title: item.name, detail: "\(item.enabled ? "已启用" : "已停用") · 失败 \(item.failureCount)",
@@ -69,11 +57,17 @@ final class FilmPlaybackLibraryController: FilmSettingsListController {
         var sectionRows = rows
         if sectionRows.isEmpty { sectionRows.append(.init(title: "暂无记录", id: "film.playback-library.empty")) }
         if !rows.isEmpty && area != .manual {
-            sectionRows.append(.init(title: area == .history ? "清空历史" : "解除全部屏蔽",
+            sectionRows.append(.init(title: "解除全部屏蔽",
                                      id: "film.playback-library.clear", enabled: !owner.busy,
                                      action: { [weak self] in self?.clear() }))
         }
-        sections = [.init(title: "", rows: sectionRows)]
+        if area == .manual, !library.manual.isEmpty {
+            let targets = library.manual.reduce(into: [String]()) { if !$0.contains($1.targetID) { $0.append($1.targetID) } }
+            sections = targets.map { target in
+                .init(title: library.manual.first(where: { $0.targetID == target })?.value["title"]?.filmText ?? target,
+                    rows: zip(library.manual, rows).filter { $0.0.targetID == target }.map { $0.1 })
+            }
+        } else { sections = [.init(title: "", rows: sectionRows)] }
         render()
     }
 
@@ -83,11 +77,9 @@ final class FilmPlaybackLibraryController: FilmSettingsListController {
     }
 
     private func clear() {
-        confirm(area == .history ? "清空播放历史" : "解除全部片源屏蔽") { [weak self] in
+        confirm("解除全部片源屏蔽") { [weak self] in
             guard let self else { return }
-            run { [owner, area] in
-                if area == .history { try await owner.removeHistory() } else { try await owner.removeBlock() }
-            }
+            run { [owner] in try await owner.removeBlock() }
         }
     }
 
@@ -99,11 +91,6 @@ final class FilmPlaybackLibraryController: FilmSettingsListController {
             do { try await action(); update() }
             catch { failure(error, retry: { [weak self] in self?.run(action) }) }
         }
-    }
-
-    private func time(_ seconds: Double) -> String {
-        let seconds = Int(seconds)
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 }
 #endif

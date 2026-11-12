@@ -6,11 +6,16 @@
 
 | 范围 | 文档 | 维护内容 |
 | --- | --- | --- |
+| 构建依赖 | [依赖缓存](dependency-cache.md) | 共享下载、已验证依赖成品、工具缓存与工作副本私有状态 |
 | 业务页面 | [页面数据请求](pages/data-requests.md) | 展示数据复用、资源完整性、用户动作及请求生命周期 |
 | 影视搜索 | [搜索与播放交接](film/search.md) | 双端入口、参考整合规则、来源分页、稳定追加和已得数据复用 |
+| 小说阅读 | [小说业务与阅读](novel/reading.md) | 来源与书籍身份、搜索／书架／历史、净化、阅读锚点、换源及资源生命周期 |
 | 音乐平台 | [平台客户端上下文](music/platform-client-context.md) | 本地初始化、状态作用域、账号交接、协议消费与受控更新 |
+| 音乐账号 | [账号导入与导出](music/account-transfer.md) | 双端明文文件、凭据与设备关联、批次冲突选择和验证后保存 |
 | 音乐播放 | [歌曲资料与智能播放](music/smart-playback.md) | 共用歌曲事实、平台搜索证据、自动／手动来源、准备提交与错源 |
 | 音乐队列 | [播放来源与自动续播](music/playback-sessions.md) | 全局循环、来源会话、候选与插队、续取、恢复和入口资格 |
+| 音乐歌单 | [所有权与订阅关系](music/playlist-ownership.md) | 自管内容、网络引用、平台订阅及同步隔离 |
+| 播放反馈 | [真实播放反馈](music/playback-feedback.md) | 共用事实、平台准入、计量、来源归属、结束与安全待发 |
 | 音乐验证 | [逐端自查](music/self-check.md) | 调用链核对、请求分类、合成场景及证据报告格式，不另定义业务规则 |
 | 来源宿主能力 | [capability ABI](../runtime/source-capability-abi.md) | HTTP、Cookie、存储、编码、加解密、Web 交互和虚拟路由的跨平台语义 |
 

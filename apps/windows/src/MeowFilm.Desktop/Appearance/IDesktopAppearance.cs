@@ -16,7 +16,7 @@ public interface IDesktopAppearance : INotifyPropertyChanged
 /// <summary>Capability-owned controls for the three General settings areas, without activating module settings.</summary>
 public interface IDesktopGeneralSettingsSource
 {
-    FrameworkElement AppearanceSettingsView { get; }
-    FrameworkElement HomeSourceSettingsView { get; }
-    FrameworkElement CacheSettingsView { get; }
+    FrameworkElement? AppearanceSettingsView => null;
+    FrameworkElement? HomeSourceSettingsView => null;
+    FrameworkElement? CacheSettingsView => null;
 }

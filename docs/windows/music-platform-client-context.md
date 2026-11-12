@@ -46,6 +46,7 @@ WY 新标识采用现有原生规则：52 位大写 hex deviceId、64 位小写 
 - 外国设备响应不更新本安装身份；不把其关联偷偷重绑到当前安装。授权 Cookie 由登录交接留在账号 owner，客户端文档不保存 MUSIC_U、MUSIC_A 或 csrf。
 - 空 `deviceId` 视为未提供关联，使用正常本地身份；非法非空标识拒绝请求。主授权 MUSIC_U 失效仍拒绝，清除匿名 MUSIC_A 或可选 csrf 不单独证明账号失效。
 - XEAPI 密钥协商限于当前操作，不猜测跨操作有效期，不保存临时 AES 材料。每日推荐读取真实推荐成员批次；账号 Cookie 缺 `deviceId` 不再禁用该读取，匿名身份仍不能绕过推荐的账号权限。
+- 网易风格配置与偏好保存复用同一账号会话、客户端 owner 和 XEAPI；只新增 `interface3.music.163.com` 的精确 HTTPS POST 路径 `/xeapi/homepage/daily/song/config/get` 与 `/xeapi/homepage/daily/song/tag/save`，不允许附加 query 或路径后缀。配置响应先核对动态分类及标签再交接客户端状态，保存响应在业务确认后交接；随后从当前已确认客户端快照在新的账号风格代次回读完整批次。未知写入不声称回滚，详见[独立偏好契约](music-native-platforms.md#网易云每日风格偏好)。
 - 目录 XEAPI 的密钥签名／nonce 关系与密钥内容先校验，再交接该响应；每日推荐完整批次及成员身份先解码校验，再交接成员响应。后续请求使用该操作已确认的快照，非法密钥、缺失批次或重复成员不更新客户端状态。
 - 全部网易云目录读取使用 `Call.Wy<T>`／`Read<T>` 的业务 decoder；搜索、歌曲批次、歌单成员、专辑／歌手、首页／频道、FM 和个人目录先校验本响应的身份、可展示数据及实际分页关系，再回写客户端状态。旧的仅返回成功 JSON 的读取签名已移除；多步响应各自确认，不靠最终页面失败后回滚或延后回写队列。
 - 官方副歌元信息保留缺失或不可用时返回空 `point` 的既有契约；只有准确、唯一且可用的录音时间段才交接该响应，缺失或错误录音不更新客户端状态。
@@ -92,3 +93,9 @@ WY 新标识采用现有原生规则：52 位大写 hex deviceId、64 位小写 
 - `MusicFeedbackProtocolTests`、`MusicOfficialStandardTests`、`MusicSyncClientContextTests`：业务校验后更新、错误结果保留基线，以及合法委托更新的明确交接。
 
 实际通过结果写入任务验证记录；上述实现说明和测试入口不等于已完成编译、UI 或实网验证。跨端核对使用[逐端自查](../common/music/self-check.md)。
+
+## 账号文件的设备关联
+
+文件边界遵循[共同账号文件契约](../common/music/account-transfer.md)。账号文件导入不替换本机安装文档：候选的网易响应 Cookie 不提交至客户端 owner；外来 deviceId 保留关联设备字段，包含 `_ntes_nnid` 的原始逗号。同一本地 deviceId 继续消费客户端 owner 当前快照及正常受信更新；导出与实际请求使用相同的组合规则。
+
+酷狗同 MID 继续优先消费客户端 owner 最新本地 dfid，外来 MID 使用账号携带的 dfid，不把文件快照固定为同一真实设备的永久旧状态。导入核对 GUID 与 MID 的真实派生关系。导出使用与实际请求相同的组合规则；仅在请求实际使用当前本机 MID 时补齐已知本机 seed，无法证明关联的历史 seed 不从当前安装推造。

@@ -15,7 +15,7 @@ public sealed partial class MusicCapability
     }
     private sealed record ResolvedMusic(Uri? Uri, IReadOnlyDictionary<string, string> Headers,
         MusicOnlineTarget? Target = null, long? ExpiresAt = null, JsonElement? Receipt = null,
-        MusicFileIdentity? File = null);
+        MusicFileIdentity? File = null, PlaybackCache.MusicAudioFileCache.PreparedFile? Bytes = null);
     private sealed record MusicFileIdentity(string Scope, string Signature);
     // User intent outlives every resolved URL and every recovery attempt.
     private sealed record MusicSelection(MusicQualityPolicy.Tier? Tier = null, ResolvedMusic? Source = null,
@@ -35,11 +35,11 @@ public sealed partial class MusicCapability
     private static MusicFileIdentity? FileIdentity(ResolvedMusic media) => media.File ??
         (media.Target is { Official: true, AccountScope: not null, QualityCacheSignature: not null } target
             ? new(target.AccountScope, target.QualityCacheSignature) : null);
-    private sealed class PendingMusic(ResolvedMusic media, CancellationTokenSource access, bool restartFeedback)
+    private sealed class PendingMusic(ResolvedMusic media, CancellationTokenSource access, bool reopening)
     {
         internal readonly ResolvedMusic Media = media;
         internal readonly CancellationTokenSource Access = access;
-        internal readonly bool RestartFeedback = restartFeedback;
+        internal readonly bool Reopening = reopening;
         internal bool SourceStarted;
     }
     private sealed class MusicRecovery(SongRow song, long epoch, CancellationTokenSource access)
@@ -52,7 +52,7 @@ public sealed partial class MusicCapability
         internal ResolvedMusic? Media;
         internal PendingMusic? Pending;
         internal bool Attempted, Opening, Recovering, Cached, RecoveryDisabled;
-        internal bool ConfirmSourceOnStart, RestartFeedbackOnStart, DurationChecked;
+        internal bool ConfirmSourceOnStart;
         internal CancellationTokenSource? Switching;
         /// <summary>The one source selection of this playback; every source operation shares it.</summary>
         internal MusicSourceSession? Session;
@@ -60,7 +60,10 @@ public sealed partial class MusicCapability
         internal CancellationTokenSource? Expiry;
         internal string? PendingFailure, SwitchingFailure;
         internal Task Work = Task.CompletedTask;
+        internal Task RejectedOutput = Task.CompletedTask;
         internal readonly TaskCompletionSource Opened = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal PlaybackCache.MusicAudioFileCache.PreparedFile? ObservedBytes;
+        internal Action? CacheProgress;
     }
     private MusicRecovery? musicRecovery;
 
@@ -74,6 +77,7 @@ public sealed partial class MusicCapability
         !state.RecoveryDisabled && state.Media?.Target is not null &&
         (RefreshableMusicError(code) || code is PlaybackError.HttpFormatUnsupported or
             PlaybackError.OpenFailed or PlaybackError.PlaybackFailed or "PLAYBACK_UNAVAILABLE" ||
+            state.Media?.Bytes is not null && (code is PlaybackError.ReadFailed or PlaybackError.ReadTruncated or PlaybackError.ReadFormatUnsupported) ||
             code is not null && UnavailableSourceCandidate(code));
 
     private static bool RecoverableMusicError(MusicRecovery state, string? code) =>
@@ -111,11 +115,12 @@ public sealed partial class MusicCapability
             application.IsOfficialPlaybackCurrent(target.Platform, target.AccountScope, target.Generation));
 
     private PendingMusic BeginPendingMedia(MusicRecovery state, ResolvedMusic media,
-        bool restartFeedback, CancellationToken token)
+        bool reopening, CancellationToken token)
     {
         DiscardPendingMedia(state);
-        if (restartFeedback && recorded) SampleFeedback();
-        var pending = new PendingMusic(media, CancellationTokenSource.CreateLinkedTokenSource(token), restartFeedback);
+        if (reopening) SampleFeedback(false);
+        media = PreparePlaybackBytes(state, media);
+        var pending = new PendingMusic(media, CancellationTokenSource.CreateLinkedTokenSource(token), reopening);
         state.Pending = pending;
         state.PendingFailure = null;
         return pending;
@@ -125,6 +130,7 @@ public sealed partial class MusicCapability
     {
         if (state.Pending is not { } pending) return;
         state.PendingFailure = failure;
+        if (!ReferenceEquals(pending.Media.Bytes, state.Media?.Bytes)) pending.Media.Bytes?.Dispose();
         try { pending.Access.Cancel(); }
         catch (ObjectDisposedException) { }
     }
@@ -134,6 +140,7 @@ public sealed partial class MusicCapability
         var pending = state.Pending;
         state.Pending = null;
         if (pending is null) return;
+        if (!ReferenceEquals(pending.Media.Bytes, state.Media?.Bytes)) pending.Media.Bytes?.Dispose();
         try { pending.Access.Cancel(); }
         catch (ObjectDisposedException) { }
         pending.Access.Dispose();
@@ -145,19 +152,21 @@ public sealed partial class MusicCapability
         if (published ? !ReferenceEquals(musicRecovery, state) || !ReferenceEquals(state.Pending, pending)
             : !CurrentPendingMedia(state, pending)) return false;
         alreadyStarted = pending.SourceStarted;
+        var previous = state.Media?.Bytes;
         state.Media = pending.Media;
+        state.Cached = pending.Media.Uri is null;
         state.Session?.Adopt(pending.Media);
+        ObservePlaybackCache(state);
+        if (!ReferenceEquals(previous, pending.Media.Bytes)) previous?.Dispose();
         playbackInstallation = pending.Media.Target?.Installation;
         if (pending.Media.Target?.Official == true)
             state.AccountEpoch = Interlocked.Read(ref officialAccountEpoch);
-        state.Cached = pending.Media.Uri is null;
-        state.DurationChecked = false;
         state.PendingFailure = null;
         state.SwitchingFailure = null;
+        state.RejectedOutput = Task.CompletedTask;
         state.Pending = null;
         pending.Access.Dispose();
         state.ConfirmSourceOnStart = true;
-        state.RestartFeedbackOnStart = pending.RestartFeedback;
         return true;
     }
 
@@ -177,7 +186,7 @@ public sealed partial class MusicCapability
     {
         try
         {
-            if (pending.Media.Uri is null)
+            if (pending.Media.Uri is null || pending.Media.Bytes is not null)
             {
                 var lease = await OpenPlaybackFileAsync(state, pending.Media, pending.Access.Token);
                 if (lease is null) throw new MusicOperationException("CACHE_MISS");
@@ -222,6 +231,9 @@ public sealed partial class MusicCapability
             // not an assumption about UI initialization order, decides whether this receipt is current.
             if (state.Media.Target?.Official == true) state.AccountEpoch = Interlocked.Read(ref officialAccountEpoch);
             if (!CurrentRecovery(state) || admission is not null && !admission()) throw new OperationCanceledException(state.Token);
+            state.Media = PreparePlaybackBytes(state, state.Media);
+            state.Session?.Adopt(state.Media);
+            ObservePlaybackCache(state);
             AcceptOfficialSong(song, state.Media.Target);
             UpdateRecordingCandidates();
             UpdateFeedbackSelection();
@@ -233,28 +245,17 @@ public sealed partial class MusicCapability
                 while (true)
                 {
                     var lease = await OpenPlaybackFileAsync(state, state.Media, state.Token);
-                    bool authorizedFile = lease is not null;
-                    if (lease is null && preparedAudio is { } prepared && preparedEntry == song.EntryId &&
-                        state.Media.Target is { AccountScope: not null, QualityCacheSignature: not null } pendingTarget &&
-                        prepared.Matches(pendingTarget.AccountScope, song.Id, pendingTarget.QualityCacheSignature))
-                        lease = await prepared.OpenAsync(state.Token);
                     if (lease is not null)
                     {
                         try
                         {
-                            if (!authorizedFile && state.Media.Target is { Official: true } cachedTarget &&
-                                state.Media.Receipt is { } cachedReceipt &&
-                                (!cachedReceipt.TryGetProperty("offlineAllowed", out var offline) ||
-                                    offline.ValueKind != JsonValueKind.True))
-                                await QualityCall("music.official.authorize",
-                                    OfficialInput(song, cachedTarget, false, false), state.Token);
                             if (!CurrentRecovery(state) || admission is not null && !admission())
                                 throw new OperationCanceledException(state.Token);
                         }
                         catch { await lease.DisposeAsync(); throw; }
-                        state.Cached = true;
+                        state.Cached = state.Media.Bytes is null;
                         try { await playback.OpenReadAsync(Id, song.EntryId!, lease, song.Title, state.Token); }
-                        catch (Exception error) when (error is PlaybackException or NotSupportedException)
+                        catch (Exception error) when (state.Cached && (error is PlaybackException or NotSupportedException))
                         {
                             await ReselectFile();
                             continue;
@@ -265,6 +266,7 @@ public sealed partial class MusicCapability
                         await ReselectFile();
                         continue;
                     }
+                    else if (state.Media.Bytes is not null) throw new MusicOperationException("CACHE_MISS");
                     else await OpenNetwork();
                     break;
                 }
@@ -279,6 +281,9 @@ public sealed partial class MusicCapability
                     var session = await CurrentSourceSession(state, state.Token);
                     var refreshed = await RefreshMissingPlaybackFileAsync(state, session, state.Media!, state.Token);
                     state.Media = await session.AutomaticAsync(state.Token, refreshed);
+                    state.Media = PreparePlaybackBytes(state, state.Media);
+                    session.Adopt(state.Media);
+                    ObservePlaybackCache(state);
                     state.Cached = false;
                     state.PendingFailure = null;
                     playbackInstallation = state.Media.Target!.Installation;
@@ -298,7 +303,9 @@ public sealed partial class MusicCapability
             if (!CurrentRecovery(state) || admission is not null && !admission()) throw new OperationCanceledException(state.Token);
             if (state.PendingFailure is { } failure)
             {
-                if (!RecoverableMusicError(state, failure) || !await RecoverMusic(state, expired: false))
+                bool recovered = failure == "RECORDING_MISMATCH" ? await RecoverRejectedMusic(state) :
+                    RecoverableMusicError(state, failure) && await RecoverMusic(state, expired: false);
+                if (!recovered)
                     throw new MusicOperationException(failure);
             }
             CheckMediaDuration();
@@ -315,9 +322,7 @@ public sealed partial class MusicCapability
     private void ScheduleMusicExpiry(MusicRecovery state)
     {
         state.Expiry?.Cancel(); state.Expiry?.Dispose(); state.Expiry = null;
-        long? deadline = state.Cached ? null : state.Media?.ExpiresAt;
-        if (state.Media?.Receipt is { } receipt && receipt.TryGetProperty("licenseExpiresAt", out var license) &&
-            license.ValueKind == JsonValueKind.Number) deadline = Math.Min(deadline ?? long.MaxValue, license.GetInt64());
+        long? deadline = state.Cached || state.Media?.Bytes is not null ? null : state.Media?.ExpiresAt;
         if (deadline is { } expiry && playback is INativePlaybackContinuation)
         {
             state.Expiry = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
@@ -337,14 +342,14 @@ public sealed partial class MusicCapability
             token.ThrowIfCancellationRequested();
             if (CurrentRecovery(state) && !await RecoverMusic(state, expired: true) && CurrentRecovery(state))
             {
-                // Exhausting retry authority must not extend a cached license
+                // Exhausting retry authority must not keep a failed input
                 // indefinitely. A replacement timer cancels this old callback.
                 if (OwnsCurrent) await playback.StopAsync();
                 MusicRecoveryFailed();
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception error) { if (CurrentRecovery(state)) MusicRecoveryFailed(error); }
+        catch (Exception) { if (CurrentRecovery(state)) MusicRecoveryFailed(); }
     }
     private bool TryMusicRecovery()
     {
@@ -459,8 +464,7 @@ public sealed partial class MusicCapability
                     if (!CurrentRecovery(state)) throw new OperationCanceledException(request.Token);
                     if (state.RecoveryDisabled || state.Session?.Signature != savedQualitySignature)
                         throw new MusicOperationException("QUALITY_POLICY_CHANGED");
-                    bool changedSource = SourceIdentity(state.Media!.Target!) != SourceIdentity(refreshed.Target!);
-                    var pending = BeginPendingMedia(state, refreshed, changedSource, request.Token);
+                    var pending = BeginPendingMedia(state, refreshed, reopening: true, request.Token);
                     EnsurePendingMedia(state, pending);
                     await ReopenPendingMedia(port, continuation, state, pending);
                     request.Token.ThrowIfCancellationRequested();
@@ -474,9 +478,7 @@ public sealed partial class MusicCapability
                         throw new MusicOperationException("RECORDING_MISMATCH");
                     if (!CommitPendingMedia(state, pending, out bool alreadyStarted))
                         throw new OperationCanceledException(request.Token);
-                    if (changedSource && recorded) CompleteFeedback("source-change");
                     AcceptOfficialSong(state.Song, refreshed.Target);
-                    if (changedSource) SelectFeedback(state.Song, currentFeedbackAutomatic, currentRecommendationFeedback);
                     UpdateFeedbackSelection(); UpdateRecordingCandidates(); UpdateLyricSources();
                     PlaybackSourceBindings();
                     if (NeedsLyrics) _ = RestoreLyricsAsync();
@@ -548,17 +550,14 @@ public sealed partial class MusicCapability
             }
             throw;
         }
-        catch (Exception error)
+        catch (Exception)
         {
             DiscardPendingMedia(state);
             if (CurrentRecovery(state))
             {
                 if (playback.OwnerId == Id && playback.Identity == state.Song.EntryId) await playback.StopAsync();
-                MusicRecoveryFailed(error);
+                MusicRecoveryFailed();
             }
-            // Callers may report a normal exhausted recovery themselves. A cache data
-            // failure must keep its type all the way to that outer status owner.
-            if (PlaybackCacheFailure(error)) throw;
             return false;
         }
         finally
@@ -569,11 +568,8 @@ public sealed partial class MusicCapability
             CheckMediaDuration();
         }
     }
-    private static bool PlaybackCacheFailure(Exception? error) => error is
-        PlaybackCache.MusicPlaybackCacheDataException or PlaybackCache.MusicPlaybackCacheCommitException or
-        MusicOperationException { Code: "CACHE_DATA_INCOMPATIBLE" };
-    private void MusicRecoveryFailed(Exception? error = null)
-    { FinishFeedback("error"); status = PlaybackCacheFailure(error) ? ErrorText(error!) : "播放失败"; Changed(nameof(Status)); }
+    private void MusicRecoveryFailed()
+    { FinishFeedback("error"); status = "播放失败"; Changed(nameof(Status)); }
     private void TrackMusicRecovery(Task task)
     {
         var observed = ObserveRecovery();
@@ -583,7 +579,7 @@ public sealed partial class MusicCapability
         {
             try { await task; }
             catch (OperationCanceledException) { }
-            catch (Exception error) { if (!stopping) MusicRecoveryFailed(error); }
+            catch (Exception) { if (!stopping) MusicRecoveryFailed(); }
         }
         async Task Remove() { await observed; eventWrites.Remove(observed); }
     }
@@ -593,13 +589,18 @@ public sealed partial class MusicCapability
         if (state is null) return Task.CompletedTask;
         CloseSourceChoices();
         state.Access.Cancel();
+        state.Media?.Bytes?.Dispose();
+        if (state.ObservedBytes is { } bytes && state.CacheProgress is { } progress)
+            bytes.ProgressChanged -= progress;
+        Changed(nameof(PlaybackCacheFraction));
         return Drain();
         async Task Drain()
         {
-            try { await Task.WhenAll(state.Opened.Task, state.Work); }
+            try { await Task.WhenAll(state.Opened.Task, state.Work, state.RejectedOutput); }
             finally
             {
                 DiscardPendingMedia(state);
+                if (state.Media?.Bytes is { } source) await source.Work;
                 state.Expiry?.Cancel(); state.Expiry?.Dispose(); state.Access.Dispose();
             }
         }

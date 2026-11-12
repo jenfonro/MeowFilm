@@ -574,7 +574,9 @@ test('QYSG HTTP list actions reject malformed and non-list results while preserv
   }
   for (const value of ['ordinary chapter text', '[{"name":']) {
     await select(value);
-    assert.deepEqual(okay(await invoke('content')), { content: value });
+    assert.deepEqual(okay(await invoke('content')), {
+      title: '', chapter: {}, content: value, blocks: [{ type: 'text', text: value }], imageStyle: '',
+    });
   }
   const cat = await load(rpc, { installationId: 'plain-cat', protocol: 'cat',
     source: 'export default { searchContent(keyword) { return keyword; } };' });

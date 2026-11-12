@@ -22,6 +22,8 @@ using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Recommendations;
 using MeowFilm.Capabilities.Search;
 using MeowFilm.Platform.Storage;
+using MeowFilm.Desktop.Artwork;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -33,6 +35,7 @@ public static partial class MusicCatalogPersonalTests
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var homeCase in HomeCases()) yield return homeCase;
+        foreach (var test in LocalHeartbeatCases()) yield return test;
         yield return Case("song cards replace only their own complete column and start at the clicked song", SectionQueue);
         yield return Case("song cards with a playlist source prepare all members and retain starting identity", SectionPlaylistQueue);
         yield return Case("playlist playback has no implicit search recommendation and can explicitly enter", PlaylistQueuePreview);
@@ -44,12 +47,16 @@ public static partial class MusicCatalogPersonalTests
             yield return Case("personal directory explicit account and complete cursor " + platform, () => DirectoryPages(platform));
         yield return Case("directory filters nullable totals empty intermediate page and failed refresh", DirectoryFilters);
         yield return Case("KG locator 30-page membership selection survives global sorting", KgMembers);
-        yield return Case("QQ favorites complete save never stores only visible page", TxSave);
+        yield return Case("owned QQ favorites cannot be saved as a network playlist", QqOwnedFavoritesCannotSaveNetworkReference);
+        yield return Case("public QQ playlist saves only a network reference after its first page", QqPublicPlaylistSavesNetworkReference);
         yield return Case("KG UI navigates past one hundred pages by platform total", LongKg);
         yield return Case("updated private locator cannot restore an old cached revision", LocatorRefresh);
         yield return Case("private tail failure preserves display and durable queue", TailFailure);
         yield return Case("duplicate member and changed snapshot cannot publish second page", PageDefects);
-        yield return Case("empty complete playlist may save but not play", EmptyPlaylist);
+        yield return Case("empty remote playlist saves a network reference and cannot play", EmptyRemotePlaylistReference);
+        yield return Case("daily detail style draft readback and native visual frames", DailyStyleDetail);
+        yield return Case("daily style admitted save survives editor dismissal", DailyStyleSaveDismissal);
+        yield return Case("daily style save settlement retires pages read during navigation", DailyStyleSaveNavigation);
         yield return Case("daily style full batch saves and replaces only on explicit actions", DailyActions);
         yield return Case("daily entry initialization shares each branch and never changes playback", DailyEntrySummaries);
         yield return Case("channel daily entries initialize songs without hover", ChannelDailySummaries);
@@ -88,7 +95,7 @@ public static partial class MusicCatalogPersonalTests
                 yield return Case((restore ? "return" : "cancel") + " retires a recommendation awaiting shared account " +
                     (failed ? "failure" : "success"), () => RecommendationAccountWaitRetirement(restore, failed));
         yield return Case("WPF footer switches only live WY FM and retires old popup buttons", PlaybackFmPopup);
-        yield return Case("WPF queue keeps recommendation candidates separate and exposes continuation", QueueCandidateSurface);
+        yield return Case("WPF queue keeps candidates and recovery without an independent continuation switch", QueueCandidateSurface);
         yield return Case("expired batch blocks actions and navigation rereads instead of stale restore", Expiry);
         yield return Case("account invalidation rejects late response and stale cards", AccountInvalidation);
         yield return Case("private paging reuses first account observation and explicit read is authoritative", AccountReadReuse);
@@ -97,7 +104,7 @@ public static partial class MusicCatalogPersonalTests
         yield return Case("private account observation preserves the authoritative read error", AccountReadFailure);
         yield return Case("account read detects external generation replacement", AccountRead);
         yield return Case("rapid FM changes ignore an old receipt and retain newest options", RapidOptions);
-        yield return Case("cancelling private preparation discards intent without commit", CancelPreparation);
+        yield return Case("cancelling private playlist playback preparation preserves the queue without commit", CancelPrivatePlaylistPlaybackPreparation);
         yield return Case("queue CAS conflict cannot autoplay or replay consumed stage", CasConflict);
         yield return Case("unknown batch save retains actual persistence without automatic retry", UnknownSave);
         yield return Case("unsupported routes leave content status and requests untouched", UnsupportedRoutes);
@@ -288,8 +295,32 @@ public static partial class MusicCatalogPersonalTests
         int width = (int)Math.Ceiling(view.ActualWidth), height = (int)Math.Ceiling(view.ActualHeight);
         Check(width > 0 && height > 0, "recommendation snapshot requires the actual arranged WPF surface");
         var frame = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
-        frame.Render(view);
-        string path = TestWorkspace.DataPath("recommendations-ui", fileName);
+        if (fileName.StartsWith("playlist-pages-", StringComparison.Ordinal))
+        {
+            var page = new DrawingVisual();
+            using (var dc = page.RenderOpen())
+            {
+                dc.DrawRectangle(new SolidColorBrush(Color.FromRgb(235, 245, 252)), null, new Rect(0, 0, width, height));
+                dc.DrawRectangle(new VisualBrush(view), null, new Rect(0, 0, width, height));
+            }
+            frame.Render(page);
+        }
+        else frame.Render(view);
+        if (fileName == "playlist-pages-style-editor.png" && view.FindName("DailyStylePopup") is Popup { IsOpen: true, Child: FrameworkElement panel })
+        {
+            var composed = new DrawingVisual();
+            var anchor = (FrameworkElement)view.FindName("DailyStyleButton");
+            var point = anchor.TranslatePoint(new Point(0, anchor.ActualHeight), view);
+            using (var dc = composed.RenderOpen())
+            {
+                dc.DrawImage(frame, new Rect(0, 0, width, height));
+                dc.DrawRectangle(new VisualBrush(panel), null, new Rect(point.X, point.Y, panel.ActualWidth, panel.ActualHeight));
+            }
+            var combined = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32); combined.Render(composed); frame = combined;
+        }
+        string path = fileName.StartsWith("playlist-pages-", StringComparison.Ordinal)
+            ? TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot, Path.Combine(TestWorkspace.ResultsRoot, "windows-native", fileName))
+            : TestWorkspace.DataPath("recommendations-ui", fileName);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         using var stream = File.Create(path);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(frame)); encoder.Save(stream);
@@ -655,10 +686,14 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.NavigateAsync("catalog-daily", default); Layout(f.Module.View);
         Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
         var buttons = Visuals<Button>(f.Module.View).ToArray();
-        var save = buttons.Single(b => Equals(b.Content, "保存到本地歌单"));
-        Check(save.IsEnabled && save.IsVisible == f.Module.View.IsVisible, "batch save control");
-        Check(Visuals<ComboBox>(f.Module.View).Any(c => AutomationProperties.GetName(c) == "每日推荐类型"), "bound daily picker");
-        save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        var more = buttons.Single(b => AutomationProperties.GetName(b) == "每日推荐更多操作");
+        Check(more.IsEnabled, "daily batch actions live in the compact more menu");
+        Check(buttons.Any(b => Equals(b.Content, "风格推荐") && Equals(b.Tag, "style")), "daily detail exposes the style destination");
+        Check(f.Module.IsCatalogDetailPage && f.Module.ShowsSongTable, "daily uses the shared song table");
+        more.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        var save = more.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "保存到本地歌单"));
+        Check(save.IsEnabled, "batch save control");
+        save.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); more.ContextMenu.IsOpen = false;
         await Until(() => f.Module.Status == "已保存到本地歌单");
         Equal(3, (await f.Detail()).GetProperty("songs").GetArrayLength());
         Check(f.App.Log.All(c => !c.Method.Contains("rpc", StringComparison.Ordinal)), "ordinary UI is native");
@@ -722,18 +757,42 @@ public static partial class MusicCatalogPersonalTests
         Check(f.Platform.Requests.OfType<MusicPlaylistRequest>().All(r => r.Limit == 30 && r.Personal?.ListId == "42"), "every page keeps locator");
         Equal(1, f.Output.Opens);
     }
-    private static async Task TxSave()
+    private static async Task QqOwnedFavoritesCannotSaveNetworkReference()
     {
         await using var f = await Fixture.Create(); f.Select("tx"); f.Platform.Total = 235;
         await f.OpenPersonalPlaylist(); Equal(100, f.Module.Songs.Count);
+        var page = f.Platform.Last<MusicPlaylistRequest>();
+        Equal("favorites", page.Id); Equal("201", page.Personal!.ListId);
+        Check(!f.Module.ShowsNetworkPlaylistAction && !f.Module.CanSaveNetworkPlaylist,
+            "owned QQ favorites cannot be collected as a network playlist");
+        int requests = f.Platform.Requests.Count;
         await f.Module.SaveCatalogPlaylistAsync();
-        var detail = await f.Detail(); Equal(235L, N(detail, "total"));
-        var all = detail.GetProperty("songs").EnumerateArray().ToList();
-        foreach (int offset in new[] { 100, 200 }) all.AddRange((await f.Detail(offset)).GetProperty("songs").EnumerateArray());
-        Equal(235, all.Count); Equal("MID235", MusicSongFixture.NativeId(all[^1]));
-        var prepare = f.App.Last("music.catalog.playlist.prepare");
-        Equal("favorites", S(prepare, "id")); Equal("201", S(prepare.GetProperty("personal"), "listId"));
-        Equal(1, f.Store.LibraryWrites); Check(f.Platform.Requests.OfType<MusicPlaylistRequest>().Count(r => r.Refresh) == 6, "QQ full reread");
+        Equal(requests, f.Platform.Requests.Count); Equal(0, Calls(f, "music.catalog.playlist.save"));
+        Equal(0, Calls(f, "music.catalog.playlist.prepare")); Equal(0, Calls(f, "music.catalog.playlist.commit"));
+        var snapshot = await f.App.Library.ReadLibrarySyncAsync();
+        Equal(0, snapshot.Library.GetProperty("networkPlaylists").GetArrayLength());
+        Equal(0, snapshot.Library.GetProperty("collections").EnumerateArray().Count(c => S(c, "kind") == "playlist"));
+        Equal(0, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
+        Equal(0, f.Store.LibraryWrites);
+    }
+    private static async Task QqPublicPlaylistSavesNetworkReference()
+    {
+        await using var f = await Fixture.Create(); f.Platform.Total = 235;
+        await f.Module.NavigateAsync("catalog-playlist/tx/201", default);
+        Equal(100, f.Module.Songs.Count); Check(f.Module.CanCatalogNext && f.Module.CanSaveNetworkPlaylist);
+        var page = f.Platform.Last<MusicPlaylistRequest>();
+        Equal("tx", page.Platform); Equal("201", page.Id); Check(page.Personal is null);
+        int requests = f.Platform.Requests.Count, reads = Calls(f, "music.catalog.playlist");
+        await f.Module.SaveCatalogPlaylistAsync();
+        var reference = f.Module.NetworkPlaylists.Single();
+        Equal("network", reference.Kind); Equal("tx", reference.Platform); Equal("201", reference.RemoteId);
+        Equal(235, reference.Count); Check(f.Module.NetworkPlaylistSaved);
+        Equal("已收藏歌单", f.Module.Status); Equal(1, f.Store.LibraryWrites);
+        Equal(requests, f.Platform.Requests.Count); Equal(reads, Calls(f, "music.catalog.playlist"));
+        Equal(0, Calls(f, "music.catalog.playlist.prepare")); Equal(0, Calls(f, "music.catalog.playlist.commit"));
+        var snapshot = await f.App.Library.ReadLibrarySyncAsync();
+        Equal(0, snapshot.Library.GetProperty("collections").EnumerateArray().Count(c => S(c, "kind") == "playlist"));
+        Equal(0, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
     }
     private static async Task LongKg()
     {
@@ -781,13 +840,272 @@ public static partial class MusicCatalogPersonalTests
             Check(f.Module.Status.Length > 0); Equal(0, f.Store.LibraryWrites);
         }
     }
-    private static async Task EmptyPlaylist()
+    private static async Task EmptyRemotePlaylistReference()
     {
         await using var f = await Fixture.Create(); f.Platform.Total = 0;
         await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
-        Check(f.Module.CanCatalogAction && !f.Module.CanPlayCatalogPlaylist);
-        await f.Module.SaveCatalogPlaylistAsync(); Equal(0L, N(await f.Detail(), "total"));
+        Check(f.Module.CanCatalogAction && f.Module.CanSaveNetworkPlaylist && !f.Module.CanPlayCatalogPlaylist);
+        await f.Module.SaveCatalogPlaylistAsync();
+        var reference = f.Module.NetworkPlaylists.Single();
+        Equal("network", reference.Kind); Equal("wy", reference.Platform); Equal("500", reference.RemoteId);
+        Equal(0, reference.Count); Equal(0, f.Module.Playlists.Count(p => p.Kind == "playlist"));
+        Check(f.Module.NetworkPlaylistSaved && !f.Module.CanPlayCatalogPlaylist);
+        Equal("已收藏歌单", f.Module.Status); Equal(1, f.Store.LibraryWrites);
+        Equal(0, Calls(f, "music.catalog.playlist.prepare")); Equal(0, Calls(f, "music.catalog.playlist.commit"));
+        Equal(0, f.Output.Opens);
     }
+    private sealed class PlaylistPageArtwork : IArtworkLoader
+    {
+        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
+        {
+            var visual = new DrawingVisual();
+            using (var dc = visual.RenderOpen())
+            {
+                dc.DrawRectangle(new SolidColorBrush(Color.FromRgb(43, 91, 115)), null, new Rect(0, 0, 192, 192));
+                dc.DrawEllipse(new SolidColorBrush(Color.FromRgb(221, 167, 104)), null, new Point(128, 65), 66, 66);
+                dc.DrawEllipse(new SolidColorBrush(Color.FromRgb(29, 40, 52)), null, new Point(79, 123), 61, 61);
+                dc.DrawEllipse(new SolidColorBrush(Color.FromRgb(221, 167, 104)), null, new Point(79, 123), 17, 17);
+            }
+            var image = new RenderTargetBitmap(192, 192, 96, 96, PixelFormats.Pbgra32); image.Render(visual); image.Freeze();
+            return Task.FromResult<IArtworkLease>(new PlaylistPageArtworkLease(image));
+        }
+    }
+    private sealed class PlaylistPageArtworkLease(BitmapSource image) : IArtworkLease
+    {
+        public BitmapSource Image => image;
+        public void Dispose() { }
+    }
+    private static async Task DailyStyleDetail()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.SampleCover = "https://art.example.test/playlist-pages.jpg";
+        ArtworkScope.SetLoader(f.Module.View, new PlaylistPageArtwork());
+        await f.Module.NavigateAsync("catalog-daily", default);
+        Check(f.Module.IsContentDetailPage && f.Module.ShowsSongTable, "daily songs share detail consumers");
+        var window = new Window { Content = f.Module.View, Width = 1180, Height = 840, ShowInTaskbar = false,
+            Background = new SolidColorBrush(Color.FromRgb(235, 245, 252)) };
+        try
+        {
+            window.Show(); window.UpdateLayout(); await Drain();
+            SaveRecommendationFrame((FrameworkElement)f.Module.View, "playlist-pages-daily.png");
+            await f.Module.SwitchDailyBranchAsync("style");
+            Equal("流行", f.Module.DailyStyleSelectionText);
+            window.Width = 860; window.UpdateLayout(); await Drain();
+            var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
+            var tablePosition = grid.TranslatePoint(new Point(), f.Module.View);
+            var branchButton = (Button)f.Module.View.FindName("DailyBranchButton");
+            Check(branchButton.TranslatePoint(new Point(branchButton.ActualWidth, 0), f.Module.View).X <= f.Module.View.ActualWidth,
+                "daily actions fit the minimum width");
+            await f.Module.OpenDailyStyleEditorAsync();
+            window.UpdateLayout(); await Drain();
+            var popup = (Popup)f.Module.View.FindName("DailyStylePopup");
+            Check(popup.IsOpen && grid.TranslatePoint(new Point(), f.Module.View) == tablePosition,
+                "style editor floats without moving the song table");
+            var scene = f.Module.DailyStyleGroups.Last().Items.First();
+            f.Module.ToggleDailyStyleTag(scene);
+            Check(f.Module.DailyStyleGroups.SelectMany(g => g.Items).Where(t => t.Selected).All(t => t.Group == "2"), "changing category clears the prior category draft");
+            Equal("流行", f.Module.DailyStyleSelectionText);
+            window.UpdateLayout(); await Drain();
+            SaveRecommendationFrame((FrameworkElement)f.Module.View, "playlist-pages-style-editor.png");
+            DesktopTheme.SetIsHighContrast(f.Module.View, true);
+            f.Module.SelectedSong = f.Module.Songs.First(); window.UpdateLayout(); await Drain();
+            var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(0);
+            Check(row.Background is SolidColorBrush background && background.Color == SystemColors.HighlightColor, "selected high contrast row uses system background");
+            var title = Visuals<TextBlock>(row).First(t => t.Text == f.Module.Songs.First().Title);
+            Check(title.Foreground is SolidColorBrush foreground && foreground.Color == SystemColors.HighlightTextColor,
+                "selected high contrast song title matches system highlight text");
+            Check(row.BorderBrush is SolidColorBrush edge && edge.Color == SystemColors.HighlightTextColor,
+                "selected high contrast border uses system color");
+            DesktopTheme.SetIsHighContrast(popup.Child, true);
+            window.UpdateLayout(); await Drain();
+            var filterTags = Visuals<Button>(popup.Child).Where(b => b.DataContext is MusicCatalogTag).ToArray();
+            var selectedTag = filterTags.First(b => ((MusicCatalogTag)b.DataContext).Selected);
+            var unselectedTag = filterTags.First(b => !((MusicCatalogTag)b.DataContext).Selected);
+            void CheckTagColors(Button button, Color fill, Color text, Color border)
+            {
+                var pill = (Border)button.Template.FindName("Pill", button);
+                var content = (ContentPresenter)button.Template.FindName("TagContent", button);
+                Check(pill.Background is SolidColorBrush brush && brush.Color == fill, "high contrast tag fill distinguishes selection");
+                Check(System.Windows.Documents.TextElement.GetForeground(content) is SolidColorBrush tagForeground && tagForeground.Color == text,
+                    "high contrast tag text matches its system background");
+                Check(pill.BorderBrush is SolidColorBrush tagEdge && tagEdge.Color == border, "high contrast tag border remains visible");
+            }
+            CheckTagColors(selectedTag, SystemColors.HighlightColor, SystemColors.HighlightTextColor, SystemColors.HighlightTextColor);
+            CheckTagColors(unselectedTag, SystemColors.ControlColor, SystemColors.ControlTextColor, SystemColors.ControlTextColor);
+            selectedTag.Focus(); await Drain();
+            Check(selectedTag.IsKeyboardFocused, "selected filter tag accepts keyboard focus");
+            CheckTagColors(selectedTag, SystemColors.HighlightColor, SystemColors.HighlightTextColor, SystemColors.HighlightTextColor);
+            Check(((Border)selectedTag.Template.FindName("Pill", selectedTag)).BorderThickness == new Thickness(2),
+                "selected high contrast tag retains the keyboard focus border");
+            DesktopTheme.SetIsHighContrast(popup.Child, false);
+            DesktopTheme.SetIsHighContrast(f.Module.View, false);
+            popup.SetCurrentValue(Popup.IsOpenProperty, false); await Drain();
+            Check(!f.Module.IsDailyStyleEditorOpen, "outside dismissal retires draft without saving"); Equal(0, f.Platform.StyleWrites);
+            await f.Module.OpenDailyStyleEditorAsync(); await Drain();
+            var panel = (FrameworkElement)popup.Child;
+            panel.RaiseEvent(new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,
+                System.Windows.PresentationSource.FromVisual(panel), 0, System.Windows.Input.Key.Escape) { RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent });
+            Check(!f.Module.IsDailyStyleEditorOpen, "Escape retires draft without saving"); Equal(0, f.Platform.StyleWrites);
+            await f.Module.OpenDailyStyleEditorAsync();
+            f.Module.ToggleDailyStyleTag(f.Module.DailyStyleGroups.First().Items.Last());
+            await f.Module.ConfirmDailyStyleAsync();
+            Equal(1, f.Platform.StyleWrites); Equal("流行 · 爵士", f.Module.DailyStyleSelectionText);
+            Check(!f.Module.IsDailyStyleEditorOpen, "matching readback closes the completed editor");
+            Equal(0, f.Output.Opens); Equal(0L, N(await f.Queue(), "total"));
+            await f.Module.OpenDailyStyleEditorAsync(); f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.Unknown;
+            f.Module.ToggleDailyStyleTag(f.Module.DailyStyleGroups.Last().Items.First());
+            await f.Module.ConfirmDailyStyleAsync();
+            Equal(2, f.Platform.StyleWrites); Equal("流行 · 爵士", f.Module.DailyStyleSelectionText);
+            Check(f.Module.IsDailyStyleEditorOpen && f.Module.Status.Length > 0, "unknown write retains actual selection and reconciliation action");
+            Check(!f.Module.CanConfirmDailyStyle, "unknown requires reconciliation before another write");
+            Check(!f.Module.CanCatalogAction && f.Module.Songs.Count == 0, "unknown write retires all old batch actions");
+            await f.Module.RefreshCatalogAsync(); Equal(2, f.Platform.StyleWrites);
+            Check(f.Module.CanCatalogAction, "explicit successful read restores batch authority");
+            var styleText = f.Module.DailyStyleSelectionText;
+            int defaultReads = f.Platform.Requests.OfType<MusicDailyRequest>().Count(r => r.Branch == MusicDailyBranch.Default);
+            await f.Module.NavigateAsync("catalog-daily", default);
+            Equal(defaultReads, f.Platform.Requests.OfType<MusicDailyRequest>().Count(r => r.Branch == MusicDailyBranch.Default));
+            Check(!f.Module.IsDailyStyle && f.Module.DailyStyleSelectionText == "选择风格", "default restores its own selection state");
+            int styleReads = f.Platform.Requests.OfType<MusicDailyRequest>().Count(r => r.Branch == MusicDailyBranch.Style);
+            await f.Module.NavigateAsync("catalog-daily/wy/style", default);
+            Equal(styleReads, f.Platform.Requests.OfType<MusicDailyRequest>().Count(r => r.Branch == MusicDailyBranch.Style));
+            Equal(styleText, f.Module.DailyStyleSelectionText);
+            await f.Module.OpenDailyStyleEditorAsync();
+            f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.Confirmed; f.Platform.StyleReadbackMissing = true;
+            await f.Module.ConfirmDailyStyleAsync(); Equal(3, f.Platform.StyleWrites);
+            Check(!f.Module.CanCatalogAction && !f.Module.CanConfirmDailyStyle && f.Module.Songs.Count == 0,
+                "confirmed write without readback cannot reuse or play the pre-write batch");
+            await f.Module.PlayContentDetailAsync(); await f.Module.SaveCatalogPlaylistAsync();
+            Equal(0, f.Output.Opens); Equal(0L, N(await f.Queue(), "total"));
+            f.Platform.StyleReadbackMissing = false;
+            await f.Module.RefreshCatalogAsync(); Check(f.Module.CanCatalogAction, "read reconciles a confirmed write with missing receipt");
+            await f.Module.OpenDailyStyleEditorAsync();
+            f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.NotSent; f.Platform.StyleReadbackMissing = true;
+            await f.Module.ConfirmDailyStyleAsync(); Equal(4, f.Platform.StyleWrites);
+            Check(f.Module.CanConfirmDailyStyle && f.Module.CanCatalogAction, "not-sent failure retains a retry and the unmodified batch");
+            f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.Confirmed; f.Platform.StyleReadbackMissing = false;
+            f.Module.CancelDailyStyleEditor();
+            await f.Module.NavigateAsync("catalog-personal", default);
+            var card = f.Module.CatalogSections.Single().Items.Single();
+            var hold = f.App.HoldNext("music.catalog.playlist");
+            var open = f.Module.OpenCatalogCardAsync(card);
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Equal(card.Title, f.Module.Heading); Equal(card.Cover, f.Module.DetailArtwork);
+            Equal("", f.Module.DetailCountText); Check(f.Module.ShowDetailSkeleton, "members load independently from summary");
+            hold.Release(); await open;
+            window.UpdateLayout(); await Drain();
+            SaveRecommendationFrame((FrameworkElement)f.Module.View, "playlist-pages-playlist.png");
+            await f.Module.NavigateAsync("catalog-daily/wy/style", default);
+            await f.Module.OpenDailyStyleEditorAsync(); f.App.RevokeAccount("wy");
+            await f.Module.ConfirmDailyStyleAsync(); Equal(4, f.Platform.StyleWrites);
+            Check(!f.Module.IsDailyStyleEditorOpen, "account invalidation retires the draft");
+        }
+        finally { window.Close(); }
+    }
+
+    private static async Task DailyStyleSaveDismissal()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.NavigateAsync("catalog-daily/wy/style", default);
+        var window = new Window { Content = f.Module.View, Width = 860, Height = 840, ShowInTaskbar = false };
+        try
+        {
+            window.Show(); await Drain();
+            var popup = (Popup)f.Module.View.FindName("DailyStylePopup");
+            await f.Module.OpenDailyStyleEditorAsync(); await Drain();
+            f.Module.ToggleDailyStyleTag(f.Module.DailyStyleGroups.Last().Items.First());
+            var hold = f.Platform.StyleSaveHold = new Held();
+            var save = f.Module.ConfirmDailyStyleAsync();
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!f.Module.CanCatalogAction && !f.Module.CanConfirmDailyStyle, "admission immediately retires old batch authority");
+            popup.SetCurrentValue(Popup.IsOpenProperty, false); await Drain();
+            Check(!f.Module.IsDailyStyleEditorOpen, "outside dismissal closes an admitted editor without claiming rollback");
+            hold.Release(); await save;
+            Equal(1, f.Platform.StyleWrites); Equal("专注", f.Module.DailyStyleSelectionText);
+            Check(f.Module.CanCatalogAction && f.Module.Songs.Count > 0, "confirmed readback publishes after only the editor closes");
+            foreach (var writeStatus in new[] { MusicDailyStyleWriteStatus.Confirmed, MusicDailyStyleWriteStatus.Unknown })
+            {
+                f.Platform.StyleWriteStatus = writeStatus; f.Platform.StyleReadbackMissing = true;
+                await f.Module.OpenDailyStyleEditorAsync(); await Drain();
+                hold = f.Platform.StyleSaveHold = new Held();
+                save = f.Module.ConfirmDailyStyleAsync();
+                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                popup.SetCurrentValue(Popup.IsOpenProperty, false); await Drain();
+                hold.Release(); await save;
+                int writes = f.Platform.StyleWrites;
+                await f.Module.OpenDailyStyleEditorAsync(); await Drain();
+                Check(!f.Module.CanConfirmDailyStyle && !f.Module.CanCatalogAction, "closing and reopening cannot bypass required readback");
+                await f.Module.ConfirmDailyStyleAsync(); Equal(writes, f.Platform.StyleWrites);
+                f.Platform.StyleReadbackMissing = false;
+                await f.Module.RefreshCatalogAsync();
+                Check(f.Module.CanCatalogAction, "explicit reread restores authority after a dismissed write");
+            }
+        }
+        finally { f.Platform.StyleSaveHold?.Release(); window.Close(); }
+    }
+
+    private static async Task DailyStyleSaveNavigation()
+    {
+        foreach (var (missingReadback, pendingRead) in new[] { (false, false), (true, false), (false, true) })
+        {
+            await using var f = await Fixture.Create();
+            await f.Module.NavigateAsync("catalog-daily/wy/style", default);
+            await f.Module.OpenDailyStyleEditorAsync();
+            f.Module.ToggleDailyStyleTag(f.Module.DailyStyleGroups.Last().Items.First());
+            var hold = f.Platform.StyleSaveHold = new Held();
+            Held? readHold = null;
+            Task? returning = null;
+            f.Platform.StyleReadbackMissing = missingReadback;
+            var save = f.Module.ConfirmDailyStyleAsync();
+            try
+            {
+                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await f.Module.NavigateAsync("catalog-daily", default);
+                if (pendingRead) readHold = f.Platform.StyleReadHold = new Held();
+                returning = f.Module.NavigateAsync("catalog-daily/wy/style", default);
+                if (readHold is not null) await readHold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                else
+                {
+                    await returning;
+                    Equal("流行", f.Module.DailyStyleSelectionText);
+                    Equal(3, f.Module.Songs.Count);
+                }
+                // The server still returned the pre-write batch above. Settlement now changes it.
+                f.Platform.DailyCount = 5;
+                hold.Release(); await save;
+                if (readHold is not null) { readHold.Release(); await returning; }
+                Equal(1, f.Platform.StyleWrites);
+                if (missingReadback)
+                {
+                    Check(!f.Module.CanCatalogAction && f.Module.Songs.Count == 0,
+                        "settlement revokes old members loaded while the write was pending");
+                    Equal("选择风格", f.Module.DailyStyleSelectionText);
+                    await f.Module.OpenDailyStyleEditorAsync();
+                    Check(!f.Module.CanConfirmDailyStyle, "navigation cannot restore write authority without a real read");
+                    await f.Module.ConfirmDailyStyleAsync(); Equal(1, f.Platform.StyleWrites);
+                }
+                else
+                {
+                    Equal("专注", f.Module.DailyStyleSelectionText);
+                    Equal(5, f.Module.Songs.Count);
+                    Check(f.Module.CanCatalogAction, "real readback replaces the page read before settlement");
+                }
+                await f.Module.NavigateAsync("catalog-daily", default);
+                await f.Module.NavigateAsync("catalog-daily/wy/style", default);
+                Equal("专注", f.Module.DailyStyleSelectionText);
+                Equal(5, f.Module.Songs.Count);
+                Equal(1, f.Platform.StyleWrites);
+                Check(f.Module.CanCatalogAction, "return cannot resurrect the stale snapshot created during save");
+            }
+            finally
+            {
+                hold.Release(); readHold?.Release();
+                await save;
+                if (returning is not null) await returning;
+            }
+        }
+    }
+
     private static async Task DailyActions()
     {
         await using var f = await Fixture.Create();
@@ -1051,14 +1369,14 @@ public static partial class MusicCatalogPersonalTests
         surface.RootVisual = footer; Layout(footer, 1110, 100); await Drain();
         var mode = (Button)footer.FindName("ModeButton");
         var menu = (ContextMenu)footer.FindName("ModeMenu");
-        var sourceButton = (Button)footer.FindName("PlaybackSourceButton");
-        var source = (ContextMenu)footer.FindName("PlaybackSourceMenu");
+        var sourceButton = (Button)footer.FindName("ModeButton");
+        var source = (ContextMenu)footer.FindName("ModeMenu");
         f.App.FailNext("music.recommendations.start", "NETWORK_ERROR");
         await f.Module.HeartbeatCurrentAsync(key); await Drain();
         Check(!f.Module.HasPlaybackHeartbeat && f.Module.PlaybackModeIcon == "repeat");
         Equal(before.GetProperty("entries").GetRawText(), (await f.Queue()).GetProperty("entries").GetRawText());
-        sourceButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        var heartbeat = source.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "从当前歌曲进入心动"));
+        await OpenSessionMenu(footer);
+        var heartbeat = source.Items.OfType<MenuItem>().Single(item => AutomationProperties.GetName(item) == "心动模式");
         Check(heartbeat.IsEnabled);
         var hold = f.App.HoldNext("music.recommendations.start", before: true);
         ((IInvokeProvider)new MenuItemAutomationPeer(heartbeat).GetPattern(PatternInterface.Invoke)).Invoke();
@@ -1066,16 +1384,17 @@ public static partial class MusicCatalogPersonalTests
         try { Check(!f.Module.HasPlaybackHeartbeat && f.Module.PlaybackModeIcon == "repeat"); }
         finally { hold.Release(); }
         await Until(() => f.Module.HasPlaybackHeartbeat && !f.Module.RecommendationLoading);
-        Equal("repeat", f.Module.PlaybackModeIcon); Equal("列表循环", AutomationProperties.GetName(mode));
+        Equal("heartbeat", f.Module.PlaybackModeIcon); Equal("心动模式", AutomationProperties.GetName(mode));
         var input = f.App.Last("music.recommendations.start");
         Equal("heartbeat", S(input, "kind")); Equal("current", S(input, "entry")); Equal("555", S(input, "playlistId"));
         Equal(S(before, "currentId"), S(input, "seedEntryId")); Equal(S(before, "currentId"), S(await f.Queue(), "currentId"));
-        Check(!f.Module.CanChangeRecommendationContinue && !f.Module.RecommendationContinue, "heartbeat has no unverified continuation");
-        mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        Equal(3, menu.Items.Count); SaveRecommendationFrame(menu, "heartbeat-global-loop-menu.png");
+        Check(f.Module.CanChangeRecommendationContinue && f.Module.RecommendationContinue, "heartbeat enters sequential continuation");
+        Equal("heartbeat", ((MusicPlaybackIcon)sourceButton.Content).Key);
+        await OpenSessionMenu(footer);
+        Equal(5, menu.Items.Count); SaveRecommendationFrame(menu, "heartbeat-unified-menu.png");
         MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(menu, true); await Drain();
         var selected = menu.Items.OfType<MenuItem>().Single(item => item.IsChecked);
-        Equal(1, (int)selected.Tag!);
+        Equal("心动模式", AutomationProperties.GetName(selected));
         Equal(SystemColors.HighlightTextBrush.Color, ((SolidColorBrush)selected.Foreground).Color);
         Equal(SystemColors.HighlightBrush.Color, ((SolidColorBrush)selected.Background).Color);
         foreach (var item in menu.Items.OfType<MenuItem>())
@@ -1090,15 +1409,16 @@ public static partial class MusicCatalogPersonalTests
         MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(menu, false); await Drain();
         menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 3)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
         await Until(() => f.Module.Mode == 3 && !f.Module.Busy); Check(f.Module.HasPlaybackHeartbeat);
+        Check(!f.Module.RecommendationContinue, "ordinary single mode retains heartbeat identity without continuation");
         await f.Module.StepAsync(true);
         int starts = f.App.Log.Count(call => call.Method == "music.recommendations.start");
         await f.Module.HeartbeatCurrentAsync(key); Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         var recommendation = await f.Queue(); string playing = S(recommendation, "currentId");
         int opens = f.Output.Opens, resumes = f.Output.Resumes;
-        sourceButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        Check(source.Items.OfType<MenuItem>().Select(item => item.Header)
-            .SequenceEqual(new object[] { "心动模式", "从当前歌曲进入推荐", "返回原队列" }));
-        var returning = source.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "返回原队列"));
+        await OpenSessionMenu(footer);
+        Check(source.Items.OfType<MenuItem>().Select(AutomationProperties.GetName)
+            .SequenceEqual(new[] { "退出心动模式", "心动模式", "列表循环", "单曲循环", "随机播放" }));
+        var returning = source.Items.OfType<MenuItem>().Single(item => AutomationProperties.GetName(item) == "退出心动模式");
         ((IInvokeProvider)new MenuItemAutomationPeer(returning).GetPattern(PatternInterface.Invoke)).Invoke();
         await Until(() => !f.Module.HasPlaybackHeartbeat && !f.Module.HasActiveRecommendation);
         var returned = await f.Queue(); var original = before.GetProperty("entries").EnumerateArray().ToList();
@@ -1108,6 +1428,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(playing, S(returned, "currentId")); Equal(playing, f.Output.Identity!);
         Equal(opens, f.Output.Opens); Equal(resumes, f.Output.Resumes); Check(f.Output.HasMedia);
         Equal("single", f.Module.PlaybackModeIcon); Equal("单曲循环", AutomationProperties.GetName(mode));
+        Equal("single", ((MusicPlaybackIcon)sourceButton.Content).Key);
         surface.RootVisual = null;
     }
 
@@ -1206,10 +1527,12 @@ public static partial class MusicCatalogPersonalTests
             WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
             PositionX = -32000, PositionY = -32000, Width = 1110, Height = 100 });
         surface.RootVisual = footer; Layout(footer, 1110, 100); await Drain();
-        ((Button)footer.FindName("PlaybackSourceButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        var sourceMenu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
-        Check(sourceMenu.Items.OfType<MenuItem>().Select(item => item.Header)
-            .SequenceEqual(new object[] { "搜索结果", "自动续播", "重试取歌" }));
+        var sessionButton = (Button)footer.FindName("ModeButton");
+        sessionButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        var sourceMenu = (ContextMenu)footer.FindName("ModeMenu");
+        Check(sourceMenu.Items.OfType<MenuItem>().Select(AutomationProperties.GetName)
+            .SequenceEqual(new[] { "推荐模式", "列表循环", "单曲循环", "随机播放" }));
+        Equal("sparkles", ((MusicPlaybackIcon)sessionButton.Content).Key);
         sourceMenu.IsOpen = false; surface.RootVisual = null;
         var candidate = f.Module.RecommendationCandidates[1];
         var stale = f.Module.RecommendationCandidates[0];
@@ -1470,16 +1793,16 @@ public static partial class MusicCatalogPersonalTests
         }
         await f.Module.ChangePlaybackFmAsync("scene", "HOT_SONG", f.Module.PlaybackFmActionKey);
         Equal("scene", f.Module.PlaybackFmMode); Equal("HOT_SONG", f.Module.PlaybackFmScene);
-        Equal("热歌", f.Module.PlaybackFmTitle); Equal(f.Module.ModeText, f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle); Equal("私人漫游", f.Module.PlaybackModeText);
         f.Module.CatalogFmMode = "familiar";
-        Equal("热歌", f.Module.PlaybackFmTitle); Equal(f.Module.ModeText, f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle); Equal("私人漫游", f.Module.PlaybackModeText);
         var held = f.Platform.HoldNextFm();
         string oldKey = f.Module.PlaybackFmActionKey;
         var failed = f.Module.ChangePlaybackFmAsync("explore", "", oldKey);
         await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
-        Equal("热歌", f.Module.PlaybackFmTitle); Equal(f.Module.ModeText, f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle); Equal("私人漫游", f.Module.PlaybackModeText);
         held.Fail("NETWORK_ERROR"); await failed; await Drain();
-        Equal("热歌", f.Module.PlaybackFmTitle); Equal(f.Module.ModeText, f.Module.PlaybackModeText);
+        Equal("热歌", f.Module.PlaybackFmTitle); Equal("私人漫游", f.Module.PlaybackModeText);
         int requests = f.Platform.Requests.Count;
         await f.Module.ChangePlaybackFmAsync("default", "", oldKey);
         Equal(requests, f.Platform.Requests.Count);
@@ -1572,15 +1895,13 @@ public static partial class MusicCatalogPersonalTests
     {
         await using var f = await Fixture.Create();
         var footer = (MusicPlayerView)f.Module.PlayerView;
-        using var surface = new HwndSource(new HwndSourceParameters("recommendation-fm-footer-fixture") {
-            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-            PositionX = -32000, PositionY = -32000, Width = 1110, Height = 100 });
-        surface.RootVisual = footer; Layout(footer, 1110, 100); await Drain();
+        using var surface = SessionSurface(footer, "recommendation-fm-footer-fixture");
+        await Drain();
         var mode = (Button)footer.FindName("ModeButton");
         var menu = (ContextMenu)footer.FindName("ModeMenu");
-        var channel = (Button)footer.FindName("FmChannelButton");
-        var popup = (Popup)footer.FindName("FmPopup");
-        mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        var popup = PlayerDialogHost.Find(footer)!;
+        var panel = (Border)footer.FindName("FmPanel");
+        await OpenSessionMenu(footer);
         Equal(1, f.Module.Mode); Check(menu.IsOpen && !popup.IsOpen, "ordinary playback opens choices without a write");
         var ordinary = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2));
         Equal(f.Module.ModeText, AutomationProperties.GetName(mode));
@@ -1588,24 +1909,24 @@ public static partial class MusicCatalogPersonalTests
         Check(!menu.IsOpen, "playback identity change closes the old global menu");
         ordinary.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
         Equal(1, f.Module.Mode);
-        mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        await OpenSessionMenu(footer);
         Check(menu.IsOpen && !popup.IsOpen, "FM opens the independent global loop menu");
         mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
         Check(!menu.IsOpen, "global menu closes independently of FM entry");
-        Equal("repeat", f.Module.PlaybackModeIcon);
-        ((Button)footer.FindName("PlaybackSourceButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        var sourceMenu = (ContextMenu)footer.FindName("PlaybackSourceMenu");
-        Check(sourceMenu.Items.OfType<MenuItem>().Select(item => item.Header)
-            .SequenceEqual(new object[] { "私人 FM", "自动续播", "从当前歌曲进入推荐", "重试取歌" }));
-        sourceMenu.IsOpen = false;
-        channel.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        Equal("fm", f.Module.PlaybackModeIcon);
+        await OpenSessionMenu(footer);
+        var sourceMenu = (ContextMenu)footer.FindName("ModeMenu");
+        Check(sourceMenu.Items.OfType<MenuItem>().Select(AutomationProperties.GetName)
+            .SequenceEqual(new[] { "私人漫游", "列表循环", "单曲循环", "随机播放", "切换频道" }));
+        await OpenSessionFm(footer);
         Check(popup.IsOpen, "live WY FM opens mode selection");
         var modes = (StackPanel)footer.FindName("FmModeChoices");
         var scenes = (UniformGrid)footer.FindName("FmSceneChoices");
         Equal(4, modes.Children.Count); Equal(43, scenes.Children.Count); Equal(4, scenes.Columns);
-        SaveRecommendationFrame(footer, "fm-footer-default-width.png");
-        SaveRecommendationFrame((FrameworkElement)popup.Child, "fm-popup-default.png");
-        SaveRecommendationFrame(scenes, "fm-scenes-all.png");
+        Check(ReferenceEquals(PresentationSource.FromVisual(panel), surface.Source) && popup.IsAncestorOf(panel),
+            "channel previews retain the real HWND root and theme resources");
+        SaveRecommendationFrame(surface.Root, "fm-popup-default.png");
+        GeneralAppearanceTests.SavePreview(surface.Root, "fm-channel-root-default", 1260, 760);
         Check(scenes.Children.OfType<Button>().All(button => Visuals<MusicPlaybackIcon>(button).Count() == 1),
             "every scene has its native icon");
         var old = modes.Children.OfType<Button>().Single(button => AutomationProperties.GetName(button) == "探索模式");
@@ -1613,17 +1934,19 @@ public static partial class MusicCatalogPersonalTests
         hot.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
         await Until(() => f.Module.PlaybackFmScene == "HOT_SONG" && !f.Module.RecommendationLoading);
         Check(!popup.IsOpen);
-        channel.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        await OpenSessionFm(footer);
         Check(popup.IsOpen);
-        SaveRecommendationFrame((FrameworkElement)popup.Child, "fm-popup-hot-song.png");
-        MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(popup.Child, true); await Drain();
+        SaveRecommendationFrame(surface.Root, "fm-popup-hot-song.png");
+        GeneralAppearanceTests.SavePreview(surface.Root, "fm-channel-root-hot-song", 1260, 760);
+        MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(panel, true); await Drain();
         var selected = scenes.Children.OfType<Button>().Single(button => AutomationProperties.GetItemStatus(button) == "已选中");
         Equal(SystemColors.HighlightTextBrush.Color, ((SolidColorBrush)selected.Foreground).Color);
         Equal(SystemColors.HighlightBrush.Color, ((SolidColorBrush)selected.Background).Color);
         Equal(SystemColors.HighlightTextBrush.Color,
             ((SolidColorBrush)((StackPanel)selected.Content).Children.OfType<TextBlock>().Single().Foreground).Color);
-        SaveRecommendationFrame((FrameworkElement)popup.Child, "fm-popup-high-contrast.png");
-        MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(popup.Child, false); await Drain();
+        SaveRecommendationFrame(surface.Root, "fm-popup-high-contrast.png");
+        GeneralAppearanceTests.SavePreview(surface.Root, "fm-channel-root-high-contrast", 1260, 760);
+        MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(panel, false); await Drain();
         int requests = f.Platform.Requests.Count;
         old.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
         Equal(requests, f.Platform.Requests.Count);
@@ -1632,7 +1955,7 @@ public static partial class MusicCatalogPersonalTests
         Check(!popup.IsOpen && !f.Module.HasPlaybackFm, "session exit closes the popup");
         retired.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
         Equal(requests, f.Platform.Requests.Count);
-        mode.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+        await OpenSessionMenu(footer);
         Check(!popup.IsOpen && menu.IsOpen); Equal(1, f.Module.Mode);
         menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
         await Until(() => f.Module.Mode == 2 && !f.Module.Busy);
@@ -1665,13 +1988,11 @@ public static partial class MusicCatalogPersonalTests
         var queueList = (ListBox)view.FindName("QueueList");
         var candidates = (ListBox)view.FindName("RecommendationList");
         Equal(1, queueList.Items.Count); Equal(3, candidates.Items.Count);
-        var toggle = Visuals<CheckBox>(view).Single(box => Equals(box.Content, "续播"));
-        Check(toggle.IsEnabled && toggle.IsChecked == true);
+        Check(!Visuals<CheckBox>(view).Any(box => Equals(box.Content, "续播")), "continuation is selected only through playback mode");
         SaveRecommendationFrame(host, "queue-candidates-default-width.png");
-        var before = await f.Queue();
-        toggle.IsChecked = false; toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        await f.Module.ChangeModeAsync(1);
         await Until(() => !f.Module.RecommendationContinue);
-        Equal(before.GetRawText(), (await f.Queue()).GetRawText());
+        Equal(3, candidates.Items.Count);
         var candidate = f.Module.RecommendationCandidates[1];
         var choice = Visuals<Button>(candidates).Single(button => ReferenceEquals(button.Tag, candidate));
         choice.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
@@ -1791,13 +2112,18 @@ public static partial class MusicCatalogPersonalTests
         var displayed = f.Module.Songs[0]; held.Release(); await old;
         Equal("familiar", f.Module.CatalogFmMode); Check(ReferenceEquals(displayed, f.Module.Songs[0]));
     }
-    private static async Task CancelPreparation()
+    private static async Task CancelPrivatePlaylistPlaybackPreparation()
     {
         await using var f = await Fixture.Create(); f.Select("kg"); await f.OpenPersonalPlaylist();
+        await f.App.Library.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("kg", 90), Song("kg", 91) }, index = 1 });
+        var before = await f.Queue(); Equal(2L, N(before, "total"));
+        int writes = f.Store.LibraryWrites;
         var held = f.App.HoldNext("music.catalog.playlist.prepare", before: true);
-        var save = f.Module.SaveCatalogPlaylistAsync(); await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        f.Module.CancelCatalog(); held.Release(); await save;
-        Check(!f.App.Log.Any(c => c.Method == "music.catalog.playlist.commit")); Equal(0, f.Store.LibraryWrites);
+        var play = f.Module.PlayCatalogPlaylistAsync(); await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        f.Module.CancelCatalog(); await held.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        held.Release(); await play;
+        Equal(0, Calls(f, "music.catalog.playlist.commit")); Equal(writes, f.Store.LibraryWrites);
+        Equal(0, f.Output.Opens); Equal(before.GetRawText(), (await f.Queue()).GetRawText());
     }
     private static async Task CasConflict()
     {
@@ -1946,8 +2272,34 @@ public static partial class MusicCatalogPersonalTests
             n["memberIds"] = JsonSerializer.SerializeToNode(Enumerable.Range(offset, count).Select(i => (1000 + i).ToString()));
             n["memberSorts"] = JsonSerializer.SerializeToNode(Enumerable.Range(offset, count).Select(i => total - i)); }) : p;
     }
-    private sealed class Platform : IMusicPlatformCatalog, IMusicChartCatalog
+    private sealed class Platform : IMusicPlatformCatalog, IMusicChartCatalog, IMusicDailyStylePreferences
     {
+        public string SampleCover = "";
+        private JsonElement WithSampleArtwork(JsonElement value) => SampleCover.Length == 0 ? value : Edit(value, row => {
+            row["cover"] = SampleCover;
+            foreach (var item in row["items"]!.AsArray().OfType<JsonObject>()) item["cover_url"] = SampleCover;
+        });
+        public int StyleWrites;
+        public MusicDailyStyleSelection StyleSelection = new("1", new[] { "11" });
+        public bool StyleReadbackMissing;
+        public Held? StyleSaveHold;
+        public Held? StyleReadHold;
+        public MusicDailyStyleWriteStatus StyleWriteStatus = MusicDailyStyleWriteStatus.Confirmed;
+        public Task<MusicDailyStyleEditor> OpenDailyStyleEditorAsync(CancellationToken cancellationToken = default) => Task.FromResult(new MusicDailyStyleEditor("fixture-account", 1, "42",
+            new[] { new MusicDailyStyleCategory("1", "曲风", new[] { new MusicDailyStyleTag("11", "流行"), new MusicDailyStyleTag("12", "爵士") }),
+                new MusicDailyStyleCategory("2", "场景", new[] { new MusicDailyStyleTag("21", "专注"), new MusicDailyStyleTag("22", "夜晚") }) }));
+        private JsonElement StyleBatch() => Edit(Batch("daily", "风格推荐"), row => {
+            row["category"] = StyleSelection.CategoryId;
+            row["tags"] = JsonSerializer.SerializeToNode(StyleSelection.TagIds.Select(id => new { id, name = id switch { "11" => "流行", "12" => "爵士", "21" => "专注", _ => "夜晚" } }));
+        });
+        public async Task<MusicDailyStyleSaveResult> SaveDailyStyleAsync(MusicDailyStyleEditor editor, MusicDailyStyleSelection selection, CancellationToken cancellationToken = default)
+        {
+            StyleWrites++;
+            if (StyleSaveHold is { } hold) await hold.Wait(cancellationToken);
+            if (StyleWriteStatus == MusicDailyStyleWriteStatus.Confirmed) StyleSelection = selection;
+            return new MusicDailyStyleSaveResult(StyleWriteStatus, StyleReadbackMissing ? null : StyleBatch(), StyleReadbackMissing ? null : StyleWriteStatus == MusicDailyStyleWriteStatus.Confirmed,
+                StyleWriteStatus == MusicDailyStyleWriteStatus.Confirmed ? null : "TIMEOUT");
+        }
         public ConcurrentQueue<object> Requests { get; } = new();
         public int Total = 65;
         public int DailyCount = 3;
@@ -1963,7 +2315,7 @@ public static partial class MusicCatalogPersonalTests
         private FmHold? nextFm;
         private readonly List<FmHold> fmHolds = [];
         public FmHold HoldNextFm() => nextFm = new();
-        public void ReleaseAll() { foreach (var hold in fmHolds) hold.Release(); nextFm?.Release(); }
+        public void ReleaseAll() { foreach (var hold in fmHolds) hold.Release(); nextFm?.Release(); StyleSaveHold?.Release(); StyleReadHold?.Release(); }
         public sealed class FmHold
         {
             public TaskCompletionSource Arrived { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1981,7 +2333,7 @@ public static partial class MusicCatalogPersonalTests
         private Task<JsonElement> Result(object request, JsonElement result, CancellationToken token)
         { token.ThrowIfCancellationRequested(); Requests.Enqueue(request); return Task.FromResult(result); }
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) =>
-            Result(r, PlaylistChange?.Invoke(r) ?? Page(r, Total), t);
+            Result(r, WithSampleArtwork(PlaylistChange?.Invoke(r) ?? Page(r, Total)), t);
         private static object Cursor(int page) => new { page, provider = new { opaque = "retained", cursor = 42 }, scope = new string('b', 64) };
         public Task<JsonElement> PersonalPlaylistsAsync(MusicPersonalPlaylistsRequest r, CancellationToken t = default)
         {
@@ -1992,7 +2344,7 @@ public static partial class MusicCatalogPersonalTests
                 : r.Platform == "tx" ? new { scope = new string('b', 64), kind = "qq-favorites", listId = "201", total = (int?)null,
                     version = (string?)null, name = "完整歌单", pageSize = 100, playlistId = "favorites", dirId = "201" } : null;
             object card = r.Page == 1
-                ? new { id, name = "完整歌单", kind = r.Platform == "wy" ? "favorites" : "playlist",
+                ? new { id, name = "完整歌单", cover = SampleCover, kind = r.Platform == "wy" ? "favorites" : "playlist",
                     relationship = "owned", ownerId = "42", available = true, locator, action = new { type = "playlist", id, locator } }
                 : new { id = "701", name = "第二页", kind = "playlist", available = true, action = new { type = "playlist", id = "701" } };
             return Result(r, E(new { platform = r.Platform, accountId = "42", collection = r.Kind.ToString().ToLowerInvariant(),
@@ -2013,7 +2365,12 @@ public static partial class MusicCatalogPersonalTests
                 }).ToArray(),
                 expiresAt = kind == "daily" ? (long?)DateTimeOffset.UtcNow.AddMinutes(Expired ? -1 : 10).ToUnixTimeMilliseconds() : null });
         }
-        public Task<JsonElement> DailyAsync(MusicDailyRequest r, CancellationToken t = default) => Result(r, Batch("daily", r.Branch == MusicDailyBranch.Style ? "风格推荐" : "每日推荐"), t);
+        public async Task<JsonElement> DailyAsync(MusicDailyRequest r, CancellationToken t = default)
+        {
+            var result = Result(r, WithSampleArtwork(r.Branch == MusicDailyBranch.Style ? StyleBatch() : Batch("daily", "每日推荐")), t);
+            if (r.Branch == MusicDailyBranch.Style && StyleReadHold is { } hold) await hold.Wait(t);
+            return await result;
+        }
         public async Task<JsonElement> FmAsync(MusicFmRequest r, CancellationToken t = default)
         {
             var result = Result(r, Batch("fm", "私人 FM", r.Preview ? 0 : 1000 + Interlocked.Increment(ref fmBatch) * 3), t);
@@ -2024,8 +2381,10 @@ public static partial class MusicCatalogPersonalTests
         public Task<JsonElement> SimilarAsync(MusicSimilarRequest r, CancellationToken t = default) => Result(r, Batch("similar", "相似歌曲"), t);
         public Task<JsonElement> HeartbeatAsync(MusicHeartbeatRequest r, CancellationToken t = default) =>
             Result(r, Edit(Batch("heartbeat", "心动推荐", 100), row => { row["context"] = JsonSerializer.SerializeToNode(new {
-                playlistId = "555", startMusicId = r.SongId ?? "101", songId = r.SongId ?? "101",
-                fromHome = r.Entry == MusicHeartbeatEntry.Favorites, count = 65 });
+                playlistId = r.Continuation?.PlaylistId ?? "555",
+                startMusicId = r.Continuation?.StartMusicId ?? r.SongId ?? "101", songId = r.SongId ?? "101",
+                fromHome = r.Entry == MusicHeartbeatEntry.Favorites, count = r.Continuation?.Count ?? 65,
+                accountId = r.Continuation?.AccountId ?? "42" });
                 row["entrySong"] = JsonNode.Parse(Song("wy", int.Parse(r.SongId ?? "101") - 1).GetRawText()); }), t);
         public Task<JsonElement> QueueRecommendationsAsync(MusicQueueRecommendationsRequest r, CancellationToken t = default) =>
             Result(r, Edit(Batch("queue-recommendations", "队列推荐", 200 + Interlocked.Increment(ref queueBatch) * 3),
@@ -2083,8 +2442,10 @@ public static partial class MusicCatalogPersonalTests
         }
         public void Release() => released.TrySetResult();
     }
-    private sealed class Application : MusicApplicationTestDouble
+    private sealed class Application : MusicApplicationTestDouble, IMusicDailyStylePreferences
     {
+        public Task<MusicDailyStyleEditor> OpenDailyStyleEditorAsync(CancellationToken cancellationToken = default) => Catalog.OpenDailyStyleEditorAsync(cancellationToken);
+        public Task<MusicDailyStyleSaveResult> SaveDailyStyleAsync(MusicDailyStyleEditor editor, MusicDailyStyleSelection selection, CancellationToken cancellationToken = default) => Catalog.SaveDailyStyleAsync(editor, selection, cancellationToken);
         public readonly MusicLibraryOwner Library;
         public readonly MusicNativeCatalogOwner Catalog;
         private readonly MusicRecommendationQueuePort recommendationQueue;
@@ -2117,9 +2478,9 @@ public static partial class MusicCatalogPersonalTests
         private readonly List<Held> allHolds = [];
         private readonly Dictionary<string, Func<JsonElement, JsonElement>> transforms = [];
         private readonly Dictionary<string, string> failures = [];
-        public Application(Store store, Platform platform)
+        public Application(Store store, Platform platform, CacheDocumentStore cache)
         {
-            Library = new(store);
+            Library = new(store, cacheStore: cache);
             Catalog = new(platform, Library);
             recommendationQueue = new(Library);
             recommendations = new(platform, recommendationQueue, SelectRecommendationAsync);
@@ -2357,20 +2718,28 @@ public static partial class MusicCatalogPersonalTests
     {
         private readonly object gate = new();
         private readonly Dictionary<string, byte[]> data = [];
+        private Store? cacheBacking;
+        public Store CacheBacking => cacheBacking ??= new();
         public ConcurrentQueue<string> Reads { get; } = new();
         public int LibraryWrites;
         public bool UnknownAfterNextLibraryWrite;
+        public bool FailReads, FailWrites, HoldWrites;
+        public readonly TaskCompletionSource WriteEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseWrite = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Reads.Enqueue(ns);
+            if (FailReads) throw new DocumentStoreException(DocumentStoreError.Storage);
             lock (gate) return Task.FromResult(data.TryGetValue(ns, out var value)
                 ? new DocumentSnapshot(value.ToArray(), DocumentFingerprint.FromBytes(value)) : new(null, DocumentFingerprint.Missing));
         }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value, DocumentFingerprint expected,
+        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value, DocumentFingerprint expected,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (HoldWrites) { WriteEntered.TrySetResult(); await ReleaseWrite.Task; }
+            if (FailWrites) throw new DocumentStoreException(DocumentStoreError.Storage);
             lock (gate)
             {
                 var previous = data.TryGetValue(ns, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
@@ -2381,7 +2750,7 @@ public static partial class MusicCatalogPersonalTests
                     LibraryWrites++;
                     if (UnknownAfterNextLibraryWrite) { UnknownAfterNextLibraryWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
                 }
-                return Task.FromResult(DocumentFingerprint.FromBytes(value.Span));
+                return DocumentFingerprint.FromBytes(value.Span);
             }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -2391,7 +2760,7 @@ public static partial class MusicCatalogPersonalTests
         public bool Confirm(string message, string title) => true;
         public string[]? SelectAudioFiles() => null;
     }
-    private sealed class Output : IMusicPlayback
+    private class Output : IMusicPlayback
     {
         public int Opens, Resumes;
         public bool StartOnOpen;
@@ -2436,15 +2805,20 @@ public static partial class MusicCatalogPersonalTests
     private sealed class Fixture : IAsyncDisposable
     {
         public Store Store { get; }
+        public CacheDocumentStore Cache { get; }
         public Platform Platform { get; } = new();
-        public Output Output { get; } = new();
+        public Output Output { get; }
         public Dialogs Dialogs { get; } = new();
         public Application App { get; }
         public MusicCapability Module { get; }
-        private Fixture(Store? store = null) { Store = store ?? new(); App = new(Store, Platform); Module = new(App, Store, Output, Dialogs); }
-        public static async Task<Fixture> Create(bool initialize = true, Store? store = null)
+        private Fixture(Store? store = null, Output? output = null)
         {
-            var f = new Fixture(store);
+            Store = store ?? new(); Cache = new(Store.CacheBacking); Output = output ?? new();
+            App = new(Store, Platform, Cache); Module = new(App, Store, Output, Dialogs, cacheStore: Cache);
+        }
+        public static async Task<Fixture> Create(bool initialize = true, Store? store = null, Output? output = null)
+        {
+            var f = new Fixture(store, output);
             try { if (initialize) await f.Module.InitializeAsync(default); return f; } catch { await f.DisposeAsync(); throw; }
         }
         public void Select(string platform)
@@ -2456,13 +2830,13 @@ public static partial class MusicCatalogPersonalTests
             Check(Module.IsCatalogPlaylist && Module.Status.Length == 0, "private playlist did not publish: " + Module.Status);
         }
         public Task<JsonElement> Queue() => App.Library.ExecuteAsync("music.queue.get", new { offset = 0, limit = 100 });
-        public async Task<JsonElement> Detail(int offset = 0)
+        public async Task<JsonElement> Detail()
         {
             var list = await App.Library.ExecuteAsync("music.library.list", new { offset = 0, limit = 100 });
             var id = list.GetProperty("items").EnumerateArray().First(p => S(p, "kind") == "playlist").GetProperty("id").GetString();
-            return await App.Library.ExecuteAsync("music.library.detail", new { id, offset, limit = 100 });
+            return await App.Library.ExecuteAsync("music.library.detail", new { id, offset = 0, limit = 100 });
         }
-        public async ValueTask DisposeAsync() { App.ReleaseAll(); Platform.ReleaseAll(); await Module.DisposeAsync(); await Store.DisposeAsync(); }
+        public async ValueTask DisposeAsync() { App.ReleaseAll(); Platform.ReleaseAll(); Store.CacheBacking.ReleaseWrite.TrySetResult(); try { await Module.DisposeAsync(); } finally { await Cache.DisposeAsync(); await Store.CacheBacking.DisposeAsync(); await Store.DisposeAsync(); } }
     }
     private static async Task OnSta(Func<Task> action)
     {

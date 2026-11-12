@@ -36,10 +36,12 @@ enum FilmPlaybackFixture {
                          metadata: RuntimeValue = .null, candidates: [RuntimeValue] = [],
                          episodes: [RuntimeValue] = [], target: RuntimeValue = target,
                          metadataSources: [RuntimeValue]? = nil, metadataSourceID: String? = nil,
-                         metadataError: String? = nil) -> RuntimeValue {
+                         metadataError: String? = nil, metadataCache: RuntimeValue = .null,
+                         metadataSupplement: RuntimeValue = .null) -> RuntimeValue {
         var fields: RuntimeObject = [
             "sessionId": .string(sessionID.uuidString.lowercased()), "sequence": .number(Double(sequence)),
             "target": target, "stage": .string(stage), "error": .null, "metadata": metadata,
+            "metadataCache": metadataCache, "metadataSupplement": metadataSupplement,
             "sources": .array([.object(["id": .string("result-a"), "title": .string("星河"), "source": source,
                                          "state": .string("ready"), "error": .null])]),
             "browsing": browsing ?? .object(["sourceId": .null, "lineId": .null, "loading": .bool(false),
@@ -87,7 +89,6 @@ actor FilmPlaybackWireServer {
     private var actionFailures: [String: RuntimeHTTPError] = [:]
     private var actionAdmission: (@Sendable (String) async throws -> Void)?
     private var releaseAdmission: (@Sendable (String, RuntimeValue) async throws -> Void)?
-    private var runtimeClosed = false
     init(_ value: RuntimeValue = FilmPlaybackFixture.snapshot(), handler: Handler? = nil) {
         self.value = value; self.handler = handler
         pending = value.filmObject?["attempt"].flatMap { $0 == .null ? nil : $0 }
@@ -106,7 +107,6 @@ actor FilmPlaybackWireServer {
         }, runtimeClosure: { try await client.waitUntilClosed() }, producer: { client })
     }
     func calls() -> [(String, RuntimeValue)] { log }
-    func closeRuntime() { runtimeClosed = true }
     func observationRequests() -> [(UUID, Int64)] { observations }
     func replyToReceipt(_ handler: @escaping @Sendable (String) async throws -> RuntimeValue) { receiptHandler = handler }
     func reply(to action: String, with value: RuntimeValue) { actionReplies[action] = value }
@@ -124,7 +124,6 @@ actor FilmPlaybackWireServer {
         let reached = waitingForCalls.filter { log.count >= $0.0 }
         waitingForCalls.removeAll { log.count >= $0.0 }
         for (_, waiter) in reached { waiter.resume() }
-        if runtimeClosed { throw RuntimeHTTPError.closed }
         if let handler { return try await handler(operation, input) }
         if operation == "session.release" || operation == "session.media.release" {
             try await releaseAdmission?(operation, input)
@@ -365,7 +364,7 @@ final class FilmPlaybackTestMedia: FilmPlaybackMediaControlling {
         emit(.state(state), attemptID: attemptID)
         return true
     }
-    func resume(sessionID: UUID, attemptID: String) {
+    func resume(sessionID: UUID, attemptID: String, userInitiated: Bool) {
         guard isCurrent(sessionID: sessionID, attemptID: attemptID), var state = currentState, state.paused else { return }
         resumes += 1; state.paused = false
         emit(.state(state), attemptID: attemptID)

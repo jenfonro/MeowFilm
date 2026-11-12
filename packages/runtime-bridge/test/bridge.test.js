@@ -117,6 +117,65 @@ test('timeout aborts HTTP and close waits for actual handler completion without 
   assert.equal(server.state.active, 0);
 });
 
+test('only the no-deadline entry outlives the client default while ordinary timeout overrides remain effective',
+  { timeout: 3000 }, async t => {
+    const release = deferred();
+    t.after(() => release.resolve());
+    const { server, identity } = await pair(t, async input => { await release.promise; return input; });
+    const client = createHttpClient({ baseUrl: server.baseUrl, timeout: 50 });
+    t.after(() => client.close());
+    const options = { path: identity.path, body: 'complete' };
+    const whole = client.requestWithoutDeadline({ ...options, timeout: 1 });
+    const extended = client.request({ ...options, timeout: 2000 });
+    whole.catch(() => {}); extended.catch(() => {});
+    try {
+      await assert.rejects(client.request(options), { code: 'TIMEOUT' });
+      assert.equal(client.state.pending, 2);
+      release.resolve();
+      assert.equal(okay(await whole), 'complete');
+      assert.equal(okay(await extended), 'complete');
+      assert.equal(client.state.pending, 0);
+    } finally { release.resolve(); }
+  });
+
+test('no-deadline cancellation and client close drain local exchanges while server close waits for real handlers',
+  { timeout: 3000 }, async t => {
+    const entered = deferred(), release = deferred(), signals = {};
+    t.after(() => release.resolve());
+    const { server, client, identity } = await pair(t, async (input, context) => {
+      signals[input] = context.signal;
+      if (Object.keys(signals).length === 2) entered.resolve();
+      await release.promise;
+      return 'late';
+    });
+    const controller = new AbortController();
+    const cancelled = assert.rejects(client.requestWithoutDeadline({
+      path: identity.path, body: 'cancel', signal: controller.signal,
+    }), { code: 'CANCELLED' });
+    const stopped = assert.rejects(client.requestWithoutDeadline({
+      path: identity.path, body: 'close',
+    }), { code: 'CLOSED' });
+    try {
+      await entered.promise;
+      controller.abort(); await cancelled;
+      await until(() => signals.cancel.aborted);
+      assert.equal(client.state.pending, 1);
+      assert.equal(server.state.active, 2);
+      const closing = client.close();
+      assert.equal(client.close(), closing);
+      await Promise.all([closing, stopped]);
+      assert.deepEqual(client.state, { closed: true, pending: 0 });
+      await until(() => signals.close.aborted);
+      assert.equal(server.state.active, 2, 'local transport drain cannot claim remote handler completion');
+      let drained = false;
+      const draining = server.close().then(() => { drained = true; });
+      await turn(); assert.equal(drained, false);
+      release.resolve(); await draining;
+      assert.deepEqual(server.state, { closed: true, active: 0 });
+      await assert.rejects(client.requestWithoutDeadline({ path: identity.path, body: null }), { code: 'CLOSED' });
+    } finally { release.resolve(); }
+  });
+
 test('duplicate active request IDs reject before dispatch, completed IDs leave no history', async t => {
   const entered = deferred(), release = deferred(); let calls = 0;
   const { call, server } = await pair(t, async input => {

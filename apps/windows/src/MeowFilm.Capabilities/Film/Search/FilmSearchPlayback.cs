@@ -1,64 +1,23 @@
-using System.Globalization;
 using System.Text.Json;
+using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>Lossless handoff from the shared search projection, never from display title inference.</summary>
+/// <summary>Decodes the Node-owned handoff without deriving identities, members, cursors or cache seeds.</summary>
 internal static class FilmSearchPlayback
 {
-    internal static FilmPlaybackRequest Capture(FilmSearchContext context)
+    internal static FilmPlaybackRequest Read(JsonElement handoff, RuntimeConnection owner)
     {
-        var carrier = context.CarrierItem;
-        string title = FilmSearchJson.Text(carrier, "title");
-        var members = context.Sources;
-        var cursors = context.Session.Cursors.Where(cursor => !context.IsRawSelection ||
-            members.Any(member => Matches(cursor.Source, member))).ToArray();
-        FilmPlaybackTarget target;
-        if (context.IsRawSelection)
-        {
-            var member = members.Single();
-            target = new(context.DisplayKey, "source", title, Source: FilmJson.Encode(new
-            {
-                key = FilmSearchJson.Text(member, "siteKey"), detailId = FilmJson.Member(member, "detailId")
-            }));
-        }
-        else if (FilmSearchJson.Text(carrier, "sourceKind") == "tmdb")
-        {
-            string kind = FilmSearchJson.Text(carrier, "tmdbType");
-            string id = FilmSearchJson.Number(carrier, "tmdbId").ToString(CultureInfo.InvariantCulture);
-            target = new($"tmdb:{kind}:{id}", kind, title, "tmdb", id);
-        }
-        else target = new(context.DisplayKey, "group", title,
-            Members: FilmJson.Encode(members.Select(member => new
-            {
-                sourceKey = FilmSearchJson.Text(member, "siteKey"), detailId = FilmJson.Member(member, "detailId")
-            }).DistinctBy(member => (member.sourceKey, member.detailId.GetRawText())).ToArray()));
+        var reference = handoff.GetProperty("searchReference");
+        if (!Guid.TryParse(FilmJson.RequiredText(reference, "sessionId"), out _) ||
+            FilmJson.RequiredText(reference, "selectionId").Length == 0)
+            throw new FilmPlaybackException("INVALID_RESPONSE");
+        var target = FilmJson.Target(handoff.GetProperty("target"));
         target.Validate();
-        var results = cursors.Select(cursor => new
-        {
-            sourceKey = cursor.Source.Key,
-            items = cursor.Pages.Values.SelectMany(page => FilmJson.Array(page.Value, "items"))
-                .Where(row => !context.IsRawSelection || SameDetail(row, target.Source!.Value.GetProperty("detailId"))).ToArray()
-        }).Where(row => row.items.Length > 0).ToArray();
-        var entries = cursors.SelectMany(cursor => cursor.Pages.Values)
-            .Concat(context.IsRawSelection ? [] : context.Session.MetadataData.Values)
-            .Where(response => response.CacheEntry is not null).Select(response => response.CacheEntry!.Value).ToArray();
-        return new(target, context.Session.SourcesLoaded ? cursors.Select(cursor => cursor.Source.Wire).ToArray() : null,
-            context.Query, FilmJson.Encode(results),
-            FilmJson.Encode(cursors.Select(cursor => new { sourceKey = cursor.Source.Key,
-                page = cursor.ConfirmedPage, completed = cursor.Ended }).ToArray()),
-            context.Metadata, FilmJson.Encode(entries))
-        { DataOwner = context.Session.DataOwner };
-    }
-
-    internal static bool Matches(FilmSearchSource source, JsonElement member) =>
-        source.Key == FilmSearchJson.Text(member, "siteKey") &&
-        source.Cat.Generation == FilmSearchJson.Number(member, "generation");
-
-    private static bool SameDetail(JsonElement row, JsonElement identity)
-    {
-        var detail = FilmJson.Member(row, "vod_id");
-        if (detail.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) detail = FilmJson.Member(row, "id");
-        return FilmJson.IsIdentity(detail) && JsonElement.DeepEquals(detail, identity);
+        JsonElement? Optional(string name) => FilmJson.Member(handoff, name) is
+            { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } value ? value.Clone() : null;
+        return new(target, FilmJson.Array(handoff, "sources"), FilmJson.RequiredText(handoff, "query"),
+            Optional("results"), Optional("search"), Optional("metadata"), Optional("cacheEntries"),
+            Optional("resultHints"), reference.Clone()) { DataOwner = owner };
     }
 }

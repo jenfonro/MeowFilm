@@ -16,6 +16,10 @@ public static partial class RuntimeHttpProtocol
     internal static readonly IReadOnlyDictionary<string, ModuleContract> Modules =
         new Dictionary<string, ModuleContract>(StringComparer.Ordinal)
     {
+        ["netease"] = new("0.1.0", "netease.token.v1", "netease.token.",
+            ["get"],
+            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
+                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP" }),
         ["tmdb"] = new("0.1.0", "tmdb.data.v1", "tmdb.data.",
             ["settings.get", "settings.update", "request"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
@@ -33,15 +37,17 @@ public static partial class RuntimeHttpProtocol
                 "ROLLBACK_UNAVAILABLE", "INVALID_SOURCE_URL", "SOURCE_DOWNLOAD_FAILED", "SOURCE_REDIRECT",
                 "MEDIA_UNAVAILABLE", "INVALID_MEDIA_CANDIDATE", "EXPIRED_MEDIA_CANDIDATE", "MEDIA_HEADERS_UNSUPPORTED",
                 "TARGET_CHANGED", "RECORDING_MISMATCH" }),
-        ["source"] = new("0.2.0", "source.runtime.v2", "source.runtime.",
+        ["source"] = new("0.3.0", "source.runtime.v2", "source.runtime.",
             ["load", "unload", "invoke", "status",
-                "close"],
+                "library.list", "library.get", "library.previewImport", "library.import", "library.save", "library.update", "library.remove",
+                "library.export", "library.invoke", "library.image", "library.releaseImage", "web.pending", "web.respond",
+                "rules.process", "close"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT",
                 "SOURCE_INTEGRITY", "SOURCE_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND",
                 "SOURCE_DISABLED", "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "UNSUPPORTED_RULE",
                 "UNSUPPORTED_DEPENDENCY", "CAPABILITY_UNAVAILABLE", "PERMISSION_DENIED", "WEB_INTERACTION_REQUIRED",
                 "TIMEOUT", "SOURCE_CLEANUP", "SOURCE_FAILURE", "NETWORK_ERROR",
-                "HTTP_ERROR", "INVALID_RESPONSE", "STORAGE_ERROR", "VIRTUAL_ROUTE_NOT_FOUND" }),
+                "HTTP_ERROR", "INVALID_RESPONSE", "STORAGE_ERROR", "CORRUPT_STORAGE", "VIRTUAL_ROUTE_NOT_FOUND" }),
         ["cat"] = new("0.2.0", "cat.script.v2", "cat.script.",
             ["start", "status", "refresh", "install",
                 "import", "edit", "update", "restart",
@@ -72,8 +78,11 @@ public static partial class RuntimeHttpProtocol
             ["session.open", "session.command", "session.snapshot", "session.release",
                 "session.attempt", "session.media.release", "settings.get", "settings.set",
                 "library.get", "library.remove", "manual.update", "data.search", "data.detail",
-                "data.metadata", "data.cache.entry", "data.invalidate"],
-            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NOT_FOUND", "NO_MATCH",
+                "data.catalog", "data.metadata", "data.metadata.entry", "data.cache.entry", "data.invalidate",
+                "rules.get", "rules.set", "rules.group.set", "rules.group.defaults", "rules.group.preview",
+                "rules.restore", "rules.preview", "rules.normalize", "rules.clear",
+                "search.open", "search.snapshot", "search.command", "search.release", "search.handoff"],
+            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "RESOURCE_LIMIT", "NOT_FOUND", "NO_MATCH",
                 "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "STALE_SOURCE", "STALE_SESSION", "STALE_ACCOUNT", "STALE_METADATA",
                 "NOT_CONFIGURED", "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED",
                 "UNSUPPORTED_OPERATION", "CAPABILITY_UNAVAILABLE", "MEDIA_UNAVAILABLE",
@@ -100,10 +109,14 @@ public static partial class RuntimeHttpProtocol
         RegexOptions.CultureInvariant)]
     private static partial Regex DoubanImagePattern();
 
+    [GeneratedRegex(@"\A/v1/source/images/[A-Za-z0-9-]+\z", RegexOptions.CultureInvariant)]
+    private static partial Regex SourceImagePattern();
+
     public static bool ValidImageReference(string? reference) => ImageProvider(reference) is not null;
 
     internal static string? ImageProvider(string? reference) => reference is null ? null :
-        ImagePattern().IsMatch(reference) ? "tmdb" : DoubanImagePattern().IsMatch(reference) ? "douban" : null;
+        ImagePattern().IsMatch(reference) ? "tmdb" : DoubanImagePattern().IsMatch(reference) ? "douban" :
+        SourceImagePattern().IsMatch(reference) ? "source" : null;
 
     public static bool ValidMethod(string? method) => method is not null && MethodPattern().IsMatch(method);
 
@@ -128,14 +141,17 @@ public static partial class RuntimeHttpProtocol
                 || description.GetProperty("protocol").GetString() != Name
                 || description.GetProperty("product").GetString() != product
                 || expectedModules.Count != Modules.Count) throw new BridgeException("INVALID_RESPONSE");
-            var remaining = expectedModules.ToDictionary(module => module.Id, module => module.Version, StringComparer.Ordinal);
+            var declaredModules = description.GetProperty("modules");
+            if (declaredModules.GetArrayLength() != expectedModules.Count) throw new BridgeException("INVALID_RESPONSE");
             var methods = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var module in description.GetProperty("modules").EnumerateArray())
+            for (var index = 0; index < expectedModules.Count; index++)
             {
+                var module = declaredModules[index];
+                var expected = expectedModules[index];
                 var id = module.GetProperty("id").GetString()!;
-                if (module.EnumerateObject().Count() != 4 || !remaining.Remove(id, out var version)
-                    || !Modules.TryGetValue(id, out var contract) || version != contract.Version
-                    || module.GetProperty("version").GetString() != version
+                if (module.EnumerateObject().Count() != 4 || id != expected.Id
+                    || !Modules.TryGetValue(id, out var contract) || expected.Version != contract.Version
+                    || module.GetProperty("version").GetString() != expected.Version
                     || module.GetProperty("contract").GetString() != contract.Name)
                     throw new BridgeException("INVALID_RESPONSE");
                 var declared = new HashSet<string>(StringComparer.Ordinal);
@@ -147,7 +163,6 @@ public static partial class RuntimeHttpProtocol
                 if (!declared.SetEquals(contract.Operations.Select(operation => contract.Prefix + operation)))
                     throw new BridgeException("INVALID_RESPONSE");
             }
-            if (remaining.Count != 0) throw new BridgeException("INVALID_RESPONSE");
             return methods;
         }
         catch { throw new BridgeException("INVALID_RESPONSE"); }

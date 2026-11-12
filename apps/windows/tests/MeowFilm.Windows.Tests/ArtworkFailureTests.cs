@@ -15,6 +15,28 @@ public static class ArtworkFailureTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("Native artwork preparation follows an address selected by synchronous failure notification", () => Sta(async () =>
+        {
+            var loader = new ImmediateFailureLoader();
+            var view = new ArtworkImage { Address = "https://art.example.test/first" };
+            ArtworkScope.SetLoader(view, loader);
+            var receipts = new List<(string Address, bool Succeeded)>();
+            view.LoadCompleted += (_, e) =>
+            {
+                receipts.Add((e.Address, e.Succeeded));
+                if (!e.Succeeded) view.Address = "https://art.example.test/second";
+            };
+            var preparation = view.PrepareForPresentationAsync();
+            Equal(2, loader.Calls);
+            Check(!preparation.IsCompleted, "preparation still owns the replacement request after inline failure");
+            var image = new FakeLease();
+            loader.Next.TrySetResult(image);
+            using var presentation = await preparation.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(ReferenceEquals(image.Image, view.Source));
+            Check(receipts.SequenceEqual(new[] { ("https://art.example.test/first", false), ("https://art.example.test/second", true) }));
+            presentation.Dispose();
+            Check(image.Disposed && view.Source is null);
+        }));
         foreach (string code in new[] { "ARTWORK_FORMAT", "ARTWORK_LIMIT", "ARTWORK_ADDRESS",
             "ARTWORK_REDIRECT", "ARTWORK_DENIED", "ARTWORK_CLOSED" })
             yield return new("Native artwork deterministic failure keeps the note without retry " + code, () => Sta(async () =>
@@ -208,6 +230,13 @@ public static class ArtworkFailureTests
             var next = new TaskCompletionSource<IArtworkLease>(TaskCreationOptions.RunContinuationsAsynchronously);
             Calls.Add((next, cancellationToken)); return next.Task;
         }
+    }
+    private sealed class ImmediateFailureLoader : IArtworkLoader
+    {
+        internal int Calls;
+        internal readonly TaskCompletionSource<IArtworkLease> Next = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default) =>
+            ++Calls == 1 ? Task.FromException<IArtworkLease>(new ArtworkException("ARTWORK_NETWORK")) : Next.Task;
     }
     private sealed class FakeLease : IArtworkLease
     {

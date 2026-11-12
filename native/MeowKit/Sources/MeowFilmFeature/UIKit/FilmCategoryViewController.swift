@@ -76,9 +76,9 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
         render()
     }
 
-    public override func pageDidBecomeActive() { model.loadIfNeeded(); render() }
+    public override func pageDidBecomeVisible() { model.loadIfNeeded(); render() }
     public override func pageDidBecomeInactive() { model.close() }
-    public override func pageDidBecomeHidden() { resetPressFeedback() }
+    public override func pageDidBecomeHidden() { model.cancel(); resetPressFeedback() }
     public override func pageDidFinishAppearing() { presentError() }
 
     public override func viewDidLayoutSubviews() {

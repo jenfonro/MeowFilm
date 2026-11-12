@@ -1,5 +1,7 @@
 # 原生音乐状态 owner
 
+集合分类、内容所有权及订阅副作用以[共同歌单契约](../common/music/playlist-ownership.md)为准；本页记录 Windows owner、命令和持久格式。
+
 ## 责任
 
 `MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史、相关设置和脚本源元数据的唯一原生文档写入者。
@@ -49,7 +51,7 @@ ValueTask DisposeAsync();
 
 `AppendQueueAsync` 是完整歌单的进程内 next 入口，返回 `{ok:true,currentId,version,mode}`，不返回全量 entryIds。它在唯一串行边界核对 `expectedVersion`，创建独立 occurrence 并将整段按输入顺序插在当前曲之后，一次 CAS、一次版本递增；当前曲、模式及旧优先队列保留，新段优先于旧 priority。空队列选中首曲且 priority 为空，不调用媒体播放。失败不分批落盘；CAS 准入前取消不写入，准入后报告真实结果，未知写入使用既有 reconcile 机制，不重放。
 
-普通 `music.queue.append` 仍仅接受 `songs/context/next`，保持 `entryIds` 回执、最多 1000 首与 512KiB 输入边界，不接受 `expectedVersion`。完整入口取消歌曲数量上限，继续使用现有 16MiB 完整输入、8MiB 文档资源边界；空输入不允许。存储 schema 和其他平台契约不变。
+普通 `music.queue.append` 仍仅接受 `songs/context/next`，保持 `entryIds` 回执、最多 1000 首与 512KiB 输入边界，不接受 `expectedVersion`。完整入口取消歌曲数量上限，继续使用现有 16MiB 完整输入、8MiB 文档资源边界；空输入不允许。此队列入口不改变队列 schema；曲库格式见下节。
 
 ## 唯一当前文档
 
@@ -83,15 +85,17 @@ online-settings
 native-catalog-source
 native-official-sources
 native-quality-policy
-native-lyric-display
 native-metadata-policy
 native-appearance
 native-device-settings
 native-search-policy
 native-search-history
 native-local-lyrics
+native-desktop-lyrics
 playback-settings
 ```
+
+多曲歌词／封面展示按稳定歌曲身份存于 `music.recording-presentation.v2` 可选缓存，不属于业务 area，也不参与整库校验或提交；手工歌词仍属于 `native-local-lyrics`。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
 旧 `lx-installations` 与 `lx-data` 条目不读取、验证、迁移或改写；原文档随无关设置保存原样保留。
@@ -154,11 +158,13 @@ playback-settings
 
 ## 曲库当前格式
 
+Library owner contract 为 `0.7.0`。
+
 wrapper 只有以下字段：
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "scope": "local",
   "revision": 0,
   "library": {}
@@ -168,21 +174,50 @@ wrapper 只有以下字段：
 `wrapper.revision` 必须等于 `library.revision`。`library` 只有：
 
 ```text
-version ownerId revision nextId collections songs accounts
+version ownerId revision nextId collections songs accounts networkPlaylists
 ```
 
 约束：
 
-- `version` 为 `1`，`ownerId` 精确等于当前 scope。
+- `version` 为 `2`，`ownerId` 精确等于当前 scope。已存在的旧 wrapper/library 版本拒绝，不转换或覆盖。
 - `nextId` 大于所有现存 `playlist:<正整数>` 的编号。
 - 只有一个收藏集合：`id=favorites`、`kind=favorites`；它没有 `deleted` 或 `locallyCreated` 字段。
 - 普通歌单 ID 必须为 canonical `playlist:<正整数>`。
 - `deleted`、`locallyCreated` 若存在只能为 `true`。
 - `order` 无重复，并且每项都引用当前 `songs`。
 - `accounts` 只允许 `wy`、`tx`、`kg`，账号 ID 最长 64 字符。
-- binding 只允许相同三个平台；`map` 方向固定为 `nativeId -> songId`。
+- binding 只允许相同三个平台且 `writable=true`；`map` 方向固定为 `nativeId -> songId`。
 - intent 的 `acknowledged` 只包含该集合中现存 binding 的 canonical binding key。
 - 歌曲必须等于 `NativeMusicSong.Normalize` 的当前规范结果；临时媒体 URL、凭据和签名资源字段不得进入持久歌曲。
+
+### 网络引用字段与回执
+
+`networkPlaylists` 是独立数组，每项严格为：
+
+```text
+id platform remoteId name cover count revision present subscription intent
+```
+
+- `id` 固定为 `network:<platform>:<remoteId>`；`platform` 允许 `wy/tx/kg/kw/mg`。`remoteId` 按对应公开歌单 ID 格式校验，不接受酷狗 LX 的 `id_*`。
+- `cover` 是清理后的公开 URL；`count` 是非负展示整数，不表示本地成员数量。该类型没有 `songs/order/bindings`。
+- `present` 是本地引用可见性。`subscription` 为 `null` 或 `{accountId,present,locator}`；账号必须对应 `library.accounts[platform]`。WY/TX 的 locator 为空对象，KG 已订阅基线保存当前账号的 `{listId}`。
+- `intent` 为 `null` 或 `{accountId,present}`，记录已绑定账号的明确本地操作。即使当时开关关闭也保留意图，但不发请求；重新开启时交给原同步协调器先拉取。未绑定的纯本地引用没有账号意图。
+- 取消后仍需基线、意图或耐久 fence 的记录以 `present=false` 保留；公开列表不显示它。无这些关系的纯本地记录可直接移除。
+
+`music.library.list` 返回自管与网络两种视图。网络视图为 `{id,kind:"network",platform,remoteId,name,cover,count,revision,editable:false}`。`PlaylistRow` 将它投影至独立 `NetworkPlaylists` 和“网络歌单”导航分组；`Playlists` 仅供自管列表与单曲添加菜单使用。
+
+网络命令：
+
+| 命令 | 参数 |
+| --- | --- |
+| `music.library.network.list` | 可选 `offset/limit` |
+| `music.library.network.get` | `platform/id`（远端 ID） |
+| `music.library.network.save` | `platform/id/name`，可选 `cover/count` |
+| `music.library.network.remove` | 本地 `id/ifRevision` |
+
+`get` 返回 `{present,collection}`；不存在时 `collection=null`。保存／取消返回本地 `{ok:true,collection,present,localSaved:true}` 及独立 `sync`：关闭时为 `{ok:true,state:"local-only"}`；开启时为原协调器的状态回执或 `{ok:false,code}`。同步状态可能为 `partial`，不能仅凭其顶层 `ok=true` 宣称官方同步完成。
+
+Catalog 的 `music.catalog.playlist.save` 只转交上述元信息命令，不生成 stage 或读取平台成员。完整 stage 的 `commit` 仅支持 `play/next`。网络详情通过 `catalog-playlist/<platform>/<remoteId>` 打开，每次重新进入请求 `refresh=true`，不恢复旧详情页缓存。收藏／取消按钮和卡片菜单使用同一引用命令；普通 Library detail／成员编辑／改名／删除原集合入口对网络 ID 返回 `READ_ONLY`。平台订阅及 WY 实时 token 能力见[原生同步](music-library-sync.md)。
 
 ## 统一歌曲与录音分组
 
@@ -256,6 +291,7 @@ music.search.settings.get / save
 music.search.history.get / record / clear
 music.lyrics.local.get / save / remove
 music.lyrics.display.get / save
+music.lyrics.desktop.settings.get / save
 music.lyrics.parse
 music.online.song
 ```
@@ -264,11 +300,13 @@ music.online.song
 
 `native-appearance` 保持 schema 1、revision CAS 及原字段：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受既有预设键或严格不透明 `#RRGGBB`（UI提交统一大写）。读取旧预设不会重写数据，自定义颜色沿原外观保存/权威重读路径消费。本次不保证旧客户端能读取新的自定义值，不增加迁移或双写。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
 
+`native-desktop-lyrics` 是独立 schema 1 area，只含 `schema`、`revision`、`layout`（single/double）、`normalColor` 和 `highlightColor`。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision` 和三个设置值，返回权威 `settings`；未知字段拒绝，无变化不写盘。不保存歌词校正、锁定、位置或源译文开关。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
+
 ## CAS、取消与关闭
 
 - 所有持久写入在同一 owner gate 内对完整 envelope 执行 CAS。
 - CAS 准入后不把取消解释为回滚；丢失写入回执时保留内存候选并阻止后续写。
-- `appearance`、`metadata`、`quality`、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
+- `appearance`、`metadata`、`quality`、桌面歌词设置、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。桌面歌词通过 `music.lyrics.desktop.settings.get`，浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
 - 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
 - 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
 - `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；取消关闭只恢复当前 owner，不重放写入。

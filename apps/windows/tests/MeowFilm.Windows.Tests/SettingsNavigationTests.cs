@@ -10,7 +10,6 @@ using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
-using MeowFilm.Platform.Scripting;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -21,7 +20,7 @@ public static class SettingsNavigationTests
     {
         yield return new("settings navigation: category opens owner view and Back restores origin without replay",
             () => MusicQualityConsumerTests.Sta(Navigate));
-        yield return new("settings composition: App restoration is independent of the view and failed Node leaves native rules usable",
+        yield return new("settings composition: App restoration is independent of the view and failed Node surfaces a real rule error without fallback",
             () => MusicQualityConsumerTests.Sta(OfflineRules));
     }
 
@@ -30,49 +29,40 @@ public static class SettingsNavigationTests
         string path = TestWorkspace.DataPath("film-settings-composition");
         Directory.CreateDirectory(path);
         await using var store = new LocalDocumentStore(path,
-            [FilmRuleService.DocumentNamespace, FilmSourceService.DocumentNamespace]);
+            [FilmSourceService.DocumentNamespace]);
         int starts = 0;
-        await using var runtime = new AppRuntimeClient(_ =>
+        await using var runtime = new AppRuntimeConnectionHost(_ =>
         {
             starts++;
             throw new InvalidOperationException("Synthetic Node startup failure");
         });
-        var rules = new FilmRuleService(new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
+        var rules = new FilmRuleService(runtime);
         var sources = new FilmSourceService(runtime, store);
-        await using var module = new FilmCapability(rules, sources);
+        await using var module = new FilmCapability(rules, sources, runtime);
         await module.InitializeAsync(default);
         Check(starts == 0 && !module.SettingsView.IsLoaded);
         runtime.Start();
         await Task.WhenAll(module.StartSourcesAsync(), module.StartSourcesAsync());
         Check(starts == 1 && sources.RuntimeError is not null && !module.SettingsView.IsLoaded);
-        await rules.InitializeAsync();
-        var saved = await rules.SaveAsync(new FilmRuleSet
-        {
-            MovieRules = [new("^(.+)$", "$1")]
-        });
-        var request = new FilmRuleRequest(FilmRuleSection.Movie, "本地规则");
-        var result = await rules.ProcessAsync(request);
-        Check(result.Matched && result.OutputText == "本地规则");
-        Check((await rules.ProcessAsync(request, saved)).OutputText == result.OutputText);
+        try { await rules.InitializeAsync(); throw new Exception("Failed Node returned rules"); }
+        catch (Exception error) when (error.Message != "Failed Node returned rules")
+        { Check(starts == 1); }
         await module.PrepareShutdownAsync();
-        try
-        {
-            await rules.ProcessAsync(request);
-            throw new Exception("Prepared settings accepted work");
-        }
+        try { await rules.ProcessAsync(new(FilmRuleSection.Movie, "规则")); throw new Exception("Prepared settings accepted work"); }
         catch (InvalidOperationException) { }
         await module.CancelShutdownPreparationAsync();
-        Check((await rules.ProcessAsync(request)).OutputText == "本地规则");
-        Check(starts == 1); // Resume does not silently recover/replay a failed runtime.
+        try { await rules.InitializeAsync(); throw new Exception("Failed Node returned rules"); }
+        catch (Exception error) when (error.Message != "Failed Node returned rules") { Check(starts == 1); }
     }
 
     private static async Task Navigate()
     {
         var music = new Module("music", "音乐");
         var film = new Module("film", "影视");
+        var novel = new Module("novel", "小说");
         await using var appearance = new AppAppearance(new QualityFixture.DocumentStore());
         await appearance.LoadAsync();
-        var shell = new ShellWindow([music, film], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
+        var shell = new ShellWindow([music, film, novel], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
         {
             Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
         };
@@ -85,7 +75,7 @@ public static class SettingsNavigationTests
             var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
             var slot = (ContentControl)header.FindName("LeadingSlot");
             var tabs = ((Panel)slot.Content).Children.OfType<RadioButton>().ToArray();
-            Check(tabs.Select(tab => tab.Content).SequenceEqual(new[] { "通用", "音乐", "影视" }));
+            Check(tabs.Select(tab => tab.Content).SequenceEqual(new[] { "通用", "音乐", "影视", "小说" }));
             Check(tabs[0].IsChecked == true && !music.SettingsView.IsVisible && !film.SettingsView.IsVisible);
             Check(film.Initializations == 0);
             tabs[1].IsChecked = true;
@@ -103,6 +93,13 @@ public static class SettingsNavigationTests
             tabs[2].IsChecked = true;
             await Drain();
             Check(((TextBox)film.SettingsView).Text == "影视草稿" && film.Initializations == 1);
+            tabs[3].IsChecked = true;
+            await Drain();
+            Check(novel.SettingsView.IsVisible && !film.SettingsView.IsVisible && novel.Initializations == 1);
+            ((TextBox)novel.SettingsView).Text = "小说排版草稿";
+            tabs[2].IsChecked = true;
+            await Drain();
+            Check(((TextBox)film.SettingsView).Text == "影视草稿" && !novel.SettingsView.IsVisible);
             tabs[0].IsChecked = true;
             await Drain();
             Check(!film.SettingsView.IsVisible && !music.SettingsView.IsVisible);

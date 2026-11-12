@@ -22,14 +22,14 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
         let otherEntrance = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
             "tx", id: "OtherMID", title: "Song 301", artist: "Synthetic"))
-        let unknown = await service.cachedSourceDiscoveryState(otherEntrance)
+        let unknown = try await service.cachedSourceDiscoveryState(otherEntrance)
         XCTAssertTrue(unknown.entries.isEmpty)
         _ = try await startPlaying(service)
         let before = store.snapshot().0, writes = store.snapshot().2
 
         let previewValue = try await preview(service), preview = try XCTUnwrap(previewValue)
         XCTAssertEqual(preview.candidates.map(\.song.title), ["Song 301"])
-        let acquired = await service.cachedSourceDiscoveryState(otherEntrance)
+        let acquired = try await service.cachedSourceDiscoveryState(otherEntrance)
         XCTAssertEqual(Set(acquired.entries.keys), ["wy"])
         let known = try XCTUnwrap(acquired.entries["wy"])
         let recommended = try MusicModel.normalize(SimilarModeAccountFixture.track("301"))
@@ -43,7 +43,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         XCTAssertEqual(reused["sources"].array.first?["sourceKey"], otherEntrance["sources"].array.first?["sourceKey"])
         let mapped = try XCTUnwrap(reused["sources"].array.first { $0["source"].string == "wy" })
         XCTAssertEqual(mapped["sourceKey"], recommended["sources"].array[0]["sourceKey"])
-        let unchangedEvidence = await service.cachedSourceDiscoveryState(otherEntrance)
+        let unchangedEvidence = try await service.cachedSourceDiscoveryState(otherEntrance)
         XCTAssertTrue(unchangedEvidence.entries.values.allSatisfy { $0.checkedAt == 0 && $0.observations.isEmpty })
         XCTAssertTrue(unchangedEvidence.checks.isEmpty)
         let cachedPreview = try await service.queueRecommendationSnapshot()
@@ -80,7 +80,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let snapshotValue = try await preview(service)
         let snapshot = try XCTUnwrap(snapshotValue)
         XCTAssertEqual(snapshot.candidates.count, 5)
-        XCTAssertTrue(snapshot.continueEnabled)
+        XCTAssertFalse(snapshot.continueEnabled)
         XCTAssertEqual(snapshot.currentEntryID, before.currentId)
         XCTAssertEqual(store.snapshot().0, bytes)
         XCTAssertEqual(store.snapshot().2, writes)
@@ -157,6 +157,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let value = try await preview(service), first = try XCTUnwrap(value)
         let chosen = try await service.playQueueRecommendation(snapshotID: first.id, candidateID: first.candidates[0].id)
         let queue = try await service.queue()
+        try await service.setQueueRecommendationContinue(true, snapshotID: first.id)
         _ = try await startPlaying(service)
         let beforeTail = await owner.count(); XCTAssertEqual(beforeTail, 1)
         _ = try await service.changeQueue(.select(queue.entries.last!.id), expectedRevision: chosen.state.revision)
@@ -197,7 +198,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         }
     }
 
-    func testDisablePreservesInFlightCandidateAndManualNextCanEnterWithoutRestartingAutoFetch() async throws {
+    func testOrdinaryModePreservesInFlightCandidatesForExplicitSelectionOnly() async throws {
         let owner = SimilarModeAccountFixture([["301"]])
         let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
         let value = try await service.queueRecommendationSnapshot(), snapshot = try XCTUnwrap(value)
@@ -211,10 +212,49 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(disabled).continueEnabled); XCTAssertEqual(disabled?.candidates.count, 1)
         let before = try await service.state()
         let next = try await service.advance(.next, reason: .manual, expectedRevision: before.revision)
-        XCTAssertEqual(next.state.total, 2); XCTAssertNotEqual(next.selectedId, "entry-1")
+        XCTAssertEqual(next.state.total, 1); XCTAssertEqual(next.selectedId, "entry-1")
+        let choice = try XCTUnwrap(disabled?.candidates.first)
+        _ = try await service.playQueueRecommendation(snapshotID: snapshot.id, candidateID: choice.id)
+        let selected = try await service.queueRecommendationSnapshot()
+        XCTAssertFalse(try XCTUnwrap(selected).continueEnabled)
         _ = try await startPlaying(service)
         let count = await owner.count(); XCTAssertEqual(count, 1)
         await service.close()
+    }
+
+    func testEveryOrdinaryModeStopsInFlightRecommendationAppendAndManualNextKeepsExistingQueue() async throws {
+        for mode in [MusicPlaybackMode.loop, .single, .shuffle] {
+            let owner = SimilarModeAccountFixture([["301", "302"], ["401", "402"]])
+            let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+            let initial = try await preview(service), snapshot = try XCTUnwrap(initial)
+            let selected = try await service.playQueueRecommendation(snapshotID: snapshot.id,
+                candidateID: snapshot.candidates[0].id)
+            try await service.setQueueRecommendationContinue(true, snapshotID: snapshot.id)
+            let queue = try await service.queue(), tail = try XCTUnwrap(queue.entries.last)
+            _ = try await service.changeQueue(.select(tail.id), expectedRevision: selected.state.revision)
+            let gate = NativeMusicGate(); await owner.suspendNext(gate)
+            _ = try await startPlaying(service); await gate.started()
+            let pending = await service.similarMode.queue?.pending, before = try await service.state()
+            _ = try await service.updateSettings(.init(ifRevision: before.settingsRevision, mode: mode))
+            await gate.release(); await pending?.value
+            let disabled = try await service.queueRecommendationSnapshot(), current = try await service.queue()
+            XCTAssertEqual(disabled?.id, snapshot.id); XCTAssertFalse(try XCTUnwrap(disabled).continueEnabled)
+            XCTAssertEqual(disabled?.candidates.count, 2)
+            XCTAssertEqual(current.entries.count, queue.entries.count); XCTAssertEqual(current.currentId, tail.id)
+            let next = try await service.advance(.next, reason: .manual, expectedRevision: current.revision)
+            XCTAssertTrue(current.entries.contains { $0.id == next.selectedId })
+            XCTAssertEqual(next.state.total, current.entries.count)
+            let choice = try XCTUnwrap(disabled?.candidates.last)
+            let explicit = try await service.playQueueRecommendation(snapshotID: snapshot.id, candidateID: choice.id)
+            XCTAssertEqual(explicit.state.mode, mode)
+            XCTAssertEqual(explicit.state.total, current.entries.count + 2)
+            let retained = try await service.queueRecommendationSnapshot()
+            XCTAssertFalse(try XCTUnwrap(retained).continueEnabled)
+            let requests = await owner.requests
+            XCTAssertEqual(requests, [.songRecommendations(seedID: "100", offset: 0),
+                .songRecommendations(seedID: "100", offset: 15)])
+            await service.close()
+        }
     }
 
     func testEmptyDuplicateAndTerminalResponseStopAutomaticRequestsAndExplicitRetryKeepsCandidates() async throws {
@@ -235,8 +275,8 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
             XCTAssertTrue(retry.canRetry)
             _ = try await service.retryQueueRecommendations(snapshotID: retry.id)
             let after = try await service.queue(), candidates = try await service.queueRecommendationSnapshot()
-            XCTAssertEqual(after.entries.count, ids.first == "301" ? 4 : 1)
-            if ids.first != "301" { XCTAssertEqual(candidates?.candidates.count, 1) }
+            XCTAssertEqual(after.entries.count, ids.first == "301" ? 3 : 1)
+            XCTAssertEqual(candidates?.candidates.count, 1)
             await service.close()
         }
     }
@@ -255,7 +295,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let retryValue = try await service.queueRecommendationSnapshot(), retry = try XCTUnwrap(retryValue)
         XCTAssertEqual(retry.candidates.count, 4)
         XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, writes)
-        XCTAssertTrue(retry.continueEnabled)
+        XCTAssertFalse(retry.continueEnabled)
         await service.close()
     }
 
@@ -380,15 +420,19 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
             if inFlight { await gate.release(); await pending?.value }
             let retained = try await service.queueRecommendationSnapshot()
             XCTAssertEqual(retained?.id, original.id); XCTAssertEqual(retained?.candidates.count, 2)
-            XCTAssertTrue(try XCTUnwrap(retained).continueEnabled)
+            XCTAssertFalse(try XCTUnwrap(retained).continueEnabled)
             let queue = try await service.queue()
             XCTAssertEqual(queue.currentId, "entry-1"); XCTAssertEqual(queue.entries.count, 2)
             let next = try await service.advance(.next, reason: .manual, expectedRevision: queue.revision)
             XCTAssertEqual(next.selectedId, "entry-2", "explicit insertion precedes recommendations")
             let candidates = try await service.queueRecommendationSnapshot()
             XCTAssertEqual(candidates?.candidates.count, 2)
-            let recommended = try await service.advance(.next, reason: .manual, expectedRevision: next.state.revision)
-            XCTAssertEqual(recommended.selectedId, "entry-3")
+            let ordinary = try await service.advance(.next, reason: .manual, expectedRevision: next.state.revision)
+            XCTAssertEqual(ordinary.selectedId, "entry-1")
+            let retainedCandidates = try await service.queueRecommendationSnapshot()
+            let choice = try XCTUnwrap(retainedCandidates?.candidates.first)
+            let recommended = try await service.playQueueRecommendation(snapshotID: original.id, candidateID: choice.id)
+            XCTAssertEqual(recommended.state.currentId, "entry-3")
             let requests = await owner.requests
             XCTAssertEqual(requests, [.songRecommendations(seedID: "100", offset: 0)])
             let active = try await service.queueRecommendationSnapshot(); XCTAssertTrue(try XCTUnwrap(active).active)
@@ -434,12 +478,12 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         await service.close()
     }
 
-    func testSearchFirstCandidatesWaitForStartedButNotForShuffleContinuationDraw() async throws {
+    func testSearchFirstCandidatesWaitForStartedInEveryOrdinaryMode() async throws {
         for mode in [MusicPlaybackMode.loop, .single, .shuffle] {
             let owner = SimilarModeAccountFixture([["301", "302"]])
             let service = NativeMusicService(document: NativeMusicMemoryDocument(try document(["100"])),
                 accounts: owner, qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(),
-                clock: { NativeMusicFixture.date }, random: { 0.75 })
+                clock: { NativeMusicFixture.date })
             try await service.setAccess(available: true, generation: 1)
             _ = try await service.updateSettings(.init(ifRevision: 0, mode: mode))
             let snapshot = try await service.queueRecommendationSnapshot()
@@ -463,89 +507,30 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         }
     }
 
-    func testDisablingSearchBeforeStartedDefersFirstCandidatesUntilEnabled() async throws {
-        let owner = SimilarModeAccountFixture([["301"]])
-        let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
-        let initial = try await service.queueRecommendationSnapshot(), id = try XCTUnwrap(initial).id
-        try await service.setQueueRecommendationContinue(false, snapshotID: id)
-        _ = try await startPlaying(service)
-        _ = try await service.previewQueueRecommendations()
-        let before = await owner.count(); XCTAssertEqual(before, 0)
-        try await service.setQueueRecommendationContinue(true, snapshotID: id)
-        let ready = try await service.previewQueueRecommendations()
-        XCTAssertEqual(ready?.candidates.count, 1)
-        let after = await owner.count(); XCTAssertEqual(after, 1)
-        await service.close()
-    }
-
-    func testShuffleFetchAndNextSelectionAreIndependentForEveryContinuationSource() async throws {
-        for sourceKind in ["search", "recommendation", "song", "artist", "fm"] {
-            for draw in [0.25, 0.75] {
-                let owner = SimilarModeAccountFixture([["201", "202", "203"], ["301", "302"]])
-                let random = RecommendationRandom(draw)
-                let store = NativeMusicMemoryDocument(try document(["100", "101", "102"]))
-                let service = NativeMusicService(document: store, scripts: NativeMusicScriptFixture(), accounts: owner,
-                    qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), random: { random.draw() })
-                try await service.setAccess(available: true, generation: 1)
-                var loader: MusicAccountQueuePages?, radio: MusicRemoteQueueSource?
-                if sourceKind == "fm" {
-                    let pages = MusicAccountQueuePages(roots: [
-                        ["101", "102", "103"].map { SimilarModeAccountFixture.track($0) },
-                        [SimilarModeAccountFixture.track("104")]
-                    ])
-                    let source = MusicRemoteQueueSource(
-                        context: .init(kind: .fm, id: "fm", title: "私人漫游", platform: "wy"),
-                        loadPage: { try await pages.read($0) },
-                        fmAction: .fm(mode: .default, submode: "", entry: nil))
-                    let start = try await MusicAccountQueueFixture.start(service, source)
-                    _ = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
-                    loader = pages; radio = source
-                } else if sourceKind == "search" {
-                    let initial = try await preview(service), batch = try XCTUnwrap(initial)
-                    _ = try await service.playQueueRecommendation(snapshotID: batch.id,
-                        candidateID: XCTUnwrap(batch.candidates.first).id)
-                } else {
-                    if sourceKind == "recommendation" {
-                        // An ordinary list, not the synthetic search fixture, owns the checkpoint.
-                        try await service.transaction(["queue"]) { $0.queue["source"] = .obj([("sourceType", .string("playlist"))]) }
-                        _ = try await service.startSimilarMode(.recommendations(occurrenceID: "entry-1", expectedRevision: 0))
-                    } else {
-                        _ = try await service.startSimilarMode(sourceKind == "artist" ? .artistRoaming(sourceIDs: ["100"], sourceName: "Artist") : .songRoaming(sourceIDs: ["100"], sourceName: "Song"))
-                    }
-                }
-                let state = try await service.state()
-                _ = try await service.updateSettings(.init(ifRevision: state.settingsRevision, mode: .shuffle))
-                if draw > 0.5 {
-                    let rows = try await service.queue()
-                    _ = try await service.changeQueue(.select(rows.entries.last!.id), expectedRevision: rows.revision)
-                }
-                let beforeRequests = await owner.count()
-                let audio = try await startPlaying(service)
-                let queuePending = await service.similarMode.queue?.pending
-                let activePending = await service.similarMode.active?.pending
-                let fmPending = await service.fmPlayback?.pending
-                await queuePending?.value; await activePending?.value; await fmPending?.value
-                let requests = await owner.count()
-                if let loader {
-                    let calls = await loader.events(); XCTAssertEqual(calls.count, draw < 0.5 ? 2 : 1)
-                } else { XCTAssertEqual(requests - beforeRequests, draw < 0.5 ? 1 : 0, sourceKind) }
-                XCTAssertEqual(random.calls, 1)
-                _ = try await service.recordSimilarPlaybackFact(fact(audio, .paused))
-                _ = try await service.recordSimilarPlaybackFact(fact(audio, .playing))
-                _ = try await service.recordSimilarPlaybackFact(fact(audio, .progress))
-                _ = try await service.state(); _ = try await service.queueRecommendationSnapshot()
-                _ = try await service.previewQueueRecommendations()
-                XCTAssertEqual(random.calls, 1, "pause/resume, seek facts and UI do not redraw")
-                let beforeNext = try await service.state()
-                let next = try await service.advance(.next, reason: .manual, expectedRevision: beforeNext.revision)
-                XCTAssertNotNil(next.selectedId); XCTAssertNotEqual(next.selectedId, audio.occurrenceId)
-                XCTAssertEqual(random.calls, 2, "navigation has its own draw, independent of fetching")
-                await radio?.close(); await service.close()
-            }
+    func testOrdinarySearchCandidatesDoNotEnableContinuationAndSpecialSelectionUsesLoop() async throws {
+        for mode in [MusicPlaybackMode.loop, .single, .shuffle] {
+            let owner = SimilarModeAccountFixture([["301"]])
+            let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+            _ = try await service.updateSettings(.init(ifRevision: 0, mode: mode))
+            let initial = try await service.queueRecommendationSnapshot(), id = try XCTUnwrap(initial).id
+            _ = try await startPlaying(service)
+            let ready = try await service.previewQueueRecommendations()
+            XCTAssertEqual(ready?.candidates.count, 1)
+            XCTAssertFalse(try XCTUnwrap(ready).continueEnabled)
+            let ordinary = try await service.queue()
+            XCTAssertEqual(ordinary.entries.count, 1)
+            try await service.setQueueRecommendationContinue(true, snapshotID: id)
+            let selected = try await service.state(), special = try await service.queueRecommendationSnapshot()
+            XCTAssertEqual(selected.mode, .loop)
+            XCTAssertTrue(try XCTUnwrap(special).continueEnabled)
+            XCTAssertEqual(selected.currentId, ordinary.currentId)
+            XCTAssertEqual(selected.total, 2, "selecting the special mode appends ready candidates without navigating")
+            let requests = await owner.count(); XCTAssertEqual(requests, 1)
+            await service.close()
         }
     }
 
-    func testShuffleSourceHandoffKeepsDecisionButReplayAfterEndDrawsAgain() async throws {
+    func testShuffleOnlyDrawsForQueueNavigationAndNeverForPlaybackFacts() async throws {
         let owner = SimilarModeAccountFixture([["301", "302"]]), random = RecommendationRandom(0.75)
         let service = NativeMusicService(document: NativeMusicMemoryDocument(try document(["100", "200"])),
             accounts: owner, qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(),
@@ -555,16 +540,18 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let state = try await service.state()
         _ = try await service.updateSettings(.init(ifRevision: state.settingsRevision, mode: .shuffle))
         let first = try await startPlaying(service)
-        XCTAssertEqual(random.calls, 1)
         let handoff = try await resolve(service, first.occurrenceId)
-        _ = try await service.recordSimilarPlaybackFact(fact(handoff, .playing))
-        _ = try await service.recordSimilarPlaybackFact(fact(handoff, .progress))
-        XCTAssertEqual(random.calls, 1, "a replacement audio attempt is not another song play")
-        _ = try await service.recordSimilarPlaybackFact(fact(handoff, .ended))
+        for kind in [MusicPlaybackFact.Kind.playing, .paused, .playing, .progress, .ended] {
+            _ = try await service.recordSimilarPlaybackFact(fact(handoff, kind))
+        }
         _ = try await startPlaying(service)
-        XCTAssertEqual(random.calls, 2, "replaying a completed occurrence is a new play event")
-        let requests = await owner.count()
-        XCTAssertEqual(requests, 1, "after the entrance batch, both controlled 75% draws decline continuation")
+        _ = try await service.state(); _ = try await service.queueRecommendationSnapshot()
+        XCTAssertEqual(random.calls, 0, "playback facts and projections never draw random values")
+        let beforeNext = try await service.state()
+        let next = try await service.advance(.next, reason: .manual, expectedRevision: beforeNext.revision)
+        XCTAssertNotEqual(next.selectedId, first.occurrenceId)
+        XCTAssertEqual(random.calls, 1, "the random source belongs only to queue navigation")
+        let requests = await owner.count(); XCTAssertEqual(requests, 1)
         await service.close()
     }
 

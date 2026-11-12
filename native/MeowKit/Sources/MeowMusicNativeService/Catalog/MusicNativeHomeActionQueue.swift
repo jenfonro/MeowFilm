@@ -38,7 +38,7 @@ extension NativeMusicService: MusicHomeActionQueueServing {
                 validate: { [weak self] in
                     guard let self else { throw MusicServiceError.closed }
                     try await self.checkPublicQueue(epoch: own, until: until)
-                }, close: { fence.remove(registration); await reader.close() })
+                }, close: { fence.remove(registration); await reader.close() }, homeAction: action)
         }
         guard let owner = accounts as? any MusicNativeHomeActionQueueProviding else { throw MusicServiceError.authRequired }
         let opening = MusicAccountQueueOpening(), own = epoch
@@ -65,7 +65,7 @@ extension NativeMusicService: MusicHomeActionQueueServing {
                     return page
                 }, validate: {
                     try lease.authorization.check(); try await owner.checkAccountQueue(lease)
-                }, close: { await owner.endAccountQueue(lease) }, dailyStyle: editor)
+                }, close: { await owner.endAccountQueue(lease) }, dailyStyle: editor, homeAction: action)
             _ = opening.finish(); return source
         } catch {
             if let lease = opening.finish() { lease.revoke(); await owner.endAccountQueue(lease) }

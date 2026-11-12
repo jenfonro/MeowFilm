@@ -760,6 +760,8 @@ public static class FilmPlaybackRecoveryTests
             throw new InvalidOperationException("Recovery must not upload or replay source management.");
         public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("Image requests are not part of this fixture.");
+        public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Image requests are not part of this fixture.");
         public ValueTask DisposeAsync() => new(disposal ??= CloseAsync());
         private async Task CloseAsync()
         {

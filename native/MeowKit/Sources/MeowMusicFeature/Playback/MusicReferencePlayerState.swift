@@ -20,7 +20,6 @@ struct MusicReferencePlayerFence: Equatable, Sendable {
 enum MusicReferencePlayerLabels {
     static func fmSource(_ action: MusicHomeAction?) -> String {
         switch action {
-        case .fm(.scene, _, _): return "FM·场景"
         case .fm:
             let title = MusicFMModeChoice.title(for: action)
             return "FM·" + (title.hasSuffix("模式") ? String(title.dropLast(2)) : title)

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum RuntimeModule: String, CaseIterable, Sendable {
-    case music, cat, source, pan, tmdb, douban, film
+    case music, cat, source, pan, tmdb, douban, film, netease
 
     public var contract: String {
         switch self {
@@ -12,6 +12,7 @@ public enum RuntimeModule: String, CaseIterable, Sendable {
         case .tmdb: return "tmdb.data.v1"
         case .douban: return "douban.data.v1"
         case .film: return "film.playback.v1"
+        case .netease: return "netease.token.v1"
         }
     }
 
@@ -23,12 +24,17 @@ public enum RuntimeModule: String, CaseIterable, Sendable {
         case .pan: return Self.panCodes
         case .tmdb, .douban: return Self.metadataCodes
         case .film: return Self.filmCodes
+        case .netease: return Self.neteaseCodes
         }
     }
 
     static let publicCodes: Set<String> = [
         "INVALID_REQUEST", "METHOD_NOT_FOUND", "PERMISSION_DENIED",
         "CLOSED", "CANCELLED", "TIMEOUT", "INVALID_RESPONSE"
+    ]
+    private static let neteaseCodes: Set<String> = [
+        "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
+        "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP"
     ]
     private static let metadataCodes: Set<String> = [
         "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR", "UPSTREAM_HTTP",
@@ -49,7 +55,7 @@ public enum RuntimeModule: String, CaseIterable, Sendable {
         "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "UNSUPPORTED_RULE", "UNSUPPORTED_DEPENDENCY",
         "CAPABILITY_UNAVAILABLE", "PERMISSION_DENIED", "WEB_INTERACTION_REQUIRED", "TIMEOUT",
         "SOURCE_CLEANUP", "SOURCE_FAILURE", "NETWORK_ERROR", "HTTP_ERROR", "INVALID_RESPONSE",
-        "STORAGE_ERROR", "VIRTUAL_ROUTE_NOT_FOUND"
+        "STORAGE_ERROR", "CORRUPT_STORAGE", "VIRTUAL_ROUTE_NOT_FOUND"
     ]
     private static let catCodes: Set<String> = [
         "INVALID_ARGUMENT", "HOST_CLOSED", "CANCELLED", "RESOURCE_LIMIT",
@@ -69,7 +75,7 @@ public enum RuntimeModule: String, CaseIterable, Sendable {
         "STALE_ACCOUNT", "STORAGE_ERROR", "CORRUPT_STORAGE", "LOGIN_EXPIRED", "PAN_FAILURE"
     ]
     private static let filmCodes: Set<String> = [
-        "INVALID_REQUEST", "CLOSED", "CANCELLED", "NOT_FOUND", "NO_MATCH",
+        "INVALID_REQUEST", "CLOSED", "CANCELLED", "RESOURCE_LIMIT", "NOT_FOUND", "NO_MATCH",
         "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "STALE_SOURCE", "STALE_SESSION", "STALE_ACCOUNT", "STALE_METADATA",
         "NOT_CONFIGURED", "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED",
         "UNSUPPORTED_OPERATION", "CAPABILITY_UNAVAILABLE", "MEDIA_UNAVAILABLE",

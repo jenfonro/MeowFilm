@@ -44,7 +44,7 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
     let resultSelection: @Sendable (MusicPlaybackSelection) -> MusicPlaybackSelection
     private var targets: [MusicCandidateDiscoveryTarget] = []
     private var attempts: [String] = []
-    private var snapshots = 0, discoveries = 0, commits = 0
+    private var snapshots = 0, discoveries = 0
     private var closed = false
     private var retained: String?
     private var cancellations: [String] = []
@@ -63,10 +63,6 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
         if closed || Task.isCancelled { throw MusicServiceError.cancelled }
         return discover ? discovered : known
     }
-    func commitDiscovery() throws {
-        if closed || Task.isCancelled { throw MusicServiceError.cancelled }
-        commits += 1
-    }
     func resolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String) async throws -> MusicPlaybackCandidate {
         targets.append(target)
         attempts.append(attemptID)
@@ -83,9 +79,9 @@ actor MusicCandidateDiscoveryTestSession: MusicCandidateDiscoverySession {
         await discoveryGate?.release()
         await resolutionGate?.release()
     }
-    func facts() -> (targets: [MusicCandidateDiscoveryTarget], snapshots: Int, discoveries: Int, commits: Int,
+    func facts() -> (targets: [MusicCandidateDiscoveryTarget], snapshots: Int, discoveries: Int,
                      retained: String?, cancellations: [String], attempts: [String]) {
-        (targets, snapshots, discoveries, commits, retained, cancellations, attempts)
+        (targets, snapshots, discoveries, retained, cancellations, attempts)
     }
 }
 

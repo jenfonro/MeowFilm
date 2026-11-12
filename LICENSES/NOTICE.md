@@ -12,7 +12,8 @@ constants and device-profile parameters taken from these sources are client
 protocol parameters, not user credentials, and are not an endorsement of their
 cryptographic design. No device-registration bypass, anti-bot simulation,
 media-unlocking or challenge bypass is copied. The opt-in pan runtime's credential
-refresh protocols and their specific trust boundary are described below.
+refresh protocols and the on-demand official Watchman SDK's execution trust
+boundary are described below.
 
 ## MeowFilm server — protocol reference
 
@@ -38,6 +39,36 @@ The new runtime implementation remains application source under GPL-3.0-only.
 - The referenced tree contains no separate license file. This entry records
   provenance, not an additional upstream license or redistribution permission.
   The application's own source remains covered by the project license above.
+
+## meowfilm-server Reader — novel behavior reference
+
+- Source: the same-owner `jenfonro/meowfilm-server` repository at
+  `934a03e5aeda7edbcef0cfb037734fed93bfe881`, `Reader/`.
+- `packages/novel-rules/novel-rules.js` adapts identity normalization from
+  `src/utils/bookIdentity.js` and the fixed simplified/traditional character
+  pairs from `src/utils/chinese.js`. Native novel pages and source-runtime
+  integration follow the Reader's book, chapter and reading behavior; no Vue
+  application, browser database or reference server executable is bundled.
+- Native source/rule managers and form descriptors adapt the same Reader's
+  `src/data/bookSourceEditorConfig.js`, `bookSourceEditorMapper.js`,
+  `replaceRules.js` and `replaceRuleImport.js`; all six Legado tabs retain the
+  original field labels, order and row counts. The native shared controls are
+  UIKit/WPF implementations, not a bundled web view.
+- The referenced tree contains no separate license notice. This records
+  provenance, not an additional third-party license grant. Application-owned
+  adaptations remain under GPL-3.0-only.
+
+## Microsoft WebView2 SDK — BSD-3-Clause
+
+- NuGet package: `Microsoft.Web.WebView2` `1.0.4314.35`, locked in the
+  Windows capability project and its package lock.
+- Copyright (C) Microsoft Corporation. All rights reserved.
+- Original package files are preserved byte-for-byte as `WebView2-LICENSE.txt`
+  and `WebView2-NOTICE.txt`.
+- Used by the Windows native host for explicit book-source login, verification
+  and dynamic-page requests. The SDK is not the Microsoft Edge WebView2 Runtime;
+  the application uses an installed compatible Runtime and does not bundle or
+  silently install that browser runtime.
 
 ## iWebPlus / iWebPlayer — Apache-2.0
 
@@ -94,6 +125,8 @@ Adapted portions:
   and `static/{player-layout.css,player-theme.js,themes/starlight.css}` with native
   Core Graphics and Core Animation. The theme-colored default record cover follows
   `static/utils.js` (`iwebplus-default-cover`) and `static/app-colors.css`.
+  Capsule title dragging and settlement follow `static/mini-swipe.js` and
+  `static/ui-motion.js`, with native UIKit gesture and animation lifetimes.
   `native/MeowKit/Sources/MeowMusicFeature/Playback/UIKit/MusicPlaybackModeIcon.swift`
   adapts the heart/FM SVGs in `static/index.html` through the confirmed 24-unit
   `MusicPlaybackIcon.cs` paths into native Core Graphics, retaining their
@@ -137,6 +170,13 @@ Adapted portions:
   `module/song_url_v1.js`; chorus metadata uses `module/song_chorus.js`.
 - Lyrics: `module/lyric_new.js`.
 - Feedback reuses the WY request encryption above.
+- Subscription/token integration additionally follows the inspected `v4.41.1`
+  reference's `module/playlist_subscribe.js`, `module/register_checktoken_v2.js`
+  and `util/request.js`. This is a separate reference from the earlier protocol
+  pin above. `packages/netease-token` adapts the Watchman initialization and token
+  request sequence; its Worker lifecycle, cancellation and runtime contract are
+  application code. The adapted portions retain the Binaryify MIT attribution
+  and `api-enhanced-MIT.txt`; that license does not cover the remote official SDK.
 
 ## L-1124/QQMusicApi — GPL-3.0-or-later
 
@@ -323,34 +363,15 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   its hash, consumed source inputs and the bundle hash are recorded in the
   iOS native build receipt. Other platforms retain their native Node Web values.
 
-## Native QuickJS-NG — MIT
-
-- Source: https://github.com/quickjs-ng/quickjs, v0.18.0,
-  commit `d7215b0ad3fc2c562e8317fd9bca058fd4863804`.
-- License: `quickjs-native-MIT.txt`; original copyright notices remain in the
-  engine sources under `native/JavaScript/quickjs`.
-- Local changes add interrupt polling during RegExp compilation (including
-  capture pre-scans), execution opcode dispatch, forward/backward references,
-  assertion/backtracking stack loops and the global empty-replacement loop.
-  Interruption is propagated as uncatchable engine errors. The reproducible patch
-  is `native/JavaScript/patches/regexp-compile-interrupt.patch`.
-- Upstream, patched-source, patch and license hashes: `scripts/quickjs-native.json`.
-- Windows links the engine into `meowfilm_js.dll` through the application's
-  JSON-only C adapter; iOS statically links the same source through the local
-  `MeowJavaScript` Swift package and bundles `quickjs-native-MIT.txt`.
-  The upstream command-line interpreter, libc/I/O module
-  and module loader are not included. This client-side engine is independent
-  of the Node script host and does not replace its native script-execution engine.
-
-### Native Unicode tables — Unicode License V3
+## Native Unicode tables — Unicode License V3
 
 - Source: `libunicode-table.h` in the same QuickJS-NG commit
   `d7215b0ad3fc2c562e8317fd9bca058fd4863804`, included by `libunicode.c`
-  and compiled into the Windows `meowfilm_js.dll` and the iOS static engine.
+  and compiled into the shared Node addon and iOS `MeowScriptHost.framework`.
 - Copyright © 1991-2026 Unicode, Inc.
 - License: `Unicode-3.0.txt` is the complete original copyright and permission
   notice extracted from that table's header, without the C comment delimiters.
-  The table and this license are hash-pinned in `scripts/quickjs-native.json`;
+  The table and this license are hash-pinned in `scripts/script-host-native.json`;
   source verification also checks that the standalone notice matches the header.
 - The Windows license package includes this notice and its manifest entry.
   The iOS App also bundles `Unicode-3.0.txt` as a resource.
@@ -358,13 +379,15 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
 
 ## QuickJS-NG — MIT
 
-- Source: `https://github.com/quickjs-ng/quickjs`, version `0.14.0`, commit
-  `3c051980ab7e783dfbfb1c70c014ce5e05ecf24c`.
+- Source: `https://github.com/quickjs-ng/quickjs`, version `0.18.0`, commit
+  `d7215b0ad3fc2c562e8317fd9bca058fd4863804`.
 - License: `quickjs-ng-LICENSE.txt`, unchanged upstream text and copyrights.
 - The common runtime compiles QuickJS as a native library in the Node-API 8
   extension `script_host_native.node`; iOS embeds the same implementation in the
-  signed `MeowScriptHost.framework`, separate from the client's rule engine.
-  One library serves independent script
+  signed `MeowScriptHost.framework`. Scripts and pure JSON application programs
+  compile the same checked-in source and Unicode tables under
+  `native/JavaScript/quickjs`, locked by `scripts/script-host-native.json`.
+  One library serves independent script and application
   runtimes and native execution threads; no WebAssembly or asm.js engine is shipped.
 - `packages/script-host/native/task-context.patch` preserves task identity across
   Promise reactions, native await, generators, finalizers and scheduled jobs. It
@@ -372,22 +395,18 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
   queued requests use their own cancellation control without replacing authority.
   The existing cancellation cleanup window is unchanged. It
   does not introduce a script memory quota or change the upstream license.
-- `packages/script-host/native/bigint-uintn.patch`, applied after that patch,
-  corrects the upstream `BigInt.asUintN` unsigned truncation and sign extension
-  for short and multi-limb integers, including limb-width boundaries. It preserves
-  coercion order, `BigInt.asIntN` semantics and the existing allocation boundary;
-  the upstream license and copyrights remain unchanged.
-- `packages/script-host/native/utf16-cstring.patch`, applied after the two patches
-  above, corrects upstream UTF-16 CString ownership for non-normal wide strings.
-  Slices and indirect storage are copied into an owned normal string before
-  returning data to the paired free API; normal wide strings retain their
-  zero-copy path. The upstream license and copyrights remain unchanged.
+- `native/JavaScript/patches/regexp-compile-interrupt.patch` polls the owning
+  runtime during regular-expression compilation, capture discovery, bytecode
+  execution, bidirectional references and global empty replacements. Interrupted
+  native operations propagate an uncatchable engine interruption.
+- The former BigInt unsigned-truncation and UTF-16 CString patches are covered
+  by 0.18's upstream implementations; their behavior regressions remain.
 - `packages/script-host/native/arraybuffer-ownership.patch`, applied last,
-  corrects ArrayBuffer detach and transfer ownership for externally backed
-  buffers. Detaching consumes the release callback once; transfers preserve
-  bytes without reallocating externally owned memory and detach the original
-  only after successful allocation. Ordinary inbound buffers keep their existing
-  backing path. The upstream license and copyrights remain unchanged.
+  makes ArrayBuffer transfer allocate the destination before changing storage
+  or detaching its source. The 0.18 realloc callback follows the external owner
+  through transfers, preserves its old allocation on failure and releases it
+  exactly once. Ordinary inbound buffers retain their owned backing path.
+  The upstream license and copyrights remain unchanged.
 
 ## OpenSSL — Apache-2.0
 
@@ -471,6 +490,55 @@ copied into the application's protocol adapters.
 They and their executable/development dependencies are not in the runtime payload.
 The neutral SDK bundle keeps upstream legal comments and the payload retains
 the original dependency license files.
+
+## NetEase token provider and official Watchman SDK
+
+`@meowfilm/netease-token` 0.1.0 is application source under GPL-3.0-only, with
+the api-enhanced MIT protocol attribution above. It uses `jsdom` 24.1.3 to load
+the official `https://acstatic-dun.126.net/tool.min.js` entry and the Watchman
+resources it loads, on demand for token acquisition. Account cookies, account
+lifecycle and subscription writes remain native-client responsibilities.
+
+The remote SDK is trusted executable upstream code, not a bundled npm dependency
+or vendored SDK copy. Its execution and network behavior are an explicitly
+accepted trust boundary; a Worker and jsdom do not make it a security sandbox.
+The SDK and its service remain subject to their rights holders' terms. Neither
+the api-enhanced MIT license, jsdom's MIT license nor the application's GPL
+grants a license to redistribute that SDK. No SDK redistribution permission is
+asserted by this notice.
+
+### jsdom production dependencies
+
+The root `package-lock.json` records the exact versions, registry URLs and
+integrities. Its installed token-provider closure contains 63 npm package
+instances, including nested `rrweb-cssom` 0.8.0 and `entities` 6.0.1 rather than
+substituting the versions used by other workspaces. Declared licenses are:
+
+- MIT: `jsdom` 24.1.3 (Copyright (c) 2010 Elijah Insua) and 55 other package
+  instances in this closure. Their original notices identify their respective
+  copyright holders.
+- MIT-0: `@csstools/color-helpers` 5.1.0, Copyright CSSTools Contributors.
+- ISC: `lru-cache` 10.4.3 and `saxes` 6.0.0.
+- BSD-2-Clause: `entities` 6.0.1 under `parse5` and `webidl-conversions` 7.0.0.
+- BSD-3-Clause: `tough-cookie` 4.1.4, Copyright (c) 2015, Salesforce.com, Inc.
+- Apache-2.0: `xml-name-validator` 5.0.0.
+
+The common runtime packager preserves the installed package manifests and
+original license files byte-for-byte, including `LICENSE.txt`, `LICENSE.md`,
+`LICENSE-MIT.txt`, `LICENCE.md`, `License` and `license.md`. Those files contain
+the complete license texts for 62 of the 63 package instances and remain in
+both platform runtime payloads; no duplicate collection of those texts is added.
+
+The `saxes` 6.0.0 npm package omits its license file. Its upstream
+[`v6.0.0/LICENSE`](https://github.com/lddubeau/saxes/blob/v6.0.0/LICENSE), retrieved
+on 2026-11-10, grants ISC terms with Copyright (c) Contributors and retains sax's
+Copyright (c) Isaac Z. Schlueter and Contributors. The existing
+`npm-node-compat-ISC.txt` preserves both attributions with the shared ISC terms.
+Distributions must retain it together with this notice and `api-enhanced-MIT.txt`.
+
+The optional `canvas`, `bufferutil` and `utf-8-validate` peers are not installed
+or part of this closure. No native addon, canvas or WebAssembly dependency is
+authorized by these license declarations.
 
 ## QR Code generator — MIT
 
@@ -634,3 +702,13 @@ public library interface is LGPLv2.1 or later. The corresponding license texts
 are `GPL-2.0-only.txt` and `LGPL-2.1-only.txt`; existing bundled upstream notices
 remain in the libVLC distribution. The plugin's SDK ABI and exact libvlccore
 identity are checked by the locked native build.
+
+## ZXing.Net — Apache-2.0 (Windows)
+
+- NuGet `ZXing.Net` 0.16.11, exact locked package; upstream
+  [micjahn/ZXing.Net](https://github.com/micjahn/ZXing.Net) release `v0.16.11.0`
+  (`fd58f3c4a5d80ccf45ef1237899a65b0ba5b83a0`).
+- Copyright Michael Jahn and ZXing contributors. Windows uses the managed QR
+  decoder for replacement-rule image import; no camera or network decoder.
+- The NuGet package declares Apache-2.0; upstream `COPYING` contains the same
+  license. License text: `Apache-2.0.txt`, already in the Windows license manifest.

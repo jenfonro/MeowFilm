@@ -25,20 +25,20 @@ public enum MusicPlayerAppearance: String, Codable, CaseIterable, Sendable {
 
 public enum MusicColorMode: String, Codable, CaseIterable, Sendable {
     case song, fixed
-    public var title: String { self == .song ? "跟随歌曲" : "固定配色" }
+    public var title: String { self == .song ? "灵动模式" : "固定颜色" }
 }
 
 public struct MusicAppearancePreferences: Codable, Equatable, Sendable {
     public var playlistView: MusicPlaylistAppearance
     public var playerTheme: MusicPlayerAppearance
     public var colorMode: MusicColorMode
-    public var colorPalette: PageColorway
+    public var colorPalette: PagePalette
     public var lockLyric: Bool
     public var lyricTranslation: Bool
     public var lyricBackground: Bool
 
     public init(playlistView: MusicPlaylistAppearance = .grid, playerTheme: MusicPlayerAppearance = .starlight,
-                colorMode: MusicColorMode = .song, colorPalette: PageColorway = .lilac,
+                colorMode: MusicColorMode = .song, colorPalette: PagePalette = .preset(.lilac),
                 lockLyric: Bool = true, lyricTranslation: Bool = true, lyricBackground: Bool = true) {
         self.playlistView = playlistView; self.playerTheme = playerTheme
         self.colorMode = colorMode; self.colorPalette = colorPalette; self.lockLyric = lockLyric
@@ -53,7 +53,7 @@ public struct MusicAppearancePreferences: Codable, Equatable, Sendable {
         playlistView = (try? values.decode(MusicPlaylistAppearance.self, forKey: .playlistView)) ?? .grid
         playerTheme = (try? values.decode(MusicPlayerAppearance.self, forKey: .playerTheme)) ?? .starlight
         colorMode = (try? values.decode(MusicColorMode.self, forKey: .colorMode)) ?? .song
-        colorPalette = (try? values.decode(PageColorway.self, forKey: .colorPalette)) ?? .lilac
+        colorPalette = (try? values.decode(PagePalette.self, forKey: .colorPalette)) ?? .preset(.lilac)
         lockLyric = (try? values.decode(Bool.self, forKey: .lockLyric)) ?? true
         lyricTranslation = (try? values.decode(Bool.self, forKey: .lyricTranslation)) ?? true
         lyricBackground = (try? values.decode(Bool.self, forKey: .lyricBackground)) ?? true
@@ -72,13 +72,15 @@ public struct MusicAppearancePreferences: Codable, Equatable, Sendable {
 
     /// Feed the existing shared system-session owner; do not create another
     /// MPNowPlayingInfoCenter writer. Original utils.js:423-440 uses the lyric
-    /// as title and moves the song title to artist, never the translated line.
-    public func lockScreenMetadata(songTitle: String, lyric: String?, isFavorite: Bool) -> MusicLockScreenMetadata {
+    /// as title, never the translation. Keep the song and artist on the second line.
+    public func lockScreenMetadata(songTitle: String, songArtist: String, lyric: String?,
+                                   isFavorite: Bool) -> MusicLockScreenMetadata {
         let title = songTitle + (isFavorite ? " ♡︎" : "")
         if lockLyric, let lyric, !lyric.isEmpty {
-            return .init(title: lyric, artist: title, album: "我的曲库")
+            return .init(title: lyric, artist: songArtist.isEmpty ? title : title + " / " + songArtist,
+                         album: "我的曲库")
         }
-        return .init(title: title, artist: "meowfilm", album: "我的曲库")
+        return .init(title: title, artist: songArtist, album: "我的曲库")
     }
 }
 
@@ -166,7 +168,7 @@ import Combine
     public static let preferencesKey = "music.ui.appearance.v1"
     public static let songColorsKey = "music.ui.songColors.v1"
     @Published public private(set) var preferences = MusicAppearancePreferences()
-    @Published public private(set) var effectivePalette: PageColorway = .lilac
+    @Published public private(set) var effectivePalette: PagePalette = .preset(.lilac)
     @Published public private(set) var persistenceError: String?
     // A mode round-trip can end on the same value before SwiftUI renders.
     // This revision still invalidates/re-samples the already displayed cover.
@@ -179,7 +181,7 @@ import Combine
     private var systemArtworkTarget: (songKey: String, artworkID: String)?
     /// Only song/cover changes fade. Preference and system scheme changes sync.
     public private(set) var animatesPaletteChanges = false
-    public var pageColorway: PageColorway { effectivePalette }
+    public var pagePalette: PagePalette { effectivePalette }
     public var animatesPageColorway: Bool { animatesPaletteChanges }
     public var pageThemeChanges: AnyPublisher<Void, Never> {
         $effectivePalette.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher()
@@ -189,6 +191,7 @@ import Combine
     private var songKey = ""
     private var generation = UUID()
     private var artworkID: String?
+    private var previewPalette: PagePalette?
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -228,12 +231,22 @@ import Combine
         return save(next)
     }
 
-    @discardableResult public func selectFixedPalette(_ palette: PageColorway) -> Bool {
+    @discardableResult public func selectFixedPalette(_ palette: PagePalette) -> Bool {
         reload()
         guard persistenceError == nil else { return false }
         var next = preferences
         next.colorMode = .fixed; next.colorPalette = palette
         return save(next)
+    }
+
+    public func previewFixedColor(_ rgb: UInt32) {
+        previewPalette = .custom(rgb)
+        publishPalette(animated: false)
+    }
+
+    public func endColorPreview() {
+        previewPalette = nil
+        publishPalette(animated: false)
     }
 
     /// Explicit recovery only; never removes the original export or library.
@@ -306,11 +319,15 @@ import Combine
     func selectSystemArtwork(_ track: MusicRemoteTrack) {
         let identity = MusicAppearanceSongIdentity(track: track)
         let url = track.artwork?.absoluteString ?? ""
+        let targetChanged = systemArtworkTarget.map {
+            !$0.songKey.utf16.elementsEqual(identity.stableKey.utf16) || !$0.artworkID.utf16.elementsEqual(url.utf16)
+        } ?? false
         systemArtworkTarget = (identity.stableKey, url)
         selectSong(identity) // Idempotent: progress/lyrics never reset tickets.
         if displayArtworkID?.utf16.elementsEqual(url.utf16) != true {
             displayGeneration = UUID(); displayArtworkID = url; displayedArtwork = nil
         }
+        if targetChanged, systemArtworkEnabled { displayedArtworkRevision = UUID() }
         setSystemArtworkEnabled(true)
     }
 
@@ -367,7 +384,7 @@ import Combine
     }
     private func publishPalette(animated: Bool) {
         animatesPaletteChanges = animated
-        let next = preferences.colorMode == .fixed ? preferences.colorPalette : cache.last
+        let next = previewPalette ?? (preferences.colorMode == .fixed ? preferences.colorPalette : .preset(cache.last))
         if effectivePalette != next { effectivePalette = next }
     }
     private func persistColors() {

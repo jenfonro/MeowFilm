@@ -6,57 +6,147 @@
  Loaded="View_Loaded" Unloaded="View_Unloaded">
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Film/Presentation/FilmSettingsTheme.xaml"/></ResourceDictionary.MergedDictionaries>
+  <Style x:Key="RecordText" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
+   <Setter Property="ToolTip" Value="{Binding Text,RelativeSource={RelativeSource Self}}"/>
+  </Style>
+  <Style x:Key="GroupSidebar" TargetType="Border">
+   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+   <Setter Property="BorderThickness" Value="0,0,1,0"/><Setter Property="Padding" Value="6,0,12,0"/>
+   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </Trigger></Style.Triggers>
+  </Style>
+  <DataTemplate x:Key="GroupTemplate">
+   <DockPanel>
+    <Border DockPanel.Dock="Right" BorderBrush="{Binding Foreground,RelativeSource={RelativeSource AncestorType=ListBoxItem}}"
+            BorderThickness=".5" CornerRadius="10" Padding="6,2" Margin="8,0,0,0">
+     <TextBlock Text="{Binding Rows.Count}" FontSize="12" Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"
+                Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
+    </Border>
+    <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" VerticalAlignment="Center"
+               Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
+   </DockPanel>
+  </DataTemplate>
  </ResourceDictionary></UserControl.Resources>
- <Grid Margin="0,16,0,0">
+ <Grid Margin="0,16,12,0">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
   <DockPanel Margin="0,0,0,10">
-   <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-    <Button Content="刷新" Click="Refresh_Click" Style="{StaticResource Settings.Button}" IsEnabled="{Binding Idle}"/>
-    <Button x:Name="AddManual" Content="添加" Click="AddManual_Click" Style="{StaticResource Settings.PrimaryButton}" Margin="8,0,0,0" Visibility="Collapsed" IsEnabled="{Binding Idle}" AutomationProperties.Name="添加人工匹配"/>
-    <Button x:Name="ClearRecords" Content="清空" Click="ClearRecords_Click" Style="{StaticResource Settings.DangerButton}" Margin="8,0,0,0" Visibility="Collapsed" IsEnabled="{Binding Idle}"/>
-   </StackPanel>
+   <Button DockPanel.Dock="Right" Content="重试" Click="Retry_Click" Style="{StaticResource Settings.Button}" IsEnabled="{Binding Idle}"
+           Visibility="{Binding ReadFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="重新读取智能播放设置"/>
    <TextBlock Text="{Binding Work}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
   </DockPanel>
   <ScrollViewer Grid.Row="1" Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-   <StackPanel Margin="0,0,12,0">
-    <StackPanel x:Name="PreferencesForm" Visibility="Collapsed" IsEnabled="{Binding Idle}">
-     <Border Style="{StaticResource Settings.Section}"><StackPanel>
-      <DockPanel><Button Content="恢复默认" Tag="rule" Click="Restore_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复排序维度默认顺序"/><TextBlock Text="排序维度" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
-      <DockPanel Margin="0,12,0,0"><StackPanel DockPanel.Dock="Right" Margin="12,0,0,0"><Button Content="上移" Tag="rule:-1" Click="Move_Click" Style="{StaticResource Settings.QuietButton}"/><Button Content="下移" Tag="rule:1" Click="Move_Click" Style="{StaticResource Settings.QuietButton}" Margin="0,6,0,0"/></StackPanel>
-       <ListBox x:Name="RuleOrder" MinHeight="90" DisplayMemberPath="Label" AutomationProperties.Name="排序维度顺序"/>
+   <StackPanel>
+    <StackPanel x:Name="PreferencesForm" Visibility="Collapsed">
+     <Border Style="{StaticResource Settings.Section}"><Grid local:SettingsLayout.Mode="Pair">
+      <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <StackPanel>
+      <DockPanel Margin="0,0,0,12"><Button Content="恢复默认" Tag="rule" Click="Restore_Click" DockPanel.Dock="Right" IsEnabled="{Binding Idle}" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复优先片源默认规则"/><TextBlock Text="优先片源规则" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
+      <local:SettingsPriorityList x:Name="RuleOrder" Title="优先片源规则" ShowTitle="False" Tag="rule" ShowToggle="False" CanEdit="{Binding Idle}" MoveRequested="Order_Move"/>
+      </StackPanel>
+      <StackPanel Style="{StaticResource Settings.PairRight}">
+       <DockPanel Margin="0,0,0,12"><Button Content="恢复默认" Tag="pan" Click="Restore_Click" DockPanel.Dock="Right" IsEnabled="{Binding Idle}" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复网盘默认顺序"/><TextBlock Text="网盘匹配规则" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
+       <local:SettingsPriorityList x:Name="PanOrder" Title="网盘匹配规则" ShowTitle="False" Tag="pan" ShowToggle="False" CanEdit="{Binding Idle}" MoveRequested="Order_Move"/>
+      </StackPanel>
+     </Grid></Border>
+     <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding Idle}"><StackPanel>
+      <DockPanel Margin="0,0,0,12">
+       <Button Content="恢复默认" Tag="keywords" Click="Restore_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复关键字默认偏好"/>
+       <StackPanel Orientation="Horizontal">
+        <TextBlock Text="关键字匹配规则" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
+        <Button Content="保存" Click="SavePreferences_Click" Margin="12,0,0,0" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="保存关键字匹配规则"/>
+       </StackPanel>
       </DockPanel>
+      <Grid>
+       <TextBox x:Name="Keywords" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="关键字匹配规则" AutomationProperties.HelpText="DDP,H.265"/>
+       <TextBlock x:Name="KeywordsPlaceholder" Text="DDP,H.265" Margin="13,0" VerticalAlignment="Center" IsHitTestVisible="False"
+                  Foreground="{DynamicResource MeowFilm.Brush.Muted}">
+        <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/>
+         <Style.Triggers><DataTrigger Binding="{Binding Text,ElementName=Keywords}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+        </Style></TextBlock.Style>
+       </TextBlock>
+      </Grid>
      </StackPanel></Border>
-     <Border Style="{StaticResource Settings.Section}"><StackPanel>
-      <DockPanel><Button Content="恢复默认" Tag="pan" Click="Restore_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复网盘默认顺序"/><TextBlock Text="网盘顺序" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
-      <DockPanel Margin="0,12,0,0"><StackPanel DockPanel.Dock="Right" Margin="12,0,0,0"><Button Content="上移" Tag="pan:-1" Click="Move_Click" Style="{StaticResource Settings.QuietButton}"/><Button Content="下移" Tag="pan:1" Click="Move_Click" Style="{StaticResource Settings.QuietButton}" Margin="0,6,0,0"/></StackPanel>
-       <ListBox x:Name="PanOrder" MinHeight="140" DisplayMemberPath="Label" AutomationProperties.Name="网盘偏好顺序"/>
-      </DockPanel>
+     <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding Idle}"><StackPanel>
+      <DockPanel Margin="0,0,0,12"><Button x:Name="AddManual" Content="添加" Click="AddManual_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="添加人工匹配"/><TextBlock Text="Manual 匹配源管理" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
+      <Border Style="{StaticResource Settings.ListSurface}"><Grid MinHeight="180" MaxHeight="340">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition/></Grid.ColumnDefinitions>
+       <Border Style="{StaticResource GroupSidebar}">
+        <DockPanel>
+         <TextBlock DockPanel.Dock="Top" Text="TMDB 数据" Style="{StaticResource Settings.ListHeader}" Margin="10,12,0,12"/>
+         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <ListBox x:Name="ManualTargets" ItemsSource="{Binding ManualGroups}" ItemTemplate="{StaticResource GroupTemplate}" ItemContainerStyle="{StaticResource Settings.ListItem}" Style="{StaticResource Settings.List}" AutomationProperties.Name="TMDB 数据"/>
+         </ScrollViewer>
+        </DockPanel>
+       </Border>
+       <Grid Grid.Column="1" Margin="12,0,0,0">
+       <DataGrid x:Name="ManualRows" ItemsSource="{Binding SelectedItem.Rows,ElementName=ManualTargets}" Style="{StaticResource FilmSettings.Grid}" AutomationProperties.Name="人工匹配源">
+        <DataGrid.Columns>
+         <DataGridTextColumn Header="站源" Binding="{Binding Source}" Width="160" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTextColumn Header="详情ID" Binding="{Binding DetailId}" Width="120" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTextColumn Header="panflag" Binding="{Binding Pan}" Width="90" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTextColumn Header="季度补全" Binding="{Binding Season}" Width="80" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTextColumn Header="自动失效" Binding="{Binding AutoDisable}" Width="80" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTextColumn Header="状态" Binding="{Binding State}" Width="160" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTemplateColumn Header="操作" Width="150"><DataGridTemplateColumn.CellTemplate><DataTemplate><StackPanel Orientation="Horizontal">
+          <Button Content="编辑" Style="{StaticResource Settings.Button}" Tag="{Binding}" Click="Edit_Click" AutomationProperties.Name="{Binding Title,StringFormat='编辑人工匹配{0}'}"/>
+          <Button Content="删除" Style="{StaticResource Settings.DangerButton}" Margin="6,0,0,0" Tag="{Binding}" Click="Remove_Click" AutomationProperties.Name="{Binding Title,StringFormat='删除人工匹配{0}'}"/>
+         </StackPanel></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+        </DataGrid.Columns>
+       </DataGrid>
+       <TextBlock Text="暂无人工匹配源" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
+        <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}"><Setter Property="Visibility" Value="Collapsed"/>
+         <Style.Triggers><DataTrigger Binding="{Binding HasItems,ElementName=ManualRows}" Value="False"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+        </Style></TextBlock.Style>
+       </TextBlock>
+       </Grid>
+      </Grid></Border>
      </StackPanel></Border>
-     <Border Style="{StaticResource Settings.Section}"><StackPanel>
-      <DockPanel><Button Content="恢复默认" Tag="keywords" Click="Restore_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="恢复关键词默认偏好"/><TextBlock Text="关键词顺序" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
-      <TextBox x:Name="Keywords" AcceptsReturn="True" MinHeight="110" Margin="0,12,0,0" Style="{StaticResource Settings.TextBox}" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="有序关键词"/>
+     <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding Idle}"><StackPanel>
+      <DockPanel Margin="0,0,0,12"><Button x:Name="ClearRecords" Content="清空" Click="ClearRecords_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="清空匹配禁用记录"/><TextBlock Text="匹配禁用管理" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
+      <Border Style="{StaticResource Settings.ListSurface}"><Grid MinHeight="180" MaxHeight="340">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition/></Grid.ColumnDefinitions>
+       <Border Style="{StaticResource GroupSidebar}">
+        <DockPanel>
+         <TextBlock DockPanel.Dock="Top" Text="禁用数据" Style="{StaticResource Settings.ListHeader}" Margin="10,12,0,12"/>
+         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <ListBox x:Name="BlockTargets" ItemsSource="{Binding BlockGroups}" ItemTemplate="{StaticResource GroupTemplate}" ItemContainerStyle="{StaticResource Settings.ListItem}" Style="{StaticResource Settings.List}" AutomationProperties.Name="禁用关键词"/>
+         </ScrollViewer>
+        </DockPanel>
+       </Border>
+       <Grid Grid.Column="1" Margin="12,0,0,0">
+       <DataGrid x:Name="BlockRows" ItemsSource="{Binding SelectedItem.Rows,ElementName=BlockTargets}" Style="{StaticResource FilmSettings.Grid}" AutomationProperties.Name="匹配禁用源">
+        <DataGrid.Columns>
+         <DataGridTextColumn Header="站源" Binding="{Binding Source}" Width="200" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTextColumn Header="网盘标识" Binding="{Binding Pan}" Width="120" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTextColumn Header="详情ID" Binding="{Binding DetailId}" Width="160" ElementStyle="{StaticResource RecordText}"/>
+         <DataGridTemplateColumn Header="操作" Width="90"><DataGridTemplateColumn.CellTemplate><DataTemplate>
+          <Button Content="删除" Style="{StaticResource Settings.DangerButton}" Tag="{Binding}" Click="Remove_Click" AutomationProperties.Name="{Binding Title,StringFormat='删除禁用片源{0}'}"/>
+         </DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+        </DataGrid.Columns>
+       </DataGrid>
+       <TextBlock Text="暂无禁用片源" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
+        <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}"><Setter Property="Visibility" Value="Collapsed"/>
+         <Style.Triggers><DataTrigger Binding="{Binding HasItems,ElementName=BlockRows}" Value="False"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+        </Style></TextBlock.Style>
+       </TextBlock>
+       </Grid>
+      </Grid></Border>
      </StackPanel></Border>
-     <Border Style="{StaticResource Settings.Section}"><CheckBox x:Name="AutoPrepare" Content="iOS进入播放页自动准备" Style="{StaticResource Settings.CheckBox}"/></Border>
-     <Button Content="保存" Click="SavePreferences_Click" HorizontalAlignment="Right" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="保存智能播放偏好"/>
     </StackPanel>
     <Border x:Name="CleanForm" Style="{StaticResource Settings.Section}" Visibility="Collapsed" IsEnabled="{Binding Idle}">
-     <StackPanel><DockPanel><Button Content="恢复默认" Tag="clean" Click="Restore_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.QuietButton}"/><TextBlock Text="站点净化关键词" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
-      <TextBox x:Name="CleanKeywords" AcceptsReturn="True" MinHeight="180" Margin="0,12,0,16" Style="{StaticResource Settings.TextBox}" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="站点净化关键词"/>
-      <Button Content="保存" Click="SavePreferences_Click" HorizontalAlignment="Right" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="保存站点净化"/>
+     <StackPanel><DockPanel Margin="0,0,0,12">
+      <Button Content="恢复默认" Tag="clean" Click="Restore_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.QuietButton}"/>
+      <StackPanel Orientation="Horizontal">
+       <TextBlock Text="站点净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
+       <Button Content="保存" Click="SavePreferences_Click" Margin="12,0,0,0" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="保存站点净化"/>
+      </StackPanel>
+     </DockPanel>
+      <TextBlock Text="关键字匹配规则" Margin="0,0,0,8"/>
+      <TextBox x:Name="CleanKeywords" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="站点净化关键词"/>
      </StackPanel>
     </Border>
-    <ItemsControl x:Name="RecordRows" ItemsSource="{Binding Rows}" IsEnabled="{Binding Idle}">
-     <ItemsControl.ItemTemplate><DataTemplate>
-      <Border Style="{StaticResource Settings.Section}"><DockPanel>
-       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="12,0,0,0">
-        <Button Content="编辑" Style="{StaticResource Settings.QuietButton}" Tag="{Binding}" Click="Edit_Click" Visibility="{Binding CanEdit,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
-        <Button Content="删除" Style="{StaticResource Settings.DangerButton}" Tag="{Binding}" Click="Remove_Click" AutomationProperties.Name="{Binding Title,StringFormat=删除{0}}"/>
-       </StackPanel>
-       <StackPanel><TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock Text="{Binding Detail}" Style="{StaticResource Capability.Muted}" Margin="0,6,0,0" TextWrapping="Wrap"/></StackPanel>
-      </DockPanel></Border>
-     </DataTemplate></ItemsControl.ItemTemplate>
-    </ItemsControl>
-    <TextBlock Text="暂无记录" HorizontalAlignment="Center" Margin="0,60" Visibility="{Binding Empty,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
    </StackPanel>
   </ScrollViewer>
   <desktop:NoticeOutlet x:Name="Notices" Grid.Row="1" VerticalAlignment="Bottom"/>

@@ -4,9 +4,9 @@
 
 ## 所有权与装配
 
-- `MusicPlatformCatalog` 是固定平台内容读取的原生 owner，公开契约为 `IMusicPlatformCatalog`。
+- `MusicPlatformCatalog` 是固定平台内容读取的原生 owner，读取契约为 `IMusicPlatformCatalog`；网易风格偏好由同一实例的独立 `IMusicDailyStylePreferences` 契约拥有。
 - 网易云、QQ、酷狗从 `IMusicPlatformSessionSource` 借用当前账号会话；酷我和咪咕只使用匿名公共元数据链，绝不借用其他平台账号。
-- Catalog 不持久化账号、不修改云端内容、不启动 Node、不调用本地服务，也不拥有页面状态。
+- Catalog 不持久化账号、不启动 Node、不调用本地服务，也不拥有页面状态。只有显式风格确认通过独立偏好接口写入云端；目录读取没有隐式保存副作用。
 - 账号 owner 在登录、退出、换号或会话失效时调用 `Invalidate`；消费者不能自行缓存 Cookie 或重建会话。
 - WY／KG 请求显式消费当前客户端快照，客户端字段与可选账号只在 wire 边界组合；QQ 类型搜索按需消费同一客户端 owner 的匿名 QIMEI／GetSession，精确歌曲和歌单读取不额外登记。构造目录不初始化或登记客户端。
 - WY 普通／VIP EAPI 的 Cookie 按加密 header 中的字符串原值构造；缺少可选 CSRF 时保留空字符串，不转换为 JSON 字面量。WEAPI、EAPI 和 VIP EAPI 各自保留原有固定包络。
@@ -68,9 +68,9 @@ Invalidate
 
 - FM：`POST EAPI /api/v1/radio/get`，普通 `mode=DEFAULT|FAMILIAR|EXPLORE|PUZZLE_MODE_RCMD`，场景 `SCENE_RCMD` + `subMode`（含 `GAMES/ELECTRONIC`）；`limit="3"/openAidj="false"/aidjReqTimes="0"/unplaySongIds`。预览 limit 为 1；规则 `ruleId/tabTagId` 使用原 `tag/tab/fm` 配方、每批 5 首。43 个场景保留官方 `FRANCH/PUNK/HOT_SONG` 等键。首页不带 mode 的私人 FM 由本机账号选择存储恢复，不改动卡片的动作身份。
 - 相似：同一路径的 WEAPI，`mode=SIMILAR/sourceType=artist|song/sourceIds/limit="3"/unplaySonIds`。这里的 `unplaySonIds` 少一个 g，与普通 FM 不混用。
-- 心动：`MusicHeartbeatRequest(Platform, Entry, SongId, PlaylistId)`；首页 `entry=favorites` 保留卡片 `songId`，current 带实际 `songId/playlistId`。同一个账号 lease 解析 `specialType=5` 且归属当前账号的真实喜欢歌单，不按标题或本地收藏猜测，也不接受普通远端歌单替代此上下文。
-- 喜欢成员完整读取，唯一成员数接受 `trackCount` 或 `trackCount+cloudTrackCount` 的已有口径；缺详情按 ID 每请求至多 100 首补齐，不按累计数量截断。`startMusicId` 与实际入口种子 `songId` 相同，使用首页展示曲或当前曲，不替换成喜欢列表首曲；current 核对其确为该歌单成员。
-- `/api/playmode/intelligence/list` 使用真实 `playlistId/songId/startMusicId/type/count`，type 为 `fromPlayAll/fromPlayOne`，count 为完整成员长度，不作为结果硬容量。完整消费返回结果；`songInfo=null` 时用顶层 id 从已读元数据或 `/api/v3/song/detail` 补齐，身份／标题不一致明确失败。响应 context 为 `playlistId/startMusicId/songId/fromHome/count`，顶层 count 是结果长度。没有经过验证的心动后续读取能力。
+- 心动：`MusicHeartbeatRequest`；首页 `entry=favorites` 保留卡片 `songId`，current 带实际 `songId/playlistId`。同一个账号 lease 解析 `specialType=5` 且归属当前账号的真实喜欢歌单，不按标题或本地收藏猜测，也不接受普通远端歌单替代此上下文。
+- 喜欢成员完整读取，唯一成员数接受 `trackCount` 或 `trackCount+cloudTrackCount` 的已有口径；缺详情按 ID 每请求至多 100 首补齐，不按累计数量截断。首批 `startMusicId` 与实际入口种子 `songId` 相同，使用首页展示曲或当前曲，不替换成喜欢列表首曲；current 核对其确为该歌单成员。
+- `/api/playmode/intelligence/list` 使用真实 `playlistId/songId/startMusicId/type/count`，type 为 `fromPlayAll/fromPlayOne`，count 为完整成员长度，不作为结果硬容量。完整消费返回结果；`songInfo=null` 时用顶层 id 从已读元数据或 `/api/v3/song/detail` 补齐，身份／标题不一致明确失败。响应 context 为 `playlistId/startMusicId/songId/fromHome/count/accountId`，顶层 count 是结果长度。续批保留原账号、playlistId、startMusicId 与入口类型，songId 为实际尾曲；入口种子仍校验成员，推荐尾曲不按喜欢成员拦截。协议参数由合成测试验证，不冒充实网算法效果验收。
 - 单曲推荐：`MusicQueueRecommendationsRequest(Platform, SeedSongId, Offset)` → `POST EAPI /api/homepage/scene/more/rcmd/song`。参数固定为 `currentPlaySongId="<seed>"/songIds="[<seed数值>]"/songCount="1"/offset="<游标>"/source="curlist_more_rcmd"/extJson="{}"`。首次 offset 0，后续只使用响应 offset，seed 两字段不随插歌／当前推荐曲变化；没有旧路由 fallback 或伪造搜索上下文。
 - scene 响应读取 `data.songList/algMap/sourceMap/offset/hasMore`；offset 必须为非负整数，hasMore 必须为布尔值，仍有更多时游标必须前移。完整解码 songList，algMap／sourceMap 接受对象或 JSON 对象字符串，算法映射优先于曲内 alg。明确缺游标／耗尽字段时失败，不猜测分页。
 - `recommendations[].source` 表示 provider；独立 feedbackSource 在心动为 aiMode，单曲推荐使用逐曲 sourceMap、缺失为 moreRcmd。读取候选本身不入队或发送反馈。
@@ -114,6 +114,29 @@ Invalidate
 
 咪咕歌曲搜索使用原生 group 单位：单页 group 数不超过请求页长，完整展开各 group 的录音版本，不另设 32／1000 版本额度；group 排名、总量和 copyright 身份必须完整保留。其他平台与歌单搜索仍使用 item 单位。
 
+## 网易云每日风格偏好
+
+现有 `MusicNativeApplication` 的 Catalog owner 可将同一 `MusicPlatformCatalog` 实例以 `IMusicDailyStylePreferences` 交给页面；该接口不扩展 `IMusicPlatformCatalog` 为通用写接口，也不单独创建会话、HTTP 或客户端 owner。
+
+- `OpenDailyStyleEditorAsync(token)` 用当前网易账号读取 `/api/homepage/daily/song/config/get`，返回 `MusicDailyStyleEditor(AccountScope, AccountGeneration, UserId, Categories)`。分类为 `MusicDailyStyleCategory(Id, Name, Tags)`，标签为 `MusicDailyStyleTag(Id, Name)`；顺序、身份和名称来自 `data.categorys[] / tagVOList[]`。缺失、重号或无名的目录明确失败。Editor 没有凭据；打开或取消编辑不写偏好。
+- `SaveDailyStyleAsync(editor, MusicDailyStyleSelection(CategoryId, TagIds), token)` 只接受开启编辑时的账号身份，在派发前和每次响应后沿用会话复核。换号返回 `NotSent / STALE_SESSION`，不会改借新号写入。页面仍须用自身编辑代次拒绝旧账号回执。
+- 保存复制草稿，要求非空、唯一、同一分类的目录成员，并在真正写入前重读配置核对成员。没有硬编码分类、标签、单选类别或选中数量上限。`tags` 为 JSON 字符串，内含数值 `categoryId` 和数值 `tagIds[]`；正整数及 JavaScript 安全整数范围属于固定上游数值协议。
+- 一次确认只发送一次 `/api/homepage/daily/song/tag/save`，不自动重试、不做补偿写。token 在准入前已取消则返回 `NotSent / CANCELLED`；准入后继续等待真实写入及回读，调用方取消不能伪装回滚。账号失效、截止或关闭仍围住传输，并等待物理收尾。
+- 普通风格读取保留既有 1 分钟缓存和同 key 在途合并。保存准入及写入结算后，仅推进该账号风格分支的内存代次、删除该分支旧 cache/flight，并围住活动读取，使旧请求以 `SNAPSHOT_CHANGED` 失去发布资格。随后以同一账号在新有效代次读取 `/api/homepage/category/daily/song/list`，可合并该代次读取并建立新的 1 分钟缓存；不能接回保存前的 flight 或缓存。默认日推和其他分支不变。
+
+保存结果是 `MusicDailyStyleSaveResult(Status, Readback, SelectionMatches, ErrorCode)`：
+
+| Status | 含义 |
+| --- | --- |
+| `NotSent` | 偏好写入尚未派发；参数、配置、账号或准入失败 |
+| `Rejected` | 已解码的服务业务响应拒绝写入；`ErrorCode` 保留服务错误分类 |
+| `Confirmed` | 服务确认写入成功；仍需检查真实回读及选择是否匹配 |
+| `Unknown` | 已派发但无法确认写入结果，可能已生效；先读取核对，不自动重试 |
+
+`Readback` 仅在真实回读并通过最终账号检查后非空，沿用 `DailyAsync(Style)` 的 `category/tags/items/scope` 批次形状。`SelectionMatches` 在有回读时按分类和无序标签集合比较，否则为 null。写入确认后回读失败仍是 `Confirmed`，但 `Readback` 为 null 且提供错误；写入失败后回读成功可展示实际选择，同时保留原写入状态与错误。回读或最终会话检查失败时 `ErrorCode` 报该失败，状态仍保留已知写入事实。
+
+数量依据：固定上游 [recommend_category_configs.js](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/19c7dad6db7d660954c7a615a686ff0acb030f91/module/recommend_category_configs.js)、[recommend_category_set.js](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/19c7dad6db7d660954c7a615a686ff0acb030f91/module/recommend_category_set.js) 和 [recommend_category_songs.js](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/19c7dad6db7d660954c7a615a686ff0acb030f91/module/recommend_category_songs.js) 确认上述字段和 XEAPI 配方，没有声明选中数量限制。尚未证实服务是否另有限制，不将 iOS 既有 `3000=1 / 其他=5` 常量当作协议；真实服务限制通过服务错误保留。
+
 ## 会话与账号隔离
 
 - 借用会话包含平台、scope、generation、userId 和 Cookie；凭据属性不可序列化、不可日志化，`ToString()` 只返回脱敏文本。
@@ -129,7 +152,7 @@ Invalidate
 - 默认调用截止时间为 25 秒；装配方可指定操作截止时间，HTTP 不再追加统一的 25／60 秒硬上限。
 - 网络层与 Catalog 不做任何并发限流：不设全局、每平台或每服务器连接上限，也不因请求量返回 `RATE_LIMITED`。请求量只由业务逻辑控制（例如搜索按“类型 × 平台”的并发、缓存与分页）；上游真实返回的限流仍报告 `RATE_LIMITED`。
 - 所有 `SendAsync`／`SendXeapiAsync` 都在请求、响应及流实际收尾后结算；取消或失效不提前释放不合作传输，关闭流程等待其排空。
-- Catalog 为单个原始响应指定 4 MiB 缓冲上限；HTTP 使用调用方的真实缓冲上限，不再施加重复的全局 4 MiB 限制。JSON 保留严格 UTF-8、重复键和嵌套校验，不再遍历附加节点／数组／字符串总额度。规范元数据仍按字段、身份和单曲模型校验；内存中的派生目录结果与累计 continuation 不套用 512 KiB 截断。
+- Catalog 为单个原始响应指定 4 MiB 缓冲上限；HTTP 使用调用方的真实缓冲上限，不再施加重复的全局 4 MiB 限制。JSON 保留严格 UTF-8、语法和嵌套校验，重复属性按最后值消费，不再遍历附加节点／数组／字符串总额度。规范元数据仍按字段、身份和单曲模型校验；内存中的派生目录结果与累计 continuation 不套用 512 KiB 截断。
 - Catalog 不直接写持久文档；客户端受信响应更新交给客户端唯一 writer。目录内存缓存最多 64 项、2 MiB，key 包含平台、账号 scope／generation／userId、操作、完整输入及实际使用的客户端身份／代次；成功响应推进客户端后按最终代次保存缓存。单个结果超过缓存容量时直接返回且不缓存，不拒绝本次读取。
 - Catalog 不缓存搜索；搜索结果只由搜索 owner 缓存一次（见[原生搜索契约](music-search.md)）。单曲／歌单最长一小时，其他普通目录最长十分钟；每日推荐使用平台返回的到期时间。显式 refresh 成功后替换同一当前 key。
 - 鉴权、权限或会话失效会清除对应平台缓存。缓存命中不绕过当前会话复核，也不授予播放、下载或离线许可。

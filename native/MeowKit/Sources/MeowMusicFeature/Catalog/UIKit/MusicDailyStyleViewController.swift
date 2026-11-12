@@ -16,7 +16,7 @@ public final class MusicDailyStyleViewController: HostingPageViewController<Musi
         model = MusicDailyStyleViewModel(page: page, source: source)
         super.init(
             themeProvider: appearance,
-            content: MusicDailyStyleContent(theme: PageTheme(palette: appearance.pageColorway))
+            content: MusicDailyStyleContent(theme: PageTheme(colors: appearance.pagePalette))
         )
         pageTitle = "选择推荐风格"
     }

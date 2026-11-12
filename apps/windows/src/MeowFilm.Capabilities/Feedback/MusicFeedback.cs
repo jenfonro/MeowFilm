@@ -27,7 +27,7 @@ public sealed partial class MusicCapability
     private IMusicPlaybackFeedback PlaybackFeedback => application.Feedback;
     private JsonElement? currentFeedbackContext;
     private MusicRecommendationFeedback? currentRecommendationFeedback;
-    private bool currentFeedbackAutomatic;
+    private bool currentFeedbackAutomatic, feedbackStarted, feedbackSuspended;
     private long feedbackRevision;
     private bool feedbackSettingsLoaded, feedbackSettingsBusy;
     private string feedbackStatus = "";
@@ -119,8 +119,8 @@ public sealed partial class MusicCapability
         if (row.EntryId is { } entry)
         {
             currentFeedbackAutomatic = automatic;
-            currentRecommendationFeedback = recommendation ??
-                (RecommendationSource.GetFeedback(entry) is { Kind: not "fm" } live ? live : null);
+            currentRecommendationFeedback = recommendation ?? RecommendationSource.GetFeedback(entry);
+            feedbackStarted = false; feedbackSuspended = false;
             PlaybackFeedback.Select(new(entry, FeedbackSong(row), currentFeedbackContext, automatic)
                 { Recommendation = FeedbackRecommendation(entry) });
         }
@@ -168,19 +168,38 @@ public sealed partial class MusicCapability
     }
     private void SampleFeedback(bool? running = null)
     {
-        if (!recorded || openedEntry is null || musicRecovery?.Pending is not null) return;
+        if (!recorded || openedEntry is null || musicRecovery?.Pending is { Reopening: true }) return;
         if (playback.OwnerId != Id || playback.Identity != openedEntry)
-        { PlaybackFeedback.Finish("interrupt"); return; }
+        { CompleteFeedback("interrupt"); return; }
+        if (!feedbackStarted && playback.HasMedia && playback.IsPlaying && musicRecovery?.Pending is null)
+            StartFeedback();
+        if (!feedbackStarted) return;
         PlaybackFeedback.Observe(openedEntry, playback.PositionSeconds, playback.DurationSeconds,
-            running ?? playback.IsPlaying, AcceptedPlaybackRate ?? 1, mode);
+            !feedbackSuspended && (running ?? playback.IsPlaying), FeedbackPlaybackRate, mode);
         PublishFeedbackStatus();
     }
-    private void StartFeedback()
+    private double FeedbackPlaybackRate => playbackRateReceipt is { } receipt &&
+        receipt.Scope.OwnerId == Id && receipt.Scope.Identity == openedEntry ? receipt.RequestedRate :
+            playback is IMusicPlaybackRate ? double.NaN : 1;
+    private void StartFeedback(bool observedStart = false)
     {
-        if (openedEntry is not null)
-            PlaybackFeedback.Started(openedEntry, playback.PositionSeconds, playback.DurationSeconds, AcceptedPlaybackRate ?? 1, mode);
+        if (openedEntry is null || feedbackStarted || !observedStart && !playback.IsPlaying) return;
+        feedbackStarted = true;
+        PlaybackFeedback.Started(openedEntry, playback.PositionSeconds, playback.DurationSeconds, FeedbackPlaybackRate, mode);
+        PlaybackFeedback.Observe(openedEntry, playback.PositionSeconds, playback.DurationSeconds,
+            playback.IsPlaying && !feedbackSuspended, FeedbackPlaybackRate, mode);
     }
     private void FinishFeedback(string reason)
     { SampleFeedback(); CompleteFeedback(reason); }
-    private void CompleteFeedback(string reason) => PlaybackFeedback.Finish(reason);
+    private void CompleteFeedback(string reason)
+    { feedbackStarted = false; PlaybackFeedback.Finish(reason); }
+    private void InvalidateFeedback()
+    { feedbackStarted = false; PlaybackFeedback.Invalidate(); }
+    private void SuspendFeedback()
+    { SampleFeedback(false); feedbackSuspended = true; }
+    private void ResumeFeedback(long epoch)
+    {
+        if (epoch != playbackEpoch || stopping) return;
+        feedbackSuspended = false; SampleFeedback();
+    }
 }

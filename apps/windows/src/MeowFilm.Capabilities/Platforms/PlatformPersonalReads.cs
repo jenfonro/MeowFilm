@@ -12,34 +12,35 @@ public sealed partial class MusicPlatformCatalog
     public Task<JsonElement> DailyAsync(MusicDailyRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null && Enum.IsDefined(request.Branch)); var p = request!;
-        return RunAsync(p.Platform, "daily", p, p.Refresh, c =>
+        return RunAsync(p.Platform, p.Branch == MusicDailyBranch.Style ? "daily-style" : "daily", p, p.Refresh, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
             var style = p.Branch == MusicDailyBranch.Style;
             return c.Xeapi(style ? "/api/homepage/category/daily/song/list" : "/api/v3/discovery/recommend/songs",
-                style ? new() : PJ.Obj(("ispush", false)), data =>
-                {
-                    var body = data["data"] as JsonObject ?? data;
-                    // A missing array, failed signature/decryption or failed upstream code never becomes empty success.
-                    var rows = PJ.Rows(PJ.First(body["dailySongs"], data["recommend"]), 1000);
-                    var branch = style ? "style" : "default";
-                    var batch = Batch(c, "daily", rows, PJ.Obj(("branch", branch)));
-                    var now = DateTimeOffset.UtcNow;
-                    var local = now.ToOffset(TimeSpan.FromHours(8));
-                    var six = new DateTimeOffset(local.Year, local.Month, local.Day, 6, 0, 0, local.Offset);
-                    if (six <= local) six = six.AddDays(1);
-                    batch["expiresAt"] = (style ? now.AddMinutes(1) : six).ToUnixTimeMilliseconds();
-                    batch["id"] = "daily:" + branch; batch["branch"] = branch;
-                    batch["name"] = style ? "风格推荐" : "每日推荐";
-                    batch["collectionType"] = "daily"; batch["engine"] = "NeteaseCollection"; batch["source"] = "wy"; batch["more"] = false;
-                    batch["cover"] = PJ.S(PJ.Array(batch["items"]).FirstOrDefault(), "cover_url");
-                    batch["category"] = PJ.At(body, "tags", "categoryId") is { } category ? PJ.Id(category) : "";
-                    var tags = PJ.At(body, "tags", "tagVOList");
-                    batch["tags"] = PJ.Arr(PJ.Rows(tags ?? new JsonArray(), 100).Select(t =>
-                        PJ.Obj(("id", PJ.Id(t["tagId"])), ("name", PJ.Metadata(t["tagName"])))));
-                    return batch;
-                });
+                style ? new() : PJ.Obj(("ispush", false)), data => DailyBatch(c, data, style));
         }, cancellationToken, privateCache: true);
+    }
+    private static JsonObject DailyBatch(Call c, JsonObject data, bool style)
+    {
+        var body = data["data"] as JsonObject ?? data;
+        // A missing array, failed signature/decryption or failed upstream code never becomes empty success.
+        var rows = PJ.Rows(PJ.First(body["dailySongs"], data["recommend"]), 1000);
+        var branch = style ? "style" : "default";
+        var batch = Batch(c, "daily", rows, PJ.Obj(("branch", branch)));
+        var now = DateTimeOffset.UtcNow;
+        var local = now.ToOffset(TimeSpan.FromHours(8));
+        var six = new DateTimeOffset(local.Year, local.Month, local.Day, 6, 0, 0, local.Offset);
+        if (six <= local) six = six.AddDays(1);
+        batch["expiresAt"] = (style ? now.AddMinutes(1) : six).ToUnixTimeMilliseconds();
+        batch["id"] = "daily:" + branch; batch["branch"] = branch;
+        batch["name"] = style ? "风格推荐" : "每日推荐";
+        batch["collectionType"] = "daily"; batch["engine"] = "NeteaseCollection"; batch["source"] = "wy"; batch["more"] = false;
+        batch["cover"] = PJ.S(PJ.Array(batch["items"]).FirstOrDefault(), "cover_url");
+        batch["category"] = PJ.At(body, "tags", "categoryId") is { } category ? PJ.Id(category) : "";
+        var tags = PJ.At(body, "tags", "tagVOList");
+        batch["tags"] = PJ.Arr(DailyStyleTags(tags ?? new JsonArray()).Select(t =>
+            PJ.Obj(("id", t.Id), ("name", t.Name))));
+        return batch;
     }
     private static readonly string[] FmScenes = ["NIGHT_EMO", "EXERCISE", "SLEEP_HELP", "RELAX", "CHEERFUL", "LYRICAL", "CURE", "FOCUS",
         "SWEET", "RHYTHM_BLUES", "RAINY", "GAMES", "RAP", "K_POP", "ORIGINAL_MUSICIAL", "ELECTRONIC", "COMMUTE",
@@ -104,15 +105,31 @@ public sealed partial class MusicPlatformCatalog
         var items = rows.Select(PlatformSongs.Wy).ToArray();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var song in items) PJ.Require(seen.Add(NativeMusicSong.NativeId(song)), "IDENTITY_MISMATCH");
+        var cookies = PJ.Cookies(c.Session);
+        var secrets = new[] { PJ.Cookie(cookies, "MUSIC_U"), PJ.Cookie(cookies, "__csrf") }.Where(value => value.Length > 0).ToArray();
+        string FeedbackText(JsonNode? value, bool identifier = false)
+        {
+            if (value is null) return "";
+            string text = identifier && value is JsonValue scalar && scalar.TryGetValue<long>(out _)
+                ? PJ.Id(value) : PJ.Text(value);
+            if (text.Length == 0) return "";
+            // Preserve exact feedback metadata; reject oversized or reflected
+            // credentials instead of truncating it into a different attribution.
+            PJ.Require(!secrets.Any(secret => text.Contains(secret, StringComparison.Ordinal)), "INVALID_RESPONSE");
+            return PJ.Input(text, 4096);
+        }
         var provenance = rows.Select((r, i) =>
         {
             string id = NativeMusicSong.NativeId(items[i]);
             var metadata = PJ.Obj(("id", id),
-                ("alg", PJ.Metadata(PJ.First(algorithms?[id], r["alg"], PJ.At(r, "songInfo", "alg")))),
+                ("alg", FeedbackText(PJ.First(algorithms?[id], r["alg"], PJ.At(r, "songInfo", "alg")))),
                 ("source", kind));
-            if (kind == "heartbeat") metadata["feedbackSource"] = "aiMode";
-            else if (kind == "queue-recommendations")
-                metadata["feedbackSource"] = PJ.Metadata(sources?[id]) is { Length: > 0 } source ? source : "moreRcmd";
+            if (FeedbackText(PJ.First(sources?[id], r["source"], PJ.At(r, "songInfo", "source"))) is { Length: > 0 } source)
+            {
+                metadata["feedbackSource"] = source;
+                if (FeedbackText(PJ.First(r["sourceId"], PJ.At(r, "songInfo", "sourceId")), identifier: true) is { Length: > 0 } sourceId)
+                    metadata["feedbackSourceId"] = sourceId;
+            }
             return metadata;
         }).ToArray();
         return PJ.Obj(("platform", c.Platform), ("kind", kind), ("items", PJ.Arr(items)), ("count", items.Length),
@@ -135,26 +152,37 @@ public sealed partial class MusicPlatformCatalog
     {
         PJ.Require(request is not null && Enum.IsDefined(request.Entry)); var p = request!;
         if (p.SongId is not null) PJ.IdInput(p.SongId);
-        if (p.Entry == MusicHeartbeatEntry.CurrentSong) { PJ.IdInput(p.SongId!); PJ.IdInput(p.PlaylistId!); }
+        if (p.Entry == MusicHeartbeatEntry.CurrentSong) PJ.IdInput(p.SongId!);
+        if (p.PlaylistId is not null) PJ.IdInput(p.PlaylistId);
+        if (p.Continuation is { } continuation)
+        {
+            PJ.IdInput(continuation.PlaylistId); PJ.IdInput(continuation.StartMusicId);
+            PJ.IdInput(continuation.AccountId); PJ.IdInput(p.SongId!);
+            PJ.Require(continuation.Count > 0 && p.PlaylistId == continuation.PlaylistId);
+        }
         return RunAsync(p.Platform, "heartbeat", p, false, async c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
-            var favorites = await HeartbeatFavorites(c);
+            var original = p.Continuation;
+            PJ.Require(original is null || original.AccountId == c.Session!.UserId, "STALE_SESSION");
+            var favorites = original is null ? await HeartbeatFavorites(c) :
+                (PlaylistId: original.PlaylistId, Ids: Array.Empty<string>(), Songs: new Dictionary<string, JsonObject>(StringComparer.Ordinal));
             var usable = favorites.Ids.Where(id => PlatformSongs.HasWyDisplayTitle(favorites.Songs[id])).ToArray();
-            PJ.Require(usable.Length > 0, "NOT_FOUND");
+            PJ.Require(original is not null || usable.Length > 0, "NOT_FOUND");
             var fromHome = p.Entry == MusicHeartbeatEntry.Favorites;
             PJ.Require(p.PlaylistId is null || p.PlaylistId == favorites.PlaylistId, "UNSUPPORTED");
             var songId = p.SongId ?? usable[0];
-            if (!fromHome) PJ.Require(favorites.Ids.Contains(songId, StringComparer.Ordinal), "UNSUPPORTED");
-            var startMusicId = songId;
+            if (original is null && !fromHome) PJ.Require(favorites.Ids.Contains(songId, StringComparer.Ordinal), "UNSUPPORTED");
+            var startMusicId = original?.StartMusicId ?? songId;
+            long count = original?.Count ?? favorites.Ids.Length;
             var rows = await c.Wy("/api/playmode/intelligence/list",
                 PJ.Obj(("playlistId", favorites.PlaylistId), ("startMusicId", startMusicId),
-                    ("songId", songId), ("type", fromHome ? "fromPlayAll" : "fromPlayOne"), ("count", favorites.Ids.Length)), data =>
+                    ("songId", songId), ("type", fromHome ? "fromPlayAll" : "fromPlayOne"), ("count", count)), data =>
                 PJ.RowsAll(data["data"]));
             var missing = rows.Where(row => row["songInfo"] is null)
                 .Select(row => PJ.Id(row["id"], "^[1-9][0-9]{0,19}$"))
                 .Where(id => !favorites.Songs.ContainsKey(id)).ToHashSet(StringComparer.Ordinal);
-            if (!favorites.Songs.ContainsKey(songId) &&
+            if (original is null && !favorites.Songs.ContainsKey(songId) &&
                 !rows.Any(row => PJ.Scalar(PJ.At(row, "songInfo", "id")) == songId))
                 missing.Add(songId);
             foreach (var ids in missing.Chunk(100))
@@ -183,14 +211,14 @@ public sealed partial class MusicPlatformCatalog
                 PJ.Require(PJ.Id(PJ.At(row, "songInfo", "id")) == id, "IDENTITY_MISMATCH");
             }
             var result = Batch(c, "heartbeat", rows, PJ.Obj(("playlistId", favorites.PlaylistId), ("startMusicId", startMusicId),
-                ("songId", songId), ("fromHome", fromHome), ("count", favorites.Ids.Length)));
+                ("songId", songId), ("fromHome", fromHome), ("count", count), ("accountId", c.Session!.UserId)));
             if (favorites.Songs.TryGetValue(songId, out var entrySong)) result["entrySong"] = PlatformSongs.Wy(entrySong);
             else if (rows.FirstOrDefault(row => PJ.Id(PJ.At(row, "songInfo", "id")) == songId) is { } returned)
                 result["entrySong"] = PlatformSongs.Wy(returned);
             return result;
         }, cancellationToken, cacheable: false);
     }
-    private static async Task<(string PlaylistId, string[] Ids, Dictionary<string, JsonObject> Songs)> HeartbeatFavorites(Call c)
+    private static async Task<(string PlaylistId, string[] Ids, Dictionary<string, JsonObject> Songs)> HeartbeatMembership(Call c)
     {
         var uid = PJ.IdInput(c.Session!.UserId);
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -246,6 +274,28 @@ public sealed partial class MusicPlatformCatalog
             }
             return (Ids: ids, Songs: songs);
         });
+        return (playlistId, membership.Ids, membership.Songs);
+    }
+    private static async Task<JsonObject?> HeartbeatHomeSeed(Call c)
+    {
+        var membership = await HeartbeatMembership(c);
+        if (membership.Ids.Length == 0) return null;
+        foreach (string id in membership.Ids)
+            if (membership.Songs.TryGetValue(id, out var song) && PlatformSongs.HasWyDisplayTitle(song))
+                return PlatformSongs.Wy(song);
+        // Only the displayed seed needs metadata; do not hydrate the whole liked library on home load.
+        string first = membership.Ids[0];
+        return await c.Wy("/api/v3/song/detail", PJ.Obj(("c", "[{\"id\":" + first + "}]")), data =>
+        {
+            var rows = PJ.Rows(data["songs"], 1);
+            PJ.Require(rows.Count == 1 && PJ.Id(rows[0]["id"]) == first, "IDENTITY_MISMATCH");
+            PJ.Require(PlatformSongs.HasWyDisplayTitle(rows[0]), "NOT_FOUND");
+            return PlatformSongs.Wy(rows[0]);
+        }, true);
+    }
+    private static async Task<(string PlaylistId, string[] Ids, Dictionary<string, JsonObject> Songs)> HeartbeatFavorites(Call c)
+    {
+        var membership = await HeartbeatMembership(c);
         var missing = membership.Ids.Where(id => !membership.Songs.TryGetValue(id, out var song) ||
             !PlatformSongs.HasWyDisplayTitle(song)).ToArray();
         foreach (var ids in missing.Chunk(100))
@@ -267,7 +317,7 @@ public sealed partial class MusicPlatformCatalog
             }, true);
             foreach (var song in songs) membership.Songs[PJ.Id(song["id"])] = song;
         }
-        return (playlistId, membership.Ids, membership.Songs);
+        return membership;
     }
     private static JsonObject? RecommendationMap(JsonNode? value)
     {
@@ -339,6 +389,7 @@ public sealed partial class MusicPlatformCatalog
                         var card = PlatformSongs.Playlist("wy", r); var id = PJ.S(card, "id");
                         card["ownerId"] = owner; card["relationship"] = owner == uid ? "owned" : "subscribed";
                         card["kind"] = owner == uid && PJ.Scalar(r["specialType"]) == "5" ? "favorites" : "playlist";
+                        card["writable"] = owner == uid && PJ.Scalar(r["specialType"] ?? JsonValue.Create(0)) is "0" or "5";
                         card["locator"] = PJ.Obj(("playlistId", id), ("specialType", r["specialType"]));
                         card["action"] = PJ.Obj(("type", "playlist"), ("id", id)); card["available"] = true;
                         return card;
@@ -398,6 +449,7 @@ public sealed partial class MusicPlatformCatalog
         var global = PJ.Scalar(PJ.First(r["global_collection_id"], r["list_create_gid"]));
         var playable = Regex.IsMatch(global, @"^[A-Za-z0-9_-]{1,200}$") && !global.StartsWith("id_", StringComparison.Ordinal);
         var owned = type == 0 && owner == uid && source != 2;
+        var writable = owned && (favorite || !special && name is not ("我喜欢" or "我喜欢的音乐" or "默认收藏"));
         var locator = owned ? PrivateLocator(c, "kugou-owned", id, count, r["list_ver"] is { } version ? PJ.Id(version) : null, name) : new JsonObject();
         locator["listId"] = id; locator["listType"] = type; locator["globalCollectionId"] = playable ? global : null;
         locator["source"] = source; locator["listVersion"] = r["list_ver"]?.DeepClone();
@@ -406,6 +458,7 @@ public sealed partial class MusicPlatformCatalog
         return PJ.Obj(("id", $"{type}:{id}"), ("name", name), ("cover", PJ.Image(PJ.First(r["cover"], r["imgurl"]))),
             ("count", count), ("source", "kg"), ("engine", "Kugou"), ("ownerId", owner),
             ("relationship", type == 0 && owner == uid && source != 2 ? "owned" : "subscribed"),
+            ("writable", writable),
             ("kind", favorite ? "favorites" : "playlist"),
             ("locator", locator), ("action", action),
             ("available", owned || playable), ("errorCode", owned || playable ? "" : "UNSUPPORTED"));
@@ -427,6 +480,7 @@ public sealed partial class MusicPlatformCatalog
             favorites["playlistId"] = "favorites"; favorites["dirId"] = "201";
             created.Add(PJ.Obj(("id", "favorites"), ("name", "我喜欢"), ("cover", ""), ("count", null),
                 ("source", "tx"), ("engine", "QQ"), ("ownerId", uid), ("relationship", "owned"), ("kind", "favorites"),
+                ("writable", true),
                 ("locator", favorites), ("action", PJ.Obj(("type", "playlist"), ("id", "favorites"), ("locator", favorites))), ("available", true)));
             foreach (var r in raw)
             {
@@ -518,6 +572,7 @@ public sealed partial class MusicPlatformCatalog
         var card = PlatformSongs.Playlist("tx", raw);
         var favorite = created && dirId == "201";
         card["ownerId"] = owner; card["relationship"] = created ? "owned" : "subscribed"; card["kind"] = favorite ? "favorites" : "playlist";
+        card["writable"] = created;
         card["locator"] = PJ.Obj(("playlistId", card["id"]), ("dirId", dirId));
         card["action"] = favorite ? PJ.Obj(("type", "unsupported")) : PJ.Obj(("type", "playlist"), ("id", card["id"]));
         card["available"] = !favorite;

@@ -588,7 +588,11 @@ final class PageViewControllerTests: XCTestCase {
         try await performRunnerAction { $0.alerts["错误"].buttons["确定"].tap() }
         await waitForErrorAlertState("default error dismissed") { page.presentedViewController == nil && page.canPresentPageAlert }
         var acknowledgements = 0
-        XCTAssertTrue(page.showError("acknowledged failure") { acknowledgements += 1 })
+        XCTAssertTrue(page.showError("acknowledged failure") {
+            XCTAssertNil(page.presentedViewController)
+            XCTAssertTrue(page.canPresentPageAlert, "Acknowledgement follows the completed dismissal")
+            acknowledgements += 1
+        })
         await waitForErrorAlertState("acknowledged error presented") {
             guard let alert = page.presentedViewController as? UIAlertController else { return false }
             return alert.view.window != nil && !alert.isBeingPresented
@@ -870,7 +874,7 @@ private enum PageLifecycleTestLocal {
 
 @MainActor
 final class PageLifecycleTestTheme: PageThemeProviding {
-    let pageColorway = PageColorway.allCases[0]
+    let pagePalette = PagePalette.preset(.lilac)
     let animatesPageColorway = false
     var pageThemeChanges: AnyPublisher<Void, Never> {
         Empty(completeImmediately: false).eraseToAnyPublisher()

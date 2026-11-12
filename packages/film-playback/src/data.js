@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { decodePanResource } from '@meowfilm/script-host/cat-output';
-import { matchesResult, normalizeDetail, stableFileIdentity } from './recognition.js';
+import { normalizeDetail, stableFileIdentity } from './recognition.js';
 import { createRecognitionRules, providerFamily } from './rules.js';
+import { createMetadataCache } from './metadata-cache.js';
+import { metadataTTL } from './metadata-policy.js';
+import { tmdbQuery } from './metadata-query.js';
 import { checkSource, clone, fail, identity, isIdentifier, object, parseSourceValue, requireValue,
   sourceRevision, text } from './identity.js';
 
@@ -15,11 +18,11 @@ const prefixes = { cat: 'cat.script.', source: 'source.runtime.', pan: 'pan.',
   tmdb: 'tmdb.data.', douban: 'douban.data.' };
 const errorCodes = new Set([
   'INVALID_REQUEST', 'UPSTREAM_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'NETWORK_ERROR',
-  'TIMEOUT', 'CANCELLED', 'CLOSED', 'STALE_SOURCE', 'STALE_ACCOUNT', 'AUTH_REQUIRED', 'AUTH_FAILED',
+  'TIMEOUT', 'RESOURCE_LIMIT', 'CANCELLED', 'CLOSED', 'STALE_SOURCE', 'STALE_ACCOUNT', 'AUTH_REQUIRED', 'AUTH_FAILED',
   'NOT_CONFIGURED', 'NOT_FOUND', 'LOGIN_EXPIRED', 'CHALLENGE_REQUIRED', 'WEB_INTERACTION_REQUIRED',
   'CAPABILITY_UNAVAILABLE', 'UNSUPPORTED_OPERATION', 'PAN_FAILURE', 'SOURCE_FAILURE', 'CAT_FAILURE',
   'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'STORAGE_ERROR', 'CORRUPT_STORAGE',
-  'MEDIA_UNAVAILABLE', 'INVALID_RULES', 'CACHE_LOAD_FAILED',
+  'MEDIA_UNAVAILABLE', 'INVALID_RULES', 'CACHE_LOAD_FAILED', 'STALE_METADATA',
 ]);
 const safeError = error => fail(error?.name === 'AbortError' ? 'CANCELLED'
   : errorCodes.has(error?.code) ? error.code : 'UPSTREAM_ERROR');
@@ -43,45 +46,6 @@ function scopeOf(source) {
     ...(source.engine === 'pan' ? {} : {
       sourceEngine: source.engine, sourceInstallationId: source.installationId,
     }) };
-}
-function cnDate(value) {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
-  const [year, month, day] = value.split('-').map(Number);
-  const utc = Date.UTC(year, month - 1, day);
-  if (new Date(utc).toISOString().slice(0, 10) !== value) return undefined;
-  return utc - 8 * HOUR;
-}
-const cnDay = at => Math.floor((at + 8 * HOUR) / DAY) * DAY - 8 * HOUR;
-
-function metadataTTL(provider, path, value, at, completeness) {
-  if (path === 'search' || /^\/3\/(?:search|discover|trending)\//.test(path) ||
-      completeness === 'partial') return 6 * HOUR;
-  if (provider === 'tmdb' && /^\/3\/tv\/\d+\/season\/\d+$/.test(path)) {
-    const today = cnDay(at);
-    let next, lastDated = -1;
-    for (const row of value.episodes) {
-      const date = cnDate(row.air_date);
-      if (date === undefined) continue;
-      lastDated = Math.max(lastDated, row.episode_number);
-      if (date >= today && (next === undefined || date < next)) next = date;
-    }
-    if (next !== undefined) {
-      // A successful fetch on its CN broadcast day is already today's refresh.
-      return Math.min(STABLE, (next <= at ? today + DAY : next) - at);
-    }
-    const undatedTail = value.episodes.some(row => cnDate(row.air_date) === undefined &&
-      row.episode_number >= lastDated);
-    return lastDated >= 0 && !undatedTail ? STABLE : DAY;
-  }
-  const tv = provider === 'tmdb' ? /^\/3\/tv\/\d+$/.test(path)
-    : /^\/rexxar\/api\/v2\/tv\/\d+$/.test(path);
-  if (tv) {
-    if (text(value.status).toLowerCase() === 'ended') return STABLE;
-    const next = cnDate(value.next_episode_to_air?.air_date);
-    if (next !== undefined) return Math.min(STABLE, (next <= at ? cnDay(at) + DAY : next) - at);
-    return DAY;
-  }
-  return STABLE;
 }
 function searchPage(raw, page) {
   const items = Array.isArray(raw.list) ? raw.list : Array.isArray(raw.items) ? raw.items : null;
@@ -114,9 +78,9 @@ function metadataValue(provider, path, value, completeness) {
     const season = provider === 'tmdb' && /^\/3\/tv\/\d+\/season\/(\d+)$/.exec(path);
     const detail = /^(?:\/3|\/rexxar\/api\/v2)\/(movie|tv)\/(\d+)$/.exec(path);
     if (season) {
-      requireValue(value.season_number === Number(season[1]) && Array.isArray(value.episodes) &&
-        value.episodes.every(row => object(row) && Number.isSafeInteger(row.episode_number) &&
-          row.episode_number >= 0), 'UPSTREAM_FORMAT');
+      requireValue(value.season_number === Number(season[1]) && (value.episodes === undefined ||
+        Array.isArray(value.episodes) && value.episodes.every(row => object(row) &&
+          Number.isSafeInteger(row.episode_number) && row.episode_number >= 0)), 'UPSTREAM_FORMAT');
     } else if (detail) {
       requireValue(String(value.id) === detail[2] && text(value.title ?? value.name), 'UPSTREAM_FORMAT');
       if (completeness === 'complete') {
@@ -127,17 +91,17 @@ function metadataValue(provider, path, value, completeness) {
   }
   return value;
 }
-function metadataSeason(record, recognition) {
-  const explicit = record.season_number ?? record.season ?? record.seasonHint;
-  return Number.isSafeInteger(explicit) && explicit >= 0 ? explicit
-    : recognition.season(record.title ?? record.name ?? '');
+async function metadataSeason(record, recognition, signal) {
+  return (await recognition.metadata(record, 'tv', { signal })).season ?? undefined;
 }
-function doubanSeason(record, metadataId, recognition) {
-  const season = metadataSeason(record, recognition);
+function seasonEvidence(record, metadataId, season) {
   const count = typeof record.episodes_count === 'string' && /^\d+$/.test(record.episodes_count)
     ? Number(record.episodes_count) : record.episodes_count;
   if (season === undefined || !Number.isSafeInteger(count) || count < 0) return undefined;
   return { season, episodeCount: count, metadataId, metadata: record };
+}
+async function doubanSeason(record, metadataId, recognition, signal) {
+  return seasonEvidence(record, metadataId, await metadataSeason(record, recognition, signal));
 }
 function mediaValue(value) {
   requireValue(object(value), 'UPSTREAM_FORMAT');
@@ -152,6 +116,11 @@ function mediaValue(value) {
     'UPSTREAM_FORMAT');
   return { ...value, url: parsed.href, headers, format: value.format ?? value.type };
 }
+function addressTTL(value, at) {
+  if (value.expiresAt === undefined) return ADDRESS;
+  requireValue(Number.isFinite(value.expiresAt) && value.expiresAt > at, 'MEDIA_UNAVAILABLE');
+  return Math.min(ADDRESS, value.expiresAt - at);
+}
 function fileValue(file, provider, revision, kind) {
   requireValue(object(file) && file.provider === provider && file.accountRevision === revision &&
     ['share', 'stored'].includes(file.kind) && (kind === undefined || file.kind === kind) &&
@@ -160,11 +129,13 @@ function fileValue(file, provider, revision, kind) {
 }
 
 /** All values, timestamps and completeness live in the one injected cache. */
-export function createPlaybackData({ modules, cache, now = Date.now }) {
+export function createPlaybackData({ modules, cache, dataRoot, now = Date.now }) {
   requireValue(modules instanceof Map && cache && typeof now === 'function');
   const lifetime = new AbortController();
   const pending = new Set();
   const cacheOwner = { domain: 'film-data', owner: randomUUID() };
+  const metadataCache = createMetadataCache({ dataRoot, cache, owner: cacheOwner, now: time, normalizeError: safeError,
+    decodeValue: metadataValue });
   let closed = false, closing;
 
   function open(signal) {
@@ -236,7 +207,7 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
   const cacheKey = request => identity('film-data', request);
   const record = (request, value, completeness, fetchedAt, expiresAt) =>
     ({ ...request, value, completeness, fetchedAt, expiresAt });
-  async function load(request, producer, { ttl, completeness = 'complete', dependencies, signal, checkSchedule }) {
+  async function load(request, producer, { ttl, completeness = 'complete', dependencies, signal, checkSchedule, refresh = false }) {
     open(signal);
     checkSchedule?.();
     return cache.load(cacheKey(request), async producerSignal => {
@@ -245,7 +216,7 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
       const duration = typeof ttl === 'function' ? ttl(value, at, completeness) : ttl;
       return record(request, value, completeness, at, at + duration);
     }, { ttl: (entry, at) => Math.max(0, entry.expiresAt - at), completeness, signal,
-      dependencies: [cacheOwner, ...dependencies] });
+      dependencies: [cacheOwner, ...dependencies], refresh });
   }
   const sourceRequest = (kind, source, fields) => ({ kind,
     source: { key: source.key, engine: source.engine, installationId: source.installationId,
@@ -276,7 +247,19 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     source.engine === 'cat' && action === 'play' ? { mediaPurpose: 'receipt' } : undefined);
     return parseSourceValue(value);
   }
-  async function search(source, query, page = 1, { signal, canSchedule } = {}) {
+  async function catalog(source, action, payload = {}, { signal, canSchedule, refresh = false } = {}) {
+    source = checkSource(source);
+    requireValue(['home', 'category'].includes(action) && object(payload));
+    const deps = sourceDependencies(source);
+    return execute(deps, { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
+      await liveSource(source, ownedSignal, checkSchedule);
+      const entry = await load(sourceRequest(action, source, { payload: clone(payload) }),
+        producerSignal => invoke(source, action, payload, producerSignal),
+        { ttl: HOUR, dependencies: deps, signal: ownedSignal, checkSchedule, refresh });
+      return clone(entry.value);
+    });
+  }
+  async function search(source, query, page = 1, { signal, canSchedule, refresh = false } = {}) {
     source = checkSource(source);
     requireValue(text(query) && Number.isSafeInteger(page) && page > 0);
     const deps = sourceDependencies(source);
@@ -288,11 +271,11 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
         }, producerSignal);
         searchPage(raw, page);
         return raw;
-      }, { ttl: HOUR, dependencies: deps, signal: ownedSignal, checkSchedule });
+      }, { ttl: HOUR, dependencies: deps, signal: ownedSignal, checkSchedule, refresh });
       return clone(searchPage(entry.value, page));
     });
   }
-  async function detail(source, detailId, { signal, canSchedule } = {}) {
+  async function detail(source, detailId, { signal, canSchedule, refresh = false } = {}) {
     source = checkSource(source);
     requireValue(isIdentifier(detailId));
     const deps = sourceDependencies(source);
@@ -302,7 +285,7 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
         const raw = await invoke(source, 'detail', { id: detailId }, producerSignal);
         detailValue(raw, source, detailId);
         return raw;
-      }, { ttl: HOUR, dependencies: deps, signal: ownedSignal, checkSchedule });
+      }, { ttl: HOUR, dependencies: deps, signal: ownedSignal, checkSchedule, refresh });
       return detailValue(clone(entry.value), source, detailId);
     });
   }
@@ -318,7 +301,7 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     const deps = providers.map(provider => accountDependency(provider));
     return execute(deps, { signal }, (ownedSignal, checkSchedule) => readAccounts(ownedSignal, deps, checkSchedule));
   }
-  async function expand(source, line, { signal, canSchedule } = {}) {
+  async function expand(source, line, { signal, canSchedule, refresh = false } = {}) {
     source = playbackSource(source);
     requireValue(object(line) && isIdentifier(line.id) && Array.isArray(line.episodes));
     const shares = new Map();
@@ -360,7 +343,7 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
             typeof item.name === 'string' && typeof item.path === 'string'), 'UPSTREAM_FORMAT');
           for (const item of value.files) fileValue(item.file, share.provider, account.revision);
           return value;
-        }, { ttl: 5 * 60_000, dependencies: dependency, signal: ownedSignal, checkSchedule });
+        }, { ttl: 5 * 60_000, dependencies: dependency, signal: ownedSignal, checkSchedule, refresh });
         lists.set(key, entry.value.files);
       }
       const episodes = [];
@@ -390,69 +373,86 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     }));
     if (imageSize !== undefined) requireValue(provider === 'tmdb' &&
       typeof imageSize === 'string' && /^(?:original|[wh][1-9]\d*)$/.test(imageSize));
+    if (query.append_to_response !== undefined) requireValue(typeof query.append_to_response === 'string');
     return { kind: 'metadata', provider, path, query: clone(query),
       ...(provider === 'tmdb' ? { imageSize: imageSize ?? 'original' } : {}) };
   }
   async function settings(provider, signal, checkSchedule) {
     const value = await call(provider, 'settings.get', {}, signal, [{ domain: provider }], checkSchedule);
     requireValue(object(value) && text(value.revision), 'UPSTREAM_FORMAT');
-    return { revision: value.revision };
+    return value;
   }
-  async function getMetadata(request, { signal, completeness = 'complete', checkSchedule }) {
+  function configuredMetadataRequest(request, configuration) {
+    return { ...request,
+      query: request.provider === 'tmdb' ? tmdbQuery(request.path, request.query, configuration) : request.query,
+      settings: { revision: configuration.revision } };
+  }
+  async function getMetadata(request, { signal, completeness = 'complete', checkSchedule, refresh = false, requestedEpisode } = {}) {
     requireValue(['partial', 'complete'].includes(completeness));
+    requireValue(typeof refresh === 'boolean' && (requestedEpisode === undefined ||
+      Number.isSafeInteger(requestedEpisode) && requestedEpisode > 0));
     const configuration = await settings(request.provider, signal, checkSchedule);
-    const keyed = { ...request, settings: configuration };
+    const keyed = configuredMetadataRequest(request, configuration);
     const deps = [{ kind: 'metadata', domain: request.provider, revision: configuration.revision }];
-    return load(keyed, async producerSignal => {
-      const { provider, path, query, imageSize } = request;
+    checkSchedule?.();
+    return metadataCache.get(keyed, async (selected, producerSignal) => {
+      const { provider, path, query, imageSize } = selected;
       const raw = await call(provider, provider === 'douban' && path === 'search' ? 'search' : 'request',
         provider === 'douban' && path === 'search' ? query : {
           path, query, ...(imageSize === undefined ? {} : { imageSize }),
         }, producerSignal, deps);
-      return metadataValue(provider, path, raw, completeness);
-    }, { ttl: (value, at, level) => metadataTTL(request.provider, request.path, value, at, level),
-      completeness, dependencies: deps, signal, checkSchedule });
+      return metadataValue(provider, path, raw, 'partial');
+    }, { completeness, signal, refresh, requestedEpisode, checkSchedule });
   }
-  async function metadata(provider, path, query = {}, { signal, canSchedule, completeness = 'complete', imageSize } = {}) {
+  function rawMetadata(entry) {
+    if (entry?.cache.status === 'stale') throw fail(entry.cache.error?.code ?? 'STALE_METADATA');
+    return entry?.value ?? null;
+  }
+  async function metadataEntry(provider, path, query = {},
+    { signal, canSchedule, completeness = 'complete', imageSize, refresh = false, requestedEpisode } = {}) {
     const request = metadataRequest(provider, path, query, imageSize);
     return execute([{ domain: provider }], { signal, canSchedule },
-      async (ownedSignal, checkSchedule) => (await getMetadata(request, { signal: ownedSignal, completeness, checkSchedule })).value);
+      (ownedSignal, checkSchedule) => getMetadata(request,
+        { signal: ownedSignal, completeness, checkSchedule, refresh, requestedEpisode }));
+  }
+  async function metadata(provider, path, query = {}, options = {}) {
+    return rawMetadata(await metadataEntry(provider, path, query, options));
   }
   function targetRequest(target) {
     requireValue(['movie', 'tv'].includes(target.kind) && /^[1-9]\d*$/.test(String(target.metadataId)));
     return metadataRequest(target.metadataProvider, target.metadataProvider === 'tmdb'
       ? `/3/${target.kind}/${target.metadataId}` : `/rexxar/api/v2/${target.kind}/${target.metadataId}`,
-    target.metadataProvider === 'tmdb' ? { language: 'zh-CN', append_to_response: 'credits,similar,images' } : {});
+    target.metadataProvider === 'tmdb' ? { append_to_response: 'credits,similar,images' } : {});
   }
-  async function targetMetadata(target, { signal, canSchedule, rules } = {}) {
-    if (!target.metadataProvider) { open(signal); return null; }
+  async function targetMetadataEntry(target, { signal, canSchedule, rules, refresh = false } = {}) {
+    if (!target.metadataProvider || ['source', 'group'].includes(target.kind)) { open(signal); return null; }
     const request = targetRequest(target);
     return execute([{ domain: target.metadataProvider }], { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
-      const value = (await getMetadata(request, { signal: ownedSignal, checkSchedule })).value;
+      const entry = await getMetadata(request, { signal: ownedSignal, checkSchedule, refresh });
+      const { value } = entry;
       if (target.metadataProvider === 'douban' && target.kind === 'tv') {
-        const season = doubanSeason(value, target.metadataId, createRecognitionRules(rules));
-        if (season) return { ...value, doubanSeasons: [season] };
+        checkSchedule();
+        const season = await doubanSeason(value, target.metadataId, createRecognitionRules(rules), ownedSignal);
+        if (season) return { ...entry, value: { ...value, doubanSeasons: [season] } };
       }
-      return value;
+      return entry;
     });
+  }
+  async function targetMetadata(target, options = {}) {
+    return rawMetadata(await targetMetadataEntry(target, options));
   }
   async function metadataSourcesValue(target, supplied, rules, signal, checkSchedule) {
     if (!target.metadataProvider) return [];
     const primaryRequest = targetRequest(target);
-    const primary = supplied ?? (await getMetadata(primaryRequest, { signal, checkSchedule })).value;
+    if (supplied !== undefined) metadataValue(target.metadataProvider, primaryRequest.path, supplied, 'complete');
+    const primary = rawMetadata(await getMetadata(primaryRequest, { signal, checkSchedule }));
     metadataValue(target.metadataProvider, primaryRequest.path, primary, 'complete');
     const recognition = createRecognitionRules(rules);
-    const title = primary.title ?? primary.name ?? target.title;
-    const query = target.kind === 'tv' ? title.replace(/第\s*(?:\d+|[一二三四五六七八九十百千两零〇]+)\s*季/gi, ' ')
-      .replace(/\b(?:s|season)\s*\d{1,3}\b/gi, ' ').trim() : title;
-    const year = record => {
-      const value = record.year ?? record.release_date?.slice(0, 4) ?? record.first_air_date?.slice(0, 4)
-        ?? record.pubdate?.[0]?.slice(0, 4);
-      return /^\d{4}$/.test(String(value)) ? Number(value) : undefined;
-    };
-    const season = record => metadataSeason(record, recognition);
-    const primarySeason = target.kind === 'tv' && target.metadataProvider === 'douban' ? season(primary) : undefined;
-    const base = { ...target, ...primary, kind: target.kind, title: query, year: year(primary) ?? target.year,
+    checkSchedule?.();
+    const hint = await recognition.metadata(primary, target.kind, { signal });
+    const { title, query } = hint;
+    const primarySeason = target.kind === 'tv' && target.metadataProvider === 'douban' ? hint.season ?? undefined : undefined;
+    const base = { ...target, ...primary, kind: target.kind, title: query, year: hint.year ?? target.year,
       metadataProvider: target.metadataProvider, metadataId: target.metadataId };
     delete base.season; delete base.seasonHint; delete base.season_number;
     delete base.episode; delete base.globalEpisode;
@@ -462,7 +462,7 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     const opposite = target.metadataProvider === 'tmdb' ? 'douban' : 'tmdb';
     const found = [];
     if (modules.has('douban') && (opposite === 'douban' || target.metadataProvider === 'douban' && target.kind === 'tv')) {
-      const response = (await getMetadata(metadataRequest('douban', 'search', { query }), { signal, checkSchedule })).value;
+      const response = rawMetadata(await getMetadata(metadataRequest('douban', 'search', { query }), { signal, checkSchedule }));
       for (const row of response.subjects.items) found.push({ ...row.target,
         id: row.target_id ?? row.target.id, kind: row.target_type ?? row.target.type,
         metadataProvider: 'douban', metadataId: row.target_id ?? row.target.id });
@@ -471,8 +471,8 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
       let page = 1, pages = 1;
       const seen = new Set();
       do {
-        const response = (await getMetadata(metadataRequest('tmdb', `/3/search/${target.kind}`,
-          { query, language: 'zh-CN', page }), { signal, checkSchedule })).value;
+        const response = rawMetadata(await getMetadata(metadataRequest('tmdb', `/3/search/${target.kind}`,
+          { query, page }), { signal, checkSchedule }));
         pages = Number(response.total_pages ?? 1);
         requireValue(Number.isSafeInteger(pages) && pages >= 0, 'UPSTREAM_FORMAT');
         const key = identity(response.results);
@@ -484,9 +484,14 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
       } while (page <= pages);
     }
     const candidates = new Map();
-    for (const row of found) {
-      if (row.kind !== target.kind || !isIdentifier(row.metadataId)) continue;
-      const actualSeason = target.kind === 'tv' ? season(row) : undefined;
+    const eligible = found.filter(row => row.kind === target.kind && isIdentifier(row.metadataId));
+    checkSchedule?.();
+    const hints = await recognition.batch(eligible.map(record => ({
+      kind: 'metadata', record, contentKind: target.kind,
+    })), { signal });
+    const matches = [];
+    for (const [index, row] of eligible.entries()) {
+      const actualSeason = target.kind === 'tv' ? hints[index].season ?? undefined : undefined;
       const expected = { ...base };
       const sameIdentity = row.metadataProvider === target.metadataProvider &&
         String(row.metadataId) === String(target.metadataId);
@@ -500,9 +505,16 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
           for (const key of ['year', 'release_date', 'first_air_date', 'pubdate']) delete expected[key];
         }
       }
-      const knownYear = year(row) !== undefined && year(base) !== undefined;
+      const knownYear = hints[index].year !== null && base.year !== undefined;
       if (!sameIdentity && !knownYear && actualSeason === undefined) continue;
-      if (!sameIdentity && !matchesResult(row, { target: expected, rules })) continue;
+      matches.push({ row, actualSeason, sameIdentity, expected });
+    }
+    checkSchedule?.();
+    const matched = await recognition.batch(matches.map(({ row, expected }) => ({
+      kind: 'match', record: row, target: expected,
+    })), { signal });
+    for (const [index, { row, actualSeason, sameIdentity }] of matches.entries()) {
+      if (!sameIdentity && !matched[index]) continue;
       const group = row.metadataProvider === 'douban' && actualSeason !== undefined
         ? identity(row.metadataProvider, actualSeason) : identity(row.metadataProvider, 'identity');
       if (!candidates.has(group)) candidates.set(group, new Map());
@@ -510,26 +522,35 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     }
     const doubanSeasons = [];
     if (target.metadataProvider === 'douban' && target.kind === 'tv') {
-      const row = doubanSeason(primary, target.metadataId, recognition);
+      const row = seasonEvidence(primary, target.metadataId, primarySeason);
       if (row) doubanSeasons.push(row);
     }
+    const confirmed = [];
     for (const group of candidates.values()) {
       if (group.size !== 1) continue;
       const { row, actualSeason } = group.values().next().value;
       const provider = row.metadataProvider;
       const existing = result.find(item => item.provider === provider && String(item.metadataId) === String(row.metadataId));
-      const value = existing?.metadata ?? (await getMetadata(targetRequest({ ...target,
-        metadataProvider: provider, metadataId: row.metadataId }), { signal, checkSchedule })).value;
+      const value = existing?.metadata ?? rawMetadata(await getMetadata(targetRequest({ ...target,
+        metadataProvider: provider, metadataId: row.metadataId }), { signal, checkSchedule }));
       const verified = { ...value, kind: target.kind, title: value.title ?? value.name,
         metadataProvider: provider, metadataId: value.id };
-      requireValue(matchesResult(verified, { target: { ...row, kind: target.kind }, rules }), 'UPSTREAM_FORMAT');
+      confirmed.push({ row, actualSeason, provider, existing, value, verified });
+    }
+    checkSchedule?.();
+    const verifiedRows = await recognition.batch(confirmed.flatMap(({ row, verified }) => [
+      { kind: 'match', record: verified, target: { ...row, kind: target.kind } },
+      { kind: 'metadata', record: verified, contentKind: target.kind },
+    ]), { signal });
+    for (const [index, { row, actualSeason, provider, existing, value }] of confirmed.entries()) {
+      requireValue(verifiedRows[index * 2], 'UPSTREAM_FORMAT');
       if (!existing) result.push({ provider, metadataId: row.metadataId, kind: target.kind,
         title: value.title ?? value.name, metadata: value, association: {
           kind: actualSeason === undefined ? 'title-year' : 'title-season',
           targetProvider: target.metadataProvider, targetMetadataId: target.metadataId,
         } });
       if (provider === 'douban' && actualSeason !== undefined) {
-        const selected = doubanSeason(value, row.metadataId, recognition);
+        const selected = seasonEvidence(value, row.metadataId, verifiedRows[index * 2 + 1].season ?? undefined);
         if (selected) doubanSeasons.push(selected);
       }
     }
@@ -550,21 +571,31 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     return execute([{ domain: 'tmdb' }, { domain: 'douban' }], { signal, canSchedule },
       (ownedSignal, checkSchedule) => metadataSourcesValue(target, supplied, rules, ownedSignal, checkSchedule));
   }
-  async function seasonMetadata(target, season, { signal, canSchedule, rules } = {}) {
+  async function seasonMetadataEntry(target, season, { signal, canSchedule, rules, refresh = false, requestedEpisode } = {}) {
+    if (['source', 'group'].includes(target.kind)) { open(signal); return null; }
     requireValue(target.kind === 'tv' && Number.isSafeInteger(season) && season >= 0);
     return execute([{ domain: target.metadataProvider }, { domain: 'douban' }], { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
-      if (target.metadataProvider === 'tmdb') return (await getMetadata(metadataRequest('tmdb',
-        `/3/tv/${target.metadataId}/season/${season}`, { language: 'zh-CN' }), { signal: ownedSignal, checkSchedule })).value;
+      if (target.metadataProvider === 'tmdb') return getMetadata(metadataRequest('tmdb',
+        `/3/tv/${target.metadataId}/season/${season}`, {}),
+      { signal: ownedSignal, checkSchedule, refresh, requestedEpisode });
       requireValue(target.metadataProvider === 'douban');
-      const primary = (await getMetadata(targetRequest(target), { signal: ownedSignal, checkSchedule })).value;
-      const row = doubanSeason(primary, target.metadataId, createRecognitionRules(rules));
-      if (row?.season === season) return { ...primary, season, episodeCount: row.episodeCount };
+      const entry = await getMetadata(targetRequest(target), { signal: ownedSignal, checkSchedule, refresh, requestedEpisode });
+      const primary = entry.value;
+      checkSchedule();
+      const row = await doubanSeason(primary, target.metadataId, createRecognitionRules(rules), ownedSignal);
+      if (row?.season === season) return { ...entry, value: { ...primary, season, episodeCount: row.episodeCount } };
+      rawMetadata(entry);
       const sources = await metadataSourcesValue(target, primary, rules, ownedSignal, checkSchedule);
       const rows = sources.find(row => row.provider === 'douban')?.seasons ?? [];
       const selected = rows.find(row => row.season === season);
       requireValue(selected, 'NOT_FOUND');
-      return { ...selected.metadata, season, episodeCount: selected.episodeCount };
+      const selectedEntry = await getMetadata(targetRequest({ ...target, metadataId: selected.metadataId }),
+        { signal: ownedSignal, checkSchedule, refresh, requestedEpisode });
+      return { ...selectedEntry, value: { ...selectedEntry.value, season, episodeCount: selected.episodeCount } };
     });
+  }
+  async function seasonMetadata(target, season, options = {}) {
+    return rawMetadata(await seasonMetadataEntry(target, season, options));
   }
   const addressIdentity = (candidate, source) => identity(scopeOf(source), candidate.file
     ? { fileIdentity: stableFileIdentity(candidate.file), accountRevision: candidate.file.accountRevision }
@@ -627,11 +658,7 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
             if (value.file !== undefined) fileValue(value.file, file.provider, file.accountRevision);
             requireValue(value.mode === selectedMode, 'UPSTREAM_FORMAT');
             return value;
-          }, { ttl: (value, at) => {
-            if (value.expiresAt === undefined) return ADDRESS;
-            requireValue(Number.isFinite(value.expiresAt) && value.expiresAt > at, 'MEDIA_UNAVAILABLE');
-            return Math.min(ADDRESS, value.expiresAt - at);
-          }, dependencies: dependency, signal, checkSchedule });
+          }, { ttl: addressTTL, dependencies: dependency, signal, checkSchedule });
           return { ...clone(entry.value), resolvedFile: clone(file), resolvedAt: entry.fetchedAt,
             expiresAt: entry.expiresAt, scope: { ...scopeOf(source), accountProvider: provider, accountRevision: row.revision,
               fileProvider: file.provider, fileAccountRevision: file.accountRevision } };
@@ -644,11 +671,13 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     }
     requireValue(source.engine !== 'pan' && !candidate.share, 'INVALID_REQUEST');
     requireValue(isIdentifier(candidate.playId) && isIdentifier(candidate.flag));
-    const value = mediaValue(await invoke(source, 'play', { flag: candidate.flag, id: candidate.playId,
-      ...(source.engine === 'cat' ? { flags: [] } : { vipFlags: [] }) }, signal, checkSchedule));
-    const at = time();
-    requireValue(value.expiresAt === undefined || Number.isFinite(value.expiresAt) && value.expiresAt > at, 'MEDIA_UNAVAILABLE');
-    return { ...value, resolvedAt: at, expiresAt: Math.min(at + ADDRESS, value.expiresAt ?? at + ADDRESS), scope: scopeOf(source) };
+    const dependencies = [...sourceDependencies(source),
+      { kind: 'address', identity: addressIdentity(candidate, source) }];
+    const entry = await load(sourceRequest('play', source, { flag: candidate.flag, playId: candidate.playId }),
+      async producerSignal => mediaValue(await invoke(source, 'play', { flag: candidate.flag, id: candidate.playId,
+        ...(source.engine === 'cat' ? { flags: [] } : { vipFlags: [] }) }, producerSignal)),
+      { ttl: addressTTL, dependencies, signal, checkSchedule });
+    return { ...clone(entry.value), resolvedAt: entry.fetchedAt, expiresAt: entry.expiresAt, scope: scopeOf(source) };
   }
   function candidateDependencies(candidate, source) {
     return [...sourceDependencies(source), ...providers.filter(provider =>
@@ -672,6 +701,15 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
       return resolveValue(candidate, source, mode, ownedSignal, checkSchedule);
     });
   }
+  async function invalidateAddress(candidate, { signal, canSchedule } = {}) {
+    requireValue(object(candidate));
+    const source = playbackSource(candidate.source);
+    return execute(candidateDependencies(candidate, source), { signal, canSchedule }, async (_ownedSignal, checkSchedule) => {
+      const selected = addressIdentity(candidate, source);
+      await cache.invalidate(entry => entry.dependencies?.some(dep => dep.kind === 'address' && dep.identity === selected));
+      checkSchedule();
+    });
+  }
   async function report(candidate, payload, { signal, canSchedule } = {}) {
     requireValue(object(candidate) && isIdentifier(candidate.playId) && isIdentifier(candidate.flag));
     const source = checkSource(candidate.source);
@@ -691,7 +729,8 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     requireValue(object(input) && ['search', 'detail', 'metadata'].includes(input.kind));
     if (input.kind === 'metadata') {
       const request = metadataRequest(input.provider, input.path, input.query ?? {}, input.imageSize);
-      return { request: { ...request, settings: await settings(input.provider, signal, checkSchedule) }, dependencies: [{ domain: input.provider }] };
+      return { request: configuredMetadataRequest(request, await settings(input.provider, signal, checkSchedule)),
+        dependencies: [{ domain: input.provider }] };
     }
     const source = checkSource(input.source);
     await liveSource(source, signal, checkSchedule);
@@ -725,6 +764,10 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     const expiresAt = Math.min(input.fetchedAt + ttl, input.expiresAt ?? input.fetchedAt + ttl);
     if (expiresAt <= time()) return undefined;
     open(signal);
+    if (input.kind === 'metadata') {
+      return metadataCache.seed(request, input.value, { completeness: input.completeness,
+        fetchedAt: input.fetchedAt, expiresAt });
+    }
     const key = cacheKey(request), previous = cache.read(key);
     if (previous && previous.fetchedAt > input.fetchedAt &&
         (previous.completeness === 'complete' || input.completeness === 'partial')) return undefined;
@@ -753,6 +796,7 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     return execute(inputDependencies(input), { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
       const { request } = await handoffRequest(input, ownedSignal, checkSchedule);
       open(ownedSignal);
+      if (input.kind === 'metadata') return metadataCache.entry(request, { minimumCompleteness });
       return cache.read(cacheKey(request), { minimumCompleteness });
     });
   }
@@ -766,13 +810,15 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     return dep => dep.kind === 'source' && dep.engine === scope.engine &&
       (scope.installationId === undefined || dep.installationId === scope.installationId);
   }
-  function invalidate(scope) {
+  async function invalidate(scope) {
     open();
     const matches = selector(scope);
     const selected = [...pending].filter(work => work.dependencies.some(matches));
     for (const work of selected) work.controller.abort();
     const drained = cache.invalidate(entry => entry.dependencies?.some(matches));
-    return Promise.allSettled(selected.map(work => work.done)).then(() => drained);
+    const disk = metadataCache.invalidate(matches);
+    const results = await Promise.allSettled([drained, disk, ...selected.map(work => work.done)]);
+    for (const result of results.slice(0, 2)) if (result.status === 'rejected') throw result.reason;
   }
   function close() {
     if (closing) return closing;
@@ -782,9 +828,11 @@ export function createPlaybackData({ modules, cache, now = Date.now }) {
     let drained;
     try { drained = cache.invalidate(entry => entry.dependencies?.some(dep => dep.domain === cacheOwner.domain && dep.owner === cacheOwner.owner)); }
     catch (error) { if (error.code !== 'CLOSED') throw error; }
-    closing = Promise.allSettled(selected.map(work => work.done)).then(() => drained);
+    closing = Promise.allSettled([...selected.map(work => work.done), drained])
+      .then(() => metadataCache.close());
     return closing;
   }
-  return { search, detail, expand, metadata, targetMetadata, seasonMetadata, metadataSources,
-    resolve, refresh, report, accounts, seed, handoff, cachedEntry, invalidate, close };
+  return { catalog, search, detail, expand, metadata, metadataEntry, targetMetadata, targetMetadataEntry,
+    seasonMetadata, seasonMetadataEntry, metadataSources, resolve, refresh, invalidateAddress,
+    report, accounts, seed, handoff, cachedEntry, invalidate, close };
 }

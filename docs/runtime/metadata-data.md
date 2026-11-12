@@ -22,7 +22,7 @@ await runtime.start();
 // 宿主结束会话时：await runtime.close();
 ```
 
-也可与既有业务模块一并传给 `createAppRuntime`，每个模块只能出现一次。通用默认 `createRuntime`／`startRuntime` 仍装配 music、cat、source。iOS／Windows 正式 App entry 在同一会话中按 music、cat、source、pan、tmdb、douban、film 顺序精确装配七模块；`connectFilmPlayback` 复用两份元数据 owner，并连接配置变更撤权。provider 本身不创建业务缓存，[影视播放业务](film-playback.md)持有唯一业务数据缓存。模块源文件已纳入公共打包闭包；搜索交接见[共同契约](../common/film/search.md)，端侧事实分别见 [iOS 影视搜索](../ios/film-search.md)和 [Windows 影视搜索](../windows/film-search.md)。
+也可与既有业务模块一并传给 `createAppRuntime`，每个模块只能出现一次。通用默认 `createRuntime`／`startRuntime` 仍装配 music、cat、source。iOS／Windows 正式 App entry 在同一会话中按 music、cat、source、pan、tmdb、douban、film、netease 顺序精确装配八模块；`connectFilmPlayback` 复用两份元数据 owner，并连接配置变更撤权。[网易 token](netease-token.md)最后独立追加，不参与元数据取数；provider 本身不创建业务缓存，[影视播放业务](film-playback.md)持有唯一业务数据缓存。模块源文件已纳入公共打包闭包；搜索交接见[共同契约](../common/film/search.md)，端侧事实分别见 [iOS 影视搜索](../ios/film-search.md)和 [Windows 影视搜索](../windows/film-search.md)。
 
 | 模块 | 版本 | contract | 逻辑方法前缀 |
 | --- | --- | --- | --- |
@@ -37,10 +37,10 @@ await runtime.start();
 
 两模块均提供：
 
-- `settings.get {}`：读取非敏感设置、凭据是否已配置和不透明配置代次 `revision`。
-- `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的脱敏设置。
+- `settings.get {}`：读取完整设置（包括明文凭据）和不透明配置代次 `revision`。
+- `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的完整设置。
 
-`revision` 由此设置 owner 生成，与凭据内容没有派生关系；包括凭据在内的有效配置改变才换代，无变化更新保持不变。调用方只比较是否相等，不解析或持久使用其内容；运行器冷启动会生成新代次。影视业务缓存以此隔离配置，不能仅凭 `…Configured` 布尔值判断账号是否相同。代次不写入设置文件，也不是第二套持久配置。
+`revision` 是设置 owner 从完整有效配置生成的不透明稳定身份；包括凭据在内的有效配置改变才换代，无变化更新和冷启动保持不变。调用方只比较是否相等，不解析其内容。影视业务缓存以此隔离配置，不复制或用明文凭据充当缓存身份。身份不另写第二套持久配置，也不包含明文凭据；业务元数据的持久化、组件完整度和定向刷新由 [film data owner](film-playback.md)统一处理。
 
 运行器独占 `<dataRoot>/tmdb/settings.json` 和 `<dataRoot>/douban/settings.json`，文档格式为 `{version:1,settings:{…}}`。首次访问恢复配置，之后使用内存快照；更新通过运行器完成，不支持绕过运行器并发外部编辑。首次未配置读取默认值，不写空文件。损坏文件明确失败，不当成缺失、不静默重置。
 
@@ -48,40 +48,34 @@ await runtime.start();
 
 凭据由运行器保存和使用。客户端仅负责设置编辑和提交，不另建持久化事实来源，不在每次启动回灌。不向外部脚本实例授予此目录。
 
-**文件本身不额外加密**。复用 `PrivateDocuments` 的安全路径和原子写入；POSIX 新文件权限为 `0600`。宿主必须提供应用专用 dataRoot 并负责系统沙箱／目录权限，尤其 Windows 的 ACL。能够读取此目录的用户可以读取凭据。日志、调试导出及备份不得公开此目录；这不是 Keychain／DPAPI 保险库。
+**文件本身不额外加密**。复用 `PrivateDocuments` 的内部文档命名和原子写入；POSIX 新文件权限为 `0600`。宿主必须提供应用专用 dataRoot 并负责系统沙箱／目录权限，尤其 Windows 的 ACL。运行器自有存储允许系统与 App 管理的目录别名，不执行脚本文件系统的链接隔离检查。能够读取此目录的用户可以读取凭据。日志、调试导出及备份不得公开此目录；这不是 Keychain／DPAPI 保险库。
 
 ### TMDB
 
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
-| `apiBase` | `https://api.themoviedb.org` | `/3/...` 之前的完整基址 |
-| `imageBase` | `https://image.tmdb.org/t/p` | 图片 size 之前的完整基址 |
-| `apiKey` | 空 | API key，仅发 API 请求 |
-| `accessToken` | 空 | Bearer token，仅发 API 请求；两者均有时优先 token |
+| `apiBase` | `https://api.themoviedb.org/3` | TMDB 数据代理地址，含 API 版本的完整基址 |
+| `imageBase` | `https://image.tmdb.org` | TMDB 图片代理地址；缺少 `/t/p` 时按来源协议追加 |
+| `apiKey` | 空 | 单一 API TOKEN 表单写入的 v3 key 或 v4 token，仅发 API 请求 |
+| `accessToken` | 空 | 运行器直接调用方可显式提供 Bearer；表单保存时清空此字段，避免旧值遮盖新输入 |
+| `language` | `zh-CN` | 元数据请求默认语言 |
+| `region` | `CN` | search/discover 默认地区 |
+| `includeAdult` | `false` | search/discover 的 `include_adult` 默认值 |
 
-get 不包含 `apiKey`／`accessToken` 原值，改为 `apiKeyConfigured`／`accessTokenConfigured` 布尔值。地址只能使用 HTTP(S)，不允许 URL userinfo、query 或 fragment；不猜测站点是哪种代理项目，不自动添加或剥离代理前缀。
+get 直接返回上述值。双端只有一个明文“TMDB API TOKEN”输入项；支持 v3 key、v4 JWT 和 `Bearer ` 前缀。保存空 TOKEN 即清除，不提供额外的清除按钮。数据／图片代理留空保存使用官方端点。地址使用 HTTP(S)，不允许混入控制字符、query 或 fragment；没有域名名单、Origin 检查或自动探测代理。
 
-例如使用 Vercel API 与 GoProxy 图片：
-
-```json
-{
-  "apiBase": "https://metadata.example.invalid",
-  "imageBase": "https://images.example.invalid/tmdb-img/t/p"
-}
-```
-
-API 请求将到 `https://metadata.example.invalid/3/movie/42`；图片到 `https://images.example.invalid/tmdb-img/t/p/w500/example.jpg`。GoProxy 的图片路由透传到 `image.tmdb.org` 根，因此必须保留 `/t/p`，不是只填 `/tmdb-img`。
-
-支持二级及多级部署目录。例如 GoProxy 挂载在 `/pan` 时：
+例如与服务器同样使用多级部署地址：
 
 ```json
 {
-  "apiBase": "https://proxy.example.invalid/pan/tmdb",
-  "imageBase": "https://proxy.example.invalid/pan/tmdb-img/t/p"
+  "apiBase": "https://proxy.example.invalid/pan/tmdb/3",
+  "imageBase": "https://proxy.example.invalid/pan/tmdb-img"
 }
 ```
 
-对应请求为 `/pan/tmdb/3/movie/42` 和 `/pan/tmdb-img/t/p/w500/example.jpg`；再嵌套一层目录也按完整前缀拼接，不会回到站点根。`apiBase` 不包含 `/3`，因为 `request.path` 已包含它。运行器不按代理项目名自动增删目录，也不会从 API 地址推导图片地址；更换这些前缀不改变客户端持有的 `/v1/tmdb/images/...`。
+`request.path=/3/movie/42` 到 `/pan/tmdb/3/movie/42`，不会叠成 `/3/3`；图片到 `/pan/tmdb-img/t/p/w500/example.jpg`，已经填写 `/t/p` 时不会重复追加。API 基址带目录但未标版本时按服务器的完整 v3 基址语义拼接资源：`/custom/tmdb` 加 `/3/movie/42` 得 `/custom/tmdb/movie/42`；纯站点根基址保留请求中的版本。显式 raw `/4/...` 请求使用版本化基址的同一部署前缀，不变成 `/3/4/...`。不按代理项目名猜目录，也不从 API 地址推导图片地址；更换代理不改变客户端持有的 `/v1/tmdb/images/...`。
+
+有效查询在 `film.data` 和原始 TMDB 适配中使用同一轻量归一化函数：省略的语言、地区、成人选项读取当前配置，显式 query 可覆盖。缓存键、导出和 handoff 都使用有效查询，并按配置 revision 隔离；客户端不再硬编码语言覆盖用户选择。
 
 ### 豆瓣
 
@@ -90,11 +84,17 @@ API 请求将到 `https://metadata.example.invalid/3/movie/42`；图片到 `http
 | `apiBase` | `https://m.douban.com` | `/rexxar/api/v2/...` 之前的基址 |
 | `searchBase` | `https://search.douban.com` | `/movie/subject_search` 之前的基址 |
 | `imageBase` | `https://img3.doubanio.com` | `/view/...` 等来源图片路径之前的基址 |
-| `apiProxy` | 空 | 可选 URL 包装型数据中转模板 |
-| `imageProxy` | 空 | 可选 URL 包装型图片中转模板 |
+| `apiProxy` | 空 | 可选 URL 包装型数据中转前缀或模板 |
+| `imageProxy` | 空 | 可选 URL 包装型图片中转前缀或模板 |
 | `cookie` | 空 | 豆瓣请求凭据，不发给图片源 |
 
-get 用 `cookieConfigured` 替代原值。域名替换／路径前缀型代理直接配置 base；URL 包装型代理必须显式配置包含**一个** `{url}` 或 `{encodedUrl}` 的 HTTP(S) 模板。例如 `https://relay.example.invalid/?url={encodedUrl}`。`apiProxy` 用于数据与搜索，`imageProxy` 用于图片；模板不参与稳定图片身份。将凭据发送到显式配置的数据代理意味着信任该代理，运行器不会替第三方代理保证保密。
+get 返回 Cookie 原值。域名替换／路径前缀型代理直接配置 base；URL 包装型代理可配置普通 HTTP(S) 前缀，或包含**一个** `{url}`／`{encodedUrl}` 的模板，例如 `https://relay.example.invalid/?url={encodedUrl}`。`apiProxy` 用于数据与搜索，`imageProxy` 用于图片；代理不参与稳定图片身份。将凭据发送到显式配置的数据代理意味着信任该代理，运行器不会替第三方代理保证保密。
+
+双端“数据源”设置独立编辑 TMDB／豆瓣；iOS 保留同页 provider 切换。豆瓣数据代理、图片代理默认“无”，不提供服务器代理。数据选择包括 CORS 前缀 `https://ciao-cors.is-an.org/`、CMLiussss 腾讯云／阿里云 API CDN 和自定义包装前缀；API CDN 不伪造网页搜索 CDN，`searchBase` 仍为官方搜索地址。图片选择独立使用官方 `img3.doubanio.com` 直连（“无”）、CMLiussss 腾讯云／阿里云或自定义包装前缀。普通前缀按服务器语义接 `encodeURIComponent(targetURL)`；已有 `{url}`／`{encodedUrl}` 占位形式仍是原始运行器接口能力，不要求表单使用模板。
+
+Cookie 和 API TOKEN 明文读写，保存失败保留输入和原 saved 快照，成功后回显实际保存值。界面不再维护 configured 占位或“清除意图”，留空保存就是清空。客户端不复制持久化，不在启动时回灌；预设只在保存时生效。Cookie 只参与豆瓣数据／搜索请求，图片不从表单附加 Cookie 或 TMDB token。
+
+通用设置的“缓存管理”调用 `film.data.invalidate`，`domain` 分别为 `douban`、`tmdb`；“清空豆瓣与 TMDB 缓存”等待两次失效均结算，任一失败则报告失败。运行器处理内存／持久缓存失效与旧在途排空，客户端不直接删文件、不重启、不清配置／账号／历史／人工匹配／屏蔽／收藏，也不把清缓存冒充配置保存或自动重搜。
 
 ## 数据请求
 
@@ -108,7 +108,7 @@ get 用 `cookieConfigured` 替代原值。域名替换／路径前缀型代理�
 }
 ```
 
-接口使用上游 GET，不设业务路径或 query 字段许可表。`path` 是追加到已配置 API base 的路径，不是完整 URL；query、fragment 不混入 path，参数单独放 query。URL 按标准规则解析与规范化。配置 accessToken 时发送 Bearer，否则配置 apiKey 覆盖 query 中同名 `api_key`；其它 query 值按原文编码。`imageSize` 缺省为 `original`，支持 TMDB 的 `original`／`w<正整数>`／`h<正整数>` 格式；具体尺寸是否由上游支持仍由来源决定，configuration 返回的尺寸数组可供选择。
+接口使用上游 GET，不设业务路径或 query 字段许可表。`path` 是追加到已配置 API base 的路径，不是完整 URL；query、fragment 不混入 path，参数单独放 query。URL 按标准规则解析与规范化。认证优先使用显式 accessToken，否则从 apiKey 中识别 v4 JWT／Bearer 或 v3 key；v4 发送 Authorization，v3 覆盖 query 中同名 `api_key`。其它 query 值按原文编码。`imageSize` 缺省为 `original`，支持 TMDB 的 `original`／`w<正整数>`／`h<正整数>` 格式；具体尺寸是否由上游支持仍由来源决定，configuration 返回的尺寸数组可供选择。
 
 覆盖电影／剧集／人物／综合搜索、discover、trending、genre、configuration、电影与剧集列表／详情、季集、人物与合集详情及关联资源。未列出的 GET 路径同样交给已配置来源处理，是否支持由上游响应决定；没有新增任意目标 URL 或写入方法接口。
 
@@ -236,3 +236,11 @@ JSON 请求和图片流都可取消；模块关闭会取消上游，并等待已
 协议／会话错误仍使用 `runtime.http.v1` 的错误码。来源独立；一方失败不隐式调用另一方或合并数据。
 
 运行器测试使用合成 HTTP 上游与假凭据，覆盖结构、图片二进制、持久化恢复、代理切换和取消排空；不代表真实 TMDB 账号权限、豆瓣 Cookie／反爬条件已在线验收。iOS／Windows 通过二进制图片通道消费稳定相对引用，普通外部 HTTP(S) 图片也不设域名／回环访问门禁；客户端设置只编辑并提交运行器配置，不复制凭据持久化。douban provider 已由正式 App 装配并供 film 复用，但不据此声称原生搜索的豆瓣接线或合并后的平台验证已完成；搜索范围以[共同契约](../common/film/search.md)及上述端侧文档为准。
+
+## Film 元数据缓存边界
+
+`film` 的 data owner 持有 `<dataRoot>/film-metadata/{provider}/{key}.json`，按需异步读取；不在构造时创建或检查目录。按完整请求身份（含设置 revision、query、图片尺寸）直接读取并解码，缺失、读取失败或数据无法使用均为 miss，正常回源；不识别、迁移或兼容历史数据，不增加独立格式预检。有效命中的组件完整度、TTL 和身份规则保持不变。
+
+首次按需读取后，生产者的成功／失败结算只使用已捕获状态和当前内存，不再次读取磁盘；外部已取得的 seed 也只合并内存状态。成功结果和刷新失败的 stale/error 先在共享有界内存缓存结算，磁盘发布不参与请求结果等待。写入由 metadata owner 按 provider 排序，按需递归创建父目录、同目录异步临时文件原子替换，失败仅输出不含请求／凭据的诊断；不是无主后台任务。读直接读取文件，失效直接枚举 provider 目录并删除当前缓存键对应的目录项，不预检目录、文件或链接类型。App 管理的根与模块目录别名可用；文档链接可以读取，原子保存替换链接目录项，失效删除链接目录项，均不改写其另一端的文件。缓存不授予权限，也不改变业务设置文件的严格读写错误语义。
+
+配置变更先同步撤销旧任务／条目资格，再等待真实生产者、在途读取和已受理写入／删除排空。缓存文件删除失败不否定已经成功的 provider 设置回执；删除失败后，本 owner 不再从该 provider 的磁盘文件恢复数据，直到后续清理确实成功；期间只使用当前内存结果或回源，防止重读未删除的失效文件。显式 `film.data.invalidate` 仍报告实际删除失败，不能把未完成的物理清理宣称为成功。关闭先停止业务准入并撤销生产者，再排空已受理缓存发布；关闭不是清缓存，成功保存的结果可供新 owner 复用。

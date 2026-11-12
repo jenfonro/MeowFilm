@@ -454,7 +454,7 @@ public static partial class MusicUiTests
                     "the responsive container keeps both 32 DIP page margins at the current DPI");
                 var accountSection = (Border)view.FindName("AccountsSection");
                 var accountPanel = (StackPanel)accountSection.Child;
-                var accountTitle = accountPanel.Children.OfType<TextBlock>().Single();
+                var accountTitle = accountPanel.Children.OfType<Grid>().Single();
                 var accounts = (MusicAccountsView)view.FindName("AccountsPanel");
                 var titleBounds = new Rect(accountTitle.TranslatePoint(new Point(), accountSection), accountTitle.RenderSize);
                 var accountBounds = new Rect(accounts.TranslatePoint(new Point(), accountSection), accounts.RenderSize);
@@ -667,7 +667,8 @@ public static partial class MusicUiTests
                     if (size.Width == 860)
                     {
                         var accountSection = (Border)view.FindName("AccountsSection");
-                        var accountLabel = ((StackPanel)accountSection.Child).Children.OfType<TextBlock>().Single(text => text.Text == "账号");
+                        var accountLabel = ((StackPanel)accountSection.Child).Children.OfType<Grid>().Single()
+                            .Children.OfType<TextBlock>().Single(text => text.Text == "账号");
                         var accounts = (MusicAccountsView)view.FindName("AccountsPanel");
                         True(accounts.TranslatePoint(new Point(), accountSection).Y >=
                             accountLabel.TranslatePoint(new Point(0, accountLabel.ActualHeight), accountSection).Y,
@@ -862,11 +863,11 @@ public static partial class MusicUiTests
             True(clear.IsEnabled && cache.IsVisible && !f.Module.HomeSourceSettingsView.IsVisible, "cache control belongs to General cache area");
             f.Dialogs.Confirmation = false;
             clear.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Until(() => !f.Module.Busy);
-            True((await f.Store.ReadAsync(MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache.Namespace)).Data is null, "cancelled confirmation does not create cache metadata");
+            True(f.Cache.ReadMemory(MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache.Namespace).Data is null, "cancelled confirmation does not create cache metadata");
             f.Dialogs.Confirmation = true;
             clear.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Until(() => !f.Module.Busy);
-            True((await f.Store.ReadAsync(MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache.Namespace)).Data is not null, "confirmed action reaches the actual isolated cache owner");
-            Equal("播放缓存已清空", f.Module.Status);
+            True(f.Cache.ReadMemory(MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache.Namespace).Data is not null, "confirmed action reaches the actual isolated cache owner");
+            Equal("播放缓存文件已清理（当前播放不中断）", f.Module.Status);
             Equal(qualityReads, f.Calls.Count("music.quality.settings.get"));
             True(!f.Runtime.HasStarted && !f.Module.SettingsView.IsLoaded, "General does not activate music accounts sources or scripts");
             foreach (int width in new[] { 900, 600 })

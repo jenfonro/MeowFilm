@@ -15,14 +15,22 @@ private final class RuntimeHTTPFixture: @unchecked Sendable {
 
 private final class RuntimeTestURLProtocol: URLProtocol, @unchecked Sendable {
     static let fixture = RuntimeHTTPFixture()
-    private let lock = NSLock()
+    private let lock = NSRecursiveLock()
     private var stopped: (@Sendable () -> Void)?
     private var didStop = false
+    private var trickleTimer: DispatchSourceTimer?
+    private var chunks: [Data] = []
+    private var sentChunks = 0
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() { Self.fixture.handle(request, self) }
     override func stopLoading() {
-        lock.lock(); didStop = true; let callback = stopped; stopped = nil; lock.unlock()
+        lock.lock()
+        didStop = true
+        trickleTimer?.cancel(); trickleTimer = nil
+        chunks.removeAll()
+        let callback = stopped; stopped = nil
+        lock.unlock()
         callback?()
     }
     func onStop(_ callback: @escaping @Sendable () -> Void) {
@@ -49,6 +57,40 @@ private final class RuntimeTestURLProtocol: URLProtocol, @unchecked Sendable {
     }
     func send(_ data: Data) { client?.urlProtocol(self, didLoad: data) }
     func fail(_ code: Int) { client?.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: code)) }
+
+    var sentChunkCount: Int { lock.lock(); defer { lock.unlock() }; return sentChunks }
+
+    /// Nineteen parts finish after 0.9 seconds; every idle interval is only 0.05 seconds.
+    func trickle(data: Data, contentType: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didStop else { return }
+        chunks = (0..<19).map { data.subdata(in: ($0 * data.count / 19)..<(($0 + 1) * data.count / 19)) }
+        try startResponse(headers: ["Content-Type": contentType, "Content-Length": String(data.count)])
+        guard !didStop else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "RuntimeTestURLProtocol.trickle"))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(50))
+        timer.setEventHandler { [weak self] in self?.sendNextChunk() }
+        trickleTimer = timer
+        timer.resume()
+    }
+
+    private func sendNextChunk() {
+        // The same recursive lock serializes delivery with stopLoading, including
+        // synchronous Foundation cancellation from inside a client callback.
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didStop, sentChunks < chunks.count else { return }
+        let chunk = chunks[sentChunks]
+        sentChunks += 1
+        send(chunk)
+        guard !didStop else { return }
+        if sentChunks == chunks.count {
+            trickleTimer?.cancel(); trickleTimer = nil
+            chunks.removeAll()
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
 
     func body() -> Data {
         if let body = request.httpBody { return body }
@@ -86,14 +128,107 @@ private actor RuntimeHTTPCloseCompletion {
 
 final class RuntimeHTTPClientTests: XCTestCase {
     private let otherRequestID = "11111111-1111-4111-8111-111111111111"
-    private func client(timeout: TimeInterval = 30) throws -> RuntimeHTTPClient {
+    private func client(timeout: TimeInterval = 30, delegateQueue: OperationQueue? = nil) throws -> RuntimeHTTPClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RuntimeTestURLProtocol.self]
         return try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43210")!,
-                                     timeout: timeout, configuration: config)
+                                     timeout: timeout, configuration: config, delegateQueue: delegateQueue)
     }
     private func reply(_ value: RuntimeValue, contract: String = "music.script.v3") -> RuntimeValue {
         .object(["ok": .bool(true), "contract": .string(contract), "value": value])
+    }
+
+    func testSourceRulesHaveNoTransportDeadlineWithoutExtendingOtherCalls() async throws {
+        let client = try client()
+        let cases: [RuntimeValue] = [
+            .object(["operation": .string("transform"), "rules": .array([
+                .object(["timeoutMillisecond": .number(40_000)]),
+                .object(["timeoutMillisecond": .number(50_000)]),
+                .object(["timeoutMillisecond": .number(600_000), "isEnabled": .bool(false)]),
+                .object([:])
+            ])]),
+            .object(["operation": .string("transform"), "rules": .array([])]),
+            .object(["operation": .string("identity"), "book": .object([:])]),
+            .object(["operation": .string("matchUrl"), "pattern": .string(".*"), "url": .string("https://fixture.invalid/")])
+        ]
+        for request in cases {
+            RuntimeTestURLProtocol.fixture.set { outgoing, transport in
+                XCTAssertEqual(outgoing.url?.path, "/v1/source/rules.process")
+                XCTAssertEqual(outgoing.timeoutInterval, 0, "Node queue wait has no batch deadline")
+                XCTAssertNil(outgoing.value(forHTTPHeaderField: "Cookie"))
+                XCTAssertEqual(try? RuntimeJSON.decode(transport.body()), .object(["request": request]))
+                transport.respond(.object(["ok": .bool(true), "contract": .string("source.runtime.v2"), "value": .null]))
+            }
+            _ = try await client.call(module: .source, operation: "rules.process", parameters: .object(["request": request]))
+        }
+        RuntimeTestURLProtocol.fixture.set { outgoing, transport in
+            XCTAssertEqual(outgoing.timeoutInterval, 30)
+            transport.respond(.object(["ok": .bool(true), "contract": .string("source.runtime.v2"), "value": .null]))
+        }
+        _ = try await client.call(module: .source, operation: "library.list")
+        _ = try await client.call(module: .source, operation: "library.invoke")
+        await client.close()
+    }
+
+    func testCancellingRulesHTTPStopsTheRealTaskAndKeepsTheSharedClientAvailable() async throws {
+        let client = try client()
+        let entered = expectation(description: "rules HTTP entered")
+        let stopped = expectation(description: "rules HTTP physically cancelled")
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            transport.onStop { stopped.fulfill() }; entered.fulfill()
+        }
+        let work = Task { try await client.call(module: .source, operation: "rules.process", parameters: .object([
+            "request": .object(["operation": .string("transform"), "rules": .array([
+                .object(["timeoutMillisecond": .number(90_000)])
+            ])])
+        ])) }
+        await fulfillment(of: [entered], timeout: 2)
+        work.cancel()
+        do { _ = try await work.value; XCTFail("Cancelled rules cannot publish a reply") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .cancelled) }
+        await fulfillment(of: [stopped], timeout: 2)
+        XCTAssertFalse(client.isClosed)
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 0)
+            transport.respond(.object(["ok": .bool(true), "contract": .string("source.runtime.v2"), "value": .bool(true)]))
+        }
+        let recovered = try await client.call(module: .source, operation: "rules.process", parameters: .object([
+            "request": .object(["operation": .string("matchUrl"), "pattern": .string(".*"), "url": .string("https://fixture.invalid/")])
+        ]))
+        XCTAssertEqual(recovered, .bool(true), "Cancelling a borrower must leave the reusable rules transport open")
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            transport.respond(.object(["ok": .bool(true), "contract": .string("runtime.http.v1"), "value": .null]))
+        }
+        _ = try await client.describe()
+        await client.close()
+    }
+
+    func testOwnerCloseWaitsForRulesSessionInvalidationAndRevokesItImmediately() async throws {
+        let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
+        let client = try client(delegateQueue: queue)
+        let entered = expectation(description: "rule request parked")
+        let stopped = expectation(description: "rule request cancelled by owner")
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            transport.onStop { stopped.fulfill() }; entered.fulfill()
+        }
+        let work = Task { try await client.call(module: .source, operation: "rules.process", parameters: .object([
+            "request": .object(["operation": .string("transform"), "rules": .array([
+                .object(["timeoutMillisecond": .number(90_000)])
+            ])])
+        ])) }
+        await fulfillment(of: [entered], timeout: 2)
+        queue.isSuspended = true
+        defer { queue.isSuspended = false }
+        let completion = RuntimeHTTPCloseCompletion()
+        let closing = Task { await client.close(); await completion.finish() }
+        try await client.waitUntilClosed()
+        await fulfillment(of: [stopped], timeout: 2)
+        let finished = await completion.finished
+        XCTAssertFalse(finished, "The rules session must actually invalidate before owner close returns")
+        queue.isSuspended = false
+        await closing.value
+        do { _ = try await work.value; XCTFail("Closed owner cannot publish rule output") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
     }
 
     func testConcurrentHTTPRepliesStayWithTheirRequestWhenCompletedInReverseOrder() async throws {
@@ -181,14 +316,15 @@ final class RuntimeHTTPClientTests: XCTestCase {
         XCTAssertEqual(RuntimeModule.allCases.map { [$0.rawValue, $0.contract] }, [
             ["music", "music.script.v3"], ["cat", "cat.script.v2"], ["source", "source.runtime.v2"],
             ["pan", "pan.runtime.v1"], ["tmdb", "tmdb.data.v1"], ["douban", "douban.data.v1"],
-            ["film", "film.playback.v1"]
+            ["film", "film.playback.v1"], ["netease", "netease.token.v1"]
         ])
         let client = try client()
         for (module, operation, contract, code, foreignCode): (RuntimeModule, String, String, String, String) in [
             (.pan, "providers", "pan.runtime.v1", "LOGIN_EXPIRED", "NO_MATCH"),
             (.tmdb, "settings.get", "tmdb.data.v1", "NETWORK_ERROR", "PAN_FAILURE"),
             (.douban, "settings.get", "douban.data.v1", "WEB_INTERACTION_REQUIRED", "AUTH_REQUIRED"),
-            (.film, "library.get", "film.playback.v1", "MEDIA_DRM_UNSUPPORTED", "SOURCE_CLEANUP")
+            (.film, "library.get", "film.playback.v1", "MEDIA_DRM_UNSUPPORTED", "SOURCE_CLEANUP"),
+            (.film, "rules.preview", "film.playback.v1", "RESOURCE_LIMIT", "SOURCE_CLEANUP")
         ] {
             RuntimeTestURLProtocol.fixture.set { request, transport in
                 XCTAssertEqual(request.url?.path, "/v1/\(module.rawValue)/\(operation)")
@@ -207,6 +343,56 @@ final class RuntimeHTTPClientTests: XCTestCase {
             }
             do { _ = try await client.call(module: module, operation: operation); XCTFail("foreign code") }
             catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+        }
+        await client.close()
+    }
+
+    func testPublishedLowerCamelCaseOperationUsesExactSourceHTTPRoute() async throws {
+        let client = try client()
+        let parameters: RuntimeValue = .object(["reference": .string("/v1/source/images/accepted")])
+        let receipt: RuntimeValue = .object(["released": .bool(true)])
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:43210/v1/source/library.releaseImage")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Meow-Session"))
+            XCTAssertNotNil(UUID(uuidString: request.value(forHTTPHeaderField: "X-Meow-Request-Id") ?? ""))
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            XCTAssertEqual(try? RuntimeJSON.decode(transport.body()), parameters)
+            transport.respond(.object(["ok": .bool(true), "contract": .string("source.runtime.v2"), "value": receipt]))
+        }
+        let value = try await client.call(module: .source, operation: "library.releaseImage", parameters: parameters)
+        XCTAssertEqual(value, receipt)
+        for operation in ["library.releaseImage.extra", "library.imageLease.releaseImage.extraPart"] {
+            RuntimeTestURLProtocol.fixture.set { request, transport in
+                XCTAssertEqual(request.url?.path, "/v1/source/\(operation)")
+                transport.respond(.object(["ok": .bool(false), "contract": .string("runtime.http.v1"),
+                    "code": .string("METHOD_NOT_FOUND")]), status: 404)
+            }
+            do { _ = try await client.call(module: .source, operation: operation); XCTFail("unknown public method") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("METHOD_NOT_FOUND")) }
+        }
+        await client.close()
+    }
+
+    func testUnsafeOperationNamesAreRejectedBeforeSendingHTTP() async throws {
+        let client = try client()
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            XCTFail("Invalid operation must be rejected before creating an HTTP request")
+            transport.respond(.object(["ok": .bool(true), "contract": .string("source.runtime.v2"), "value": .null]))
+        }
+        for operation in ["", "Library.releaseImage", "library.ReleaseImage", "releaseImage", ".releaseImage",
+                          "library.", "../library.releaseImage", "library/releaseImage",
+                          "/v1/source/library.releaseImage", "https://fixture.invalid/library.releaseImage",
+                          "library.releaseImage/../close", "library.%72eleaseImage", "library.releaseImage%2fclose",
+                          "library.releaseImage?operation=close", "library.releaseImage#close",
+                          " library.releaseImage", "library.releaseImage ", "\nlibrary.releaseImage",
+                          "library.releaseImage\n", "library.releaseImage\u{0000}"] {
+            do {
+                _ = try await client.call(module: .source, operation: operation)
+                XCTFail("Invalid operation was accepted: \(String(reflecting: operation))")
+            } catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest, String(reflecting: operation)) }
         }
         await client.close()
     }
@@ -361,6 +547,116 @@ final class RuntimeHTTPClientTests: XCTestCase {
         XCTAssertTrue(client.isClosed)
     }
 
+    func testPerCallDeadlineExtendsOneRequestWithoutChangingTheDefault() async throws {
+        let client = try client(timeout: 0.2)
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 1)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
+                transport.respond(.object(["ok": .bool(true), "contract": .string("pan.runtime.v1"),
+                                           "value": .string("confirmed")]))
+            }
+        }
+        let result = try await client.call(module: .pan, operation: "login.poll", timeout: 1)
+        XCTAssertEqual(result, .string("confirmed"))
+        let stopped = expectation(description: "default deadline drained the next request")
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 0.2)
+            transport.onStop { stopped.fulfill() }
+        }
+        do { _ = try await client.call(module: .pan, operation: "providers"); XCTFail("Default deadline must still apply") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        await fulfillment(of: [stopped], timeout: 2)
+        await client.close()
+    }
+
+    func testTrickledRPCAndImageStillRespectWholeDeadline() async throws {
+        let rpcBytes = try RuntimeJSON.encode(reply(.string("available"), contract: "pan.runtime.v1"))
+        let imageBytes = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=="))
+        let reference = try XCTUnwrap(RuntimeHTTPClient.metadataImageURL("/v1/tmdb/images/w500/deadline.png"))
+        let client = try client(timeout: 0.4)
+        let rpcStopped = expectation(description: "trickled RPC physically stopped")
+        let imageStopped = expectation(description: "trickled image physically stopped")
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 0.4)
+            let image = request.url?.path == reference.absoluteString
+            if !image { XCTAssertEqual(request.url?.path, "/v1/pan/providers") }
+            transport.onStop { [weak transport] in
+                XCTAssertGreaterThan(transport?.sentChunkCount ?? 0, 1, "Data must arrive repeatedly before the whole deadline")
+                (image ? imageStopped : rpcStopped).fulfill()
+            }
+            try! transport.trickle(data: image ? imageBytes : rpcBytes,
+                                   contentType: image ? "image/png" : "application/json")
+        }
+        async let rpc: Void = {
+            do { _ = try await client.call(module: .pan, operation: "providers"); XCTFail("Trickled RPC must time out") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        }()
+        async let image: Void = {
+            do { _ = try await client.readMetadataImage(reference); XCTFail("Trickled image must time out") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        }()
+        _ = await (rpc, image)
+        await fulfillment(of: [rpcStopped, imageStopped], timeout: 2)
+        XCTAssertFalse(client.isClosed)
+        await client.close()
+    }
+
+    func testExtendedCallDoesNotExtendConcurrentDefaultRPCOrImage() async throws {
+        let rpcBytes = try RuntimeJSON.encode(reply(.string("confirmed"), contract: "pan.runtime.v1"))
+        let imageBytes = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=="))
+        let reference = try XCTUnwrap(RuntimeHTTPClient.metadataImageURL("/v1/tmdb/images/w500/deadline.png"))
+        let client = try client(timeout: 0.4)
+        let extendedStarted = expectation(description: "extended call is streaming before default requests start")
+        let rpcStopped = expectation(description: "parallel default RPC physically stopped")
+        let imageStopped = expectation(description: "parallel default image physically stopped")
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            let extended = request.url?.path == "/v1/pan/login.poll"
+            let image = request.url?.path == reference.absoluteString
+            XCTAssertEqual(request.timeoutInterval, extended ? 1.6 : 0.4)
+            if !extended {
+                if !image { XCTAssertEqual(request.url?.path, "/v1/pan/providers") }
+                transport.onStop { [weak transport] in
+                    XCTAssertGreaterThan(transport?.sentChunkCount ?? 0, 1)
+                    (image ? imageStopped : rpcStopped).fulfill()
+                }
+            }
+            try! transport.trickle(data: image ? imageBytes : rpcBytes,
+                                   contentType: image ? "image/png" : "application/json")
+            if extended { extendedStarted.fulfill() }
+        }
+        async let extended: Void = {
+            do {
+                let value = try await client.call(module: .pan, operation: "login.poll", timeout: 1.6)
+                XCTAssertEqual(value, .string("confirmed"))
+            } catch { XCTFail("The extended call must finish its trickled response: \(error)") }
+        }()
+        await fulfillment(of: [extendedStarted], timeout: 2)
+        async let rpc: Void = {
+            do { _ = try await client.call(module: .pan, operation: "providers"); XCTFail("Parallel RPC keeps its default deadline") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        }()
+        async let image: Void = {
+            do { _ = try await client.readMetadataImage(reference); XCTFail("Parallel image keeps its default deadline") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        }()
+        _ = await (extended, rpc, image)
+        await fulfillment(of: [rpcStopped, imageStopped], timeout: 2)
+        XCTAssertFalse(client.isClosed)
+        await client.close()
+    }
+
+    func testInvalidPerCallTimeoutIsRejectedBeforeHTTP() async throws {
+        let client = try client()
+        RuntimeTestURLProtocol.fixture.set { _, _ in XCTFail("Invalid deadline must not send") }
+        for timeout in [Double.zero, -1, .infinity, .nan] {
+            do { _ = try await client.call(module: .pan, operation: "login.poll", timeout: timeout); XCTFail("Invalid deadline") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest) }
+        }
+        await client.close()
+    }
+
     func testTimeoutDoesNotRetryAndPreCancelledCallsNeverSend() async throws {
         let client = try client()
         let called = expectation(description: "one transport attempt")
@@ -512,27 +808,103 @@ final class RuntimeHTTPClientTests: XCTestCase {
             await client.close()
         }
     }
+    func testSourceImagesUseOnlyOpaqueTrustedRoutesAndKeepFullContentBeyondCardBudget() async throws {
+        let client = try client(), bytes = Data(repeating: 0x45, count: 4 * 1_024 * 1_024 + 1)
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:43210/v1/source/images/opaque-reference_1")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Meow-Session"))
+            XCTAssertNotNil(UUID(uuidString: request.value(forHTTPHeaderField: "X-Meow-Request-Id") ?? ""))
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            try! transport.respond(data: bytes, headers: ["Content-Type": "image/png", "Content-Length": "\(bytes.count)"])
+        }
+        let read = try await client.readSourceImage("/v1/source/images/opaque-reference_1")
+        XCTAssertEqual(read, bytes)
+        for path in ["https://fixture.invalid/v1/source/images/a", "//fixture.invalid/a", "/v1/source/images/../a",
+                     "/v1/source/images/%2e%2e", "/v1/source/images/a?key=secret", "/v1/source/images/a/b", "/v1/tmdb/images/w500/a.png"] {
+            XCTAssertNil(RuntimeHTTPClient.sourceImageURL(path))
+            do { _ = try await client.readSourceImage(path); XCTFail(path) }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest) }
+        }
+        await client.close()
+    }
+    func testSourceImageErrorsAndCancellationDoNotReturnPrivatePartialBytes() async throws {
+        let client = try client()
+        for mode in ["remote", "identity", "redirect", "truncated"] {
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                switch mode {
+                case "remote":
+                    transport.respond(.object(["ok": .bool(false), "contract": .string("source.runtime.v2"), "code": .string("STALE_SOURCE")]), status: 404)
+                case "identity":
+                    try! transport.respond(data: Data([1]), headers: ["Content-Type": "image/png", "X-Meow-Request-Id": UUID().uuidString])
+                case "redirect":
+                    try! transport.respond(data: Data(), status: 302, headers: ["Location": "https://fixture.invalid/private"])
+                default:
+                    try! transport.startResponse(headers: ["Content-Type": "image/png", "Content-Length": "100"])
+                    transport.send(Data([1])); transport.fail(NSURLErrorNetworkConnectionLost)
+                }
+            }
+            do { _ = try await client.readSourceImage("/v1/source/images/private"); XCTFail(mode) }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, mode == "remote" ? .remote("STALE_SOURCE") : .invalidResponse) }
+        }
+        let entered = expectation(description: "source image streaming"), stopped = expectation(description: "source image physically stopped")
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            transport.onStop { stopped.fulfill() }
+            try! transport.startResponse(headers: ["Content-Type": "image/png"])
+            transport.send(Data([1])); entered.fulfill()
+        }
+        let read = Task { try await client.readSourceImage("/v1/source/images/private") }
+        await fulfillment(of: [entered], timeout: 3); read.cancel()
+        do { _ = try await read.value; XCTFail("Cancelled image cannot return bytes") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .cancelled) }
+        await fulfillment(of: [stopped], timeout: 3); await client.close()
+    }
 
-    func testAppDescribeRequiresExactSevenModuleVersionsContractsAndTMDBMethods() async throws {
+    func testAppDescribeRequiresExactEightModuleOrderVersionsContractsAndMethods() async throws {
         let client = try client()
         let modules: [RuntimeValue] = [
             .object(["id": .string("music"), "version": .string("0.8.0"), "contract": .string("music.script.v3")]),
             .object(["id": .string("cat"), "version": .string("0.2.0"), "contract": .string("cat.script.v2")]),
-            .object(["id": .string("source"), "version": .string("0.2.0"), "contract": .string("source.runtime.v2")]),
+            .object(["id": .string("source"), "version": .string("0.3.0"), "contract": .string("source.runtime.v2")]),
             .object(["id": .string("pan"), "version": .string("0.1.0"), "contract": .string("pan.runtime.v1")]),
             .object(["id": .string("tmdb"), "version": .string("0.1.0"), "contract": .string("tmdb.data.v1"),
                 "methods": .array(["request", "settings.get", "settings.update"].map { .string("tmdb.data." + $0) })]),
             .object(["id": .string("douban"), "version": .string("0.1.0"), "contract": .string("douban.data.v1")]),
-            .object(["id": .string("film"), "version": .string("0.1.0"), "contract": .string("film.playback.v1")])
+            .object(["id": .string("film"), "version": .string("0.1.0"), "contract": .string("film.playback.v1")]),
+            .object(["id": .string("netease"), "version": .string("0.1.0"), "contract": .string("netease.token.v1"),
+                "methods": .array([.string("netease.token.get")])])
         ]
-        let invalidTMDB: RuntimeValue = .object(["id": .string("tmdb"), "version": .string("0.2.0"), "contract": .string("tmdb.data.v1")])
-        let beforeTMDB = Array(modules.prefix(4)), afterTMDB = Array(modules.suffix(2))
-        let missingTMDB: [RuntimeValue] = beforeTMDB + afterTMDB
-        let duplicateTMDB: [RuntimeValue] = modules + [modules[4]]
-        let wrongVersion: [RuntimeValue] = beforeTMDB + [invalidTMDB] + afterTMDB
-        let wrongModule: [RuntimeValue] = beforeTMDB + [modules[0]] + afterTMDB
-        let suppliedModules = [modules, missingTMDB, duplicateTMDB, wrongVersion, wrongModule]
-        for (index, supplied) in suppliedModules.enumerated() {
+        var reordered = modules
+        reordered.swapAt(3, 4)
+        var invalid = [
+            Array(modules.prefix(3)), Array(modules.prefix(4)),
+            [modules[0], modules[1], modules[2], modules[4], modules[7]],
+            Array(modules.prefix(7)), Array(modules.prefix(4)) + Array(modules.suffix(3)),
+            modules + [modules[4]], reordered
+        ]
+        for index in modules.indices {
+            for (field, value) in [("version", RuntimeValue.string("invalid")),
+                                   ("contract", .string("invalid")), ("id", .string("unknown"))] {
+                var supplied = modules
+                guard case .object(var fields) = supplied[index] else { return XCTFail("module fixture") }
+                fields[field] = value; supplied[index] = .object(fields); invalid.append(supplied)
+            }
+        }
+        for (index, field, value) in [
+            (2, "version", RuntimeValue.string("0.2.0")),
+            (4, "version", .string("0.2.0")), (4, "methods", .array([])),
+            (4, "methods", .array([.string("tmdb.data.request")])),
+            (4, "id", .string("music")),
+            (7, "version", .string("0.2.0")), (7, "contract", .string("music.script.v3")),
+            (7, "methods", .array([])), (7, "methods", .array([.string("netease.token.get"), .string("netease.token.get")])),
+            (7, "methods", .array([.string("netease.token.other")])), (7, "id", .string("music"))
+        ] {
+            var supplied = modules
+            guard case .object(var fields) = supplied[index] else { return XCTFail("module fixture") }
+            fields[field] = value; supplied[index] = .object(fields); invalid.append(supplied)
+        }
+        for (index, supplied) in ([modules] + invalid).enumerated() {
             RuntimeTestURLProtocol.fixture.set { _, transport in
                 transport.respond(.object(["ok": .bool(true), "contract": .string("runtime.http.v1"), "value": .object([
                     "protocol": .string("runtime.http.v1"), "product": .string("aggregate"), "modules": .array(supplied)
@@ -542,6 +914,73 @@ final class RuntimeHTTPClientTests: XCTestCase {
             catch { XCTAssertNotEqual(index, 0); XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
         }
         await client.close()
+    }
+
+    func testNeteaseTokenRoutingHasEmptyInputAndSixtySecondBudgetWithOrdinaryRequestBudgetPreserved() async throws {
+        let client = try client()
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.url?.path, "/v1/netease/get")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.timeoutInterval, 60)
+            XCTAssertEqual(transport.body(), Data("{}".utf8))
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            transport.respond(.object(["ok": .bool(true), "contract": .string("netease.token.v1"),
+                                       "value": .object(["token": .string("synthetic-token")])]))
+        }
+        let value = try await client.call(module: .netease, operation: "get")
+        XCTAssertEqual(value, .object(["token": .string("synthetic-token")]))
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 30)
+            transport.respond(.object(["ok": .bool(true), "contract": .string("music.script.v3"), "value": .null]))
+        }
+        _ = try await client.call(module: .music, operation: "invoke")
+        RuntimeTestURLProtocol.fixture.set { _, _ in XCTFail("invalid token calls must not reach HTTP") }
+        for (operation, parameters) in [("token.get", RuntimeValue.object([:])),
+                                        ("get", .object(["cookie": .string("synthetic")])),
+                                        ("get", .null)] {
+            do { _ = try await client.call(module: .netease, operation: operation, parameters: parameters); XCTFail("invalid input") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest) }
+        }
+        await client.close()
+    }
+
+    func testNeteaseTokenEnvelopeAcceptsOnlyItsContractAndClosedErrorVocabulary() async throws {
+        let client = try client()
+        for code in ["INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
+                     "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP"] {
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                transport.respond(.object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string(code)]))
+            }
+            do { _ = try await client.call(module: .netease, operation: "get"); XCTFail("remote failure") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote(code)) }
+        }
+        for response in [
+            reply(.object(["token": .string("synthetic")])),
+            .object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string("SCRIPT_FAILURE")]),
+            .object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string("SDK_FAILURE"), "message": .string("unsafe")])
+        ] {
+            RuntimeTestURLProtocol.fixture.set { _, transport in transport.respond(response) }
+            do { _ = try await client.call(module: .netease, operation: "get"); XCTFail("invalid envelope") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+        }
+        await client.close()
+    }
+
+    func testNeteaseTokenCancellationAndOwnerCloseStopTheActualHTTPTask() async throws {
+        for ownerClose in [false, true] {
+            let client = try client()
+            let entered = expectation(description: "token request entered"), stopped = expectation(description: "token request stopped")
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                transport.onStop { stopped.fulfill() }; entered.fulfill()
+            }
+            let pending = Task { try await client.call(module: .netease, operation: "get") }
+            await fulfillment(of: [entered], timeout: 2)
+            if ownerClose { await client.close() } else { pending.cancel() }
+            do { _ = try await pending.value; XCTFail("pending token cannot succeed") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, ownerClose ? .closed : .cancelled) }
+            await fulfillment(of: [stopped], timeout: 2)
+            await client.close()
+        }
     }
 
     func testRejectsMalformedEndpointComponents() throws {
@@ -654,26 +1093,28 @@ final class RuntimeHTTPClientTests: XCTestCase {
     }
 
     func testConfirmedClosureIsObservableBeforeBlockedHTTPDrainCompletes() async throws {
-        let client = try client(), drain = DispatchSemaphore(value: 0)
+        let delegateQueue = OperationQueue()
+        delegateQueue.maxConcurrentOperationCount = 1
+        let client = try client(delegateQueue: delegateQueue)
         let entered = expectation(description: "HTTP request is parked")
-        let stopping = expectation(description: "HTTP cancellation is awaiting physical drain")
+        let stopping = expectation(description: "HTTP transport received cancellation")
         RuntimeTestURLProtocol.fixture.set { _, transport in
-            transport.onStop {
-                stopping.fulfill()
-                XCTAssertEqual(drain.wait(timeout: .now() + 5), .success)
-            }
+            transport.onStop { stopping.fulfill() }
             entered.fulfill()
         }
         let request = Task { try await client.describe() }
         await fulfillment(of: [entered], timeout: 2)
+        // URLProtocol.stopLoading may overlap session invalidation. Hold the
+        // actual completion/invalidation queue to keep the owner's drain pending.
+        delegateQueue.isSuspended = true
+        defer { delegateQueue.isSuspended = false }
         let completion = RuntimeHTTPCloseCompletion()
         let closing = Task { await client.close(); await completion.finish() }
-        defer { drain.signal() }
         try await client.waitUntilClosed()
         await fulfillment(of: [stopping], timeout: 2)
         let finished = await completion.finished
         XCTAssertFalse(finished, "Revocation must not wait for HTTP drain, but owner close must")
-        drain.signal()
+        delegateQueue.isSuspended = false
         await closing.value
         do { _ = try await request.value; XCTFail("owner invalidated HTTP") }
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }

@@ -25,8 +25,10 @@ enum MusicRemoteCollectionActionsFixture {
     }
     static func source(_ pages: MusicAccountQueuePages,
                        kind: MusicRemoteQueueContext.Kind = .playlist,
+                       collection: MusicPublicBrowseCollection? = .init(platform: .qq, nativeID: "501", title: "Remote collection"),
                        probe: MusicRemoteCollectionActionsProbe = .init()) -> MusicRemoteQueueSource {
-        .init(context: .init(kind: kind, id: "remote-list", title: "Remote collection", platform: "tx"),
+        .init(context: .init(kind: kind, id: "remote-list", title: "Remote collection", platform: "tx",
+                            collection: kind == .playlist ? collection : nil),
             loadPage: { try await pages.read($0) },
             validate: { try await probe.validate() },
             close: { await probe.close() })
@@ -51,4 +53,5 @@ actor MusicRemoteCollectionActionsProbe {
     }
     func close() { closes += 1 }
     func closeCount() -> Int { closes }
+    func validationCount() -> Int { validations }
 }

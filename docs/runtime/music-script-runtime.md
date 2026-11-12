@@ -44,7 +44,7 @@ Content-Type: application/octet-stream
 
 ## 安装事实与私有 KV
 
-音乐模块是 `<dataRoot>/music` 的唯一 writer。`PrivateDocuments` 限定私有路径、拒绝链接与路径穿越，原子替换完整文件。
+音乐模块是 `<dataRoot>/music` 的唯一 writer。`PrivateDocuments` 使用 App 提供的存储根及内部文档命名契约，允许系统与 App 管理的目录别名，原子替换完整文件；它不是脚本文件系统，不对运行器自有文档做链接或祖先目录隔离检查。脚本的存储能力边界由脚本宿主管理。
 
 - `catalog.json`：schema、revision、UUID、名称、origin、enabled、current/previous、完整声明与检测快照。
 - `sources/<sha256>.js`：内容寻址源码；current、previous 和正在试运行的候选保留，完成管理后回收无引用文件。

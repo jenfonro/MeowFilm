@@ -18,76 +18,78 @@ public static partial class MusicUiTests
         yield return Case("TMDB admitted settings save drains before close and never restores a revoked search", MetadataSaveDrain);
         yield return Case("metadata content captures its exact producer and never invents native detail cache receipts", MetadataProducerConsumer);
     }
+    private static void MetadataSearch(FilmSearchConsumerRuntime runtime)
+    {
+        var details = new Dictionary<Guid, JsonElement>();
+        runtime.SearchOpen = (id, input) =>
+        {
+            details[id] = MetadataRuntime.Detail("详情" + runtime.SearchOpens);
+            return SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), [SearchFixture.Card("tmdb:tv:7", "tmdb", "目标", [])], []);
+        };
+        runtime.SearchHandoff = input =>
+        {
+            var id = Guid.Parse(FilmJson.Text(input, "sessionId"));
+            return SearchFixture.Handoff(id, FilmJson.Text(input, "selectionId"), FilmJson.Text(runtime.SearchValue(id), "query"),
+                new("tmdb:tv:7", "tv", "目标", "tmdb", "7"), [], metadata: details[id]);
+        };
+    }
     private static async Task MetadataSaveConsumer()
     {
-        using var runtime = new MetadataRuntime();
-        var metadata = new FilmMetadataService(runtime);
-        await using var scene = await UnifiedScene.Create(metadata: metadata);
+        using var settings = new MetadataRuntime();
+        var metadata = new FilmMetadataService(settings);
+        using var runtime = new FilmSearchConsumerRuntime(); MetadataSearch(runtime);
+        await using var scene = await UnifiedScene.Create(metadata: metadata, runtime: runtime);
         await scene.Submit("目标", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
         var oldSession = scene.Film.Search.Current!;
-        var oldCard = scene.Page.Cards.Single(card => card.SearchContext!.DisplayKey.StartsWith("tmdb:", StringComparison.Ordinal));
-        await scene.Page.OpenCardAsync(oldCard);
+        await scene.Page.OpenCardAsync(scene.Page.Cards.Single());
         var oldPlayback = scene.Film.Playback!;
-        var oldContext = oldPlayback.SearchContext!;
-        runtime.FailSave = true;
+        settings.FailSave = true;
         await BridgeTests.Expect("STORAGE_ERROR", () => metadata.SaveSettingsAsync(new Dictionary<string, object?>()));
-        True(ReferenceEquals(scene.Film.Search.Current, oldSession), "failed save cannot revoke an effective search");
-        runtime.FailSave = false;
+        True(ReferenceEquals(scene.Film.Search.Current, oldSession), "failed settings receipt cannot revoke an effective search");
+        settings.FailSave = false;
         await metadata.SaveSettingsAsync(new Dictionary<string, object?>());
-        True(scene.Film.Search.Current is null && scene.Page.Cards.Count == 0 && runtime.Searches == 1,
-            "success revokes the current lease and visible old cards without requesting anything");
+        True(scene.Film.Search.Current is null && scene.Page.Cards.Count == 0 && runtime.SearchOpens == 1,
+            "successful save revokes display without starting another search");
         Equal("详情1", oldPlayback.Overview);
-        scene.Click("BackButton");
-        await SearchFixture.Until(() => scene.SearchHost is not null && scene.Status == "");
+        scene.Click("BackButton"); await SearchFixture.Until(() => scene.SearchHost is not null && scene.Status == "");
         await SearchFixture.Settle(scene.Film.Search.Current!);
         var current = scene.Film.Search.Current!;
-        True(!ReferenceEquals(current, oldSession) && current.Query == oldSession.Query &&
-            runtime.Searches == 2 && runtime.Details == 2, "return explicitly enters the same word with fresh content calls to the Node owner");
-        await scene.Page.OpenCardAsync(scene.Page.Cards.Single(card => card.SearchContext!.DisplayKey.StartsWith("tmdb:", StringComparison.Ordinal)));
-        True(!ReferenceEquals(oldPlayback, scene.Film.Playback) && !ReferenceEquals(oldContext.Session, scene.Film.Playback!.SearchContext!.Session),
-            "the actual page and FilmCapability receiver accept the new session without re-identifying the old choice");
-        Equal("详情2", scene.Film.Playback!.Overview);
-        Equal("详情1", oldPlayback.Overview);
-        True(ReferenceEquals(oldContext.Session, oldSession), "old opened detail retains its original session and metadata");
+        True(!ReferenceEquals(current, oldSession) && current.Query == oldSession.Query && runtime.SearchOpens == 2,
+            "explicit same-word return asks Node for a new session after invalidation");
+        await scene.Page.OpenCardAsync(scene.Page.Cards.Single());
+        True(!ReferenceEquals(oldPlayback, scene.Film.Playback), "the new opaque session creates a different playback selection");
+        Equal("详情2", scene.Film.Playback!.Overview); Equal("详情1", oldPlayback.Overview);
     }
     private static async Task MetadataLateConsumer()
     {
-        var held = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var runtime = new MetadataRuntime { HeldDetail = held.Task };
-        var metadata = new FilmMetadataService(runtime);
-        await using var scene = await UnifiedScene.Create(metadata: metadata);
-        try
-        {
-            await scene.Submit("目标", "film");
-            var previous = scene.Film.Search.Current!;
-            await SearchFixture.Until(() => runtime.Details == 1);
-            var old = new FilmSearchContext(previous, previous.Items.Single(item => item.GetProperty("sourceKind").GetString() == "tmdb"));
-            await metadata.SaveSettingsAsync(new Dictionary<string, object?>());
-            True(runtime.DetailToken.IsCancellationRequested && scene.Film.Search.Current is null &&
-                runtime.Searches == 1, "save cancels in-flight old detail and does not search automatically");
-            runtime.HeldDetail = null;
-            await scene.Submit("目标", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
-            var refreshed = new FilmSearchContext(scene.Film.Search.Current!,
-                scene.Film.Search.Current!.Items.Single(item => item.GetProperty("sourceKind").GetString() == "tmdb"));
-            held.SetResult(MetadataRuntime.Detail("迟到旧详情"));
-            await SearchFixture.Settle(previous); await Drain();
-            await scene.Submit("另一个词", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
-            Equal(3, runtime.Details);
-            var next = scene.Page.Cards.Single(card => card.SearchContext!.DisplayKey.StartsWith("tmdb:", StringComparison.Ordinal));
-            Equal("详情3", next.SearchContext!.Metadata!.Value.GetProperty("overview").GetString());
-            Equal("详情2", refreshed.Metadata!.Value.GetProperty("overview").GetString());
-            Equal("已得搜索简介", old.Metadata!.Value.GetProperty("overview").GetString());
-            True(runtime.Searches == 3, "every new query calls the formal producer; this mock does not impersonate the unique Node cache");
-            True(scene.Film.Search.TrackedSessions == 1, "retired old query drains and releases the service tracking");
-        }
-        finally { held.TrySetResult(MetadataRuntime.Detail("迟到旧详情")); }
+        using var settings = new MetadataRuntime();
+        var metadata = new FilmMetadataService(settings);
+        using var runtime = new FilmSearchConsumerRuntime(); MetadataSearch(runtime);
+        await using var scene = await UnifiedScene.Create(metadata: metadata, runtime: runtime);
+        await scene.Submit("目标", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
+        var previous = scene.Film.Search.Current!;
+        await scene.Page.OpenCardAsync(scene.Page.Cards.Single()); var retained = scene.Film.Playback!;
+        await metadata.SaveSettingsAsync(new Dictionary<string, object?>());
+        True(scene.Film.Search.Current is null && previous.Retired && runtime.SearchOpens == 1,
+            "save cancels old UI publication without automatically requesting new content");
+        scene.Click("BackButton"); await SearchFixture.Until(() => scene.SearchHost is not null && scene.Status == "");
+        await SearchFixture.Settle(scene.Film.Search.Current!);
+        var refreshed = scene.Film.Search.Current!;
+        runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(previous.Id), previous.Query,
+            [SearchFixture.Card("tmdb:tv:7", "tmdb", "迟到旧详情", [])], [], revision: 99));
+        await Drain();
+        True(scene.Page.Cards.Single().Title == "目标" && refreshed.Revision < 99 && previous.Revision < 99,
+            "late revoked metadata cannot replace the new query or the retained old snapshot");
+        Equal("详情1", retained.Overview);
+        await scene.Page.OpenCardAsync(scene.Page.Cards.Single()); Equal("详情2", scene.Film.Playback!.Overview);
     }
     private static async Task MetadataSaveDrain()
     {
         var receipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var runtime = new MetadataRuntime { HeldSave = receipt.Task };
-        var metadata = new FilmMetadataService(runtime);
-        await using var scene = await UnifiedScene.Create(metadata: metadata);
+        using var settings = new MetadataRuntime { HeldSave = receipt.Task };
+        var metadata = new FilmMetadataService(settings);
+        using var runtime = new FilmSearchConsumerRuntime(); MetadataSearch(runtime);
+        await using var scene = await UnifiedScene.Create(metadata: metadata, runtime: runtime);
         await scene.Submit("目标", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
         using var caller = new CancellationTokenSource();
         var save = metadata.SaveSettingsAsync(new Dictionary<string, object?>(), caller.Token);
@@ -95,29 +97,26 @@ public static partial class MusicUiTests
         var close = scene.Film.PrepareShutdownAsync();
         try
         {
-            True(!save.IsCompleted && !close.IsCompleted && !runtime.SaveToken.IsCancellationRequested,
-                "an admitted write cannot be abandoned by caller cancel or close preparation");
+            True(!save.IsCompleted && !close.IsCompleted && !settings.SaveToken.IsCancellationRequested,
+                "caller cancellation and close drain an admitted settings write without abandoning its receipt");
             receipt.SetResult(); await save; await close;
-            True(scene.Film.Search.Current is null && scene.Page.Cards.Count == 0,
-                "the successful receipt still revokes its old search before shutdown drain acknowledges completion");
+            True(scene.Film.Search.Current is null && scene.Page.Cards.Count == 0, "successful save revokes the old search during shutdown");
             await scene.Film.CancelShutdownPreparationAsync();
-            True(scene.Film.Search.Current is null && runtime.Searches == 1,
-                "cancelled shutdown does not auto-request the revoked metadata session");
+            True(scene.Film.Search.Current is null && runtime.SearchOpens == 1, "shutdown cancellation does not restore a revoked search");
             await scene.Submit("最终关闭", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
-            var retained = scene.Page.Cards.Single(card => card.SearchContext!.DisplayKey.StartsWith("tmdb:", StringComparison.Ordinal)).SearchContext!;
-            string snapshot = retained.Metadata!.Value.GetRawText();
+            await scene.Page.OpenCardAsync(scene.Page.Cards.Single()); var retained = scene.Film.Playback!;
+            string snapshot = retained.Request.Metadata!.Value.GetRawText();
             var finalReceipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            runtime.HeldSave = finalReceipt.Task;
+            settings.HeldSave = finalReceipt.Task;
             var finalSave = metadata.SaveSettingsAsync(new Dictionary<string, object?>());
             var abort = scene.Film.AbortAsync();
             try
             {
-                await SearchFixture.Until(() => scene.Search.Engine.Disposals == 1 && scene.Film.Search.TrackedSessions == 0);
-                True(!abort.IsCompleted && !finalSave.IsCompleted,
-                    "forced release still waits for an admitted settings receipt after the search owner physically closes");
+                True(!abort.IsCompleted && !finalSave.IsCompleted, "forced close still waits for its admitted settings write");
                 finalReceipt.SetResult(); await finalSave; await abort;
-                Equal(snapshot, retained.Metadata!.Value.GetRawText());
-                True(retained.Query == "最终关闭", "final disposal cannot dispatch saved notifications to a released search or discard its retained data");
+                Equal(snapshot, retained.Request.Metadata!.Value.GetRawText());
+                True(scene.Film.Search.TrackedSessions == 0 && retained.SearchContext!.Query == "最终关闭",
+                    "final disposal releases search ownership but preserves retained display data");
             }
             finally { finalReceipt.TrySetResult(); }
         }
@@ -200,7 +199,7 @@ public static partial class MusicUiTests
             }
             return JsonSerializer.SerializeToElement(new { ok = true, contract = "tmdb.data.v1", value = new
             { apiBase = "https://api.fixture.invalid", imageBase = "https://image.fixture.invalid/t/p",
-                apiKeyConfigured = false, accessTokenConfigured = false } });
+                apiKey = "", accessToken = "", language = "zh-CN", region = "CN", includeAdult = false } });
         }
         private async Task<JsonElement> ContentAsync(string method, object? parameters, CancellationToken cancellationToken)
         {
@@ -216,9 +215,9 @@ public static partial class MusicUiTests
             var query = request.GetProperty("query");
             if (path == "/3/search/multi")
             {
-                True(query.EnumerateObject().Count() == 3 && query.GetProperty("query").ValueKind == JsonValueKind.String &&
-                    query.GetProperty("page").GetInt32() == 1 && query.GetProperty("language").GetString() == "zh-CN" &&
-                    request.GetProperty("imageSize").GetString() == "w500", "search uses its original query, first page, language and w500 identity");
+                True(query.EnumerateObject().Count() == 2 && query.GetProperty("query").ValueKind == JsonValueKind.String &&
+                    query.GetProperty("page").GetInt32() == 1 &&
+                    request.GetProperty("imageSize").GetString() == "w500", "search uses its original query, first page and w500 identity; configured language belongs to Node");
                 if (receipt) { Interlocked.Increment(ref CacheReads); return Success(null); }
                 Interlocked.Increment(ref Searches);
                 return Success(new
@@ -230,8 +229,7 @@ public static partial class MusicUiTests
                     }
                 });
             }
-            True(path == "/3/tv/7" && query.EnumerateObject().Count() == 2 &&
-                query.GetProperty("language").GetString() == "zh-CN" &&
+            True(path == "/3/tv/7" && query.EnumerateObject().Count() == 1 &&
                 query.GetProperty("append_to_response").GetString() == "credits,similar,images" &&
                 request.GetProperty("imageSize").GetString() == "original", "full detail uses its exact type/ID, append set and original image identity");
             if (receipt) { Interlocked.Increment(ref CacheReads); return Success(null); }

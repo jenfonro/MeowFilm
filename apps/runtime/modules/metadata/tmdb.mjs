@@ -1,3 +1,5 @@
+import { tmdbQuery } from '@meowfilm/film-playback/metadata-query';
+
 const imageFields = new Set([
   'poster_path', 'backdrop_path', 'profile_path', 'logo_path', 'still_path', 'file_path',
 ]);
@@ -102,15 +104,25 @@ export async function requestTMDB(input, { settings, request, signal }) {
     (signal === undefined || signal instanceof AbortSignal));
   const path = input.path;
   const size = imageSize(input.imageSize === undefined ? 'original' : input.imageSize);
-  const url = new URL(`${baseURL(settings.apiBase)}${path}`);
-  url.search = queryParams(input.query === undefined ? {} : input.query).toString();
+  const base = baseURL(settings.apiBase);
+  const basePath = new URL(base).pathname;
+  // A versioned API base keeps its deployment prefix when a raw GET selects
+  // another TMDB API version. Unversioned custom bases follow the server's v3 base convention.
+  const versioned = /\/[34]$/.test(basePath) && /^\/[34](?=\/|$)/.test(path);
+  const prefix = versioned ? base.slice(0, -2) : base;
+  const resource = versioned || basePath === '/' ? path : path.replace(/^\/3(?=\/|$)/, '');
+  const url = new URL(`${prefix}${resource}`);
+  const query = input.query === undefined ? {} : input.query;
+  requireValue(record(query));
+  url.search = queryParams(tmdbQuery(path, query, settings)).toString();
   const { apiKey, accessToken } = settings;
   requireValue(typeof apiKey === 'string' && !control.test(apiKey) &&
     typeof accessToken === 'string' && !control.test(accessToken));
   const headers = { Accept: 'application/json' };
-  // Both authenticate TMDB reads; prefer the token so no key is placed in the URL.
-  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-  else if (apiKey) url.searchParams.set('api_key', apiKey);
+  const credential = (accessToken || apiKey).trim();
+  const token = credential.replace(/^Bearer\s+/i, '').trim();
+  if (token && (accessToken || /^Bearer\s+/i.test(credential) || token.includes('.'))) headers.Authorization = `Bearer ${token}`;
+  else if (token) url.searchParams.set('api_key', token);
   requireValue(!signal?.aborted, 'CANCELLED');
   let response;
   try {
@@ -128,8 +140,9 @@ export function tmdbImageTarget(path, settings) {
   requireValue(typeof path === 'string' && !control.test(path) && object(settings));
   const match = /^\/v1\/tmdb\/images\/(original|[wh][1-9]\d*)\/([A-Za-z0-9_-]+\.[A-Za-z0-9]+)$/.exec(path);
   requireValue(match !== null);
+  const base = baseURL(settings.imageBase);
   return {
-    url: `${baseURL(settings.imageBase)}/${match[1]}/${match[2]}`,
+    url: `${base}${base.endsWith('/t/p') ? '' : '/t/p'}/${match[1]}/${match[2]}`,
     headers: { Accept: 'image/*' },
   };
 }

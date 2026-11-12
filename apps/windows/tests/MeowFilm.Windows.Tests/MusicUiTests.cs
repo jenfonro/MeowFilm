@@ -17,8 +17,10 @@ using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
 
@@ -231,6 +233,116 @@ public static partial class MusicUiTests
                 window.Content = null;
                 window.Close();
             }
+        });
+        yield return Case("record posture survives same-track artwork pause visibility and canceled swipes", async () =>
+        {
+            foreach (var size in new[] { 60, 300 })
+            {
+                var record = new MusicRecordView
+                {
+                    Width = size, Height = size, Address = "fixture://same-cover", TrackIdentity = "song:1",
+                    SwipeIdentity = "attempt:1", SwipeEnabled = true
+                };
+                ArtworkScope.SetLoader(record, new PlayerArtworkFixture());
+                using var source = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("record-posture-fixture")
+                {
+                    WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                    PositionX = -32000, PositionY = -32000, Width = size, Height = size
+                });
+                source.RootVisual = record; Render(record, size, size); await Drain();
+                var rotation = (RotateTransform)record.FindName("Rotation");
+                Equal(0d, rotation.Angle);
+                rotation.Angle = 63;
+                record.Visibility = Visibility.Hidden; await Drain();
+                record.Visibility = Visibility.Visible; await Drain();
+                record.Address = "fixture://updated-cover"; await Drain();
+                Equal(63d, rotation.Angle);
+                record.Address = ""; await Drain();
+                Equal(63d, rotation.Angle);
+                record.SwipeIdentity = "attempt:2"; await Drain();
+                Equal(63d, rotation.Angle);
+                record.Playing = true; await Task.Delay(200); await Drain();
+                record.Playing = false; await Task.Delay(40); await Drain();
+                var paused = rotation.Angle;
+                if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
+                    True(paused > 63 && paused < 75, "playing continues from the existing posture");
+                await Task.Delay(160); await Drain();
+                True(Math.Abs(rotation.Angle - paused) < .01, "pause freezes the disc");
+                record.Address = "fixture://same-cover";
+                record.SetValue(MusicRecordView.PaletteBrushProperty, Brushes.Teal);
+                await Drain();
+                True(Math.Abs(rotation.Angle - paused) < .01, "same-track cover and theme retain the paused angle");
+                record.Visibility = Visibility.Hidden; await Drain();
+                record.Visibility = Visibility.Visible; await Drain();
+                True(Math.Abs(rotation.Angle - paused) < .01, "hide and show retain the paused posture");
+                source.RootVisual = null; await Drain();
+                source.RootVisual = record; Render(record, size, size); await Drain();
+                True(Math.Abs(rotation.Angle - paused) < .01, "unload and reload retain the same track posture");
+                record.BeginSwipe(size / 2); record.UpdateSwipe(0); record.EndSwipe(commit: false);
+                await Until(() => Math.Abs(record.SwipeOffset) < .5);
+                True(Math.Abs(rotation.Angle - paused) < .01, "canceling a swipe does not reset the disc");
+                record.Playing = true; await Task.Delay(200); await Drain();
+                record.Playing = false; await Task.Delay(40); await Drain();
+                if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
+                    True(rotation.Angle > paused && rotation.Angle < paused + 12, "resume continues from the retained posture");
+                record.Playing = true; await Task.Delay(160); await Drain();
+                record.Visibility = Visibility.Hidden; await Drain();
+                var hidden = rotation.Angle;
+                await Task.Delay(160); await Drain();
+                True(Math.Abs(rotation.Angle - hidden) < .01, "hidden discs retain their last visible posture");
+                record.Playing = false;
+                record.Visibility = Visibility.Visible; await Drain();
+                True(Math.Abs(rotation.Angle - hidden) < .01, "pausing while hidden returns at the retained angle");
+                paused = hidden;
+
+                var commits = 0;
+                record.SwipeCommitted += (_, e) =>
+                {
+                    True(Math.Abs(record.SwipeOffset) >= size - .5, "the old disc leaves before the queue commit");
+                    True(Math.Abs(rotation.Angle - paused) < .01, "the visible outgoing disc never rewinds");
+                    record.TrackIdentity = "song:2";
+                    Equal("fixture://same-cover", record.Address);
+                    Equal(0d, rotation.Angle);
+                    commits++;
+                    record.ResolveSwipe(e.Identity);
+                };
+                record.BeginSwipe(size / 2); record.UpdateSwipe(0);
+                // Compact discs also require the product's 48-DIP commit threshold.
+                record.UpdateSwipe(-size); record.EndSwipe(commit: true);
+                await Until(() => commits == 1 && Math.Abs(record.SwipeOffset) < .5);
+                rotation.Angle = 91;
+                record.Address = ""; Equal(91d, rotation.Angle);
+                record.TrackIdentity = "song:3"; Equal(0d, rotation.Angle);
+                rotation.Angle = 17;
+                record.TrackIdentity = "song:4"; Equal(0d, rotation.Angle);
+                record.TrackIdentity = "song:1"; Equal(0d, rotation.Angle);
+                source.RootVisual = null;
+            }
+        });
+        yield return Case("footer and detail records follow the same track identity independently of media attempts", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            Render(f.Module.PlayerView, 860, 92); Render(detail, 860, 600); await Drain();
+            var footer = Visuals(f.Module.PlayerView).OfType<MusicRecordView>().Single();
+            var full = (MusicRecordView)detail.FindName("DetailRecord");
+            await Drain();
+            Equal(f.Module.CurrentTrackIdentity, footer.TrackIdentity);
+            Equal(footer.TrackIdentity, full.TrackIdentity);
+            var identity = footer.TrackIdentity;
+            var attempt = f.Module.PlaybackPresentationKey;
+            var rotations = new[] { footer, full }.Select(record => (RotateTransform)record.FindName("Rotation")).ToArray();
+            foreach (var rotation in rotations) rotation.Angle = 63;
+            await f.Playback.StopAsync();
+            await f.Module.TogglePlaybackAsync(); await Drain();
+            True(attempt != f.Module.PlaybackPresentationKey, "reopening media advances its request identity");
+            Equal(identity, f.Module.CurrentTrackIdentity);
+            foreach (var rotation in rotations) Equal(63d, rotation.Angle);
+            await f.Module.StepAsync(true); await Drain();
+            True(identity != f.Module.CurrentTrackIdentity, "a queue step changes the track identity");
+            Equal(f.Module.CurrentTrackIdentity, footer.TrackIdentity);
+            Equal(footer.TrackIdentity, full.TrackIdentity);
+            foreach (var rotation in rotations) Equal(0d, rotation.Angle);
         });
         yield return Case("record swipe cancellation fences identity visibility resize and interrupted return", async () =>
         {
@@ -828,7 +940,7 @@ public static partial class MusicUiTests
             Equal(2, f.Calls.Count("music.queue.playCollection"));
             Equal(1, f.Playback.Opens.Count); True(f.Module.CanPlay, "successful retry restores the current queue");
         });
-        yield return Case("playlist navigation rejects an oversized local total without request expansion", async () =>
+        yield return Case("playlist navigation rejects totals beyond the DTO resource boundary without request expansion", async () =>
         {
             await using var f = await Fixture.Create();
             var before = f.Module.Playlists.ToArray();
@@ -836,7 +948,7 @@ public static partial class MusicUiTests
             f.Calls.TransformNext("music.library.list", reply =>
             {
                 var changed = JsonNode.Parse(reply.GetRawText())!.AsObject();
-                changed["total"] = 10_001;
+                changed["total"] = 100_001;
                 return JsonSerializer.SerializeToElement(changed);
             });
             await f.Module.RefreshAsync();
@@ -1174,8 +1286,9 @@ public static partial class MusicUiTests
         public void Release() => release.TrySetResult();
         public async Task<JsonElement> Hold(JsonElement reply) { Arrived.TrySetResult(); await release.Task; return reply; }
     }
-    private sealed class ObservedApplication(IMusicApplication inner) : MusicApplicationForwarder(inner)
+    private sealed class ObservedApplication(IMusicApplication inner, IMusicPlaybackFeedback? feedback = null) : MusicApplicationForwarder(inner)
     {
+        public override IMusicPlaybackFeedback Feedback => feedback ?? base.Feedback;
         private sealed record Rule(string Method, Func<JsonElement, bool> Match, Func<JsonElement, Task<JsonElement>> Apply, bool Before);
         private readonly List<Rule> rules = [];
         private readonly List<HeldReply> holds = [];
@@ -1263,6 +1376,8 @@ public static partial class MusicUiTests
     {
         public required string Root;
         public required IDocumentStore Store;
+        public required IDocumentStore CacheBacking;
+        public required CacheDocumentStore Cache;
         public required NativeMusicScriptTestRuntime Runtime;
         public required MusicNativeApplication Application;
         public required ObservedApplication Calls;
@@ -1271,20 +1386,26 @@ public static partial class MusicUiTests
         public readonly Dialogs Dialogs;
         private Fixture(PlaybackProbe playback, Dialogs dialogs) { Playback = playback; Dialogs = dialogs; }
         public static async Task<Fixture> Create(string? root = null, bool persistent = false, NativePlayback? native = null,
-            IMusicPlayback? output = null, bool withPlaybackCache = false)
+            IMusicPlayback? output = null, bool withPlaybackCache = false, IMusicPlaybackFeedback? feedback = null)
         {
             root ??= NewRoot();
             IDocumentStore store = persistent
                 ? new LocalDocumentStore(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces) : new DocumentProbe();
+            string cacheRoot = Path.Combine(root, "cache-documents");
+            Directory.CreateDirectory(cacheRoot);
+            IDocumentStore cacheBacking = persistent
+                ? new LocalDocumentStore(cacheRoot, AppIdentity.CacheNamespaces, protectedNamespaces: AppIdentity.CacheProtectedNamespaces)
+                : new DocumentProbe();
+            var cache = new CacheDocumentStore(cacheBacking);
             var runtime = new NativeMusicScriptTestRuntime(); MusicCapability? module = null;
-            var application = new MusicNativeApplication(store, runtime, new NoUpstream());
+            var application = new MusicNativeApplication(store, runtime, cache, new NoUpstream());
             try
             {
-                var calls = new ObservedApplication(application); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
+                var calls = new ObservedApplication(application, feedback); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
                 module = native is null
                     ? new MusicCapability(calls, store, output ?? playback, withPlaybackCache ?
-                        new MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache(Path.Combine(root, "playback-cache"), store) : null, dialogs)
-                    : new MusicCapability(calls, store, native, dialogs);
+                        new MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache(Path.Combine(root, "playback-cache"), cache) : null, dialogs, cacheStore: cache)
+                    : new MusicCapability(calls, store, native, dialogs, cacheStore: cache);
                 await module.InitializeAsync(default);
                 Equal("wy", module.CatalogSourcePlatform);
                 True(module.CanEditCatalogSource && !module.HasCatalogSourceError, "shared UI fixture restores the native catalog source");
@@ -1292,12 +1413,12 @@ public static partial class MusicUiTests
                 Equal(0, calls.Count("music.catalogSource.settings.save"));
                 await module.NavigateAsync("favorites", default);
                 True(!runtime.HasStarted, "native initialization never starts Node");
-                return new(playback, dialogs) { Root = root, Store = store, Runtime = runtime, Application = application, Calls = calls, Module = module };
+                return new(playback, dialogs) { Root = root, Store = store, CacheBacking = cacheBacking, Cache = cache, Runtime = runtime, Application = application, Calls = calls, Module = module };
             }
             catch
             {
                 try { if (module is not null) await module.DisposeAsync(); else await application.DisposeAsync(); }
-                finally { await runtime.DisposeAsync(); await store.DisposeAsync(); }
+                finally { await cache.DisposeAsync(); await cacheBacking.DisposeAsync(); await runtime.DisposeAsync(); await store.DisposeAsync(); }
                 throw;
             }
         }
@@ -1341,7 +1462,7 @@ public static partial class MusicUiTests
         {
             Calls.ReleaseAll();
             try { await Module.DisposeAsync(); }
-            finally { try { await Runtime.DisposeAsync(); } finally { await Store.DisposeAsync(); } }
+            finally { try { await Cache.DisposeAsync(); await CacheBacking.DisposeAsync(); await Runtime.DisposeAsync(); } finally { await Store.DisposeAsync(); } }
         }
     }
     private sealed class NoUpstream : System.Net.Http.HttpMessageHandler

@@ -23,7 +23,8 @@ final class MusicSearchResultsCellsTests: XCTestCase {
                        [CGFloat(17), CGFloat(17), CGFloat(17)])
         XCTAssertTrue(buttons.allSatisfy { $0.titleLabel?.numberOfLines == 1 })
         XCTAssertEqual(buttons[1].frame.minX - buttons[0].frame.maxX, 32, accuracy: 0.5)
-        XCTAssertEqual(indicator.bounds.height, 2.5, accuracy: 0.01)
+        XCTAssertEqual(indicator.bounds.size, CGSize(width: 20, height: 3))
+        XCTAssertEqual(indicator.frame.midX, buttons[0].frame.midX, accuracy: 0.01)
         XCTAssertEqual(indicator.backgroundColor, UIColor(theme.accent))
         XCTAssertEqual(buttons[0].titleColor(for: .normal), UIColor(theme.ink))
         XCTAssertEqual(buttons[1].titleColor(for: .normal), UIColor(theme.muted))
@@ -31,6 +32,7 @@ final class MusicSearchResultsCellsTests: XCTestCase {
         tabs.setPosition(1)
         tabs.layoutIfNeeded()
         let end = indicator.frame
+        XCTAssertEqual(indicator.frame.midX, buttons[1].frame.midX, accuracy: 0.01)
         XCTAssertEqual(buttons.map(\.frame), buttonFrames)
         XCTAssertEqual(buttons[0].titleColor(for: .normal), UIColor(theme.muted))
         XCTAssertEqual(buttons[1].titleColor(for: .normal), UIColor(theme.ink))
@@ -51,6 +53,48 @@ final class MusicSearchResultsCellsTests: XCTestCase {
         tabs.setSelectedIndex(2)
         XCTAssertTrue(buttons[2].accessibilityTraits.contains(.selected))
         XCTAssertFalse(buttons[0].accessibilityTraits.contains(.selected))
+    }
+
+    func testFiveCategoryIndicatorsKeepFixedSizeAndCenterWhenThemeAndSelectionChange() throws {
+        let tabs = MusicSearchResultTabsView(frame: CGRect(x: 0, y: 0, width: 358, height: 48))
+        let titles = ["综合", "单曲", "歌单", "影视", "小说"]
+        tabs.setTitles(titles, theme: PageTheme())
+        tabs.layoutIfNeeded()
+        let buttons = try titles.indices.map {
+            try XCTUnwrap(identified("music.search.results.tab.\($0)", in: tabs) as? UIButton)
+        }
+        let frames = buttons.map(\.frame)
+        let indicator = try XCTUnwrap(identified("music.search.results.tab.indicator", in: tabs))
+        var selections: [Int] = []
+        tabs.onSelect = { selections.append($0) }
+        for dark in [false, true] {
+            let theme = PageTheme(palette: .mint, dark: dark)
+            tabs.applyTheme(theme)
+            for index in titles.indices {
+                buttons[index].sendActions(for: .touchUpInside)
+                tabs.setSelectedIndex(index)
+                tabs.setPosition(CGFloat(index))
+                tabs.layoutIfNeeded()
+                XCTAssertEqual(buttons.map(\.frame), frames)
+                XCTAssertEqual(indicator.bounds.size, CGSize(width: 20, height: 3))
+                XCTAssertEqual(indicator.frame.midX, buttons[index].frame.midX, accuracy: 0.01)
+                XCTAssertGreaterThan(indicator.frame.minY, 0)
+                XCTAssertLessThanOrEqual(indicator.frame.maxY, tabs.bounds.height)
+                XCTAssertEqual(indicator.backgroundColor, UIColor(theme.accent))
+                XCTAssertEqual(buttons.filter { $0.accessibilityTraits.contains(.selected) }, [buttons[index]])
+                XCTAssertTrue(buttons.allSatisfy { $0.bounds.height >= 44 })
+                XCTAssertEqual(buttons[index].titleColor(for: .normal), UIColor(theme.ink))
+            }
+        }
+        XCTAssertEqual(selections, Array(titles.indices) + Array(titles.indices))
+        let format = UIGraphicsImageRendererFormat(); format.scale = 2
+        let image = UIGraphicsImageRenderer(bounds: tabs.bounds, format: format).image { context in
+            tabs.layer.render(in: context.cgContext)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "search-five-category-centered-indicator"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testSongCellUsesTextAndThreeActionsWithoutArtworkOrSequence() throws {

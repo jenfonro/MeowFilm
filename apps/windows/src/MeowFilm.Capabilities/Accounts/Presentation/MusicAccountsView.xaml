@@ -9,7 +9,7 @@
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/>
+    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/AccountSettingsTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
    <Style x:Key="Account.PlatformColumn" TargetType="ColumnDefinition">
     <Setter Property="Width" Value="196"/>
@@ -35,10 +35,6 @@
      <Setter Property="Width" Value="6"/>
     </Trigger></Style.Triggers>
    </Style>
-   <Style x:Key="Account.Header" TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}">
-    <Setter Property="VerticalAlignment" Value="Center"/>
-    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-   </Style>
    <Style x:Key="Account.PlatformName" TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
     <Setter Property="Margin" Value="12,0,0,0"/>
     <Setter Property="VerticalAlignment" Value="Center"/>
@@ -46,16 +42,6 @@
     <Style.Triggers><Trigger Property="local:MusicAccountsView.IsCompactTable" Value="True">
      <Setter Property="Margin" Value="8,0,0,0"/><Setter Property="FontSize" Value="13"/>
     </Trigger></Style.Triggers>
-   </Style>
-   <Style x:Key="Account.Row" TargetType="Border">
-    <Setter Property="Height" Value="76"/>
-    <Setter Property="BorderBrush" Value="{DynamicResource Settings.Brush.Rule}"/>
-    <Setter Property="BorderThickness" Value="0,1,0,0"/>
-    <Style.Triggers>
-     <DataTrigger Binding="{Binding (ItemsControl.AlternationIndex),RelativeSource={RelativeSource AncestorType=ContentPresenter}}" Value="0">
-      <Setter Property="BorderThickness" Value="0"/>
-     </DataTrigger>
-    </Style.Triggers>
    </Style>
    <Style x:Key="Account.PreferenceSwitch" TargetType="CheckBox" BasedOn="{StaticResource Settings.Switch}">
     <Setter Property="HorizontalAlignment" Value="Center"/>
@@ -111,20 +97,6 @@
     <Style.Triggers>
      <DataTrigger Binding="{Binding Source.IsLoggedIn}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
      <DataTrigger Binding="{Binding Source.ShowLogin}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-    </Style.Triggers>
-   </Style>
-   <Style x:Key="Login.Segment" TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
-    <Setter Property="Padding" Value="10,4"/>
-    <Style.Triggers>
-     <MultiTrigger><MultiTrigger.Conditions>
-      <Condition Property="Tag" Value="{x:Static Visibility.Visible}"/>
-      <Condition Property="IsEnabled" Value="True"/>
-      <Condition Property="IsMouseOver" Value="False"/>
-      <Condition Property="IsPressed" Value="False"/>
-      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="False"/>
-     </MultiTrigger.Conditions>
-      <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}"/>
-     </MultiTrigger>
     </Style.Triggers>
    </Style>
    <DataTemplate x:Key="Account.Person">
@@ -277,20 +249,11 @@
 
   <Popup x:Name="LoginPopup" PlacementTarget="{Binding ElementName=Root}" desktop:DialogPlacement.Centered="True"
          StaysOpen="False" AllowsTransparency="True" Opened="LoginPopup_Opened" Closed="LoginPopup_Closed" DataContext="{Binding}">
-   <Border Width="360" Padding="20" CornerRadius="12" Style="{StaticResource Settings.PopupSurface}">
-    <Border.Effect><DropShadowEffect BlurRadius="20" ShadowDepth="4" Opacity=".16"/></Border.Effect>
+   <local:AccountLoginSurface x:Name="LoginSurface"
+           Style="{StaticResource Account.LoginSurface}" CloseRequested="CloseLogin_Click">
     <Grid>
-     <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-     </Grid.RowDefinitions>
-     <DockPanel>
-      <Button DockPanel.Dock="Right" Content="&#xE711;" Click="CloseLogin_Click"
-              Style="{StaticResource Settings.PopupClose}" AutomationProperties.Name="关闭登录"/>
-      <TextBlock x:Name="LoginTitle" Style="{StaticResource Settings.PopupTitle}" VerticalAlignment="Center"/>
-     </DockPanel>
-     <Border Grid.Row="1" Background="{DynamicResource Settings.Brush.Active}" CornerRadius="6" Margin="0,16,0,16" Padding="2">
+     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+     <Border Background="{DynamicResource Settings.Brush.Active}" CornerRadius="6" Margin="0,0,0,16" Padding="2">
       <UniformGrid Columns="2">
        <Button x:Name="QrModeButton" Content="二维码登录" Click="QrMode_Click"
                Tag="{Binding Visibility,ElementName=QrPanel}"
@@ -300,10 +263,9 @@
                Style="{StaticResource Login.Segment}" IsEnabled="{Binding ShowAccountSms}"/>
       </UniformGrid>
      </Border>
-     <Grid Grid.Row="2">
+     <Grid Grid.Row="1">
       <StackPanel x:Name="QrPanel" HorizontalAlignment="Center">
-       <Border Width="230" Height="230" CornerRadius="8" BorderBrush="{DynamicResource MeowFilm.Brush.Border}"
-               BorderThickness="1" Padding="14">
+       <Border Style="{StaticResource Account.QrFrame}">
         <Image x:Name="AccountQrImage" Source="{Binding AccountQrImage}" Stretch="Uniform"
                RenderOptions.BitmapScalingMode="NearestNeighbor"
                AutomationProperties.Name="{Binding AccountQrAccessibleName}"/>
@@ -347,7 +309,7 @@
       </StackPanel>
      </Grid>
     </Grid>
-   </Border>
+   </local:AccountLoginSurface>
   </Popup>
  </Grid>
 </UserControl>

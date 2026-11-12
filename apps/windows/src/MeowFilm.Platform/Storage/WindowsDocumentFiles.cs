@@ -25,17 +25,24 @@ internal static class WindowsDocumentFiles
         internal string Path { get; }
         internal byte[] Identity { get; }
 
-        internal Root(string path)
+        internal Root(string path) : this(ValidateRoot(path), false) { }
+
+        // The data root itself may be missing or a link during explicit cleanup.
+        // Only its ordinary ancestors are created/pinned here, never the leaf.
+        internal static Root OpenParent(string validatedRoot) =>
+            new(System.IO.Path.GetDirectoryName(validatedRoot)!, true);
+
+        private Root(string path, bool createMissing)
         {
-            Path = ValidateRoot(path);
+            Path = path;
             try
             {
                 string cursor = System.IO.Path.GetPathRoot(Path)!;
                 handles.Add(OpenDirectory(cursor, false)!);
-                foreach (string segment in Path[cursor.Length..].Split('\\'))
+                foreach (string segment in Path[cursor.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
                 {
                     cursor = System.IO.Path.Combine(cursor, segment);
-                    handles.Add(OpenDirectory(cursor, false)!);
+                    handles.Add(OpenDirectory(cursor, createMissing) ?? CreateDirectory(cursor));
                 }
                 var info = Information(handles[^1]);
                 if (info.FileIndexHigh == 0 && info.FileIndexLow == 0) Fail(DocumentStoreError.UnsafePath);
@@ -59,7 +66,7 @@ internal static class WindowsDocumentFiles
         }
     }
 
-    private static string ValidateRoot(string path)
+    internal static string ValidateRoot(string path)
     {
         if (string.IsNullOrEmpty(path)) Fail(DocumentStoreError.InvalidRequest);
         path = path.Replace('/', '\\').TrimEnd('\\');
@@ -86,11 +93,11 @@ internal static class WindowsDocumentFiles
     }
 
     // Call only for the canonical root/ancestors accepted by ValidateRoot or the
-    // fixed, generated descendants of that root. Never accept an external extended,
+    // fixed descendants or entries enumerated below a pinned directory. Never accept an external extended,
     // UNC, device or relative path. Keep Root.Path/namespace/entropy identities unchanged.
     // This bypasses MAX_PATH without depending on host manifests or machine policy;
     // it does not bypass no-follow opens, directory pins or file-handle validation.
-    private static string NativePath(string validatedPath)
+    internal static string NativePath(string validatedPath)
     {
         if (validatedPath.Length < 3 || !char.IsAsciiLetter(validatedPath[0]) ||
             validatedPath[1] != ':' || validatedPath[2] != '\\') Fail(DocumentStoreError.UnsafePath);
@@ -154,6 +161,47 @@ internal static class WindowsDocumentFiles
         if ((info.FileAttributes & (DirectoryAttribute | ReparseAttribute)) != 0 || info.NumberOfLinks != 1 ||
             GetFileType(handle) != 1) Fail(DocumentStoreError.UnsafePath);
         return checked((long)(((ulong)info.FileSizeHigh << 32) | info.FileSizeLow));
+    }
+
+    // DELETE both tests existing store pins before the first child is touched and
+    // blocks a legacy store (which does not share DELETE) from opening this root.
+    // Denying DELETE sharing pins the name throughout path-based child traversal.
+    internal static SafeFileHandle? OpenDeletionEntry(string path)
+    {
+        var handle = CreateFileW(NativePath(path), Delete | 0x80 /* FILE_READ_ATTRIBUTES */,
+            DirectoryShare, IntPtr.Zero, OpenExisting, OpenReparse | BackupSemantics, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            if (error is 2 or 3) return null;
+            Fail(DocumentStoreError.Storage);
+        }
+        try
+        {
+            if (GetFileType(handle) != 1) Fail(DocumentStoreError.UnsafePath);
+            _ = Information(handle);
+            return handle;
+        }
+        catch { handle.Dispose(); throw; }
+    }
+
+    internal static bool IsOrdinaryDirectory(SafeFileHandle handle) =>
+        (Information(handle).FileAttributes & (DirectoryAttribute | ReparseAttribute)) == DirectoryAttribute;
+
+    // Unlink only this opened entry, never a re-resolved path or a link target.
+    // POSIX disposition removes the name on close even if another reader shares
+    // DELETE; ignoring READONLY does not change attributes of an external hardlink.
+    internal static void DeleteEntry(SafeFileHandle handle)
+    {
+        IntPtr buffer = Marshal.AllocHGlobal(sizeof(int));
+        try
+        {
+            Marshal.WriteInt32(buffer, 0x1 | 0x2 | 0x10);
+            if (!SetFileInformationByHandle(handle, 21 /* FileDispositionInfoEx */, buffer, sizeof(int)))
+                Fail(DocumentStoreError.Storage);
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
     }
 
     // Rename by the already-open source handle, never a string-based delete/move.

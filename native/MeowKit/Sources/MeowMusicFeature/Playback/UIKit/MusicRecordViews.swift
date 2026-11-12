@@ -236,7 +236,15 @@ final class MusicRecordDiscView: UIView {
     private let starMask = CALayer()
     private var theme = PageTheme()
     private var rotating = false
+    private var suspended = false
+    private var rotationStartTime: CFTimeInterval?
+    private var rotationStartAngle: CGFloat = 0
+    private static let rotationDuration: CFTimeInterval = 32
     private var stars: [CAShapeLayer] = []
+
+    override var isHidden: Bool {
+        didSet { updateRotation() }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -291,6 +299,12 @@ final class MusicRecordDiscView: UIView {
         }
 
         coverHost.layer.speed = 0
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(suspendRotation),
+            name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(resumeRotation),
+            name: UIApplication.didBecomeActiveNotification, object: nil)
         configure(theme: theme, image: nil)
     }
 
@@ -302,7 +316,7 @@ final class MusicRecordDiscView: UIView {
             self.theme = theme
             setNeedsDisplay()
         }
-        let material = MusicRecordMaterials(palette: theme.palette)
+        let material = MusicRecordMaterials(colors: theme.palette)
         let reflect = UIColor(material.reflect)
         let sheenAngle = 36 * Double.pi / 180
         sheen.endPoint = CGPoint(x: 0.5 + CGFloat(sin(sheenAngle)) * 0.5,
@@ -329,43 +343,93 @@ final class MusicRecordDiscView: UIView {
     }
 
     func setRotating(_ value: Bool) {
-        guard rotating != value else { return }
-        if window != nil { installAnimations() }
-        let layer = coverHost.layer
-        if value {
-            let offset = layer.timeOffset
-            layer.speed = 1
-            layer.timeOffset = 0
-            layer.beginTime = 0
-            layer.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) - offset
-        } else {
-            let time = layer.convertTime(CACurrentMediaTime(), from: nil)
-            layer.speed = 0
-            layer.timeOffset = time
-        }
         rotating = value
+        updateRotation()
+    }
+
+    /// The owner calls this only after the outgoing disc has completely left.
+    /// Entering, cancellation, artwork updates and visibility changes never reset it.
+    func resetAfterDeparture() {
+        rotating = false
+        freezeRotation()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        coverHost.layer.transform = CATransform3DIdentity
+        coverHost.layer.beginTime = 0
+        coverHost.layer.timeOffset = 0
+        CATransaction.commit()
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil { installAnimations() }
-        else { setRotating(false) }
+        updateRotation()
     }
 
-    private func installAnimations() {
-        // UIKit can discard animations installed before the view reaches a window.
-        // Reattach them to the retained rotor clock, preserving its held phase.
-        let time = coverHost.layer.convertTime(CACurrentMediaTime(), from: nil)
-        if coverHost.layer.animation(forKey: "record.rotation") == nil {
-            let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
-            rotation.fromValue = 0
-            rotation.toValue = Double.pi * 2
-            rotation.duration = 32
-            rotation.beginTime = time
-            rotation.timeOffset = time
-            rotation.repeatCount = .infinity
-            coverHost.layer.add(rotation, forKey: "record.rotation")
+    @objc private func suspendRotation() {
+        suspended = true
+        updateRotation()
+    }
+
+    @objc private func resumeRotation() {
+        suspended = false
+        updateRotation()
+    }
+
+    private func updateRotation() {
+        guard rotating, window != nil, !isHidden, !suspended else {
+            freezeRotation()
+            return
         }
+        let layer = coverHost.layer
+        if rotationStartTime != nil {
+            guard layer.animation(forKey: "record.rotation") == nil else { return }
+            // If UIKit discarded the animation, its clock still identifies the phase.
+            freezeRotation()
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let offset = layer.timeOffset
+        layer.speed = 1
+        layer.timeOffset = 0
+        layer.beginTime = 0
+        layer.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) - offset
+        let time = layer.convertTime(CACurrentMediaTime(), from: nil)
+        rotationStartTime = time
+        rotationStartAngle = atan2(layer.transform.m12, layer.transform.m11)
+        let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
+        rotation.fromValue = rotationStartAngle
+        rotation.toValue = rotationStartAngle + .pi * 2
+        rotation.duration = Self.rotationDuration
+        rotation.beginTime = time
+        rotation.repeatCount = .infinity
+        rotation.timingFunction = CAMediaTimingFunction(name: .linear)
+        layer.add(rotation, forKey: "record.rotation")
+        installSparkles(at: time)
+        CATransaction.commit()
+    }
+
+    private func freezeRotation() {
+        guard let startTime = rotationStartTime else { return }
+        let layer = coverHost.layer
+        let time = layer.convertTime(CACurrentMediaTime(), from: nil)
+        let angle: CGFloat
+        if layer.animation(forKey: "record.rotation") != nil, let visible = layer.presentation() {
+            angle = atan2(visible.transform.m12, visible.transform.m11)
+        } else {
+            angle = rotationStartAngle + CGFloat((time - startTime) / Self.rotationDuration) * .pi * 2
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // The held pose belongs to the model, so animation removal cannot expose zero.
+        layer.speed = 0
+        layer.timeOffset = time
+        layer.transform = CATransform3DMakeRotation(angle, 0, 0, 1)
+        layer.removeAnimation(forKey: "record.rotation")
+        CATransaction.commit()
+        rotationStartTime = nil
+    }
+
+    private func installSparkles(at time: CFTimeInterval) {
         for (index, star) in stars.enumerated() where star.animation(forKey: "record.sparkle") == nil {
             let scale = CAKeyframeAnimation(keyPath: "transform.scale")
             scale.values = [0.6, 1.5, 0.6]
@@ -387,10 +451,11 @@ final class MusicRecordDiscView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        coverHost.frame = bounds
-
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        // A rotating view's frame is undefined; keep its untransformed geometry fixed.
+        coverHost.bounds = CGRect(origin: .zero, size: bounds.size)
+        coverHost.center = CGPoint(x: bounds.midX, y: bounds.midY)
         starHost.frame = bounds
         sheen.frame = bounds
         let maskChanged = sheenMask.bounds.size != bounds.size || sheenMask.contents == nil
@@ -434,7 +499,7 @@ final class MusicRecordDiscView: UIView {
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext(),
               let space = CGColorSpace(name: CGColorSpace.sRGB) else { return }
-        let material = MusicRecordMaterials(palette: theme.palette)
+        let material = MusicRecordMaterials(colors: theme.palette)
         // Keep the reference colored glass. Lift only its inner edge toward the
         // page color, so removing the dark collar does not erase the whole disc.
         let ring = UIColor(theme.dark ? material.ring :

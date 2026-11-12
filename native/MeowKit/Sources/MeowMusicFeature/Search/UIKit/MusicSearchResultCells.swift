@@ -102,15 +102,14 @@ final class MusicSearchResultTabsView: UIView {
         let upper = indicatorFrame(for: buttons[interval.upper])
         indicator.frame = CGRect(
             x: MusicPagingTabTransition.interpolate(lower.minX, upper.minX, progress: interval.progress),
-            y: max(0, bounds.height - 8.5),
+            y: max(0, bounds.height - 9),
             width: MusicPagingTabTransition.interpolate(lower.width, upper.width, progress: interval.progress),
-            height: 2.5
+            height: 3
         )
     }
 
     private func indicatorFrame(for button: UIButton) -> CGRect {
-        let width = max(20, button.bounds.width * 0.68)
-        return CGRect(x: button.frame.midX - width / 2, y: 0, width: width, height: 2.5)
+        CGRect(x: button.frame.midX - 10, y: 0, width: 20, height: 3)
     }
 }
 

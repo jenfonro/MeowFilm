@@ -241,6 +241,18 @@ public partial class FilmPlaybackView : UserControl
         e.Handled = true;
         if (boundPage is { } page && !page.PlayerActionPending("switch")) await ActAsync("switch");
     }
+    private async void RefreshBrowsing_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is FilmPlaybackPage page)
+            await ExecuteAsync(page, page.RefreshBrowsingAsync, "资料刷新失败");
+    }
+    private async void RetryMedia_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is FilmPlaybackPage page)
+            await ExecuteAsync(page, page.RetryMediaAsync, "取址失败");
+    }
     private async void Block_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;

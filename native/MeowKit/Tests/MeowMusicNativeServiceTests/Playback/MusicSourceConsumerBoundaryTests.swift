@@ -77,6 +77,7 @@ private actor ConsumerBoundaryAccounts: MusicNativeAccountProviding, MusicNative
 private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
     func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
                 accepts: @escaping @Sendable (MusicAudioFileCacheIdentity) -> Bool) -> MusicAudioFileCacheHit? { nil }
+    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback { MusicTestByteSource() }
     func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) -> MusicAudioFileCacheVersion? { nil }
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion,
                confirmedAt: Date, authorization: MusicQueueAuthorization) {}
@@ -168,7 +169,14 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
             if paused { XCTAssertEqual(model.phase, .paused) }
         } else { XCTAssertEqual(model.activeResourceID, old) }
         let exclusions = try await service.sourceExclusions()
-        XCTAssertTrue(exclusions.isEmpty, "Recording exclusion must not become provider exclusion")
+        XCTAssertEqual(exclusions.count, 1)
+        let exclusion = try XCTUnwrap(exclusions.first)
+        XCTAssertEqual(exclusion.songID, model.current?.track.songId)
+        XCTAssertEqual(exclusion.provider, "")
+        if case .recording(_, let duration, let sourceKey) = exclusion.scope {
+            XCTAssertEqual(duration, 180)
+            XCTAssertEqual(sourceKey, rejected.selection.sourceKey)
+        } else { XCTFail("Recording exclusion must not become provider exclusion") }
         await session.close(); await model.close(); await service.close()
     }
     func testExpiredOfficialExactResultDoesNotEnumerateOtherProviders() async throws {

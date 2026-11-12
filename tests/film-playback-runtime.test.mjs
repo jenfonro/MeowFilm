@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { connectFilmPlayback, createAppRuntime, createRuntimeClient,
-  createCatScriptModule } from '../apps/runtime/entry.mjs';
+  createCatScriptModule, createNeteaseTokenModule } from '../apps/runtime/entry.mjs';
 
 const root = fileURLToPath(new URL('../tmp/test-results/film-playback/http/', import.meta.url));
 const deferred = () => {
@@ -28,7 +28,7 @@ const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); ret
 const source = { key: 'film-source', engine: 'cat', installationId: 'script', siteId: 'fixture',
   generation: 1, name: 'Fixture source' };
 const movie = { id: 'film:fixture', kind: 'movie', title: 'Fixture Film' };
-async function setup(t, { invoke } = {}) {
+async function setup(t, { invoke, tokenProvider } = {}) {
   mkdirSync(root, { recursive: true });
   const directory = mkdtempSync(join(root, 'case-'));
   const identity = { sessionId: randomUUID() };
@@ -70,6 +70,7 @@ async function setup(t, { invoke } = {}) {
     }, async close() {},
   };
   const modules = [cat], film = connectFilmPlayback(modules, { dataRoot: directory });
+  if (tokenProvider) modules.push(createNeteaseTokenModule({ provider: tokenProvider }));
   const app = createAppRuntime({ ...identity, modules });
   await app.start();
   const client = createRuntimeClient({ baseUrl: app.baseUrl });
@@ -116,6 +117,7 @@ async function observation(f, id, query = '', signal) {
       assert.ok(message.includes(`id: ${value.sequence}`));
       return value;
     },
+    async drain() { while (!(await reader.read()).done) {} },
     async close() { controller.abort(); await reader.cancel().catch(() => {}); },
   };
 }
@@ -243,6 +245,83 @@ test('runtime shutdown stops provider work and waits for physical completion, no
   // local AbortSignal cancellation, whose public result above is CANCELLED.
   assert.equal((await work).code, 'CLOSED');
 });
+
+test('film SSE and requests coexist with token success, cancellation, SDK failure and runtime shutdown',
+  { timeout: 10000 }, async t => {
+    const requests = [], searchEntered = deferred(), finishSearch = deferred();
+    let events, closes = 0;
+    t.after(async () => { finishSearch.resolve(); await events?.close(); });
+    const f = await setup(t, {
+      tokenProvider: {
+        get({ signal }) {
+          const request = deferred();
+          const cancel = () => request.reject(Object.assign(new Error('CANCELLED'), { code: 'CANCELLED' }));
+          signal.addEventListener('abort', cancel, { once: true });
+          requests.push(request);
+          return request.promise.finally(() => signal.removeEventListener('abort', cancel));
+        },
+        async close() {
+          closes++;
+          for (const request of requests) request.reject(Object.assign(new Error('CLOSED'), { code: 'CLOSED' }));
+        },
+      },
+      async invoke(input) {
+        if (input.operation !== 'search' || input.payload.wd !== 'parallel-sdk') return;
+        searchEntered.resolve();
+        await finishSearch.promise;
+        return { list: [{ vod_id: 'parallel', vod_name: 'Parallel Film' }], pagecount: 1 };
+      },
+    });
+    const id = await f.open({ platform: 'windows' }), attempt = await f.pending(id);
+    await f.command(id, 'media.started', { attemptId: attempt.id });
+    events = await observation(f, id);
+    let previous = await events.next();
+    const progress = async position => {
+      await f.command(id, 'media.progress', { attemptId: attempt.id, position, duration: 90, paused: false });
+      let current;
+      do { current = await events.next(); } while (current.current?.position !== position);
+      assert.equal(current.sessionId, id);
+      assert.equal(current.current.attemptId, attempt.id);
+      assert.ok(current.sequence > previous.sequence);
+      previous = current;
+    };
+
+    const success = f.client.call('netease.token.get');
+    const first = await until(() => requests[0]);
+    await progress(11);
+    first.resolve('synthetic-coexistence-token');
+    assert.deepEqual(await success, {
+      ok: true, contract: 'netease.token.v1', value: { token: 'synthetic-coexistence-token' },
+    });
+
+    const controller = new AbortController();
+    const cancelled = assert.rejects(f.client.call('netease.token.get', {}, { signal: controller.signal }),
+      { code: 'CANCELLED' });
+    await until(() => requests[1]);
+    controller.abort();
+    await cancelled;
+    await progress(22);
+
+    const failed = f.client.call('netease.token.get');
+    const third = await until(() => requests[2]);
+    const search = f.rpc('data.search', { source, query: 'parallel-sdk', page: 1 });
+    await searchEntered.promise;
+    third.reject(new Error('private SDK failure detail'));
+    assert.deepEqual(await failed, { ok: false, contract: 'netease.token.v1', code: 'SDK_FAILURE' });
+    finishSearch.resolve();
+    assert.deepEqual(okay(await search).items.map(item => item.vod_id), ['parallel']);
+    await progress(33);
+
+    const stopped = assert.rejects(f.client.call('netease.token.get'), { code: 'CLOSED' });
+    await until(() => requests[3]);
+    await progress(44);
+    // Keep the SSE exchange open: /v1/close must drain both it and the token request.
+    const ended = events.drain().catch(error => { assert.equal(error.name, 'TypeError'); });
+    assert.deepEqual(okay(await f.client.shutdown()), { closed: true, cleanupComplete: true });
+    await Promise.all([stopped, ended]);
+    assert.equal(closes, 1);
+    await until(() => f.app.state.active === 0);
+  });
 
 test('real Cat Worker local media uses its mapped listener, stays cold during preparation and expires with the source',
   { timeout: 20000 }, async t => {

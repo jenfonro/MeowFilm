@@ -9,8 +9,10 @@ export function createRuntimeClient({ baseUrl, timeout } = {}) {
       if (!selected) return Promise.reject(new BridgeError('METHOD_NOT_FOUND'));
       const [id, { prefix, contract, codes }] = selected;
       const operation = method.slice(prefix.length);
-      if (!/^[a-z]+(?:\.[a-z]+)*$(?![\s\S])/.test(operation)) return Promise.reject(new BridgeError('METHOD_NOT_FOUND'));
-      return client.request({ ...options, path: `/v1/${id}/${operation}`, body: params, contract, codes });
+      if (!/^[a-z]+(?:\.[a-z][a-zA-Z]*)*$(?![\s\S])/.test(operation)) return Promise.reject(new BridgeError('METHOD_NOT_FOUND'));
+      const request = id === 'source' && operation === 'rules.process'
+        ? client.requestWithoutDeadline : client.request;
+      return request({ ...options, path: `/v1/${id}/${operation}`, body: params, contract, codes });
     },
     upload(module, installationId, sourceRevision, bytes, { basename, ...options } = {}) {
       if (!Object.hasOwn(contracts, module) || !contracts[module].upload) {

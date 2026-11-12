@@ -14,9 +14,15 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
 | `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；音乐本地启动测试使用合成存储与拒绝网络的 transport，冷启动清理测试使用临时数据与模拟 Keychain |
-| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/cat/source/pan/tmdb/douban/film 七模块薄 entry，复用公共 JS 模块 |
+| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/cat/source/pan/tmdb/douban/film/netease 八模块薄 entry，复用公共 JS 模块 |
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
+
+### 设置语义配色
+
+设置内容使用 `PageTheme.settings` 提供的 `SettingsTheme`，仅由浅／深外观决定，不依赖歌曲、命名预设或自定义基准色。UIKit 与 SwiftUI 统一使用中性不透明卡片、淡中性渐变轮廓、行分隔线和独立输入底／边界；正文、辅助文字与字段提示保持可读对比度。操作、选中和开关为稳定蓝色，危险操作为红色，来源状态使用可读的成功／警告／错误语义色；平台标识与真实颜色数据不重染。
+
+设置窗口背景和 App 页头仍使用原 `PageTheme` 渐变；首页、播放器、原始播放目录、FM 选择器和阅读正文的配色契约不变。原始目录复用影视列表布局但显式不采用设置语义色。该投影不读写偏好，不新增主题模式或存储。
 
 ### 启动与首页发布
 
@@ -42,15 +48,13 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
-| `MeowFilmFeature` | 影视页面、搜索会话、规则及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime、MeowJavaScript、FilmRuleProgram、FilmSearchProgram |
-| `native/JavaScript` | 锁源 QuickJS 原生 C ABI 与后台 Swift JSON 引擎 | 无业务依赖 |
+| `MeowFilmFeature` | 影视页面、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime |
 | `native/VideoKernel` | 锁定 FFmpeg 8.1.2、私有 C／Swift 适配与系统 sample-buffer 输出 | Apple 系统媒体框架，无业务依赖 |
-| `packages/film-rules` | 同一份规则 JS 的 SwiftPM 资源包 | 无原生业务依赖 |
-| `packages/film-search` | 影视搜索整合 JS 的 SwiftPM 静态资源包 | 无原生业务依赖 |
+| `packages/film-rules`／`packages/film-search` | Node 加载的共享规则／搜索程序，不再作为 SwiftPM 依赖 | 共享 script-host 原生载体 |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
 
-影视智能播放、业务数据缓存、新增历史／人工匹配／屏蔽／偏好由 Node film owner 管理；原生模型仅投影快照并提交命令，收藏、规则与图片缓存保留原 owner。共用约束见[影视播放契约](../runtime/film-playback.md)，视频内核构建输入见[发布](release.md)。原生导航／搜索合并接线与平台验证仍须单独收口，不以七模块装配或内核版本代替实跑证据。
+影视规则文档／执行、搜索调度／聚合、智能播放、业务数据缓存及历史／人工匹配／屏蔽／偏好由 Node film owner 管理；原生只持编辑草稿／展示快照并提交命令，收藏、来源配置与图片缓存保留原 owner。规则与通用脚本使用同一 `MeowScriptHost.framework` 内的 QuickJS-NG 0.18.0 核心，各自独立 Runtime／Context，不链接客户端规则引擎。共用约束见[影视播放契约](../runtime/film-playback.md)，视频内核构建输入见[发布](release.md)。平台验证仍须单独记录，不以八模块装配或内核版本代替实跑证据。
 
 全局搜索的音乐／影视关系由 `MeowfilmSearchComposition` 装配。`MeowUI` 仅提供目标选择和附加结果内容契约；音乐搜索分页容器按契约承载内容，不导入影视、不承载影视取数或整合策略。影视搜索、真实详情导航与关闭 ownership 见[影视搜索](film-search.md)。
 
@@ -121,7 +125,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 胶囊和卡片的非控制区域直接打开完整播放器；卡片同时收回胶囊。完整播放器呈现时，底部栏和胶囊保持在底页原位，不下移或隐藏。
 - 完整播放器是独立页面，从底部向上滑入并叠加在当前页面之上，不由停靠元素形变而来。
 - 完整播放器通过自绘收起按钮向下收起；屏幕左边缘右滑仍作为返回输入，但手势进度映射为同一条向下收起轨迹，不改变普通页面的横向滑动返回。
-- 播放器的私人漫游选择页是直接呈现的独立单页，复用 `BottomPageTransition` 与左边缘返回，不使用没有可返回栈项的导航容器。关闭只返回播放器，不退出 FM；短滑、取消、旋转或后台中断保留页面与选择能力，账号／FM 失效则在转场结束后关闭。
+- 播放器的私人漫游选择页是直接呈现的独立单页，使用 `VerticalPageTransition(edge: .top)` 从顶部向下进入，关闭向上退出，左边缘返回只驱动相同轨迹（全屏播放器使用 `.bottom`），不使用没有可返回栈项的导航容器。关闭只返回播放器，不退出 FM；短滑、取消、旋转或后台中断保留页面与选择能力，账号／FM 失效则在转场结束后关闭。
 - 播放器不安装公共页头；独立收起／音频输出控件按自身水平安全区避让，背景继续贯穿页面。
 - 停靠元素与完整播放器各有控件实例，但复用同一个播放控件组件和同一份播放状态。
 - 播放器视图只负责布局和动画；播放状态、歌词、副歌、封面读取等业务任务由对应状态所有者负责。
@@ -153,7 +157,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 胶囊使用白色不透明底色；卡片使用由当前歌曲封面取色的浅色渐变。停靠元素通过自身的圆角与阴影同底页分层，不改变底部栏配色。
 - 完整播放器页面背景取自当前歌曲封面颜色。
 - 由封面取得的背景色调整到浅色外观的取值范围内：深色或过亮的封面不能产生近黑或近白的背景。适配只调整背景色，不为个别封面改动文字和控件颜色。
-- 共享主题只接收解析完成的色板，不读取歌曲或音乐偏好。
+- 共享主题只接收 `PagePalette`（命名预设或自定义 RGB 基准色），不读取歌曲或音乐偏好。自定义颜色在原生调色面板内只预览，确认后由既有偏好 owner 持久化；歌曲采样与缓存仍归音乐 owner。设置分组按需求增加很淡的渐变外轮廓，不改变窗口背景坐标。
 
 ## 数据身份
 
@@ -167,7 +171,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `music.accounts.v1` | 三平台账号凭据与固定账号槽 |
 | `music.account-url-cache.v1` | 账号授权 URL 缓存 |
 | `meowfilm.music.audio-cache.v1` | 实际播放后的完整音频缓存 |
-| `music.playback-display.v1`、`music.home.snapshot.v1` | 播放展示和首页快照缓存 |
+| `music.playback-display.v2`、`music.home.snapshot.v1` | 播放展示和首页快照缓存 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏的来源 ID 与影片 ID |

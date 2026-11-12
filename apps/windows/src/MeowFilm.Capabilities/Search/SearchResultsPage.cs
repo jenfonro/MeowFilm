@@ -11,25 +11,30 @@ namespace MeowFilm.Capabilities;
 public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChanged, IDisposable
 {
     private readonly FilmCapability film;
+    private readonly NovelCapability? novel;
     private readonly SearchResultsView view;
     private string query = "", tab = "overview", error = "";
     private bool raw, active;
     private string? musicLocation;
     private FilmSearchSession? session;
-    private double aggregateScroll, rawScroll;
+    private double aggregateScroll, rawScroll, novelScroll;
     private long submission;
     private bool disposed, changingMusic;
+    private CancellationTokenSource? novelPresentation;
     private readonly SemaphoreSlim musicGate = new(1, 1);
-    public SearchResultsPage(MusicCapability music, FilmCapability film)
+    public SearchResultsPage(MusicCapability music, FilmCapability film, NovelCapability? novel = null)
     {
         Music = music;
         this.film = film;
+        this.novel = novel;
         Tabs = Array.AsReadOnly(new[] { new SearchResultTab("overview", "综合"), new("songs", "单曲"),
-            new("playlists", "歌单"), new("film", "影视") });
+            new("playlists", "歌单"), new("film", "影视"), new("novel", "小说") });
         view = new(this);
         film.Search.Changed += FilmChanged;
         music.PropertyChanged += MusicChanged;
+        if (novel is not null) novel.Search.Changed += NovelChanged;
     }
+    private void NovelChanged(object? sender, EventArgs e) { if (!disposed && active && tab == "novel") view.PublishNovel(); }
     private void FilmChanged(object? sender, EventArgs e)
     {
         if (disposed) return;
@@ -38,7 +43,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     }
     private void MusicChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!disposed && active && !changingMusic && tab != "film" &&
+        if (!disposed && active && !changingMusic && tab is not ("film" or "novel") &&
             e.PropertyName == nameof(MusicCapability.SearchTab))
         { tab = Music.SearchTab; musicLocation = Music.CaptureNavigationLocation(); RefreshTabs(); }
     }
@@ -48,6 +53,9 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         Deactivate(); disposed = true;
         film.Search.Changed -= FilmChanged;
         Music.PropertyChanged -= MusicChanged;
+        if (novel is not null) novel.Search.Changed -= NovelChanged;
+        NavigateToPlaybackAsync = null; NavigationToken = null;
+        NavigateToNovelAsync = null; NovelNavigationToken = null;
     }
     public string Id => "search-results";
     public string Title => "搜索";
@@ -56,8 +64,8 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     public FrameworkElement View => view;
     public IDesktopModule ContentOwner => Music;
     internal MusicCapability Music { get; }
-    public IReadOnlyList<DesktopSearchTarget> Targets { get; } = [new("music", "音乐"), new("film", "影视")];
-    public string SelectedTarget => tab == "film" ? "film" : "music";
+    public IReadOnlyList<DesktopSearchTarget> Targets { get; } = [new("music", "音乐"), new("film", "影视"), new("novel", "小说")];
+    public string SelectedTarget => tab is "film" or "novel" ? tab : "music";
     public string SelectedTab => tab;
     public string Query => query;
     public IReadOnlyList<SearchResultTab> Tabs { get; }
@@ -73,7 +81,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         }
     }
     public bool CanLoadMore => session?.CanLoadMore == true;
-    public bool HasMore => session?.Cursors.Any(cursor => !cursor.Ended) == true;
+    public bool HasMore => session?.HasMore == true;
     public string MetadataStatus => session?.MetadataState switch
     {
         FilmSearchChannelState.Unavailable => "TMDB 不可用",
@@ -87,17 +95,23 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         session.SitesState == FilmSearchChannelState.Error ? "搜索不可用" : "无搜索结果";
     public Func<FilmCardItem, CancellationToken, Task>? NavigateToPlaybackAsync { get; set; }
     public Func<CancellationToken>? NavigationToken { get; set; }
+    public Func<NovelBook, CancellationToken, Task>? NavigateToNovelAsync { get; set; }
+    public Func<CancellationToken>? NovelNavigationToken { get; set; }
+    internal NovelCapability? Novel => novel;
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public async Task ActivateAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ObjectDisposedException.ThrowIf(disposed, this);
+        RetireNovel();
         active = true;
         long operation = ++submission;
-        if (tab != "film" && musicLocation is not null)
+        if (tab is not ("film" or "novel") && musicLocation is not null)
             await PresentMusicAsync(operation, query, tab, submit: false, cancellationToken);
         else if (tab == "film" && query.Length > 0) session = film.Search.Start(query, cancellationToken);
+        else if (tab == "novel" && novel is not null && query.Length > 0)
+            await PresentNovelAsync(operation, query, BeginNovel(cancellationToken));
         if (!IsCurrent(operation, cancellationToken)) return;
         view.Present(); PublishFilm(); RestoreScroll();
     }
@@ -107,6 +121,9 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         active = false;
         submission++;
         view.ReleaseMusic();
+        _ = film.Search.StopAsync();
+        RetireNovel();
+        if (novel is not null) novel.SearchWebOwner = null;
     }
     public async Task SubmitAsync(string query, string target, CancellationToken token)
     {
@@ -116,12 +133,13 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         long operation = ++submission;
         query = query.Trim();
         ArgumentException.ThrowIfNullOrEmpty(query);
-        if (target is not ("music" or "film")) throw new ArgumentException("Unknown search target.", nameof(target));
+        if (target is not ("music" or "film" or "novel")) throw new ArgumentException("Unknown search target.", nameof(target));
+        RetireNovel();
         RememberScroll();
         if (this.query != query)
         {
             this.query = query;
-            aggregateScroll = rawScroll = 0;
+            aggregateScroll = rawScroll = novelScroll = 0;
             musicLocation = null;
             film.Search.InvalidateQuery(query);
             session = null;
@@ -129,10 +147,16 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
             Changed(nameof(Query));
         }
         error = ""; Changed(nameof(Error));
-        tab = target == "film" ? "film" : "overview";
+        tab = target is "film" or "novel" ? target : "overview";
         RefreshTabs();
         if (target == "film") { session = film.Search.Start(query, token); PublishFilm(); }
-        else await PresentMusicAsync(operation, query, "overview", submit: true, token);
+        else
+        {
+            await film.Search.StopAsync();
+            if (!IsCurrent(operation, token)) return;
+            if (target == "novel") await PresentNovelAsync(operation, query, BeginNovel(token));
+            else await PresentMusicAsync(operation, query, "overview", submit: true, token);
+        }
         if (IsCurrent(operation, token)) { view.Present(); RestoreScroll(); }
     }
     public async Task OpenTabAsync(string next)
@@ -140,14 +164,19 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         if (!active || next == tab || !Tabs.Any(item => item.Id == next) || query.Length == 0) return;
         long operation = ++submission;
         string word = query;
-        var token = NavigationToken?.Invoke() ?? default;
+        var token = next == "novel" ? NovelNavigationToken?.Invoke() ?? default : NavigationToken?.Invoke() ?? default;
         RememberScroll();
+        bool leavingFilm = tab == "film" && next != "film";
+        RetireNovel();
         tab = next;
         RefreshTabs();
         error = ""; Changed(nameof(Error));
+        if (leavingFilm) await film.Search.StopAsync();
+        if (!IsCurrent(operation, token)) return;
         try
         {
             if (next == "film") { session = film.Search.Start(word, token); PublishFilm(); }
+            else if (next == "novel") await PresentNovelAsync(operation, word, BeginNovel(token));
             else await PresentMusicAsync(operation, word, next, submit: false, token);
         }
         catch (OperationCanceledException) { }
@@ -156,6 +185,56 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
             if (IsCurrent(operation, token)) { error = "搜索暂时不可用"; Changed(nameof(Error)); }
         }
         if (IsCurrent(operation, token)) { view.Present(); RestoreScroll(); }
+    }
+    private CancellationToken BeginNovel(CancellationToken token)
+    {
+        novelPresentation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        return novelPresentation.Token;
+    }
+    private void RetireNovel()
+    {
+        var previous = novelPresentation; novelPresentation = null;
+        previous?.Cancel(); previous?.Dispose();
+        // Retire admission and in-flight pages, not the retained results or cursors.
+        novel?.Search.Cancel();
+    }
+    private bool IsCurrentNovel(long operation, string word, CancellationToken token) =>
+        IsCurrent(operation, token) && tab == "novel" && query == word;
+    private async Task PresentNovelAsync(long operation, string word, CancellationToken token)
+    {
+        if (novel is null) throw new InvalidOperationException("Novel search is not composed.");
+        await novel.Sources.EnsureReadyAsync(token);
+        if (!IsCurrentNovel(operation, word, token)) return;
+        StartNovel(operation, word, token);
+        view.PublishNovel();
+    }
+    private void StartNovel(long operation, string word, CancellationToken token)
+    {
+        _ = Observe();
+        async Task Observe()
+        {
+            try { await novel!.Search.StartAsync(word, token); }
+            catch (OperationCanceledException) { }
+            catch { if (IsCurrentNovel(operation, word, token)) { error = "小说搜索失败"; Changed(nameof(Error)); } }
+        }
+    }
+    internal async Task LoadMoreNovelAsync()
+    {
+        if (!active || tab != "novel" || novel is null || novelPresentation is null) return;
+        long operation = submission; string word = query; var token = novelPresentation.Token;
+        try { await novel.Search.LoadMoreAsync(token); }
+        catch (OperationCanceledException) { }
+        catch { if (IsCurrentNovel(operation, word, token)) { error = "小说搜索失败"; Changed(nameof(Error)); } }
+    }
+    public async Task OpenNovelAsync(NovelBook book)
+    {
+        if (!active || tab != "novel" || novel is null || !novel.Search.Books.Contains(book) || NavigateToNovelAsync is null) return;
+        long operation = submission; string word = query;
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(NovelNavigationToken?.Invoke() ?? default,
+            novelPresentation?.Token ?? default);
+        try { await NavigateToNovelAsync(book, lifetime.Token); }
+        catch (OperationCanceledException) { }
+        catch { if (IsCurrentNovel(operation, word, lifetime.Token)) { error = "无法打开书籍"; Changed(nameof(Error)); } }
     }
     private bool IsCurrent(long operation, CancellationToken token) =>
         !disposed && active && operation == submission && !token.IsCancellationRequested;
@@ -184,6 +263,8 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     }
     private void PublishFilm()
     {
+        error = session?.Error is { Length: > 0 } failure ? FilmPlaybackError.Message(failure, "搜索不可用") : "";
+        Changed(nameof(Error));
         var values = (raw ? session?.RawItems : session?.Items) ?? [];
         var cards = values.Select(item => new FilmCardItem(
             FilmSearchJson.Text(item, "id"), FilmSearchJson.Text(item, "title"),
@@ -214,17 +295,20 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     }
     private void RememberScroll()
     {
+        if (tab == "novel") { novelScroll = view.NovelScroll.VerticalOffset; return; }
         if (tab != "film") return;
         if (raw) rawScroll = view.FilmScroll.VerticalOffset; else aggregateScroll = view.FilmScroll.VerticalOffset;
     }
     private void RestoreScroll()
     {
-        if (!active || tab != "film") return;
+        if (!active || tab is not ("film" or "novel")) return;
         long operation = submission;
         _ = view.Dispatcher.InvokeAsync(() =>
         {
             if (active && tab == "film" && operation == submission)
                 view.FilmScroll.ScrollToVerticalOffset(raw ? rawScroll : aggregateScroll);
+            if (active && tab == "novel" && operation == submission)
+                view.NovelScroll.ScrollToVerticalOffset(novelScroll);
         }, System.Windows.Threading.DispatcherPriority.Loaded);
     }
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));

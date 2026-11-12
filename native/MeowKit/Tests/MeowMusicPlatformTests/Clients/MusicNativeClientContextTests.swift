@@ -180,6 +180,31 @@ final class MusicNativeClientContextTests: XCTestCase {
         XCTAssertEqual(document.counts().commits, 1)
         clients.close()
     }
+    func testGuestAudioAndQRUseTheSamePersistentInstallationWithoutVisitorRegistration() async throws {
+        let document = QQPublicPersistenceMemory(), clients = try owner(document)
+        let installed = try await clients.nativeClientDevice(platform: .netease)
+        let clock = MusicAccountTestClock(), http = MusicNeteaseTestHTTP(clock: clock)
+        let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() }, clientContexts: clients)
+        _ = try await adapter.publicStandardAudio(nativeID: "101")
+        let challenge = try await adapter.createQR(id: UUID())
+        await adapter.cancelQR(challenge.id)
+        await adapter.revoke()
+        _ = try await adapter.publicStandardAudio(nativeID: "101")
+        let calls = await http.recorded()
+        XCTAssertEqual(calls.map(\.request.url.path), [
+            "/eapi/song/enhance/player/url", "/eapi/login/qrcode/unikey",
+            "/eapi/song/enhance/player/url",
+        ])
+        for call in calls {
+            XCTAssertTrue(call.request.headers["Cookie"]?.contains("deviceId=" + installed.fields["deviceId"]!) == true)
+            XCTAssertFalse(call.request.headers["Cookie"]?.contains("MUSIC_U=") == true)
+            XCTAssertFalse(call.request.headers["Cookie"]?.contains("MUSIC_A=") == true)
+        }
+        let after = try await clients.nativeClientDevice(platform: .netease)
+        XCTAssertEqual(after.fields, installed.fields)
+        XCTAssertEqual(document.counts().commits, 1)
+        clients.close()
+    }
     func testAccountAuthRejectionCannotPartiallyCommitClientFieldsFromTheSameResponse() async throws {
         let document = QQPublicPersistenceMemory(), clients = try owner(document)
         let installed = try await clients.nativeClientDevice(platform: .netease)

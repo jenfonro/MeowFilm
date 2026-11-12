@@ -114,7 +114,7 @@ private actor RecoveryHomeAccount: MusicNativeAccountProviding, MusicNativeHomeD
             // check authority and generation before publication/persistence.
             return data
         case .artistActivity: return Data(#"{"code":200,"data":{"newWorks":[]}}"#.utf8)
-        case .playlistMetadata, .songMetadata, .vipSongs: throw MusicServiceError.invalidRequest
+        case .playlistMetadata, .songMetadata, .vipSongs, .heartbeatSeed: throw MusicServiceError.invalidRequest
         }
     }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {

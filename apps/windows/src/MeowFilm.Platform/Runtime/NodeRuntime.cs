@@ -198,6 +198,12 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         if (!IsConnected) return Task.FromException<JsonElement>(new BridgeException("CLOSED"));
         return client.CallAsync(method, parameters, cancellationToken);
     }
+    public Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected) return Task.FromException<JsonElement>(new BridgeException("CLOSED"));
+        return client.CallAsync(method, parameters, timeout, cancellationToken);
+    }
 
     public IAsyncEnumerable<JsonElement> EventsAsync(string module, Guid sessionId, long after = 0,
         CancellationToken cancellationToken = default)
@@ -217,6 +223,12 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
     {
         if (!IsConnected) return Task.FromException<byte[]>(new BridgeException("CLOSED"));
         return client.ReadImageAsync(reference, maximumBytes, cancellationToken);
+    }
+
+    public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected) return Task.FromException<byte[]>(new BridgeException("CLOSED"));
+        return client.ReadImageAsync(reference, cancellationToken);
     }
 
     private static async Task<string> WatchPipeAsync(Stream stream)

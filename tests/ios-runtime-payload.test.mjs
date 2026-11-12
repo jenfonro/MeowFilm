@@ -19,9 +19,10 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
     import { readFileSync } from 'node:fs';
     const payload = process.cwd();
     const unusedProvider = new URL('./app/modules/metadata/douban.mjs', import.meta.url).href;
+    let commonOnly = true;
     registerHooks({ resolve(specifier, context, next) {
       const result = next(specifier, context);
-      if (result.url === unusedProvider) throw new SyntaxError('DOUBAN_PROVIDER_UNAVAILABLE');
+      if (commonOnly && result.url === unusedProvider) throw new SyntaxError('DOUBAN_PROVIDER_UNAVAILABLE');
       if (result.url.startsWith('file:')) {
         const path = relative(payload, fileURLToPath(result.url));
         if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
@@ -30,10 +31,11 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
       return result;
     } });
     const { createRuntime, createRuntimeClient, createAppRuntime, createMusicScriptModule,
-      createCatScriptModule, createSourceRuntimeModule, createTMDBDataModule } = await import('./app/entry.mjs');
+      createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule,
+      createTMDBDataModule, createDoubanDataModule, connectFilmPlayback,
+      createNeteaseTokenModule } = await import('./app/entry.mjs');
     const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
-    const runtime = createRuntime({ sessionId, dataRoot: join(payload, 'data'), source: { platform: 'ios' },
-      pan: {}, tmdb: {}, douban: {}, film: {} });
+    const runtime = createRuntime({ sessionId, dataRoot: join(payload, 'data'), source: { platform: 'ios' } });
     let client;
     try {
       await runtime.start();
@@ -41,22 +43,21 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
       const described = await client.describe();
       assert.equal(described.ok, true);
       assert.deepEqual(described.value.modules.map(value => [value.id, value.version]),
-        [['music', '0.8.0'], ['cat', '0.2.0'], ['source', '0.2.0'], ['pan', '0.1.0'],
-          ['tmdb', '0.1.0'], ['douban', '0.1.0'], ['film', '0.1.0']]);
+        [['music', '0.8.0'], ['cat', '0.2.0'], ['source', '0.3.0']]);
       const listed = await client.call('music.script.sources.list');
       assert.equal(listed.ok, true);
-      for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
-        'film.settings.get', 'film.library.get']) {
-        const reply = await client.call(method);
-        assert.equal(reply.ok, true, JSON.stringify(reply));
-      }
       assert.equal((await client.shutdown()).ok, true);
     } finally { await runtime.close(); await client?.close(); }
+    commonOnly = false;
     const dataRoot = join(payload, 'app-data');
-    const app = createAppRuntime({ sessionId, modules: [
+    const modules = [
       createMusicScriptModule({ dataRoot }), createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }),
-      createSourceRuntimeModule({ platform: 'ios' }), createTMDBDataModule({ dataRoot }),
-    ] });
+      createSourceRuntimeModule({ platform: 'ios', dataRoot }), createPanRuntimeModule({ dataRoot }),
+      createTMDBDataModule({ dataRoot }), createDoubanDataModule({ dataRoot }),
+    ];
+    connectFilmPlayback(modules, { dataRoot });
+    modules.push(createNeteaseTokenModule());
+    const app = createAppRuntime({ sessionId, modules });
     try {
       await app.start();
       client = createRuntimeClient({ baseUrl: app.baseUrl });
@@ -66,16 +67,25 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
       assert.deepEqual(described.value.modules.map(value => value.id), manifest.modules);
       assert.deepEqual(described.value.modules.map(value => [value.id, value.version, value.contract]), [
         ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
-        ['source', '0.2.0', 'source.runtime.v2'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
+        ['source', '0.3.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
+        ['tmdb', '0.1.0', 'tmdb.data.v1'], ['douban', '0.1.0', 'douban.data.v1'],
+        ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
       ]);
-      assert.deepEqual(described.value.modules[3].methods, [
+      assert.deepEqual(described.value.modules[4].methods, [
         'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
       ]);
+      assert.deepEqual(described.value.modules[7].methods, ['netease.token.get']);
+      assert.ok(described.value.modules[2].methods.includes('source.runtime.rules.process'));
+      for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
+        'film.settings.get', 'film.library.get']) {
+        const reply = await client.call(method);
+        assert.equal(reply.ok, true, JSON.stringify(reply));
+      }
       const settings = await client.call('tmdb.data.settings.get');
       assert.equal(settings.ok, true);
       assert.equal(settings.contract, 'tmdb.data.v1');
-      assert.equal(settings.value.apiKeyConfigured, false);
-      assert.equal(settings.value.accessTokenConfigured, false);
+      assert.equal(settings.value.apiKey, '');
+      assert.equal(settings.value.accessToken, '');
       assert.equal((await client.shutdown()).ok, true);
     } finally { await app.close(); await client?.close(); }
     console.log('IOS_JS_CLOSURE_OK');

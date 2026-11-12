@@ -8,7 +8,7 @@ const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_
 const success = value => ({ ok: true, contract: HTTP_PROTOCOL, value });
 const failureCode = id => ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE',
   cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE', tmdb: 'UPSTREAM_FORMAT', douban: 'UPSTREAM_FORMAT',
-  film: 'UPSTREAM_ERROR' })[id];
+  film: 'UPSTREAM_ERROR', netease: 'SDK_FAILURE' })[id];
 
 /** Lifecycle session configuration; no platform bootstrap or persistent identity. */
 export function createAppRuntime({ sessionId,

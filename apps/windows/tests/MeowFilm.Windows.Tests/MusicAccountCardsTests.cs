@@ -35,6 +35,9 @@ public static partial class MusicUiTests
                 AccountCardButton(view, "网易云音乐登录").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 await SearchUntil(() => !f.Module.AccountBusy); await Drain();
                 var popup = (Popup)view.FindName("LoginPopup");
+                True(popup.Child is AccountLoginSurface surface &&
+                    ReferenceEquals(surface.Style, view.FindResource("Account.LoginSurface")),
+                    "music consumes the shared neutral login surface");
                 var qr = (Button)view.FindName("QrModeButton");
                 var sms = (Button)view.FindName("SmsModeButton");
                 True(popup.IsOpen && f.Module.ShowAccountSms && sms.IsEnabled,

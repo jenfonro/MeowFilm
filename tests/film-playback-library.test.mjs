@@ -421,19 +421,23 @@ test('E31/E37: sensitive share document and containing directory have owner-only
       enabled: true, autoDisable: false, failureCount: 0,
     });
   });
-  assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(path).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path).mode & 0o777, 0o600);
+  }
   fs.chmodSync(directory, 0o755);
   fs.chmodSync(path, 0o644);
   owner.close();
   const restarted = createPlaybackLibrary({ dataRoot });
   t.after(() => restarted.close());
-  assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(path).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path).mode & 0o777, 0o600);
+  }
   assert.equal(restarted.read().manual[0].share.password, 'fixture-only');
 });
 
-test('E37: symlink or hardlink documents and owned symlink directories cannot redirect this owner', async t => {
+test('E37: linked documents and App-managed directory aliases support reads, atomic saves and restart', async t => {
   for (const kind of ['file-symlink', 'hardlink', 'directory-symlink']) {
     await t.test(kind, sub => {
       const base = area(sub), dataRoot = join(base, 'data'), other = join(base, 'other');
@@ -442,38 +446,50 @@ test('E37: symlink or hardlink documents and owned symlink directories cannot re
       const bytes = JSON.stringify(empty()), otherFile = join(other, 'library.json');
       fs.writeFileSync(otherFile, bytes);
       const directory = join(dataRoot, 'film-playback');
-      if (kind === 'directory-symlink') fs.symlinkSync(other, directory);
+      if (kind === 'directory-symlink') fs.symlinkSync(other, directory, 'junction');
       else {
         fs.mkdirSync(directory);
         if (kind === 'file-symlink') fs.symlinkSync(otherFile, join(directory, 'library.json'));
         else fs.linkSync(otherFile, join(directory, 'library.json'));
       }
-      assert.throws(() => createPlaybackLibrary({ dataRoot }), { code: 'STORAGE_ERROR' });
-      assert.equal(fs.readFileSync(otherFile, 'utf8'), bytes);
+      const { owner, path } = library(sub, dataRoot);
+      assert.deepEqual(owner.read(), empty());
+      const saved = owner.update(draft => { draft.blocks.push(block()); });
+      assert.deepEqual(JSON.parse(fs.readFileSync(path, 'utf8')), saved);
+      if (kind === 'directory-symlink') {
+        assert.deepEqual(JSON.parse(fs.readFileSync(otherFile, 'utf8')), saved);
+      } else {
+        assert.equal(fs.readFileSync(otherFile, 'utf8'), bytes, 'atomic replacement preserves the other linked entry');
+      }
+      owner.close();
+      const { owner: restarted } = library(sub, dataRoot);
+      assert.deepEqual(restarted.read(), saved);
     });
   }
 });
 
-test('E37: App-owned root aliases remain valid and pin this owner to the initial canonical directory', t => {
+test('E37: an App-owned root alias follows its current destination for normal I/O', t => {
   const base = area(t), original = join(base, 'original'), other = join(base, 'other');
   const linked = join(base, 'linked');
   fs.mkdirSync(original);
   fs.mkdirSync(other);
-  fs.symlinkSync(original, linked);
+  fs.symlinkSync(original, linked, 'junction');
   const owner = createPlaybackLibrary({ dataRoot: linked });
   t.after(() => owner.close());
   fs.unlinkSync(linked);
-  fs.symlinkSync(other, linked);
-  owner.update(draft => { draft.blocks.push(block()); });
-  assert.equal(fs.existsSync(join(other, 'film-playback', 'library.json')), false);
-  assert.deepEqual(JSON.parse(fs.readFileSync(join(original, 'film-playback', 'library.json'), 'utf8')).blocks,
-    [block()]);
+  fs.symlinkSync(other, linked, 'junction');
+  const saved = owner.update(draft => { draft.blocks.push(block()); });
+  assert.equal(fs.existsSync(join(original, 'film-playback', 'library.json')), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(other, 'film-playback', 'library.json'), 'utf8')), saved);
+  owner.close();
+  const { owner: restarted } = library(t, linked);
+  assert.deepEqual(restarted.read(), saved);
 });
 
-test('E37: a not-yet-created App root below a platform alias can commit without moving the trusted subtree', t => {
+test('E37: a not-yet-created App root below a platform alias supports first save, restart and later saves', t => {
   const base = area(t), actual = join(base, 'actual'), linked = join(base, 'linked');
   fs.mkdirSync(actual);
-  fs.symlinkSync(actual, linked);
+  fs.symlinkSync(actual, linked, 'junction');
   const dataRoot = join(linked, 'application-support', 'script-runtime');
   const owner = createPlaybackLibrary({ dataRoot });
   t.after(() => owner.close());
@@ -481,7 +497,53 @@ test('E37: a not-yet-created App root below a platform alias can commit without 
   const restarted = createPlaybackLibrary({ dataRoot });
   t.after(() => restarted.close());
   assert.deepEqual(restarted.read().blocks, [block()]);
-  assert.equal(fs.existsSync(join(actual, 'application-support', 'script-runtime', 'film-playback', 'library.json')), true);
+  restarted.update(draft => { draft.manual.push(manual()); });
+  const actualPath = join(actual, 'application-support', 'script-runtime', 'film-playback', 'library.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(actualPath, 'utf8')), restarted.read());
+});
+
+test('E37: an App-managed module directory alias supports first creation and restart', t => {
+  const base = area(t), dataRoot = join(base, 'data'), actual = join(base, 'actual');
+  fs.mkdirSync(dataRoot);
+  fs.mkdirSync(actual);
+  fs.symlinkSync(actual, join(dataRoot, 'film-playback'), 'junction');
+  const { owner, path } = library(t, dataRoot);
+  assert.equal(fs.existsSync(path), false);
+  const saved = owner.update(draft => { draft.manual.push(manual()); });
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(actual, 'library.json'), 'utf8')), saved);
+  owner.close();
+  const { owner: restarted } = library(t, dataRoot);
+  assert.deepEqual(restarted.read(), saved);
+  restarted.update(draft => { draft.blocks.push(block()); });
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(actual, 'library.json'), 'utf8')), restarted.read());
+});
+
+test('E37: obstructed paths cannot commit and preserve existing filesystem contents', async t => {
+  for (const kind of ['data-root', 'module-directory', 'document']) {
+    await t.test(kind, sub => {
+      const base = area(sub), dataRoot = join(base, 'data');
+      const directory = join(dataRoot, 'film-playback'), path = join(directory, 'library.json');
+      const blocked = kind === 'data-root' ? dataRoot : directory;
+      if (kind === 'document') fs.mkdirSync(path, { recursive: true });
+      else {
+        fs.mkdirSync(kind === 'data-root' ? base : dataRoot, { recursive: true });
+        fs.writeFileSync(blocked, 'synthetic storage obstruction');
+      }
+      // Windows open reports ENOENT below a file rather than POSIX ENOTDIR.
+      // Reading can therefore be a miss, but saving must never accept this path.
+      if (process.platform === 'win32' && kind !== 'document') {
+        const { owner } = library(sub, dataRoot);
+        assert.deepEqual(owner.read(), empty());
+        assert.throws(() => owner.update(draft => { draft.blocks.push(block()); }),
+          { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
+        assert.deepEqual(owner.read(), empty());
+      } else {
+        assert.throws(() => createPlaybackLibrary({ dataRoot }), { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
+      }
+      if (kind === 'document') assert.deepEqual(fs.readdirSync(path), []);
+      else assert.equal(fs.readFileSync(blocked, 'utf8'), 'synthetic storage obstruction');
+    });
+  }
 });
 
 test('E37: bad manual sharing references and transport secrets fail with safe errors', async t => {

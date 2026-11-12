@@ -5,10 +5,11 @@ import MeowMusicFeature
 
 enum MusicLibraryValidation {
     static func validate(_ lib: MJ, owner: String) throws {
-        try lib.requireFields(["version", "ownerId", "revision", "nextId", "collections", "songs", "accounts", "status"])
-        try musicRequire(lib["version"] == .n(1) && !owner.isEmpty && musicSame(lib["ownerId"].string, owner) &&
+        try lib.requireFields(["version", "ownerId", "revision", "nextId", "collections", "networkReferences", "songs", "accounts", "status"])
+        try musicRequire(lib["version"] == .n(2) && !owner.isEmpty && musicSame(lib["ownerId"].string, owner) &&
             lib["revision"].isInteger && lib["nextId"].isInteger && lib["nextId"].int > 0 &&
-            lib["collections"].isArray && lib["collections"].array.count <= 2000 &&
+            lib["collections"].isArray && lib["networkReferences"].isArray &&
+            lib["collections"].array.count + lib["networkReferences"].array.count <= 2000 &&
             lib["songs"].isObject && lib["songs"].fields.count <= 20_000 && lib["accounts"].isObject, .corruptDocument)
         var nativeOwners: [String: String] = [:], collectionIDs = Set<Data>(), remoteBindings = Set<String>()
         let knownSongs = musicIDs(lib["songs"].fields.map(\.0))
@@ -41,7 +42,7 @@ enum MusicLibraryValidation {
                     bindings.insert(key).inserted && remoteBindings.insert(key).inserted && b["baseline"].isArray &&
                     b["baseline"].array.allSatisfy { $0.isString && !$0.string.isEmpty } &&
                     Set(b["baseline"].strings).count == b["baseline"].array.count && b["map"].isObject &&
-                    b["writable"].isBool && b["name"].isString, .corruptDocument)
+                    b["writable"] == .bool(true) && b["name"].isString, .corruptDocument)
                 for (_, songID) in b["map"].fields {
                     _ = try songID.text()
                     try musicRequire(knownSongs.contains(Data(songID.string.utf8)), .corruptDocument)
@@ -57,6 +58,7 @@ enum MusicLibraryValidation {
             }
         }
         try musicRequire(lib["collections"].array.filter { $0["kind"].string == "favorites" }.count == 1, .favoritesProtected)
+        try MusicNativeNetworkPlaylists.validate(lib)
         for (platform, id) in lib["accounts"].fields { try musicRequire(MusicModel.sites.contains(platform), .corruptDocument); _ = try id.text() }
     }
 }
@@ -141,14 +143,16 @@ extension NativeMusicService {
     }
     public func collections() async throws -> [MusicCollection] {
         let library = try read().library["library"]
-        return library["collections"].array.filter { !$0["deleted"].bool }.map { row in
+        let managed: [MusicCollection] = library["collections"].array.filter { !$0["deleted"].bool }.map { row in
             let first = row["order"].strings.first.map { library["songs"][$0] } ?? .null
             return .init(id: row["id"].string, title: row["name"].string, kind: row["kind"].string,
                 count: row["order"].array.count, revision: row["revision"].int,
                 artwork: MusicNativePublicBrowseSupport.artwork(first["cover_url"]))
         }
+        return managed + library["networkReferences"].array.filter { $0["present"].bool }.map(networkCollectionDTO)
     }
     public func tracks(in requested: MusicCollection) async throws -> [MusicRemoteTrack] {
+        try musicRequire(requested.networkReference == nil, .unsupported)
         let d = try read(), c = try collection(requested.id, d)
         try musicRequire(c["revision"].int == requested.revision, .staleRevision)
         let ids = c["order"].strings
@@ -163,7 +167,7 @@ extension NativeMusicService {
         let acquired = try await sharedSongMetadata(originals)
         let result = try transaction(["library"]) { d in
             var lib = d.library["library"]
-            try musicRequire(lib["collections"].array.count < 2000, .limit)
+            try musicRequire(lib["collections"].array.count + lib["networkReferences"].array.count < 2000, .limit)
             // Revalidate references after the metadata owner's suspensions.
             try musicRequire(try refs.map { try song($0, d) } == originals, .targetChanged)
             let ids = try upsert(acquired, library: &lib)
@@ -179,6 +183,7 @@ extension NativeMusicService {
         return result
     }
     public func editPlaylist(_ requested: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection {
+        try musicRequire(requested.networkReference == nil, .unsupported)
         let acquired: [MJ]?, originals: [MJ]?
         if let refs {
             let before = try read()
@@ -207,7 +212,11 @@ extension NativeMusicService {
             var touched = Set<Data>()
             for id in previous + next where touched.insert(Data(id.utf8)).inserted {
                 let before = previous.contains { musicSame($0, id) }, after = next.contains { musicSame($0, id) }
-                if before != after { intents[id] = .obj([("present", .bool(after)), ("pending", .bool(true)), ("origin", .string("local"))]) }
+                if before != after {
+                    // An unbound local removal must not become a future account's delete.
+                    if !after, c["bindings"].array.isEmpty { intents.remove(id) }
+                    else { intents[id] = .obj([("present", .bool(after)), ("pending", .bool(true)), ("origin", .string("local"))]) }
+                }
             }
             c["intents"] = intents; c["order"] = .strings(next); c["manualOrder"] = .bool(true); c["revision"] = .n(requested.revision + 1)
             d.library["library"] = lib; saveCollection(c, &d)
@@ -219,6 +228,7 @@ extension NativeMusicService {
         return result
     }
     public func removePlaylist(_ requested: MusicCollection) async throws {
+        try musicRequire(requested.networkReference == nil, .unsupported)
         try transaction(["library"]) { d in
             var c = try collection(requested.id, d)
             try musicRequire(c["kind"].string != "favorites", .favoritesProtected)

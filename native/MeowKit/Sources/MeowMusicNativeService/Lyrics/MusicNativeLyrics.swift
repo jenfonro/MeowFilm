@@ -53,7 +53,7 @@ enum MusicNativeLyricsParser {
         result += ns.substring(from: start); return result
     }
     struct Word { var time: Double; var duration: Double?; let text: String }
-    struct Line { var time: Double; var end: Double?; let text: String; var words: [Word]; let qrc: Bool; let ordinal: Int }
+    struct Line { var time: Double; var end: Double?; let text: String; var words: [Word]; let ordinal: Int }
     static func lines(_ raw: String, translation: String = "", duration: Double = 0) throws -> [MusicLyricLine] {
         let input = xmlText(raw)
         let offset = (matches(#"\[offset:([+-]?\d+)\]"#, input, insensitive: true).first.flatMap { Double($0[1]) } ?? 0) / 1000
@@ -71,11 +71,11 @@ enum MusicNativeLyricsParser {
                     }
                 } else {
                     words = matches(#"\((\d+),(\d+),\d+\)(.*?)(?=\(\d+,\d+,\d+\)|$)"#, content).filter { !$0[3].isEmpty }.map {
-                        .init(time: (Double($0[1]) ?? 0) / 1000 + offset, duration: max(0, (Double($0[2]) ?? 0) / 1000), text: $0[3])
+                        .init(time: (Double($0[1]) ?? 0) / 1000 + offset, duration: (Double($0[2]) ?? 0) / 1000, text: $0[3])
                     }
                 }
                 let plain = words.isEmpty ? content.trimmingCharacters(in: .whitespaces) : words.map(\.text).joined()
-                if !plain.isEmpty { output.append(.init(time: max(0, time + offset), end: max(0, end + offset), text: plain, words: words, qrc: qrc, ordinal: output.count)) }
+                if !plain.isEmpty { output.append(.init(time: time + offset, end: end + offset, text: plain, words: words, ordinal: output.count)) }
             } else if let head = matches(#"^((?:\[\d{1,3}:\d{2}(?:\.\d{1,3})?\])+)(.*)$"#, text).first {
                 let content = head[2].trimmingCharacters(in: .whitespaces), ns = head[2].trimmingCharacters(in: .whitespaces) as NSString
                 if content.isEmpty { continue }
@@ -85,18 +85,24 @@ enum MusicNativeLyricsParser {
                     var words: [Word] = [], end: Double?
                     if let first = markers.first {
                         let before = ns.substring(to: first.range.location)
-                        if !before.isEmpty { words.append(.init(time: time + offset, duration: nil, text: before)) }
                         let relative = !first[1].isEmpty && clock(first[1], first[2]) < time - 1
+                        let stamps = markers.map {
+                            clock($0[1].isEmpty ? $0[3] : $0[1], $0[2].isEmpty ? $0[4] : $0[2]) + (relative ? time : 0) + offset
+                        }
+                        if !before.isEmpty {
+                            words.append(.init(time: time + offset, duration: max(0, stamps[0] - time - offset), text: before))
+                        }
                         for (i, marker) in markers.enumerated() {
-                            let stamp = clock(marker[1].isEmpty ? marker[3] : marker[1], marker[2].isEmpty ? marker[4] : marker[2]) + (relative ? time : 0) + offset
                             let from = NSMaxRange(marker.range), to = i + 1 < markers.count ? markers[i + 1].range.location : ns.length
                             let word = ns.substring(with: NSRange(location: from, length: to - from))
-                            if !word.isEmpty { words.append(.init(time: max(0, stamp), duration: nil, text: word)) }
-                            else if i + 1 == markers.count { end = stamp }
+                            if !word.isEmpty {
+                                let length: Double? = i + 1 < stamps.count ? max(0, stamps[i + 1] - stamps[i]) : nil
+                                words.append(.init(time: stamps[i], duration: length, text: word))
+                            } else if i + 1 == markers.count { end = stamps[i] }
                         }
                     }
                     let plain = markers.isEmpty ? content : words.map(\.text).joined()
-                    if !plain.isEmpty { output.append(.init(time: max(0, time + offset), end: end, text: plain, words: words, qrc: false, ordinal: output.count)) }
+                    if !plain.isEmpty { output.append(.init(time: time + offset, end: end, text: plain, words: words, ordinal: output.count)) }
                 }
             }
             try musicRequire(output.count <= 6000, .limit)
@@ -112,31 +118,19 @@ enum MusicNativeLyricsParser {
         var result: [MusicLyricLine] = []
         for (i, row) in output.enumerated() {
             let next = output.dropFirst(i + 1).first { $0.time > row.time }?.time
-            let end = row.qrc ? row.end ?? row.time : max(row.time + 0.05, row.end ?? next ?? (duration > row.time ? duration : row.time + 5))
+            let end = max(row.time, row.end ?? next ?? (duration > row.time ? duration : row.time))
             try musicRequire(row.time.isFinite && end.isFinite && abs(row.time) <= 9_007_199_254_740, .invalidLyricResponse)
             var words: [MusicLyricWord] = []
-            if row.words.isEmpty {
-                let chars = row.text.map(String.init)
-                func weight(_ c: String) -> Double {
-                    if c.rangeOfCharacter(from: .whitespacesAndNewlines) != nil { return 0.25 }
-                    return c.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.union(.symbols).contains($0) } ? 0.5 : 1
-                }
-                let sum = chars.reduce(0) { $0 + weight($1) }, total = sum > 0 ? sum : 1
-                var start = row.time
-                for char in chars {
-                    let length = (end - row.time) * weight(char) / total
-                    words.append(.init(time: start, duration: length, text: char)); start += length
-                }
-            } else {
-                for (j, word) in row.words.enumerated() {
-                    let length = word.duration ?? max(0.05, (j + 1 < row.words.count ? row.words[j + 1].time : end) - word.time)
-                    try musicRequire(word.time.isFinite && length.isFinite && length >= 0, .invalidLyricResponse)
-                    words.append(.init(time: word.time, duration: length, text: word.text))
-                }
+            for (j, word) in row.words.enumerated() {
+                let boundary = j + 1 < row.words.count ? row.words[j + 1].time : row.end ?? next
+                let length = word.duration ?? boundary.map { max(0, $0 - word.time) } ?? 0
+                try musicRequire(word.time.isFinite && length.isFinite && length >= 0, .invalidLyricResponse)
+                words.append(.init(time: word.time, duration: length, text: word.text))
             }
-            let texts = (translated[Int64((row.time * 1000).rounded())] ?? []).filter { $0 != row.text }
-            result.append(.init(index: i, time: row.time, end: end, text: row.text, translation: texts.joined(separator: "\n"),
-                timing: row.words.isEmpty ? "estimated" : "word", words: words))
+            let time = max(0, row.time)
+            let texts = (translated[Int64((time * 1000).rounded())] ?? []).filter { $0 != row.text }
+            result.append(.init(index: i, time: time, end: max(time, end), text: row.text, translation: texts.joined(separator: "\n"),
+                words: words))
         }
         return result
     }

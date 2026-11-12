@@ -25,6 +25,8 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
     internal readonly string Root;
     internal readonly string Platform;
     internal readonly Store Wrapper;
+    internal readonly Store CacheBacking;
+    internal readonly CacheDocumentStore Cache;
     internal readonly MusicPlatformHttp Http;
     internal readonly MusicAccountOwner Owner;
     internal readonly MusicClientContextFixture Clients;
@@ -41,9 +43,14 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root);
         Directory.CreateDirectory(Root);
         Wrapper = new(new LocalDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
+        string cacheRoot = Path.Combine(Root, "cache");
+        Directory.CreateDirectory(cacheRoot);
+        CacheBacking = new(new LocalDocumentStore(cacheRoot,
+            [MusicAccountOwner.DetailsCacheNamespace], protectedNamespaces: [MusicAccountOwner.DetailsCacheNamespace]));
+        Cache = new(CacheBacking);
         Http = MusicPlatformHttp.CreateWithHandler(new Handler(this));
         Clients = new(Http, Wrapper.Inner);
-        Owner = Clients.CreateAccountOwner(Wrapper, timeout: timeout);
+        Owner = Clients.CreateAccountOwner(Wrapper, timeout: timeout, detailsCacheStore: Cache);
     }
     internal async Task Seed()
     {
@@ -76,15 +83,32 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         }
         finally { CryptographicOperations.ZeroMemory(doc.Data!); }
     }
-    internal static JsonObject DetailsRow(JsonObject root) => root["entries"]!.AsArray()
-        .Single(r => r!["key"]!.GetValue<string>().Contains("\"account-details\"", StringComparison.Ordinal))!["value"]!.AsObject();
+    internal async Task<JsonObject> CacheDocument()
+    {
+        var doc = await Cache.ReadAsync(MusicAccountOwner.DetailsCacheNamespace);
+        try { return JsonNode.Parse(doc.Data!)!.AsObject(); }
+        finally { CryptographicOperations.ZeroMemory(doc.Data!); }
+    }
+    internal async Task MutateCache(Action<JsonObject> change)
+    {
+        var doc = await Cache.ReadAsync(MusicAccountOwner.DetailsCacheNamespace);
+        try
+        {
+            var root = JsonNode.Parse(doc.Data!)!.AsObject(); change(root);
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(root);
+            try { await Cache.WriteAsync(MusicAccountOwner.DetailsCacheNamespace, bytes, doc.Fingerprint); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+        }
+        finally { CryptographicOperations.ZeroMemory(doc.Data!); }
+    }
+    internal static JsonObject DetailsRow(JsonObject root) => root.First().Value!.AsObject();
     internal static JsonObject AccountRow(JsonObject root) => root["entries"]!.AsArray()
         .Single(r => r!["key"]!.GetValue<string>().Contains("\"platform-account\"", StringComparison.Ordinal))!["value"]!.AsObject();
     public async ValueTask DisposeAsync()
     {
-        Release.TrySetResult(); Wrapper.Release.TrySetResult();
+        Release.TrySetResult(); Wrapper.Release.TrySetResult(); CacheBacking.Release.TrySetResult();
         try { await Owner.DisposeAsync(); }
-        finally { await Clients.DisposeAsync(); Http.Dispose(); await Wrapper.DisposeAsync(); }
+        finally { await Clients.DisposeAsync(); Http.Dispose(); await Cache.DisposeAsync(); await CacheBacking.DisposeAsync(); await Wrapper.DisposeAsync(); }
     }
     private sealed class Handler(MusicAccountDetailsFixture f) : HttpMessageHandler
     {
@@ -147,12 +171,13 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
     {
         internal LocalDocumentStore Inner => inner;
         internal int Reads, Writes, Disposals;
-        internal bool Hold, HoldRead, LoseReceipt, Conflict;
+        internal bool Hold, HoldRead, LoseReceipt, Conflict, FailRead;
         internal TaskCompletionSource Entered { get; } = Signal();
         internal TaskCompletionSource Release { get; } = Signal();
         public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             Interlocked.Increment(ref Reads);
+            if (FailRead) throw new DocumentStoreException(DocumentStoreError.Storage);
             if (HoldRead) { Entered.TrySetResult(); await Release.Task; token = default; }
             return await inner.ReadAsync(ns, token);
         }

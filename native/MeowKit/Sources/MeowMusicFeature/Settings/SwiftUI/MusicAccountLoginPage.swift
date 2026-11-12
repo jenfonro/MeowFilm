@@ -18,14 +18,14 @@ final class MusicAccountLoginViewController: MusicSettingsPageViewController<Mus
         self.owner = owner
         state = MusicAccountLoginState(owner: owner, service: service, platform: platform)
         super.init(appearance: appearance, content: MusicAccountLoginContent(
-            state: state, theme: PageTheme(palette: appearance.pageColorway)
+            state: state, theme: PageTheme(colors: appearance.pagePalette)
         ))
         pageTitle = platform.title
         modalPresentationStyle = .overFullScreen
         modalTransitionStyle = .crossDissolve
     }
 
-    override func loadView() { view = MusicAccountFloatingBackdrop() }
+    override func loadView() { view = AccountFloatingBackdrop() }
     override var usesPageHeader: Bool { false }
 
     override func viewDidLoad() {
@@ -82,7 +82,7 @@ struct MusicAccountLoginContent: View {
     var close: () -> Void = {}
 
     var body: some View {
-        MusicAccountFloatingCard(theme: theme) {
+        AccountFloatingCard(theme: theme) {
             VStack(alignment: .leading, spacing: 20) {
                 MusicAccountCardHeader(
                     platform: state.platform, title: state.platform.title + "登录", theme: theme, close: close
@@ -104,12 +104,12 @@ struct MusicAccountLoginContent: View {
                                           platform: state.platform, theme: theme)
                         if state.canRetry {
                             Button("重试", action: state.retry)
-                                .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                                .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
                         }
                         if let status = state.status {
                             Text(status)
                                 .font(.subheadline)
-                                .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                                .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                                 .frame(maxWidth: .infinity)
                         }
                     }
@@ -135,15 +135,15 @@ struct MusicAccountLoginContent: View {
             if let status = state.status {
                 Text(status)
                     .font(.subheadline)
-                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                     .multilineTextAlignment(.center)
             }
             if state.canRetry {
                 Button("重试", action: state.retry)
-                    .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                    .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
             } else if state.image != nil {
                 Button("保存二维码", action: shareQR)
-                    .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                    .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
             }
         }
         .frame(maxWidth: .infinity)
@@ -161,7 +161,7 @@ private struct MusicLoginMethodTabs: View {
             tab(.qr, title: "扫码登录")
         }
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color(uiColor: UIColor(theme.border))).frame(height: 1)
+            Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(height: 1)
         }
         .disabled(!state.available)
     }
@@ -172,9 +172,9 @@ private struct MusicLoginMethodTabs: View {
             VStack(spacing: 8) {
                 Text(title)
                     .font(.subheadline.weight(selected ? .semibold : .regular))
-                    .foregroundStyle(Color(uiColor: UIColor(selected ? theme.ink : theme.muted)))
+                    .foregroundStyle(Color(uiColor: UIColor(selected ? theme.settings.ink : theme.settings.muted)))
                 Capsule()
-                    .fill(selected ? Color(uiColor: UIColor(theme.accent)) : Color.clear)
+                    .fill(selected ? Color(uiColor: UIColor(theme.settings.accent)) : Color.clear)
                     .frame(width: 40, height: 3)
             }
             .frame(maxWidth: .infinity, minHeight: 44)
@@ -204,7 +204,7 @@ private struct MusicSMSLoginForm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("手机号").font(.subheadline.weight(.semibold))
-            MusicAccountInputCapsule(theme: theme) {
+            AccountInputCapsule(theme: theme) {
                 countryCode
                 divider
                 TextField("", text: Binding(get: { fields.value.phone }, set: { fields.setPhone($0) }))
@@ -215,7 +215,7 @@ private struct MusicSMSLoginForm: View {
                     .frame(minHeight: 48)
             }
             Text("验证码").font(.subheadline.weight(.semibold)).padding(.top, 6)
-            MusicAccountInputCapsule(theme: theme) {
+            AccountInputCapsule(theme: theme) {
                 TextField("", text: Binding(get: { fields.value.code }, set: { fields.setCode($0) }))
                     .keyboardType(.numberPad)
                     .textContentType(.oneTimeCode)
@@ -232,11 +232,11 @@ private struct MusicSMSLoginForm: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color(uiColor: UIColor(actions.value.canSend ? theme.accent : theme.muted)))
+                .foregroundStyle(Color(uiColor: UIColor(actions.value.canSend ? theme.settings.accent : theme.settings.muted)))
                 .disabled(!actions.value.canSend)
             }
             Button("登录", action: actions.submit)
-                .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
                 .disabled(!actions.value.canSubmit)
                 .padding(.top, 10)
         }
@@ -248,7 +248,7 @@ private struct MusicSMSLoginForm: View {
     }
 
     private var divider: some View {
-        Rectangle().fill(Color(uiColor: UIColor(theme.border))).frame(width: 1, height: 22)
+        Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(width: 1, height: 22)
     }
 
     @ViewBuilder
@@ -275,7 +275,7 @@ private struct MusicSMSLoginForm: View {
                     label
                     Image(systemName: "chevron.down").font(.caption2.weight(.semibold))
                 }
-                .foregroundStyle(Color(uiColor: UIColor(theme.ink)))
+                .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
                 .padding(.horizontal, 16)
                 .frame(minWidth: 44, minHeight: 48)
                 .contentShape(Rectangle())

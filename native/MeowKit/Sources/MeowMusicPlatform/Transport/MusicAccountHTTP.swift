@@ -60,7 +60,7 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
         "interface.music.163.com": ["/api/bsr/sk/get"],
         "interfacepc.music.163.com": ["/eapi/login/qrcode/unikey", "/eapi/login/qrcode/client/login",
                                      "/eapi/v6/playlist/detail", "/eapi/song/music/detail/get"],
-        "interface3.music.163.com": ["/xeapi/register/anonimous", "/xeapi/v3/discovery/recommend/songs",
+        "interface3.music.163.com": ["/xeapi/v3/discovery/recommend/songs",
                                     "/xeapi/song/enhance/player/url/v1"],
         "music.163.com": ["/weapi/w/nuser/account/get", "/weapi/v1/radio/get", "/weapi/user/playlist",
                           "/weapi/v3/song/detail", "/weapi/music-vip-membership/client/vip/info", "/weapi/song/chorus"]
@@ -100,7 +100,11 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
             let response = try await transfer(value, trace: trace)
             trace.record(.completed, http: response.status)
             return response
-        } catch { trace.failed(error); throw MusicServiceError.sanitized(error) }
+        } catch {
+            trace.failed(error)
+            if error is MusicAccountFeedbackNotSent { throw error }
+            throw MusicServiceError.sanitized(error)
+        }
     }
     private func transfer(_ value: MusicAccountHTTPRequest, trace: MusicRequestTrace) async throws -> MusicAccountHTTPResponse {
         try Task.checkCancellation()
@@ -180,7 +184,10 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
         if let failure = value.failure { continuation.resume(throwing: failure) }
         else if value.cancelled { continuation.resume(throwing: MusicServiceError.cancelled) }
         else if let error {
-            continuation.resume(throwing: MusicServiceError.sanitized(error))
+            if MusicAccountFeedbackNotSent.matches(error as NSError, url: value.url,
+                bytesSent: task.countOfBytesSent, responseReceived: value.response != nil) {
+                continuation.resume(throwing: MusicAccountFeedbackNotSent.connectionUnavailable)
+            } else { continuation.resume(throwing: MusicServiceError.sanitized(error)) }
         } else if let response = value.response {
             continuation.resume(returning: .init(status: response.statusCode, data: value.data, headers: value.headers))
         } else { continuation.resume(throwing: MusicServiceError.upstreamInvalid) }

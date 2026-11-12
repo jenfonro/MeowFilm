@@ -471,7 +471,6 @@ export function createMediaService() {
 
   async function serveCached(task, owner, resource, request, response) {
     if (!owner.cache || request.headers['if-none-match'] || request.headers['if-modified-since']) return false;
-    await owner.cache.wait(resource.url);
     if (task.controller.signal.aborted || owner.revoked) throw failure('MEDIA_CANCELLED');
     const document = owner.cache.document(documentKey(resource));
     if (document && document.expiresAt > Date.now()) {
@@ -600,7 +599,8 @@ export function createMediaService() {
 
   async function prefetchOperation(owner, job, perform) {
     if (job.controller.signal.aborted) throw job.controller.signal.reason;
-    if (operations.size >= maximumActiveRequests) throw failure('MEDIA_BUSY');
+    // Leave the final transport slot for playback, even when every active task is prefetch.
+    if (operations.size >= maximumActiveRequests - 1) throw failure('MEDIA_BUSY');
     const task = operation(owner);
     const cancel = () => task.cancel(job.controller.signal.reason?.code);
     job.controller.signal.addEventListener('abort', cancel, { once: true });

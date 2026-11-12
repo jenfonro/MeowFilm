@@ -1,6 +1,6 @@
 # Reader 书源运行时
 
-Reader adapter 位于 `@meowfilm/source-runtime`，由 `source@0.2.0`／`source.runtime.v2` 管理，与 `music@0.8.0`、`cat@0.2.0` 一同装配。规则包不依赖 Node 或 Windows API；通用 script-host 为每个 source 分配一个原生线程、一个 QuickJS Runtime 和可信 core/用户 realm 两个 Context。平台能力和清理语义以[来源 capability ABI](source-capability-abi.md)为唯一来源，不另建运行器。
+Reader adapter 位于 `@meowfilm/source-runtime`，由 `source@0.3.0`／`source.runtime.v2` 管理，与 `music@0.8.0`、`cat@0.2.0` 一同装配。规则包不依赖 Node 或 Windows API；通用 script-host 为每个 source 分配一个原生线程、一个 QuickJS Runtime 和可信 core/用户 realm 两个 Context。平台能力和清理语义以[来源 capability ABI](source-capability-abi.md)为唯一来源，不另建运行器。
 
 ## 协议
 
@@ -26,11 +26,12 @@ content
 loginStatus
 login
 image
+payAction
 ```
 
-动作输入和前一动作结果由应用显式传递；运行时不保存全局“当前书”。搜索、详情、目录和正文结果使用统一书籍、章节和正文结构，URL 按响应最终地址和来源地址归一。当前范围是底层规则和结果契约，不包含阅读 UI、书架、阅读进度或其他平台客户端接入。
+动作输入和前一动作结果由应用显式传递；运行时不保存全局“当前书”。搜索、详情、目录和正文结果使用统一书籍、章节和正文结构，URL 按响应最终地址和来源地址归一。永久书源仓库、原生 Web 待办和受信图片见[书源仓库](source-library.md)，书架和阅读进度仍由原生客户端拥有。
 
-Legado 图片规则与轻悦时光 `imagedecrypt` 返回的字节在内部 ABI 中保持 `Uint8Array`；仅公开 HTTP 的 `image` 结果 `body` 投影为既有 Buffer JSON，例如 `{type:"Buffer",data:[0,255,65]}`。字符串 body 原样保留，不递归转换其他字段或调用任意 `toJSON`，非法非 JSON 结果仍明确失败。
+Legado 图片规则与轻悦时光 `imagedecrypt` 返回的字节在内部 ABI 中保持 `Uint8Array`。产品图片通过 `library.image` 和受信 GET 二进制路由下载、解码与释放；既有低层 `invoke image` 的 body 保留原有 Buffer JSON 投影供直接规则诊断。字符串 body 原样保留，不递归转换其他字段或调用任意 `toJSON`，非法非 JSON 结果仍明确失败。
 
 轻悦时光 `search`／`exploreKinds`／`explore`／`toc` 必须返回数组或既有列表 wrapper（`books`／`kinds`／`chapters`／`list`）。合法空数组和 JSON 字符串包装继续支持；畸形 JSON 或非列表值报 `SCRIPT_PROTOCOL_ERROR`（公开 `SOURCE_FAILURE`），不能伪装成成功空列表。正文等非列表动作及 CatVod 普通字符串语义不变。
 
@@ -48,9 +49,11 @@ guest 提供实际样本使用的 `fetch`、`Headers`、`Response`、`AbortContr
 
 浏览器全局预留轻悦时光旧脚本使用的可选 `toc` 别名；它仅避免脚本把未声明别名回写到 `window` 时在初始化阶段崩溃，不新增动作，目录动作仍由协议函数 `chapter` 提供。
 
-jQuery、内置 CryptoJS／js-sha1 及已知 AdGuard、Cloudflare、`bt-stats.js` 遥测或浏览器注入脚本不会从网络重复加载；脚本要求未内置的 CryptoJS 顶层算法时，仍按外部脚本预算经受信 HTTP 获取，不伪装成已支持。浏览器、验证码、动态页面和应用交互转为 `web.interact`。默认通用 Node owner 未注入 Web broker，因此需要该能力的动作明确失败。
+Legado `java.webView(html,url,script="",delayTime=1000)` 与两个五参数变体 `webViewGetSource`／`webViewGetOverrideUrl` 保持 Reader 参数顺序；变体第四参数分别为匹配正则，第五参数为延时。sourceRegex 返回匹配资源 URL，overrideUrlRegex 返回导航 URL，不将资源 URL 当正文下载。`startBrowser`／`startBrowserAwait`／`showBrowser` 将原生页面结果包装为 StrResponse，脚本可调用 `.body()`／`.url()`／`.raw()`／`.code()`。Web 原参数中的 null 槽位不压缩；QYSG 未知签名不套用 Legado，参考实现证据及 Cookie 载体见[书源仓库 Web ABI](source-library.md#已核实的-web-helper-abi)。
 
-`AbortController` 可立即终止 guest 对 `fetch` 的等待；底层 capability 由主线程跟踪至宿主 I/O 真正完成，不因动作结束提前记为已回收，也不设置网络任务数量门槛。`cache.all*`、登录信息和书籍变量仍按 source/generation 隔离，不采用上游“所有书源共享缓存”的语义。
+jQuery、内置 CryptoJS／js-sha1 及已知 AdGuard、Cloudflare、`bt-stats.js` 遥测或浏览器注入脚本不会从网络重复加载；脚本要求未内置的 CryptoJS 顶层算法时，仍按外部脚本预算经受信 HTTP 获取，不伪装成已支持。浏览器、验证码、动态页面和应用交互转为 `web.interact`；source 模块默认装配可取消的 Web broker，由原生客户端处理 `web.pending/respond`。
+
+`AbortController` 可立即终止 guest 对 `fetch` 的等待；底层 capability 由主线程跟踪至宿主 I/O 真正完成，不因动作结束提前记为已回收，也不设置网络任务数量门槛。`cache.all*`、登录信息和书籍变量仍按 source/generation 隔离，不采用上游“所有书源共享缓存”的语义。仓库恢复仅向当前 generation 注入持久私有数据副本；失败候选与退休请求不写回。
 
 ## 生命周期与 RPC
 
@@ -62,6 +65,10 @@ source.runtime.invoke
 source.runtime.status
 source.runtime.unload
 source.runtime.close
+source.runtime.library.*
+source.runtime.web.pending
+source.runtime.web.respond
+source.runtime.rules.process
 ```
 
 `PUT /v1/source/sources/{installationId}/{sourceRevision}?basename=...` 一次上传原始源码，接受无路径 `.json/.js/.html/.htm`，长度 1 至 16 MiB，严格 UTF-8 并保留既有 BOM 行为。POST body 是普通 JSON，响应统一 `{ok:true,contract:"source.runtime.v2",value}` 或 `{ok:false,contract,code}`；invoke 的 value 即业务值，控制正文没有普通字节配额。
@@ -69,6 +76,8 @@ source.runtime.close
 完整候选按 installation/sourceRevision 拥有，同键同内容幂等，不同内容报 SOURCE_INTEGRITY。新完整上传替换未采用候选，部分 body 不发布；指定版本不存在报 SOURCE_NOT_FOUND。字段/身份/CAS 前置拒绝不消费候选，取入试运行后失败释放；未采用候选在下一次完整上传、卸载或关闭释放，无分片、token、TTL、Base64 或传输摘要。原始 uploadHash 与规范化 contentHash 分别计算并复用，不能混淆。
 
 load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol/version/metadata 可选，默认自动识别、1.0.0、空对象，metadata 保留 32 KiB 格式边界。invoke 必填 `installationId,revision,generation,action,payload`，可选 timeoutMs 为 1 至 60000；unload 必填 installationId/revision，generation 可选。
+
+`rules.process {request}` 单独承载小说身份、归并、章节匹配、净化／简繁、规则校验及固定 URL 正则匹配，返回原纯规则结果，不接受客户端程序。Node owner 接受完整规则列表，稳定排序后逐条使用原规则预算，最后统一简繁；默认 3000ms、URL 匹配 2000ms，不增加规则预算业务上限或整个 transform 的固定截止。`TIMEOUT`／`CANCELLED` 保留原分类，失败实际释放后可重建，close 等待所有已接受规则任务排空。RPC 字段、错误及所有权以[书源仓库的小说纯规则契约](source-library.md#小说纯规则)为准；原生本地配置不迁入 Node 存储。
 
 加载使用 installation、revision、expectedRevision 做 CAS，调用与卸载核对 generation；候选失败保留原实例，发布后清理失败触发回滚或明确 `SOURCE_CLEANUP`。开发版不提供旧数据迁移或旧契约兼容层。
 
@@ -78,9 +87,9 @@ load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol
 
 每个实例的原生 Runtime、两个 Context、profile、DOM registry、变量和虚拟路由独立。源码 16 MiB 与 QuickJS 栈边界保留；移除脚本内存配额、普通响应/state 累计配额与 OOM 自动重启。初始化/请求默认 60 秒、清理 3 秒，不设单段同步时限或固定实例/并发/timer/网络/profile 数量。主控可取消卡死执行并等待真实原生线程退出。
 
-初始化整体受同一截止信号约束，候选 HTML 和外部脚本请求按实际 I/O 所有权登记。同一安装的管理事务有序执行；动作可在 await 等待期间交错推进，各自保留请求身份、阶段上下文和取消 fence；不同安装可独立推进，status 不等待慢实例。HTTP abort/未完成 response close fence 结果，正常 finish 不取消完成工作。Reader DOM 文档/节点/字符串、分页、HTML 候选、外部脚本及规则解析预算保留；`maximumParseBytes` 只用于解析，不限制普通 HTTP body、变量、Cookie、storage 或路由状态。
+初始化整体受同一截止信号约束，候选 HTML 和外部脚本请求按实际 I/O 所有权登记。同一安装的执行生命周期事务有序，永久仓库管理事务统一串行提交；动作可在 await 等待期间交错推进，各自保留请求身份、阶段上下文和取消 fence，status 不等待慢实例。HTTP abort/未完成 response close fence 结果，正常 finish 不取消完成工作。Reader DOM 文档/节点/字符串、HTML 候选、外部脚本及规则解析预算保留；目录与正文分页使用去重队列，不设固定页数截断，仍可取消或超时。`maximumParseBytes` 只用于解析，不限制普通 HTTP body、变量、Cookie、storage 或路由状态。
 
-iOS 与 Windows 宿主均通过当前 HTTP 装配 source，不新增阅读 UI；平台装配与验证边界分别见[iOS 运行底座](../ios/runtime-preflight.md)和[Windows 平台接入](../windows/app-runtime.md)。不提供旧后端或 wire 兼容路径；通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。
+iOS 与 Windows 宿主均通过当前 HTTP 装配 source，原生阅读业务消费书源仓库、正文块及受信图片；平台装配与验证边界分别见[iOS 运行底座](../ios/runtime-preflight.md)和[Windows 平台接入](../windows/app-runtime.md)。不提供旧后端或 wire 兼容路径；通用验证不代替两端阅读 UI 验证，见[通用验证范围](script-runtime.md#构建发布与验证边界)。
 
 ## 兼容边界
 

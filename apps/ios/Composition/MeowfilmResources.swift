@@ -6,6 +6,7 @@ import MeowMusicPlatform
 import MeowMusicNativeService
 import MeowFilmFeature
 import MeowRuntime
+import MeowNovelFeature
 
 /// Filesystem preparation is off MainActor. Music and Cat borrow the App's
 /// script session; their installations and private data belong to Node.
@@ -24,6 +25,10 @@ struct MeowfilmResources: Sendable {
     let filmRules: FilmRuleService
     let filmSourceSettings: FilmSourceService
     let filmMetadata: FilmTMDBService
+    let filmDoubanSettings: FilmDoubanSettingsService
+    let novelLibrary: NovelLibrary
+    let novelRules: NovelRuleProcessor
+    let novelRuntime: NovelRuntime
 
     init() throws {
         // A sideloading host may rewrite the installed bundle identifier while
@@ -41,13 +46,13 @@ struct MeowfilmResources: Sendable {
             .appendingPathComponent("documents", isDirectory: true)
         musicDocument = MusicNativeLibraryDocument(storeFactory: Self.documentFactory(
             base: libraryRoot, namespace: MusicNativeLibraryDocument.namespace))
-        if let caches {
-            musicAudioCache = NativeMusicAudioFileCache(rootURL: caches.resolvingSymlinksInPath()
-                .appendingPathComponent("meowfilm.music.audio-cache.v1", isDirectory: true))
-        } else { musicAudioCache = nil }
         musicDisplayCache = MusicNativePlaybackDisplayCache(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativePlaybackDisplayCache.namespace,
             maximumDocumentBytes: 16 * 1024 * 1024))
+        if let caches {
+            musicAudioCache = NativeMusicAudioFileCache(rootURL: caches.resolvingSymlinksInPath()
+                .appendingPathComponent("meowfilm.music.audio-cache.v1", isDirectory: true), displayCache: musicDisplayCache)
+        } else { musicAudioCache = nil }
         musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativePersistentSourceDiscoveryCache.namespace,
             maximumDocumentBytes: 4 * 1024 * 1024))
@@ -58,10 +63,15 @@ struct MeowfilmResources: Sendable {
         let connection: @Sendable () async throws -> RuntimeHTTPClient = {
             try await scriptSession.connection()
         }
+        novelLibrary = NovelLibrary(store: try Self.documentFactory(base: libraryRoot, namespace: NovelLibrary.namespace)())
+        let novelRuntime = NovelRuntime(connection: connection)
+        self.novelRuntime = novelRuntime
+        novelRules = NovelRuleProcessor(runtime: novelRuntime)
         musicScripts = NativeMusicScriptService(connection: connection)
+        let neteaseToken = RuntimeMusicNeteaseTokenProvider(connection: connection)
         filmMetadata = FilmTMDBService(connection: connection)
-        filmRules = try FilmRuleService(store: Self.documentFactory(
-            base: libraryRoot, namespace: FilmRuleService.documentNamespace)())
+        filmDoubanSettings = FilmDoubanSettingsService(connection: connection)
+        filmRules = FilmRuleService(connection: connection)
         filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),
             storeFactory: Self.documentFactory(base: libraryRoot, namespace: FilmSourceService.documentNamespace))
         let protectedRoot = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)
@@ -74,8 +84,10 @@ struct MeowfilmResources: Sendable {
         musicAccountGate = try? MusicAccountAccessGate(
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier,
             urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.account-url-cache.v1")(),
+            feedbackOutboxStoreFactory: Self.documentFactory(
+                base: libraryRoot, namespace: "music.netease-feedback-outbox.v1"),
             audioCache: musicAudioCache, displayCache: musicDisplayCache,
-            clientContexts: musicClients, qqClient: musicPublicQQ
+            clientContexts: musicClients, qqClient: musicPublicQQ, neteaseTokenProvider: neteaseToken
         )
         musicAccounts = musicAccountGate?.service
     }

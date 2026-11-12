@@ -125,7 +125,8 @@ final class MusicSourceRecordingDiscoveryTests: XCTestCase {
             XCTAssertEqual(valid.selection.sourceKey, reject ? primaryKey : peerKey)
             if reject { XCTAssertNotEqual(valid.candidate.url, rejected.candidate.url) }
             let exclusions = try await service.sourceExclusions(), history = try await service.playedSongs()
-            XCTAssertTrue(exclusions.isEmpty)
+            XCTAssertEqual(exclusions.filter { $0.scope != .providerPlatform }.count, reject ? 1 : 0)
+            XCTAssertTrue(exclusions.filter { $0.scope == .providerPlatform }.isEmpty)
             XCTAssertTrue(history.isEmpty)
             if !reject {
                 let callsAfter = await scripts.calls()
@@ -164,7 +165,7 @@ final class MusicSourceRecordingDiscoveryTests: XCTestCase {
             resourceId: result.candidate.resourceId, kind: .playing, position: 0, duration: 180))
         XCTAssertTrue(accepted)
         let exclusions = try await service.sourceExclusions()
-        XCTAssertTrue(exclusions.isEmpty)
+        XCTAssertEqual(exclusions.map(\.scope), [.recording(fingerprint: MusicModel.fingerprint(song), duration: 180, sourceKey: key)])
         await service.close()
     }
 
@@ -293,12 +294,6 @@ private actor RecordingPublicationCache: MusicSourceDiscoveryCaching {
         let value = await base.entries(fingerprint: fingerprint, duration: duration)
         if let gate = entriesGate { entriesGate = nil; await gate.enter() }
         return value // Deliberately return the old snapshot after public rejection.
-    }
-    func excluded(fingerprint: String, duration: Double) async -> Set<String> {
-        await base.excluded(fingerprint: fingerprint, duration: duration)
-    }
-    func exclude(fingerprint: String, duration: Double, sourceKey: String) async {
-        await base.exclude(fingerprint: fingerprint, duration: duration, sourceKey: sourceKey)
     }
     func record(fingerprint: String, duration: Double, platform: String, checkedAt: Double,
                 sources: [MusicSourceDiscoverySource]) async {
@@ -449,7 +444,7 @@ extension MusicSourceRecordingDiscoveryTests {
         XCTAssertTrue(accepted, "Recording rejection cannot retire the healthy primary's fact owner")
         XCTAssertEqual(try MusicDocument(f.document.read(), runID: "publication").history, f.history)
         let providers = try await f.service.sourceExclusions()
-        XCTAssertTrue(providers.isEmpty, "A recording decision must never become a provider exclusion")
+        XCTAssertTrue(providers.filter { $0.scope == .providerPlatform }.isEmpty, "A recording decision must never become a provider exclusion")
     }
     @MainActor private func closePublication(_ f: PublicationFixture) async {
         await f.model.close(); await f.service.close()
@@ -479,7 +474,7 @@ extension MusicSourceRecordingDiscoveryTests {
         }
         let queue = try await f.service.queue()
         XCTAssertEqual(queue.revision, adopted && key != nil ? 2 : 1)
-        let excluded = await f.cache.excluded(fingerprint: MusicModel.fingerprint(f.song), duration: 180)
+        let excluded = try await f.service.recordingSourceExclusions(f.song)
         XCTAssertEqual(excluded, key.map { Set([$0]) } ?? [])
         let updates = await f.session.updates()
         await gate.release()
@@ -505,7 +500,7 @@ extension MusicSourceRecordingDiscoveryTests {
         await lease.close(); await closePublication(f)
     }
 
-    @MainActor func testOldDiscoveryReceiptCannotReintroduceRejectedRecordingThroughStagedAdoption() async throws {
+    @MainActor func testOldDiscoveryReceiptCannotReintroduceRejectedRecordingOrRewriteQueue() async throws {
         let f = try await publicationFixture(adopted: false)
         _ = try await f.session.loadMore(refresh: false)
         let first = try await publicationUpdates(await f.session.updates())
@@ -527,14 +522,17 @@ extension MusicSourceRecordingDiscoveryTests {
             XCTAssertTrue(value.sources.contains { $0.selection.sourceKey == f.primary })
             XCTAssertTrue(value.sources.contains { $0.selection.sourceKey == f.other })
         }
-        let before = await f.scripts.calls()
+        let before = await f.scripts.calls(), original = try await f.service.read()
         let prepared = try await f.session.match(intent: .exact(survivor.selection))
         XCTAssertEqual(prepared.selection, survivor.selection)
         let after = await f.scripts.calls()
         XCTAssertEqual(after.count, before.count, "The other discovered recording retains its usable URL")
         let queue = try await f.service.queue()
-        XCTAssertEqual(Set(queue.entries[0].track.sources.map(\.sourceKey)), [f.primary, f.other],
-                       "Choosing a lawful peer cannot adopt the rejected key from a late staged snapshot")
+        XCTAssertFalse(queue.entries[0].track.sources.contains { $0.sourceKey == f.rejected },
+                       "A late staged snapshot cannot reintroduce the rejected recording")
+        let current = try await f.service.read()
+        XCTAssertEqual(current.queue, original.queue, "Choosing a lawful peer does not rewrite the queue")
+        XCTAssertEqual(current.playback, original.playback)
         await f.service.discardSource(attemptID: prepared.candidate.attemptId)
         try await assertPublicationDonor(f)
         await closePublication(f)
@@ -562,7 +560,7 @@ extension MusicSourceRecordingDiscoveryTests {
             // After audio: external declaration check, final recording check,
             // provider admission, then the session's final owner check. This
             // injects only the confirmed notification, not a fabricated CAS.
-            f.document.arm(afterReads: 4) {
+            f.document.arm(afterReads: 6) {
                 let completed = DispatchSemaphore(value: 0)
                 Task.detached { await native.recordingRejected(sourceKey: rejectedKey); completed.signal() }
                 guard completed.wait(timeout: .now() + 3) == .success else { throw MusicServiceError.timeout }
@@ -592,5 +590,53 @@ extension MusicSourceRecordingDiscoveryTests {
             try await assertPublicationDonor(f)
             await closePublication(f)
         }
+    }
+}
+
+extension MusicSourceRecordingDiscoveryTests {
+    func testTemporaryRecordingDecisionSurvivesRestartAndCacheRemovalAndCanBeRestored() async throws {
+        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
+        let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "peer"))
+        let song = try MusicModel.mergeSources(primary, adding: peer["sources"].array)
+        let key = peer["sources"].array[0]["sourceKey"].string
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let first = try await NativeMusicFixture.service(store, scripts: RecordingDiscoveryScripts(), sourceDiscovery: cache)
+        let originalLibrary = try MusicDocument(store.read(), runID: "temporary").library
+        let inspection = try await first.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        try await inspection.reject(sourceKey: key, occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let saved = try await first.sourceExclusions()
+        XCTAssertEqual(saved.map(\.scope), [.recording(fingerprint: MusicModel.fingerprint(song), duration: 180, sourceKey: key)])
+        XCTAssertEqual(try MusicDocument(store.read(), runID: "temporary").library, originalLibrary)
+        await cache.persist(retaining: [])
+        await first.close()
+
+        // A new service receives a completely empty cache, but the same business document.
+        let reopened = try await NativeMusicFixture.service(store, scripts: RecordingDiscoveryScripts())
+        let decisions = try await reopened.sourceExclusions()
+        XCTAssertEqual(decisions, saved)
+        let excluded = try await reopened.recordingSourceExclusions(song)
+        XCTAssertEqual(excluded, [key])
+        let other = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "other", title: "Other recording"))
+        let otherKeys = try await reopened.recordingSourceExclusions(other)
+        XCTAssertTrue(otherKeys.isEmpty)
+        // The discovery evidence survives restoration and can offer the exact source again.
+        let at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+        await reopened.sourceDiscovery.record(fingerprint: MusicModel.fingerprint(song), duration: 180,
+            platform: "tx", checkedAt: at, sources: [.init(sourceKey: key, source: "tx", musicInfo: peer["sources"].array[0]["musicInfo"].json)])
+        let hidden = try await reopened.sourceDiscoveryState(song)
+        XCTAssertFalse(hidden.entries["tx"]?.sources.contains { $0.sourceKey == key } ?? false)
+        try await reopened.excludeSource(for: .init(kind: .queue, id: "entry-1"), provider: "recording-script", platform: "tx")
+        let before = try await reopened.state()
+        try await reopened.restoreSourceExclusion(id: XCTUnwrap(decisions.first).id)
+        let after = try await reopened.state()
+        XCTAssertEqual(after.revision, before.revision)
+        XCTAssertEqual(after.currentId, before.currentId)
+        let restored = try await reopened.sourceDiscoveryState(song)
+        XCTAssertTrue(restored.entries["tx"]?.sources.contains { $0.sourceKey == key } ?? false)
+        let remaining = try await reopened.sourceExclusions()
+        XCTAssertEqual(remaining.map(\.scope), [.providerPlatform])
+        XCTAssertEqual(remaining.first?.provider, "recording-script")
+        await reopened.close()
     }
 }

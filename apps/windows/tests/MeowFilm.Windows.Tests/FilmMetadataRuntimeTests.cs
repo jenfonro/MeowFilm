@@ -13,7 +13,6 @@ using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop.Artwork;
 using MeowFilm.Platform.Runtime;
-using MeowFilm.Platform.Scripting;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -25,8 +24,6 @@ public static class FilmMetadataRuntimeTests
     private const string OriginalPoster = "/v1/tmdb/images/original/poster.png";
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("real App adapter search detail artwork and restart preserve stable identities", SearchArtwork);
-        yield return Case("source failures stay errors and failed detail preserves complete original search metadata", Failures);
         yield return Case("native settings preserve replace clear failed drafts and restore after restart", Settings);
         yield return Case("ordinary metadata cancellation leaves a late complete response in the Node cache", Cancellation);
         yield return Case("concurrent complete details share the Node producer and exact request keys remain isolated", MetadataKeys);
@@ -102,18 +99,15 @@ public static class FilmMetadataRuntimeTests
             "complete detail uses the exact identity, language and full append set");
     }
 
-    private static async Task SearchArtwork()
+    internal static async Task SearchArtwork()
     {
         await using var api = new RuntimeHttpClientTests.Server();
         await using var images = new RuntimeHttpClientTests.Server();
         string data = NewData();
         await using var first = await RuntimeHost.OpenAsync(data);
         await first.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
-        { ["apiBase"] = api.BaseUrl + "/api", ["imageBase"] = api.BaseUrl + "/img" });
-        var sources = new SearchSources(SearchFixture.Source("a"))
-        { Read = (_, _, page, _) => Task.FromResult(SearchFixture.Page(2, (page.ToString(), "站源", ""))) };
-        await using var search = new FilmSearchService(new SearchEngine(), sources,
-            _ => Task.FromResult<IReadOnlyList<string>>([]), first.Metadata);
+        { ["apiBase"] = api.BaseUrl + "/api/3", ["imageBase"] = api.BaseUrl + "/img" });
+        await using var search = new FilmSearchService(first.Client.CaptureConnectionAsync, new SearchSources(), first.Metadata.ResolveImage);
         var session = search.Start("原查询2");
         await using (var exchange = await api.AcceptAsync())
         {
@@ -132,15 +126,16 @@ public static class FilmMetadataRuntimeTests
         await SearchFixture.Settle(session);
         var item = session.Items.Single(value => value.GetProperty("sourceKind").GetString() == "tmdb");
         var context = new FilmSearchContext(session, item);
+        var handoff = await context.HandoffAsync(default);
         Check(context.Query == "原查询2" && context.MetadataSearchPayload!.Value.GetProperty("marker").GetString() == "完整原响应" &&
-            context.Metadata!.Value.GetProperty("overview").GetString() == "真实详情回执" &&
-            context.Metadata!.Value.GetProperty("poster_path").GetString() == OriginalPoster, "full search and detail JSON reach the native context");
+            handoff.Metadata!.Value.GetProperty("overview").GetString() == "真实详情回执" &&
+            handoff.Metadata!.Value.GetProperty("poster_path").GetString() == OriginalPoster, "full search and detail JSON reach the native context");
         string searchPoster = context.MetadataSearchPayload!.Value.GetProperty("results")[0].GetProperty("poster_path").GetString()!;
         Check(searchPoster == Poster &&
             context.MetadataSearchPayload!.Value.GetProperty("raw").GetProperty("unknown").GetProperty("text").GetString() == "  搜索原字段  " &&
             context.MetadataSearchPayload!.Value.GetProperty("raw").GetProperty("unknown").GetProperty("nullable").ValueKind == JsonValueKind.Null,
             "search keeps w500 image references and complete unknown raw fields independently of full detail");
-        CompleteDetail(context.Metadata!.Value, "真实详情回执");
+        CompleteDetail(handoff.Metadata!.Value, "真实详情回执");
         Check(item.GetProperty("poster").GetString() == OriginalPoster && first.Metadata.ResolveImage(searchPoster) == searchPoster,
             "the enhanced card uses original detail while stable search image references stay unchanged");
         await search.LoadMoreAsync();
@@ -154,7 +149,7 @@ public static class FilmMetadataRuntimeTests
         var pixels = artwork.AcquireAsync(searchPoster);
         await using (var exchange = await api.AcceptAsync())
         {
-            Request(exchange, "/img/w500/poster.png");
+            Request(exchange, "/img/t/p/w500/poster.png");
             Check(!exchange.Headers.ContainsKey("Authorization") && Query(exchange).Count == 0,
                 "image requests never carry upstream API credentials");
             await exchange.ReplyAsync(RuntimeImageTests.Png, contentType: "image/png");
@@ -176,7 +171,7 @@ public static class FilmMetadataRuntimeTests
         var uncached = artwork.AcquireAsync("/v1/tmdb/images/w300/poster.png");
         await using (var exchange = await images.AcceptAsync())
         {
-            Request(exchange, "/pictures/w300/poster.png");
+            Request(exchange, "/pictures/t/p/w300/poster.png");
             await exchange.ReplyAsync(RuntimeImageTests.Png, contentType: "image/png");
         }
         using var resized = await uncached;
@@ -190,21 +185,20 @@ public static class FilmMetadataRuntimeTests
         var restarted = artwork.AcquireAsync("/v1/tmdb/images/w500/restarted.png");
         await using (var exchange = await images.AcceptAsync())
         {
-            Request(exchange, "/pictures/w500/restarted.png");
+            Request(exchange, "/pictures/t/p/w500/restarted.png");
             await exchange.ReplyAsync(RuntimeImageTests.Png, contentType: "image/png");
         }
         using var restored = await restarted;
         Console.WriteLine($"TMDB_RUNTIME restart=true; oldProcess={oldProcess}; currentProcess={second.ProcessId}; stableCache=true; publicNetwork=false");
     }
 
-    private static async Task Failures()
+    internal static async Task Failures()
     {
         await using var upstream = new RuntimeHttpClientTests.Server();
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         { ["apiBase"] = upstream.BaseUrl, ["imageBase"] = upstream.BaseUrl + "/img" });
-        await using var search = new FilmSearchService(new SearchEngine(), new SearchSources(),
-            _ => Task.FromResult<IReadOnlyList<string>>([]), host.Metadata);
+        await using var search = new FilmSearchService(host.Client.CaptureConnectionAsync, new SearchSources(), host.Metadata.ResolveImage);
         var failed = search.Start("失败2");
         await using (var exchange = await upstream.AcceptAsync())
             await exchange.ReplyAsync(Json(new { error = "synthetic upstream failure" }), 503);
@@ -229,8 +223,9 @@ public static class FilmMetadataRuntimeTests
         }
         await SearchFixture.Settle(session);
         var context = new FilmSearchContext(session, session.Items.Single());
+        var handoff = await context.HandoffAsync(default);
         Check(session.MetadataState == FilmSearchChannelState.Completed && context.Query == "目标2" && context.MetadataQuery == "目标" &&
-            context.Metadata!.Value.GetProperty("overview").GetString() == "已得搜索简介" &&
+            handoff.Metadata!.Value.GetProperty("overview").GetString() == "已得搜索简介" &&
             context.MetadataSearchPayload!.Value.GetProperty("marker").GetString() == "完整原响应",
             "the failed real movie detail cannot discard the effective fallback query or full original search metadata");
         await using var artwork = new ArtworkService(readTrusted: host.Client.ReadImageAsync);
@@ -251,7 +246,7 @@ public static class FilmMetadataRuntimeTests
         var retry = artwork.AcquireAsync(Poster);
         await using (var exchange = await upstream.AcceptAsync())
         {
-            Request(exchange, "/img/w500/poster.png");
+            Request(exchange, "/img/t/p/w500/poster.png");
             await exchange.ReplyAsync(RuntimeImageTests.Png, contentType: "image/png");
         }
         using var recovered = await retry;
@@ -268,65 +263,64 @@ public static class FilmMetadataRuntimeTests
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         {
             ["apiBase"] = upstream.BaseUrl, ["imageBase"] = upstream.BaseUrl + "/img",
-            ["apiKey"] = "synthetic-api-key", ["accessToken"] = "synthetic-access-token"
+            ["apiKey"] = "synthetic-api-key", ["accessToken"] = "synthetic.access.token"
         });
         string documents = Path.Combine(data, "documents");
         Directory.CreateDirectory(documents);
         await using (var store = new LocalDocumentStore(documents,
-            [FilmRuleService.DocumentNamespace, FilmSourceService.DocumentNamespace]))
+            [FilmSourceService.DocumentNamespace]))
         {
-            var rules = new FilmRuleService(new NativeJavaScriptJsonEngine(FilmRuleService.LoadProgramSource()), store);
+            var rules = new FilmRuleService(host.Client);
             var sources = new FilmSourceService(host.Client, store);
-            await using var film = new FilmCapability(rules, sources, host.Metadata);
+            await using var film = new FilmCapability(rules, sources, host.Client, host.Metadata);
             var view = (FilmSettingsView)film.SettingsView;
             view.Width = 900; view.Height = 650;
             using var surface = Mount(view);
             var navigation = (StackPanel)view.FindName("SettingsNavigation");
-            navigation.Children.OfType<RadioButton>().Single(button => Equals(button.Tag, "tmdb")).IsChecked = true;
+            navigation.Children.OfType<RadioButton>().Single(button => Equals(button.Tag, "metadata")).IsChecked = true;
             await SearchFixture.Until(() => view.MetadataLoaded && !view.MetadataBusy);
-            var key = (PasswordBox)view.FindName("MetadataApiKey");
-            var token = (PasswordBox)view.FindName("MetadataAccessToken");
+            var token = (TextBox)view.FindName("MetadataApiToken");
             var apiBase = (TextBox)view.FindName("MetadataApiBase");
-            Check(key.Password.Length == 0 && token.Password.Length == 0 && view.ApiKeyState == "已配置" &&
-                view.AccessTokenState == "已配置" && AutomationProperties.GetName(key) == "TMDB API key",
-                "the actual settings form uses password fields and displays only configured state");
+            Check(token.Text == "synthetic.access.token" && AutomationProperties.GetName(token) == "TMDB API TOKEN",
+                "the actual settings form exposes one editable plain token");
             Capture(view, "tmdb-settings-wide.png");
             view.Width = 420; Layout(view);
-            Check(apiBase.ActualWidth > 100 && apiBase.ActualWidth < 420 && key.ActualWidth > 80 &&
-                key.ActualWidth < 420, "native fields retain usable widths inside the narrow settings viewport");
+            Check(apiBase.ActualWidth > 100 && apiBase.ActualWidth < 420 && token.ActualWidth > 80 &&
+                token.ActualWidth < 420, "native fields retain usable widths inside the narrow settings viewport");
             Capture(view, "tmdb-settings-narrow.png");
             await SaveView(view);
-            await Credentials(host.Metadata, upstream, "初始保留", expectedToken: "synthetic-access-token");
-            key.Password = "   "; token.Password = "   ";
+            await Credentials(host.Metadata, upstream, "初始保留", expectedToken: "synthetic.access.token");
             await SaveView(view);
-            Check(host.Metadata.Settings is { ApiKeyConfigured: true, AccessTokenConfigured: true } &&
-                view.ApiKeyState == "已配置" && view.AccessTokenState == "已配置" &&
-                key.Password.Length == 0 && token.Password.Length == 0,
-                "whitespace-only drafts preserve configured credentials and clear only transient password fields");
-            await Credentials(host.Metadata, upstream, "空白草稿", expectedToken: "synthetic-access-token");
-            key.Password = "synthetic-replacement-key"; token.Password = "synthetic-replacement-token";
+            Check(host.Metadata.Settings is { ApiKey: "synthetic.access.token", AccessToken: "" } &&
+                token.Text == "synthetic.access.token", "an unedited plain token survives another save");
+            await Credentials(host.Metadata, upstream, "未修改", expectedToken: "synthetic.access.token");
+            token.Text = "synthetic.replacement.token";
             await SaveView(view);
-            Check(key.Password.Length == 0 && token.Password.Length == 0, "success clears transient secret drafts without echo");
-            await Credentials(host.Metadata, upstream, "替换", expectedToken: "synthetic-replacement-token");
-            Clear(view, "accessToken"); await SaveView(view);
-            Check(view.AccessTokenState == "未配置" && view.ApiKeyState == "已配置", "the explicit token clear does not clear the API key");
-            await Credentials(host.Metadata, upstream, "清除token", expectedKey: "synthetic-replacement-key");
-            Clear(view, "apiKey"); await SaveView(view);
-            await Credentials(host.Metadata, upstream, "清除key");
+            Check(token.Text == "synthetic.replacement.token", "successful replacement remains visible and editable");
+            await Credentials(host.Metadata, upstream, "替换", expectedToken: "synthetic.replacement.token");
+            token.Text = "synthetic-replacement-key"; await SaveView(view);
+            Check(host.Metadata.Settings is { ApiKey: "synthetic-replacement-key", AccessToken: "" },
+                "the same input replaces v4 authentication with a v3 key");
+            await Credentials(host.Metadata, upstream, "改用key", expectedKey: "synthetic-replacement-key");
+            token.Text = "   "; await SaveView(view);
+            Check(host.Metadata.Settings is { ApiKey: "", AccessToken: "" } && token.Text == "",
+                "an empty save clears credentials without a separate clear action");
+            await Credentials(host.Metadata, upstream, "清空");
             string savedBase = host.Metadata.Settings!.ApiBase;
-            apiBase.Text = "https://invalid.example/?query=not-a-base"; key.Password = "synthetic-retry-key";
+            apiBase.Text = "https://invalid.example/?query=not-a-base"; token.Text = "synthetic-retry-key";
             await SaveView(view);
-            Check(apiBase.Text.Contains("?query=", StringComparison.Ordinal) && key.Password == "synthetic-retry-key" &&
-                host.Metadata.Settings!.ApiBase == savedBase && !host.Metadata.Settings!.ApiKeyConfigured,
+            Check(apiBase.Text.Contains("?query=", StringComparison.Ordinal) && token.Text == "synthetic-retry-key" &&
+                host.Metadata.Settings!.ApiBase == savedBase && host.Metadata.Settings!.ApiToken == "",
                 "failed validation retains drafts and cannot publish unsaved settings");
             apiBase.Text = savedBase; await SaveView(view);
-            Check(host.Metadata.Settings!.ApiKeyConfigured && key.Password.Length == 0, "the unchanged failure draft can be retried explicitly");
+            Check(host.Metadata.Settings!.ApiKey == "synthetic-retry-key" && token.Text == "synthetic-retry-key",
+                "the unchanged failure draft can be retried explicitly");
             surface.RootVisual = null;
         }
         await host.DisposeAsync();
         await using var restored = await RuntimeHost.OpenAsync(data);
-        Check(restored.Metadata.Settings is { ApiKeyConfigured: true, AccessTokenConfigured: false },
-            "runtime-owned configured and cleared credentials restore in a new process");
+        Check(restored.Metadata.Settings is { ApiKey: "synthetic-retry-key", AccessToken: "" },
+            "runtime-owned plain and cleared credentials restore in a new process");
         await Credentials(restored.Metadata, upstream, "重启恢复", expectedKey: "synthetic-retry-key");
     }
 
@@ -340,13 +334,14 @@ public static class FilmMetadataRuntimeTests
         await using var exchange = await upstream.AcceptAsync();
         Request(exchange, "/3/search/multi");
         var query = Query(exchange);
-        Check(query["query"] == word && query["page"] == "1" && query["language"] == "zh-CN",
-            "each settings credential probe uses a distinct exact metadata search key");
+        Check(query["query"] == word && query["page"] == "1" && query["language"] == "zh-CN" &&
+            query["region"] == "CN" && query["include_adult"] == "false",
+            "each settings credential probe uses a distinct exact metadata search key and configured defaults");
         Check(expectedToken is null ? !exchange.Headers.ContainsKey("Authorization") :
                 exchange.Headers.GetValueOrDefault("Authorization") == "Bearer " + expectedToken,
-            "only the configured upstream token is used; credentials are not returned by get");
+            "only the configured upstream token is used");
         Check(expectedKey is null ? !query.ContainsKey("api_key") : query.GetValueOrDefault("api_key") == expectedKey,
-            "API key is preserved, replaced or explicitly cleared according to the actual settings action");
+            "API key is preserved, replaced or cleared by saving an empty input");
         await exchange.ReplyAsync(Json(new { results = Array.Empty<object>() }));
         await search;
     }
@@ -355,10 +350,6 @@ public static class FilmMetadataRuntimeTests
         ((Button)view.FindName("MetadataSave")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         await SearchFixture.Until(() => !view.MetadataBusy);
     }
-    private static void Clear(FilmSettingsView view, string key) =>
-        Visuals(view).OfType<Button>().Single(button => Equals(button.Tag, key))
-            .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-
     private static async Task Cancellation()
     {
         await using var upstream = new RuntimeHttpClientTests.Server();
@@ -566,7 +557,7 @@ public static class FilmMetadataRuntimeTests
         internal static async Task<RuntimeHost> OpenAsync(string root)
         {
             string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
-                ?? throw new InvalidOperationException("A real seven-module Windows runtime bundle is required.");
+                ?? throw new InvalidOperationException("A real eight-module Windows runtime bundle is required.");
             var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId, AppIdentity.ScriptModules);
             var host = new RuntimeHost(root, bundle);
             try

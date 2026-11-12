@@ -183,7 +183,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             }
             connection = captured; rpc = client;
             searchScope = FilmJson.Array(opening.Parameters, "sources");
-            searchSelection = FilmJson.Target(opening.Parameters.GetProperty("target"));
+            searchSelection = FilmJson.Target(opened.Raw.GetProperty("target"));
             targetPage.FreezeSearchScope(FilmPlaybackOpen.OriginalSources(openParameters, searchScope));
             runtimeRevoke = captured.Revoked.Register(() =>
             {
@@ -279,7 +279,13 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     {
         presenting = true;
         if (rpc is null || snapshot is null) return Task.CompletedTask;
-        return observing is { IsCompleted: false } ? Task.CompletedTask : ReconnectAsync();
+        return ResumeCoreAsync();
+
+        async Task ResumeCoreAsync()
+        {
+            if (observing is not { IsCompleted: false }) await ReconnectAsync();
+            await CommandAsync("browse.refresh", new { refresh = false });
+        }
     }
 
     internal Task CommandAsync(string action, object? parameters = null)
@@ -297,10 +303,10 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         {
             if (playbackCommands++ == 0)
                 playbackAdmission = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            // Blocking can be rejected without any business mutation. Keep the
+            // Blocking or retry can be rejected without any business mutation. Keep the
             // admitted candidate alive; control serializes its commit behind
             // the durable RPC, and only an accepted snapshot may retire it.
-            if (action != "block")
+            if (action is not ("block" or "media.retry"))
             {
                 continuingFrom = action is "pan" or "quality" or "switch" ? current?.Receipt.AttemptId ?? "" : "";
                 ticket = ++intentGeneration;
@@ -311,13 +317,18 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         return Track(CommandCoreAsync(action, parameters, ticket));
     }
 
-    internal void UpdateSearch(FilmPlaybackPage targetPage, FilmPlaybackTarget carrier, long revision)
+    internal void UpdateSearch(FilmPlaybackPage targetPage, long revision)
     {
         if (!IsCurrentPage(targetPage) || rpc is null || snapshot is null || connection is null ||
             searchSelection is null || connection.Revoked.IsCancellationRequested) return;
         if (FilmJson.Text(snapshot.Raw, "stage") == "stopped" ||
             snapshot.Target.Kind == "group" && snapshot.Target.Members!.Value.GetArrayLength() == 0) return;
-        var parameters = FilmPlaybackOpen.SearchUpdateFor(targetPage, searchSelection, carrier, revision, connection, searchScope);
+        if (targetPage.SearchContext is not { } context ||
+            !FilmPlaybackOpen.SameOwner(targetPage.Request.DataOwner, connection)) return;
+        var parameters = FilmJson.Encode(new
+        {
+            selectionId = searchSelection.Id, revision, searchReference = context.Reference, sources = searchScope
+        });
         searchUpdate = (targetPage, parameters, ownerGeneration);
         if (searchUpdating is not { IsCompleted: false }) searchUpdating = Track(PublishSearchAsync());
     }
@@ -386,9 +397,10 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                 var value = await client.CommandAsync(id, action, parameters, connection!.Revoked);
                 if (generation == ownerGeneration)
                 {
-                    if (action == "block" && ticket == intentGeneration)
+                    if (action is "block" or "media.retry" && ticket == intentGeneration)
                         continuingFrom = current?.Receipt.AttemptId ?? "";
-                    Apply(new(value), scheduleMedia: !ChangesPlayback(action) && ticket == intentGeneration);
+                    Apply(new(value), scheduleMedia: action != "browse.refresh" &&
+                        !ChangesPlayback(action) && ticket == intentGeneration);
                 }
             }
             catch (Exception error) when (action == "stop") { stopFailure ??= error; }
@@ -424,7 +436,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     }
 
     private static bool ChangesPlayback(string action) => action is "play" or "prepare" or "stop" or
-        "select.episode" or "select.candidate" or "next" or "previous" or "pan" or "quality" or "switch" or "block";
+        "select.episode" or "select.candidate" or "next" or "previous" or "pan" or "quality" or "switch" or "block" or "media.retry";
 
     private async Task EnterMediaCommitAsync(CancellationToken token)
     {
@@ -443,8 +455,12 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     {
         if (snapshot is { } previous &&
             (next.SessionId != previous.SessionId || next.Sequence < previous.Sequence)) return;
+        string error = DisplayError(next);
+        string previousError = snapshot is { } old ? DisplayError(old) : "";
         snapshot = next;
         page?.Apply(next);
+        if (error.Length > 0 && error != previousError)
+            OperationFailed?.Invoke(this, error);
         NotifyMedia();
         string id = next.AttemptId;
         // Removing a pending attempt revokes publication, not a healthy accepted donor.
@@ -463,6 +479,12 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         pendingPublication = CancellationTokenSource.CreateLinkedTokenSource(connection!.Revoked);
         Track(ConsumeAsync(next, ownerGeneration, intentGeneration, pendingPublication));
     }
+
+    private static string DisplayError(FilmPlaybackSnapshot value) =>
+        FilmJson.Text(value.Raw, "metadataError") is { Length: > 0 } metadata ? metadata :
+        value.MetadataCache?.ErrorCode is { Length: > 0 } cache ? cache :
+        FilmJson.Text(value.Browsing, "error") is { Length: > 0 } browsing ? browsing :
+        FilmJson.Text(value.Raw, "error");
 
     private async Task ConsumeAsync(FilmPlaybackSnapshot candidateSnapshot, long generation, long ticket,
         CancellationTokenSource publication)

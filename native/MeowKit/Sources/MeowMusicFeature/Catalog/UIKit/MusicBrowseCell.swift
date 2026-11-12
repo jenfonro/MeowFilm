@@ -8,6 +8,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private let artwork = MusicArtworkView(size: 0)
     private let textGradient = CAGradientLayer()
     private let title = UILabel(), subtitle = UILabel(), preview = UILabel()
+    private let releaseType = UILabel()
     private let reason = UILabel()
     private let previews = UIStackView()
     private let rankingPreview = UIView()
@@ -36,7 +37,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         for row in rankingRows { rankingPreview.addSubview(row) }
-        for item in [artwork, title, subtitle, preview, reason, previews, rankingPreview, play] {
+        for item in [artwork, title, subtitle, preview, releaseType, reason, previews, rankingPreview, play] {
             contentView.addSubview(item)
         }
         textGradient.name = "music.browse.text-gradient"
@@ -57,6 +58,14 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         title.font = .systemFont(ofSize: 13, weight: .medium)
         subtitle.font = .systemFont(ofSize: 11)
         preview.font = .systemFont(ofSize: 13)
+        releaseType.font = .systemFont(ofSize: 11, weight: .medium)
+        releaseType.textColor = .white
+        releaseType.textAlignment = .center
+        releaseType.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        releaseType.layer.cornerRadius = 3
+        releaseType.clipsToBounds = true
+        releaseType.isAccessibilityElement = false
+        releaseType.isHidden = true
         reason.font = .systemFont(ofSize: 10)
         previews.axis = .vertical; previews.spacing = 3; previews.distribution = .fillEqually
         play.setImage(regularPlayImage, for: .normal)
@@ -145,16 +154,18 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         if itemID != item.id || style != layout { resetPressFeedback() }
         style = layout; action = onPlay; itemID = item.id; currentTheme = theme
         artwork.contentMode = layout == .banner ? .scaleAspectFit : .scaleAspectFill
-        artwork.layer.cornerRadius = layout == .banner ? 0 : 8
+        artwork.layer.cornerRadius = layout == .banner || layout == .artistUpdates ? 0 : 8
+        artwork.backgroundColor = layout == .artistUpdates ? .clear : UIColor.white.withAlphaComponent(0.18)
         featurePaletteRole = MusicBrowseFeaturePalette.Role(item)
         rankingShowsFallback = false
         if layout != .rankingStack { loadArtwork(artworkURL ?? item.artwork) }
-        title.text = layout == .rankingStack || item.coverLabel.isEmpty ?
+        title.text = layout == .rankingStack || layout == .artistUpdates || item.coverLabel.isEmpty ?
             item.title : item.title + "\n" + item.coverLabel
-        title.font = .systemFont(ofSize: layout == .rankingStack ? 20 : layout == .banner ? 14 : 13,
-                                 weight: layout == .rankingStack ? .semibold :
+        title.font = .systemFont(ofSize: layout == .rankingStack ? 20 :
+                                    layout == .banner || layout == .artistUpdates ? 14 : 13,
+                                 weight: layout == .rankingStack || layout == .artistUpdates ? .semibold :
                                     layout == .banner ? .regular : .medium)
-        title.numberOfLines = layout == .rankingStack ? 1 : 2
+        title.numberOfLines = layout == .rankingStack || layout == .artistUpdates ? 1 : 2
         subtitle.text = layout == .rankingStack ? item.ranking?.updateFrequency ?? "" : item.subtitle
         subtitle.font = .systemFont(ofSize: layout == .rankingStack ? 12 : 11)
         subtitle.textAlignment = layout == .rankingStack ? .right : .natural
@@ -165,6 +176,15 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
                 (entry.artist.isEmpty ? "" : " − " + entry.artist) + (change.isEmpty ? "" : "  " + change)
         }.joined(separator: "\n")
             ?? item.previewSongs.map(\.title).joined(separator: "\n")
+        if layout == .artistUpdates {
+            if case .collection(let collection) = item.content, let count = collection.count {
+                preview.text = "\(count) 首歌曲"
+            } else { preview.text = nil }
+        }
+        preview.numberOfLines = layout == .artistUpdates ? 1 : 3
+        preview.font = .systemFont(ofSize: layout == .artistUpdates ? 11 : 13)
+        releaseType.text = item.coverLabel
+        releaseType.isHidden = layout != .artistUpdates || item.coverLabel.isEmpty
         reason.text = item.recommendationReason
         reason.textColor = UIColor(theme.muted)
         if layout != .rankingStack, let frequency = item.ranking?.updateFrequency, !frequency.isEmpty {
@@ -212,11 +232,11 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         preview.textColor = UIColor(theme.ink)
         play.setImage(layout == .rankingStack ? rankingPlayImage : regularPlayImage, for: .normal)
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        if layout == .rankingStack {
+        if layout == .rankingStack || layout == .artistUpdates {
             play.tintColor = UIColor.white.withAlphaComponent(0.9)
             play.backgroundColor = .clear
             play.layer.cornerRadius = 0
-            play.layer.shadowOpacity = 0.35
+            play.layer.shadowOpacity = layout == .rankingStack ? 0.35 : 0
         } else {
             play.tintColor = UIColor(theme.ink)
             play.backgroundColor = UIColor.white.withAlphaComponent(0.88)
@@ -228,11 +248,9 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         case .track, .collection, .action, .daily: play.isHidden = !showsPlayButton
         default: play.isHidden = true
         }
-        if layout == .featureRail, case .action(let action) = item.content, action.isPersonalFM {
-            play.isHidden = true
-        }
         if layout == .banner { play.isHidden = true }
         accessibilityLabel = ([item.title, subtitle.isHidden ? "" : subtitle.text ?? ""] +
+            (layout == .artistUpdates ? [preview.text ?? ""] : []) +
             (layout == .rankingStack ? entries.map(\.title) : []))
             .filter { !$0.isEmpty }.joined(separator: "，")
         play.accessibilityLabel = "播放" + item.title
@@ -242,7 +260,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             $0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         }
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        textGradient.isHidden = !overlaysArtwork || !hasOverlayText
+        textGradient.isHidden = !(layout == .artistUpdates || (overlaysArtwork && hasOverlayText))
         CATransaction.commit()
         applyTextGradient()
         applyCardSurface()
@@ -273,7 +291,10 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             ? [.layerMinXMinYCorner, .layerMaxXMinYCorner]
             : [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         let colors: [CGColor], locations: [NSNumber]
-        if style == .featureRail && visible {
+        if style == .artistUpdates {
+            colors = MusicBrowseFeaturePalette.artistGradientColors(featurePalette)
+            locations = [0, 1]
+        } else if style == .featureRail && visible {
             let color = MusicBrowseFeaturePalette.color(featurePalette, role: featurePaletteRole)
             colors = [
                 color.withAlphaComponent(0).cgColor,
@@ -292,13 +313,23 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         artwork.layer.maskedCorners = corners
         textGradient.maskedCorners = corners
+        textGradient.cornerRadius = style == .artistUpdates ? 0 : 8
+        textGradient.startPoint = style == .artistUpdates ? CGPoint(x: 0, y: 0.5) : CGPoint(x: 0.5, y: 0)
+        textGradient.endPoint = style == .artistUpdates ? CGPoint(x: 1, y: 0.5) : CGPoint(x: 0.5, y: 1)
         textGradient.colors = colors
         textGradient.locations = locations
         CATransaction.commit()
     }
 
     private func applyCardSurface() {
-        if style == .featureRail, !textGradient.isHidden {
+        if style == .artistUpdates {
+            contentView.backgroundColor = .clear
+            contentView.layer.cornerRadius = 8
+            contentView.clipsToBounds = true
+            title.textColor = .white
+            subtitle.textColor = UIColor.white.withAlphaComponent(0.85)
+            preview.textColor = UIColor.white.withAlphaComponent(0.8)
+        } else if style == .featureRail, !textGradient.isHidden {
             contentView.backgroundColor =
                 MusicBrowseFeaturePalette.color(featurePalette, role: featurePaletteRole)
             contentView.layer.cornerRadius = artwork.layer.cornerRadius
@@ -376,7 +407,22 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             }
             reason.frame = .zero
             previews.frame = .zero
-        } else if style == .rankedSongs || style == .vipRankedSongs || style == .artistUpdates {
+        } else if style == .artistUpdates {
+            let side = height
+            let textX = side + 14
+            let textWidth = max(0, width - textX - 14)
+            artwork.frame = CGRect(x: 0, y: 0, width: side, height: side)
+            title.frame = CGRect(x: textX, y: 10, width: textWidth, height: 20)
+            subtitle.frame = CGRect(x: textX, y: 32, width: max(0, width - textX - 44), height: 18)
+            preview.frame = CGRect(x: textX, y: height - 28,
+                                   width: max(0, width - textX - 44), height: 18)
+            play.frame = play.isHidden ? .zero :
+                CGRect(x: width - 44, y: height - 44, width: 44, height: 44)
+            releaseType.frame = releaseType.isHidden ? .zero :
+                CGRect(x: 6, y: 6, width: min(side - 12, releaseType.intrinsicContentSize.width + 8), height: 18)
+            reason.frame = .zero
+            previews.frame = .zero
+        } else if style == .rankedSongs || style == .vipRankedSongs {
             artwork.frame = CGRect(x: 0, y: 4, width: 94, height: 94)
             title.frame = CGRect(x: 106, y: 8, width: max(0, width - 108), height: 36)
             subtitle.frame = CGRect(x: 106, y: 46, width: max(0, width - 108), height: 18)
@@ -421,7 +467,9 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             reason.frame = .zero
         }
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        textGradient.frame = textGradient.isHidden ? .zero : artwork.frame
+        textGradient.frame = textGradient.isHidden ? .zero : style == .artistUpdates ?
+            CGRect(x: artwork.frame.maxX, y: 0, width: max(0, width - artwork.frame.maxX), height: height) :
+            artwork.frame
         CATransaction.commit()
         if previews.isHidden { artwork.isHidden = false }
     }
@@ -554,8 +602,22 @@ private enum MusicBrowseFeaturePalette {
         case .preview:
             value = limitLuminance(source, maximum: 170)
         case .standard:
-            value = limitLuminance(blend(source, with: entryTint, targetWeight: 0.65), maximum: 96)
+            value = standard(source)
         }
+        return color(value)
+    }
+
+    static func artistGradientColors(_ source: Value) -> [CGColor] {
+        let base = standard(source)
+        let light = blend(base, with: Value(red: 255, green: 255, blue: 255), targetWeight: 0.25)
+        return [base, light].map { color($0).cgColor }
+    }
+
+    private static func standard(_ source: Value) -> Value {
+        limitLuminance(blend(source, with: entryTint, targetWeight: 0.65), maximum: 96)
+    }
+
+    private static func color(_ value: Value) -> UIColor {
         func channel(_ value: Double) -> CGFloat {
             CGFloat(min(255, max(0, Int(value.rounded(.toNearestOrAwayFromZero))))) / 255
         }
@@ -642,6 +704,7 @@ final class MusicBrowseHeader: UICollectionReusableView {
     private var playAction: (() -> Void)?
     private var channelAction: (() -> Void)?
     private var headingHeight: CGFloat = 0
+    private var leadingAvatars = false
 
     static func height(for section: MusicPublicBrowseSection, showsSectionPlayback: Bool = true) -> CGFloat {
         return headingHeight(for: section, showsSectionPlayback: showsSectionPlayback) + (section.tabs.isEmpty ? 0 : 36)
@@ -681,6 +744,7 @@ final class MusicBrowseHeader: UICollectionReusableView {
                    onChannel: @escaping () -> Void, onChoice: @escaping (String) -> Void,
                    onRetry: @escaping () -> Void, error: String?) {
         headingHeight = Self.headingHeight(for: section, showsSectionPlayback: showsSectionPlayback)
+        leadingAvatars = section.layout == .artistUpdates
         title.text = section.title
         title.textColor = UIColor(theme.ink)
         playAction = onPlay
@@ -734,7 +798,7 @@ final class MusicBrowseHeader: UICollectionReusableView {
         let maximum = max(0, titleArea - (channelArrow.isHidden ? 0 : 18))
         let width = channelArrow.isHidden ? maximum :
             min(maximum, title.sizeThatFits(CGSize(width: maximum, height: height)).width)
-        title.frame = CGRect(x: 0, y: 2, width: width, height: height)
+        title.frame = CGRect(x: leadingAvatars ? avatarWidth : 0, y: 2, width: width, height: height)
         channelArrow.frame = channelArrow.isHidden ? .zero :
             CGRect(x: title.frame.maxX + 6, y: title.frame.midY - 8, width: 12, height: 16)
         channelButton.frame = CGRect(x: 0, y: 0, width: max(0, bounds.width - choiceWidth - playWidth), height: headingHeight)
@@ -743,7 +807,8 @@ final class MusicBrowseHeader: UICollectionReusableView {
         tabs.frame = CGRect(x: 0, y: headingHeight, width: bounds.width,
                             height: max(0, bounds.height - headingHeight))
         for (index, avatar) in avatars.enumerated() {
-            avatar.frame = CGRect(x: titleArea + CGFloat(index) * 18 + 8, y: 8, width: 25, height: 25)
+            avatar.frame = CGRect(x: (leadingAvatars ? 0 : titleArea + 8) + CGFloat(index) * 18,
+                                  y: leadingAvatars ? title.frame.midY - 12.5 : 8, width: 25, height: 25)
         }
         if errorLabel.text != nil {
             let y = bounds.height - 64

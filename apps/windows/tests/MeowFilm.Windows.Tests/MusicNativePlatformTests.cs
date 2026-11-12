@@ -19,8 +19,10 @@ public static partial class MusicNativePlatformTests
     private const string KgHash = "ABCDEF0123456789ABCDEF0123456789";
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in DailyStyleCases()) yield return test;
         foreach (var test in ChartCases()) yield return test;
         foreach (var test in ChannelDirectoryCases()) yield return test;
+        foreach (var test in HomeHeartbeatCases()) yield return test;
         yield return Case("platform response uses the last JSON field at every object without stripping provider metadata", async () =>
         {
             using var http = MusicPlatformHttp.CreateWithHandler(new Handler((_, _) => Task.FromResult(
@@ -1660,6 +1662,27 @@ public static partial class MusicNativePlatformTests
             Equal(2, f.Calls); Equal(2, first.GetProperty("items").GetArrayLength()); True(!second.GetProperty("empty").GetBoolean());
             True(!second.TryGetProperty("more", out _));
         });
+        yield return Case("personal batches preserve exact per-song feedback provenance without credential reflection", async () =>
+        {
+            foreach (bool nested in new[] { false, true })
+            {
+                var song = Wy("1");
+                song["source"] = "upstream-radio"; song["sourceId"] = 77; song["alg"] = "row-alg";
+                var row = nested ? new JsonObject { ["id"] = "1", ["songInfo"] = song } : song;
+                using var f = new Fixture(_ => Json(J(new { code = 200, data = new[] { row } })), Session("wy"));
+                var result = await f.Catalog.FmAsync(new());
+                var metadata = result.GetProperty("recommendations")[0];
+                Equal("upstream-radio", metadata.GetProperty("feedbackSource").GetString());
+                Equal("77", metadata.GetProperty("feedbackSourceId").GetString());
+                Equal("row-alg", metadata.GetProperty("alg").GetString());
+            }
+            foreach (string field in new[] { "source", "sourceId", "alg" })
+            {
+                var row = Wy("1"); row["source"] = "upstream-radio"; row[field] = "prefix-SYNTHETIC_ONLY-suffix";
+                using var f = new Fixture(_ => Json(J(new { code = 200, data = new[] { row } })), Session("wy"));
+                await Error("INVALID_RESPONSE", () => f.Catalog.FmAsync(new()));
+            }
+        });
         yield return Case("fm empty result differs from malformed and business error", async () =>
         {
             using var empty = new Fixture(_ => Json(J(new { code = 200, data = Array.Empty<object>() })), Session("wy"));
@@ -1785,7 +1808,7 @@ public static partial class MusicNativePlatformTests
                 foreach (var metadata in result.GetProperty("recommendations").EnumerateArray())
                 {
                     Equal("heartbeat", metadata.GetProperty("source").GetString());
-                    Equal("aiMode", metadata.GetProperty("feedbackSource").GetString());
+                    True(!metadata.TryGetProperty("feedbackSource", out _));
                 }
                 Equal("liked", result.GetProperty("recommendations")[0].GetProperty("alg").GetString());
                 Equal(3, f.Calls);
@@ -1867,7 +1890,7 @@ public static partial class MusicNativePlatformTests
                 for (int i = 0; i < ids.Length; i++) Song(result.GetProperty("items")[i], "wy", ids[i]);
                 Equal(4, result.GetProperty("recommendations").GetArrayLength());
                 foreach (var metadata in result.GetProperty("recommendations").EnumerateArray())
-                    Equal("aiMode", metadata.GetProperty("feedbackSource").GetString());
+                    True(!metadata.TryGetProperty("feedbackSource", out _));
             }
         });
         yield return Case("heartbeat rejects invalid cloud counts and incomplete cloud membership before recommendation HTTP", async () =>
@@ -2159,7 +2182,7 @@ public static partial class MusicNativePlatformTests
                 Equal(1, result.GetProperty("count").GetInt32()); Equal(i < 2, result.GetProperty("hasMore").GetBoolean());
                 offset = result.GetProperty("offset").GetInt32(); Equal((i + 1) * 15, offset);
                 Equal("queue-recommendations", result.GetProperty("recommendations")[0].GetProperty("source").GetString());
-                Equal("moreRcmd", result.GetProperty("recommendations")[0].GetProperty("feedbackSource").GetString());
+                True(!result.GetProperty("recommendations")[0].TryGetProperty("feedbackSource", out _));
             }
             await Error("INVALID_REQUEST", () => f.Catalog.QueueRecommendationsAsync(new("wy", "invalid")));
             await Error("INVALID_REQUEST", () => f.Catalog.QueueRecommendationsAsync(new("wy", "1", -1)));
@@ -2192,7 +2215,7 @@ public static partial class MusicNativePlatformTests
                 Equal("queue-recommendations", first.GetProperty("source").GetString());
                 Equal("tail-alg", last.GetProperty("alg").GetString()); Equal("tailSource", last.GetProperty("feedbackSource").GetString());
                 Equal("inline-only", result.GetProperty("recommendations")[1].GetProperty("alg").GetString());
-                Equal("moreRcmd", result.GetProperty("recommendations")[1].GetProperty("feedbackSource").GetString());
+                True(!result.GetProperty("recommendations")[1].TryGetProperty("feedbackSource", out _));
             }
         });
         yield return Case("queue recommendations require real cursor and exhaustion metadata", async () =>

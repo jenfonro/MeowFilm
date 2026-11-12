@@ -26,8 +26,12 @@ public partial class SettingsPriorityList : UserControl
         typeof(IEnumerable), typeof(SettingsPriorityList), new PropertyMetadata(null, ItemsChanged));
     public static readonly DependencyProperty TitleProperty = DependencyProperty.Register(nameof(Title),
         typeof(string), typeof(SettingsPriorityList), new PropertyMetadata(""));
+    public static readonly DependencyProperty ShowTitleProperty = DependencyProperty.Register(nameof(ShowTitle),
+        typeof(bool), typeof(SettingsPriorityList), new PropertyMetadata(true));
     public static readonly DependencyProperty ShowLogosProperty = DependencyProperty.Register(nameof(ShowLogos),
         typeof(bool), typeof(SettingsPriorityList), new PropertyMetadata(false));
+    public static readonly DependencyProperty ShowToggleProperty = DependencyProperty.Register(nameof(ShowToggle),
+        typeof(bool), typeof(SettingsPriorityList), new PropertyMetadata(true));
     public static readonly DependencyProperty CanEditProperty = DependencyProperty.Register(nameof(CanEdit),
         typeof(bool), typeof(SettingsPriorityList), new PropertyMetadata(false, AuthorityChanged));
     private readonly SettingsReorderDrag drag;
@@ -50,7 +54,9 @@ public partial class SettingsPriorityList : UserControl
 
     public IEnumerable? ItemsSource { get => (IEnumerable?)GetValue(ItemsSourceProperty); set => SetValue(ItemsSourceProperty, value); }
     public string Title { get => (string)GetValue(TitleProperty); set => SetValue(TitleProperty, value); }
+    public bool ShowTitle { get => (bool)GetValue(ShowTitleProperty); set => SetValue(ShowTitleProperty, value); }
     public bool ShowLogos { get => (bool)GetValue(ShowLogosProperty); set => SetValue(ShowLogosProperty, value); }
+    public bool ShowToggle { get => (bool)GetValue(ShowToggleProperty); set => SetValue(ShowToggleProperty, value); }
     public bool CanEdit { get => (bool)GetValue(CanEditProperty); set => SetValue(CanEditProperty, value); }
     public event EventHandler<SettingsPriorityMoveEventArgs>? MoveRequested;
     public event EventHandler<SettingsPriorityToggleEventArgs>? ToggleRequested;

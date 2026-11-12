@@ -52,12 +52,10 @@ public struct MusicCandidateDiscoverySnapshot: Sendable {
 }
 
 /// A recording/queue/access-bound session, not a new runtime or document writer.
-/// Discovery stages metadata; resolving a discovered target adopts it through the
-/// existing owner's CAS. Closing cancels only this session's work/attempt.
+/// Discovery stages metadata without rewriting queue members. Closing cancels
+/// only this session's work/attempt.
 public protocol MusicCandidateDiscoverySession: Sendable {
     func snapshot(discover: Bool, force: Bool) async throws -> MusicCandidateDiscoverySnapshot
-    /// Explicit single-writer adoption, including empty/partial discovery backoff.
-    func commitDiscovery() async throws
     func resolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String) async throws -> MusicPlaybackCandidate
     func cancel(attemptID: String) async
     func close(retainingAttemptID: String?) async

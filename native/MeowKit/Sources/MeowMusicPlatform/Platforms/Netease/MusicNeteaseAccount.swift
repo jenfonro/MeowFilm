@@ -3,11 +3,44 @@
 import Foundation
 import CoreImage
 import CoreGraphics
-import CryptoKit
 import MeowAccounts
 import MeowMusicFeature
 
 extension NeteaseMusicAccountAdapter {
+    /// Failed candidates cannot patch the installation. Only a successful identity
+    /// check may apply response device changes through the existing client owner.
+    func verifyForImport(_ credential: AccountCredential) async throws -> MusicQQVerified {
+        let candidate = NeteaseMusicAccountAdapter(transport: transport, now: now)
+        let own = epoch, before = try context(credential).device
+        let client = try before["deviceId"].flatMap { try clientContexts?.matchingDevice(.netease, identity: $0) }
+        let verified = try await candidate.verify(credential)
+        try check(own)
+        let after = try context(verified.credential).device
+        if let client, let clientContexts, before["deviceId"] == after["deviceId"] {
+            let patch = after.filter { before[$0.key] != $0.value }
+            let removals = Set(before.keys).subtracting(after.keys)
+            if !patch.isEmpty || !removals.isEmpty {
+                _ = try clientContexts.update(client, fields: patch, removing: removals)
+            }
+        }
+        return verified
+    }
+    func fileCredential(_ credential: AccountCredential) async throws -> AccountCredential {
+        let context = try context(credential)
+        if let clientContexts {
+            if context.device.isEmpty {
+                guard let existing = try clientContexts.existingDevice(.netease) else {
+                    throw MusicServiceError.verificationRequired
+                }
+                context.device = existing.fields
+            } else if let id = context.device["deviceId"],
+                      let existing = try clientContexts.matchingDevice(.netease, identity: id) {
+                context.device = existing.fields
+            }
+        }
+        guard context.device["deviceId"]?.isEmpty == false else { throw MusicServiceError.verificationRequired }
+        return try self.credential(context)
+    }
     func context(_ credential: AccountCredential) throws -> MusicNeteaseContext {
         let bytes = credential.dataRepresentation()
         guard bytes.count <= 32_768 else { throw MusicServiceError.limit }
@@ -86,18 +119,6 @@ extension NeteaseMusicAccountAdapter {
         try check(own)
         return try await verifiedUpdate(context)
     }
-    func bootstrap(_ context: MusicNeteaseContext) async throws {
-        try ensureDevice(context)
-        let id = context.device["deviceId"]!, key = Array("3go8&$8*3*3h0k(2)2".utf8)
-        let xored = Data(id.utf8.enumerated().map { $0.element ^ key[$0.offset % key.count] })
-        let hash = Data(Insecure.MD5.hash(data: xored)).base64EncodedString()
-        let username = Data((id + " " + hash).utf8).base64EncodedString()
-        _ = try await request("/api/register/anonimous", data: ["username": username], crypto: "xeapi", context: context)
-        guard context.cookies["MUSIC_A"]?.isEmpty == false, context.cookies["MUSIC_U"] == nil else {
-            throw MusicServiceError.upstreamInvalid
-        }
-        context.cookies.removeValue(forKey: "__csrf")
-    }
     static func qrImage(_ key: String) throws -> Data {
         let url = try MusicQQWire.query("https://music.163.com/login", ["codekey": key])
         guard let filter = CIFilter(name: "CIQRCodeGenerator") else { throw MusicServiceError.unavailable }
@@ -121,7 +142,6 @@ extension NeteaseMusicAccountAdapter {
         let context = MusicNeteaseContext(), expires = now().addingTimeInterval(180)
         context.qrID = id; qr[id] = .init(expires: expires, context: context)
         do {
-            try await bootstrap(context)
             let root = try await request("/api/login/qrcode/unikey", data: ["type": 3], context: context)
             let key = try MusicQQWire.string(root["unikey"] ?? (root["data"] as? [String: Any])?["unikey"], maximum: 512)
             _ = try currentQR(id)
@@ -155,6 +175,9 @@ extension NeteaseMusicAccountAdapter {
             if let account = root["account"], !(account is NSNull),
                let value = try MusicQQWire.object(account)["id"],
                try MusicNeteaseWire.id(value) != context.accountID { throw MusicServiceError.targetChanged }
+            // Anonymous cookies received during QR creation are challenge-local.
+            // Existing account MUSIC_A restored/imported through context() is preserved.
+            context.cookies.removeValue(forKey: "MUSIC_A")
             let verified = MusicQQVerified(credential: try credential(context), nickname: nickname, nativeID: context.accountID)
             qr.removeValue(forKey: id)
             return .init(progress: .confirmed, verified: verified)

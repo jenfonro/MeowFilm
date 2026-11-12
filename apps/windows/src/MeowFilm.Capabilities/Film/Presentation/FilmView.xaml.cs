@@ -54,6 +54,19 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
             await module.RetrySectionAsync(section);
     }
 
+    private async void HomeRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (sender is Button { DataContext: FilmHomeSection section })
+            await module.RefreshSectionAsync(section);
+    }
+
+    private async void DataRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        await module.RefreshDataAsync();
+    }
+
     private async void DataRetry_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;

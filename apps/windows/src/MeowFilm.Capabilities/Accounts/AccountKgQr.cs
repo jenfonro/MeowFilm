@@ -2,6 +2,8 @@
 // KuGouMusicApi 514f870db7e60ca37bc5535be5da36d32b571c6f:
 // register_dev/login_qr_{key,check,create}, util/{crypto,request,helper}. See LICENSES/NOTICE.md.
 using System.Security.Cryptography;
+using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
 
@@ -101,7 +103,11 @@ public sealed partial class MusicAccountProtocol
                 ["KUGOU_API_MAC"] = "02:00:00:00:00:00", ["KUGOU_API_WEBGL"] = device.Seed
             };
             if (device.Dfid is not null) parts["dfid"] = device.Dfid;
-            if (result["t1"] is not null) parts["t1"] = AccountRules.Text(Text(result["t1"]), 4096);
+            if (result["t1"] is { } t1)
+            {
+                AccountRules.Require(t1.GetValueKind() is JsonValueKind.String or JsonValueKind.Number, "INVALID_RESPONSE");
+                parts["t1"] = KgT1(t1);
+            }
             // No Set-Cookie merge or login VIP/rights assertion; only validated exact identity.
             string cookie = string.Join("; ", parts.Select(p => p.Key + "=" + p.Value));
             try { _ = AccountRules.Cookies(cookie); }
@@ -113,5 +119,30 @@ public sealed partial class MusicAccountProtocol
             await ctx.Accept(accept, new("kg", id, cookie, details)).ConfigureAwait(false);
             return new("kg", id, "authenticated");
         }, replace: false);
+    }
+    private static string KgT1(JsonNode value)
+    {
+        if (value.GetValueKind() == JsonValueKind.String) return AccountRules.Text(Text(value), 4096);
+        // Expand a JSON number exactly, without a floating-point or decimal precision round-trip.
+        string raw = value.ToJsonString();
+        bool negative = raw[0] == '-';
+        if (negative) raw = raw[1..];
+        int at = raw.IndexOfAny(['e', 'E']);
+        string mantissa = at < 0 ? raw : raw[..at];
+        int dot = mantissa.IndexOf('.');
+        string digits = mantissa.Replace(".", "", StringComparison.Ordinal);
+        int leading = digits.Length - digits.TrimStart('0').Length;
+        digits = digits.TrimStart('0').TrimEnd('0');
+        if (digits.Length == 0) return "0";
+        int exponent = 0;
+        AccountRules.Require(at < 0 || int.TryParse(raw[(at + 1)..], NumberStyles.AllowLeadingSign,
+            CultureInfo.InvariantCulture, out exponent), "INVALID_RESPONSE");
+        long point = (long)(dot < 0 ? mantissa.Length : dot) + exponent - leading;
+        // 4096 is the existing t1 credential capacity, not a new transfer/file limit.
+        long length = point <= 0 ? 2 - point + digits.Length : Math.Max(point, digits.Length + (point < digits.Length ? 1 : 0));
+        AccountRules.Require(length + (negative ? 1 : 0) <= 4096, "INVALID_RESPONSE");
+        string text = point <= 0 ? "0." + new string('0', (int)-point) + digits :
+            point >= digits.Length ? digits + new string('0', (int)point - digits.Length) : digits.Insert((int)point, ".");
+        return negative ? "-" + text : text;
     }
 }

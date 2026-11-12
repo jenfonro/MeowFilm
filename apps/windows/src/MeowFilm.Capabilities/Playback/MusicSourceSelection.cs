@@ -246,6 +246,7 @@ public sealed partial class MusicCapability
         state.Expiry?.Cancel();
         // Fence every resume path before the first asynchronous write or search.
         state.Session.Exclude(provider, target.Platform);
+        InvalidateFeedback();
         var stopped = ((INativePlaybackHandoff)playback).StopOutputForHandoffAsync();
         var persisted = PersistExclusion();
         return SwitchAsync(state, async (session, token) =>
@@ -266,7 +267,7 @@ public sealed partial class MusicCapability
             ForgetRecording(state.Song.Id);
         }
     }
-    private Task Notify(string message)
+    internal Task Notify(string message)
     {
         status = message; Changed(nameof(Status));
         return Task.CompletedTask;
@@ -409,18 +410,16 @@ public sealed partial class MusicCapability
         if (!CurrentRecovery(state)) throw new OperationCanceledException(token);
         await state.Session!.LoadExclusionsAsync(token);
         if (state.Session.Excluded(next.Target!)) throw new MusicOperationException("SOURCE_EXCLUDED");
-        var old = state.Media!;
-        bool changedSource = SourceIdentity(old.Target!) != SourceIdentity(next.Target!);
-        var pending = BeginPendingMedia(state, next, changedSource, token);
+        var pending = BeginPendingMedia(state, next, reopening: false, token);
         try
         {
-            if (next.Uri is null)
+            if (pending.Media.Uri is null || pending.Media.Bytes is not null)
             {
-                var lease = await OpenPlaybackFileAsync(state, next, pending.Access.Token);
+                var lease = await OpenPlaybackFileAsync(state, pending.Media, pending.Access.Token);
                 if (lease is null) throw new MusicOperationException("CACHE_MISS");
                 await port.PrepareReadHandoffAsync(lease, pending.Access.Token);
             }
-            else await port.PrepareHandoffAsync(next.Uri, next.Headers, pending.Access.Token);
+            else await port.PrepareHandoffAsync(pending.Media.Uri, pending.Media.Headers, pending.Access.Token);
             EnsurePendingMedia(state, pending);
             await state.Session!.LoadExclusionsAsync(pending.Access.Token);
             if (state.Session.Excluded(next.Target!)) throw new MusicOperationException("SOURCE_EXCLUDED");
@@ -428,11 +427,10 @@ public sealed partial class MusicCapability
                 throw new MusicOperationException("RECORDING_MISMATCH");
             await port.CommitHandoffAsync(() =>
             {
+                SampleFeedback();
                 if (!CommitPendingMedia(state, pending, out _, published: true)) return;
                 accepted();
-                if (changedSource && recorded) CompleteFeedback("source-change");
                 AcceptOfficialSong(state.Song, next.Target);
-                if (changedSource) SelectFeedback(state.Song, currentFeedbackAutomatic, currentRecommendationFeedback);
                 UpdateFeedbackSelection();
                 state.Attempted = false;
                 ScheduleMusicExpiry(state);
@@ -460,13 +458,23 @@ public sealed partial class MusicCapability
     /// recording: drop it for this session and change source. Unknown durations never mismatch.</summary>
     private void CheckMediaDuration()
     {
-        if (musicRecovery is not { Session: { } session, Media: { } media } state || state.DurationChecked ||
-            state.Opening || state.Recovering || !CurrentRecovery(state) || !OwnsCurrent || !playback.HasMedia) return;
+        if (musicRecovery is not { Session: { } session, Media: { } media } state || state.Recovering ||
+            state.PendingFailure == "RECORDING_MISMATCH" || !CurrentRecovery(state) || !OwnsCurrent || !playback.HasMedia) return;
         double actual = playback.DurationSeconds;
         if (actual <= 0 || ExpectedDuration(state.Song) <= 0 || !double.IsFinite(actual)) return;
-        state.DurationChecked = true;
         if (!MediaDurationMismatch(state.Song, actual)) return;
         session.Reject(media, "RECORDING_MISMATCH");
-        TrackMusicRecovery(RecoverMusic(state, expired: false, mismatch: true));
+        InvalidateFeedback();
+        state.PendingFailure = "RECORDING_MISMATCH";
+        state.RejectedOutput = playback is INativePlaybackHandoff port ? port.StopOutputForHandoffAsync() : playback.StopAsync();
+        if (!state.Opening) TrackMusicRecovery(RecoverRejectedMusic(state));
+    }
+    private async Task<bool> RecoverRejectedMusic(MusicRecovery state)
+    {
+        await state.RejectedOutput;
+        if (!CurrentRecovery(state)) return false;
+        bool recovered = await RecoverMusic(state, expired: false, mismatch: true);
+        if (!recovered && CurrentRecovery(state)) MusicRecoveryFailed();
+        return recovered;
     }
 }

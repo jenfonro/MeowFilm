@@ -58,15 +58,17 @@ function capabilitiesFor(routes, calls = []) {
       });
       if (name === 'http.request') {
         const url = new URL(input.url);
-        const value = routes[url.pathname];
+        const route = routes[url.pathname];
+        const value = typeof route === 'function' ? route(input) : route;
         if (value === undefined) throw Object.assign(new Error(), { code: 'NETWORK_ERROR' });
+        const response = typeof value === 'string' ? { data: value } : value;
         return {
           version: hostApiVersion,
           status: 200,
           statusText: 'OK',
           headers: { 'content-type': ['text/html; charset=utf-8'] },
-          url: url.href,
-          body: body(value),
+          url: response.url ?? url.href,
+          body: body(response.data),
         };
       }
       if (name === 'cookie.get') return '';
@@ -310,7 +312,7 @@ test('QYSG remote definitions preserve HTTP URL credentials through import and t
   assert.equal(calls.find(call => call.name === 'http.request').input.url, url);
 });
 
-test('pagination limits fail explicitly instead of returning a truncated table of contents', async t => {
+test('pagination follows all distinct pages and stops at a repeated URL', async t => {
   const source = {
     ...legadoSource,
     ruleToc: {
@@ -328,15 +330,200 @@ test('pagination limits fail explicitly instead of returning a truncated table o
         <a class="next" href="/book/1/toc?page=2">next</a>`,
     }),
     createSandbox: sandboxFactory(),
-    limits: { maximumPages: 1 },
   });
   t.after(() => session.close());
   await session.start();
   session.activate();
-  await assert.rejects(session.invoke('toc', {
+  const result = await session.invoke('toc', {
     bookUrl: 'https://books.invalid/book/1',
     tocUrl: 'https://books.invalid/book/1/toc',
-  }), { code: 'RESOURCE_LIMIT' });
+  });
+  assert.equal(result.chapters.length, 1);
+  assert.equal(result.chapters[0].name, 'Chapter One');
+});
+
+test('TOC aliases skip already processed final pages while preserving first-page HTML reuse', async t => {
+  for (const cached of [false, true]) await t.test(cached ? 'cached first page' : 'requested first page', async t => {
+    const first = '<li><a>Volume One</a><i class="volume">true</i></li>' +
+      '<li><a href="/chapter/one">Chapter One</a></li>' +
+      '<a class="next" href="/toc-alias">repeat</a>' +
+      '<a class="next" href="/toc-two-alias">second</a>' +
+      '<a class="next" href="/nested/toc-two">same second page</a>';
+    const calls = [];
+    const session = new SourceSession({
+      installationId: 'toc-final-pages',
+      source: { ...legadoSource, ruleToc: { ...legadoSource.ruleToc,
+        nextTocUrl: '.next@href', isVolume: '.volume@text' } },
+      protocol: 'legado',
+      capabilities: capabilitiesFor({
+        '/book/1/toc': first,
+        '/toc-alias': { url: 'https://books.invalid/book/1/toc', data: first },
+        '/toc-two-alias': { url: 'https://books.invalid/nested/toc-two',
+          data: '<li><a>Volume Two</a><i class="volume">true</i></li>' +
+            '<li><a href="chapter/two">Chapter Two</a></li>' +
+            '<a class="next" href="/book/1/toc">cycle</a>' },
+      }, calls),
+      createSandbox: sandboxFactory(),
+    });
+    t.after(() => session.close());
+    await session.start();
+    session.activate();
+    const result = await session.invoke('toc', { book: {
+      bookUrl: 'https://books.invalid/book/1', tocUrl: 'https://books.invalid/book/1/toc',
+      ...(cached ? { tocHtml: first } : {}),
+    } });
+    assert.deepEqual(result.chapters.map(chapter => chapter.name),
+      ['Volume One', 'Chapter One', 'Volume Two', 'Chapter Two']);
+    assert.deepEqual(result.chapters.map(chapter => chapter.isVolume), [true, false, true, false]);
+    assert.deepEqual(result.chapters.map(chapter => chapter.index), [0, 1, 2, 3]);
+    assert.equal(result.chapters[3].chapterUrl, 'https://books.invalid/nested/chapter/two');
+    assert.deepEqual(calls.filter(call => call.name === 'http.request')
+      .map(call => new URL(call.input.url).pathname),
+    [...(cached ? [] : ['/book/1/toc']), '/toc-alias', '/toc-two-alias']);
+  });
+});
+
+test('content aliases cannot repeat final pages or append the next chapter', async t => {
+  const calls = [];
+  const session = new SourceSession({
+    installationId: 'content-final-pages',
+    source: { ...legadoSource, ruleContent: { ...legadoSource.ruleContent,
+      title: 'h1@text', nextContentUrl: '.next@href' } },
+    protocol: 'legado',
+    capabilities: capabilitiesFor({
+      '/chapter/one': '<h1>First title</h1><article><p>First</p></article>' +
+        '<a class="next" href="/content-alias">repeat</a>' +
+        '<a class="next" href="/second-alias">second</a>' +
+        '<a class="next" href="/nested/second">same second page</a>' +
+        '<a class="next" href="/chapter/two">next chapter</a>' +
+        '<a class="next" href="/next-chapter-alias">redirect to next chapter</a>',
+      '/content-alias': { url: 'https://books.invalid/chapter/one',
+        data: '<h1>Duplicate title</h1><article>Duplicate</article>' },
+      '/second-alias': { url: 'https://books.invalid/nested/second',
+        data: '<article><p>Second</p><img src="picture.png" alt="Page image"><p>Third</p></article>' +
+          '<a class="next" href="/chapter/one">cycle</a>' },
+      '/next-chapter-alias': { url: 'https://books.invalid/chapter/two',
+        data: '<h1>Next chapter title</h1><article>Next chapter</article>' },
+    }, calls),
+    createSandbox: sandboxFactory(),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  const result = await session.invoke('content', {
+    bookUrl: 'https://books.invalid/book/1', chapterUrl: 'https://books.invalid/chapter/one',
+    nextChapterUrl: 'https://books.invalid/chapter/two',
+  });
+  assert.equal(result.title, 'First title');
+  assert.equal(result.chapterUrl, 'https://books.invalid/chapter/one');
+  assert.deepEqual(result.blocks, [
+    { type: 'text', text: 'First' }, { type: 'text', text: 'Second' },
+    { type: 'image', src: 'https://books.invalid/nested/picture.png', alt: 'Page image' },
+    { type: 'text', text: 'Third' },
+  ]);
+  assert.deepEqual(result.nextUrls, ['https://books.invalid/chapter/one',
+    'https://books.invalid/nested/second']);
+  assert.deepEqual(calls.filter(call => call.name === 'http.request')
+    .map(call => new URL(call.input.url).pathname),
+  ['/chapter/one', '/content-alias', '/second-alias', '/next-chapter-alias']);
+});
+
+test('TOC and content retain distinct POST pages at one final URL after options and script rendering', async t => {
+  for (const action of ['toc', 'content']) await t.test(action, async t => {
+    const endpoint = 'https://books.invalid/pages';
+    const post = '/pages,' + JSON.stringify({ method: 'POST', body: 'page={{page}}' });
+    const calls = [];
+    let renderedRequests = 0;
+    const session = new SourceSession({
+      installationId: 'post-pages',
+      source: { ...legadoSource,
+        jsLib: `function nextRequest() {
+          const page = Math.min(4, Number(java.getVariable('requestPage') || 2) + 1);
+          java.put('requestPage', page);
+          return { url: '${endpoint}', body: 'page=' + page };
+        }`,
+        ruleToc: { ...legadoSource.ruleToc, nextTocUrl: '.next@href' },
+        ruleContent: { ...legadoSource.ruleContent, nextContentUrl: '.next@href' },
+      },
+      protocol: 'legado',
+      capabilities: capabilitiesFor({
+        '/pages': input => {
+          const text = new TextDecoder().decode(input.body);
+          const page = input.method === 'GET' ? 1 : Number(text.slice('page='.length));
+          assert.ok([1, 2, 3, 4].includes(page));
+          if (page !== 1) assert.equal(text, `page=${page}`);
+          const content = action === 'toc'
+            ? `<li><a href="/chapter/${page}">Page ${page}</a></li>`
+            : `<article><p>Page ${page}</p></article>`;
+          const next = page === 1 ? post : '@js:nextRequest()';
+          return content + `<a class="next" href='${next}'>next</a>` +
+            (page === 4 ? '<a class="next" href="/pages">cycle</a>' : '');
+        },
+      }, calls),
+      createSandbox: sandboxFactory({
+        evaluate(_options, code) {
+          assert.match(code, /nextRequest\(\)/);
+          return { url: endpoint, body: `page=${Math.min(4, 2 + ++renderedRequests)}` };
+        },
+      }),
+    });
+    t.after(() => session.close());
+    await session.start();
+    session.activate();
+    const result = await session.invoke(action, {
+      bookUrl: 'https://books.invalid/book/1', page: 2,
+      ...(action === 'toc' ? { tocUrl: endpoint } : { chapterUrl: endpoint }),
+    });
+    if (action === 'toc') {
+      assert.deepEqual(result.chapters.map(chapter => chapter.name),
+        ['Page 1', 'Page 2', 'Page 3', 'Page 4']);
+    } else {
+      assert.deepEqual(result.blocks, [
+        { type: 'text', text: 'Page 1' }, { type: 'text', text: 'Page 2' },
+        { type: 'text', text: 'Page 3' }, { type: 'text', text: 'Page 4' },
+      ]);
+    }
+    assert.equal(renderedRequests, 3);
+    assert.deepEqual(calls.filter(call => call.name === 'http.request').map(call =>
+      [call.input.url, call.input.method, new TextDecoder().decode(call.input.body)]),
+    [[endpoint, 'GET', ''], [endpoint, 'POST', 'page=2'],
+      [endpoint, 'POST', 'page=3'], [endpoint, 'POST', 'page=4']]);
+  });
+});
+
+test('variable parsing failures retain no invocation resources and allow later content calls', async t => {
+  const calls = [];
+  const session = new SourceSession({
+    installationId: 'variable-parse-cleanup', source: legadoSource, protocol: 'legado',
+    capabilities: capabilitiesFor({ '/chapter/one': '<article><p>Recovered</p></article>' }, calls),
+    createSandbox: sandboxFactory(),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  for (const field of ['book', 'chapter']) {
+    const requests = calls.filter(call => call.name === 'http.request').length;
+    await assert.rejects(session.invoke('content', {
+      chapterUrl: 'https://books.invalid/chapter/one', [field]: { variable: '[1]' },
+    }), { code: 'SCRIPT_EXCEPTION' });
+    await session.drain();
+    assert.equal(session.kernel.registries.size, 0);
+    assert.equal(session.kernel.invocations.size, 0);
+    assert.equal(session.stats().pendingAdapterTasks, 0);
+    assert.equal(calls.filter(call => call.name === 'http.request').length, requests);
+
+    const result = await session.invoke('content', {
+      chapterUrl: 'https://books.invalid/chapter/one',
+      book: { variable: JSON.stringify({ fromBook: 'book' }) },
+      chapter: { variable: JSON.stringify({ fromChapter: 'chapter' }) },
+    });
+    assert.deepEqual(result.blocks, [{ type: 'text', text: 'Recovered' }]);
+    assert.deepEqual(JSON.parse(result.chapter.variable), { fromBook: 'book', fromChapter: 'chapter' });
+    await session.drain();
+    assert.equal(session.kernel.registries.size, 0);
+    assert.equal(session.kernel.invocations.size, 0);
+    assert.equal(session.stats().pendingAdapterTasks, 0);
+  }
 });
 
 test('QYSG combined script bytes remain inside the source budget', async () => {
@@ -724,7 +911,9 @@ test('QYSG list contracts report protocol errors without changing non-list strin
     }
   }
   for (value of ['plain chapter text', '[1,']) {
-    assert.deepEqual(await session.invoke('content', {}), { content: value });
+    assert.deepEqual(await session.invoke('content', {}), {
+      title: '', chapter: {}, content: value, blocks: [{ type: 'text', text: value }], imageStyle: '',
+    });
   }
 });
 

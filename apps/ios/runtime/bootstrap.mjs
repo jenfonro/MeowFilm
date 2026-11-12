@@ -5,6 +5,19 @@ import { BridgeError, decodeJSONValue, validateSession } from '@meowfilm/runtime
 import { duplicateBootstrapDescriptor } from '../../../packages/script-host/src/native-engine.js';
 import { createAppRuntime } from '../../runtime/bootstrap.mjs';
 
+const startupStages = new Set([
+  'arguments', 'native-binding', 'bootstrap-channel', 'configuration', 'assembly',
+  'music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'listen', 'endpoint',
+]);
+const startupErrorCategories = new Set([
+  'INVALID_REQUEST', 'INVALID_RESPONSE', 'CLOSED', 'CANCELLED', 'TIMEOUT',
+  'STORAGE_ERROR', 'CORRUPT_STORAGE', 'PERMISSION_DENIED',
+  'NATIVE_ARTIFACT_INVALID', 'NATIVE_ABI_MISMATCH', 'DESCRIPTOR_UNAVAILABLE',
+  'ERR_DLOPEN_FAILED', 'ERR_INVALID_FD_TYPE',
+  'EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EISDIR', 'EIO', 'ENOSPC', 'EROFS', 'EMFILE', 'ENFILE', 'EBADF',
+  'EADDRINUSE', 'EADDRNOTAVAIL', 'EPIPE', 'ECONNRESET',
+]);
+
 /** The only launch argument is an App-owned, connected private descriptor. */
 export function parseIOSLaunchArguments(argv) {
   if (!Array.isArray(argv) || argv.length !== 2 || argv[0] !== '--meow-bootstrap-fd' ||
@@ -41,9 +54,14 @@ export function installIOSFailureBoundary(runtime, { target = process, report = 
 }
 
 /** One configuration, one endpoint, then EOF. Business traffic is HTTP only. */
-export async function startIOSAppRuntime({ product, assemble, argv = process.argv.slice(2) } = {}) {
+export async function startIOSAppRuntime({
+  product, assemble, argv = process.argv.slice(2), onStage = () => {},
+} = {}) {
+  onStage('arguments');
   const { descriptor } = parseIOSLaunchArguments(argv);
+  onStage('native-binding');
   const duplicate = duplicateBootstrapDescriptor(descriptor);
+  onStage('bootstrap-channel');
   let channel;
   try {
     channel = new Socket({ fd: duplicate, readable: true, writable: true, allowHalfOpen: true });
@@ -63,15 +81,23 @@ export async function startIOSAppRuntime({ product, assemble, argv = process.arg
   channel.on('error', stop);
   installIOSFailureBoundary({ close });
   try {
+    onStage('configuration');
     if (typeof assemble !== 'function') throw new BridgeError('INVALID_REQUEST');
     const configuration = await readConfiguration(channel);
     if (ended) throw new BridgeError('CLOSED');
+    onStage('assembly');
     runtime = createAppRuntime({ product,
       sessionId: configuration.sessionId,
-      assemble: () => assemble({ dataRoot: configuration.dataRoot }),
+      assemble: () => {
+        const modules = assemble({ dataRoot: configuration.dataRoot });
+        onStage('assembly');
+        return modules;
+      },
     });
+    onStage('listen');
     await runtime.start();
     if (ended) throw new BridgeError('CLOSED');
+    onStage('endpoint');
     await new Promise((resolve, reject) => {
       channel.write(`${JSON.stringify({ baseUrl: runtime.baseUrl })}\n`, error => error ? reject(error) : resolve());
     });
@@ -121,7 +147,13 @@ function readConfiguration(channel) {
 
 function reportIOSRuntimeFailure() { process.stderr.write('IOS_RUNTIME_FAILED\n'); }
 
-export function reportIOSRuntimeStartFailure() {
-  process.stderr.write('IOS_RUNTIME_START_FAILED\n');
+export function reportIOSRuntimeStartFailure(error, stage) {
+  let category = 'UNKNOWN';
+  try {
+    const code = error?.code;
+    if (startupErrorCategories.has(code)) category = code;
+  } catch { /* An unknown thrown value cannot replace the safe diagnostic. */ }
+  const initialization = startupStages.has(stage) ? stage : 'unknown';
+  process.stderr.write(`IOS_RUNTIME_START_FAILED stage=${initialization} category=${category}\n`);
   process.exitCode = 1;
 }

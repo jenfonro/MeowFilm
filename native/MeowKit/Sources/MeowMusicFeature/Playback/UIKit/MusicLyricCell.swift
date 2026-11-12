@@ -5,10 +5,35 @@ import MeowUI
 @MainActor
 final class MusicLyricCell: UITableViewCell {
     static let reuseIdentifier = "MusicLyricCell"
+
+    static func height(for line: MusicLyricLine, width: CGFloat,
+                       preferences: MusicAppearancePreferences, traits: UITraitCollection) -> CGFloat {
+        let label = UILabel()
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.lineBreakMode = .byWordWrapping
+        label.text = line.text
+        let size = CGSize(width: max(0, width - 128), height: .greatestFiniteMagnitude)
+        let metrics = UIFontMetrics(forTextStyle: .body)
+        let textHeight = [UIFont.Weight.medium, .semibold].map { weight in
+            label.font = metrics.scaledFont(for: .systemFont(ofSize: 18, weight: weight),
+                                            compatibleWith: traits)
+            return label.sizeThatFits(size).height
+        }.max() ?? 0
+        guard let translated = preferences.translation(line.translation, expanded: true) else {
+            return ceil(textHeight) + 16
+        }
+        label.text = translated
+        label.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(
+            for: .systemFont(ofSize: 13.5), compatibleWith: traits)
+        return ceil(textHeight) + ceil(label.sizeThatFits(size).height) + 6 + 16
+    }
+
     private let lyric = MusicTimedLyricView()
     private let translation = UILabel()
     private var line: MusicLyricLine?
-    private var theme = PageTheme()
+    private var colors = MusicLyricColors(backgrounds: [.init(rgb: 0xffffff)],
+                                         accent: .init(rgb: 0x4f365d), artwork: false)
     private var lyricSelected = false
     private var active = false
     private var previewDragging = false
@@ -19,6 +44,7 @@ final class MusicLyricCell: UITableViewCell {
         selectionStyle = .none
         translation.numberOfLines = 0
         translation.textAlignment = .center
+        translation.lineBreakMode = .byWordWrapping
         let stack = UIStackView(arrangedSubviews: [lyric, translation])
         stack.axis = .vertical
         stack.spacing = 6
@@ -33,14 +59,15 @@ final class MusicLyricCell: UITableViewCell {
 
     func configure(line: MusicLyricLine, selected: Bool, active: Bool, timed: Bool,
                    previewDragging: Bool, position: Double, rate: Double, playing: Bool,
-                   preferences: MusicAppearancePreferences, theme: PageTheme) {
-        self.line = line; self.theme = theme
+                   preferences: MusicAppearancePreferences, colors: MusicLyricColors) {
+        self.line = line; self.colors = colors
         lyricSelected = selected; self.active = active
         self.previewDragging = previewDragging
         applyLyricStyle()
         translation.text = preferences.translation(line.translation, expanded: true)
         translation.isHidden = translation.text == nil
-        translation.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: .systemFont(ofSize: 13.5))
+        translation.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(
+            for: .systemFont(ofSize: 13.5), compatibleWith: traitCollection)
         updateSurfaceStyle()
         accessibilityLabel = preferences.lyricAccessibilityLabel(
             text: line.text, translation: line.translation, expanded: true)
@@ -48,14 +75,14 @@ final class MusicLyricCell: UITableViewCell {
     }
 
     func updateTime(_ position: Double, playing: Bool, rate: Double, active: Bool) {
-        _ = updateState(selected: lyricSelected, active: active, timed: active,
-                        previewDragging: previewDragging, position: position, playing: playing, rate: rate)
+        // Explicit media samples (including confirmed seeks) may repeat a position.
+        lyric.calibrate(position: position)
+        updateState(selected: lyricSelected, active: active, timed: active,
+                    previewDragging: previewDragging, position: position, playing: playing, rate: rate)
     }
 
-    @discardableResult
     func updateState(selected: Bool, active: Bool, timed: Bool, previewDragging: Bool,
-                     position: Double, playing: Bool, rate: Double) -> Bool {
-        let previousFont = lyricFont
+                     position: Double, playing: Bool, rate: Double) {
         let styleChanged = lyricSelected != selected || self.active != active ||
             self.previewDragging != previewDragging
         lyricSelected = selected; self.active = active
@@ -65,29 +92,32 @@ final class MusicLyricCell: UITableViewCell {
             updateSurfaceStyle()
         }
         lyric.update(position: position, active: timed, playing: playing, rate: rate)
-        return previousFont != lyricFont
+    }
+
+    override var isHidden: Bool {
+        didSet { lyric.refreshVisibility() }
     }
 
     private var lyricFont: UIFont {
         UIFontMetrics(forTextStyle: .body).scaledFont(
-            for: .systemFont(ofSize: 18, weight: lyricSelected || active ? .semibold : .medium))
+            for: .systemFont(ofSize: 18, weight: lyricSelected || active ? .semibold : .medium),
+            compatibleWith: traitCollection)
     }
 
     private func applyLyricStyle() {
         guard let line else { return }
-        let foreground = lyricSelected ? UIColor(theme.accent) : UIColor(theme.ink)
-        let muted = lyricSelected ? foreground : UIColor(theme.muted)
+        let foreground = UIColor(colors.highlight)
+        let muted = UIColor(lyricSelected && !active ? colors.highlight : active ? colors.unsung : colors.normal)
         lyric.configure(line: line, color: foreground, muted: muted, font: lyricFont)
     }
 
     private func updateSurfaceStyle() {
         let selectedSurface = lyricSelected && !previewDragging
         contentView.backgroundColor = selectedSurface
-            ? UIColor(theme.accent).withAlphaComponent(0.08) : .clear
+            ? UIColor(colors.highlight).withAlphaComponent(0.08) : .clear
         contentView.layer.borderColor = selectedSurface
-            ? UIColor(theme.accent).withAlphaComponent(0.28).cgColor : UIColor.clear.cgColor
-        translation.textColor = lyricSelected ? UIColor(theme.accent)
-            : active ? UIColor(theme.ink) : UIColor(theme.muted)
+            ? UIColor(colors.highlight).withAlphaComponent(0.28).cgColor : UIColor.clear.cgColor
+        translation.textColor = UIColor(lyricSelected || active ? colors.highlight : colors.normal)
     }
 
     override func prepareForReuse() {
@@ -95,27 +125,34 @@ final class MusicLyricCell: UITableViewCell {
         line = nil; lyricSelected = false; active = false; previewDragging = false
         contentView.backgroundColor = .clear
         contentView.layer.borderColor = UIColor.clear.cgColor
+        translation.text = nil
+        accessibilityLabel = nil
         lyric.reset()
     }
 }
 
-/// UIKit lays out the text, Core Animation interpolates the admitted current
-/// word mask. There is no drawing timer or per-frame lyric/business mutation.
+/// Media samples calibrate a monotonic clock. Core Animation interpolates each
+/// word interval; a single boundary callback continues it without frame work.
 @MainActor
 private final class MusicTimedLyricView: UIView {
     private let textLabel = UILabel(), highlight = UILabel()
     private let maskLayer = CAShapeLayer()
     private var line: MusicLyricLine?
-    private var position: Double = 0
+    private var samplePosition: Double?
+    private var anchorPosition: Double = 0
+    private var anchorTime: CFTimeInterval = 0
     private var active = false
     private var playing = false
     private var rate: Double = 1
+    private var boundaryWork: DispatchWorkItem?
+    private var clockGeneration: UInt = 0
     private struct WordGeometry {
         let word: MusicLyricWord
         let rects: [CGRect]
         let width: CGFloat
     }
     private var wordGeometry: [WordGeometry] = []
+    private var wordBoundaries: [Double] = []
     private var geometrySize: CGSize = .zero
     private var geometryDirty = true
 
@@ -137,6 +174,7 @@ private final class MusicTimedLyricView: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(line: MusicLyricLine, color: UIColor, muted: UIColor, font: UIFont) {
+        if self.line != line { reset() }
         if self.line != line || textLabel.font != font {
             self.line = line
             textLabel.text = line.text; highlight.text = line.text
@@ -171,66 +209,144 @@ private final class MusicTimedLyricView: UIView {
     }
 
     func update(position: Double, active: Bool, playing: Bool, rate: Double) {
-        let needsMask = self.active || active
-        self.position = position; self.active = active; self.playing = playing; self.rate = rate
-        if needsMask { drawMask() }
+        let now = CACurrentMediaTime()
+        if samplePosition != position {
+            samplePosition = position
+            anchorPosition = position
+            anchorTime = now
+        } else if self.playing != playing || self.rate != rate {
+            anchorPosition = mediaPosition(at: now)
+            anchorTime = now
+        }
+        self.active = active; self.playing = playing; self.rate = rate
+        drawMask()
+    }
+
+    func calibrate(position: Double) {
+        samplePosition = position
+        anchorPosition = position
+        anchorTime = CACurrentMediaTime()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        drawMask()
+    }
+
+    override var isHidden: Bool {
+        didSet { drawMask() }
+    }
+
+    func refreshVisibility() { drawMask() }
+
+    deinit {
+        boundaryWork?.cancel()
     }
 
     func reset() {
         line = nil; active = false; playing = false
+        samplePosition = nil
+        anchorPosition = 0; anchorTime = 0
         textLabel.text = nil; highlight.text = nil
         wordGeometry.removeAll()
+        wordBoundaries.removeAll()
         geometryDirty = true
-        maskLayer.removeAnimation(forKey: "lyric.word")
+        stopClock()
         maskLayer.path = nil
     }
 
-    private func drawMask() {
+    private func mediaPosition(at time: CFTimeInterval) -> Double {
+        anchorPosition + (playing ? max(0, time - anchorTime) * rate : 0)
+    }
+
+    private func stopClock() {
+        clockGeneration &+= 1
+        boundaryWork?.cancel()
+        boundaryWork = nil
         maskLayer.removeAnimation(forKey: "lyric.word")
+    }
+
+    private var isDisplayed: Bool {
+        guard window != nil else { return false }
+        var view: UIView? = self
+        while let current = view {
+            if current.isHidden { return false }
+            view = current.superview
+        }
+        return true
+    }
+
+    private func drawMask() {
+        stopClock()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        guard active, let line else { maskLayer.path = nil; return }
+        guard active, let line else {
+            maskLayer.path = nil
+            return
+        }
         guard !line.words.isEmpty else {
             maskLayer.path = CGPath(rect: bounds, transform: nil)
             return
         }
         guard bounds.width > 0, let font = textLabel.font else { return }
         if geometryDirty || geometrySize != bounds.size { measureWords(line: line, font: font) }
-        let start = CGMutablePath(), end = CGMutablePath()
-        var wordEnd: Double?
+        let now = CACurrentMediaTime()
+        let position = mediaPosition(at: now)
+        let nextBoundary = wordBoundaries.first { $0 > position }
+        let path = CGMutablePath(), endPath = CGMutablePath()
+        var interpolates = false
         for geometry in wordGeometry {
             let word = geometry.word
             let fraction = word.duration > 0 ? min(1, max(0, (position - word.time) / word.duration))
                 : position >= word.time ? 1 : 0
             var progress = geometry.width * CGFloat(fraction)
-            let finishWord = playing && position >= word.time && word.duration > 0 && fraction < 1
-            if finishWord { wordEnd = word.time + word.duration }
+            // A zero-duration word changes at the boundary callback, never
+            // gradually during the preceding gap.
+            let endFraction = word.duration > 0
+                ? min(1, max(0, ((nextBoundary ?? position) - word.time) / word.duration)) : fraction
+            var endProgress = geometry.width * CGFloat(endFraction)
+            if endFraction > fraction { interpolates = true }
             for rect in geometry.rects {
-                var visible = rect
+                var visible = rect, endVisible = rect
                 visible.size.width = min(rect.width, max(0, progress))
-                start.addRect(visible)
-                end.addRect(finishWord ? rect : visible)
+                endVisible.size.width = min(rect.width, max(0, endProgress))
+                // Identical path topology also preserves wrapped-word geometry.
+                path.addRect(visible)
+                endPath.addRect(endVisible)
                 progress -= rect.width
+                endProgress -= rect.width
             }
         }
-        maskLayer.path = start
-        if let wordEnd, rate > 0, wordEnd > position, playing {
+        maskLayer.path = path
+        guard playing, rate > 0, isDisplayed, let nextBoundary else { return }
+        let duration = (nextBoundary - position) / rate
+        if interpolates {
             let animation = CABasicAnimation(keyPath: "path")
-            animation.fromValue = start
-            animation.toValue = end
-            animation.duration = (wordEnd - position) / rate
+            animation.fromValue = path
+            animation.toValue = endPath
+            animation.beginTime = maskLayer.convertTime(now, from: nil)
+            animation.duration = duration
             animation.timingFunction = CAMediaTimingFunction(name: .linear)
             animation.fillMode = .forwards
             animation.isRemovedOnCompletion = false
             maskLayer.add(animation, forKey: "lyric.word")
         }
+        let generation = clockGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.clockGeneration == generation else { return }
+            self.drawMask()
+        }
+        boundaryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, now + duration - CACurrentMediaTime()),
+                                       execute: work)
     }
 
     private func measureWords(line: MusicLyricLine, font: UIFont) {
         geometryDirty = false
         geometrySize = bounds.size
         wordGeometry.removeAll(keepingCapacity: true)
+        wordBoundaries.removeAll(keepingCapacity: true)
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byWordWrapping
@@ -258,8 +374,23 @@ private final class MusicTimedLyricView: UIView {
                                            in: container) { rect, _ in
                 rects.append(rect.offsetBy(dx: 0, dy: offsetY))
             }
-            wordGeometry.append(.init(word: word, rects: rects, width: rects.reduce(0) { $0 + $1.width }))
+            let width = rects.reduce(0) { $0 + $1.width }
+            wordGeometry.append(.init(word: word, rects: rects, width: width))
+            wordBoundaries.append(word.time)
+            if word.duration > 0 {
+                wordBoundaries.append(word.time + word.duration)
+                // A wrapped word advances along one line at a time. Split its
+                // linear interval where the actual measured line fragments end.
+                if width > 0 {
+                    var consumed: CGFloat = 0
+                    for rect in rects.dropLast() {
+                        consumed += rect.width
+                        wordBoundaries.append(word.time + word.duration * Double(consumed / width))
+                    }
+                }
+            }
         }
+        wordBoundaries = Array(Set(wordBoundaries)).sorted()
     }
 }
 #endif

@@ -120,7 +120,8 @@ extension MusicViewModel {
             try admitted()
             let next = try await service.state(), rows = try await service.queue()
             try admitted()
-            guard before.revision == next.revision, before.currentId == next.currentId,
+            guard before.revision == next.revision, before.settingsRevision == next.settingsRevision,
+                  before.currentId == next.currentId,
                   next.revision == rows.revision, next.currentId == rows.currentId,
                   next.revision >= state.revision, next.settingsRevision >= state.settingsRevision else { return }
             if refreshQueue {
@@ -199,7 +200,7 @@ extension MusicViewModel {
                   result.state.settingsRevision >= state.settingsRevision else { throw MusicServiceError.cancelled }
             stopFM()
             switch result.action {
-            case .playCurrent, .restoreOnly: invalidateSelection(stopMedia: true, preservingQueueIntent: intent)
+            case .playCurrent, .restoreOnly: invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: intent)
             case .keepCurrent, .togglePlayback: break
             }
             playbackState.state = result.state; notices.queueNotice = nil

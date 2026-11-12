@@ -41,7 +41,8 @@ import MeowJSON
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let path = "/eapi/playmode/intelligence/list"
         await f.http.replies(path, [try MusicNeteaseFixture.response([
-            "code": 200, "data": [["songInfo": MusicNeteaseFixture.song(102), "alg": "synthetic-alg"]]
+            "code": 200, "data": [["songInfo": MusicNeteaseFixture.song(102), "alg": "synthetic-alg",
+                "source": "actual-heart-source", "sourceId": "actual-source-id"]]
         ])])
         let lease = try await f.service.beginAccountQueue(platform: .netease)
         let batch = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: "102", fromHome: false, context: nil))
@@ -50,17 +51,19 @@ import MeowJSON
         let first = try MusicQQWire.decode(XCTUnwrap(batch.items.first?.data))
         let attribution = try MusicQQWire.object(first["_recommendation"])
         XCTAssertEqual(attribution["source"] as? String, "heartbeat")
-        XCTAssertEqual(attribution["feedbackSource"] as? String, "aiMode")
+        XCTAssertEqual(attribution["feedbackSource"] as? String, "actual-heart-source")
+        XCTAssertEqual(attribution["feedbackSourceId"] as? String, "actual-source-id")
         XCTAssertEqual(attribution["sourceId"] as? String, "501")
+        XCTAssertEqual(attribution["seedId"] as? String, "102")
         XCTAssertEqual(attribution["alg"] as? String, "synthetic-alg")
-        _ = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: "102", fromHome: true, context: context))
+        _ = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: "102", fromHome: false, context: context))
         let records = await f.http.recorded(), requests = records.filter { $0.request.url.path == path }
         XCTAssertEqual(requests.count, 2)
         let one = try MusicQQWire.decode(XCTUnwrap(requests.first?.payload))
         let all = try MusicQQWire.decode(XCTUnwrap(requests.last?.payload))
         XCTAssertEqual(one["type"] as? String, "fromPlayOne"); XCTAssertEqual(one["songId"] as? String, "102")
-        XCTAssertEqual(all["type"] as? String, "fromPlayAll")
-        XCTAssertTrue(["101", "102"].contains(all["songId"] as? String ?? ""))
+        XCTAssertEqual(all["type"] as? String, "fromPlayOne")
+        XCTAssertEqual(all["songId"] as? String, "102")
         XCTAssertEqual(one["count"] as? Int, 2); XCTAssertEqual(all["count"] as? Int, 2)
         XCTAssertEqual(records.filter { $0.request.url.path == "/weapi/user/playlist" }.count, 2)
         XCTAssertEqual(records.filter { $0.request.url.path == "/eapi/v6/playlist/detail" }.count, 2)
@@ -85,7 +88,7 @@ import MeowJSON
         let song = try MusicQQWire.decode(XCTUnwrap(second.items.first?.data))
         let recommendation = try MusicQQWire.object(song["_recommendation"])
         XCTAssertEqual(recommendation["source"] as? String, "moreRcmd")
-        XCTAssertEqual(recommendation["feedbackSource"] as? String, "moreRcmd")
+        XCTAssertEqual(recommendation["feedbackSource"] as? String, "")
         XCTAssertEqual(recommendation["songId"] as? String, "102")
         XCTAssertEqual(recommendation["alg"] as? String, "synthetic-102")
         let records = await f.http.recorded(), pages = records.filter { $0.request.url.path == path }
@@ -110,6 +113,8 @@ import MeowJSON
         let batch = try await f.service.similarModeBatch(lease, request: .songRoaming(sourceIDs: ["101"]))
         let song = try MusicQQWire.decode(XCTUnwrap(batch.items.first?.data))
         XCTAssertEqual(try MusicQQWire.object(song["_recommendation"])["source"] as? String, "similar")
+        XCTAssertEqual(try MusicQQWire.object(song["_recommendation"])["feedbackSource"] as? String, "",
+            "A similar-mode request does not invent a playback source")
         let forged = MusicAccountQueueLease(id: lease.id, platform: lease.platform)
         do { _ = try await f.service.similarModeScope(forged); XCTFail("Copied UUID accepted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }

@@ -64,12 +64,12 @@ public sealed partial class MusicCapability
         }
     }
     public bool AccountBusy => accountCancellation is not null || !accountSettlement.IsCompleted;
-    public bool CanManageAccount => !stopping && selectedAccount is not null && !AccountBusy && !accountQrSaving;
+    public bool CanManageAccount => !stopping && !accountTransferBusy && selectedAccount is not null && !AccountBusy && !accountQrSaving;
     public string AccountStatus => accountStatus;
     private void AccountBindings()
     {
         foreach (string property in new[] { nameof(SelectedAccount), nameof(SelectedAccountPlatform), nameof(AccountBusy),
-            nameof(CanManageAccount), nameof(AccountStatus) }) Changed(property);
+            nameof(CanManageAccount), nameof(CanTransferAccounts), nameof(AccountStatus) }) Changed(property);
         AccountQrBindings();
         AccountSmsBindings();
         AccountDetailsBindings();
@@ -145,7 +145,14 @@ public sealed partial class MusicCapability
     }
     public async Task ReadAccountsAsync()
     {
-        _ = await StartAccountRead(force: true);
+        var result = await StartAccountRead(force: true);
+        if (!stopping && result.ErrorCode is null && result.Epoch == accountEpoch &&
+            result.Observation == Volatile.Read(ref accountObservation))
+        {
+            // An explicit read consumes the notice even when it joined a passive read.
+            accountStatus = "";
+            AccountBindings();
+        }
     }
     private Task<AccountReadResult> StartAccountRead(bool force, bool allowStopping = false)
     {
@@ -183,7 +190,7 @@ public sealed partial class MusicCapability
                     accountsLoaded = true;
                     loadedAccountObservation = observation;
                     accountSaveUncertain = false;
-                    accountStatus = "";
+                    // Passive reconciliation must not consume an operation's result notice.
                     errorCode = null;
                     AccountBindings();
                 }
@@ -197,7 +204,7 @@ public sealed partial class MusicCapability
                         _ => "INVALID_RESPONSE"
                     };
                     if ((!stopping || allowStopping) && epoch == accountEpoch &&
-                        observation == Volatile.Read(ref accountObservation))
+                        observation == Volatile.Read(ref accountObservation) && (force || accountStatus.Length == 0))
                     {
                         accountStatus = AccountError(error);
                         AccountBindings();
@@ -228,7 +235,7 @@ public sealed partial class MusicCapability
         Accounts.Any(current => current.Platform == account.Platform && current.Generation == account.Generation &&
             current.UserId == account.UserId && current.State is "saved" or "verified");
     internal bool CanLogoutAccount(MusicPlatformAccount account) =>
-        !stopping && !disposed && !accountSaveUncertain && !AccountBusy && IsCurrentAccount(account);
+        !stopping && !disposed && !accountTransferBusy && !accountSaveUncertain && !AccountBusy && IsCurrentAccount(account);
 
     public Task LogoutAccountAsync(MusicPlatformAccount account, bool confirmed)
     {
@@ -340,12 +347,17 @@ public sealed partial class MusicCapability
                 await Call("music.accounts.cancel", new { platform }, lifetime.Token);
                 if (epoch != accountEpoch) return;
                 AccountReadResult result;
+                bool joinedRead;
                 do
                 {
+                    joinedRead = !accountRead.IsCompleted;
                     result = await StartAccountRead(force: true, allowStopping: true);
                 }
                 while (epoch == accountEpoch && (result.Epoch != epoch ||
-                    result.Observation != Volatile.Read(ref accountObservation)));
+                    result.Observation != Volatile.Read(ref accountObservation) ||
+                    // An ordinary observation joined above can be retired by
+                    // shutdown. It is not the settlement's confirming receipt.
+                    joinedRead && result.ErrorCode == "CANCELLED" && !lifetime.IsCancellationRequested));
                 if (epoch != accountEpoch) return;
                 if (result.ErrorCode is { } code) throw new MusicOperationException(code);
                 accountStatus = accountSaveUncertain ? "取消结果待核对，请读取账号状态" :

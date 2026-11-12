@@ -275,3 +275,57 @@ private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchec
         await lease.close(); await service.close()
     }
 }
+
+extension MusicSourceExclusionCommitTests {
+    func testMetadataProjectionFiltersStagedAdditionsUsingCurrentCrossSongIDDecisions() async throws {
+        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
+        let existing = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "existing"))
+        let rejected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "rejected"))
+        let allowed = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "allowed"))
+        let song = try MusicModel.mergeSources(primary, adding: existing["sources"].array)
+        let staged = try MusicModel.mergeSources(song, adding: rejected["sources"].array + allowed["sources"].array)
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        let service = try await NativeMusicFixture.service(store)
+        // The staged result predates both decisions, made through another entrance.
+        var otherEntrance = primary
+        otherEntrance["songId"] = .string("song:other-entrance")
+        for source in [existing, rejected] {
+            try await service.excludeRecordingSource(otherEntrance, sourceKey: source["sources"].array[0]["sourceKey"].string)
+        }
+        try await service.retainSongMetadata([staged])
+        let projected = try await service.sharedSongMetadata(song)
+        let expected = song["sources"].array + allowed["sources"].array
+        XCTAssertEqual(Set(projected["sources"].array.map { $0["sourceKey"].string }),
+            Set(expected.map { $0["sourceKey"].string }))
+        XCTAssertEqual(projected["sources"].array.first, song["sources"].array.first)
+        let saved = try MusicDocument(store.read(), runID: "exclusion").queue["entries"].array[0]["song"]
+        XCTAssertEqual(saved, song)
+        let decisions = try await service.sourceExclusions()
+        XCTAssertEqual(decisions.count, 2)
+        XCTAssertTrue(decisions.allSatisfy { $0.songID == "song:other-entrance" })
+        await service.close()
+    }
+
+    func testRecordingDecisionSaveFailureIsReportedWithoutChangingQueueOrDecisions() async throws {
+        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
+        let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "peer"))
+        let song = try MusicModel.mergeSources(primary, adding: peer["sources"].array)
+        let key = peer["sources"].array[0]["sourceKey"].string
+        let backing = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        let document = ExclusionCommitDocument(backing)
+        let service = NativeMusicService(document: document, qq: NativeMusicQQFixture(),
+            transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        try await service.setAccess(available: true, generation: 1)
+        let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let before = try backing.read()
+        document.arm(.failureBeforeCommit)
+        do {
+            try await session.reject(sourceKey: key, occurrenceID: "entry-1", expectedQueueRevision: 1)
+            XCTFail("A failed business write cannot report a saved recording decision")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
+        XCTAssertEqual(try backing.read(), before)
+        let rows = try await service.sourceExclusions()
+        XCTAssertTrue(rows.isEmpty)
+        await service.close()
+    }
+}

@@ -19,10 +19,10 @@ internal sealed class StoredAccount
     public override string ToString() => "StoredAccount (redacted)";
 }
 
-internal sealed partial class AccountDocument
+internal sealed class AccountDocument
 {
     internal const int MaximumBytes = 8 * 1024 * 1024;
-    private const int CurrentEntryCount = 6;
+    private const int CurrentEntryCount = 3;
     private static readonly JsonSerializerOptions Encoding = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
@@ -73,11 +73,6 @@ internal sealed partial class AccountDocument
             if (key == Key(platform))
             {
                 _ = ReadAccount(value, platform);
-                return;
-            }
-            if (key == DetailsKey(platform))
-            {
-                _ = ReadDetails(value, platform);
                 return;
             }
         }
@@ -141,8 +136,7 @@ internal sealed partial class AccountDocument
         return new() { Generation = generation, Cookie = cookie, Profile = profile, Scope = scope,
             ValidatedAt = validatedAt, ValueFingerprint = fingerprint };
     }
-    internal byte[] Replace(string platform, StoredAccount expected, StoredAccount next,
-        MusicAccountDetailsObservation? observation)
+    internal byte[] Replace(string platform, StoredAccount expected, StoredAccount next)
     {
         var current = Get(platform);
         AccountRules.Require(current.Generation == expected.Generation &&
@@ -158,16 +152,6 @@ internal sealed partial class AccountDocument
             entries.Add(new JsonObject { ["key"] = Key(platform), ["value"] = value });
         }
         else existing["value"] = value;
-        if (observation is not null)
-        {
-            var account = Get(platform);
-            var previousDetails = GetDetails(platform);
-            var details = new StoredAccountDetails((previousDetails?.Revision ?? 0) + 1, account.Generation,
-                account.Scope!, account.ValueFingerprint!, observation.Profile.UserId, observation.Profile,
-                observation.ProfileFetchedAt, observation.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl,
-                observation.Entitlements);
-            return ReplaceDetails(platform, account, previousDetails, details);
-        }
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root, Encoding);
         if (bytes.Length <= MaximumBytes) return bytes;
         CryptographicOperations.ZeroMemory(bytes);

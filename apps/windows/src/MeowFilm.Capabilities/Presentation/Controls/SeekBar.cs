@@ -32,6 +32,9 @@ public sealed class SeekBar : Slider
     public static readonly DependencyProperty RailAtTopProperty = DependencyProperty.Register(
         nameof(RailAtTop), typeof(bool), typeof(SeekBar),
         new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender));
+    public static readonly DependencyProperty CacheFractionProperty = DependencyProperty.Register(
+        nameof(CacheFraction), typeof(double), typeof(SeekBar),
+        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
     private static readonly DependencyProperty ExpansionProperty = DependencyProperty.Register(
         "Expansion", typeof(double), typeof(SeekBar),
         new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
@@ -63,6 +66,7 @@ public sealed class SeekBar : Slider
     public Brush PlayedBrush { get => (Brush)GetValue(PlayedBrushProperty); set => SetValue(PlayedBrushProperty, value); }
     public Brush RailBrush { get => (Brush)GetValue(RailBrushProperty); set => SetValue(RailBrushProperty, value); }
     public bool RailAtTop { get => (bool)GetValue(RailAtTopProperty); set => SetValue(RailAtTopProperty, value); }
+    public double CacheFraction { get => (double)GetValue(CacheFractionProperty); set => SetValue(CacheFractionProperty, value); }
     public bool IsPlaying { get => (bool)GetValue(IsPlayingProperty); set => SetValue(IsPlayingProperty, value); }
     public double? PlaybackRate { get => (double?)GetValue(PlaybackRateProperty); set => SetValue(PlaybackRateProperty, value); }
     public string PresentationKey { get => (string)GetValue(PresentationKeyProperty); set => SetValue(PresentationKeyProperty, value); }
@@ -137,6 +141,12 @@ public sealed class SeekBar : Slider
         dc.PushOpacity(1);
         dc.DrawRectangle(rail, null, new Rect(0, y - thickness / 2, width, thickness));
         dc.Pop();
+        if (double.IsFinite(CacheFraction) && CacheFraction > 0)
+        {
+            dc.PushOpacity(highContrast ? .5 : .28);
+            dc.DrawRectangle(active, null, new Rect(0, y - thickness / 2, Math.Clamp(CacheFraction, 0, 1) * width, thickness));
+            dc.Pop();
+        }
         if (end > 0) dc.DrawRectangle(active, null, new Rect(0, y - thickness / 2, end, thickness));
         if (double.IsFinite(ChorusSeconds) && ChorusSeconds >= Minimum && ChorusSeconds < Maximum)
         {

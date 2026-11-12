@@ -6,7 +6,13 @@ using MeowFilm.Core.Runtime;
 namespace MeowFilm.Capabilities;
 
 public sealed record FilmMetadataSettings(string ApiBase, string ImageBase,
-    bool ApiKeyConfigured, bool AccessTokenConfigured);
+    string ApiKey, string AccessToken, string Language, string Region, bool IncludeAdult)
+{
+    public string ApiToken => AccessToken.Length > 0 ? AccessToken : ApiKey;
+}
+
+public sealed record FilmDoubanSettings(string ApiBase, string SearchBase, string ImageBase,
+    string ApiProxy, string ImageProxy, string Cookie);
 
 /// <summary>TMDB access through the App runtime. Only the runtime persists settings and credentials.</summary>
 public sealed class FilmMetadataService(IRuntimeClient runtime) : IFilmSearchMetadata, IAsyncDisposable
@@ -20,20 +26,20 @@ public sealed class FilmMetadataService(IRuntimeClient runtime) : IFilmSearchMet
     public event EventHandler? Saved;
 
     public Task<JsonElement> SearchAsync(string query, CancellationToken token) =>
-        ContentAsync("/3/search/multi", new { query, page = 1, language = "zh-CN" }, "w500", token);
+        ContentAsync("/3/search/multi", new { query, page = 1 }, "w500", token);
     public Task<JsonElement> DetailAsync(string type, long id, CancellationToken token)
     {
         if (type is not ("movie" or "tv") || id <= 0) throw new BridgeException("INVALID_REQUEST");
         return ContentAsync("/3/" + type + "/" + id.ToString(CultureInfo.InvariantCulture),
-            new { language = "zh-CN", append_to_response = "credits,similar,images" }, "original", token);
+            new { append_to_response = "credits,similar,images" }, "original", token);
     }
     async Task<FilmSearchData> IFilmSearchMetadata.SearchAsync(string query, CancellationToken token) =>
-        await ReadContentAsync("/3/search/multi", new { query, page = 1, language = "zh-CN" }, "w500", token);
+        await ReadContentAsync("/3/search/multi", new { query, page = 1 }, "w500", token);
     Task<FilmSearchData> IFilmSearchMetadata.DetailAsync(string type, long id, CancellationToken token)
     {
         if (type is not ("movie" or "tv") || id <= 0) throw new BridgeException("INVALID_REQUEST");
         return ReadContentAsync("/3/" + type + "/" + id.ToString(CultureInfo.InvariantCulture),
-            new { language = "zh-CN", append_to_response = "credits,similar,images" }, "original", token);
+            new { append_to_response = "credits,similar,images" }, "original", token);
     }
     private async Task<JsonElement> ContentAsync(string path, object query, string imageSize, CancellationToken token) =>
         (await ReadContentAsync(path, query, imageSize, token)).Value;
@@ -79,6 +85,16 @@ public sealed class FilmMetadataService(IRuntimeClient runtime) : IFilmSearchMet
         }, token, writing: true);
     }
 
+    public Task<FilmDoubanSettings> GetDoubanSettingsAsync(CancellationToken token = default) =>
+        RunAsync("douban.data.settings.get", new { }, ParseDoubanSettings, token);
+
+    public Task<FilmDoubanSettings> SaveDoubanSettingsAsync(IReadOnlyDictionary<string, object?> patch,
+        CancellationToken token = default) =>
+        RunAsync("douban.data.settings.update", patch, ParseDoubanSettings, token, writing: true);
+
+    public Task ClearCacheAsync(string provider, CancellationToken token = default) =>
+        RunAsync("film.data.invalidate", new { domain = provider }, _ => true, token, writing: true);
+
     private Task<T> RunAsync<T>(string method, object input, Func<JsonElement, T> receive,
         CancellationToken token, bool writing = false)
     {
@@ -109,9 +125,19 @@ public sealed class FilmMetadataService(IRuntimeClient runtime) : IFilmSearchMet
     {
         try
         {
-            return new(value.GetProperty("apiBase").GetString() ?? throw new BridgeException("INVALID_RESPONSE"),
-                value.GetProperty("imageBase").GetString() ?? throw new BridgeException("INVALID_RESPONSE"),
-                value.GetProperty("apiKeyConfigured").GetBoolean(), value.GetProperty("accessTokenConfigured").GetBoolean());
+            string Text(string key) => value.GetProperty(key).GetString() ?? throw new BridgeException("INVALID_RESPONSE");
+            return new(Text("apiBase"), Text("imageBase"), Text("apiKey"), Text("accessToken"),
+                Text("language"), Text("region"), value.GetProperty("includeAdult").GetBoolean());
+        }
+        catch { throw new BridgeException("INVALID_RESPONSE"); }
+    }
+    private static FilmDoubanSettings ParseDoubanSettings(JsonElement value)
+    {
+        try
+        {
+            string Text(string key) => value.GetProperty(key).GetString() ?? throw new BridgeException("INVALID_RESPONSE");
+            return new(Text("apiBase"), Text("searchBase"), Text("imageBase"),
+                Text("apiProxy"), Text("imageProxy"), Text("cookie"));
         }
         catch { throw new BridgeException("INVALID_RESPONSE"); }
     }

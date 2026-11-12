@@ -20,7 +20,7 @@ public final class FilmHomeModel: ObservableObject {
     private var loadTask: Task<Void, Never>?
     private var isClosed = false
 
-    public init(sources: [any FilmSource] = [DoubanFilmSource()]) {
+    public init(sources: [any FilmSource]) {
         let descriptors = sources.map(\.descriptor)
         self.sources = descriptors
         self.selectedSourceID = descriptors.first?.id
@@ -43,7 +43,6 @@ public final class FilmHomeModel: ObservableObject {
     public func loadIfNeeded() -> Task<Void, Never>? {
         guard !isClosed else { return nil }
         if let loadTask { return loadTask }
-        guard let selectedSourceID, snapshots[selectedSourceID] == nil else { return nil }
         return startLoad()
     }
 
@@ -51,7 +50,7 @@ public final class FilmHomeModel: ObservableObject {
     public func refresh() -> Task<Void, Never>? {
         guard !isClosed else { return nil }
         retireRequest()
-        return startLoad()
+        return startLoad(refresh: true)
     }
 
     @discardableResult
@@ -74,7 +73,7 @@ public final class FilmHomeModel: ObservableObject {
         cancel()
     }
 
-    private func startLoad() -> Task<Void, Never>? {
+    private func startLoad(refresh: Bool = false) -> Task<Void, Never>? {
         guard let selectedSourceID, let source = sourceByID[selectedSourceID] else { return nil }
         let requestID = UUID()
         self.requestID = requestID
@@ -83,7 +82,7 @@ public final class FilmHomeModel: ObservableObject {
         let task = Task<Void, Never> { [weak self] in
             do {
                 try Task.checkCancellation()
-                let sections = try await source.loadHome()
+                let sections = try await source.loadHome(refresh: refresh)
                 try Task.checkCancellation()
                 self?.finish(.success(sections), sourceID: selectedSourceID, requestID: requestID)
             } catch {
@@ -111,7 +110,7 @@ public final class FilmHomeModel: ObservableObject {
         switch result {
         case .success(let sections):
             self.sections = sections
-            error = nil
+            error = sections.compactMap { $0.cache?.errorCode }.first.map { .runtime(code: $0) }
         case .failure(let error):
             self.error = error
         }
