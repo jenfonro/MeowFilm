@@ -1275,12 +1275,12 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     private func showRemoteActionError() {
-        guard let page = remotePage else { return }
-        let message = page.actionError?.message(
+        guard let page = remotePage, let error = page.actionError, let id = page.actionErrorID else { return }
+        let message = error.message(
             operation: page.actionOperation,
             diagnosticID: page.actionDiagnosticID
         )
-        _ = showError(message)
+        showError(message) { [weak page] in page?.dismissActionError(id: id) }
     }
 
     private func showFavoriteError() {

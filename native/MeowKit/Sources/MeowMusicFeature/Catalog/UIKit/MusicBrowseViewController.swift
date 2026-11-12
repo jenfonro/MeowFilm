@@ -181,7 +181,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     public override func pageDidFinishAppearing() {
         showReadErrorIfNeeded()
-        showError(page?.actionError?.localizedDescription)
+        showActionErrorIfNeeded()
     }
 
     public override func applyTheme() {
@@ -502,7 +502,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         }
         configureActions()
         loadVisibleFMPreviews()
-        showError(page?.actionError?.localizedDescription)
+        showActionErrorIfNeeded()
         showReadErrorIfNeeded()
     }
 
@@ -604,6 +604,13 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         else { current = nil }
         let preview = fmPreviews[item.id]
         return current ?? (preview?.authorization.isActive == true ? preview?.artwork : nil) ?? item.artwork
+    }
+
+    private func showActionErrorIfNeeded() {
+        guard let page, let error = page.actionError, let id = page.actionErrorID else { return }
+        showError(error.message(operation: page.actionOperation, diagnosticID: page.actionDiagnosticID)) { [weak page] in
+            page?.dismissActionError(id: id)
+        }
     }
 
     private func showReadErrorIfNeeded() {
@@ -804,7 +811,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             let page = try await model.remoteQueuePage(source, cursor: cursor)
             try Task.checkCancellation()
             let index = selected.flatMap { selected in page.items.firstIndex {
-                $0.songId.utf8.elementsEqual(selected.songId.utf8) && $0.sources == selected.sources
+                MusicPublicBrowseViewModel.sameActionIdentity($0, selected)
             } } ?? (selected == nil && !page.items.isEmpty ? 0 : nil)
             if let index {
                 await model.playRemoteQueue(source, start: .init(index: offset + index, track: page.items[index]))

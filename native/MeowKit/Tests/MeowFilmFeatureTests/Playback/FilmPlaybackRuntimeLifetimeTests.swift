@@ -247,31 +247,6 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         XCTAssertEqual(model.sessionReleaseError?.code, "CLOSED")
     }
 
-    func testLateExternalPlayerRejectionCannotResumeRevokedNativeOutput() async throws {
-        let client = try client(), opening = FilmPlaybackGate(), result = FilmPlaybackGate()
-        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("external")))
-        let media = FilmPlaybackTestMedia()
-        let model = FilmPlaybackModel(transport: server.transport(runtime: client), media: media,
-            openExternalURL: { _ in await opening.release(); await result.wait(); return false },
-            request: { FilmPlaybackFixture.request() })
-        await model.open()?.value
-        await model.waitForPendingWork()
-        let handoff = model.openExternalPlayer(.infuse)
-        await opening.wait()
-        let stopped = expectation(description: "revoked native owner drains without waiting on external completion")
-        media.onStop = { stopped.fulfill() }
-        await client.close()
-        await fulfillment(of: [stopped], timeout: 2)
-        await model.waitForPendingWork()
-        await result.release()
-        await handoff?.value
-        XCTAssertEqual(media.resumes, 0)
-        XCTAssertFalse(media.isCurrent(sessionID: FilmPlaybackFixture.sessionID, attemptID: "external"))
-        XCTAssertNil(model.send("play"))
-        XCTAssertFalse(model.isReleased)
-    }
-
     func testCloseWaitsForDrainAndKeepsNativeStopAndRPCReleaseFailuresSeparatelyVisible() async throws {
         let client = try client(), drain = FilmPlaybackGate(), entered = FilmPlaybackGate()
         let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
@@ -360,7 +335,6 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
     private func makeModel(_ server: FilmPlaybackWireServer, _ media: FilmPlaybackTestMedia,
                            _ client: RuntimeHTTPClient) -> FilmPlaybackModel {
         .init(transport: server.transport(runtime: client), media: media,
-              openExternalURL: { _ in XCTFail("Unexpected external handoff"); return false },
               request: { FilmPlaybackFixture.request() })
     }
 }

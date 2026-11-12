@@ -32,7 +32,13 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
             table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
-    override func applyTheme() { super.applyTheme(); if isViewLoaded { table.reloadData() } }
+    override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        view.tintColor = UIColor(theme.settings.accent)
+        table.separatorColor = UIColor(theme.settings.separator)
+        table.reloadData()
+    }
     func numberOfSections(in tableView: UITableView) -> Int { resetUserData == nil ? 2 : 3 }
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 0 ? 3 : section == 1 ? 2 : 1 }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -49,12 +55,14 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
         var content = cell.defaultContentConfiguration()
         content.text = label
         content.textProperties.font = .preferredFont(forTextStyle: .body)
-        content.textProperties.color = indexPath.section == 2 ? .systemRed : UIColor(theme.ink)
+        content.textProperties.color = UIColor(indexPath.section == 2 ? theme.settings.danger : theme.settings.ink)
         content.textProperties.numberOfLines = 0
         cell.contentConfiguration = content
         cell.backgroundColor = .clear
         cell.backgroundView = SettingsRowBackgroundView(theme: theme,
             first: indexPath.row == 0, last: indexPath.row == tableView.numberOfRows(inSection: indexPath.section) - 1)
+        cell.selectedBackgroundView = SettingsRowBackgroundView(theme: theme, first: indexPath.row == 0,
+            last: indexPath.row == tableView.numberOfRows(inSection: indexPath.section) - 1, selected: true)
         cell.accessoryType = indexPath.section == 2 ? .none : .disclosureIndicator
         cell.accessibilityTraits = .button
         cell.isAccessibilityElement = true

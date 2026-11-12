@@ -77,19 +77,21 @@ struct MusicSourceExclusionsContent: View {
                     ForEach(MusicPublicBrowsePlatform.allCases) { Text($0.title).tag($0.rawValue) }
                 }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme))
                 Button("添加", action: add).disabled(state.song.isEmpty)
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .modifier(MusicSettingsRowStyle(theme: theme))
             }
             Section("已排除") {
-                if state.rows.isEmpty { Text("暂无错源").foregroundStyle(.secondary).modifier(MusicSettingsRowStyle(theme: theme)) }
+                if state.rows.isEmpty { Text("暂无错源").foregroundStyle(Color(uiColor: UIColor(theme.settings.muted))).modifier(MusicSettingsRowStyle(theme: theme)) }
                 ForEach(state.rows) { row in
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(row.title + " — " + row.artist)
                             Text(exclusionLabel(row))
-                                .font(.caption).foregroundStyle(.secondary)
+                                .font(.caption).foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         }
                         Spacer()
                         Button("恢复") { restore(row.id) }
+                            .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     }.modifier(MusicSettingsRowStyle(theme: theme))
                 }
             }

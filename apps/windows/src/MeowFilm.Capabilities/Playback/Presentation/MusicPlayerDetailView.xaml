@@ -65,13 +65,81 @@
      </ControlTemplate></Setter.Value>
     </Setter>
    </Style>
+   <Style x:Key="Player.LyricAdjust" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+    <Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/>
+    <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/>
+    <Setter Property="FontSize" Value="10"/><Setter Property="Foreground" Value="#EBEAED"/>
+    <Setter Property="BorderBrush" Value="#30FFFFFF"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+     <Border CornerRadius="18" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+             BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+      <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+     </Border>
+    </ControlTemplate></Setter.Value></Setter>
+    <Setter Property="IsEnabled" Value="{Binding CanAdjustLyricOffset}"/>
+    <Style.Triggers>
+     <Trigger Property="IsMouseOver" Value="True">
+      <Setter Property="Background" Value="#14FFFFFF"/><Setter Property="BorderBrush" Value="#60FFFFFF"/>
+     </Trigger>
+     <Trigger Property="IsPressed" Value="True">
+      <Setter Property="Background" Value="#22FFFFFF"/><Setter Property="BorderBrush" Value="#80FFFFFF"/>
+     </Trigger>
+     <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="#E0FFFFFF"/></Trigger>
+     <Trigger Property="IsEnabled" Value="False">
+      <Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="#18FFFFFF"/>
+     </Trigger>
+     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+     </Trigger>
+     <MultiTrigger><MultiTrigger.Conditions>
+      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsKeyboardFocused" Value="True"/>
+     </MultiTrigger.Conditions><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
+     <MultiTrigger><MultiTrigger.Conditions>
+      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsMouseOver" Value="True"/>
+     </MultiTrigger.Conditions>
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+     </MultiTrigger>
+     <MultiTrigger><MultiTrigger.Conditions>
+      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsPressed" Value="True"/>
+     </MultiTrigger.Conditions>
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+     </MultiTrigger>
+     <MultiTrigger><MultiTrigger.Conditions>
+      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsEnabled" Value="False"/>
+     </MultiTrigger.Conditions>
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+     </MultiTrigger>
+    </Style.Triggers>
+   </Style>
+   <Style x:Key="Player.LyricPreviewAction" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+    <Setter Property="Height" Value="24"/><Setter Property="MinHeight" Value="0"/>
+    <Setter Property="Padding" Value="6,1"/><Setter Property="FontSize" Value="12"/>
+    <Setter Property="Foreground" Value="#C5C3C8"/><Setter Property="Background" Value="#08FFFFFF"/>
+    <Setter Property="BorderBrush" Value="#30FFFFFF"/>
+    <Setter Property="Template">
+     <Setter.Value><ControlTemplate TargetType="Button">
+      <Border CornerRadius="12" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+              BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+       <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+     </ControlTemplate></Setter.Value>
+    </Setter>
+   </Style>
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid>
   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
- <Grid MaxWidth="1240" Margin="0,52,0,0">
+ <Grid MaxWidth="1240" Margin="0,88,0,0">
   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-  <Viewbox Margin="40,0,0,0" MaxWidth="520" MaxHeight="600" Stretch="Uniform" VerticalAlignment="Center">
+  <Viewbox Margin="12,0,0,0" MaxWidth="500" MaxHeight="560" Stretch="Uniform" StretchDirection="DownOnly" VerticalAlignment="Center">
    <Canvas Width="520" Height="600">
     <Ellipse Canvas.Left="53" Canvas.Top="103" Width="414" Height="414" Fill="#0AFFFFFF" Stroke="#20FFFFFF" StrokeThickness="1"/>
     <local:MusicRecordView x:Name="DetailRecord" Canvas.Left="66" Canvas.Top="116" Width="388" Height="388"
@@ -94,10 +162,11 @@
     </Canvas>
    </Canvas>
   </Viewbox>
-  <Grid Grid.Column="1" Margin="16,18,68,20">
+  <Grid Grid.Column="1" Margin="28,18,20,20">
+   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <StackPanel>
-    <TextBlock Text="{Binding CurrentTitle}" FontSize="26" FontWeight="SemiBold"
+    <TextBlock x:Name="DetailTitle" Text="{Binding CurrentTitle}" FontSize="26" FontWeight="SemiBold"
                TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
     <WrapPanel Opacity=".68" Margin="0,0,0,18">
      <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
@@ -131,11 +200,18 @@
               AutomationProperties.Name="从当前歌曲开始心动"/>
      </StackPanel>
     </Border>
-   <Grid x:Name="LyricViewport" Grid.Row="2">
+   <Grid x:Name="LyricViewport" Grid.Row="2" Margin="-76,0,0,0">
     <!-- OpacityMask composites the lyric viewport into an intermediate surface: use grayscale here only. -->
+    <Grid x:Name="LyricFadeViewport" Background="Transparent" ClipToBounds="True">
+     <Grid.OpacityMask>
+      <LinearGradientBrush MappingMode="Absolute" StartPoint="0,0" EndPoint="0,1">
+       <GradientStop Color="Transparent" Offset="0"/><GradientStop Color="Black" Offset=".10"/>
+       <GradientStop Color="Black" Offset=".90"/><GradientStop Color="Transparent" Offset="1"/>
+      </LinearGradientBrush>
+     </Grid.OpacityMask>
     <local:MusicLyricList Background="Transparent" BorderThickness="0" Padding="0"
      TextOptions.TextRenderingMode="Grayscale"
-     Position="{Binding PositionSeconds}" IsPlaying="{Binding IsPlaying}"
+     Position="{Binding LyricPositionSeconds}" IsPlaying="{Binding IsPlaying}"
      PlaybackRate="{Binding AcceptedPlaybackRate}" PresentationKey="{Binding PlaybackPresentationKey}"
      ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
      ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True"
@@ -151,12 +227,6 @@
        <ItemsPresenter/>
       </ScrollViewer>
      </ControlTemplate></ListBox.Template>
-     <ListBox.OpacityMask>
-      <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-       <GradientStop Color="Transparent" Offset="0"/><GradientStop Color="Black" Offset=".12"/>
-       <GradientStop Color="Black" Offset=".84"/><GradientStop Color="Transparent" Offset="1"/>
-      </LinearGradientBrush>
-     </ListBox.OpacityMask>
      <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
       <Setter Property="IsHitTestVisible" Value="False"/><Setter Property="Focusable" Value="False"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
@@ -178,7 +248,7 @@
       </Style.Triggers>
      </Style></ListBox.ItemContainerStyle>
      <ListBox.ItemTemplate><DataTemplate>
-      <Border Padding="64,11,64,11" MinHeight="47">
+      <Border Padding="76,11,16,11" MinHeight="47">
         <StackPanel>
          <TextBlock Text="{Binding Text}" FontSize="20" TextWrapping="Wrap">
           <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
@@ -207,23 +277,48 @@
       </Border>
      </DataTemplate></ListBox.ItemTemplate>
     </local:MusicLyricList>
+    </Grid>
     <Border x:Name="LyricPreviewFrame" VerticalAlignment="Center" CornerRadius="12"
             Background="#12FFFFFF" BorderBrush="#48FFFFFF" BorderThickness="1" MinHeight="47"
             Visibility="{Binding HasLyricPreview,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-     <Grid>
-      <TextBlock Text="{Binding LyricPreviewTime}" FontSize="12" Margin="12,0,0,0"
-                 HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False"/>
-      <Button x:Name="ConfirmLyric" Click="PlayLyric_Click" HorizontalAlignment="Right" VerticalAlignment="Center"
-              Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,8,0"
+      <Button x:Name="ConfirmLyric" Click="PlayLyric_Click" HorizontalAlignment="Left" VerticalAlignment="Center"
+              Style="{StaticResource Player.LyricPreviewAction}" Margin="8,0,0,0"
               IsEnabled="{Binding CanConfirmLyricPreview}" AutomationProperties.Name="播放此处">
-       <TextBlock Text="&#xE768;" FontFamily="Segoe Fluent Icons"/>
+       <StackPanel Orientation="Horizontal">
+        <TextBlock Text="&#xE768;" FontFamily="Segoe Fluent Icons" FontSize="9" VerticalAlignment="Center"
+                   Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+        <TextBlock Text="{Binding LyricPreviewTime}" Margin="4,0,0,0" VerticalAlignment="Center"
+                   Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"
+                   Typography.NumeralAlignment="Tabular"/>
+       </StackPanel>
       </Button>
-     </Grid>
     </Border>
     <TextBlock x:Name="LyricState" Text="{Binding LyricStatus}" FontSize="20"
                HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
 
    </Grid>
+   <StackPanel x:Name="LyricTimingRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
+    <Button x:Name="DelayLyricButton" Click="DelayLyric_Click"
+            Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词延后 0.5 秒" AutomationProperties.Name="歌词延后 0.5 秒">
+     <Grid Width="26" Height="26" IsHitTestVisible="False">
+      <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2"
+            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+            Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+      <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                 Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+     </Grid>
+    </Button>
+    <Button x:Name="AdvanceLyricButton" Click="AdvanceLyric_Click"
+            Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词提前 0.5 秒" AutomationProperties.Name="歌词提前 0.5 秒">
+     <Grid Width="26" Height="26" IsHitTestVisible="False">
+      <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2"
+            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+            Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+      <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                 Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+     </Grid>
+    </Button>
+   </StackPanel>
   </Grid>
  </Grid>
   <ContentControl x:Name="DetailPlayerHost" Grid.Row="1" HorizontalContentAlignment="Stretch"

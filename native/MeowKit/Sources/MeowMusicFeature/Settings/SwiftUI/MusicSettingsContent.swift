@@ -103,7 +103,7 @@ struct MusicSettingsIconLabel: View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
                 .frame(width: 24)
-                .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                 .accessibilityHidden(true)
             Text(title)
                 .fixedSize(horizontal: false, vertical: true)
@@ -118,19 +118,7 @@ struct MusicPlatformLogo: View {
     var theme: PageTheme
 
     var body: some View {
-        Group {
-            if let assetName {
-                Image(assetName, bundle: .main)
-                    .renderingMode(.original)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                Image(systemName: "music.note")
-                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+        AccountPlatformMark(assetName: assetName, symbol: "music.note", size: size, theme: theme)
     }
 }
 
@@ -140,11 +128,8 @@ struct MusicPlatformLabel: View {
     let theme: PageTheme
 
     var body: some View {
-        HStack(spacing: 12) {
-            MusicPlatformLogo(assetName: platform.settingsLogoName, theme: theme)
-            Text(platform.title)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        AccountPlatformLabel(title: platform.title, assetName: platform.settingsLogoName,
+                             symbol: "music.note", theme: theme)
     }
 }
 
@@ -173,7 +158,7 @@ struct MusicSettingsLinkRow<Label: View>: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             Image(systemName: "chevron.right")
                 .font(.footnote.weight(.semibold))
-                .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                 .frame(width: 16)
                 .accessibilityHidden(true)
         }
@@ -190,13 +175,13 @@ struct MusicSettingsRowStyle: ViewModifier {
         content
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-            .listRowSeparatorTint(Color(uiColor: UIColor(theme.border)))
+            .listRowSeparatorTint(Color(uiColor: UIColor(theme.settings.separator)))
             .listRowBackground(
-                Color(uiColor: UIColor(theme.surface)).opacity(0.58)
+                Color(uiColor: UIColor(theme.settings.surface))
                     .overlay {
                         Rectangle().strokeBorder(
-                            LinearGradient(colors: [0.12, 0.24, 0.52].map {
-                                Color(uiColor: UIColor(theme.border)).opacity($0)
+                            LinearGradient(colors: [0.55, 0.72, 1].map {
+                                Color(uiColor: UIColor(theme.settings.border)).opacity($0)
                             }, startPoint: .top, endPoint: .bottom),
                             lineWidth: 0.7
                         )
@@ -215,8 +200,8 @@ struct MusicSettingsListStyle: ViewModifier {
             .contentMargins(.horizontal, 16, for: .scrollContent)
             .listSectionSpacing(24)
             .environment(\.defaultMinListRowHeight, 56)
-            .foregroundStyle(Color(uiColor: UIColor(theme.ink)))
-            .tint(Color(uiColor: UIColor(theme.accent)))
+            .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
+            .tint(Color(uiColor: UIColor(theme.settings.accent)))
             .background(Color.clear)
     }
 }

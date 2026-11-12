@@ -1,7 +1,9 @@
 import XCTest
 import UIKit
 import MeowUI
+@testable import MeowFilmFeature
 @testable import MeowMusicFeature
+@testable import MeowNovelFeature
 @testable import Meowfilm
 
 @MainActor
@@ -138,6 +140,8 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
             let page = MeowfilmSettingsViewController(themeProvider: store, resetUserData: {})
             let window = try host(page, width: width)
             window.overrideUserInterfaceStyle = dark ? .dark : .light
+            page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+            waitUntil { page.theme.dark == dark }
             page.traitOverrides.preferredContentSizeCategory = category
             page.view.layoutIfNeeded()
             let table = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UITableView }.first)
@@ -151,12 +155,98 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
             let colors = MusicColorSettingsViewController(state: MusicAppearanceSettingsState(store: store))
             let colorWindow = try host(colors, width: width)
             colorWindow.overrideUserInterfaceStyle = dark ? .dark : .light
+            colors.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+            waitUntil { colors.theme.dark == dark }
             colors.traitOverrides.preferredContentSizeCategory = category
             colors.view.layoutIfNeeded()
             XCTAssertEqual(colors.pageTitle, "配色设置")
             waitUntil { !self.descendants(colors.view).compactMap { $0 as? UIScrollView }.isEmpty }
             XCTAssertEqual(colors.view.bounds.width, width, accuracy: 1)
             attach(colors, "settings-colors-\(Int(width))-\(dark ? "dark" : "light")-large")
+        }
+    }
+
+    func testRootAndNovelSettingsUseStableColorsWhileTheirBackgroundStillFollowsThePalette() throws {
+        let domain = "SettingsSemanticColors." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let store = MusicAppearancePreferencesStore(defaults: defaults)
+        let root = MeowfilmSettingsViewController(themeProvider: store, resetUserData: {})
+        let novel = NovelTablePage(themeProvider: store)
+        novel.pageTitle = "小说设置"
+        novel.rows = [.init(title: "书源管理", detail: "启用") {}, .init(title: "删除", destructive: true) {}]
+        _ = try host(root); _ = try host(novel)
+        let table = try XCTUnwrap(descendants(root.view).compactMap { $0 as? UITableView }.first)
+        let novelTable = try XCTUnwrap(descendants(novel.view).compactMap { $0 as? UITableView }.first)
+        for dark in [false, true] {
+            root.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+            novel.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+            waitUntil { root.theme.dark == dark && novel.theme.dark == dark }
+            for palette in [PagePalette.preset(.coral), .custom(0xffff00)] {
+                store.selectFixedPalette(palette)
+                root.applyTheme(); novel.applyTheme()
+                let colors = SettingsTheme(dark: dark)
+                XCTAssertEqual(root.theme.palette, palette)
+                XCTAssertEqual(root.pageHeader.background.theme.palette, palette)
+                XCTAssertEqual(root.view.tintColor, UIColor(colors.accent))
+                XCTAssertEqual(table.separatorColor, UIColor(colors.separator))
+                let row = root.tableView(table, cellForRowAt: IndexPath(row: 0, section: 0))
+                let content = try XCTUnwrap(row.contentConfiguration as? UIListContentConfiguration)
+                XCTAssertEqual(content.textProperties.color, UIColor(colors.ink))
+                let danger = root.tableView(table, cellForRowAt: IndexPath(row: 0, section: 2))
+                XCTAssertEqual((danger.contentConfiguration as? UIListContentConfiguration)?.textProperties.color,
+                    UIColor(colors.danger))
+                let novelRow = novel.tableView(novelTable, cellForRowAt: IndexPath(row: 0, section: 0))
+                XCTAssertEqual(novelRow.textLabel?.textColor, UIColor(colors.ink))
+                XCTAssertEqual(novelRow.detailTextLabel?.textColor, UIColor(colors.muted))
+                XCTAssertEqual(novel.view.tintColor, UIColor(colors.accent))
+                XCTAssertEqual(novel.tableView(novelTable, cellForRowAt: IndexPath(row: 1, section: 0)).textLabel?.textColor,
+                    UIColor(colors.danger))
+            }
+            attach(root, "settings-semantic-root-\(dark ? "dark" : "light")")
+            attach(novel, "settings-semantic-novel-\(dark ? "dark" : "light")")
+        }
+    }
+
+    func testFilmControlsKeepTheirDraftAndReadableSemanticColorsAcrossAppearanceChanges() throws {
+        let store = MusicAppearancePreferencesStore()
+        let page = FilmSettingsListController(themeProvider: store)
+        page.pageTitle = "规则设置"
+        let field = filmTextField("查询词", id: "semantic.query", value: "保留草稿")
+        let pattern = filmTextView("pattern", id: "semantic.pattern", value: "(第\\d+集)")
+        let toggle = UISwitch(); toggle.isOn = true
+        let stack = UIStackView(arrangedSubviews: [field, pattern, toggle])
+        stack.axis = .vertical; stack.spacing = 12
+        page.sections = [.init(title: "测试", rows: [
+            .init(title: "", id: "semantic.fields", content: stack),
+            .init(title: "选中", id: "semantic.selected", selected: true),
+            .init(title: "删除", id: "semantic.delete", destructive: true),
+        ])]
+        _ = try host(page)
+        for dark in [false, true] {
+            page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+            waitUntil { page.theme.dark == dark }
+            page.applyTheme(); page.view.layoutIfNeeded()
+            _ = page.tableView(page.table, cellForRowAt: IndexPath(row: 0, section: 0))
+            let colors = SettingsTheme(dark: dark)
+            XCTAssertEqual(field.text, "保留草稿")
+            XCTAssertEqual(pattern.text, "(第\\d+集)")
+            XCTAssertEqual(field.textColor, UIColor(colors.ink))
+            XCTAssertEqual(field.backgroundColor, UIColor(colors.input))
+            XCTAssertEqual(field.tintColor, UIColor(colors.accent))
+            XCTAssertEqual(field.attributedPlaceholder?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor,
+                UIColor(colors.muted))
+            XCTAssertEqual(pattern.textColor, UIColor(colors.ink))
+            XCTAssertEqual(pattern.backgroundColor, UIColor(colors.input))
+            XCTAssertEqual(toggle.onTintColor, UIColor(colors.accent))
+            XCTAssertEqual(page.view.tintColor, UIColor(colors.accent))
+            let selected = page.tableView(page.table, cellForRowAt: IndexPath(row: 1, section: 0))
+            XCTAssertEqual(selected.accessoryType, .checkmark)
+            let danger = page.tableView(page.table, cellForRowAt: IndexPath(row: 2, section: 0))
+            XCTAssertEqual((danger.contentConfiguration as? UIListContentConfiguration)?.textProperties.color,
+                UIColor(colors.danger))
+            page.table.reloadData(); page.view.layoutIfNeeded()
+            attach(page, "settings-semantic-film-fields-\(dark ? "dark" : "light")")
         }
     }
 

@@ -2,7 +2,6 @@ using System.Text.Json;
 using System.IO;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using Net.Codecrete.QrCodeGenerator;
 using MeowFilm.Capabilities.Accounts;
 
 namespace MeowFilm.Capabilities;
@@ -48,19 +47,8 @@ public static class MusicAccountQrImage
             uri.Query[prefix.Length..].Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('_' or '-')) ||
             address.Any(character => char.IsControl(character)))
             throw new MusicOperationException("INVALID_RESPONSE");
-        var qr = QrCode.EncodeText(address, QrCode.Ecc.Medium);
-        const int border = 4, scale = 4;
-        int width = checked((qr.Size + border * 2) * scale);
-        if (width > 1024) throw new MusicOperationException("LIMIT");
-        var pixels = new byte[width * width];
-        Array.Fill(pixels, (byte)255);
-        for (int y = 0; y < qr.Size; y++)
-            for (int x = 0; x < qr.Size; x++)
-                if (qr.GetModule(x, y))
-                    for (int dy = 0; dy < scale; dy++)
-                        Array.Fill(pixels, (byte)0, ((y + border) * scale + dy) * width + (x + border) * scale, scale);
-        var bitmap = BitmapSource.Create(width, width, 96, 96, PixelFormats.Gray8, null, pixels, width);
-        bitmap.Freeze();
+        var bitmap = QrCodeImage.Create(address);
+        if (bitmap.PixelWidth > 1024) throw new MusicOperationException("LIMIT");
         return bitmap;
     }
 }

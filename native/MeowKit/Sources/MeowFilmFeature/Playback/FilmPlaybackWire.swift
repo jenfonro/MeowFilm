@@ -557,9 +557,6 @@ public struct FilmPlaybackError: Error, Equatable, Sendable, LocalizedError {
         case "STORAGE_ERROR", "LIBRARY_UPDATE_FAILED": "保存失败"
         case "CORRUPT_STORAGE": "本地播放资料已损坏"
         case "BUSY": "操作尚未完成"
-        case "EXTERNAL_PLAYER_NO_CURRENT": "当前没有可交接的播放"
-        case "EXTERNAL_PLAYER_DRM": "此媒体需要额外解密信息，请继续内置播放"
-        case "EXTERNAL_PLAYER_OPEN_FAILED": "无法打开所选播放器"
         default: code
         }
     }

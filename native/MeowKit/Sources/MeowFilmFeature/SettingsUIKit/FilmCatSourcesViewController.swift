@@ -156,7 +156,7 @@ final class FilmCatDetailController: FilmSourcePageController {
             .init(title: "状态", detail: filmSourceState(cat.state), id: "film.cat.state"),
             .init(title: "修改时间", detail: filmSourceDate(cat.modifiedAt), id: "film.cat.modified"),
             .init(title: "更新状态", detail: filmSourceState(cat.updateState), id: "film.cat.updateState"),
-            filmSwitchRow("启用", id: "film.cat.enabled", isOn: cat.enabled, enabled: !busy, ink: UIColor(theme.ink)) { [weak self] enabled in
+            filmSwitchRow("启用", id: "film.cat.enabled", isOn: cat.enabled, enabled: !busy) { [weak self] enabled in
                 guard let self else { return }
                 perform({ [service] in _ = try await service.enableCat(cat.installationId, enabled: enabled) })
             },
@@ -170,7 +170,7 @@ final class FilmCatDetailController: FilmSourcePageController {
             .init(title: "重启", id: "film.cat.restart", enabled: !busy && cat.canRestart, action: { [weak self] in
                 guard let self else { return }; perform({ [service] in _ = try await service.restartCat(cat.installationId) }, success: "已重启")
             }),
-            .init(title: "删除", id: "film.cat.delete", enabled: !busy, action: { [weak self] in
+            .init(title: "删除", id: "film.cat.delete", enabled: !busy, destructive: true, action: { [weak self] in
                 self?.confirm("删除猫源？", message: "关联视频源也将删除。") { [weak self] in
                     guard let self else { return }
                     deleteBatch([cat], isPresent: { cat, snapshot in

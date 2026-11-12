@@ -76,9 +76,10 @@ import Combine
 
     /// Safe to call before audio preparation; it never resolves or plays media.
     func select(_ entry: MusicQueueEntry, lyricsEnabled: Bool, restoreOnly: Bool = false,
-                force: Bool = false) {
+                force: Bool = false, refreshSources: Bool = false) {
         guard available, !closed else { return }
-        if !force, self.entry == entry, enabled == lyricsEnabled, authorization?.isActive == true,
+        if !force, !(refreshSources && (state != "ready" && lyricsEnabled || coverURL == nil)),
+           self.entry == entry, enabled == lyricsEnabled, authorization?.isActive == true,
            self.restoreOnly == restoreOnly || !self.restoreOnly { return }
         let sameRecording = self.entry?.id == entry.id && self.entry?.track.songId == entry.track.songId
         if force { lyrics.removeAll() }
@@ -111,7 +112,8 @@ import Combine
             guard let service else { throw MusicServiceError.unavailable }
             let metadata = try await service.metadataCandidates(occurrenceID: entry.id)
             try check(id, access: access)
-            guard metadata.occurrenceID == entry.id, metadata.track == entry.track else {
+            guard metadata.occurrenceID == entry.id, metadata.track.ref == entry.track.ref,
+                  metadata.track.songId == entry.track.songId, metadata.track.duration == entry.track.duration else {
                 throw MusicServiceError.targetChanged
             }
             candidates = metadata.candidates

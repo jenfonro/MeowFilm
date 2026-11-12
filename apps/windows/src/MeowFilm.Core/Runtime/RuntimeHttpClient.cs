@@ -29,7 +29,15 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
     }
 
     public Task<JsonElement> CallAsync(string method, object? parameters = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        CallAsyncCore(method, parameters, null, cancellationToken);
+
+    public Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        CallAsyncCore(method, parameters, timeout, cancellationToken);
+
+    private Task<JsonElement> CallAsyncCore(string method, object? parameters, TimeSpan? timeout,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         foreach (var (id, contract) in RuntimeHttpProtocol.Modules)
@@ -37,16 +45,16 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             if (method is null || !method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;
             var operation = method[contract.Prefix.Length..];
             if (!contract.Operations.Contains(operation, StringComparer.Ordinal)) break;
-            return SendJsonAsync($"/v1/{id}/{operation}", parameters ?? new { }, contract, cancellationToken);
+            return SendJsonAsync($"/v1/{id}/{operation}", parameters ?? new { }, contract, timeout, cancellationToken);
         }
         throw new BridgeException("METHOD_UNAVAILABLE");
     }
     private async Task<JsonElement> SendJsonAsync(string path, object parameters,
-        RuntimeHttpProtocol.ModuleContract contract, CancellationToken token)
+        RuntimeHttpProtocol.ModuleContract contract, TimeSpan? timeout, CancellationToken token)
     {
         var bytes = BridgeCodec.EncodeJSONValue(parameters);
         try { return await RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, contract.Codes, token,
-            timeout: contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60) : null).ConfigureAwait(false); }
+            timeout: timeout ?? (contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60) : null)).ConfigureAwait(false); }
         finally { Clear(bytes); }
     }
 

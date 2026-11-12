@@ -469,7 +469,6 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         if target.kind != .source { sources.append(try FilmPlaybackSource(otherSource())) }
         let request = FilmPlaybackRequest(target: target, sources: sources)
         let model = FilmPlaybackModel(transport: server.transport, media: media,
-            openExternalURL: { _ in XCTFail("Unexpected external-player launch"); return false },
             request: { request })
         addTeardownBlock { await model.close() }
         return model

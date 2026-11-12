@@ -79,7 +79,7 @@ extension NativeMusicService: MusicRemoteQueueServing {
         try check(own); try source.authorization.check()
         // Display handles remain short-lived; full queue collection below uses
         // the source snapshot, not the 600-handle cache or just visible rows.
-        // Keep its source keys: MusicRemoteQueueStart pins that raw identity.
+        // The start pins the original member, not presentation-only additions.
         return .init(items: try songs.map { try remember($0) },
                      cursor: page.cursor, dailyStyle: page.dailyStyle)
     }
@@ -131,10 +131,9 @@ extension NativeMusicService: MusicRemoteQueueServing {
         let recommendations = try raw.map(MusicNativeSimilarData.recommendation)
         try musicRequire(songs.indices.contains(start.index) && !songs.isEmpty, .notFound)
         let selected = songs[start.index]
-        let selectedKeys = try MusicModel.sources(selected).map(\.sourceKey)
+        let primary = try MusicModel.sources(selected).first
         try musicRequire(musicSame(selected["songId"].string, start.songID) &&
-            selectedKeys.count == start.sourceKeys.count &&
-            zip(selectedKeys, start.sourceKeys).allSatisfy { musicSame($0.0, $0.1) }, .targetChanged)
+            primary != nil && primary == start.primarySource, .targetChanged)
         try await work { try await source.validate() }
         try check(own); try intent.check(); try source.authorization.check()
         try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)

@@ -529,7 +529,7 @@ test('Tianyi configured password recovery retries the same request with the new 
   }
 });
 
-test('Tianyi persistent session expiry is retried only once and Cookie-only refresh is not a fake success', async () => {
+test('Tianyi persistent session expiry is retried only once and Cookie-only refresh requires account confirmation', async () => {
   const f = fixture(() => response({ res_code: 'InvalidSessionKey' }),
     { cookie: 'session=old', username: 'synthetic-user', password: 'password' });
   let refreshes = 0;
@@ -537,9 +537,17 @@ test('Tianyi persistent session expiry is retried only once and Cookie-only refr
   await assert.rejects(tianyi.list({ share }, f.ctx), { code: 'AUTH_REQUIRED' });
   assert.equal(refreshes, 1);
   assert.equal(f.calls.length, 2);
-  const cookieOnly = fixture(() => assert.fail('unexpected upstream'));
-  await assert.rejects(tianyi.refresh({}, cookieOnly.ctx), { code: 'NOT_CONFIGURED' });
-  assert.equal(cookieOnly.calls.length, 0);
+  const cookieOnly = fixture((target, request) => {
+    if (target.pathname === '/api/portal/loginUrl.action') {
+      return response('', 302, { location: 'https://open.e.189.cn/api/logbox/separate/web/index.html' });
+    }
+    assert.equal(target.href, 'https://open.e.189.cn/api/logbox/separate/web/index.html');
+    assert.equal(request.headers.Cookie, '');
+    return response('synthetic login page');
+  });
+  await assert.rejects(tianyi.refresh({}, cookieOnly.ctx), { code: 'AUTH_REQUIRED' });
+  assert.equal(cookieOnly.calls.length, 2);
+  assert.deepEqual(cookieOnly.patches, []);
 });
 
 function passwordFixture({
@@ -643,6 +651,63 @@ test('Tianyi password login uses RSA PKCS#1 v1.5 and preserves exact password by
   assert.match(f.ctx.credentials.cookie, /session=fresh/);
   assert.equal(f.ctx.credentials.password, f.password);
   assert.deepEqual(f.patches.map(patch => Object.keys(patch)), [['cookie']]);
+});
+
+test('Tianyi account refresh distinguishes submitted authentication failure from format, network, challenge and service errors', async t => {
+  const f = passwordFixture();
+  const request = f.transport.request.bind(f.transport);
+  let failure;
+  f.transport.request = async input => {
+    const path = new URL(input.url).pathname;
+    if (failure?.stage === 'configuration' && path.endsWith('encryptConf.do') ||
+        failure?.stage === 'submission' && path.endsWith('loginSubmit.do')) {
+      if (failure.value instanceof Error) throw failure.value;
+      return failure.value;
+    }
+    return request(input);
+  };
+  const root = mkdtempSync(join(tmpdir(), 'pan-tianyi-status-'));
+  const service = createPanService({ dataRoot: root, transport: f.transport, now: () => 1800000000000 });
+  t.after(async () => { await service.close(); rmSync(root, { recursive: true, force: true }); });
+  await service.invoke('settings.set', { provider: 'tianyi', credentials: {
+    cookie: 'session=synthetic-old', username: 'synthetic-user', password: f.password,
+  } });
+  const state = async () => (await service.invoke('settings.get')).accounts.find(item => item.provider === 'tianyi');
+  const path = join(root, 'pan/accounts.json');
+  for (const status of ['signedIn', 'expired']) {
+    if (status === 'expired') {
+      failure = { stage: 'submission', value: response('', 401) };
+      const before = readFileSync(path);
+      await assert.rejects(service.invoke('refresh', { provider: 'tianyi' }), { code: 'AUTH_REQUIRED' });
+      assert.deepEqual(readFileSync(path), before);
+    }
+    const snapshot = await state();
+    assert.equal(snapshot.status, status);
+    for (const stage of ['configuration', 'submission']) {
+      for (const [value, code] of [
+        [new PanError('NETWORK_ERROR'), 'NETWORK_ERROR'], [new PanError('TIMEOUT'), 'TIMEOUT'],
+        [response('invalid-json'), 'UPSTREAM_FORMAT'], [response({}), 'UPSTREAM_FORMAT'],
+        [response('busy', 429), 'UPSTREAM_HTTP'], [response('unavailable', 503), 'UPSTREAM_HTTP'],
+        [response({ result: 429 }), 'UPSTREAM_ERROR'], [response({ result: -1 }), 'UPSTREAM_ERROR'],
+        [response({ result: -2, msg: '验证码 required' }), 'CHALLENGE_REQUIRED'],
+      ]) {
+        failure = { stage, value };
+        const before = readFileSync(path);
+        await assert.rejects(service.invoke('refresh', { provider: 'tianyi' }), { code });
+        assert.deepEqual(await state(), snapshot);
+        assert.deepEqual(readFileSync(path), before);
+      }
+    }
+  }
+  failure = undefined;
+  const result = await service.invoke('refresh', { provider: 'tianyi' });
+  assert.equal(result.refreshed, true);
+  assert.equal(result.account.status, 'signedIn');
+  assert.equal(result.account.revision, 1);
+  const saved = JSON.parse(readFileSync(path)).accounts.tianyi;
+  assert.equal(saved.credentials.password, f.password);
+  assert.match(saved.credentials.cookie, /session=fresh/);
+  assert.equal(JSON.stringify(result).includes(f.password), false);
 });
 
 test('Tianyi password login normalizes reference metadata and keeps the exact password', async () => {

@@ -340,7 +340,9 @@ function refreshToken(body) {
     offset = elements.lastIndex;
   }
   requireValue(values.has('return'), 'UPSTREAM_FORMAT');
-  requireValue(values.get('return') === '0', 'AUTH_FAILED');
+  const result = values.get('return');
+  requireValue(/^-?\d+$/.test(result), 'UPSTREAM_FORMAT');
+  requireValue(result === '0', result === '1' ? 'AUTH_FAILED' : 'UPSTREAM_ERROR');
   requireValue(values.get('token'), 'UPSTREAM_FORMAT');
   return values.get('token');
 }
@@ -352,7 +354,9 @@ async function refresh(_, ctx) {
     headers: { 'Content-Type': 'application/xml', Accept: 'application/xml', 'User-Agent': userAgent },
     body: `<root><token>${escapeXML(auth.token)}</token><account>${escapeXML(auth.account)}</account><clienttype>656</clienttype></root>`,
   });
-  assertHTTP(response.status);
+  if (ctx.signal?.aborted) throw new PanError('CANCELLED');
+  requireValue(response.status >= 200 && response.status < 300,
+    response.status === 401 ? 'AUTH_REQUIRED' : 'UPSTREAM_HTTP');
   const token = refreshToken(response.body);
   await ctx.updateCredentials({
     authorization: Buffer.from(`${auth.prefix}:${auth.account}:${token}`).toString('base64'), refreshedAt: ctx.now(),

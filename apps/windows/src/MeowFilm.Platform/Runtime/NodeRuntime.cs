@@ -198,6 +198,12 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         if (!IsConnected) return Task.FromException<JsonElement>(new BridgeException("CLOSED"));
         return client.CallAsync(method, parameters, cancellationToken);
     }
+    public Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected) return Task.FromException<JsonElement>(new BridgeException("CLOSED"));
+        return client.CallAsync(method, parameters, timeout, cancellationToken);
+    }
 
     public IAsyncEnumerable<JsonElement> EventsAsync(string module, Guid sessionId, long after = 0,
         CancellationToken cancellationToken = default)

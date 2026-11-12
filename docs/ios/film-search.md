@@ -13,6 +13,8 @@
 
 原始列表为工具行右侧开关，TMDB 加载／失败／不可用状态在其左边；手机沿现有窄屏工具行布局，不把所有音乐分页标签挤到一行。切换只改同一 session 的展示模式和独立滚动位置；TMDB 失败可用“重试”继续原会话。
 
+分类高亮沿用分页滑动插值，使用文字下方独立居中的 20×3 短横线，不改变按钮和文字布局。搜索卡片直接显示 Node 的 `textBadge`／`siteLabel`：海报右上角为橙色白字圆角角标，内缩 8、最大海报宽度 70%；标题下的来源／聚合／电影／剧集为居中浅底描边标签，深色模式沿服务器配色调整。两者长值单行省略、空值隐藏，标题仍保留 iOS 两行及原按压效果，搜索不显示评分；首页三张加第四张边缘及仅标题展示不变。
+
 ## 真实 TMDB 接线
 
 HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata-data.md)，本端不复制其上游路由规则。`apps/ios/runtime/entries/aggregate.mjs` 保留现有 dataRoot 和 Cat 目录布局，显式装配 music／cat／source／pan／tmdb／douban／film／netease 八模块。`RuntimePayload` 和 App launcher 按序精确校验同一清单，精确版本／contract 见[运行底座](runtime-preflight.md)；通用 runtime 默认三模块不变。
@@ -27,7 +29,8 @@ HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata
 
 - Swift：`bash scripts/test-native.sh test --filter 'FilmSearchSessionTests|FilmSearchHandoffTests|FilmSearchAuthorizationScopeTests|FilmSearchStableIdentityTests|FilmPlaybackSearchContextTests|FilmTMDBServiceTests'`，验证完整 Node 卡片、两模式顺序、错误／空／不可用、SSE、停止即撤发布、同 session 恢复、来源准入、准确 handoff 和关闭排空；播放 context 测试验证晚到 reference 更新和重进坐标。stop 迟到数据回归为 `FilmSearchSessionTests/testStopReceiptKeepsEveryDisplayedFieldAfterRejectedSSEUntilSameSessionResume`、`testCancelledAcceptedOpenBindsIdentityWithoutPublishingStopCardsAndResumesThenReleases`；保留既有 SSE／accepted more 取消断言。搜索算法、逐源游标和缓存行为由 Node 搜索测试覆盖，不再用 Swift 替身实现另一套算法。
 - 跨查询详情回归分别验证原生旧 UI 发布被撤销、真实 Node producer 优雅完成、同键缓存复用及配置失效后的物理取消；不能再以原生成功详情字典的调用次数证明统一缓存正确。可控 continuation gate 覆盖晚到旧读者；真实宿主补充 Node 缓存及网络证据。
-- scheme `MeowfilmAcceptance` 的 UIKit 精确方法：`MeowfilmAcceptanceUITests/FilmSearchUIKitTests/testExistingPosterAddsSearchBadgeAndSourceLabelAtNarrowAndWideWidths`、`testSearchContentUsesExistingPostersKeepsBothModesAndDeliversLiveContext`、`testRawTypedZeroCardsKeepSeparateNavigationAndRealFavoritesAcrossReload`（后两项使用同一 target/class 前缀）。使用真实 `FilmPosterCell` 断言长标题、窄宽、普通／聚合／电影／剧集文本，并保存附件 `film-search-existing-posters-narrow-three-kinds`；固定 Node wire 回执覆盖模式切换和 live context，不冒充引擎执行。
+- scheme `MeowfilmAcceptance` 的 UIKit 精确方法：`MeowfilmAcceptanceUITests/FilmSearchUIKitTests/testExistingPosterAddsSearchBadgeAndSourceLabelAtNarrowAndWideWidths`、`testSearchContentUsesExistingPostersKeepsBothModesAndDeliversLiveContext`、`testRawTypedZeroCardsKeepSeparateNavigationAndRealFavoritesAcrossReload`（后两项使用同一 target/class 前缀）。使用真实 `FilmPosterCell` 断言长标题、窄宽、普通／聚合／电影／剧集文本、服务器角标和来源标签、深浅色及按压/复用，并保存附件 `film-search-server-posters-<width>-<light|dark>`；固定 Node wire 回执覆盖模式切换和 live context，不冒充引擎执行。
+- 同 scheme 的 `MusicSearchResultsCellsTests/testTabsKeepStableFramesWhileIndicatorAndColorsFollowPaging`、`testFiveCategoryIndicatorsKeepFixedSizeAndCenterWhenThemeAndSelectionChange` 验证独立短横线、滑动插值、五分类点击／选中态和主题切换；附件 `search-five-category-centered-indicator` 为固定数据原生视图。
 - 同 scheme：`-only-testing:MeowfilmAcceptanceUITests/SearchPageViewControllerTests`；`MusicUIKitRegressionTests` 下的 `testAdditionalSearchCategoryIsLazyAndTargetSubmissionAlwaysSelectsRequestedCategory`、`testGlobalSearchAddsAllFourCategoriesWhenMusicPlaylistSearchIsDisabled`、`testNewMusicSubmissionDuringPendingAdditionalSwipeDoesNotStartSupersededDomain`。
 - 同 scheme 的真实 NodeMobile 精确入口如下。实际 App 协调器验证入口默认目标、真实卡片点击、在途成员交接、详情释放、第二轮后返回再进入及请求次数；临时 Cat HTTP 程序验证完整125条页与第二页；额外验证 Unicode 规则预览与真实搜索输入／聚合结果一致和孤立 UTF16。规则与搜索都经真实 NodeMobile，TMDB 使用 loopback 合成成功空上游并恢复原配置，不访问公网。通道不可用的独立语义仍由消费者协议测试覆盖。
 

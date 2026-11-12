@@ -76,14 +76,12 @@ final class FilmManualMatchEditor: FilmSettingsListController {
             ]
         }
         rows += [field("季线索", season),
-            filmSwitchRow("启用", id: "film.manual.enabled", isOn: enabled, enabled: task == nil,
-                          ink: UIColor(theme.ink)) { [weak self] in self?.enabled = $0 },
-            filmSwitchRow("连续失败自动停用", id: "film.manual.auto-disable", isOn: autoDisable, enabled: task == nil,
-                          ink: UIColor(theme.ink)) { [weak self] in self?.autoDisable = $0 },
+            filmSwitchRow("启用", id: "film.manual.enabled", isOn: enabled, enabled: task == nil) { [weak self] in self?.enabled = $0 },
+            filmSwitchRow("连续失败自动停用", id: "film.manual.auto-disable", isOn: autoDisable, enabled: task == nil) { [weak self] in self?.autoDisable = $0 },
         ]
         if let original {
             rows.append(.init(title: "失败次数", detail: "\(original.failureCount)", id: "film.manual.failures"))
-            rows.append(.init(title: "删除", id: "film.manual.remove", enabled: task == nil,
+            rows.append(.init(title: "删除", id: "film.manual.remove", enabled: task == nil, destructive: true,
                               action: { [weak self] in self?.remove() }))
         }
         sections = [.init(title: "", rows: rows)]
@@ -93,8 +91,8 @@ final class FilmManualMatchEditor: FilmSettingsListController {
     private func field(_ title: String, _ field: UITextField) -> FilmSettingsRow {
         let label = UILabel()
         label.text = title; label.font = .preferredFont(forTextStyle: .subheadline)
-        label.textColor = UIColor(theme.muted)
-        field.textColor = UIColor(theme.ink); field.isEnabled = task == nil
+        label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).muted) }
+        field.textColor = UIColor(theme.settings.ink); field.isEnabled = task == nil
         let stack = UIStackView(arrangedSubviews: [label, field])
         stack.axis = .vertical; stack.spacing = 8
         return .init(title: title, id: "", content: stack)

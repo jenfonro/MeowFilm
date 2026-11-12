@@ -76,7 +76,7 @@ final class FilmRulePageViewController: FilmSettingsListController {
         ]))
         if owner.draft == nil { sections.append(.init(title: "", rows: [.init(title: "加载中", id: "film.rules.busy")])) }
         if testExpanded {
-            testFields.input.textColor = UIColor(theme.ink); testFields.query.textColor = UIColor(theme.ink)
+            testFields.input.textColor = UIColor(theme.settings.ink); testFields.query.textColor = UIColor(theme.settings.ink)
             sections.append(.init(title: "测试文本", rows: [
                 .init(title: "", id: "film.rule.test.fields", content: testFields),
                 .init(title: testing ? "取消测试" : "测试", id: "film.rule.test.run", action: { [weak self] in

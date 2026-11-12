@@ -54,6 +54,7 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
 
     public override func applyTheme() {
         super.applyTheme()
+        if isViewLoaded { view.tintColor = UIColor(theme.settings.accent) }
         guard isViewLoaded, renderedTheme != theme else { return }
         renderedTheme = theme
         render()

@@ -15,14 +15,22 @@ private final class RuntimeHTTPFixture: @unchecked Sendable {
 
 private final class RuntimeTestURLProtocol: URLProtocol, @unchecked Sendable {
     static let fixture = RuntimeHTTPFixture()
-    private let lock = NSLock()
+    private let lock = NSRecursiveLock()
     private var stopped: (@Sendable () -> Void)?
     private var didStop = false
+    private var trickleTimer: DispatchSourceTimer?
+    private var chunks: [Data] = []
+    private var sentChunks = 0
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() { Self.fixture.handle(request, self) }
     override func stopLoading() {
-        lock.lock(); didStop = true; let callback = stopped; stopped = nil; lock.unlock()
+        lock.lock()
+        didStop = true
+        trickleTimer?.cancel(); trickleTimer = nil
+        chunks.removeAll()
+        let callback = stopped; stopped = nil
+        lock.unlock()
         callback?()
     }
     func onStop(_ callback: @escaping @Sendable () -> Void) {
@@ -49,6 +57,40 @@ private final class RuntimeTestURLProtocol: URLProtocol, @unchecked Sendable {
     }
     func send(_ data: Data) { client?.urlProtocol(self, didLoad: data) }
     func fail(_ code: Int) { client?.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: code)) }
+
+    var sentChunkCount: Int { lock.lock(); defer { lock.unlock() }; return sentChunks }
+
+    /// Nineteen parts finish after 0.9 seconds; every idle interval is only 0.05 seconds.
+    func trickle(data: Data, contentType: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didStop else { return }
+        chunks = (0..<19).map { data.subdata(in: ($0 * data.count / 19)..<(($0 + 1) * data.count / 19)) }
+        try startResponse(headers: ["Content-Type": contentType, "Content-Length": String(data.count)])
+        guard !didStop else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "RuntimeTestURLProtocol.trickle"))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(50))
+        timer.setEventHandler { [weak self] in self?.sendNextChunk() }
+        trickleTimer = timer
+        timer.resume()
+    }
+
+    private func sendNextChunk() {
+        // The same recursive lock serializes delivery with stopLoading, including
+        // synchronous Foundation cancellation from inside a client callback.
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didStop, sentChunks < chunks.count else { return }
+        let chunk = chunks[sentChunks]
+        sentChunks += 1
+        send(chunk)
+        guard !didStop else { return }
+        if sentChunks == chunks.count {
+            trickleTimer?.cancel(); trickleTimer = nil
+            chunks.removeAll()
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
 
     func body() -> Data {
         if let body = request.httpBody { return body }
@@ -503,6 +545,116 @@ final class RuntimeHTTPClientTests: XCTestCase {
         do { _ = try await client.describe(); XCTFail("closed") }
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
         XCTAssertTrue(client.isClosed)
+    }
+
+    func testPerCallDeadlineExtendsOneRequestWithoutChangingTheDefault() async throws {
+        let client = try client(timeout: 0.2)
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 1)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
+                transport.respond(.object(["ok": .bool(true), "contract": .string("pan.runtime.v1"),
+                                           "value": .string("confirmed")]))
+            }
+        }
+        let result = try await client.call(module: .pan, operation: "login.poll", timeout: 1)
+        XCTAssertEqual(result, .string("confirmed"))
+        let stopped = expectation(description: "default deadline drained the next request")
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 0.2)
+            transport.onStop { stopped.fulfill() }
+        }
+        do { _ = try await client.call(module: .pan, operation: "providers"); XCTFail("Default deadline must still apply") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        await fulfillment(of: [stopped], timeout: 2)
+        await client.close()
+    }
+
+    func testTrickledRPCAndImageStillRespectWholeDeadline() async throws {
+        let rpcBytes = try RuntimeJSON.encode(reply(.string("available"), contract: "pan.runtime.v1"))
+        let imageBytes = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=="))
+        let reference = try XCTUnwrap(RuntimeHTTPClient.metadataImageURL("/v1/tmdb/images/w500/deadline.png"))
+        let client = try client(timeout: 0.4)
+        let rpcStopped = expectation(description: "trickled RPC physically stopped")
+        let imageStopped = expectation(description: "trickled image physically stopped")
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.timeoutInterval, 0.4)
+            let image = request.url?.path == reference.absoluteString
+            if !image { XCTAssertEqual(request.url?.path, "/v1/pan/providers") }
+            transport.onStop { [weak transport] in
+                XCTAssertGreaterThan(transport?.sentChunkCount ?? 0, 1, "Data must arrive repeatedly before the whole deadline")
+                (image ? imageStopped : rpcStopped).fulfill()
+            }
+            try! transport.trickle(data: image ? imageBytes : rpcBytes,
+                                   contentType: image ? "image/png" : "application/json")
+        }
+        async let rpc: Void = {
+            do { _ = try await client.call(module: .pan, operation: "providers"); XCTFail("Trickled RPC must time out") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        }()
+        async let image: Void = {
+            do { _ = try await client.readMetadataImage(reference); XCTFail("Trickled image must time out") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        }()
+        _ = await (rpc, image)
+        await fulfillment(of: [rpcStopped, imageStopped], timeout: 2)
+        XCTAssertFalse(client.isClosed)
+        await client.close()
+    }
+
+    func testExtendedCallDoesNotExtendConcurrentDefaultRPCOrImage() async throws {
+        let rpcBytes = try RuntimeJSON.encode(reply(.string("confirmed"), contract: "pan.runtime.v1"))
+        let imageBytes = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=="))
+        let reference = try XCTUnwrap(RuntimeHTTPClient.metadataImageURL("/v1/tmdb/images/w500/deadline.png"))
+        let client = try client(timeout: 0.4)
+        let extendedStarted = expectation(description: "extended call is streaming before default requests start")
+        let rpcStopped = expectation(description: "parallel default RPC physically stopped")
+        let imageStopped = expectation(description: "parallel default image physically stopped")
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            let extended = request.url?.path == "/v1/pan/login.poll"
+            let image = request.url?.path == reference.absoluteString
+            XCTAssertEqual(request.timeoutInterval, extended ? 1.6 : 0.4)
+            if !extended {
+                if !image { XCTAssertEqual(request.url?.path, "/v1/pan/providers") }
+                transport.onStop { [weak transport] in
+                    XCTAssertGreaterThan(transport?.sentChunkCount ?? 0, 1)
+                    (image ? imageStopped : rpcStopped).fulfill()
+                }
+            }
+            try! transport.trickle(data: image ? imageBytes : rpcBytes,
+                                   contentType: image ? "image/png" : "application/json")
+            if extended { extendedStarted.fulfill() }
+        }
+        async let extended: Void = {
+            do {
+                let value = try await client.call(module: .pan, operation: "login.poll", timeout: 1.6)
+                XCTAssertEqual(value, .string("confirmed"))
+            } catch { XCTFail("The extended call must finish its trickled response: \(error)") }
+        }()
+        await fulfillment(of: [extendedStarted], timeout: 2)
+        async let rpc: Void = {
+            do { _ = try await client.call(module: .pan, operation: "providers"); XCTFail("Parallel RPC keeps its default deadline") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        }()
+        async let image: Void = {
+            do { _ = try await client.readMetadataImage(reference); XCTFail("Parallel image keeps its default deadline") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .timeout) }
+        }()
+        _ = await (extended, rpc, image)
+        await fulfillment(of: [rpcStopped, imageStopped], timeout: 2)
+        XCTAssertFalse(client.isClosed)
+        await client.close()
+    }
+
+    func testInvalidPerCallTimeoutIsRejectedBeforeHTTP() async throws {
+        let client = try client()
+        RuntimeTestURLProtocol.fixture.set { _, _ in XCTFail("Invalid deadline must not send") }
+        for timeout in [Double.zero, -1, .infinity, .nan] {
+            do { _ = try await client.call(module: .pan, operation: "login.poll", timeout: timeout); XCTFail("Invalid deadline") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest) }
+        }
+        await client.close()
     }
 
     func testTimeoutDoesNotRetryAndPreCancelledCallsNeverSend() async throws {

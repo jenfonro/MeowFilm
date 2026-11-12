@@ -22,7 +22,7 @@ final class FilmRuleEditorView: UIStackView, UITextViewDelegate {
         axis = .vertical; spacing = 8
         let patternLabel = UILabel()
         patternLabel.text = "pattern"; patternLabel.font = .preferredFont(forTextStyle: .caption1)
-        patternLabel.adjustsFontForContentSizeCategory = true; patternLabel.textColor = UIColor(theme.muted)
+        patternLabel.adjustsFontForContentSizeCategory = true; patternLabel.textColor = UIColor(theme.settings.muted)
         addArrangedSubview(patternLabel)
         pattern.text = rule.pattern
         pattern.accessibilityLabel = "pattern"; pattern.accessibilityIdentifier = id + ".pattern"
@@ -33,16 +33,16 @@ final class FilmRuleEditorView: UIStackView, UITextViewDelegate {
         pattern.smartQuotesType = .no; pattern.smartDashesType = .no
         pattern.heightAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         pattern.delegate = self
-        pattern.textColor = UIColor(theme.ink)
+        pattern.textColor = UIColor(theme.settings.ink)
         addArrangedSubview(pattern)
         if !group.isClean {
             options.spacing = 12; options.distribution = .fill
             for (name, field) in [("replace", replacement), ("flags", flags)] {
-                field.textColor = UIColor(theme.ink)
+                field.textColor = UIColor(theme.settings.ink)
                 field.addAction(UIAction { [weak self] _ in self?.changed() }, for: .editingChanged)
                 let label = UILabel()
                 label.text = name; label.font = .preferredFont(forTextStyle: .caption1)
-                label.adjustsFontForContentSizeCategory = true; label.textColor = UIColor(theme.muted)
+                label.adjustsFontForContentSizeCategory = true; label.textColor = UIColor(theme.settings.muted)
                 let stack = UIStackView(arrangedSubviews: [label, field])
                 stack.axis = .vertical; stack.spacing = 4
                 if name == "flags" {
@@ -57,6 +57,7 @@ final class FilmRuleEditorView: UIStackView, UITextViewDelegate {
             addArrangedSubview(options)
         }
         delete.setTitle("删除", for: .normal)
+        delete.tintColor = UIColor(theme.settings.danger)
         delete.accessibilityIdentifier = id + ".delete"
         delete.titleLabel?.font = .preferredFont(forTextStyle: .body)
         delete.titleLabel?.adjustsFontForContentSizeCategory = true

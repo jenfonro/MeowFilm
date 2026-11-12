@@ -12,12 +12,14 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     var requests: [MusicScriptRequest] = []
     var fails = Set<String>()
     var sourceGate: NativeMusicGate?, writeGate: NativeMusicGate?
+    var resolveGate: MusicNativeCandidateDiscoveryBarrier?
     var sourceDuration: Double = 180
     init(_ ids: [String] = ["a", "b"], enabled: Bool = true, sites: [String: [String]] = [:]) {
         self.enabled = Dictionary(uniqueKeysWithValues: ids.map { ($0, enabled) }); self.sites = sites
     }
     func fail(_ keys: Set<String>) { fails = keys }
     func holdSource(_ gate: NativeMusicGate) { sourceGate = gate }
+    func holdResolve(_ gate: MusicNativeCandidateDiscoveryBarrier) { resolveGate = gate }
     func holdWriteReceipt(_ gate: NativeMusicGate) { writeGate = gate }
     func setDuration(_ value: Double) { sourceDuration = value }
     func snapshot(_ id: String) -> MusicScriptSource {
@@ -32,8 +34,9 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         guard enabled[installationID] != nil else { throw MusicServiceError.sourceUnavailable }
         return snapshot(installationID)
     }
-    func resolve(request: MusicScriptRequest) throws -> MusicScriptResult<MusicNativeAudio> {
+    func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio> {
         requests.append(request)
+        if let gate = resolveGate { await gate.enter() }
         if fails.contains(request.installationID + ":" + request.quality) { throw MusicServiceError.audioUnavailable }
         return .init(value: .init(url: URL(string: "https://media.invalid/\(request.installationID).\(request.quality)")!,
                      delivery: .init(quality: request.quality, evidence: .officialResponse, duration: sourceDuration)),
@@ -146,10 +149,18 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         await model.previewQueueRecommendations()
         await fulfillment(of: [published], timeout: 2)
         XCTAssertEqual(model.queueRecommendations?.candidates.count, 1)
-        let mediaGate = NativeMusicGate()
-        await scripts.holdSource(mediaGate)
+        let recommendationID = try XCTUnwrap(model.queueRecommendations?.id)
+        await model.setQueueRecommendationContinue(true, snapshotID: recommendationID)
+        let mediaGate = MusicNativeCandidateDiscoveryBarrier()
+        await scripts.holdResolve(mediaGate)
         let navigation = Task { await model.next() }
-        await mediaGate.started()
+        await mediaGate.started(1)
+        guard await mediaGate.count() > 0 else {
+            await mediaGate.release(); await navigation.value
+            XCTFail("Navigation did not request audio: \(model.error ?? "no error")")
+            await model.close(); await service.close()
+            return
+        }
         let intent = try XCTUnwrap(model.navigationPlaybackIntent)
         let selected = try XCTUnwrap(model.current?.id)
         XCTAssertNotEqual(selected, "entry-1")

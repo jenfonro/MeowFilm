@@ -32,6 +32,7 @@ open class NovelTablePage: PageViewController, UITableViewDataSource, UITableVie
         var title: String
         var detail: String = ""
         var id: String = ""
+        var destructive = false
         var action: () -> Void
     }
     var rows: [Row] = [] { didSet { if isViewLoaded { table.reloadData() } } }
@@ -43,12 +44,23 @@ open class NovelTablePage: PageViewController, UITableViewDataSource, UITableVie
         NSLayoutConstraint.activate([table.topAnchor.constraint(equalTo: contentTopAnchor), table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             table.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor), table.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor)])
     }
-    open override func applyTheme() { super.applyTheme(); if isViewLoaded { table.reloadData() } }
+    open override func applyTheme() {
+        super.applyTheme()
+        if isViewLoaded {
+            view.tintColor = UIColor(theme.settings.accent)
+            table.separatorColor = UIColor(theme.settings.separator)
+            table.reloadData()
+        }
+    }
     public func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows.count }
     public func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let row = rows[indexPath.row], cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
-        cell.backgroundColor = UIColor(theme.surface); cell.textLabel?.text = row.title; cell.detailTextLabel?.text = row.detail
-        cell.textLabel?.textColor = UIColor(theme.ink); cell.detailTextLabel?.textColor = UIColor(theme.muted)
+        cell.backgroundColor = .clear; cell.textLabel?.text = row.title; cell.detailTextLabel?.text = row.detail
+        cell.backgroundView = SettingsRowBackgroundView(theme: theme, first: indexPath.row == 0, last: indexPath.row == rows.count - 1)
+        cell.selectedBackgroundView = SettingsRowBackgroundView(theme: theme, first: indexPath.row == 0,
+            last: indexPath.row == rows.count - 1, selected: true)
+        cell.textLabel?.textColor = UIColor(row.destructive ? theme.settings.danger : theme.settings.ink)
+        cell.detailTextLabel?.textColor = UIColor(theme.settings.muted)
         cell.textLabel?.numberOfLines = 0; cell.detailTextLabel?.numberOfLines = 0; cell.accessoryType = .disclosureIndicator
         cell.accessibilityIdentifier = row.id; return cell
     }

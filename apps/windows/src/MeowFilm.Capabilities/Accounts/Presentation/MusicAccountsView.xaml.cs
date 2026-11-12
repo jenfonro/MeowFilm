@@ -168,7 +168,7 @@ public partial class MusicAccountsView : UserControl
         if (!SurfaceVisible || Owner is not { CanEdit: true, AccountBusy: false } owner ||
             sender is not Button { Tag: MusicPlatformSettingsRow row } ||
             !owner.PlatformSettings.Contains(row) || !row.ShowLogin) return;
-        LoginTitle.Text = row.Name;
+        LoginSurface.Title = row.Name;
         RetireLoginPopup();
         loginOwner = owner;
         QrMode();

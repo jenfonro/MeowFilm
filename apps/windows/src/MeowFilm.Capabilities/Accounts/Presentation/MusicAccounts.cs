@@ -347,12 +347,17 @@ public sealed partial class MusicCapability
                 await Call("music.accounts.cancel", new { platform }, lifetime.Token);
                 if (epoch != accountEpoch) return;
                 AccountReadResult result;
+                bool joinedRead;
                 do
                 {
+                    joinedRead = !accountRead.IsCompleted;
                     result = await StartAccountRead(force: true, allowStopping: true);
                 }
                 while (epoch == accountEpoch && (result.Epoch != epoch ||
-                    result.Observation != Volatile.Read(ref accountObservation)));
+                    result.Observation != Volatile.Read(ref accountObservation) ||
+                    // An ordinary observation joined above can be retired by
+                    // shutdown. It is not the settlement's confirming receipt.
+                    joinedRead && result.ErrorCode == "CANCELLED" && !lifetime.IsCancellationRequested));
                 if (epoch != accountEpoch) return;
                 if (result.ErrorCode is { } code) throw new MusicOperationException(code);
                 accountStatus = accountSaveUncertain ? "取消结果待核对，请读取账号状态" :

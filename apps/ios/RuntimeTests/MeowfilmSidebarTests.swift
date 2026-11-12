@@ -679,7 +679,8 @@ private final class SidebarFilmFixture {
             XCTFail("Rendering the saved sidebar must not request Douban")
             throw FilmSearchError.unavailable
         }), didSave: {})
-        model = FilmSettingsModel(rules: rules, sources: sources, tmdb: tmdb, douban: douban)
+        model = FilmSettingsModel(rules: rules, sources: sources, tmdb: tmdb, douban: douban,
+            pan: PanAccountsModel(service: .init(request: { _, _, _ in throw RuntimeHTTPError.closed })))
     }
 
     static func cats(for videos: [FilmVideoSource]) -> [FilmCatSource] {

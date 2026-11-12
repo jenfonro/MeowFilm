@@ -277,7 +277,7 @@ private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchec
 }
 
 extension MusicSourceExclusionCommitTests {
-    func testCandidateCommitFiltersEveryStagedAdditionUsingCurrentCrossSongIDDecisions() async throws {
+    func testMetadataProjectionFiltersStagedAdditionsUsingCurrentCrossSongIDDecisions() async throws {
         let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
         let existing = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "existing"))
         let rejected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "rejected"))
@@ -286,22 +286,20 @@ extension MusicSourceExclusionCommitTests {
         let staged = try MusicModel.mergeSources(song, adding: rejected["sources"].array + allowed["sources"].array)
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let service = try await NativeMusicFixture.service(store)
-        let state = try await service.state(), epoch = await service.epoch
-        let seed = MusicNativeCandidateDiscoverySeed(occurrenceID: "entry-1", song: song, state: state,
-            epoch: epoch, lifetime: MusicNativeCandidateDiscoveryLifetime())
         // The staged result predates both decisions, made through another entrance.
         var otherEntrance = primary
         otherEntrance["songId"] = .string("song:other-entrance")
         for source in [existing, rejected] {
             try await service.excludeRecordingSource(otherEntrance, sourceKey: source["sources"].array[0]["sourceKey"].string)
         }
-        let committed = try await service.candidateCommit(seed, staged: staged)
+        try await service.retainSongMetadata([staged])
+        let projected = try await service.sharedSongMetadata(song)
         let expected = song["sources"].array + allowed["sources"].array
-        XCTAssertEqual(Set(committed.song["sources"].array.map { $0["sourceKey"].string }),
+        XCTAssertEqual(Set(projected["sources"].array.map { $0["sourceKey"].string }),
             Set(expected.map { $0["sourceKey"].string }))
-        XCTAssertEqual(committed.song["sources"].array.first, song["sources"].array.first)
+        XCTAssertEqual(projected["sources"].array.first, song["sources"].array.first)
         let saved = try MusicDocument(store.read(), runID: "exclusion").queue["entries"].array[0]["song"]
-        XCTAssertEqual(saved, committed.song)
+        XCTAssertEqual(saved, song)
         let decisions = try await service.sourceExclusions()
         XCTAssertEqual(decisions.count, 2)
         XCTAssertTrue(decisions.allSatisfy { $0.songID == "song:other-entrance" })
