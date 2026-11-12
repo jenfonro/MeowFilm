@@ -118,8 +118,11 @@ extension MusicNativePlatforms {
     }
     func browseWYSignature(_ row: MJ, ids: [String]? = nil) throws -> String {
         let members = try ids ?? browseWYIDs(row)
-        return MusicNativePublicBrowseSupport.digest(.array([row["id"], row["name"], row["creator"]["userId"],
-            row["updateTime"], row["trackUpdateTime"], row["trackCount"], .strings(members)]))
+        // Generated playlists can advance trackUpdateTime on every read without
+        // changing a member. Bind actions to the resource and ordered members,
+        // not its refresh clock or presentation metadata.
+        return MusicNativePublicBrowseSupport.digest(.array([.string(try MusicPlatformProtocol.numericID(row["id"])),
+            row["creator"]["userId"], row["trackCount"], .strings(members)]))
     }
     static func hasWYSongDisplayFields(_ row: MJ) -> Bool {
         let artists = row.contains("ar") ? row["ar"] : row["artists"]

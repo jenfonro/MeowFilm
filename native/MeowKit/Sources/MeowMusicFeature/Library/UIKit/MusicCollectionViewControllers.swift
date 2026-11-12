@@ -22,7 +22,6 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     private var displayedTracks: [MusicRemoteTrack] = []
     private var displayedTrackIndices: [MusicReference: Int] = [:]
     private var remoteSelected: Set<MusicReference> = []
-    private var shownRemoteActionError: String?
 
     private var localContent: (page: MusicCollectionViewModel, draft: MusicCollectionEditorDraft)? {
         guard case .local(let page, let draft) = content else { return nil }
@@ -529,13 +528,9 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     }
 
     private func showRemoteActionError(_ page: MusicPublicBrowseViewModel) {
-        guard let error = page.actionError else {
-            shownRemoteActionError = nil
-            return
-        }
+        guard let error = page.actionError, let id = page.actionErrorID else { return }
         let message = error.message(operation: page.actionOperation, diagnosticID: page.actionDiagnosticID)
-        guard shownRemoteActionError != message else { return }
-        if showError(message) { shownRemoteActionError = message }
+        showError(message) { [weak page] in page?.dismissActionError(id: id) }
     }
 }
 

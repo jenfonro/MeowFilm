@@ -149,8 +149,8 @@ extension NeteaseMusicAccountAdapter: MusicNeteasePublicAudioProvider {
             publicAudioContext = context
         }
         // Public standard/chorus endpoints do not require anonymous
-        // registration. XEAPI negotiates its own keys on demand; the separate
-        // account/login bootstrap and its credentials remain unchanged.
+        // registration. XEAPI negotiates its own keys on demand; account login
+        // uses a separate challenge-local context.
         guard context.accountID.isEmpty, context.cookies["MUSIC_U"] == nil else { throw MusicServiceError.targetChanged }
         return context
     }

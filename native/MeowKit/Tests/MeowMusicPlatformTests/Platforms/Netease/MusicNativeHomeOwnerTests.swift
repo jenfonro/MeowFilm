@@ -74,6 +74,54 @@ import MeowJSON
         _ = await f.service.close()
     }
 
+    func testFinishedFailedCancelledOrExpiredLoginReturnsToGuestWithoutRevivingOldGrants() async throws {
+        for ending in ["failed", "cancelled", "expired"] {
+            let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
+            let old = try await f.service.nativeHomeBinding()
+            let oldOptions = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
+            let oldOption = try XCTUnwrap(oldOptions.first)
+            if ending == "failed" {
+                await f.http.replies("/eapi/login/qrcode/unikey", [try MusicNeteaseFixture.response(["code": 500])])
+                do { _ = try await f.service.beginLogin(platform: .netease); XCTFail("Expected QR failure") }
+                catch { XCTAssertEqual(error as? MusicServiceError, .upstreamFailed) }
+            } else {
+                let challenge = try await f.service.beginLogin(platform: .netease)
+                do { _ = try await f.service.nativeHomeBinding(); XCTFail("Pending login became guest") }
+                catch { XCTAssertEqual(error as? MusicServiceError, .busy) }
+                if ending == "expired" {
+                    f.clock.advance(181)
+                    let progress = try await f.service.checkLogin(challengeID: challenge.id)
+                    XCTAssertEqual(progress, .expired)
+                } else { await f.service.cancelLogin(challengeID: challenge.id) }
+            }
+            XCTAssertFalse(old.authorization.isActive)
+            let guest = try await f.service.nativeHomeBinding()
+            XCTAssertFalse(guest.loggedIn); XCTAssertEqual(guest.scope, old.scope)
+            XCTAssertNotEqual(guest.revision, old.revision)
+            let repeated = try await f.service.nativeHomeBinding()
+            XCTAssertEqual(repeated, guest)
+            do {
+                _ = try await f.service.nativeResolve(platform: .netease, nativeID: "101",
+                    selection: oldOption.selection(quality: "128k"))
+                XCTFail("Old guest playback grant revived")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+            let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
+            let option = try XCTUnwrap(options.first)
+            let audio = try await f.service.nativeResolve(platform: .netease, nativeID: "101",
+                selection: option.selection(quality: "128k"))
+            XCTAssertEqual(audio.delivery?.quality, "128k")
+            XCTAssertEqual(audio.playbackAuthorization?.isActive, true)
+            do {
+                _ = try await f.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)
+                XCTFail("Guest restored a private capability")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
+            XCTAssertNil(f.store.peek(f.identity))
+            let calls = await f.http.recorded()
+            XCTAssertFalse(calls.contains { $0.request.url.path.contains("vip") || $0.request.url.path.contains("nuser") })
+            _ = await f.service.close()
+        }
+    }
+
     func testConfirmedAuthenticationDenialAllowsGuestWithoutHidingOtherFailures() async throws {
         for (code, expected) in [(500, MusicServiceError.upstreamFailed), (429, .rateLimited), (460, .verificationRequired)] {
             let f = try MusicNeteaseNativeFixture(); try await f.enable()

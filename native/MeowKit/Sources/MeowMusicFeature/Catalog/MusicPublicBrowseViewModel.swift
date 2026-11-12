@@ -1002,6 +1002,11 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         let id = UUID(); issuedIntent = id
         return .init(id: id, page: pageEpoch, access: generation)
     }
+    var actionErrorID: UUID? { actionError == nil ? nil : actionEpoch }
+    func dismissActionError(id: UUID) {
+        guard actionErrorID == id else { return }
+        actionError = nil; actionDiagnosticID = nil
+    }
     public func perform(intent: MusicPublicBrowseActionIntent, operation: String = "歌单操作",
                         kind: MusicRequestTrace.Operation = .library,
                         _ body: @escaping @MainActor () async throws -> Void) async {
