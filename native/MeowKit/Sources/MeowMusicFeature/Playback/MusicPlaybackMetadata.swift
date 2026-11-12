@@ -78,7 +78,7 @@ import Combine
     func select(_ entry: MusicQueueEntry, lyricsEnabled: Bool, restoreOnly: Bool = false,
                 force: Bool = false) {
         guard available, !closed else { return }
-        if !force, self.entry == entry, enabled == lyricsEnabled, authorization?.isActive != false,
+        if !force, self.entry == entry, enabled == lyricsEnabled, authorization?.isActive == true,
            self.restoreOnly == restoreOnly || !self.restoreOnly { return }
         let sameRecording = self.entry?.id == entry.id && self.entry?.track.songId == entry.track.songId
         if force { lyrics.removeAll() }
@@ -132,11 +132,10 @@ import Combine
                     return
                 }
             }
-            // Persistent display storage requires an admitted local account scope.
-            if let scope {
-                identity = .init(scope: scope.scope, occurrenceID: entry.id, songID: entry.track.songId,
-                                 contentFingerprint: metadata.contentFingerprint)
-            }
+            // Presentation has no playback grant. Independent script playback
+            // can keep its own recording cache without an official account.
+            identity = .init(scope: "music", songID: entry.track.songId,
+                             contentFingerprint: metadata.contentFingerprint)
             let saved: MusicPlaybackDisplaySnapshot?
             if let display, let identity { saved = await display.read(identity, authorization: fence) }
             else { saved = nil }

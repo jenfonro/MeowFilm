@@ -166,10 +166,10 @@ final class MusicScriptHistoryCacheTests: XCTestCase {
 // Test-only deterministic actor drain: production does not expose capture internals.
 private extension NativeMusicService {
     func stageAudioCacheForTestsToDrain() async throws {
-        // First-fact staging is enqueued on this same actor; yield to its local
-        // continuation, then drain captures. A finite deadline fails, never sleeps indefinitely.
+        // Preparation owns the source before any playing fact; wait for that
+        // owner and drain captures without an unbounded sleep.
         try await MusicCandidateDiscoveryDeadline.run(seconds: 3, timing: .init()) {
-            while await self.audioCacheAttempt?.captured != true { try Task.checkCancellation(); await Task.yield() }
+            while await self.audioCacheAttempt?.source == nil { try Task.checkCancellation(); await Task.yield() }
             let captures = await Array(self.audioCacheCaptures.values)
             for task in captures { await task.value }
         }

@@ -402,7 +402,7 @@ private extension MusicPreparedSource {
             startPosition: position, requestedQuality: value.requestedQuality,
             resolvedSelection: value.resolvedSelection, expiresAt: value.expiresAt,
             fileAuthorization: value.fileAuthorization, delivery: value.delivery,
-            playbackAuthorization: value.playbackAuthorization), selection: selection)
+            playbackAuthorization: value.playbackAuthorization, byteSource: value.byteSource), selection: selection)
     }
 }
 #endif

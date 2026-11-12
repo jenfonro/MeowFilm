@@ -126,14 +126,9 @@ extension NativeMusicService {
                 candidates.append(.init(source: source, artwork: artwork))
             }
         }
-        // Exclude transient discovery timestamps and occurrence identity, while
-        // retaining every source's public locator.
-        let fields = ["songId", "title", "artist", "album", "duration", "cover_url"]
-        let sourceFields = ["sourceKey", "source", "musicInfo"]
-        var identity = MJ.obj(fields.filter(song.contains).map { ($0, song[$0]) })
-        identity["sources"] = .array(song["sources"].array.map { row in
-            .obj(sourceFields.filter(row.contains).map { ($0, row[$0]) })
-        })
+        // Recording identity does not change when metadata discovery adds a
+        // locator, renews an artwork URL, or the queue creates a new occurrence.
+        let identity = MJ.array([song["songId"], song["duration"]])
         let result = MusicMetadataCandidates(occurrenceID: occurrenceID, queueRevision: d.queue["revision"].int,
             preferences: prefs, track: track, contentRevision: nil,
             contentFingerprint: identity.stable.digest, candidates: candidates)

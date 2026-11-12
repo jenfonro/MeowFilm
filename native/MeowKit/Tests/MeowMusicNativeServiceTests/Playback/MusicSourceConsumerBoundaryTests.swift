@@ -77,6 +77,7 @@ private actor ConsumerBoundaryAccounts: MusicNativeAccountProviding, MusicNative
 private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
     func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
                 accepts: @escaping @Sendable (MusicAudioFileCacheIdentity) -> Bool) -> MusicAudioFileCacheHit? { nil }
+    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback { MusicTestByteSource() }
     func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) -> MusicAudioFileCacheVersion? { nil }
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion,
                confirmedAt: Date, authorization: MusicQueueAuthorization) {}

@@ -165,7 +165,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `music.accounts.v1` | 三平台账号凭据与固定账号槽 |
 | `music.account-url-cache.v1` | 账号授权 URL 缓存 |
 | `meowfilm.music.audio-cache.v1` | 实际播放后的完整音频缓存 |
-| `music.playback-display.v1`、`music.home.snapshot.v1` | 播放展示和首页快照缓存 |
+| `music.playback-display.v2`、`music.home.snapshot.v1` | 播放展示和首页快照缓存 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏的来源 ID 与影片 ID |

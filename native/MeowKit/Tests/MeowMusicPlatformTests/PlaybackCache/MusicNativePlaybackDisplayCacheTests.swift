@@ -9,7 +9,7 @@ final class MusicNativePlaybackDisplayCacheTests: XCTestCase {
         let version: Int
         let value: MusicPlaybackDisplaySnapshot
     }
-    private let identity = MusicPlaybackDisplayIdentity(scope: "local", occurrenceID: "entry",
+    private let identity = MusicPlaybackDisplayIdentity(scope: "local",
         songID: "song", contentFingerprint: String(repeating: "a", count: 64))
     private var lines: [MusicLyricLine] {
         [.init(index: 0, time: 0, end: 1, text: "AB", words: [
@@ -33,8 +33,8 @@ final class MusicNativePlaybackDisplayCacheTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let auth = MusicQueueAuthorization()
         await cache.storeLyrics(lines, sourceKey: "native", identity: identity, authorization: auth)
-        let saved = try JSONDecoder().decode(Envelope.self, from: XCTUnwrap(store.read(key: "current")))
-        XCTAssertEqual(saved.version, 2)
+        let saved = try JSONDecoder().decode(Envelope.self, from: XCTUnwrap(store.read(key: MusicNativePlaybackDisplayCache.key(identity))))
+        XCTAssertEqual(saved.version, 3)
         let cold = MusicNativePlaybackDisplayCache(storeFactory: { store })
         let hit = await cold.read(identity, authorization: auth)
         XCTAssertEqual(hit?.lines, lines)
@@ -51,13 +51,13 @@ final class MusicNativePlaybackDisplayCacheTests: XCTestCase {
             "lines":[{"index":0,"time":1,"end":6,"text":"AB","translation":"","timing":"estimated",
             "words":[{"time":1,"duration":2.5,"text":"A"},{"time":3.5,"duration":2.5,"text":"B"}]}]}}
             """.utf8)
-        try store.write(original, key: "current")
+        try store.write(original, key: MusicNativePlaybackDisplayCache.key(identity))
         let library = try DocumentStore(baseURL: root, namespace: "unrelated.library")
         let untouched = Data(#"{"user":"retained"}"#.utf8)
         try library.write(untouched, key: "songs")
         let hit = await cache.read(identity, authorization: .init())
         XCTAssertNil(hit)
-        XCTAssertEqual(try store.read(key: "current"), original)
+        XCTAssertEqual(try store.read(key: MusicNativePlaybackDisplayCache.key(identity)), original)
         XCTAssertEqual(try library.read(key: "songs"), untouched)
 
         await cache.storeLyrics(lines, sourceKey: "fresh", identity: identity, authorization: .init())
@@ -73,7 +73,7 @@ final class MusicNativePlaybackDisplayCacheTests: XCTestCase {
         let old = MusicPlaybackDisplaySnapshot(identity: identity, lyricSourceKey: "old", lines: [
             .init(index: 0, time: 1, end: 6, text: "A", words: [.init(time: 1, duration: 5, text: "A")])
         ])
-        try store.write(JSONEncoder().encode(Envelope(version: 1, value: old)), key: "current")
+        try store.write(JSONEncoder().encode(Envelope(version: 1, value: old)), key: MusicNativePlaybackDisplayCache.key(identity))
         let image = try artwork()
         await cache.storeArtwork(image, sourceKey: "cover", identity: identity, authorization: .init())
         let hit = await cache.read(identity, authorization: .init())
@@ -103,11 +103,52 @@ final class MusicNativePlaybackDisplayCacheTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let invalid = [MusicLyricLine(index: 0, time: -0.1, end: 1, text: "invalid")]
         await cache.storeLyrics(invalid, sourceKey: "native", identity: identity, authorization: .init())
-        XCTAssertNil(try store.read(key: "current"))
+        XCTAssertNil(try store.read(key: MusicNativePlaybackDisplayCache.key(identity)))
         let snapshot = MusicPlaybackDisplaySnapshot(identity: identity, lyricSourceKey: "native", lines: invalid)
-        try store.write(JSONEncoder().encode(Envelope(version: 2, value: snapshot)), key: "current")
+        try store.write(JSONEncoder().encode(Envelope(version: 3, value: snapshot)), key: MusicNativePlaybackDisplayCache.key(identity))
         let cold = MusicNativePlaybackDisplayCache(storeFactory: { store })
         let hit = await cold.read(identity, authorization: .init())
-        XCTAssertNil(hit)
+        XCTAssertTrue(hit?.lines.isEmpty ?? true)
     }
+    func testMultipleRecordingsSurviveColdReadAndClearTogether() async throws {
+        let (root, store, cache) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let other = MusicPlaybackDisplayIdentity(scope: "local", songID: "other", contentFingerprint: String(repeating: "b", count: 64))
+        let image = try artwork(), auth = MusicQueueAuthorization()
+        for song in [identity, other] {
+            await cache.storeLyrics(lines, sourceKey: "native", identity: song, authorization: auth)
+            await cache.storeArtwork(image, sourceKey: "cover", identity: song, authorization: auth)
+        }
+        let cold = MusicNativePlaybackDisplayCache(storeFactory: { store })
+        for song in [other, identity] {
+            let hit = await cold.read(song, authorization: auth)
+            XCTAssertEqual(hit?.lines, lines); XCTAssertEqual(hit?.artwork, image)
+        }
+        await cold.clear()
+        for song in [identity, other] {
+            let hit = await cold.read(song, authorization: auth)
+            XCTAssertNil(hit)
+        }
+    }
+
+    func testDamagedLyricsDoNotDiscardHealthyArtworkAndEvictionIsPerSong() async throws {
+        let (root, store, cache) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = try artwork(), auth = MusicQueueAuthorization()
+        await cache.storeLyrics(lines, sourceKey: "native", identity: identity, authorization: auth)
+        await cache.storeArtwork(image, sourceKey: "cover", identity: identity, authorization: auth)
+        let invalid = MusicPlaybackDisplaySnapshot(identity: identity, lyricSourceKey: "native",
+            lines: [.init(index: 0, time: -1, end: 0, text: "bad")], artworkSourceKey: "cover", artwork: image)
+        try store.write(JSONEncoder().encode(Envelope(version: 3, value: invalid)), key: MusicNativePlaybackDisplayCache.key(identity))
+        let cold = MusicNativePlaybackDisplayCache(storeFactory: { store })
+        let hit = await cold.read(identity, authorization: auth)
+        XCTAssertEqual(hit?.artwork, image); XCTAssertEqual(hit?.lines, [])
+        await cold.remove(songIDs: ["unrelated"], through: Date())
+        let retained = await cold.read(identity, authorization: auth)
+        XCTAssertNotNil(retained)
+        await cold.remove(songIDs: [identity.songID], through: Date())
+        let evicted = await cold.read(identity, authorization: auth)
+        XCTAssertNil(evicted)
+    }
+
 }

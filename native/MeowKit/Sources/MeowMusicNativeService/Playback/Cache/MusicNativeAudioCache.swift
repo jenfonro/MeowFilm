@@ -11,7 +11,7 @@ struct MusicNativeAudioCacheAttempt: Sendable {
     let expectedDuration: Double
     let audio: MusicNativeAudio?
     let playbackAuthorization: MusicQueueAuthorization
-    var captured = false
+    var source: (any MusicAudioFilePlayback)?
     var captureCompleted = false
     var fileVersion: MusicAudioFileCacheVersion?
 }
@@ -21,20 +21,18 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         SHA256.hash(data: MJ.array([song["songId"], song["duration"]]).bytes).map { String(format: "%02x", $0) }.joined()
     }
     static func audioCacheSignature(song: MJ, playback: MJ) -> String {
-        let policy = MusicModel.policy(playback)
-        // The reference file signature binds recording/duration and normalized
-        // quality policy, not an expiring URL, queue occurrence or account token.
-        let value = MJ.array([song["songId"], song["duration"], .strings(policy.enabled),
-                              .strings(policy.order), .strings(policy.spatial), .strings(policy.spatialOrder)])
-        return SHA256.hash(data: value.bytes).map { String(format: "%02x", $0) }.joined()
+        // The recording is stable; the current quality/source policy is checked
+        // separately at admission rather than invalidating healthy bytes.
+        scriptAudioSignature(song)
     }
 
     func retireAudioCacheAttempt() {
         if let value = audioCacheAttempt {
+            value.source?.retire()
             value.playbackAuthorization.revoke()
             // A complete response already in flight may finish after a track
             // switch. Incomplete responses observe playbackAuthorization.
-            if value.audio == nil || !value.captured || value.captureCompleted {
+            if value.source == nil || value.captureCompleted {
                 value.authorization.revoke()
                 access.remove(value.accessRegistration)
             }
@@ -161,64 +159,77 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         return .init(candidate: candidate, selection: selected)
     }
 
-    /// Captures eligibility, never a playing fact. Filling requires an accepted
-    /// playing state; resolving, opening a page or progress alone cannot start it.
-    func stageAudioCache(audio: MusicNativeAudio, song: MJ, selection: MusicPlaybackSelection,
-                         attemptID: String) async throws {
-        guard audioFileCache != nil, audio.fileCachePolicy.allowed,
-              song["duration"].number.isFinite, song["duration"].number > 0 else { return }
+    /// The player's own byte source starts one sequential transfer. Publication
+    /// and played-age renewal still require the accepted actual-playing fact.
+    func prepareAudioCache(audio: MusicNativeAudio, song: MJ, selection: MusicPlaybackSelection,
+                           attemptID: String, playbackAuthorization: MusicQueueAuthorization,
+                           preparing: Bool = false) async throws -> MusicNativeAudioCacheAttempt? {
+        guard let audioFileCache else { return nil }
+        if ["m3u", "m3u8"].contains(audio.url.pathExtension.lowercased()) { return nil }
         try audio.playbackAuthorization?.check()
         let own = epoch, official = selection.installationId.hasPrefix("official:")
         let scope: MusicNativeCacheScope
         if official {
-            guard let provider = accounts as? any MusicNativeCacheScopeProviding else { return }
-            do { scope = try await cacheScope(provider) }
-            catch { try check(own); return } // Optional cache failure cannot break a valid remote stream.
+            guard let provider = accounts as? any MusicNativeCacheScopeProviding else { return nil }
+            scope = try await cacheScope(provider)
         } else { scope = scriptAudioCacheScope }
         try check(own)
         try audio.playbackAuthorization?.check()
-        guard attempt?.id == attemptID else { throw MusicServiceError.staleResult }
+        try playbackAuthorization.check()
+        if !preparing { try musicRequire(attempt?.id == attemptID, .staleResult) }
         let d = try read(), (source, _) = try target(song, selection.sourceKey)
         let identity = MusicAudioFileCacheIdentity(scope: scope.scope, songID: song["songId"].string,
             sourceKey: source.sourceKey, platform: source.platform, nativeID: source.nativeId,
             requestedQuality: selection.quality,
             playbackSignature: official ? Self.audioCacheSignature(song: song, playback: d.playback) : Self.scriptAudioSignature(song),
             provider: selection.installationId, generation: selection.generation)
-        retireAudioCacheAttempt()
         let (authorization, registration) = cacheAuthorization(parent: scope.authorization)
-        // Keep the original media grant across the deferred fill; a later
-        // account scope is not authority to fetch an earlier account's URL.
-        audioCacheAttempt = .init(attemptID: attemptID, identity: identity, authorization: authorization,
-            scopeAuthorization: scope.authorization, accessRegistration: registration,
-            expectedDuration: song["duration"].number, audio: audio,
-            playbackAuthorization: audio.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization())
+        let selectionAuthorization = MusicQueueAuthorization(parent: playbackAuthorization)
+        var byteSource: (any MusicAudioFilePlayback)?
+        do {
+            let bytes = try await audioFileCache.preparePlayback(.init(identity: identity, audio: audio,
+                expectedDuration: song["duration"].number, authorization: authorization,
+                playbackAuthorization: selectionAuthorization))
+            byteSource = bytes
+            try check(own); try playbackAuthorization.check()
+            try audio.playbackAuthorization?.check()
+            if !preparing { try musicRequire(attempt?.id == attemptID, .staleResult) }
+            return .init(attemptID: attemptID, identity: identity, authorization: authorization,
+                scopeAuthorization: scope.authorization, accessRegistration: registration,
+                expectedDuration: song["duration"].number, audio: audio,
+                playbackAuthorization: selectionAuthorization, source: bytes)
+        } catch {
+            byteSource?.retire()
+            selectionAuthorization.revoke(); authorization.revoke(); access.remove(registration)
+            try check(own)
+            try playbackAuthorization.check()
+            throw error
+        }
+    }
+
+    func observeAudioCacheCapture(_ cache: MusicNativeAudioCacheAttempt?) {
+        guard let cache, let source = cache.source else { return }
+        let registration = cache.accessRegistration, authorization = cache.authorization
+        audioCacheCaptures[registration] = Task { [weak self] in
+            let version = await source.result()
+            guard let self else { authorization.revoke(); return }
+            await self.finishedAudioCacheCapture(registration, authorization: authorization, version: version)
+        }
     }
 
     func audioCacheAcceptedFact(_ fact: MusicPlaybackFact) {
-        guard let cache = audioFileCache, var current = audioCacheAttempt,
+        guard let cache = audioFileCache, let current = audioCacheAttempt,
               current.attemptID == fact.attemptId, current.authorization.isActive,
               attempt?.id == fact.attemptId, attempt?.isPlaying == true,
               fact.kind == .playing || fact.kind == .progress else { return }
         let at = now()
-        if let audio = current.audio, !current.captured {
-            guard current.playbackAuthorization.isActive else { return }
-            current.captured = true
-            let request = MusicAudioFileCacheRequest(identity: current.identity, audio: audio,
-                expectedDuration: current.expectedDuration, confirmedAt: at, authorization: current.authorization,
-                playbackAuthorization: current.playbackAuthorization)
-            let registration = current.accessRegistration, authorization = current.authorization
-            audioCacheCaptures[registration] = Task { [weak self] in
-                let version = await cache.storeAfterPlayback(request)
-                guard let self else { authorization.revoke(); return }
-                await self.finishedAudioCacheCapture(registration, authorization: authorization, version: version)
-            }
-        } else if (current.audio == nil || current.captureCompleted),
-                  let version = current.fileVersion {
+        if let source = current.source, !current.captureCompleted {
+            source.confirmPlayback(at: at)
+        } else if let version = current.fileVersion {
             let identity = current.identity, authorization = current.authorization
             audioCacheTask?.cancel()
             audioCacheTask = Task { await cache.touch(identity, version: version, confirmedAt: at, authorization: authorization) }
         }
-        audioCacheAttempt = current
     }
 
     private func finishedAudioCacheCapture(_ registration: UUID, authorization: MusicQueueAuthorization,
@@ -227,6 +238,9 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         if audioCacheAttempt?.accessRegistration == registration {
             audioCacheAttempt?.captureCompleted = true
             audioCacheAttempt?.fileVersion = version
+        } else if let id = preparedSources.first(where: { $0.value.cache?.accessRegistration == registration })?.key {
+            preparedSources[id]?.cache?.captureCompleted = true
+            preparedSources[id]?.cache?.fileVersion = version
         } else {
             authorization.revoke()
             access.remove(registration)

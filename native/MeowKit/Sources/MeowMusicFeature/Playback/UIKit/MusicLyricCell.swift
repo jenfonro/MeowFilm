@@ -32,7 +32,8 @@ final class MusicLyricCell: UITableViewCell {
     private let lyric = MusicTimedLyricView()
     private let translation = UILabel()
     private var line: MusicLyricLine?
-    private var theme = PageTheme()
+    private var colors = MusicLyricColors(backgrounds: [.init(rgb: 0xffffff)],
+                                         accent: .init(rgb: 0x4f365d), artwork: false)
     private var lyricSelected = false
     private var active = false
     private var previewDragging = false
@@ -58,8 +59,8 @@ final class MusicLyricCell: UITableViewCell {
 
     func configure(line: MusicLyricLine, selected: Bool, active: Bool, timed: Bool,
                    previewDragging: Bool, position: Double, rate: Double, playing: Bool,
-                   preferences: MusicAppearancePreferences, theme: PageTheme) {
-        self.line = line; self.theme = theme
+                   preferences: MusicAppearancePreferences, colors: MusicLyricColors) {
+        self.line = line; self.colors = colors
         lyricSelected = selected; self.active = active
         self.previewDragging = previewDragging
         applyLyricStyle()
@@ -105,19 +106,18 @@ final class MusicLyricCell: UITableViewCell {
 
     private func applyLyricStyle() {
         guard let line else { return }
-        let foreground = lyricSelected ? UIColor(theme.accent) : UIColor(theme.ink)
-        let muted = lyricSelected ? foreground : UIColor(theme.muted)
+        let foreground = UIColor(colors.highlight)
+        let muted = UIColor(lyricSelected && !active ? colors.highlight : active ? colors.unsung : colors.normal)
         lyric.configure(line: line, color: foreground, muted: muted, font: lyricFont)
     }
 
     private func updateSurfaceStyle() {
         let selectedSurface = lyricSelected && !previewDragging
         contentView.backgroundColor = selectedSurface
-            ? UIColor(theme.accent).withAlphaComponent(0.08) : .clear
+            ? UIColor(colors.highlight).withAlphaComponent(0.08) : .clear
         contentView.layer.borderColor = selectedSurface
-            ? UIColor(theme.accent).withAlphaComponent(0.28).cgColor : UIColor.clear.cgColor
-        translation.textColor = lyricSelected ? UIColor(theme.accent)
-            : active ? UIColor(theme.ink) : UIColor(theme.muted)
+            ? UIColor(colors.highlight).withAlphaComponent(0.28).cgColor : UIColor.clear.cgColor
+        translation.textColor = UIColor(lyricSelected || active ? colors.highlight : colors.normal)
     }
 
     override func prepareForReuse() {

@@ -46,13 +46,13 @@ struct MeowfilmResources: Sendable {
             .appendingPathComponent("documents", isDirectory: true)
         musicDocument = MusicNativeLibraryDocument(storeFactory: Self.documentFactory(
             base: libraryRoot, namespace: MusicNativeLibraryDocument.namespace))
-        if let caches {
-            musicAudioCache = NativeMusicAudioFileCache(rootURL: caches.resolvingSymlinksInPath()
-                .appendingPathComponent("meowfilm.music.audio-cache.v1", isDirectory: true))
-        } else { musicAudioCache = nil }
         musicDisplayCache = MusicNativePlaybackDisplayCache(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativePlaybackDisplayCache.namespace,
             maximumDocumentBytes: 16 * 1024 * 1024))
+        if let caches {
+            musicAudioCache = NativeMusicAudioFileCache(rootURL: caches.resolvingSymlinksInPath()
+                .appendingPathComponent("meowfilm.music.audio-cache.v1", isDirectory: true), displayCache: musicDisplayCache)
+        } else { musicAudioCache = nil }
         musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativePersistentSourceDiscoveryCache.namespace,
             maximumDocumentBytes: 4 * 1024 * 1024))

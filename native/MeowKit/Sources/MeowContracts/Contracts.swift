@@ -58,13 +58,21 @@ public struct PlaybackResource: Sendable, Equatable {
     public let title: String
     public let headers: [String: String]
     public let startPosition: TimeInterval
-    public init(id: String, url: URL, title: String, headers: [String: String] = [:], startPosition: TimeInterval = 0) throws {
+    public let byteSource: (any PlaybackByteSource)?
+    public init(id: String, url: URL, title: String, headers: [String: String] = [:], startPosition: TimeInterval = 0,
+                byteSource: (any PlaybackByteSource)? = nil) throws {
         guard !id.isEmpty, ["https", "http", "file"].contains(url.scheme?.lowercased() ?? ""),
               url.user == nil, url.password == nil, startPosition.isFinite, startPosition >= 0 else {
             throw ContractError.invalidURL
         }
         self.id = id; self.url = url; self.title = title
         self.headers = headers; self.startPosition = startPosition
+        self.byteSource = byteSource
+    }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id && lhs.url == rhs.url && lhs.title == rhs.title &&
+            lhs.headers == rhs.headers && lhs.startPosition == rhs.startPosition &&
+            lhs.byteSource?.id == rhs.byteSource?.id
     }
 }
 

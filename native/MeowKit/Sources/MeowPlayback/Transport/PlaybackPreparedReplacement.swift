@@ -39,7 +39,10 @@ public final class PlaybackPreparedReplacement {
         let onFailure: @Sendable (PlaybackNetworkError) -> Void = { error in
             Task { @MainActor in failures.receive?(error) }
         }
-        if plan.route == .scopedHLS {
+        if let source = resource.byteSource {
+            localMediaFetch = true; player.allowsExternalPlayback = false
+            binding = NativePlaybackAsset(source: source, onFailure: onFailure)
+        } else if plan.route == .scopedHLS {
             let route = try HLSLoopbackRoute(plan: plan, budget: budget, onFailure: onFailure)
             self.route = route; localMediaFetch = true; player.allowsExternalPlayback = false
             try await wait {

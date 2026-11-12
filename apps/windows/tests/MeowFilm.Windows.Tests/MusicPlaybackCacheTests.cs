@@ -18,6 +18,55 @@ public static class MusicPlaybackCacheTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("Music sequential file plays unknown completeness without publishing complete history", async () =>
+        {
+            await using var f = new Fixture();
+            using var source = f.Cache.Prepare("scope", "song", CacheSignature, f.Info(full: false),
+                () => true, default, speculative: false);
+            await source.Work.WaitAsync(TimeSpan.FromSeconds(5));
+            await using var reader = await source.OpenAsync(default);
+            Check(reader is not null && reader.Content.ReadByte() == 'R');
+            source.Played.TrySetResult(f.Clock.Now);
+            Check(source.BufferedFraction < 1 && f.Requests == 1);
+            Check(await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default) is null);
+        });
+        foreach (bool clear in new[] { false, true })
+            yield return new("Music sequential reader seek cancel pause and publication clear=" + clear, async () =>
+            {
+                await using var f = new Fixture();
+                f.PrefixLength = 2000;
+                using var source = f.Cache.Prepare("scope", "song", CacheSignature, f.Info(), () => true, default, speculative: false);
+                await using var reader = await source.OpenAsync(default);
+                Check(reader is not null);
+                await f.PrefixSent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                byte[] first = new byte[32];
+                Check(await reader!.Content.ReadAsync(first) == 32 && first.SequenceEqual(f.Bytes.Take(32)));
+                reader.Content.Seek(6000, SeekOrigin.Begin);
+                using (var cancel = new CancellationTokenSource())
+                {
+                    var waiting = reader.Content.ReadAsync(new byte[32], cancel.Token).AsTask();
+                    Check(!waiting.IsCompleted, "uncached seek waits instead of issuing a Range request");
+                    cancel.Cancel();
+                    try { await waiting; throw new InvalidOperationException("Expected read cancellation"); }
+                    catch (OperationCanceledException) { }
+                }
+                reader.Content.Seek(0, SeekOrigin.Begin);
+                Check(await reader.Content.ReadAsync(first) == 32);
+                Check(f.Requests == 1 && source.BufferedFraction > 0 && source.BufferedFraction < 1);
+                double prefix = source.BufferedFraction;
+                if (clear) await f.Cache.ClearAsync(default).WaitAsync(TimeSpan.FromSeconds(5));
+                f.ReleaseBody.TrySetResult();
+                reader.Content.Seek(6000, SeekOrigin.Begin);
+                var later = new byte[32];
+                Check(await reader.Content.ReadAsync(later) == 32 && later.SequenceEqual(f.Bytes.Skip(6000).Take(32)));
+                Check(source.BufferedFraction >= prefix && source.BufferedFraction < 1, "EOF alone is not publication");
+                source.Played.TrySetResult(f.Clock.Now);
+                await source.Work.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(clear ? source.BufferedFraction >= prefix && source.BufferedFraction < 1 : source.BufferedFraction == 1);
+                reader.Content.Seek(0, SeekOrigin.Begin);
+                Check(await reader.Content.ReadAsync(first) == 32, "publication does not retire the playing reader");
+                Check(f.Requests == 1);
+            });
         yield return new("Music cache clear fences reads already holding an index without revoking open leases", async () =>
         {
             await using var f = new Fixture();
@@ -227,18 +276,16 @@ public static class MusicPlaybackCacheTests
             Check(info!["quality"]!.GetValue<string>() == "master" && info["bitDepth"]!.GetValue<int>() == 16);
             Check(info["url"] is null && info["headers"] is null);
         });
-        yield return new("Music online-only complete cache retains bytes without manufacturing offline permission", async () =>
+        yield return new("Music complete cache reopens without a membership or URL entitlement", async () =>
         {
             await using var f = new Fixture();
             var raw = System.Text.Json.Nodes.JsonNode.Parse(f.Info(scope: "public:wy").GetRawText())!.AsObject();
-            raw["offlineAllowed"] = false;
             await f.Cache.StorePlayedAsync("public:wy", "song", CacheSignature, JsonSerializer.SerializeToElement(raw), () => true, default);
             await f.CacheStore.DrainAsync();
             await using var reopenedStore = new CacheDocumentStore(f.Store);
             var restarted = f.NewCache(cacheStore: reopenedStore);
             var info = await restarted.ReadInfoAsync("public:wy", "song", CacheSignature, default);
-            Check(info is not null && info["offlineAllowed"]!.GetValue<bool>() == false &&
-                info["licenseExpiresAt"] is null, "byte cache must not grant offline entitlement");
+            Check(info is not null, "healthy bytes outlive their source URL");
             await using var lease = await restarted.OpenAsync("public:wy", "song", CacheSignature, default);
             Check(lease is not null && lease.Length == f.Bytes.Length);
             await f.CacheStore.DrainAsync();
@@ -323,7 +370,7 @@ public static class MusicPlaybackCacheTests
                 Check(f.Requests == 1 && lease?.Length == f.Bytes.Length);
             }
         });
-        yield return new("Music file cache metadata identity license and size mismatches miss without blocking producers", async () =>
+        yield return new("Music file cache metadata identity and size mismatches miss without blocking producers", async () =>
         {
             foreach (Action<JsonObject> change in new Action<JsonObject>[]
             {
@@ -333,14 +380,7 @@ public static class MusicPlaybackCacheTests
                 entry => entry["info"]!["qualityCacheSignature"] = OtherCacheSignature,
                 entry => entry["info"]!["duration"] = 2,
                 entry => entry["info"]!["size"] = 5,
-                entry => entry["info"]!["licenseExpiresAt"] = 1,
                 entry => entry["info"]!.AsObject().Remove("scope"),
-                entry =>
-                {
-                    entry["info"]!["licenseExpiresAt"] = 2_000_000_000_000L;
-                    entry["info"]!["authorizationExpiresAt"] = 2_000_000_000_000L;
-                    entry["info"]!["offlineAllowed"] = true;
-                }
             })
             {
                 await using var f = new Fixture();
@@ -352,7 +392,7 @@ public static class MusicPlaybackCacheTests
                 Check(await f.Cache.OpenAsync("scope", "song", CacheSignature, default) is null);
                 await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
                 var repaired = await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default);
-                Check(repaired is not null && !repaired["offlineAllowed"]!.GetValue<bool>());
+                Check(repaired is not null);
             }
         });
         yield return new("Music file cache invalid producer identity never starts network or publishes", async () =>
@@ -435,14 +475,17 @@ public static class MusicPlaybackCacheTests
             await using var afterUrl = await restarted.OpenAsync("account", "song", CacheSignature, default);
             Check(afterUrl is not null);
         });
-        yield return new("Music file cache real-play touch extends TTL but never license lifetime", async () =>
+        yield return new("Music file cache real-play touch renews TTL while reads do not", async () =>
         {
             await using var f = new Fixture();
             await f.Cache.StorePlayedAsync("account", "song", CacheSignature,
-                f.Info(scope: "account", license: f.Clock.Now + 2 * 86400000), () => true, default);
+                f.Info(scope: "account"), () => true, default);
             f.Clock.Now += 86400000;
             await f.Cache.TouchAsync("account", "song", CacheSignature, default);
-            f.Clock.Now += 86400001;
+            f.Clock.Now += MusicAudioFileCache.Ttl - 1;
+            await using var renewed = await f.Cache.OpenAsync("account", "song", CacheSignature, default);
+            Check(renewed is not null);
+            f.Clock.Now += 1;
             Check(await f.Cache.OpenAsync("account", "song", CacheSignature, default) is null);
         });
         yield return new("Music file cache refuses incomplete body wrong duration and stale publication", async () =>
@@ -525,6 +568,9 @@ public static class MusicPlaybackCacheTests
             new(Root, cacheStore ?? CacheStore, validate ?? ((_, expected, _) => Task.FromResult(expected)), Clock,
                 new NativeHttpMediaOptions());
         internal string? RequiredHeader;
+        internal int PrefixLength;
+        internal readonly TaskCompletionSource PrefixSent = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource ReleaseBody = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal JsonElement ScriptInfo(string provider, string quality)
         {
             string signature = MusicAudioFileCache.ScriptSignature(provider, "wy", "recording", quality);
@@ -534,12 +580,12 @@ public static class MusicPlaybackCacheTests
             raw["quality"] = quality; raw["requestedQuality"] = quality;
             raw["qualityCacheSignature"] = signature;
             raw["headers"] = new JsonObject { ["X-Music-Test"] = "cache-token" };
-            foreach (string field in new[] { "generation", "qualityPolicySignature", "offlineAllowed", "delivery", "authorizationExpiresAt" })
+            foreach (string field in new[] { "generation", "qualityPolicySignature", "delivery" })
                 raw.Remove(field);
             return JsonSerializer.SerializeToElement(raw);
         }
         internal JsonElement Info(string scope = "scope", string song = "song",
-            string? signature = null, bool full = true, long? size = null, long? license = null) =>
+            string? signature = null, bool full = true, long? size = null) =>
             JsonSerializer.SerializeToElement(new
             {
                 ok = true,
@@ -562,10 +608,7 @@ public static class MusicPlaybackCacheTests
                 duration = 1d,
                 size = size ?? Bytes.Length,
                 full,
-                licenseExpiresAt = license,
                 delivery = "wy-official",
-                offlineAllowed = full && license is not null,
-                authorizationExpiresAt = license
             });
         private async Task Serve()
         {
@@ -589,7 +632,12 @@ public static class MusicPlaybackCacheTests
                     }
                     byte[] header = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {Bytes.Length}\r\nContent-Type: audio/wav\r\nConnection: close\r\n\r\n");
                     await stream.WriteAsync(header, lifetime.Token);
-                    await stream.WriteAsync(Bytes, lifetime.Token);
+                    if (PrefixLength > 0) {
+                        await stream.WriteAsync(Bytes.AsMemory(0, PrefixLength), lifetime.Token);
+                        PrefixSent.TrySetResult();
+                        await ReleaseBody.Task.WaitAsync(lifetime.Token);
+                        await stream.WriteAsync(Bytes.AsMemory(PrefixLength), lifetime.Token);
+                    } else await stream.WriteAsync(Bytes, lifetime.Token);
                 }
             }
             catch (OperationCanceledException) { }

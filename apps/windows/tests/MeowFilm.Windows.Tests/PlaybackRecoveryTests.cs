@@ -323,7 +323,7 @@ public static partial class PlaybackRecoveryTests
                 f.App.FeedbackProbe.Finishes.Count == 0,
                 "revoked pending account cannot start publish or force an unnecessary old-source reopen");
         });
-        yield return Test("official next-track preload reauthorizes and consumes prepared online bytes", async () =>
+        yield return Test("official next-track preload consumes prepared bytes without reauthorizing", async () =>
         {
             await using var f = await ControlledMusicFixture.Create(playbackCache: true);
             await f.PlayPair();
@@ -335,7 +335,7 @@ public static partial class PlaybackRecoveryTests
                 "validated provisional bytes");
             int transfers = f.Origin.Requests.Count, networkOpens = f.Output.NetworkOpens;
             await f.Module.StepAsync(true);
-            await Until(() => f.Output.ReadOpens == 1 && f.App.Authorizations == 1 &&
+            await Until(() => f.Output.ReadOpens == 2 && f.App.Authorizations == 0 &&
                 f.App.HistoryWrites == 2 && f.App.ConfirmWrites == 2,
                 "prepared next occurrence");
             await prepared.Work.WaitAsync(TimeSpan.FromSeconds(5));
@@ -373,7 +373,7 @@ public static partial class PlaybackRecoveryTests
                 await prepared.Work.WaitAsync(TimeSpan.FromSeconds(5));
                 await using var absent = await f.Cache!.OpenAsync(
                     "fixture", f.NextSongId!, new string('a', 64), default);
-                Check(absent is null && !Directory.EnumerateFiles(f.CacheRoot!, "*.audio").Any(),
+                Check(absent is null && Directory.EnumerateFiles(f.CacheRoot!, "*.audio").All(f.CurrentFiles.Contains),
                     action + " cannot publish stale prepared bytes");
             });
         foreach (bool holdPeek in new[] { true, false })
@@ -433,7 +433,8 @@ public static partial class PlaybackRecoveryTests
                     if (prepared is not null) await prepared.Work.WaitAsync(TimeSpan.FromSeconds(5));
                     await Until(() => Field(f.Module, "musicPreload") is null, "late old preload is drained");
                     await using var absent = await f.Cache!.OpenAsync("fixture", f.NextSongId!, new string('a', 64), default);
-                    Check(absent is null && f.Prepared is null && !Directory.EnumerateFiles(f.CacheRoot!, "*.audio").Any() &&
+                    Check(absent is null && f.Prepared is null &&
+                        Directory.EnumerateFiles(f.CacheRoot!, "*.audio").All(f.CurrentFiles.Contains) &&
                         f.Output.HasMedia && f.Output.IsPlaying &&
                         f.App.Resolutions.Count == resolutions &&
                         before == (f.Output.Identity, f.Output.NetworkOpens, f.Output.ReadOpens, f.Output.Reopens,
@@ -460,8 +461,8 @@ public static partial class PlaybackRecoveryTests
                 await Until(() => f.App.HistoryWrites == before.HistoryWrites + 1 &&
                     f.App.ConfirmWrites == before.ConfirmWrites + 1, "inserted first song starts");
                 Check(f.Output.Identity == next.GetProperty("next").GetProperty("id").GetString() &&
-                    f.Module.CurrentTitle == "插入首曲" && f.Output.NetworkOpens == before.NetworkOpens + 1 &&
-                    f.Output.ReadOpens == before.ReadOpens && f.Output.Reopens == before.Reopens,
+                    f.Module.CurrentTitle == "插入首曲" && f.Output.NetworkOpens == before.NetworkOpens &&
+                    f.Output.ReadOpens == before.ReadOpens + 1 && f.Output.Reopens == before.Reopens,
                     "actual next playback consumes the inserted first song and never the cancelled old prepared bytes");
             });
         yield return Test("official shutdown waits for a noncooperative physical preload to settle", async () =>
@@ -1242,14 +1243,14 @@ public static partial class PlaybackRecoveryTests
                 await using var persisted = await f.Cache!.OpenAsync(
                     "fixture", f.NextSongId!, new string('a', 64), default);
                 if (scriptWins)
-                    Check(f.Output.ReadOpens == 0 && f.Output.NetworkOpens == networkOpens + 1 &&
+                    Check(f.Output.ReadOpens == 2 && f.Output.NetworkOpens == networkOpens &&
                         f.App.Authorizations == 0 && persisted is null &&
-                        f.Output.OpenedUris.Last().AbsolutePath == "/preload-script-wy-master.wav" &&
+                        f.Origin.Requests.Last().Path == "/preload-script-wy-master.wav" &&
                         f.App.Resolutions.Count(row => Installation(row) == "preload-script") == 2,
                         "lower-quality preloaded bytes never bypass the remaining higher-quality source");
                 else
-                    Check(f.Output.ReadOpens == 1 && f.Output.NetworkOpens == networkOpens &&
-                        f.App.Authorizations == 1 && persisted is not null &&
+                    Check(f.Output.ReadOpens == 2 && f.Output.NetworkOpens == networkOpens &&
+                        f.App.Authorizations == 0 && persisted is not null &&
                         f.App.Resolutions.All(row => Installation(row) is null),
                         "playable prepared bytes are authorized and published without requesting lower-quality scripts");
             });
@@ -1335,7 +1336,7 @@ public static partial class PlaybackRecoveryTests
                 f.Output.Fail(PlaybackError.HttpUnauthorized);
                 await Until(() => f.Module.CanSwitchSource || !f.Output.HasMedia, "local recovery settled");
                 Check(f.Output.HasMedia && f.Output.IsPlaying == !paused && f.Output.PauseRequested == paused &&
-                    f.Output.ReadOpens == 1 && f.Output.Reopens == 1 && f.App.Resolutions.Count == before &&
+                    f.Output.ReadOpens == 2 && f.Output.Reopens == 1 && f.App.Resolutions.Count == before &&
                     f.Output.Identity == identity && f.Output.PositionSeconds == 37 && f.Module.CurrentQualityLabel == "无损",
                     "complete independent bytes recover at the same position and intent without parsing a script");
             });
@@ -1356,11 +1357,11 @@ public static partial class PlaybackRecoveryTests
                 f.Output.Plan(startBeforeCompletion: true);
                 f.Output.Fail(PlaybackError.HttpUnauthorized);
                 await Until(() => f.Module.CanSwitchSource || !f.Output.HasMedia, "corrupt file recovery settled");
-                Check(f.Output.ReadOpens == 0 && f.App.Resolutions.Count == before + (disabled ? 0 : 1) &&
+                Check(f.Output.ReadOpens == (disabled ? 1 : 2) && f.App.Resolutions.Count == before + (disabled ? 0 : 1) &&
                     f.Output.IsPlaying == !disabled && f.Output.Reopens == (disabled ? 0 : 1),
                     "bad bytes do not blacklist an enabled source or authorize a disabled parser");
             });
-        yield return Test("playback boundary official completed recovery retains online authorization", async () =>
+        yield return Test("playback boundary official completed recovery needs no online authorization", async () =>
         {
             await using var f = await ControlledMusicFixture.Create(playbackCache: true,
                 officialQuality: "flac", qualityRequest: "flac");
@@ -1368,14 +1369,13 @@ public static partial class PlaybackRecoveryTests
                 album = "", musicInfo = new { songmid = "42" } });
             f.App.CacheableSongId = song.GetProperty("song").GetProperty("songId").GetString();
             await f.Play();
-            await Until(() => Field(Field(f.Module, "musicRecovery")!, "Media") is { } media &&
-                media.GetType().GetProperty("File")?.GetValue(media) is not null, "official file published");
+            await Until(() => f.Module.PlaybackCacheFraction == 1, "official file published");
             int resolves = f.App.Resolutions.Count, authorizations = f.App.Authorizations;
             f.Output.Plan(startBeforeCompletion: true);
             f.Output.Fail(PlaybackError.HttpUnauthorized);
             await Until(() => f.Module.CanSwitchSource || !f.Output.HasMedia, "official file recovery settled");
-            Check(f.Output.IsPlaying && f.Output.ReadOpens == 1 && f.App.Resolutions.Count == resolves &&
-                f.App.Authorizations == authorizations + 1, "a full non-offline official file still needs current online authorization");
+            Check(f.Output.IsPlaying && f.Output.ReadOpens == 2 && f.App.Resolutions.Count == resolves &&
+                f.App.Authorizations == authorizations, "a healthy complete official file needs no new online authorization");
         });
         yield return Test("playback boundary completed bytes never override a durable exclusion", async () =>
         {
@@ -1389,7 +1389,7 @@ public static partial class PlaybackRecoveryTests
             int resolves = f.App.Resolutions.Count;
             f.Output.Fail(PlaybackError.HttpUnauthorized);
             await Until(() => !f.Output.HasMedia, "excluded input cannot recover");
-            Check(f.Output.ReadOpens == 0 && f.Output.Reopens == 0 && f.App.Resolutions.Count == resolves,
+            Check(f.Output.ReadOpens == 1 && f.Output.Reopens == 0 && f.App.Resolutions.Count == resolves,
                 "neither a local file nor new parsing can revive the excluded input");
         });
         foreach (string completion in new[] { "cancelled", "success", "no-match" })
@@ -1522,7 +1522,7 @@ public static partial class PlaybackRecoveryTests
                 f.Output.Plan(startBeforeCompletion: true);
                 f.Output.Fail(PlaybackError.HttpUnauthorized);
                 await Until(() => f.Module.CanSwitchSource || !f.Output.HasMedia, "completed history recovery settled");
-                Check(f.Output.IsPlaying && f.Output.ReadOpens == 1 && f.App.Resolutions.Count == resolves,
+                Check(f.Output.IsPlaying && f.Output.ReadOpens == 2 && f.App.Resolutions.Count == resolves,
                     "an unrelated exclusion must not make a complete permitted file depend on successful parsing");
             });
         yield return Test("playback interaction exclusion fences pending recovery", async () =>
@@ -1563,7 +1563,8 @@ public static partial class PlaybackRecoveryTests
             f.Output.Fail(PlaybackError.HttpUnauthorized);
             await Until(() => f.App.Resolutions.Count > resolves && f.Output.IsPlaying, "cache miss recovery settled");
             Check(f.App.Resolutions.Count == resolves + 1 && f.Output.HasMedia && f.Output.Reopens == 1 &&
-                f.Output.OpenedUris.Last() == f.Origin.Uri($"{id}-wy-flac.wav"),
+                f.Output.OpenedUris.Last().Host == "cache.invalid" && f.Output.ReadOpens == 2 &&
+                f.Origin.Requests.Last().Path == $"/{id}-wy-flac.wav",
                 "unusable optional cache does not block a new authorized source resolution");
         });
         foreach (string stage in new[] { "resolve", "network", "file" })
@@ -1614,6 +1615,10 @@ public static partial class PlaybackRecoveryTests
                 f.Output.Plan();
                 await f.Module.SwitchQualityAsync("high");
                 Check(f.Module.CurrentSource == b && f.Output.Commits == 1, "B is accepted before A's file is damaged");
+                // B now has a sequential file producer too. Its validation is not
+                // part of A's corrupt-file retry and must be allowed to drain.
+                f.HoldValidation = false;
+                f.ValidationRelease.TrySetResult();
                 if (failure == "disabled")
                 {
                     await f.Module.RefreshSourceManagementAsync();
@@ -1641,8 +1646,7 @@ public static partial class PlaybackRecoveryTests
                 artist = "fixture", album = "", musicInfo = new { songmid = "42" } });
             f.App.CacheableSongId = song.GetProperty("song").GetProperty("songId").GetString();
             await f.Play();
-            await Until(() => Field(Field(f.Module, "musicRecovery")!, "Media") is { } media &&
-                media.GetType().GetProperty("File")?.GetValue(media) is not null, "official complete file");
+            await Until(() => f.Module.PlaybackCacheFraction == 1, "official complete file");
             f.Module.OpenSourceChoices();
             var official = f.Module.SourceChoices.Single(row => row.Provider == "网易云音乐" && row.Selectable);
             f.HoldValidation = true;
@@ -1655,7 +1659,7 @@ public static partial class PlaybackRecoveryTests
             await f.Module.SelectSourceChoiceAsync(official);
             Check(f.Output.Commits == 2 && f.Module.CurrentSource == "网易云音乐" && f.Output.IsPlaying &&
                 f.Output.OpenedUris.Last().Host == "cache.invalid" && f.App.Resolutions.Count == resolves &&
-                f.App.Authorizations == authorizations + 1, "offline bytes cannot bypass current official online authorization");
+                f.App.Authorizations == authorizations, "complete bytes do not require a second online URL authorization");
         });
         yield return Test("playback interaction corrupt index during file recovery reparses source", async () =>
         {
@@ -1664,7 +1668,7 @@ public static partial class PlaybackRecoveryTests
                 scripts: [new(id, quality: "flac")], qualityRequest: "flac");
             await f.Play(); await CompletedHistory(f);
             await f.Play();
-            Check(f.Output.ReadOpens == 1, "history is the current file input");
+            Check(f.Output.ReadOpens == 2, "history is the current file input");
             var snapshot = await f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace);
             var corrupt = Encoding.UTF8.GetBytes("{");
             await f.CacheStore.WriteAsync(MusicAudioFileCache.Namespace, corrupt, snapshot.Fingerprint);
@@ -1673,15 +1677,15 @@ public static partial class PlaybackRecoveryTests
             f.Output.Fail(PlaybackError.ReadFailed);
             await Until(() => f.App.Resolutions.Count > resolves && f.Output.IsPlaying, "cached input recovery settled");
             Check(f.App.Resolutions.Count == resolves + 1 && f.Output.HasMedia && f.Output.Reopens == 1 &&
-                f.Output.OpenedUris.Last() == f.Origin.Uri($"{id}-wy-flac.wav"),
+                f.Output.OpenedUris.Last().Host == "cache.invalid" && f.Output.ReadOpens == 3 &&
+                f.Origin.Requests.Last().Path == $"/{id}-wy-flac.wav",
                 "corrupt cache is a miss; failed local input obtains a fresh source without cache-format failure");
         });
     }
 
     private static async Task CompletedHistory(ControlledMusicFixture f)
     {
-        await Until(() => Field(Field(f.Module, "musicRecovery")!, "Media") is { } media &&
-            media.GetType().GetProperty("File")?.GetValue(media) is not null, "complete file identity published");
+        await Until(() => f.Module.PlaybackCacheFraction == 1, "complete file atomically published");
         var queue = await f.App.ExecuteAsync("music.queue.get");
         string songId = queue.GetProperty("current").GetProperty("song").GetProperty("songId").GetString()!;
         var history = await f.Cache!.ReadScriptHistoryAsync(songId, default);
@@ -1823,7 +1827,7 @@ public static partial class PlaybackRecoveryTests
             await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
                 "official file committed");
             await f.Play();
-            Check(f.Output.ReadOpens == 1, "official complete-file history");
+            Check(f.Output.ReadOpens == 2, "official complete-file history");
             f.Module.OpenSourceChoices();
             var original = f.Module.SourceChoices.Single(row => row.Provider == "网易云音乐" && row.Selectable);
             await f.Module.LoadMoreSourcesAsync();
@@ -1919,12 +1923,11 @@ public static partial class PlaybackRecoveryTests
             await f.Play();
             await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
                 "script cache publication");
-            await Until(() => Field(Field(f.Module, "musicRecovery")!, "Media") is { } media &&
-                media.GetType().GetProperty("File")?.GetValue(media) is not null, "file identity publication");
+            await Until(() => f.Module.PlaybackCacheFraction == 1, "file identity publication");
             foreach (var path in Directory.GetFiles(f.CacheRoot!, "*.audio")) await File.WriteAllBytesAsync(path, [1, 2, 3]);
             int before = f.App.Resolutions.Count;
             await f.Play();
-            Check(f.App.Resolutions.Count > before && f.Output.NetworkOpens == 2 && f.Output.IsPlaying,
+            Check(f.App.Resolutions.Count > before && f.Output.NetworkOpens == 0 && f.Output.ReadOpens == 2 && f.Output.IsPlaying,
                 "a corrupt local copy must not disqualify the same working online source");
         });
         yield return Test("source lifecycle explicit listed result retains its quality after policy refresh", async () =>
@@ -1966,7 +1969,7 @@ public static partial class PlaybackRecoveryTests
             await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
                 "script cache publication");
             await f.Play();
-            Check(f.Output.ReadOpens == 1, "history is loaded");
+            Check(f.Output.ReadOpens == 2, "history is loaded");
             f.Module.OpenSourceChoices();
             var choice = f.Module.SourceChoices.Single(row => row.Provider == "lifecycle-cleared" && row.Selectable);
             while (!f.Module.SourceChoices.Any(row => row.Provider == "lifecycle-other" && row.Selectable) &&
@@ -2024,7 +2027,7 @@ public static partial class PlaybackRecoveryTests
             await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
                 "current script cached");
             await f.Module.PlayQueueSurfaceItemAsync(f.Module.QueueSurfaceRows.First());
-            Check(f.Output.ReadOpens == 1, "current song uses persistent history");
+            Check(f.Output.ReadOpens == 2, "current song uses persistent history");
             int before = f.App.Resolutions.Count(row => Installation(row) is null &&
                 row.GetProperty("song").GetProperty("songId").GetString() == f.NextSongId);
             f.Output.SetPosition(105);
@@ -2034,7 +2037,7 @@ public static partial class PlaybackRecoveryTests
                 row.GetProperty("song").GetProperty("songId").GetString() == f.NextSongId) - before;
             Check(next > 0 && f.App.Resolutions.Where(row =>
                 row.GetProperty("song").GetProperty("songId").GetString() == f.NextSongId).All(row => Installation(row) is null) &&
-                f.Output.ReadOpens == 1 && f.Output.IsPlaying,
+                f.Output.ReadOpens == 2 && f.Output.IsPlaying,
                 "history playback permits only official next-track preparation without changing current playback");
         });
         yield return Test("source lifecycle newly enabled official platform joins current explicit quality intent", async () =>
@@ -2260,7 +2263,7 @@ public static partial class PlaybackRecoveryTests
             await f.Play();
             await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null, "official file");
             await f.Play();
-            Check(f.Output.ReadOpens == 1, "second occurrence is a complete official file");
+            Check(f.Output.ReadOpens == 2, "second occurrence is a complete official file");
             f.Module.OpenSourceChoices();
             var choice = f.Module.SourceChoices.First(row => row.Key != "auto" && row.Selectable);
             await f.Module.ActivateQualitySettingsAsync();
@@ -2632,6 +2635,7 @@ public static partial class PlaybackRecoveryTests
         internal readonly TaskCompletionSource ValidationRelease =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool HoldValidation;
+        internal string[] CurrentFiles = [];
         internal CancellationToken ValidationToken;
         internal string? NextSongId;
         internal MusicAudioFileCache.PreparedFile? Prepared =>
@@ -2689,6 +2693,13 @@ public static partial class PlaybackRecoveryTests
             Check(replaced.GetProperty("ok").GetBoolean(), "controlled pair queue");
             await Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             await Module.PlayQueueSurfaceItemAsync(Module.QueueSurfaceRows.First());
+            if (Cache is not null)
+            {
+                var media = Field(Field(Module, "musicRecovery")!, "Media")!;
+                var source = (MusicAudioFileCache.PreparedFile)media.GetType().GetProperty("Bytes")!.GetValue(media)!;
+                await source.Work.WaitAsync(TimeSpan.FromSeconds(5));
+                CurrentFiles = Directory.GetFiles(CacheRoot!, "*.audio");
+            }
         }
         internal async Task<MusicAudioFileCache.PreparedFile> WaitForPrepared()
         {
@@ -3227,9 +3238,8 @@ public static partial class PlaybackRecoveryTests
                     url = origin.Uri(DistinctSourceUrls ? $"official-{platform}-{OfficialQuality}.wav" :
                         platform == "tx" ? "other.wav" : Resolutions.Count == 1 ? "old.wav" : "new.wav").AbsoluteUri,
                     headers = new { }, expiresAt = OfficialExpiry, duration = 120d,
-                    size = full ? Wave().Length : 0, full, licenseExpiresAt = (long?)null,
-                    delivery = platform + "-official", offlineAllowed = false,
-                    authorizationExpiresAt = (long?)null });
+                    size = full ? Wave().Length : 0, full,
+                    delivery = platform + "-official" });
             }
             // The shared module is replaced by these synthetic installations; the native
             // capability still consumes the actual list/item contract.

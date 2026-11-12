@@ -412,6 +412,46 @@ final class PlaybackStateMachineTests: XCTestCase {
         XCTAssertNil(PlaybackStateMachine.TimeRange(start: 20, end: 10))
     }
 
+    func testExplicitResumeRequiresSuccessfulAudioAdmissionWithoutEndNotification() throws {
+        var (state, generation) = try readyState()
+        state.progress(generation: generation, position: 35)
+        state.interruptionBegan()
+        XCTAssertTrue(state.resume(userInitiated: true))
+        XCTAssertTrue(state.requestsAudioAdmission); XCTAssertFalse(state.shouldPlay)
+        state.audioSessionActivated(generation: generation)
+        XCTAssertTrue(state.shouldPlay); XCTAssertFalse(state.isInterrupted)
+        XCTAssertEqual(state.snapshot.position, 35)
+        state.interruptionEnded(shouldResume: false)
+        XCTAssertTrue(state.shouldPlay)
+    }
+
+    func testPauseNewInterruptionAndReplacementRejectOldAudioAdmission() throws {
+        for change in ["pause", "interruption", "owner"] {
+            var (state, generation) = try readyState()
+            state.interruptionBegan()
+            _ = state.resume(userInitiated: true)
+            switch change {
+            case "pause": state.pause()
+            case "interruption": state.interruptionBegan()
+            default: _ = state.begin(resource: try resource(id: "film"), owner: "film")
+            }
+            state.audioSessionActivated(generation: generation)
+            XCTAssertFalse(state.shouldPlay, change)
+            XCTAssertFalse(state.requestsAudioAdmission, change)
+        }
+    }
+
+    func testFailedAdmissionKeepsCurrentMediaAndCanBeRetried() throws {
+        var (state, generation) = try readyState()
+        state.progress(generation: generation, position: 35)
+        state.audioSessionUnavailable(generation: generation)
+        XCTAssertEqual(state.generation, generation); XCTAssertTrue(state.isReady)
+        XCTAssertEqual(state.snapshot.phase, .paused); XCTAssertEqual(state.snapshot.position, 35)
+        XCTAssertTrue(state.resume(userInitiated: true))
+        state.audioSessionActivated(generation: generation)
+        XCTAssertTrue(state.shouldPlay); XCTAssertNil(state.error)
+    }
+
     func testInterruptionResumesOnlyWithSystemPermissionAndPriorIntent() throws {
         var (state, generation) = try readyState()
         state.transport(generation: generation, state: .playing)

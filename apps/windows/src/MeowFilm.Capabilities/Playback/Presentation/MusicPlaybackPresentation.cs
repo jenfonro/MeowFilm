@@ -16,7 +16,7 @@ public sealed partial class MusicCapability
 internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<string> changed)
 {
     private bool playing, canSeek, canRate, canToggle, hasQuality;
-    private double position, duration = 1;
+    private double position, duration = 1, cacheFraction;
     private double? rate;
     private int volume;
     private string source = "", quality = "", sourceQuality = "", sourceSymbol = "", sourceDescription = "",
@@ -31,6 +31,7 @@ internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<s
 
     internal void Refresh()
     {
+        Publish(ref cacheFraction, module.PlaybackCacheFraction, nameof(MusicCapability.PlaybackCacheFraction));
         Publish(ref playing, module.IsPlaying, nameof(MusicCapability.IsPlaying));
         Publish(ref source, module.CurrentSource, nameof(MusicCapability.CurrentSource));
         Publish(ref sourceQuality, module.CurrentSourceQuality, nameof(MusicCapability.CurrentSourceQuality));

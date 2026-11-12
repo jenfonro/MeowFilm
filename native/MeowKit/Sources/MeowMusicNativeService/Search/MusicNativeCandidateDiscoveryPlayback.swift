@@ -63,25 +63,27 @@ extension NativeMusicService {
             attempt?.selection = resolvedSelection
             let valid = try media(audio)
             try validateDelivery(valid, song: seed.song, playback: d.playback)
+            let authorization = valid.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
+            audioCacheAttempt = try await prepareAudioCache(audio: valid, song: seed.song,
+                selection: resolvedSelection, attemptID: attemptID, playbackAuthorization: authorization)
+            observeAudioCacheCapture(audioCacheAttempt)
             let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: seed.occurrenceID, resourceId: "music:" + attemptID,
                 url: valid.url, headers: valid.headers, title: seed.song["title"].string,
                 startPosition: seed.cacheRecovery?.position ?? d.playback["position"]["seconds"].number,
                 requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
                 expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
-                delivery: valid.delivery, playbackAuthorization: valid.playbackAuthorization)
+                delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
             _ = try candidate.resource()
-            try await stageAudioCache(audio: valid, song: seed.song, selection: resolvedSelection, attemptID: attemptID)
             try await admitRecordingSource(seed.song, sourceKey: selection.sourceKey)
             let latest = try candidateAttemptCheck(seed, attemptID: attemptID)
             try admitSource(seed.song, selection: selection)
             try pinPlaybackRecovery(candidate: candidate, song: seed.song, state: latest)
             let publish = {
-                self.attempt?.authorization = valid.playbackAuthorization
+                self.attempt?.authorization = authorization
                 self.attempt?.ready = true
             }
             let authorize = {
-                if let authorization = valid.playbackAuthorization { try authorization.perform(publish) }
-                else { publish() }
+                try authorization.perform(publish)
             }
             if let recovery = seed.cacheRecovery { try recovery.authorization.perform(authorize) }
             else { try authorize() }

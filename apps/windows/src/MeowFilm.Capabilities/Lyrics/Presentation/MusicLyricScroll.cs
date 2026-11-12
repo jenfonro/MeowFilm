@@ -65,7 +65,8 @@ internal static class MusicLyricScroll
     internal static void Move(ScrollViewer viewer, double target, TranslateTransform presentation,
         MusicLyricList list, Action? settled = null) => MoveCore(viewer, target, presentation, list, settled);
 
-    internal static void MoveManual(ScrollViewer viewer, double target) => MoveCore(viewer, target, null, null, null);
+    internal static void MoveManual(ScrollViewer viewer, double target, Action? settled = null) =>
+        MoveCore(viewer, target, null, null, settled);
 
     private static void MoveCore(ScrollViewer viewer, double target, TranslateTransform? presentation,
         MusicLyricList? list, Action? settled)

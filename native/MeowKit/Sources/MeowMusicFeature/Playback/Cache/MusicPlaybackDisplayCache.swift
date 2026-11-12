@@ -1,14 +1,13 @@
 import Foundation
 
-/// Last selected recording's presentation, not a media URL, playback grant,
+/// One stable recording's presentation, not a media URL, playback grant,
 /// queue or download. It may be read during cold restoration without playback.
 public struct MusicPlaybackDisplayIdentity: Codable, Equatable, Sendable {
     public let scope: String
-    public let occurrenceID: String
     public let songID: String
     public let contentFingerprint: String
-    public init(scope: String, occurrenceID: String, songID: String, contentFingerprint: String) {
-        self.scope = scope; self.occurrenceID = occurrenceID
+    public init(scope: String, songID: String, contentFingerprint: String) {
+        self.scope = scope
         self.songID = songID; self.contentFingerprint = contentFingerprint
     }
 }
@@ -28,7 +27,7 @@ public struct MusicPlaybackDisplaySnapshot: Codable, Sendable {
 
 /// Optional evictable native presentation persistence. Each patch preserves the
 /// other part only for exactly the same identity. A revoked selection cannot
-/// overwrite the newer selection, even when disk initialization was suspended.
+/// publish after its selection was revoked, even when disk initialization was suspended.
 public protocol MusicPlaybackDisplayCaching: Sendable {
     func read(_ identity: MusicPlaybackDisplayIdentity,
               authorization: MusicQueueAuthorization) async -> MusicPlaybackDisplaySnapshot?

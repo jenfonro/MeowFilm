@@ -94,7 +94,7 @@ native-local-lyrics
 playback-settings
 ```
 
-歌词展示快照独立存于 `music.lyric-display.v1` 可选缓存，不属于业务 area，也不参与整库校验或提交；手工歌词仍属于 `native-local-lyrics`。
+多曲歌词／封面展示按稳定歌曲身份存于 `music.recording-presentation.v2` 可选缓存，不属于业务 area，也不参与整库校验或提交；手工歌词仍属于 `native-local-lyrics`。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
 旧 `lx-installations` 与 `lx-data` 条目不读取、验证、迁移或改写；原文档随无关设置保存原样保留。

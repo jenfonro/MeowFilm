@@ -1,4 +1,5 @@
 import Foundation
+import MeowContracts
 
 /// Complete, previously played music bytes. This is an evictable cache, not a
 /// user download, offline library item, playlist record or playback authority.
@@ -77,6 +78,25 @@ public struct MusicAudioFileCacheRequest: Sendable {
     }
 }
 
+public struct MusicAudioFilePlaybackRequest: Sendable {
+    public let identity: MusicAudioFileCacheIdentity
+    public let audio: MusicNativeAudio
+    public let expectedDuration: Double
+    public let authorization: MusicQueueAuthorization
+    public let playbackAuthorization: MusicQueueAuthorization
+    public init(identity: MusicAudioFileCacheIdentity, audio: MusicNativeAudio, expectedDuration: Double,
+                authorization: MusicQueueAuthorization, playbackAuthorization: MusicQueueAuthorization) {
+        self.identity = identity; self.audio = audio; self.expectedDuration = expectedDuration
+        self.authorization = authorization; self.playbackAuthorization = playbackAuthorization
+    }
+}
+
+public protocol MusicAudioFilePlayback: PlaybackByteSource {
+    /// Only the playback owner supplies an accepted real-playing timestamp.
+    func confirmPlayback(at date: Date)
+    func result() async -> MusicAudioFileCacheVersion?
+}
+
 /// Implementations are passive at construction, bounded to the reference's
 /// 256 MiB total and 30 days since actual play, and fail as cache misses.
 /// Lookup does not renew age. Cancellation/clear must prevent old publication.
@@ -84,6 +104,7 @@ public protocol MusicAudioFileCaching: Sendable {
     func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
                 accepts: @escaping @Sendable (MusicAudioFileCacheIdentity) -> Bool) async -> MusicAudioFileCacheHit?
     @discardableResult func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) async -> MusicAudioFileCacheVersion?
+    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion, confirmedAt: Date,
                authorization: MusicQueueAuthorization) async
     func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) async

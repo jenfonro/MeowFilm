@@ -57,6 +57,7 @@ struct PlaybackStateMachine {
     private(set) var wantsPlayback = false
     private(set) var isReady = false
     private(set) var isInterrupted = false
+    private(set) var requestsAudioAdmission = false
     private(set) var pendingSeek: Seek?
     private(set) var activeSeek: Seek?
     private(set) var seekableRanges: [TimeRange] = []
@@ -92,7 +93,7 @@ struct PlaybackStateMachine {
     }
 
     var shouldPlay: Bool {
-        isPlayable && isReady && wantsPlayback && !isInterrupted
+        isPlayable && isReady && wantsPlayback && !isInterrupted && !requestsAudioAdmission
             && pendingSeek == nil && activeSeek == nil && snapshot.phase != .ended
     }
 
@@ -144,6 +145,7 @@ struct PlaybackStateMachine {
         seekableRanges = []
         pendingSeek = nil
         activeSeek = nil
+        requestsAudioAdmission = false
         // An interruption applies to the audio session, not just the old item.
         // Keep it active across a switch, but never transfer automatic-resume
         // permission from the old resource to the new one.
@@ -181,6 +183,7 @@ struct PlaybackStateMachine {
     mutating func pause() {
         guard isPlayable else { return }
         wantsPlayback = false
+        requestsAudioAdmission = false
         interruptedGeneration = nil
         lastReportedTransport = .paused
         if snapshot.phase != .ended, snapshot.phase != .paused {
@@ -190,7 +193,7 @@ struct PlaybackStateMachine {
     }
 
     @discardableResult
-    mutating func resume() -> Bool {
+    mutating func resume(userInitiated: Bool = false) -> Bool {
         guard isPlayable, let token = generation else { return false }
         let needsTransition = !wantsPlayback || snapshot.phase == .ended
         if snapshot.phase == .ended {
@@ -200,9 +203,34 @@ struct PlaybackStateMachine {
             snapshot.phase = .paused
         }
         wantsPlayback = true
+        if userInitiated, isInterrupted {
+            requestsAudioAdmission = true
+        }
+        if (error as? NativePlaybackError) == .audioSessionUnavailable {
+            error = nil; snapshot.error = nil
+        }
         if isInterrupted { interruptedGeneration = token }
         if needsTransition { updatePendingPhase() }
         return true
+    }
+
+    mutating func audioSessionActivated(generation token: UUID) {
+        guard accepts(token), wantsPlayback else { return }
+        if requestsAudioAdmission {
+            requestsAudioAdmission = false
+            isInterrupted = false
+            interruptedGeneration = nil
+            updatePendingPhase()
+        }
+    }
+
+    mutating func audioSessionUnavailable(generation token: UUID) {
+        guard accepts(token) else { return }
+        error = NativePlaybackError.audioSessionUnavailable
+        snapshot.error = error?.localizedDescription
+        let alreadyPaused = snapshot.phase == .paused
+        pause()
+        if alreadyPaused { record(.paused) }
     }
 
     @discardableResult
@@ -346,6 +374,7 @@ struct PlaybackStateMachine {
     }
 
     mutating func interruptionBegan() {
+        requestsAudioAdmission = false
         guard !isInterrupted else { return }
         isInterrupted = true
         interruptedGeneration = wantsPlayback && isPlayable ? generation : nil
@@ -358,7 +387,8 @@ struct PlaybackStateMachine {
 
     mutating func interruptionEnded(shouldResume: Bool) {
         guard isInterrupted else { return }
-        let mayResume = shouldResume && wantsPlayback && interruptedGeneration == generation
+        let mayResume = wantsPlayback &&
+            (requestsAudioAdmission || shouldResume && interruptedGeneration == generation)
         isInterrupted = false
         interruptedGeneration = nil
         if isPlayable {
@@ -368,6 +398,7 @@ struct PlaybackStateMachine {
     }
 
     mutating func mediaServicesReset() {
+        requestsAudioAdmission = false
         isInterrupted = false
         interruptedGeneration = nil
         if let token = generation, isPlayable {
@@ -379,6 +410,7 @@ struct PlaybackStateMachine {
     mutating func end(generation token: UUID, naturally: Bool = true) -> Bool {
         guard accepts(token), outstandingSeek == nil, snapshot.phase != .ended else { return false }
         wantsPlayback = false
+        requestsAudioAdmission = false
         interruptedGeneration = nil
         lastReportedTransport = .paused
         snapshot.phase = .ended
@@ -401,6 +433,7 @@ struct PlaybackStateMachine {
         snapshot.error = failure.localizedDescription
         snapshot.phase = .failed
         wantsPlayback = false
+        requestsAudioAdmission = false
         isReady = false
         pendingSeek = nil
         activeSeek = nil
@@ -422,6 +455,7 @@ struct PlaybackStateMachine {
         title = ""
         error = nil
         wantsPlayback = false
+        requestsAudioAdmission = false
         isReady = false
         pendingSeek = nil
         activeSeek = nil

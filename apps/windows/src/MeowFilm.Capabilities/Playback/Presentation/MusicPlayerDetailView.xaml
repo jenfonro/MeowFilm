@@ -165,7 +165,8 @@
        <Binding Path="DataContext" RelativeSource="{RelativeSource Self}"/>
        <Binding Path="DataContext.FirstLyric" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
        <Binding Path="DataContext.LastLyric" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
-       <Binding Path="ActualHeight" RelativeSource="{RelativeSource AncestorType=ListBox}"/>
+       <Binding Path="ViewportHeight" RelativeSource="{RelativeSource AncestorType=ScrollViewer}"/>
+       <Binding Path="ActualHeight" RelativeSource="{RelativeSource Self}"/>
       </MultiBinding></Setter.Value></Setter>
       <Setter Property="Opacity" Value=".40"/>
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
@@ -177,7 +178,7 @@
       </Style.Triggers>
      </Style></ListBox.ItemContainerStyle>
      <ListBox.ItemTemplate><DataTemplate>
-      <Border Padding="0,11,12,11" MinHeight="47">
+      <Border Padding="64,11,64,11" MinHeight="47">
         <StackPanel>
          <TextBlock Text="{Binding Text}" FontSize="20" TextWrapping="Wrap">
           <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
@@ -206,18 +207,19 @@
       </Border>
      </DataTemplate></ListBox.ItemTemplate>
     </local:MusicLyricList>
-    <Grid VerticalAlignment="Center"
-          Visibility="{Binding HasLyricPreview,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-     <Border Height="1" Background="#48FFFFFF" IsHitTestVisible="False"/>
-     <Button x:Name="ConfirmLyric" Click="PlayLyric_Click" HorizontalAlignment="Right"
-             Style="{StaticResource MeowFilm.QuietButton}" Margin="0,-32,0,0" MaxWidth="360"
-             IsEnabled="{Binding CanConfirmLyricPreview}" AutomationProperties.Name="播放此处">
-      <StackPanel Orientation="Horizontal">
-       <TextBlock Text="&#xE768;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" VerticalAlignment="Center"/>
-       <TextBlock Text="{Binding LyricPreviewText}" FontSize="12" MaxWidth="290" TextTrimming="CharacterEllipsis"/>
-      </StackPanel>
-     </Button>
-    </Grid>
+    <Border x:Name="LyricPreviewFrame" VerticalAlignment="Center" CornerRadius="12"
+            Background="#12FFFFFF" BorderBrush="#48FFFFFF" BorderThickness="1" MinHeight="47"
+            Visibility="{Binding HasLyricPreview,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+     <Grid>
+      <TextBlock Text="{Binding LyricPreviewTime}" FontSize="12" Margin="12,0,0,0"
+                 HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False"/>
+      <Button x:Name="ConfirmLyric" Click="PlayLyric_Click" HorizontalAlignment="Right" VerticalAlignment="Center"
+              Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,8,0"
+              IsEnabled="{Binding CanConfirmLyricPreview}" AutomationProperties.Name="播放此处">
+       <TextBlock Text="&#xE768;" FontFamily="Segoe Fluent Icons"/>
+      </Button>
+     </Grid>
+    </Border>
     <TextBlock x:Name="LyricState" Text="{Binding LyricStatus}" FontSize="20"
                HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
 

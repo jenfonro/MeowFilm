@@ -376,18 +376,21 @@ public struct MusicPlaybackCandidate: Sendable {
     public let fileAuthorization: MusicQueueAuthorization?
     public let playbackAuthorization: MusicQueueAuthorization?
     public let delivery: MusicAudioDelivery?
+    public let byteSource: (any PlaybackByteSource)?
     public var isCachedAudio: Bool { fileAuthorization != nil }
     public init(attemptId: String, occurrenceId: String, resourceId: String, url: URL, headers: [String: String] = [:],
                 title: String, startPosition: Double = 0, requestedQuality: String,
                 resolvedSelection: MusicPlaybackSelection, expiresAt: Double? = nil,
                 fileAuthorization: MusicQueueAuthorization? = nil, delivery: MusicAudioDelivery? = nil,
-                playbackAuthorization: MusicQueueAuthorization? = nil) {
+                playbackAuthorization: MusicQueueAuthorization? = nil,
+                byteSource: (any PlaybackByteSource)? = nil) {
         self.attemptId = attemptId; self.occurrenceId = occurrenceId; self.resourceId = resourceId; self.url = url
         self.headers = headers; self.title = title; self.startPosition = startPosition
         self.requestedQuality = requestedQuality; self.expiresAt = expiresAt
         self.resolvedSelection = resolvedSelection
         self.fileAuthorization = fileAuthorization
         self.delivery = delivery; self.playbackAuthorization = playbackAuthorization
+        self.byteSource = byteSource
     }
     func validateResolvedSelection(for requested: MusicPlaybackSelection) throws {
         let resolved = resolvedSelection, official = requested.installationId.hasPrefix("official:")
@@ -406,7 +409,8 @@ public struct MusicPlaybackCandidate: Sendable {
     public func resource() throws -> PlaybackResource {
         try fileAuthorization?.check()
         try playbackAuthorization?.check()
-        return try PlaybackResource(id: resourceId, url: url, title: title, headers: headers, startPosition: startPosition)
+        return try PlaybackResource(id: resourceId, url: url, title: title, headers: headers, startPosition: startPosition,
+                                    byteSource: byteSource)
     }
 }
 public struct MusicPlaybackFact: Sendable {

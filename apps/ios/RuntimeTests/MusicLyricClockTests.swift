@@ -193,7 +193,8 @@ final class MusicLyricClockTests: XCTestCase {
                            position: Double, playing: Bool) {
         cell.configure(line: line, selected: false, active: true, timed: true,
             previewDragging: false, position: position, rate: 1, playing: playing,
-            preferences: MusicAppearancePreferences(), theme: PageTheme())
+            preferences: MusicAppearancePreferences(),
+            colors: MusicPlayerBackgroundView.lyricColors(palette: PageTheme().palette, artwork: false))
     }
 
     @MainActor

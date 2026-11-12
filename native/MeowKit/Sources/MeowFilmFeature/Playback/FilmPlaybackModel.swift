@@ -525,7 +525,7 @@ public final class FilmPlaybackModel: ObservableObject {
                    let previousCurrent, committed === previousCurrent,
                    previousCurrent.started, !previousCurrent.retired, !previousCurrent.terminal,
                    snapshot?.attempt == nil, snapshot?.current?.attemptID == previousCurrent.attempt.id {
-                    media.resume(sessionID: sessionID, attemptID: previousCurrent.attempt.id)
+                    media.resume(sessionID: sessionID, attemptID: previousCurrent.attempt.id, userInitiated: true)
                 }
             } catch {
                 if command.ui, closed { continue }
@@ -840,7 +840,7 @@ public final class FilmPlaybackModel: ObservableObject {
               media.isCurrent(sessionID: current.sessionID, attemptID: current.attempt.id) else {
             send("play"); return
         }
-        if mediaState.paused { media.resume(sessionID: current.sessionID, attemptID: current.attempt.id) }
+        if mediaState.paused { media.resume(sessionID: current.sessionID, attemptID: current.attempt.id, userInitiated: true) }
         else { _ = media.pause(sessionID: current.sessionID, attemptID: current.attempt.id) }
     }
     public func seek(to value: Double) { if !runtimeClosed, let sessionID { media.seek(sessionID: sessionID, to: value) } }
@@ -899,7 +899,7 @@ public final class FilmPlaybackModel: ObservableObject {
                     let rejectionAdmission = externalPlaybackAdmission
                     if restore {
                         requiresExplicitPlay = false
-                        if paused { media.resume(sessionID: current.sessionID, attemptID: current.attempt.id) }
+                        if paused { media.resume(sessionID: current.sessionID, attemptID: current.attempt.id, userInitiated: false) }
                     } else {
                         commandAdmission = UUID(); awaitingIntent = nil
                         await closeSession()

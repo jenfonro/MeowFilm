@@ -136,7 +136,7 @@ public static class MusicOfficialSelectionTests
             byte[] cached = scene.CacheBacking.Data[MusicSourceCache.Namespace].ToArray();
             var candidates = await scene.Candidates(song, policy, true);
             Check(candidates.GetProperty("candidates").GetArrayLength() == 0 && scene.Handler.Searches == 0);
-            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+            foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
             await scene.CacheStore.DrainAsync();
             Check(scene.Handler.Calls == calls && scene.Handler.Vkeys == vkeys && scene.Store.Writes == writes);
@@ -230,7 +230,7 @@ public static class MusicOfficialSelectionTests
             Code(await scene.App.ExecuteAsync("music.official.candidates", new {
                 song, quality = "320k", qualityPolicySignature = policy.GetProperty("signature").GetString()
             }), "PENDING_WRITE");
-            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+            foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "PENDING_WRITE");
             Check(scene.Handler.Calls == calls && scene.Store.Writes == writes,
                 "native readers must neither reconcile nor replay an unknown settings write");
@@ -238,7 +238,7 @@ public static class MusicOfficialSelectionTests
             var settings = (await scene.Ok("music.officialSources.settings.get")).GetProperty("settings");
             Check(settings.GetProperty("revision").GetInt64() == 1 &&
                 settings.GetProperty("enabled").EnumerateArray().All(value => value.GetString() != "tx"));
-            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+            foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
             Check(scene.Handler.Calls == calls && scene.Store.Writes == writes && scene.Runtime.Calls == 0);
         });

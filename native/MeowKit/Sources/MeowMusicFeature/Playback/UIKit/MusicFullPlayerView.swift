@@ -66,7 +66,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     private var rendering = false
     private var recordWidth: CGFloat = 0
     private var lyricTranslation: Bool?
-    private var lyricTheme: PageTheme?
+    private var lyricColors: MusicLyricColors
     private var lyricViewportSize = CGSize.zero
     private var lyricHeights: [Int: CGFloat] = [:]
     private var lyricsPositioned = false
@@ -85,6 +85,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
     init(content: MusicPlayerContentModel) {
         self.content = content
+        lyricColors = MusicPlayerBackgroundView.lyricColors(palette: content.appearance.effectivePalette,
+            artwork: content.appearance.preferences.lyricBackground)
         controls = MusicPlaybackControlsView(content: content, layout: .full)
         super.init(style: .full, palette: content.appearance.effectivePalette)
         accessibilityIdentifier = "music.player.page"
@@ -153,7 +155,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
         lyricBackdrop.contentMode = .scaleAspectFill
         lyricBackdrop.clipsToBounds = true
-        lyricBackdrop.alpha = 0.24
+        lyricBackdrop.alpha = CGFloat(MusicLyricColors.artworkOpacity)
         lyricBackdrop.isUserInteractionEnabled = false
         lyricBackdrop.accessibilityElementsHidden = true
         backdropMask.colors = [UIColor.clear.cgColor, UIColor.black.cgColor,
@@ -449,7 +451,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
                        previewDragging: lyricSelection.isDragging, position: content.clock.position,
                        rate: content.clock.rate, playing: rendering && lyricExpanded &&
                        content.clock.playing && timed, preferences: content.appearance.preferences,
-                       theme: content.controlTheme)
+                       colors: lyricColors)
         cell.accessibilityCustomActions = [
             UIAccessibilityCustomAction(name: "返回唱片", target: self,
                                         selector: #selector(accessibilityToggleLyrics))
@@ -780,14 +782,16 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     private func updateAppearance() {
         apply(palette: content.appearance.effectivePalette,
               animated: rendering && window != nil && content.appearance.animatesPaletteChanges)
-        let theme = content.controlTheme
+        let theme = PageTheme(colors: content.appearance.effectivePalette, dark: false)
         close.tintColor = UIColor(theme.ink)
         previewSeek.tintColor = UIColor(theme.accent)
         followLyrics.tintColor = UIColor(theme.muted)
         sourceButton.configuration?.baseForegroundColor = UIColor(theme.ink)
-        lyricStatus.textColor = UIColor(theme.muted)
-        previewTime.textColor = UIColor(theme.muted)
-        previewRule.backgroundColor = UIColor(theme.muted).withAlphaComponent(0.28)
+        let colors = MusicPlayerBackgroundView.lyricColors(palette: content.appearance.effectivePalette,
+            artwork: content.appearance.preferences.lyricBackground)
+        lyricStatus.textColor = UIColor(colors.normal)
+        previewTime.textColor = UIColor(colors.normal)
+        previewRule.backgroundColor = UIColor(colors.highlight).withAlphaComponent(0.28)
         route.tintColor = UIColor(theme.ink)
         route.activeTintColor = UIColor(theme.accent)
         for button in [translationToggle, backgroundToggle] {
@@ -799,9 +803,9 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         synchronizeRecords()
         updateLyricPreview(force: true)
         let translation = content.appearance.preferences.lyricTranslation
-        if lyricTranslation != translation || lyricTheme != theme {
+        if lyricTranslation != translation || lyricColors != colors {
             lyricTranslation = translation
-            lyricTheme = theme
+            lyricColors = colors
             refreshVisibleLyrics()
         }
     }

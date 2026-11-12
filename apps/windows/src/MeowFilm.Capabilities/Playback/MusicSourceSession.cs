@@ -106,6 +106,7 @@ public sealed partial class MusicCapability
         private readonly HashSet<string> otherFailed = new(StringComparer.Ordinal);
         private readonly HashSet<string> checkedContent = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim selection = new(1);
+        private readonly bool OfficialOnly = officialOnly;
         private HashSet<SourceExclusion> exclusions = [];
         private long exclusionsRevision = -1;
         private JsonElement expanded = owner.KnownOfficialSong(song);
@@ -119,7 +120,22 @@ public sealed partial class MusicCapability
         }
         private bool RecordingAllowed(string platform, string? key, bool manualSource = false) => manualSource || !recordingRequired ||
             platform == preferredPlatform && key == preferredKey;
-        internal readonly SourceScript[] Scripts = scripts;
+        private SourceScript[] Scripts = scripts;
+        private bool scriptsLoaded = officialOnly;
+        private async Task LoadScriptsAsync(CancellationToken token)
+        {
+            if (scriptsLoaded) return;
+            try
+            {
+                var list = await owner.Call("music.sources.list", cancellationToken: token);
+                Scripts = list.GetProperty("items").EnumerateArray().Where(item => item.GetProperty("enabled").GetBoolean())
+                    .Select(item => new SourceScript(MusicDto.Text(item, "installationId"), MusicDto.Text(item, "name"),
+                        item.GetProperty("sites") is { ValueKind: JsonValueKind.Object } sites ? sites.Clone() : null)).ToArray();
+                scriptsLoaded = true;
+            }
+            catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
+            { Failure ??= error.Code; scriptsLoaded = true; }
+        }
         internal string? Failure;
         internal void Inherit(MusicSourceSession previous)
         {
@@ -134,7 +150,7 @@ public sealed partial class MusicCapability
         }
         private async Task LoadHistoryAsync(CancellationToken token)
         {
-            if (historyLoaded || officialOnly || owner.audioFileCache is null) return;
+            if (historyLoaded || OfficialOnly || owner.audioFileCache is null) return;
             foreach (var info in await owner.audioFileCache.ReadScriptHistoryAsync(Song.Id, token))
             {
                 string level = MusicDto.Text(info, "quality");
@@ -235,7 +251,7 @@ public sealed partial class MusicCapability
         }
         private IEnumerable<MusicOnlineTarget> ScriptTargets(string level, bool manualSource = false)
         {
-            if (officialOnly || !MusicQualityPolicy.LxTypes.Contains(level)) yield break;
+            if (OfficialOnly || !MusicQualityPolicy.LxTypes.Contains(level)) yield break;
             var recordings = expanded.GetProperty("sources").EnumerateArray()
                 .Where(row => RecordingAllowed(MusicDto.Text(row, "source"), MusicDto.Text(row, "sourceKey"), manualSource))
                 .OrderBy(row => MusicDto.Text(row, "source") == preferredPlatform && MusicDto.Text(row, "sourceKey") == preferredKey ? 0 : 1)
@@ -327,6 +343,12 @@ public sealed partial class MusicCapability
             foreach (var (target, level) in candidates.Where(pair => pair.Target.Official))
                 if (await TryAsync(target, level, tier, exact, token, urlCacheOnly: true) is { } cached)
                 { if (!collect) return cached; found ??= cached; }
+            bool loadedScripts = scriptsLoaded;
+            await LoadScriptsAsync(token);
+            if (!loadedScripts) candidates = candidates.Concat(tier.Levels.SelectMany(level => ScriptTargets(level)
+                    .Select(target => (Target: target, Level: level))))
+                .DistinctBy(pair => AttemptKey(pair.Target, pair.Level))
+                .Where(pair => !Excluded(pair.Target) && !Rejected(pair.Target)).ToArray();
             var work = candidates.Where(pair => !Attempts.TryGetValue(AttemptKey(pair.Target, pair.Level), out var attempt) ||
                 attempt.State == SourceAttemptState.Pending || attempt.State == SourceAttemptState.Ok && !Fresh(attempt)).ToArray();
             if (work.Length == 0) return found ?? Known(tier, exact);
@@ -372,7 +394,7 @@ public sealed partial class MusicCapability
         /// are rechecked only with unambiguous content-failure evidence; the owner enforces age.</summary>
         private async Task<bool> CompleteAsync(CancellationToken token, bool manualSource)
         {
-            if (officialOnly || recordingRequired && !manualSource) return false;
+            if (OfficialOnly || recordingRequired && !manualSource) return false;
             var failures = contentFailed.Except(otherFailed).Except(checkedContent).ToArray();
             if (completed && failures.Length == 0) return false;
             var targets = Library.NativeMusicSong.Platforms.Where(platform =>
@@ -407,6 +429,7 @@ public sealed partial class MusicCapability
                 await LoadExclusionsAsync(token);
                 await LoadHistoryAsync(token);
                 if (!collect && Known(tier, exact) is { } history) return history;
+                if (collect || manualSource) await LoadScriptsAsync(token);
                 // A just-issued receipt is usable until its actual deadline. The cache's
                 // early-expiry margin must not immediately trigger another URL lookup.
                 if (!collect && resolved is not null && !Excluded(resolved.Target!) && !Rejected(resolved.Target!) &&
@@ -456,6 +479,7 @@ public sealed partial class MusicCapability
             // Historical media has no current script authority. New parsing must obtain it afresh.
             if (!target.Official && (target.QualityPolicySignature != Signature || target.Generation == 0 || target.SourceRevision != Revision))
             {
+                await LoadScriptsAsync(token);
                 var eligible = ScriptTargets(target.Quality, target.ManualSource)
                     .FirstOrDefault(value => SourceIdentity(value) == SourceIdentity(target));
                 if (eligible is null) throw new MusicOperationException("SOURCE_DISABLED");
@@ -546,24 +570,9 @@ public sealed partial class MusicCapability
         var enabled = officials.GetProperty("settings").GetProperty("enabled").EnumerateArray()
             .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         SourceScript[] scripts = [];
-        bool unavailable = false;
-        if (!officialOnly)
-        {
-            try
-            {
-                var list = await Call("music.sources.list", cancellationToken: token);
-                scripts = list.GetProperty("items").EnumerateArray().Where(item => item.GetProperty("enabled").GetBoolean())
-                    .Select(item => new SourceScript(MusicDto.Text(item, "installationId"), MusicDto.Text(item, "name"),
-                        item.GetProperty("sites") is { ValueKind: JsonValueKind.Object } sites ? sites.Clone() : null))
-                    .ToArray();
-            }
-            // The script service failing never blocks built-in providers.
-            catch (MusicOperationException error) when (error.Code == "SCRIPT_RUNTIME_UNAVAILABLE") { unavailable = true; }
-        }
         string? platform = recordingPlatforms.GetValueOrDefault(song.Id);
         string? key = platform is null ? null : recordingChoices.GetValueOrDefault(song.Id + "\0" + platform);
         var session = new MusicSourceSession(this, song, signature, policy, scripts, enabled, officialOnly, platform, key, explicitRecordings.Contains(song.Id));
-        if (unavailable) session.Failure = "SCRIPT_RUNTIME_UNAVAILABLE";
         await session.LoadExclusionsAsync(token);
         return session;
     }

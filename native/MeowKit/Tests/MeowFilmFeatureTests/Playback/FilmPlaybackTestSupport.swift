@@ -367,7 +367,7 @@ final class FilmPlaybackTestMedia: FilmPlaybackMediaControlling {
         emit(.state(state), attemptID: attemptID)
         return true
     }
-    func resume(sessionID: UUID, attemptID: String) {
+    func resume(sessionID: UUID, attemptID: String, userInitiated: Bool) {
         guard isCurrent(sessionID: sessionID, attemptID: attemptID), var state = currentState, state.paused else { return }
         resumes += 1; state.paused = false
         emit(.state(state), attemptID: attemptID)

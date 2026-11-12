@@ -1,7 +1,7 @@
 import Foundation
 
-/// A media-only port. Script presentation headers are sanitized separately;
-/// account credentials and cookies are never accepted.
+/// A media-only port. Persistent capture accepts only presentation headers;
+/// streaming preserves the source owner's explicitly admitted media headers.
 /// Injected transports must call `accept` before bytes and `finishBody` ONLY
 /// after a successful transport EOF (not just after receiving Content-Length).
 public protocol NativeMusicAudioCacheTransport: Sendable {
@@ -14,8 +14,10 @@ public struct NativeMusicAudioCacheHTTPRequest: Sendable {
     public let platform: String
     public let scriptMedia: Bool
     public let headers: [String: String]
-    public init(url: URL, platform: String, scriptMedia: Bool = false, headers: [String: String] = [:]) {
+    let streaming: Bool
+    public init(url: URL, platform: String, scriptMedia: Bool = false, headers: [String: String] = [:], streaming: Bool = false) {
         self.url = url; self.platform = platform; self.scriptMedia = scriptMedia; self.headers = headers
+        self.streaming = streaming
     }
 }
 
@@ -40,7 +42,13 @@ enum NativeMusicAudioCacheHTTPPolicy {
 
     // Deliberately narrower than general account/image hosts. Unknown official
     // CDN aliases remain misses; this list is not an arbitrary host allow-list.
-    static func permits(_ url: URL, platform: String, scriptMedia: Bool = false) -> Bool {
+    static func permits(_ url: URL, platform: String, scriptMedia: Bool = false, streaming: Bool = false) -> Bool {
+        if streaming {
+            guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+                  let host = url.host, !host.isEmpty, url.user == nil, url.password == nil,
+                  (1...65535).contains(url.port ?? (scheme == "https" ? 443 : 80)) else { return false }
+            return true
+        }
         let domains: [String]
         switch platform {
         case "wy": domains = ["music.126.net"]
@@ -51,7 +59,8 @@ enum NativeMusicAudioCacheHTTPPolicy {
         guard url.absoluteString.utf8.count <= 16_384,
               !url.absoluteString.utf8.contains(where: { $0 <= 32 || $0 == 127 || $0 == 92 }),
               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              parts.scheme == "https", parts.user == nil, parts.password == nil,
+              parts.scheme == "https",
+              parts.user == nil, parts.password == nil,
               parts.fragment == nil, parts.port == nil || (scriptMedia ? (1...65535).contains(parts.port!) : parts.port == 443),
               let host = parts.host?.lowercased(), !host.hasSuffix("."),
               host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy({
@@ -63,8 +72,10 @@ enum NativeMusicAudioCacheHTTPPolicy {
     }
 
     static func request(_ value: NativeMusicAudioCacheHTTPRequest) throws -> URLRequest {
-        guard permits(value.url, platform: value.platform, scriptMedia: value.scriptMedia) else { throw NativeMusicAudioCacheFailure.miss }
-        var request = URLRequest(url: value.url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+        guard permits(value.url, platform: value.platform, scriptMedia: value.scriptMedia, streaming: value.streaming) else { throw NativeMusicAudioCacheFailure.miss }
+        var parts = URLComponents(url: value.url, resolvingAgainstBaseURL: false)!
+        parts.fragment = nil
+        var request = URLRequest(url: parts.url!, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
                                  timeoutInterval: transferIdle)
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
@@ -74,7 +85,27 @@ enum NativeMusicAudioCacheHTTPPolicy {
             "Accept": "audio/*, application/octet-stream, application/mp4",
             "Accept-Encoding": "identity"
         ]
-        if value.scriptMedia {
+        if value.streaming {
+            let token = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
+            let reserved: Set<String> = [
+                "host", "connection", "content-length", "transfer-encoding", "accept-encoding",
+                "range", "if-range", "te", "trailer", "upgrade", "expect", "set-cookie",
+                "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"
+            ]
+            guard value.headers.count <= 64 else { throw NativeMusicAudioCacheFailure.miss }
+            var names: Set<String> = [], bytes = 0
+            for (name, header) in value.headers {
+                let key = name.lowercased()
+                bytes += name.utf8.count + header.utf8.count
+                guard !key.isEmpty, key.utf8.allSatisfy({ token.contains($0) }),
+                      !header.utf8.contains(where: { $0 < 32 || $0 == 127 }),
+                      bytes <= 16 * 1024, names.insert(key).inserted,
+                      !reserved.contains(key), !key.hasPrefix("proxy-") else {
+                    throw NativeMusicAudioCacheFailure.miss
+                }
+                request.setValue(header, forHTTPHeaderField: key)
+            }
+        } else if value.scriptMedia {
             // Only the media owner's admitted presentation headers, never an
             // account credential/cookie or a persisted secret.
             for (key, value) in value.headers where ["referer", "user-agent"].contains(key.lowercased()) {
@@ -88,14 +119,21 @@ enum NativeMusicAudioCacheHTTPPolicy {
     }
 
     static func redirect(_ response: HTTPURLResponse, proposed: URLRequest,
-                         platform: String, count: Int, scriptMedia: Bool = false, headers: [String: String] = [:]) throws -> URLRequest {
+                         platform: String, count: Int, scriptMedia: Bool = false, headers: [String: String] = [:], streaming: Bool = false) throws -> URLRequest {
         guard (1...5).contains(count), [301, 302, 303, 307, 308].contains(response.statusCode),
-              let origin = response.url, permits(origin, platform: platform, scriptMedia: scriptMedia),
+              let origin = response.url, permits(origin, platform: platform, scriptMedia: scriptMedia, streaming: streaming),
               let destination = proposed.url else { throw NativeMusicAudioCacheFailure.miss }
+        guard !(origin.scheme?.lowercased() == "https" && destination.scheme?.lowercased() != "https") else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
         let sameOrigin = origin.host?.lowercased() == destination.host?.lowercased() &&
-            origin.scheme == destination.scheme && (origin.port ?? 443) == (destination.port ?? 443)
+            origin.scheme?.lowercased() == destination.scheme?.lowercased() &&
+            (origin.port ?? (origin.scheme?.lowercased() == "https" ? 443 : 80)) ==
+            (destination.port ?? (destination.scheme?.lowercased() == "https" ? 443 : 80))
+        let forwarded = sameOrigin ? headers : streaming
+            ? headers.filter { ["user-agent", "accept"].contains($0.key.lowercased()) } : [:]
         return try request(.init(url: destination, platform: platform, scriptMedia: scriptMedia,
-                                 headers: sameOrigin ? headers : [:]))
+                                 headers: forwarded, streaming: streaming))
     }
 
     static func configuration() -> URLSessionConfiguration {
@@ -109,7 +147,14 @@ enum NativeMusicAudioCacheHTTPPolicy {
     }
 
     static func length(_ response: NativeMusicAudioCacheHTTPResponse, platform: String, scriptMedia: Bool = false) throws -> Int64 {
-        guard [200, 206].contains(response.status), permits(response.url, platform: platform, scriptMedia: scriptMedia),
+        guard let value = try length(response, platform: platform, scriptMedia: scriptMedia, streaming: false) else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
+        return value
+    }
+
+    static func length(_ response: NativeMusicAudioCacheHTTPResponse, platform: String, scriptMedia: Bool, streaming: Bool) throws -> Int64? {
+        guard [200, 206].contains(response.status), permits(response.url, platform: platform, scriptMedia: scriptMedia, streaming: streaming),
               response.headers.count <= 128 else { throw NativeMusicAudioCacheFailure.miss }
         var headers: [String: String] = [:]
         for (key, value) in response.headers {
@@ -119,9 +164,11 @@ enum NativeMusicAudioCacheHTTPPolicy {
                   !value.utf8.contains(where: { $0 < 32 || $0 == 127 }),
                   headers.updateValue(value, forKey: name) == nil else { throw NativeMusicAudioCacheFailure.miss }
         }
-        guard headers["transfer-encoding"] == nil,
-              headers["content-encoding"] == nil || headers["content-encoding"]?.lowercased() == "identity",
-              let rawType = headers["content-type"] else { throw NativeMusicAudioCacheFailure.miss }
+        guard streaming || headers["transfer-encoding"] == nil,
+              headers["content-encoding"] == nil || headers["content-encoding"]?.lowercased() == "identity" else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
+        let rawType = headers["content-type"] ?? ""
         let type = rawType.split(separator: ";", maxSplits: 1).first.map {
             $0.trimmingCharacters(in: .whitespaces).lowercased()
         } ?? ""
@@ -131,10 +178,16 @@ enum NativeMusicAudioCacheHTTPPolicy {
             "audio/flac", "audio/x-flac", "audio/wav", "audio/wave", "audio/x-wav",
             "application/octet-stream", "binary/octet-stream", "application/mp4", "video/mp4"
         ]
-        guard types.contains(type) else { throw NativeMusicAudioCacheFailure.miss }
+        guard types.contains(type) || streaming && (type.isEmpty || type.hasPrefix("audio/") && !type.contains("mpegurl")) else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
         if response.status == 200 {
-            guard headers["content-range"] == nil, let raw = headers["content-length"],
-                  let count = positiveLength(raw) else { throw NativeMusicAudioCacheFailure.miss }
+            guard headers["content-range"] == nil else { throw NativeMusicAudioCacheFailure.miss }
+            guard let raw = headers["content-length"] else {
+                if streaming { return nil }
+                throw NativeMusicAudioCacheFailure.miss
+            }
+            guard let count = positiveLength(raw) else { throw NativeMusicAudioCacheFailure.miss }
             return count
         }
         // RFC 9110 §14.4: accept only a single, complete identity representation.
@@ -185,10 +238,12 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
     private var finished = false
     private var receivedResponse = false
     private var redirects = 0
+    private var redirectHeaders: [String: String]
     private var responseTask: Task<Void, Never>?
 
     init(request: NativeMusicAudioCacheHTTPRequest, sink: NativeMusicAudioCacheSink) {
         self.request = request; self.sink = sink
+        redirectHeaders = request.headers
     }
 
     func run(_ request: URLRequest) async throws {
@@ -271,11 +326,18 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
         redirects += 1
         let count = redirects
         let allowed = !finished && !receivedResponse && count <= 5
+        let headers = redirectHeaders
         lock.unlock()
         guard allowed, let sanitized = try? NativeMusicAudioCacheHTTPPolicy.redirect(
             response, proposed: request, platform: self.request.platform, count: count,
-            scriptMedia: self.request.scriptMedia, headers: task.currentRequest?.allHTTPHeaderFields ?? [:])
+            scriptMedia: self.request.scriptMedia, headers: headers,
+            streaming: self.request.streaming)
         else { completionHandler(nil); cancel(); return }
+        // Only retain admitted headers, never URLSession's generated transport
+        // headers. A cross-origin strip remains effective for the whole chain.
+        lock.lock()
+        redirectHeaders = headers.filter { name, _ in sanitized.value(forHTTPHeaderField: name) != nil }
+        lock.unlock()
         completionHandler(sanitized)
     }
 

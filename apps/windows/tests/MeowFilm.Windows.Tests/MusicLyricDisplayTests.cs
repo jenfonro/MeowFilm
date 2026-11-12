@@ -22,6 +22,8 @@ public static partial class MusicLyricDisplayTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("Native lyric first last resize and manual rounded preview share viewport center", () => Sta(VerifyCenteredLyrics));
+        yield return new("Native recording presentation preserves multiple songs independent artwork and cold lyrics", VerifyMultiplePresentations);
         yield return new("Native lyric source selection loads exact recording immediately without a refresh button", () => Sta(async () =>
         {
             await using var f = await Fixture.Create();
@@ -408,9 +410,10 @@ public static partial class MusicLyricDisplayTests
             var lines = MusicLyricTiming.Parse("[00:01]<00:01.000>A<00:02.000>B<00:03.000>");
             Ok(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key, lines }));
             var snapshot = JsonNode.Parse(cache.ReadMemory(MusicLibraryOwner.LyricDisplayNamespace).Data!)!.AsObject();
-            var expected = snapshot["lines"]!.DeepClone();
-            snapshot["unused"] = "ignored"; snapshot["schema"] = "not consulted";
-            var row = snapshot["lines"]![0]!.AsObject();
+            var record = snapshot["entries"]!.AsObject().First().Value!.AsObject();
+            var expected = record["lines"]!.DeepClone();
+            record["unused"] = "ignored"; record["schema"] = "not consulted";
+            var row = record["lines"]![0]!.AsObject();
             row["unused"] = new JsonArray(1, 2);
             row["words"]![0]!["unused"] = true;
             cache.Save(MusicLibraryOwner.LyricDisplayNamespace, Encoding.UTF8.GetBytes(snapshot.ToJsonString()));
