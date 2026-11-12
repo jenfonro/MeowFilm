@@ -8,6 +8,7 @@ struct MusicNativePlaybackRecoveryPin: Sendable {
     let epoch: UUID
     let occurrenceID: String
     let selection: MusicPlaybackSelection
+    let originalSong: MJ
     let song: MJ
     let queueRevision: Int
     let settings: MJ
@@ -40,7 +41,8 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         try requirePlatform(source.platform)
         _ = try media(.init(url: candidate.url, headers: candidate.headers))
         let pin = MusicNativePlaybackRecoveryPin(epoch: epoch, occurrenceID: current.occurrence,
-            selection: selection, song: song, queueRevision: state.queue["revision"].int,
+            selection: selection, originalSong: try self.song(.init(kind: .queue, id: current.occurrence), state),
+            song: song, queueRevision: state.queue["revision"].int,
             settings: Self.recoverySettings(state.playback), attemptID: current.id, url: candidate.url)
         try checkPlaybackRecoveryDocument(pin)
         try access.perform { attempt?.recovery = pin }
@@ -94,7 +96,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         retireAudioCacheAttempt()
         try access.perform {
             attempt = Attempt(id: attemptID, occurrence: pin.occurrenceID,
-                sourceKey: selection.sourceKey, selection: selection, started: suspended.started,
+                sourceKey: selection.sourceKey, selection: selection, recording: suspended.recording, started: suspended.started,
                 authorization: suspended.authorization)
             attempt?.recovery = suspended.recovery
         }
@@ -155,8 +157,8 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         try musicRequire(d.queue["revision"].int == pin.queueRevision &&
             Self.recoverySettings(d.playback) == pin.settings, .staleRevision)
         let song = try self.song(.init(kind: .queue, id: pin.occurrenceID), d)
-        try musicRequire(song == pin.song, .targetChanged)
-        let (source, info) = try target(song, pin.selection.sourceKey)
+        try musicRequire(song == pin.originalSong, .targetChanged)
+        let (source, info) = try target(pin.song, pin.selection.sourceKey)
         try musicRequire(source.platform == pin.selection.siteId &&
             musicSame(try MusicModel.sourceKey(info), pin.selection.sourceKey), .targetChanged)
         try requirePlatform(source.platform)

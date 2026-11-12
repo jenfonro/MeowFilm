@@ -164,14 +164,15 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 position: sample.position, duration: sample.duration))
             let admission: MusicNativeFeedbackAdmission
             if let attempt, attempt.ready, attempt.id == sample.attemptID, attempt.occurrence == sample.occurrenceID {
+                let song = try playbackSong(.init(kind: .queue, id: sample.occurrenceID), draft)
                 try attempt.authorization?.check()
                 if attempt.ended && ![.ended, .failed, .stopped].contains(sample.kind) { return }
                 if !playbackFeedback.ownsAttempt(attempt.id) {
                     replaceFeedbackAttempt(attemptID: attempt.id, occurrenceID: sample.occurrenceID,
-                        song: entry["song"], sourceKey: attempt.sourceKey, authorization: attempt.authorization)
+                        song: song, sourceKey: attempt.sourceKey, authorization: attempt.authorization)
                 }
                 admission = .init(attemptID: attempt.id, occurrenceID: attempt.occurrence,
-                    song: entry["song"], sourceKey: attempt.sourceKey, authorization: attempt.authorization, ended: attempt.ended)
+                    song: song, sourceKey: attempt.sourceKey, authorization: attempt.authorization, ended: attempt.ended)
             } else {
                 // Legacy resolve/renewal can own an unready successor while the
                 // old native resource still sounds. Its admitted observations
@@ -183,11 +184,13 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 try previous.authorization?.check()
                 admission = previous
             }
-            _ = try target(entry["song"], admission.sourceKey)
+            _ = try target(admission.song, admission.sourceKey)
             playbackFeedbackAdmission = admission
             var context = entry["context"]
             if let automatic = sample.automatic { context["automatic"] = .bool(automatic) }
-            let targets = try similarFeedbackTargets(entry: entry, context: context, selectedSourceKey: admission.sourceKey)
+            var recordingEntry = entry
+            recordingEntry["song"] = admission.song
+            let targets = try similarFeedbackTargets(entry: recordingEntry, context: context, selectedSourceKey: admission.sourceKey)
                 .filter { platformEnabled($0.platform.rawValue) }
             let settings = try MusicNativeFeedbackSettings.decode(draft.playback)
             let own = epoch

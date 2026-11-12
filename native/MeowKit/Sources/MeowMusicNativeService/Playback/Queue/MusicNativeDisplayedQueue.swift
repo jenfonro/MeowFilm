@@ -11,9 +11,9 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
         try musicRequire(before.queue["revision"].int == expectedRevision, .staleRevision)
         let context: MJ, binding: MusicNativeHomeBinding?
         let historyDate: String?
-        // Displayed home rows are single-source; KuGou rows use the KuGou guest binding.
+        // The originating primary platform owns the home binding, not metadata additions.
         let source: MusicPublicBrowsePlatform = tracks.allSatisfy { track in
-            !track.sources.isEmpty && track.sources.allSatisfy { $0.platform == MusicPublicBrowsePlatform.kugou.rawValue }
+            track.sources.first?.platform == MusicPublicBrowsePlatform.kugou.rawValue
         } ? .kugou : .netease
         switch origin {
         case .song:
@@ -58,17 +58,17 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
             try intent.check()
             try musicRequire(!track.songId.isEmpty && (1...16).contains(track.sources.count))
             try musicRequire(try JSONEncoder().encode(track).count <= 64 * 1024, .limit)
-            for source in track.sources { try requirePlatform(source.platform) }
+            try requirePlatform(track.sources[0].platform)
             let raw: MJ?
             if let historyDate {
                 raw = historySongs[Data(track.songId.utf8)]
                 guard raw != nil else { throw MusicServiceError.notFound }
-            } else if let value = resolvedByID[Self.identityKey(songId: track.songId, sourceKeys: track.sources.map(\.sourceKey))] {
+            } else if let value = resolvedByID[Self.identityKey(songId: track.songId, primarySourceKey: track.sources[0].sourceKey)] {
                 raw = value
             } else if let value = try? song(track.ref, before) {
                 raw = value
             } else {
-                raw = cachedByID[Self.identityKey(songId: track.songId, sourceKeys: track.sources.map(\.sourceKey))]
+                raw = cachedByID[Self.identityKey(songId: track.songId, primarySourceKey: track.sources[0].sourceKey)]
             }
             if let raw {
                 try Self.checkDisplayedIdentity(raw, track)
@@ -79,7 +79,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
             } else {
                 // Reference discovery songs are NetEase recordings. Re-fetch
                 // only that exact native ID, never title-search or another source.
-                try musicRequire(track.sources.count == 1 && track.sources[0].platform == "wy", .targetChanged)
+                try musicRequire(track.sources[0].platform == "wy", .targetChanged)
                 let id = track.sources[0].nativeId
                 try MusicHomeAction.songCollection(ids: [id]).validate()
                 missing.append((position, id))
@@ -163,22 +163,18 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
         return result
     }
 
-    /// De-duplication identity: the same identity checkDisplayedIdentity
-    /// enforces, songId plus the sources in order. Keying by songId alone
-    /// folds distinct recordings that share a fingerprint-derived songId
-    /// (same title/artist/version, different native IDs) into one entry,
-    /// so a later track resolves to the wrong recording and fails the
-    /// identity check as if its target had changed.
-    private static func identityKey(songId: String, sourceKeys: [String]) -> Data {
-        Data((songId + "\n" + sourceKeys.joined(separator: "\n")).utf8)
+    /// Repeated occurrences can share a recording, but different primary native
+    /// IDs must not collapse merely because their song fingerprint is the same.
+    private static func identityKey(songId: String, primarySourceKey: String) -> Data {
+        Data((songId + "\n" + primarySourceKey).utf8)
     }
     private static func identityKey(_ song: MJ) throws -> Data {
-        try identityKey(songId: song["songId"].string, sourceKeys: MusicModel.sources(song).map(\.sourceKey))
+        try identityKey(songId: song["songId"].string, primarySourceKey: MusicModel.sources(song)[0].sourceKey)
     }
 
     private static func checkDisplayedIdentity(_ song: MJ, _ displayed: MusicRemoteTrack) throws {
         let actual = try MusicModel.track(song, displayed.ref)
         try musicRequire(actual.songId.utf8.elementsEqual(displayed.songId.utf8) &&
-            actual.sources == displayed.sources, .targetChanged)
+            actual.sources.first != nil && actual.sources.first == displayed.sources.first, .targetChanged)
     }
 }

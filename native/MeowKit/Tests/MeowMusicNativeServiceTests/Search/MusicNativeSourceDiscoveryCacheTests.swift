@@ -408,9 +408,10 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let snapshot = try await session.snapshot(discover: true, force: false)
         XCTAssertTrue(snapshot.searched)
         XCTAssertEqual(snapshot.track.sources.map(\.nativeId), ["SeedMID"])
-        try await session.commitDiscovery()
         let saved = try await service.read()
-        let info = saved.queue["entries"].array[0]["song"]["sources"].array[0]["musicInfo"]
+        XCTAssertEqual(saved.queue["entries"].array[0]["song"], song)
+        let shared = try await service.sharedSongMetadata(song)
+        let info = shared["sources"].array[0]["musicInfo"]
         XCTAssertEqual(info["singer"].string, "Fixture")
         XCTAssertEqual(info["duration"].number, 180)
         let calls = await qq.calls()
@@ -490,9 +491,8 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         XCTAssertEqual(store.snapshot().0, before)
         let httpCalls = await http.calls(), qqCalls = await qq.calls()
         XCTAssertTrue(httpCalls.isEmpty); XCTAssertTrue(qqCalls.isEmpty)
-        try await session.commitDiscovery()
         let queue = try await service.queue()
-        XCTAssertEqual(queue.revision, 2)
+        XCTAssertEqual(queue.revision, 1)
         XCTAssertTrue(queue.entries[0].track.sources.contains { $0.platform == "wy" && $0.nativeId == "cached" })
         await session.close(retainingAttemptID: nil); await service.close()
     }
@@ -556,18 +556,17 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
             qq: MusicNativeCandidateDiscoveryQQ(), http: http, sourceDiscovery: cache, clock: { clock.now() })
         let first = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         _ = try await first.snapshot(discover: true, force: false)
-        try await first.commitDiscovery()
         await first.close(retainingAttemptID: nil)
         let firstCalls = await http.calls()
         XCTAssertEqual(Set(firstCalls), ["wy", "kg", "kw", "mg"])
         clock.advance(24 * 60 * 60 - 1)
-        let early = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 2)
+        let early = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         _ = try await early.snapshot(discover: true, force: false)
         await early.close(retainingAttemptID: nil)
         let earlyCalls = await http.calls()
         XCTAssertEqual(earlyCalls, firstCalls, "an empty check is reused for 24 hours")
         clock.advance(2)
-        let second = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 2)
+        let second = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         _ = try await second.snapshot(discover: true, force: false)
         await second.close(retainingAttemptID: nil)
         let secondCalls = await http.calls()
@@ -650,9 +649,8 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let snapshot = try await session.snapshot(discover: true, force: true)
         XCTAssertEqual(Set(snapshot.track.sources.map(\.platform)), ["wy", "tx", "kg", "kw", "mg"])
-        try await session.commitDiscovery()
         let queue = try await service.queue(), memory = await entry(cache, seed)
-        XCTAssertEqual(queue.revision, 2)
+        XCTAssertEqual(queue.revision, 1)
         XCTAssertEqual(Set(memory.keys), ["wy", "tx", "kg", "kw", "mg"], "an unreadable document does not hide this run's checks")
         let target = try XCTUnwrap(MusicNativeCandidateDiscoveryFixture.target(snapshot))
         let candidate = try await session.resolve(target, attemptID: UUID().uuidString.lowercased())
@@ -666,7 +664,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         await service.close()
     }
 
-    func testPersistentWriteFailureDoesNotRejectDiscoveryOrItsQueueCommit() async throws {
+    func testPersistentWriteFailureDoesNotRejectDiscoveryOrPlayback() async throws {
         let seed = try MusicNativeCandidateDiscoveryFixture.song()
         let store = try favoriteStore(seed)
         // An absent base reads as no document but cannot accept a replacement.
@@ -680,10 +678,9 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let snapshot = try await session.snapshot(discover: true, force: true)
         XCTAssertEqual(Set(snapshot.track.sources.map(\.platform)), ["wy", "tx", "kg", "kw", "mg"])
-        try await session.commitDiscovery()
         await service.flushSourceDiscoveryPersist()
         let queue = try await service.queue(), memory = await entry(cache, seed)
-        XCTAssertEqual(queue.revision, 2)
+        XCTAssertEqual(queue.revision, 1)
         XCTAssertEqual(Set(memory.keys), ["wy", "tx", "kg", "kw", "mg"], "a failed write keeps serving memory")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
         let target = try XCTUnwrap(MusicNativeCandidateDiscoveryFixture.target(snapshot))
@@ -708,9 +705,8 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let snapshot = try await session.snapshot(discover: true, force: true)
         XCTAssertEqual(Set(snapshot.track.sources.map(\.platform)), ["wy", "tx", "kg", "kw", "mg"])
-        try await session.commitDiscovery()
         let queue = try await service.queue()
-        XCTAssertEqual(queue.revision, 2)
+        XCTAssertEqual(queue.revision, 1)
         await session.close(retainingAttemptID: nil); await service.close()
     }
 }

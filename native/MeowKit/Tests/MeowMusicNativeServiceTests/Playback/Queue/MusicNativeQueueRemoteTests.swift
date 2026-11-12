@@ -108,7 +108,7 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]])
         let source = MusicAccountQueueFixture.source(loader)
         let start = try await MusicAccountQueueFixture.start(service, source)
-        let wrong = MusicRemoteQueueStart(index: 0, songID: "different-recording", sourceKeys: start.sourceKeys)
+        let wrong = MusicRemoteQueueStart(index: 0, songID: "different-recording", primarySource: try XCTUnwrap(start.primarySource))
         do { _ = try await service.replaceRemoteQueue(source, start: wrong, expectedRevision: old.revision, intent: .init()); XCTFail() }
         catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
         let cycle = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]],

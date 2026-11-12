@@ -5,6 +5,46 @@ import MeowMusicPlatform
 @testable import MeowMusicNativeService
 
 final class MusicAudioCacheAdmissionTests: XCTestCase {
+    func testCachedPeerPlaybackUsesSharedRecordingWithoutQueueWrite() async throws {
+        for preparing in [false, true] {
+            let original = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
+            let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "PeerMID"))
+            let source = try XCTUnwrap(MusicModel.sources(peer).first)
+            let identity = MusicAudioFileCacheIdentity(scope: "script-history", songID: original["songId"].string,
+                sourceKey: source.sourceKey, platform: source.platform, nativeID: source.nativeId,
+                requestedQuality: "flac", playbackSignature: NativeMusicService.scriptAudioSignature(original),
+                provider: "historical-script")
+            let gate = MusicNativeCandidateDiscoveryBarrier()
+            await gate.release()
+            let file = AdmissionLookupCache(hit: .init(identity: identity,
+                fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
+                measuredQuality: "flac", expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)), gate: gate)
+            let store = try MusicNativeCandidateDiscoveryFixture.store(song: original)
+            let service = NativeMusicService(document: store, qq: NativeMusicQQFixture(), audioFileCache: file,
+                transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+            try await service.setAccess(available: true, generation: 1)
+            try await service.retainSongMetadata([peer])
+            let before = try await service.read(), writes = store.snapshot().2
+            let hit = try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(),
+                occurrenceID: "entry-1", selection: identity.selection, requestedQuality: nil, preparing: preparing)
+            let candidate = try XCTUnwrap(hit?.candidate)
+            XCTAssertEqual(hit?.selection, identity.selection)
+            if preparing { try await service.activateSource(attemptID: candidate.attemptId) }
+            let prepared = try await service.read()
+            XCTAssertEqual(prepared.queue, before.queue)
+            XCTAssertEqual(prepared.playback, before.playback)
+            XCTAssertEqual(store.snapshot().2, writes)
+            let accepted = try await service.record(.init(attemptId: candidate.attemptId, occurrenceId: "entry-1",
+                resourceId: candidate.resourceId, kind: .playing, position: 24, duration: 180))
+            XCTAssertTrue(accepted)
+            let after = try await service.read()
+            XCTAssertEqual(after.queue, before.queue)
+            XCTAssertTrue(after.history["days"].array.first?["songs"].array.first?["song"]["sources"].array
+                .contains { $0["sourceKey"].string == source.sourceKey } == true)
+            await service.close()
+        }
+    }
+
     func testLookupRechecksExclusionAfterSuspensionWithoutBlockingOtherSongsOrPlatforms() async throws {
         for official in [false, true] {
             for excluded in ["same", "other-song", "other-platform", "other-provider"] {

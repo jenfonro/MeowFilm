@@ -670,13 +670,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         guard Self.sameActionIdentity(track, renewed) else { throw MusicServiceError.targetChanged }
         return renewed
     }
-    private static func sameActionIdentity(_ lhs: MusicRemoteTrack, _ rhs: MusicRemoteTrack) -> Bool {
-        lhs.songId.utf8.elementsEqual(rhs.songId.utf8) && lhs.sources.count == rhs.sources.count &&
-            zip(lhs.sources, rhs.sources).allSatisfy {
-                $0.0.sourceKey.utf8.elementsEqual($0.1.sourceKey.utf8) &&
-                $0.0.platform.utf8.elementsEqual($0.1.platform.utf8) &&
-                $0.0.nativeId.utf8.elementsEqual($0.1.nativeId.utf8)
-            }
+    static func sameActionIdentity(_ lhs: MusicRemoteTrack, _ rhs: MusicRemoteTrack) -> Bool {
+        lhs.songId.utf8.elementsEqual(rhs.songId.utf8) && lhs.sources.first != nil &&
+            lhs.sources.first == rhs.sources.first
     }
     public func previous() async {
         guard canPrevious else { return }
