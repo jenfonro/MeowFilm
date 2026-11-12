@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
@@ -30,7 +31,10 @@ public static class MusicQqAccountUiTests
         yield return Case("datacontext-replacement-cancels-old-owner-without-polling-new-owner", ContextReplacement);
     }
     private static TestCase Case(string name, Func<Task> action) => new("music.accounts.qq.ui." + name, () => Sta(action));
-    private static void Check(bool value) => MusicNativeQqAccountTests.Check(value);
+    private static void Check(bool condition,
+        [CallerArgumentExpression(nameof(condition))] string expression = "",
+        [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
+    { if (!condition) throw new InvalidOperationException($"QQ account assertion at {member}:{line}: {expression}"); }
     private static async Task Sta(Func<Task> action)
     {
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -207,12 +211,21 @@ public static class MusicQqAccountUiTests
             await first.Module.BeginAccountQrAsync();
             await next.Module.BeginAccountQrAsync();
             Check(next.Module.HasAccountQr);
+            await first.Module.ActivatePlatformSettingsAsync();
+            await next.Module.ActivatePlatformSettingsAsync();
+            int firstCancels = first.Calls.AccountCalls.Count(method => method == "music.accounts.cancel");
+            int firstReads = first.Calls.AccountCalls.Count(method => method == "music.accounts.list");
+            int nextAccountCalls = next.Calls.AccountCalls.Count;
+            var nextQr = next.Module.AccountQrImage;
             int nextCalls = next.Transport.Calls;
             view.DataContext = next.Module;
             await Until(() => !first.Module.HasAccountQr && !first.Module.AccountBusy);
+            Check(first.Calls.AccountCalls.Count(method => method == "music.accounts.cancel") == firstCancels + 1 &&
+                first.Calls.AccountCalls.Count(method => method == "music.accounts.list") == firstReads + 1);
             int calls = first.Transport.Calls;
             await Task.Delay(2300);
             Check(first.Transport.Calls == calls && next.Transport.Calls == nextCalls && next.Module.HasAccountQr);
+            Check(next.Calls.AccountCalls.Count == nextAccountCalls && ReferenceEquals(nextQr, next.Module.AccountQrImage));
         }
         finally { window.Close(); }
     }
@@ -223,10 +236,14 @@ public static class MusicQqAccountUiTests
     };
     private static void OpenLogin(MusicAccountsView view) =>
         ((Popup)view.FindName("LoginPopup")).IsOpen = true;
-    private static async Task Until(Func<bool> predicate)
+    private static async Task Until(Func<bool> predicate,
+        [CallerArgumentExpression(nameof(predicate))] string expression = "",
+        [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(6));
-        while (!predicate()) await Task.Delay(20, timeout.Token);
+        try { while (!predicate()) await Task.Delay(20, timeout.Token); }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        { throw new TimeoutException($"QQ account wait at {member}:{line}: {expression}"); }
     }
     private sealed class NoRuntime : IRuntimeClient
     {
@@ -243,17 +260,25 @@ public static class MusicQqAccountUiTests
         internal QqAccountFixtureHandler Transport = new();
         internal QqAccountStore Store;
         internal MusicNativeApplication Application;
+        internal MusicAccountFixtureApplication Calls;
         internal MusicCapability Module;
         private Fixture()
         {
             Store = new(new LocalDocumentStore(MusicNativeQqAccountTests.DataPath(), AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Application = new(Store, Runtime, Transport);
-            Module = new(Application, Store, new Output(), new Dialogs());
+            Calls = new(Application);
+            Module = new(Calls, Store, new Output(), new Dialogs());
         }
         internal static async Task<Fixture> Create()
         {
             var f = new Fixture();
-            try { await f.Module.InitializeAsync(default); f.Module.SelectedAccount = f.Module.Accounts[1]; return f; }
+            try
+            {
+                await f.Module.InitializeAsync(default);
+                // Account fixtures stay on a local page instead of refreshing an unrelated home.
+                await f.Module.NavigateAsync("favorites", default);
+                f.Module.SelectedAccount = f.Module.Accounts[1]; return f;
+            }
             catch { await f.DisposeAsync(); throw; }
         }
         public async ValueTask DisposeAsync()

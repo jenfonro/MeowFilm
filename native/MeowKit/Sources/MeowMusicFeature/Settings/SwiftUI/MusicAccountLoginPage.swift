@@ -25,7 +25,7 @@ final class MusicAccountLoginViewController: MusicSettingsPageViewController<Mus
         modalTransitionStyle = .crossDissolve
     }
 
-    override func loadView() { view = MusicAccountFloatingBackdrop() }
+    override func loadView() { view = AccountFloatingBackdrop() }
     override var usesPageHeader: Bool { false }
 
     override func viewDidLoad() {
@@ -82,7 +82,7 @@ struct MusicAccountLoginContent: View {
     var close: () -> Void = {}
 
     var body: some View {
-        MusicAccountFloatingCard(theme: theme) {
+        AccountFloatingCard(theme: theme) {
             VStack(alignment: .leading, spacing: 20) {
                 MusicAccountCardHeader(
                     platform: state.platform, title: state.platform.title + "登录", theme: theme, close: close
@@ -104,7 +104,7 @@ struct MusicAccountLoginContent: View {
                                           platform: state.platform, theme: theme)
                         if state.canRetry {
                             Button("重试", action: state.retry)
-                                .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                                .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
                         }
                         if let status = state.status {
                             Text(status)
@@ -140,10 +140,10 @@ struct MusicAccountLoginContent: View {
             }
             if state.canRetry {
                 Button("重试", action: state.retry)
-                    .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                    .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
             } else if state.image != nil {
                 Button("保存二维码", action: shareQR)
-                    .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                    .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
             }
         }
         .frame(maxWidth: .infinity)
@@ -204,7 +204,7 @@ private struct MusicSMSLoginForm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("手机号").font(.subheadline.weight(.semibold))
-            MusicAccountInputCapsule(theme: theme) {
+            AccountInputCapsule(theme: theme) {
                 countryCode
                 divider
                 TextField("", text: Binding(get: { fields.value.phone }, set: { fields.setPhone($0) }))
@@ -215,7 +215,7 @@ private struct MusicSMSLoginForm: View {
                     .frame(minHeight: 48)
             }
             Text("验证码").font(.subheadline.weight(.semibold)).padding(.top, 6)
-            MusicAccountInputCapsule(theme: theme) {
+            AccountInputCapsule(theme: theme) {
                 TextField("", text: Binding(get: { fields.value.code }, set: { fields.setCode($0) }))
                     .keyboardType(.numberPad)
                     .textContentType(.oneTimeCode)
@@ -236,7 +236,7 @@ private struct MusicSMSLoginForm: View {
                 .disabled(!actions.value.canSend)
             }
             Button("登录", action: actions.submit)
-                .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
                 .disabled(!actions.value.canSubmit)
                 .padding(.top, 10)
         }

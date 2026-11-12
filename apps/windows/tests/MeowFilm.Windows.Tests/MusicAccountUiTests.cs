@@ -61,6 +61,39 @@ public static class MusicAccountUiTests
             Check(runtime.Calls.Count(call => call.Method == "music.accounts.cancel") == 1);
             Check(runtime.Calls.Count(call => call.Method == "music.accounts.list") == 1);
         });
+        yield return Test("shutdown drains the active cancellation read before confirming its receipt", async () =>
+        {
+            foreach (bool observeBeforeShutdown in new[] { false, true })
+            {
+                var runtime = new Application { HoldImport = true, HoldList = true };
+                await using var module = Create(runtime);
+                module.SelectedAccount = module.Accounts[0];
+                var import = module.ImportAccountAsync("fixture=x");
+                await runtime.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                var cancel = module.CancelAccountAsync();
+                try
+                {
+                    Task observation = observeBeforeShutdown ? module.ReadAccountsAsync() : Task.CompletedTask;
+                    if (!observeBeforeShutdown)
+                        await runtime.ListArrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    var prepare = module.PrepareShutdownAsync();
+                    await runtime.ListArrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    await Dispatcher.Yield(DispatcherPriority.Background);
+                    Check(!cancel.IsCompleted && !prepare.IsCompleted);
+                    runtime.ListReply.TrySetResult(Application.Accounts());
+                    await Task.WhenAll(import, cancel, observation, prepare);
+                    Check(module.SelectedAccount!.State == "none" && module.AccountStatus == "已取消");
+                    Check(runtime.Calls.Count(call => call.Method == "music.accounts.import") == 1);
+                    Check(runtime.Calls.Count(call => call.Method == "music.accounts.cancel") == 1);
+                    Check(runtime.Calls.Count(call => call.Method == "music.accounts.list") == 1);
+                }
+                finally
+                {
+                    runtime.ListReply.TrySetResult(Application.Accounts());
+                    runtime.Reply.TrySetResult(BridgeCodec.Value(new { ok = true, account = Application.Account("wy", "verified") }));
+                }
+            }
+        });
         yield return Test("malformed account response preserves rows and sanitizes errors", async () =>
         {
             var runtime = new Application { InvalidList = true };
@@ -134,21 +167,30 @@ public static class MusicAccountUiTests
     }
     private sealed class Application : MusicApplicationTestDouble
     {
-        public bool HoldImport, UnknownImport, InvalidList;
+        public bool HoldImport, UnknownImport, InvalidList, HoldList;
         public readonly TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource<JsonElement> Reply = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ListArrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource<JsonElement> ListReply = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public List<(string Method, JsonElement Parameters)> Calls { get; } = [];
         public static object Account(string platform, string state) => new
         {
             platform, state, generation = 1,
             profile = state == "verified" ? new { platform, userId = "42", displayName = "合成账号" } : null
         };
+        public static JsonElement Accounts() => BridgeCodec.Value(new { ok = true,
+            items = new[] { Account("wy", "none"), Account("tx", "none"), Account("kg", "none") } });
         public override Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             var dto = BridgeCodec.Value(parameters ?? new { }); Calls.Add((method, dto));
             if (method == "music.accounts.import" && HoldImport) { Arrived.TrySetResult(); return Reply.Task; }
             if (method == "music.accounts.import" && UnknownImport)
                 return Task.FromResult(BridgeCodec.Value(new { ok = false, code = "COMMIT_UNKNOWN" }));
+            if (method == "music.accounts.list" && HoldList)
+            {
+                ListArrived.TrySetResult();
+                return ListReply.Task.WaitAsync(cancellationToken);
+            }
             if (method == "music.library.detail")
                 return Task.FromResult(BridgeCodec.Value(new { ok = true, offset = 0, limit = 100, total = 1,
                     collection = new { id = "favorites", name = "收藏", kind = "favorites", revision = 1, count = 1 },

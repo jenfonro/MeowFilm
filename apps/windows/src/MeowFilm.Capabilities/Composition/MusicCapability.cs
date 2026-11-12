@@ -998,7 +998,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         loadCancellation?.Cancel(); // Only reads: never cancel admitted mutations/history writes.
         catalogSourceReadCancellation?.Cancel(); // The shared startup source read is independent of its waiters.
         startupCancellation?.Cancel();
-        accountReadCancellation?.Cancel();
+        // Cancellation settlement owns its confirming read. Cancelling that
+        // read here would turn an ordinary page exit into an unknown receipt.
+        if (accountSettlement.IsCompleted) accountReadCancellation?.Cancel();
         collectionPageCancellation?.Cancel();
         // Resolution may be a network read; cancel it before waiting for commandTail.
         onlineCancellation?.Cancel(); RetireLyrics(); CancelMusicPreload();

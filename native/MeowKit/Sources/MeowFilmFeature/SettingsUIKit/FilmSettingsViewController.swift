@@ -31,6 +31,8 @@ public final class FilmSettingsViewController: PageViewController {
                 page = FilmVideoSourcesViewController(service: model.sources, themeProvider: themeProvider)
             case .dataSources:
                 page = FilmDataSourceSettingsViewController(tmdb: model.tmdb, douban: model.douban, themeProvider: themeProvider)
+            case .pan:
+                page = PanAccountsViewController(model: model.pan, themeProvider: themeProvider)
             case .preferences:
                 guard let playback = model.playback else { showError("播放设置暂不可用"); return }
                 page = FilmSmartPlaybackSettingsController(owner: playback, themeProvider: themeProvider)
@@ -63,7 +65,7 @@ public final class FilmSettingsViewController: PageViewController {
 }
 
 private enum FilmSettingsDestination: String, CaseIterable {
-    case search, matching, cats, videos, dataSources, preferences
+    case search, matching, cats, videos, dataSources, pan, preferences
     var title: String {
         switch self {
         case .search: return "搜索净化设置"
@@ -71,6 +73,7 @@ private enum FilmSettingsDestination: String, CaseIterable {
         case .cats: return "猫源"
         case .videos: return "视频源"
         case .dataSources: return "数据源"
+        case .pan: return "网盘账号"
         case .preferences: return "智能播放设置"
         }
     }

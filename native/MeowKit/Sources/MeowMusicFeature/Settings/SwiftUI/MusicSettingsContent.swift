@@ -118,19 +118,7 @@ struct MusicPlatformLogo: View {
     var theme: PageTheme
 
     var body: some View {
-        Group {
-            if let assetName {
-                Image(assetName, bundle: .main)
-                    .renderingMode(.original)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                Image(systemName: "music.note")
-                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+        AccountPlatformMark(assetName: assetName, symbol: "music.note", size: size, theme: theme)
     }
 }
 
@@ -140,11 +128,8 @@ struct MusicPlatformLabel: View {
     let theme: PageTheme
 
     var body: some View {
-        HStack(spacing: 12) {
-            MusicPlatformLogo(assetName: platform.settingsLogoName, theme: theme)
-            Text(platform.title)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        AccountPlatformLabel(title: platform.title, assetName: platform.settingsLogoName,
+                             symbol: "music.note", theme: theme)
     }
 }
 

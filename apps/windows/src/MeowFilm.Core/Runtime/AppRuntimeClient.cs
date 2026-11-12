@@ -81,6 +81,13 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         return ExecuteAsync((session, token) => session.CallAsync(method, parameters, token), cancellationToken,
             waitForCompletion: method == "source.runtime.rules.process");
     }
+    public Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!RuntimeHttpProtocol.ValidMethod(method)) throw new BridgeException("INVALID_MESSAGE");
+        return ExecuteAsync((session, token) => session.CallAsync(method, parameters, timeout, token), cancellationToken);
+    }
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
         ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
     {

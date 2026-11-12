@@ -986,21 +986,26 @@ test('Baidu cancellation and Cookie persistence failures stop subsequent operati
 
 test('Baidu service list stamps the reference and rejects an unsupported play mode before transfer', async t => {
   const dataRoot = mkdtempSync(join(tmpdir(), 'pan-baidu-'));
-  const f = fixture(() => listing([{ fs_id: 'original-file', isdir: 0, server_filename: '原名#$*.mp4', path: '/原名#$*.mp4' }]));
+  const f = fixture(url => url.pathname === '/api/loginStatus'
+    ? response({ login_info: { bdstoken: 'synthetic-account-confirmation' } })
+    : listing([{ fs_id: 'original-file', isdir: 0, server_filename: '原名#$*.mp4', path: '/原名#$*.mp4' }]));
   const service = createPanService({ dataRoot, transport: f.transport });
   t.after(async () => { await service.close(); rmSync(dataRoot, { recursive: true, force: true }); });
   const capabilities = (await service.invoke('providers')).providers.find(item => item.provider === 'baidu');
   assert.deepEqual(capabilities, {
     provider: 'baidu', credentialFields: ['cookie'], list: true, prepare: true,
-    modes: ['streaming'], login: true, refresh: false,
+    modes: ['streaming'], login: true, refresh: true,
   });
   await service.invoke('settings.set', { provider: 'baidu', credentials: { cookie: 'BDUSS=synthetic' } });
   const result = await service.invoke('list', { provider: 'baidu', share: { ...share, password: '' } });
   assert.equal(result.files[0].file.provider, 'baidu');
   assert.equal(result.files[0].file.accountRevision, 1);
   await assert.rejects(service.invoke('play', { provider: 'baidu', file: result.files[0].file, mode: 'download' }), { code: 'UNSUPPORTED_OPERATION' });
-  await assert.rejects(service.invoke('refresh', { provider: 'baidu' }), { code: 'UNSUPPORTED_OPERATION' });
-  assert.equal(f.calls.length, 1);
+  const refreshed = await service.invoke('refresh', { provider: 'baidu' });
+  assert.equal(refreshed.refreshed, true);
+  assert.equal(refreshed.account.status, 'signedIn');
+  assert.equal(f.calls.length, 2);
+  assert.equal(new URL(f.calls[1].url).pathname, '/api/loginStatus');
 });
 
 test('Baidu service list to share playback uses precise transfer mapping, not original or first same-name file', async t => {

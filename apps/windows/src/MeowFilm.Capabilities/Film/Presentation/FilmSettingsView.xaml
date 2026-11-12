@@ -29,6 +29,7 @@
      <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="猫源管理"/>
      <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="视频源管理"/>
      <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="数据源设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+     <RadioButton Content="网盘账号" Tag="pan" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="网盘账号"/>
      <StackPanel x:Name="BusinessNavigation" Orientation="Horizontal" Visibility="Collapsed">
       <RadioButton Content="智能播放设置" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
      </StackPanel>
@@ -89,6 +90,7 @@
    </ScrollViewer>
   </Grid>
   <Grid x:Name="BusinessPage" Grid.Row="1" Visibility="Collapsed"/>
+  <local:PanAccountsView x:Name="PanPage" Grid.Row="1" Visibility="Collapsed"/>
   <Grid x:Name="RulesPage" Grid.Row="1">
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">

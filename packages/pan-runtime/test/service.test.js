@@ -37,6 +37,7 @@ test('seven providers expose actual capabilities and configurations persist in p
   const available = (await service.invoke('providers')).providers;
   assert.deepEqual(available.map(item => item.provider),
     ['baidu', 'quark', 'uc', 'tianyi', 'yidong', 'quark_tv', 'uc_tv']);
+  assert.equal(available.every(item => item.refresh), true);
   assert.equal(available.find(item => item.provider === 'quark_tv').list, false);
   assert.equal(available.find(item => item.provider === 'uc_tv').prepare, false);
   const secret = ' cookie=synthetic-private-value ';
@@ -55,7 +56,7 @@ test('seven providers expose actual capabilities and configurations persist in p
   try {
     assert.deepEqual(await recovered.invoke('settings.get'), state);
     assert.deepEqual(await recovered.invoke('settings.clear', { provider: 'baidu' }),
-      { provider: 'baidu', revision: 2, configured: false, fields: [] });
+      { provider: 'baidu', revision: 2, configured: false, fields: [], status: 'signedOut' });
     assert.equal(JSON.parse(readFileSync(join(root, 'pan/accounts.json'), 'utf8')).accounts.baidu.revision, 2);
   } finally { await recovered.close(); }
 });
@@ -286,6 +287,7 @@ test('QR pending, scanned, concurrent confirmation and repeated polling expose s
   for (const reply of await Promise.all(calls)) {
     assert.equal(reply.status, 'confirmed');
     assert.equal(reply.account.revision, 1);
+    assert.equal(reply.account.status, 'signedIn');
     assert.ok(!JSON.stringify(reply).includes('synthetic-confirmed-cookie'));
   }
   assert.equal(polls, 3);
@@ -294,25 +296,76 @@ test('QR pending, scanned, concurrent confirmation and repeated polling expose s
   assert.match(saved.accounts.baidu.credentials.cookie, /BDUSS=synthetic-confirmed-cookie/);
   assert.equal((await service.invoke('login.poll', input)).status, 'confirmed');
   assert.equal(polls, 3);
+  assert.equal((await service.invoke('login.cancel', input)).status, 'confirmed');
+  assert.equal((await service.invoke('settings.get')).accounts[0].status, 'signedIn');
   await service.invoke('settings.clear', { provider: 'baidu' });
   assert.equal((await service.invoke('login.poll', input)).status, 'cancelled');
 });
 
 test('QR persistence failure is not confirmation and may be retried without repeating upstream completion', async t => {
   let polls = 0;
-  const { service, root } = setup(t, baiduLogin(() => { polls++; return confirmedQR(); }));
+  const loginHTTP = baiduLogin(() => { polls++; return confirmedQR(); });
+  const { service, root } = setup(t, input => new URL(input.url).pathname === '/api/loginStatus'
+    ? { status: 401, headers: {}, body: Buffer.alloc(0) } : loginHTTP(input));
   await service.invoke('settings.set', { provider: 'baidu', credentials: { cookie: 'synthetic-existing' } });
+  await assert.rejects(service.invoke('refresh', { provider: 'baidu' }), { code: 'AUTH_REQUIRED' });
+  assert.equal((await service.invoke('settings.get')).accounts[0].status, 'expired');
   const login = await service.invoke('login.start', { provider: 'baidu' }), input = { sessionId: login.sessionId };
   const path = join(root, 'pan/accounts.json'), backup = join(root, 'pan/held-accounts');
   renameSync(path, backup);
   mkdirSync(path);
   await assert.rejects(service.invoke('login.poll', input), { code: 'STORAGE_ERROR' });
   assert.equal((await service.invoke('settings.get')).accounts[0].revision, 1);
+  assert.equal((await service.invoke('settings.get')).accounts[0].status, 'expired');
   rmSync(path, { recursive: true }); renameSync(backup, path);
-  assert.equal((await service.invoke('login.poll', input)).status, 'confirmed');
+  const confirmed = await service.invoke('login.poll', input);
+  assert.equal(confirmed.status, 'confirmed');
+  assert.equal(confirmed.account.status, 'signedIn');
   assert.equal(polls, 1);
   assert.equal(JSON.parse(readFileSync(path)).accounts.baidu.revision, 2);
 });
+
+for (const provider of ['baidu', 'quark', 'uc']) {
+  for (const action of ['cancel', 'replace']) {
+    test(`${provider}: ${action} rejects a late QR start without reviving its challenge or changing credentials`, async t => {
+      const entered = deferred(), release = deferred();
+      let starts = 0;
+      const loginHTTP = baiduLogin(() => response({ errno: 1 }));
+      const { service, root } = setup(t, async input => {
+        const path = new URL(input.url).pathname;
+        const isStart = path === '/v2/api/getqrcode' || path.endsWith('/getTokenForQrcodeLogin');
+        if (isStart && ++starts === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+        if (provider === 'baidu') return loginHTTP(input);
+        if (isStart) return response({ status: 2000000, data: { token: 'synthetic-qr-token' } });
+        if (path.endsWith('/getServiceTicketByQrcodeToken')) return response({ status: 'pending' });
+        return response({});
+      });
+      const controller = new AbortController();
+      const pending = assert.rejects(service.invoke('login.start', { provider }, { signal: controller.signal }),
+        { code: action === 'cancel' || provider === 'baidu' ? 'CANCELLED' : 'STALE_ACCOUNT' });
+      await entered.promise;
+      if (action === 'cancel') controller.abort();
+      else await service.invoke('settings.set', { provider, credentials: { cookie: 'session=synthetic-new' } });
+      release.resolve();
+      await pending;
+      const current = (await service.invoke('settings.get')).accounts.find(item => item.provider === provider);
+      assert.equal(current.revision, action === 'cancel' ? 0 : 1);
+      assert.equal(current.status, action === 'cancel' ? 'signedOut' : 'signedIn');
+      if (action === 'replace') {
+        assert.deepEqual(JSON.parse(readFileSync(join(root, 'pan/accounts.json'))).accounts[provider].credentials,
+          { cookie: 'session=synthetic-new' });
+      }
+      const next = await service.invoke('login.start', { provider });
+      assert.equal(next.status, 'pending');
+      assert.equal((await service.invoke('login.poll', { sessionId: next.sessionId })).status, 'pending');
+      assert.equal((await service.invoke('login.cancel', { sessionId: next.sessionId })).status, 'cancelled');
+      assert.deepEqual((await service.invoke('settings.get')).accounts.find(item => item.provider === provider), current);
+    });
+  }
+}
 
 test('QR cancellation and replacement invalidate pending completion without saving the old login', async t => {
   for (const action of ['cancel', 'replace']) {
@@ -377,6 +430,7 @@ test('upstream expired QR stays distinct from pending and cannot write credentia
   assert.equal((await service.invoke('login.poll', input)).status, 'expired');
   assert.equal((await service.invoke('login.poll', input)).status, 'expired');
   assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === 'quark').revision, 0);
+  assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === 'quark').status, 'signedOut');
 });
 
 test('starting another QR session and reaching the protocol expiry retire old challenges without polling upstream', async t => {

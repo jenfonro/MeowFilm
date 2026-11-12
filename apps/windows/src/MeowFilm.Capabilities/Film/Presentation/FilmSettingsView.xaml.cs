@@ -14,6 +14,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private readonly FilmRuleService rules;
     private readonly FilmSourceService sources;
     private readonly FilmMetadataService? metadata;
+    private readonly PanAccounts panAccounts;
     private readonly FilmPlaybackSettingsView? playbackSettings;
     private string section = "rules";
     private bool initialized, observingSources;
@@ -31,7 +32,9 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         this.rules = rules ?? throw new ArgumentNullException(nameof(rules));
         this.sources = sources ?? throw new ArgumentNullException(nameof(sources));
         this.metadata = metadata;
+        panAccounts = new(sources.Runtime);
         InitializeComponent();
+        PanPage.DataContext = panAccounts;
         if (business is not null)
         {
             playbackSettings = new(business, target, "clean");
@@ -82,14 +85,19 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         playbackSettings?.Deactivate();
         ClosePopup(restoreFocus: false);
     }
-    internal Task PreparePlaybackSettingsShutdownAsync() =>
-        playbackSettings?.PrepareShutdownAsync() ?? Task.CompletedTask;
-    internal void ResumePlaybackSettings() => playbackSettings?.Resume();
+    internal Task PreparePlaybackSettingsShutdownAsync() => Task.WhenAll(
+        playbackSettings?.PrepareShutdownAsync() ?? Task.CompletedTask, panAccounts.PrepareShutdownAsync());
+    internal void ResumePlaybackSettings()
+    {
+        playbackSettings?.Resume();
+        panAccounts.Resume();
+    }
 
     private async Task ActivateCurrentAsync()
     {
         if (!Active) return;
-        if (section == "rules")
+        if (section == "pan") await panAccounts.ActivateAsync();
+        else if (section == "rules")
         {
             if ((!RulesLoaded || rulesReloadPending) && !RulesBusy && !RulesFailed) await LoadRulesAsync();
             if (Active && section == "rules") await PresentPlaybackSettingsAsync("clean");
@@ -133,7 +141,8 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         CatsPage.Visibility = key == "cats" ? Visibility.Visible : Visibility.Collapsed;
         VideosPage.Visibility = key == "videos" ? Visibility.Visible : Visibility.Collapsed;
         MetadataPage.Visibility = key == "metadata" ? Visibility.Visible : Visibility.Collapsed;
-        BusinessPage.Visibility = key is "rules" or "cats" or "videos" or "metadata" ? Visibility.Collapsed : Visibility.Visible;
+        PanPage.Visibility = key == "pan" ? Visibility.Visible : Visibility.Collapsed;
+        BusinessPage.Visibility = key is "rules" or "cats" or "videos" or "metadata" or "pan" ? Visibility.Collapsed : Visibility.Visible;
         anchor.Focus(); anchor.BringIntoView();
         await ActivateCurrentAsync();
     }
