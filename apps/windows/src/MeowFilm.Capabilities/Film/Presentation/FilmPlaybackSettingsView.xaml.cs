@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
@@ -17,10 +18,7 @@ public sealed record FilmSettingRow(string Title, JsonElement Value, bool Manual
     public string AutoDisable => FilmJson.Bool(Value, "autoDisable") ? "开启" : "关闭";
     public string State => $"{(FilmJson.Bool(Value, "enabled") ? "已启用" : "已停用")} · 连续失败{FilmJson.Integer(Value, "failureCount") ?? 0}次";
 }
-public sealed record FilmSettingGroup(string Id, string Title, IReadOnlyList<FilmSettingRow> Rows)
-{
-    public string Label => $"{Title} ({Rows.Count})";
-}
+public sealed record FilmSettingGroup(string Id, string Title, IReadOnlyList<FilmSettingRow> Rows);
 
 public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChanged
 {
@@ -34,15 +32,18 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private string section = "preferences";
     private long generation;
     private bool readBusy, mutating, stopping;
+    private readonly ObservableCollection<OrderItem> ruleItems = [], panItems = [];
     private IReadOnlyList<FilmSettingRow> rows = [];
 
     internal FilmPlaybackSettingsView(FilmPlaybackSettings service, Func<FilmPlaybackTarget?> target, string section = "preferences")
     {
         this.service = service; this.target = target; this.section = section;
         InitializeComponent(); DataContext = this;
+        RuleOrder.ItemsSource = ruleItems; PanOrder.ItemsSource = panItems;
         PresentSection();
     }
     public bool Idle => !stopping && !readBusy && !mutating;
+    public bool ReadFailed { get; private set; }
     public string Work { get; private set; } = "";
     public IReadOnlyList<FilmSettingRow> Rows => rows;
     public IReadOnlyList<FilmSettingGroup> ManualGroups { get; private set; } = [];
@@ -72,7 +73,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         generation++;
         read?.Cancel();
         editor?.Close(); editor = null;
-        readBusy = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Work = ""; Changed();
+        readBusy = false; ReadFailed = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Work = ""; Changed();
     }
     internal async Task PrepareShutdownAsync()
     {
@@ -88,7 +89,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     private async void View_Loaded(object sender, RoutedEventArgs e) { if (preferences is null) await LoadAsync(); }
     private void View_Unloaded(object sender, RoutedEventArgs e) => Deactivate();
-    private async void Refresh_Click(object sender, RoutedEventArgs e) => await LoadAsync();
+    private async void Retry_Click(object sender, RoutedEventArgs e) { if (ReadFailed) await LoadAsync(); }
     private Task LoadAsync()
     {
         if (stopping || !IsLoaded || !IsVisible) return Task.CompletedTask;
@@ -111,7 +112,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         string requestedSection = section;
         string? selectedManual = (ManualTargets.SelectedItem as FilmSettingGroup)?.Id;
         string? selectedBlock = (BlockTargets.SelectedItem as FilmSettingGroup)?.Id;
-        readBusy = true; Work = "读取中…"; rows = []; ManualGroups = []; BlockGroups = []; Changed();
+        readBusy = true; ReadFailed = false; Work = "读取中…"; rows = []; ManualGroups = []; BlockGroups = []; Changed();
         try
         {
             var loaded = await service.ReadPreferencesAsync(token);
@@ -130,7 +131,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             Work = "";
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        catch (Exception) { if (ticket == generation) { Work = "读取失败"; Notify("影视设置读取失败"); } }
+        catch (Exception) { if (ticket == generation) { ReadFailed = true; Work = "读取失败"; Notify("影视设置读取失败"); } }
         finally { if (ticket == generation) { readBusy = false; Changed(); } }
     }
     private static FilmSettingRow[] ReadRows(JsonElement library, string field)
@@ -151,42 +152,68 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private void PopulatePreferences()
     {
         if (preferences is not { } value) return;
-        RuleOrder.ItemsSource = value.RuleOrder.Select(id => new OrderItem(id, Label(id))).ToArray();
-        PanOrder.ItemsSource = value.PanOrder.Select(id => new OrderItem(id, Label(id))).ToArray();
+        PopulateOrders();
         Keywords.Text = string.Join(",", value.Keywords);
         CleanKeywords.Text = string.Join(",", value.SiteCleanKeywords);
     }
-    private void Order_Move(object? sender, SettingsPriorityMoveEventArgs e)
+    private void PopulateOrders()
     {
-        if (!Idle || sender is not SettingsPriorityList list) return;
-        var items = list.ItemsSource!.Cast<OrderItem>().ToList();
+        if (preferences is not { } value) return;
+        ReplaceOrder(ruleItems, value.RuleOrder); ReplaceOrder(panItems, value.PanOrder);
+    }
+    private static void ReplaceOrder(ObservableCollection<OrderItem> items, string[] order)
+    {
+        for (int index = 0; index < order.Length; index++)
+        {
+            var item = items.FirstOrDefault(item => item.Id == order[index]);
+            if (item is null) items.Insert(index, new(order[index], Label(order[index])));
+            else if (items.IndexOf(item) != index) items.Move(items.IndexOf(item), index);
+        }
+    }
+    private async void Order_Move(object? sender, SettingsPriorityMoveEventArgs e)
+    {
+        if (preferences is null || !Idle || sender is not SettingsPriorityList list ||
+            list.ItemsSource is not ObservableCollection<OrderItem> items) return;
         int source = items.IndexOf((OrderItem)e.Source), destination = items.IndexOf((OrderItem)e.Target);
         if (source < 0 || destination < 0 || source == destination) return;
-        items.RemoveAt(source); items.Insert(destination, (OrderItem)e.Source);
-        list.ItemsSource = items;
+        long ticket = generation;
+        items.Move(source, destination);
+        var order = items.Select(item => item.Id).ToArray();
+        var draft = ReferenceEquals(list, RuleOrder) ? preferences with { RuleOrder = order } : preferences with { PanOrder = order };
+        bool saved = await MutateAsync(() => service.SavePreferencesAsync(draft),
+            value => { preferences = value; PopulateOrders(); }, "设置已保存");
+        if (!saved && ticket == generation) PopulateOrders();
     }
     private static string[] Words(string value) => value.Split([',', '，']).Select(word => word.Trim()).Where(word => word.Length > 0).ToArray();
     private FilmPreferences Draft() => section == "clean" ? preferences! with { SiteCleanKeywords = Words(CleanKeywords.Text) }
-        : preferences! with { RuleOrder = RuleOrder.ItemsSource!.Cast<OrderItem>().Select(item => item.Id).ToArray(),
-            PanOrder = PanOrder.ItemsSource!.Cast<OrderItem>().Select(item => item.Id).ToArray(), Keywords = Words(Keywords.Text) };
+        : preferences! with { Keywords = Words(Keywords.Text) };
     private async void SavePreferences_Click(object sender, RoutedEventArgs e)
     {
         if (preferences is null || !Idle) return;
         var draft = Draft();
         await MutateAsync(() => service.SavePreferencesAsync(draft), saved =>
-        { preferences = saved; PopulatePreferences(); }, "设置已保存");
+        {
+            preferences = saved;
+            if (section == "clean") CleanKeywords.Text = string.Join(",", saved.SiteCleanKeywords);
+            else Keywords.Text = string.Join(",", saved.Keywords);
+        }, "设置已保存");
     }
     private async void Restore_Click(object sender, RoutedEventArgs e)
     {
-        if (preferences is null || sender is not Button { Tag: string group }) return;
-        var value = Draft(); var defaults = FilmPreferences.Defaults;
+        if (preferences is null || !Idle || sender is not Button { Tag: string group }) return;
+        var value = preferences; var defaults = FilmPreferences.Defaults;
         var next = group switch
         {
             "rule" => value with { RuleOrder = defaults.RuleOrder }, "pan" => value with { PanOrder = defaults.PanOrder },
             "keywords" => value with { Keywords = defaults.Keywords }, _ => value with { SiteCleanKeywords = defaults.SiteCleanKeywords }
         };
         await MutateAsync(() => service.SavePreferencesAsync(next), saved =>
-        { preferences = saved; PopulatePreferences(); }, "已恢复默认");
+        {
+            preferences = saved;
+            if (group == "keywords") Keywords.Text = string.Join(",", saved.Keywords);
+            else if (group == "clean") CleanKeywords.Text = string.Join(",", saved.SiteCleanKeywords);
+            else PopulateOrders();
+        }, "已恢复默认");
     }
     private Task<bool> MutateAsync<T>(Func<Task<T>> action, Action<T>? publish, string success)
     {

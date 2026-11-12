@@ -16,7 +16,8 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <StackPanel>
-  <TextBlock Text="{Binding Title,ElementName=Root}" FontSize="14" Margin="0,0,0,12"/>
+  <TextBlock Text="{Binding Title,ElementName=Root}" FontSize="14" Margin="0,0,0,12"
+             Visibility="{Binding ShowTitle,ElementName=Root,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
   <Border x:Name="ListSurface" Style="{StaticResource Settings.ListSurface}">
    <AdornerDecorator>
      <ListBox x:Name="PriorityItems" Style="{StaticResource Settings.List}" ItemContainerStyle="{StaticResource Settings.ListItem}"
