@@ -189,12 +189,13 @@ open class PageViewController: UIViewController {
     /// The content is laid out below the app-owned header. Pages with their own
     /// full-screen layout (the player) override `usesPageHeader`.
     open var usesPageHeader: Bool { true }
+    open var headerContentHeight: CGFloat { PageLayoutMetrics.navigation }
 
     private func installHeader() {
         view.addSubview(pageHeader)
         pageHeader.accessibilityIdentifier = "page.header"
         pageHeader.translatesAutoresizingMaskIntoConstraints = false
-        let height = pageHeader.heightAnchor.constraint(equalToConstant: PageLayoutMetrics.navigation)
+        let height = pageHeader.heightAnchor.constraint(equalToConstant: headerContentHeight)
         headerHeight = height
         NSLayoutConstraint.activate([
             pageHeader.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -248,7 +249,7 @@ open class PageViewController: UIViewController {
         guard hasOwnHeader else { return }
         let statusBar = view.safeAreaInsets.top
         pageHeader.statusBarHeight = statusBar
-        let height = statusBar + PageLayoutMetrics.navigation
+        let height = statusBar + headerContentHeight
         if headerHeight?.constant != height { headerHeight?.constant = height }
     }
 

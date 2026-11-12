@@ -32,6 +32,10 @@ public struct NovelSource: Codable, Equatable, Sendable, Identifiable {
     public var `protocol`: String
     public var actions: [String]
     public var errorCode: String?
+    public var weight: Double?
+    public var lastUpdateTime: Double?
+    public var respondTime: Double?
+    public var hasExplore: Bool?
     public var id: String { installationId }
 }
 

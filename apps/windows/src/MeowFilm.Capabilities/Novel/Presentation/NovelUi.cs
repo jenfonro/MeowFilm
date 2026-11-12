@@ -53,19 +53,22 @@ internal static class NovelUi
         var pending = CancellationTokenSource.CreateLinkedTokenSource(token);
         var popup = new Popup { PlacementTarget = owner, AllowsTransparency = true, StaysOpen = true };
         DialogPlacement.SetCentered(popup, true);
-        var surface = new Border { Padding = new(24), CornerRadius = new(12),
+        var surface = new Border { Padding = new(0), CornerRadius = new(20),
             Width = Math.Min(640, Math.Max(320, Window.GetWindow(owner)?.ActualWidth - 64 ?? 640)) };
         Theme(surface); surface.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface");
         KeyboardNavigation.SetTabNavigation(surface, KeyboardNavigationMode.Cycle);
         AutomationProperties.SetName(surface, title);
-        var grid = new DockPanel(); var heading = Text(title, 20); DockPanel.SetDock(heading, Dock.Top); grid.Children.Add(heading);
+        var grid = new DockPanel(); var heading = Text(title, 17); heading.Margin = new(0); heading.VerticalAlignment = VerticalAlignment.Center;
+        var header = new Border { Child = heading, Height = 52, Padding = new(20, 0, 20, 0), BorderThickness = new(0, 0, 0, 1) }; header.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.Border"); DockPanel.SetDock(header, Dock.Top); grid.Children.Add(header);
         var notices = new NoticeStack();
-        var buttons = Bar(); DockPanel.SetDock(buttons, Dock.Bottom);
+        var buttons = Bar(); buttons.HorizontalAlignment = HorizontalAlignment.Right; buttons.Margin = new(20, 14, 10, 12); DockPanel.SetDock(buttons, Dock.Bottom);
         bool busy = false, accepted = false, closed = false, finished = false;
         Exception? failure = null;
         CancellationTokenRegistration registration = default;
         var cancel = Button("取消", () => popup.IsOpen = false);
         var accept = Button(action, () => { });
+        cancel.Background = new SolidColorBrush(Color.FromArgb(20, 118, 118, 128)); accept.Background = new SolidColorBrush(Color.FromRgb(0, 122, 255)); accept.Foreground = Brushes.White;
+        foreach (var button in new[] { cancel, accept }) { button.MinWidth = 66; button.Height = 36; button.MinHeight = 36; }
         if (autoSubmit) accept.Visibility = Visibility.Collapsed;
         accept.Click += async (_, _) => await AcceptAsync();
         async Task AcceptAsync()
@@ -77,13 +80,13 @@ internal static class NovelUi
             catch (Exception error)
             {
                 if (autoSubmit || !popup.IsOpen || pending.IsCancellationRequested) { failure = error; popup.IsOpen = false; }
-                else notices.Show(popup, "操作失败，请检查输入或重试");
+                else notices.Show(popup, error is InvalidDataException ? error.Message : "操作失败，请检查输入或重试");
             }
             finally { busy = false; accept.IsEnabled = true; Complete(); }
         }
-        buttons.Children.Add(accept); buttons.Children.Add(cancel); grid.Children.Add(buttons);
+        buttons.Children.Add(cancel); buttons.Children.Add(accept); grid.Children.Add(buttons);
         DockPanel.SetDock(notices, Dock.Top); grid.Children.Add(notices);
-        grid.Children.Add(new ScrollViewer { Content = body, MaxHeight = Math.Max(200, Window.GetWindow(owner)?.ActualHeight - 200 ?? 520),
+        grid.Children.Add(new ScrollViewer { Content = body, Margin = new(20, 20, 20, 0), MaxHeight = Math.Max(200, Window.GetWindow(owner)?.ActualHeight - 220 ?? 520),
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
         surface.Child = grid; popup.Child = surface;
         registration = token.Register(() => owner.Dispatcher.BeginInvoke(new Action(() => { if (!finished) popup.IsOpen = false; })));

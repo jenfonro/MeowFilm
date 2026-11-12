@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | `library.list` | `{}` | `{sources:[SourceRecord]}` |
 | `library.get` | `{installationId}` | `{source:SourceRecord,definition:string}` |
+| `library.previewImport` | `{text?,url?,fileName?}`，text/url 二选一 | `{items:[{index,name,sourceUrl,group,protocol,exists,definition}],failures:[{index,name,code}]}` |
 | `library.import` | `{text?,url?,fileName?}`，text/url 二选一 | `{sources:[SourceRecord],failures:[{index,name,code}]}` |
 | `library.save` | `{installationId,expectedRevision,definition:string}` | `{source:SourceRecord}` |
 | `library.update` | `{installationId,expectedRevision,patch:{name?,group?,enabled?,enabledExplore?,order?}}` | `{source:SourceRecord}` |
@@ -17,9 +18,13 @@
 | `library.export` | `{installationIds:[string]}` | `{text:string}` |
 | `library.invoke` | `{installationId,revision,action,payload}` | 动作原值 |
 
-`SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，恢复失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。order 是有符号安全整数，列表按 order、名称、installationId 排序。无源返回空列表。
+`SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，另投影用于管理排序／操作的 `weight,lastUpdateTime,respondTime,hasExplore`；恢复失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。order 是有符号安全整数，列表按 order、名称、installationId 排序。无源返回空列表。
 
-导入接受 Legado、异次元 JSON 对象或数组，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析、验证与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码继续遵循现有 16 MiB 格式边界。
+导入接受 Legado、异次元 JSON 对象或数组、`sources/bookSources/data` 数组容器、逐行 JSON，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析、验证与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码继续遵循现有 16 MiB 格式边界。
+
+`library.previewImport` 仅下载、解析和识别定义，不安装、不执行候选、不修改永久库或创建私有源数据。URL 只下载一次；返回的定义包含来源身份和当前管理元数据，客户端确认所选条目后将这些定义一次性传给 `library.import`，不再下载。预览也受取消／关闭排空约束，失败条目不隐藏有效项。
+
+`library.get` 返回原协议定义加上当前管理的名称、分组、启停和排序，未改规则与扩展值保留原类型；编辑保存不能把列表操作恢复为旧元数据。
 
 save 先试运行完整候选，随后原子替换仓库；语法、初始化、取消或写盘失败保留原定义及 revision，并恢复可用的旧运行实例。禁用不删除定义或私有状态，重新启用恢复；remove 删除该源及其私有值，撤销 Web、图片和运行任务。客户端不保存原始定义用来恢复安装；get 仅供编辑，export 仅包含定义和管理字段，不导出 Cookie、缓存和私有变量。
 

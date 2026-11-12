@@ -1,119 +1,175 @@
 #if os(iOS)
 import UIKit
 import UniformTypeIdentifiers
+import CoreImage
 import MeowUI
 
 @MainActor
-final class NovelRulesViewController: NovelTablePage, UIDocumentPickerDelegate {
-    private let feature: NovelFeature
-    private var group: String?
-    init(feature: NovelFeature, themeProvider: any PageThemeProviding) { self.feature = feature; super.init(themeProvider: themeProvider); pageTitle = "替换净化" }
+final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDelegate {
+    private var query = "", group: String?, noGroup = false, qrImport = false
+    private let groupButton = ManagementListView.icon("management.group", label: "分组")
+    private let moreButton = ManagementListView.icon("management.more", label: "更多")
+    private var groups: [String] { Array(Set(feature.local.rules.flatMap { NovelGroups.split($0.group) })).sorted() }
+    private var visible: [NovelRule] {
+        let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return feature.local.rules.enumerated().filter { _, rule in
+            (!noGroup || rule.group.isEmpty) && (group == nil || NovelGroups.split(rule.group).contains(group!)) &&
+            (keyword.isEmpty || [rule.name, rule.group, rule.pattern, rule.replacement, rule.scope].contains { $0.localizedCaseInsensitiveContains(keyword) })
+        }.sorted { $0.element.order == $1.element.order ? $0.element.name.localizedStandardCompare($1.element.name) == .orderedAscending : $0.element.order < $1.element.order }.map(\.element)
+    }
+    override init(feature: NovelFeature, themeProvider: any PageThemeProviding) { super.init(feature: feature, themeProvider: themeProvider); pageTitle = "替换净化" }
     override func viewDidLoad() {
-        super.viewDidLoad(); view.accessibilityIdentifier = "novel.rules"
-        pageHeader.setTrailing([PageHeaderTextButton(title: "操作") { [weak self] in self?.actions() }])
-        observe(feature) { [weak self] in self?.render() }; render()
+        super.viewDidLoad(); view.accessibilityIdentifier = "novel.rules"; manager.search.placeholder = "搜索替换规则"
+        manager.onSearch = { [weak self] in self?.query = $0; self?.render() }
+        for button in [groupButton, moreButton] { button.showsMenuAsPrimaryAction = true; manager.tools.addArrangedSubview(button) }
+        manager.onSelection = { [weak self] in self?.menus() }
+        manager.onDelete = { [weak self] in guard let self else { return }; remove(feature.local.rules.filter { self.manager.selected.contains($0.id) }) }
+        render()
     }
-    private func render() {
-        rows = feature.local.rules.filter { group == nil || $0.group == group }.enumerated().sorted {
-            $0.element.order == $1.element.order ? $0.offset < $1.offset : $0.element.order < $1.element.order
-        }.map { _, rule in
-            .init(title: rule.name.isEmpty ? rule.pattern : rule.name, detail: (rule.isEnabled ? "启用" : "停用") + (rule.group.isEmpty ? "" : " · " + rule.group)) { [weak self] in self?.edit(rule) }
-        }
+    override func render() {
+        manager.setRows(visible.map { rule in .init(id: rule.id, title: rule.name.isEmpty ? rule.pattern : rule.name, detail: rule.group,
+            enabled: rule.isEnabled, edit: { [weak self] in self?.edit(rule) }, toggle: { [weak self] enabled in
+                guard let self else { return }; var next = rule; next.isEnabled = enabled; save(next)
+            }, menu: UIMenu(children: [action("置顶") { [weak self] in self?.move(rule, top: true) }, action("置底") { [weak self] in self?.move(rule, top: false) }, action("删除", destructive: true) { [weak self] in self?.remove([rule]) }])) }, total: feature.local.rules.count, validIDs: Set(feature.local.rules.map(\.id)), emptyMessage: feature.local.rules.isEmpty ? "暂无替换规则，请先新建" : "没有匹配的替换规则")
+        menus()
     }
-    private func actions() {
-        let alert = UIAlertController(title: "替换净化", message: nil, preferredStyle: .actionSheet)
-        alert.addAction(UIAlertAction(title: "新增", style: .default) { [weak self] _ in self?.edit(NovelRule()) })
-        alert.addAction(UIAlertAction(title: "分组", style: .default) { [weak self] _ in
-            guard let self else { return }; let names = ["全部"] + Set(feature.local.rules.map(\.group)).sorted()
-            let page = NovelChoiceList(title: "分组", choices: names, themeProvider: themeProvider) { [weak self] index in self?.group = index == 0 ? nil : names[index]; self?.render() }
-            navigationController?.pushViewController(page, animated: true)
-        })
-        alert.addAction(UIAlertAction(title: "导入", style: .default) { [weak self] _ in
-            guard let self else { return }; let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json, .plainText], asCopy: true)
-            picker.allowsMultipleSelection = true; picker.delegate = self; present(picker, animated: true)
-        })
-        alert.addAction(UIAlertAction(title: "导出", style: .default) { [weak self] _ in
-            guard let self else { return }
-            do { let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; share(text: String(decoding: try encoder.encode(feature.local.rules), as: UTF8.self), name: "purification-rules.json") }
-            catch { showError(error.localizedDescription) }
-        })
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel)); alert.popoverPresentationController?.sourceView = view; present(alert, animated: true)
+    private func menus() {
+        groupButton.menu = UIMenu(children: [action("分组管理") { [weak self] in self?.manageGroups() }, action("全部分组", selected: group == nil && !noGroup) { [weak self] in self?.group = nil; self?.noGroup = false; self?.render() }, action("无分组", selected: noGroup) { [weak self] in self?.group = nil; self?.noGroup = true; self?.render() }] + groups.map { name in action(name, selected: group == name) { [weak self] in self?.group = name; self?.noGroup = false; self?.render() } })
+        moreButton.menu = UIMenu(children: [action("新建替换") { [weak self] in var rule = NovelRule(); rule.isRegex = true; self?.edit(rule) }, action("本地导入") { [weak self] in self?.fileImport(qr: false) }, action("网络导入") { [weak self] in self?.networkImport() }, action("二维码导入") { [weak self] in self?.fileImport(qr: true) }, action("导出替换规则") { [weak self] in guard let self else { return }; perform { [weak self] in guard let self else { return }; try share(NovelRuleImport.encode(feature.local.rules), name: "replace-rules.json") } }])
+        manager.footerMore.menu = UIMenu(children: [action("导出选中规则") { [weak self] in guard let self else { return }; perform { [weak self] in guard let self else { return }; try share(NovelRuleImport.encode(feature.local.rules.filter { self.manager.selected.contains($0.id) }), name: "replace-rules.json") } }])
     }
-    private func edit(_ rule: NovelRule) {
-        let page = NovelRuleEditor(rule: rule, feature: feature, themeProvider: themeProvider)
-        navigationController?.pushViewController(page, animated: true)
+    private func save(_ rule: NovelRule) {
+        perform { [feature] in var next = feature.local.rules; if let index = next.firstIndex(where: { $0.id == rule.id }) { next[index] = rule } else { next.append(rule) }; try await feature.saveRules(next) }
     }
+    private func edit(_ rule: NovelRule) { navigationController?.pushViewController(NovelRuleEditor(rule: rule, feature: feature, themeProvider: themeProvider), animated: true) }
+    private func move(_ rule: NovelRule, top: Bool) {
+        var rules = feature.local.rules.enumerated().sorted { $0.element.order == $1.element.order ? $0.offset < $1.offset : $0.element.order < $1.element.order }.map(\.element).filter { $0.id != rule.id }
+        if top { rules.insert(rule, at: 0) } else { rules.append(rule) }
+        for index in rules.indices { rules[index].order = index }
+        let next = rules; perform { [feature] in try await feature.saveRules(next) }
+    }
+    private func remove(_ rules: [NovelRule]) {
+        let ids = Set(rules.map(\.id))
+        confirmDelete(ids.count) { [feature] in try await feature.saveRules(feature.local.rules.filter { !ids.contains($0.id) }) }
+    }
+    private func fileImport(qr: Bool) { qrImport = qr; let picker = UIDocumentPickerViewController(forOpeningContentTypes: qr ? [.image] : [.json, .plainText], asCopy: true); picker.delegate = self; present(picker, animated: true) }
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        runPageTask { [weak self] in
-            guard let self else { return }; var errors: [String] = []
-            for url in urls {
-                do {
-                    let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    let data = try Data(contentsOf: url), imported = try JSONDecoder().decode([NovelRule].self, from: data)
-                    var next = feature.local.rules
-                    for rule in imported {
-                        try await feature.rules.validate(rule)
-                        if let index = next.firstIndex(where: { $0.id == rule.id }) { next[index] = rule } else { next.append(rule) }
-                    }
-                    try await feature.saveRules(next)
-                } catch { errors.append(url.lastPathComponent + " · " + error.localizedDescription) }
-            }
-            if !errors.isEmpty { showError(errors.joined(separator: "\n")) }
+        guard let url = urls.first else { return }; let qr = qrImport
+        dismissPageModal(controller) { [weak self] in self?.perform { [weak self] in
+            guard let self else { return }; let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: url), text: String
+            if qr {
+                text = try Self.readRuleQr(data)
+            } else { guard let value = String(data: data, encoding: .utf8) else { throw NovelError.invalidRule(["替换规则文件不是 UTF-8"]) }; text = value }
+            try await preview(text)
+        } }
+    }
+    static func readRuleQr(_ data: Data) throws -> String {
+        guard let image = CIImage(data: data), let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]), let value = (detector.features(in: image).first as? CIQRCodeFeature)?.messageString else { throw NovelError.invalidRule(["未识别到二维码内容"]) }
+        return value
+    }
+    private func networkImport() {
+        var preview: (rules: [NovelRule], failures: [String]) = ([], [])
+        addressDialog(label: "替换规则地址", placeholder: "请输入网络替换规则地址", load: { [self] text in
+            guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.user == nil, url.password == nil else { throw NovelError.invalidRule(["网络地址无效"]) }
+            let config = URLSessionConfiguration.ephemeral; config.httpCookieStorage = nil
+            let session = URLSession(configuration: config); defer { session.finishTasksAndInvalidate() }
+            let (data, response) = try await session.data(from: url)
+            guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode), let text = String(data: data, encoding: .utf8) else { throw NovelError.invalidResponse }
+            preview = try await self.parse(text)
+        }, completed: { [weak self] in self?.showPreview(preview.rules, failures: preview.failures) })
+    }
+    private func preview(_ text: String) async throws {
+        let preview = try await parse(text)
+        try Task.checkCancellation(); showPreview(preview.rules, failures: preview.failures)
+    }
+    private func parse(_ text: String) async throws -> (rules: [NovelRule], failures: [String]) {
+        var rules: [NovelRule] = [], failures: [String] = []
+        for (index, entry) in try NovelRuleImport.entries(text).enumerated() {
+            do { let rule = try NovelRuleImport.decode(entry); try await feature.rules.validate(rule); rules.append(rule) }
+            catch is CancellationError { throw CancellationError() }
+            catch { try Task.checkCancellation(); failures.append("规则 \(index + 1) 无效") }
         }
+        return (rules, failures)
+    }
+    private func showPreview(_ rules: [NovelRule], failures: [String] = []) {
+        let current = Dictionary(feature.local.rules.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        let statuses = rules.map { NovelRuleImport.status($0, existing: current[$0.id]) }
+        let selection = ManagementImportView(items: rules.enumerated().map { index, rule in .init(title: rule.name.isEmpty ? rule.pattern : rule.name, detail: rule.group, status: statuses[index]) }, selected: Set(rules.indices.filter { statuses[$0] != "已有" }))
+        let dialog = ManagementDialog(title: "导入替换规则", action: "确定导入", themeProvider: themeProvider); dialog.body.addArrangedSubview(selection)
+        if !failures.isEmpty { let label = UILabel(); label.text = failures.joined(separator: "\n"); label.numberOfLines = 0; label.textColor = .systemRed; label.font = .systemFont(ofSize: 12); dialog.body.addArrangedSubview(label) }
+        dialog.submit = { [feature] in
+            guard !selection.selected.isEmpty else { throw NovelError.invalidRule(["请选择要导入的替换规则"]) }
+            var next = feature.local.rules
+            for (index, rule) in rules.enumerated() where selection.selected.contains(index) { if let at = next.firstIndex(where: { $0.id == rule.id }) { next[at] = rule } else { next.append(rule) } }
+            try await feature.saveRules(next); return true
+        }; present(dialog, animated: true)
+    }
+    private func manageGroups() {
+        let ids = manager.selected
+        groupsPage(groups: { [self] in groups }, create: { [feature] name in
+            var next = feature.local.rules; for index in next.indices where ids.contains(next[index].id) { next[index].group = NovelGroups.replacing(next[index].group, old: "", new: name) }
+            try await feature.saveRules(next)
+        }, change: { [feature] old, name in
+            var next = feature.local.rules; for index in next.indices where NovelGroups.split(next[index].group).contains(old) { next[index].group = NovelGroups.replacing(next[index].group, old: old, new: name) }
+            try await feature.saveRules(next)
+        })
     }
 }
 
 @MainActor
-final class NovelRuleEditor: NovelTablePage {
+final class NovelRuleEditor: ManagementPageViewController {
     private var rule: NovelRule
     private let feature: NovelFeature
-    init(rule: NovelRule, feature: NovelFeature, themeProvider: any PageThemeProviding) { self.rule = rule; self.feature = feature; super.init(themeProvider: themeProvider); pageTitle = "净化规则" }
+    private let form = ManagementFormView()
+    private var timeout: String, saving = false
+    init(rule: NovelRule, feature: NovelFeature, themeProvider: any PageThemeProviding) { self.rule = rule; self.feature = feature; timeout = String(rule.timeoutMillisecond); super.init(themeProvider: themeProvider); pageTitle = "替换规则编辑" }
     override func viewDidLoad() {
-        super.viewDidLoad(); pageHeader.setTrailing([PageHeaderTextButton(title: "保存") { [weak self] in self?.save() }]); render()
+        super.viewDidLoad(); view.accessibilityIdentifier = "novel.rule.editor"; form.boxedInputs = true
+        let save = PageHeaderButton(image: ManagementIcon.save, accessibilityLabel: "保存") { [weak self] in self?.save() }; save.accessibilityIdentifier = "novel.rule.save"
+        setManagementActions([save, PageHeaderButton(image: ManagementIcon.more, accessibilityLabel: "更多", menu: UIMenu(children: [UIAction(title: "复制规则") { [weak self] _ in self?.copy() }, UIAction(title: "粘贴规则") { [weak self] _ in self?.paste() }]))])
+        view.addSubview(form); form.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([form.topAnchor.constraint(equalTo: contentTopAnchor), form.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12), form.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12), form.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor)])
+        render()
     }
-    private func text(_ title: String, key: WritableKeyPath<NovelRule, String>) -> Row {
-        .init(title: title, detail: rule[keyPath: key]) { [weak self] in
-            guard let self else { return }; textPrompt(title: title, value: rule[keyPath: key]) { [weak self] in self?.rule[keyPath: key] = $0; self?.render() }
-        }
-    }
-    private func toggle(_ title: String, key: WritableKeyPath<NovelRule, Bool>) -> Row {
-        .init(title: title, detail: rule[keyPath: key] ? "开启" : "关闭") { [weak self] in guard let self else { return }; rule[keyPath: key].toggle(); render() }
-    }
+    override func applyTheme() { super.applyTheme(); if isViewLoaded { form.applyTheme(theme) } }
+    private func text(_ label: String, _ key: WritableKeyPath<NovelRule, String>, rows: Int = 1, id: String) { form.text(label, value: rule[keyPath: key], rows: rows, id: "novel.rule.field." + id) { [weak self] in self?.rule[keyPath: key] = $0 } }
     private func render() {
-        rows = [text("名称", key: \.name), text("分组", key: \.group), toggle("启用", key: \.isEnabled),
-            text("查找", key: \.pattern), text("替换为", key: \.replacement), toggle("正则表达式", key: \.isRegex),
-            toggle("处理标题", key: \.scopeTitle), toggle("处理正文", key: \.scopeContent),
-            text("适用书名或源 URL", key: \.scope), text("排除书名或源 URL", key: \.excludeScope),
-            .init(title: "顺序", detail: "\(rule.order)") { [weak self] in
-                guard let self else { return }; textPrompt(title: "顺序", value: "\(rule.order)", keyboard: .numbersAndPunctuation) { [weak self] value in
-                    guard let self else { return }; guard let number = Int(value) else { showError("顺序无效"); return }; rule.order = number; render()
-                }
-            },
-            .init(title: "执行超时（毫秒）", detail: "\(rule.timeoutMillisecond)") { [weak self] in
-                guard let self else { return }; textPrompt(title: "执行超时（毫秒）", value: "\(rule.timeoutMillisecond)", keyboard: .numberPad) { [weak self] value in
-                    guard let self else { return }; guard let number = Int(value), number > 0 else { showError("超时无效"); return }; rule.timeoutMillisecond = number; render()
-                }
-            },
-            .init(title: "删除", destructive: true) { [weak self] in
-                guard let self else { return }
-                let alert = UIAlertController(title: "删除净化规则", message: rule.name, preferredStyle: .alert)
-                alert.addAction(UIAlertAction(title: "取消", style: .cancel)); alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in
-                    guard let self else { return }; runPageTask { [weak self] in
-                        guard let self else { return }; do { try await feature.saveRules(feature.local.rules.filter { $0.id != self.rule.id }); navigationController?.popViewController(animated: true) }
-                        catch { showError(error.localizedDescription) }
-                    }
-                }); present(alert, animated: true)
-            }]
+        form.clear()
+        text("替换规则名称（name）", \.name, id: "name"); text("分组（group）", \.group, id: "group")
+        text("替换规则（pattern）", \.pattern, rows: 5, id: "pattern")
+        form.addSection(ManagementFormView.check("使用正则表达式", value: rule.isRegex, round: true) { [weak self] in self?.rule.isRegex = $0 })
+        text("替换为（replacement）", \.replacement, rows: 4, id: "replacement")
+        let checks = UIStackView(arrangedSubviews: [ManagementFormView.check("作用于标题", value: rule.scopeTitle, round: true) { [weak self] in self?.rule.scopeTitle = $0 }, ManagementFormView.check("作用于正文", value: rule.scopeContent, round: true) { [weak self] in self?.rule.scopeContent = $0 }, UIView()]); checks.spacing = 14; form.addSection(checks)
+        text("替换范围，选填书名或者书源 URL（scope）", \.scope, id: "scope"); text("排除范围，选填书名或者书源 URL（excludeScope）", \.excludeScope, id: "excludeScope")
+        form.text("超时毫秒数（timeoutMillisecond）", value: timeout, id: "novel.rule.field.timeoutMillisecond") { [weak self] in self?.timeout = $0 }
+        form.applyTheme(theme)
+    }
+    private func payload() throws -> NovelRule {
+        guard let timeout = Int(timeout), timeout > 0 else { throw NovelError.invalidRule(["超时毫秒数无效"]) }
+        var next = rule; next.timeoutMillisecond = timeout
+        next.name = next.name.trimmingCharacters(in: .whitespacesAndNewlines); next.group = next.group.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.scope = next.scope.trimmingCharacters(in: .whitespacesAndNewlines); next.excludeScope = next.excludeScope.trimmingCharacters(in: .whitespacesAndNewlines)
+        return next
     }
     private func save() {
-        runPageTask { [weak self] in
-            guard let self else { return }
-            do {
-                var next = feature.local.rules
-                if let index = next.firstIndex(where: { $0.id == self.rule.id }) { next[index] = rule } else { next.append(rule) }
-                try await feature.saveRules(next); navigationController?.popViewController(animated: true)
-            } catch { showError(error.localizedDescription) }
+        guard !saving else { return }; view.endEditing(true)
+        do {
+            let rule = try payload(); saving = true
+            runPageTask { [weak self] in
+                guard let self else { return }; defer { saving = false }
+                do { var next = feature.local.rules; if let index = next.firstIndex(where: { $0.id == rule.id }) { next[index] = rule } else { next.append(rule) }; try await feature.saveRules(next); navigationController?.popViewController(animated: true) }
+                catch is CancellationError { } catch { if !Task.isCancelled { showError(error.localizedDescription) } }
+            }
+        } catch { showError(error.localizedDescription) }
+    }
+    private func copy() { do { UIPasteboard.general.string = try String(decoding: JSONEncoder().encode(payload()), as: UTF8.self) } catch { showError(error.localizedDescription) } }
+    private func paste() {
+        do {
+            guard var next = try NovelRuleImport.parse(UIPasteboard.general.string ?? "").first else { throw NovelError.invalidResponse }
+            next.id = rule.id; next.order = rule.order; next.isEnabled = rule.isEnabled; rule = next; timeout = String(next.timeoutMillisecond); render()
         }
+        catch { showError("剪贴板内容格式不对") }
     }
 }
 #endif

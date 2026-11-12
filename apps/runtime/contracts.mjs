@@ -53,7 +53,7 @@ export const contracts = Object.freeze({
       'MEDIA_HEADERS_UNSUPPORTED', 'TARGET_CHANGED', 'RECORDING_MISMATCH']) },
   source: { contract: 'source.runtime.v2', version: '0.3.0', prefix: 'source.runtime.', upload: true,
     operations: ['load', 'unload', 'invoke', 'status', 'close',
-      'library.list', 'library.get', 'library.import', 'library.save', 'library.update', 'library.remove',
+      'library.list', 'library.get', 'library.previewImport', 'library.import', 'library.save', 'library.update', 'library.remove',
       'library.export', 'library.invoke', 'library.image', 'library.releaseImage', 'web.pending', 'web.respond',
       'rules.process'],
     codes: new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SOURCE_INTEGRITY',

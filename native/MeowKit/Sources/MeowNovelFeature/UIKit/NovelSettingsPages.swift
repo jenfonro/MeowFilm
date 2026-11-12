@@ -182,36 +182,4 @@ final class NovelChoiceList: NovelTablePage {
     }
 }
 
-@MainActor
-final class NovelJSONEditor: PageViewController {
-    private let text = UITextView()
-    private let original: String
-    private let save: (String) async throws -> Void
-    private var saving = false
-    init(title: String, text: String, themeProvider: any PageThemeProviding, save: @escaping (String) async throws -> Void) {
-        original = text; self.save = save; super.init(themeProvider: themeProvider); pageTitle = title
-    }
-    override func viewDidLoad() {
-        super.viewDidLoad(); text.text = original; text.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
-        text.autocorrectionType = .no; text.autocapitalizationType = .none
-        view.addSubview(text); text.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([text.topAnchor.constraint(equalTo: contentTopAnchor), text.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-            text.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor), text.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor)])
-        pageHeader.setTrailing([PageHeaderTextButton(title: "保存") { [weak self] in self?.commit() }])
-    }
-    override func applyTheme() {
-        super.applyTheme()
-        guard isViewLoaded else { return }
-        view.tintColor = UIColor(theme.settings.accent)
-        theme.settings.apply(to: text)
-    }
-    private func commit() {
-        guard !saving else { return }; saving = true; let value = text.text ?? ""
-        runPageTask { [weak self] in
-            guard let self else { return }; defer { saving = false }
-            do { try await save(value); navigationController?.popViewController(animated: true) }
-            catch { showError(error.localizedDescription) }
-        }
-    }
-}
 #endif

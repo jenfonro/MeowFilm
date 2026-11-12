@@ -94,6 +94,12 @@ test('library manages batch imports, origin updates, revisions, edits, ordering 
       enabledExplore: false } })).source;
   assert.equal(value(await rpc('library.list')).sources[0].name, 'Renamed');
   assert.equal(value(await rpc('library.get', { installationId: item.installationId })).source.group, 'Favorites');
+  const editable = JSON.parse(value(await rpc('library.get', { installationId: item.installationId })).definition);
+  assert.equal(editable.bookSourceName, 'Renamed');
+  assert.equal(editable.bookSourceGroup, 'Favorites');
+  assert.equal(editable.enabledExplore, false);
+  assert.equal(editable.customOrder, -1);
+  assert.deepEqual(editable.ruleSearch, source.ruleSearch);
   const exported = JSON.parse(value(await rpc('library.export', { installationIds: [item.installationId] })).text);
   assert.equal(exported[0].bookSourceName, 'Renamed');
   assert.equal(exported[0].bookSourceGroup, 'Favorites');
@@ -627,4 +633,68 @@ test('a late HTTP response after disable cannot persist its Set-Cookie header', 
   item = value(await rpc('library.update', { installationId: item.installationId,
     expectedRevision: item.revision, patch: { enabled: true } })).source;
   assert.equal(value(await invoke(rpc, item, 'loginStatus')).loggedIn, false);
+});
+
+test('import preview is read-only, preserves protocols and metadata, and imports only confirmed definitions', async t => {
+  const dataRoot = temp(t), disk = new PrivateDocuments(dataRoot, 'source');
+  const { rpc, calls } = setup(t, { dataRoot });
+  const candidates = [
+    { ...source, enabled: false, weight: 7, respondTime: 12, lastUpdateTime: 42,
+      jsLib: 'throw new Error("preview must not execute")', extension: { kept: [null, 3, true] } },
+    { bookSourceName: '异次元', bookSourceUrl: 'https://legacy-preview.invalid/', enable: false,
+      ruleSearchList: '.book', ruleSearchUrl: 'https://legacy-preview.invalid/?searchKey' },
+    { bookSourceName: '轻悦时光', bookSourceUrl: 'https://qysg-preview.invalid/', html: '<script>throw new Error("not executed")</script>' },
+  ];
+  const preview = value(await rpc('library.previewImport', { text: JSON.stringify({ bookSources: candidates }) }));
+  assert.deepEqual(preview.failures, []);
+  assert.deepEqual(preview.items.map(item => item.protocol), ['legado', 'yiciyuan', 'qysg']);
+  assert.ok(preview.items.every(item => item.exists === false));
+  assert.deepEqual(value(await rpc('library.list')).sources, []);
+  assert.equal(disk.read('library.json'), null);
+  assert.deepEqual(calls, []);
+  // A cancelled preview needs no discard RPC and must not leave an installation.
+  const selected = JSON.parse(preview.items[0].definition);
+  const imported = value(await rpc('library.import', { text: JSON.stringify([selected]) }));
+  assert.deepEqual(imported.failures, []);
+  assert.equal(imported.sources.length, 1);
+  assert.deepEqual(Object.fromEntries(['weight', 'respondTime', 'lastUpdateTime', 'hasExplore'].map(key => [key, imported.sources[0][key]])),
+    { weight: 7, respondTime: 12, lastUpdateTime: 42, hasExplore: true });
+  const exported = JSON.parse(value(await rpc('library.export', { installationIds: [imported.sources[0].installationId] })).text);
+  assert.deepEqual(exported[0].extension, candidates[0].extension);
+  const again = value(await rpc('library.previewImport', { text: JSON.stringify(candidates) }));
+  assert.deepEqual(again.items.map(item => item.exists), [true, false, false]);
+  assert.equal(value(await rpc('library.list')).sources[0].revision, 1);
+});
+
+test('URL preview downloads once, retains standalone HTML identity and accepts Reader container and line formats', async t => {
+  const standalone = '<script>function search(){return [];}</script>';
+  const { rpc, calls } = setup(t, { respond: input => ({ statusCode: 200, url: input.url, headers: {}, body: standalone }) });
+  const preview = value(await rpc('library.previewImport', { url: 'https://preview.invalid/source.html', fileName: 'source.html' }));
+  assert.equal(calls.length, 1);
+  assert.equal(preview.items[0].sourceUrl, 'https://preview.invalid/source.html');
+  assert.equal(value(await rpc('library.list')).sources.length, 0);
+  const imported = value(await rpc('library.import', { text: preview.items[0].definition }));
+  assert.equal(imported.sources[0].sourceUrl, preview.items[0].sourceUrl);
+  assert.equal(calls.length, 1, 'confirming a preview must not download its input a second time');
+  for (const text of [JSON.stringify({ sources: [source] }), JSON.stringify({ data: [source] }),
+    '\uFEFF' + JSON.stringify(source) + '\n' + JSON.stringify({ ...source, bookSourceUrl: 'https://second.invalid/' })]) {
+    const result = value(await rpc('library.previewImport', { text }));
+    assert.equal(result.failures.length, 0);
+    assert.ok(result.items.length > 0);
+  }
+});
+
+test('cancelled preview is drained by shutdown and never writes the permanent repository', async t => {
+  const entered = deferred(), held = deferred(), cancelled = deferred();
+  const { rpc, module } = setup(t, { respond: async input => {
+    entered.resolve(); input.signal.addEventListener('abort', () => cancelled.resolve(), { once: true });
+    await held.promise;
+    return { statusCode: 200, headers: {}, url: input.url, body: JSON.stringify(source) };
+  } });
+  const preview = rpc('library.previewImport', { url: 'https://preview.invalid/held' });
+  await entered.promise;
+  const closing = module.close(); let done = false; closing.then(() => { done = true; });
+  await cancelled.promise; await new Promise(resolve => setImmediate(resolve)); assert.equal(done, false);
+  held.resolve(); denied(await preview, 'CLOSED');
+  const receipt = await closing; assert.equal(receipt.ok, true); assert.equal(receipt.value.cleanupComplete, true);
 });

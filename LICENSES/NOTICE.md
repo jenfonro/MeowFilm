@@ -49,6 +49,11 @@ The new runtime implementation remains application source under GPL-3.0-only.
   pairs from `src/utils/chinese.js`. Native novel pages and source-runtime
   integration follow the Reader's book, chapter and reading behavior; no Vue
   application, browser database or reference server executable is bundled.
+- Native source/rule managers and form descriptors adapt the same Reader's
+  `src/data/bookSourceEditorConfig.js`, `bookSourceEditorMapper.js`,
+  `replaceRules.js` and `replaceRuleImport.js`; all six Legado tabs retain the
+  original field labels, order and row counts. The native shared controls are
+  UIKit/WPF implementations, not a bundled web view.
 - The referenced tree contains no separate license notice. This records
   provenance, not an additional third-party license grant. Application-owned
   adaptations remain under GPL-3.0-only.
@@ -697,3 +702,13 @@ public library interface is LGPLv2.1 or later. The corresponding license texts
 are `GPL-2.0-only.txt` and `LGPL-2.1-only.txt`; existing bundled upstream notices
 remain in the libVLC distribution. The plugin's SDK ABI and exact libvlccore
 identity are checked by the locked native build.
+
+## ZXing.Net — Apache-2.0 (Windows)
+
+- NuGet `ZXing.Net` 0.16.11, exact locked package; upstream
+  [micjahn/ZXing.Net](https://github.com/micjahn/ZXing.Net) release `v0.16.11.0`
+  (`fd58f3c4a5d80ccf45ef1237899a65b0ba5b83a0`).
+- Copyright Michael Jahn and ZXing contributors. Windows uses the managed QR
+  decoder for replacement-rule image import; no camera or network decoder.
+- The NuGet package declares Apache-2.0; upstream `COPYING` contains the same
+  license. License text: `Apache-2.0.txt`, already in the Windows license manifest.
