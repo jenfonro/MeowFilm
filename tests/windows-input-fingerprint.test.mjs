@@ -14,6 +14,7 @@ const metadataFiles = [
 test('Windows input inventory covers shared packaging, locked configuration and shipped assets', () => {
   for (const path of [
     'scripts/package-runtime.mjs', 'scripts/test-root.mjs', 'scripts/windows/test.ps1',
+    'scripts/dependency-download.mjs',
     'scripts/script-host-native.json', 'apps/runtime/modules/music-script.mjs',
     'native/JavaScript/patches/regexp-compile-interrupt.patch', 'native/JavaScript/quickjs/quickjs.c',
     'packages/film-rules/film-rules.js', 'packages/film-rules/playback-rules.js', 'packages/film-search/film-search.js',
@@ -60,6 +61,7 @@ test('new shared Node helpers participate in the fingerprint without registratio
     writeFileSync(join(root, entry), "import '../fresh-helper.mjs';");
     const before = fingerprintInputs(root, [entry]);
     writeFileSync(join(root, helper), 'export const value = 1;');
+    assert.equal(isWindowsBuildInput(helper), true);
     const included = fingerprintInputs(root, [entry, helper]);
     assert.notEqual(included, before);
     writeFileSync(join(root, helper), 'export const value = 2;');

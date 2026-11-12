@@ -22,7 +22,11 @@ try {
         # Fail before publishing if Inno is unavailable. Ordinary builds never resolve it.
         $InstallerCompiler = Resolve-WindowsInstallerCompiler
     }
+    $NativePolicy = Get-Content -LiteralPath (Join-Path $WindowsRoot 'scripts\script-host-native.json') -Raw | ConvertFrom-Json
+    $NodeVersion = $NativePolicy.build.node
     $NodeRuntime = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'node-runtime.json') -Raw | ConvertFrom-Json
+    $NodeRuntime | Add-Member -NotePropertyName version -NotePropertyValue $NodeVersion
+    $NodeRuntime | Add-Member -NotePropertyName source -NotePropertyValue "https://nodejs.org/dist/v$NodeVersion/win-x64/node.exe"
     $DataIdentity = 'aggregate' # Current wire/data identity, not a product selector.
     $Project = Join-Path $WindowsAppRoot 'app\MeowFilm.Windows.App.csproj'
     if (-not (Test-Path -LiteralPath $Project -PathType Leaf)) { throw 'The native Windows App entry is missing.' }
@@ -32,11 +36,15 @@ try {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # The shipped Node runtime is product content bound to LICENSES/node-LICENSE.txt.
     if ((Get-FileHash -LiteralPath $WindowsNode -Algorithm SHA256).Hash.ToLowerInvariant() -ne $NodeRuntime.sha256) {
-        throw "The bundled Node runtime is locked to the official win-x64 node.exe v$($NodeRuntime.version); put it first on PATH."
+        throw "The bundled Node runtime is locked to the official win-x64 node.exe v$NodeVersion; put it first on PATH."
     }
     $SelfContained = (-not $FrameworkDependent).ToString().ToLowerInvariant()
     $Rid = 'win-x64'
-    & $WindowsDotnet restore $Project --locked-mode --configfile $WindowsNuGetConfig --runtime $Rid "-p:SelfContained=$SelfContained" -p:TargetLatestRuntimePatch=true -p:ExcludeRestorePackageImports=true
+    $PublishProperties = @("-p:Configuration=$Configuration", "-p:RuntimeIdentifier=$Rid",
+        "-p:SelfContained=$SelfContained", '-p:TargetLatestRuntimePatch=true',
+        '-p:VlcWindowsX64Enabled=true', '-p:VlcWindowsX86Enabled=false', '-p:VlcWindowsArm64Enabled=false')
+    & $WindowsDotnet restore $Project --locked-mode --configfile $WindowsNuGetConfig @PublishProperties `
+        -p:ExcludeRestorePackageImports=true
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $Output = Assert-WindowsPath -Owner $WindowsTmpRoot -Path (Join-Path $WindowsTmpRoot 'publish')
     if (Test-Path -LiteralPath $Output) { Remove-Item -LiteralPath $Output -Recurse -Force }
@@ -44,9 +52,7 @@ try {
     # Use MSBuild's resolved publish closure, not a recursive copy of a reused
     # bin directory that can retain assemblies from a previously enabled module.
     # Only a complete checked staging tree replaces the fixed local installation.
-    & $WindowsDotnet publish $Project --configuration $Configuration --no-restore --runtime $Rid `
-        "--self-contained" $SelfContained -p:TargetLatestRuntimePatch=true `
-        -p:VlcWindowsX64Enabled=true -p:VlcWindowsX86Enabled=false -p:VlcWindowsArm64Enabled=false `
+    & $WindowsDotnet publish $Project --no-restore @PublishProperties `
         --output $Output --nologo -nodeReuse:false
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $Runtime = Join-Path $Output 'runtime'
@@ -71,7 +77,7 @@ try {
     })
     $Manifest | Add-Member -NotePropertyName node -NotePropertyValue $NodeRuntime
     [System.IO.File]::WriteAllText($ManifestPath, ($Manifest | ConvertTo-Json -Depth 50) + "`n", [System.Text.UTF8Encoding]::new($false))
-    & $WindowsNode (Join-Path $PSScriptRoot 'verify-projects.mjs') --build $Output --identity $DataIdentity $Configuration
+    & $WindowsNode (Join-Path $PSScriptRoot 'verify-projects.mjs') --build $Output --identity $DataIdentity @PublishProperties
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not $FrameworkDependent -and
         (-not (Test-Path -LiteralPath (Join-Path $Output 'coreclr.dll')) -or
@@ -90,7 +96,7 @@ try {
     if ($FinalHash -ne $InputHash) { throw 'Code inputs changed during this build; output is not a stable candidate.' }
     $Result = [ordered]@{
         schemaVersion = 1; application = 'meowfilm'; dataIdentity = $DataIdentity; configuration = $Configuration
-        sdk = (& $WindowsDotnet --version); node = $NodeRuntime.version
+        sdk = (& $WindowsDotnet --version); node = $NodeVersion
         codeInputSha256 = $InputHash
         gitHead = (& $WindowsGit -C $WindowsRoot rev-parse HEAD)
         createdAt = (Get-Date -Format o)

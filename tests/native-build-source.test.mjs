@@ -21,7 +21,7 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 test('native header verification follows node-gyp default and configured shared caches', () => {
   const gypPackage = require.resolve('node-gyp/package.json');
-  const version = JSON.parse(readFileSync(join(repository, 'scripts/script-host-native.json'))).nodeHeaders.version;
+  const version = JSON.parse(readFileSync(join(repository, 'scripts/script-host-native.json'))).build.node;
   const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
     !/^npm_(?:package_config_node_gyp_|config_)devdir$/i.test(name)));
   const configured = join(repository, 'tmp/test-results/native-build-source/shared headers');
@@ -37,7 +37,7 @@ test('native header verification follows node-gyp default and configured shared 
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { resolve } from 'node:path';
       import { nodeGypCache, policy } from './scripts/quickjs/build-native.mjs';
-      console.log(resolve(nodeGypCache(${JSON.stringify(gypPackage)}).directory, policy.nodeHeaders.version));
+      console.log(resolve(nodeGypCache(${JSON.stringify(gypPackage)}).directory, policy.build.node));
     `], { cwd: repository, env: { ...environment, ...settings }, encoding: 'utf8' });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
@@ -55,8 +55,8 @@ async function fixture(t, recorded = true, shared = false) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), bytes);
   };
-  for (const path of ['scripts/quickjs/build-native.mjs', 'scripts/dependency-download.mjs',
-    'scripts/script-host-native.json']) {
+  for (const path of ['scripts/quickjs/build-native.mjs', 'scripts/quickjs/native-inputs.mjs',
+    'scripts/dependency-download.mjs', 'scripts/script-host-native.json']) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     cpSync(join(repository, path), join(root, path));
   }

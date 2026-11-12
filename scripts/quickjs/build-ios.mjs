@@ -4,6 +4,7 @@ import { access, lstat, mkdir, readFile, writeFile, rename, rm } from 'node:fs/p
 import { resolve, basename, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { nativeSourceInputs } from './native-inputs.mjs';
 import {
   root, policy, loadedBuildInputs, commands, run, files, hashInputs, prepareSource, verifySourceInventory,
   artifact, unchanged, sdkDependencyInputs,
@@ -135,9 +136,7 @@ export async function buildIOSNative(target) {
       'scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs',
       'scripts/quickjs/build-source-sdk.mjs', 'scripts/prepare-ios-runtime.py',
       'scripts/ios-node-mobile.json', ...nativeInputs, ...sourceInputs, ...sdkCandidates, ...catWebCandidates,
-      ...Object.values(policy.sources).flatMap(source => [source.archivePath, source.license.path]),
-      ...policy.patches.map(patch => patch.path),
-      ...Object.values(policy.sources).flatMap(source => source.unicodeLicense ? [source.unicodeLicense.path] : []),
+      ...nativeSourceInputs(policy), ...policy.patches.map(patch => patch.path),
       ...mobile.inputs.map(input => input.path),
     ]);
     const beforeMap = new Map(before.map(input => [input.path, input.sha256]));
@@ -185,14 +184,14 @@ export async function buildIOSNative(target) {
       `#define MEOW_TARGET_ARCH "${target.arch}"`,
       `#define MEOW_MINIMUM_OS "${target.minimumOS}"`, '',
     ].join('\n'));
-    const arch = target.arch === 'x64' ? 'x86_64' : target.arch;
+    const arch = target.xcframeworkArchitecture;
     const triple = `${arch}-apple-ios${target.minimumOS}${target.sdk === 'iphonesimulator' ? '-simulator' : ''}`;
     const flags = ['-target', triple, '-isysroot', sdkRoot, '-O2', '-fPIC',
       '-fvisibility=hidden', '-fno-common'];
     const opensslBuild = resolve(directory, 'openssl');
     await mkdir(opensslBuild, { recursive: true });
-    const opensslTarget = target.sdk === 'iphoneos' ? 'ios64-xcrun'
-      : target.arch === 'arm64' ? 'iossimulator-arm64-xcrun' : 'iossimulator-x86_64-xcrun';
+    const opensslTarget = target.variant === null ? 'ios64-xcrun'
+      : target.xcframeworkArchitecture === 'arm64' ? 'iossimulator-arm64-xcrun' : 'iossimulator-x86_64-xcrun';
     const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
     const configure = [
       resolve(root, policy.sources.openssl.sourcePath, 'Configure'), opensslTarget,

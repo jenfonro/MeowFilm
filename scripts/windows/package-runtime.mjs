@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { packageRuntime } from '../package-runtime.mjs';
+import { sourceReferences } from '../module-policy.mjs';
 
 const MANIFEST = 'runtime-manifest.json';
 const TRANSPORT = 'windows-http-v1';
@@ -74,25 +75,32 @@ function inventory(root, relative = '', occupied = new Map()) {
 // notices stay byte-for-byte from packageRuntime. Do not silently omit a new
 // platform helper, dynamic import or asset: extend this explicit mapping first.
 function relocate(source, imports, dynamicImports = new Map()) {
-  const seen = new Set();
-  const pattern = /^import\s+\{[^{}]+\}\s+from\s+(['"])([^'"\r\n]+)\1;[ \t]*\r?$/gm;
-  let output = source.replace(pattern, (statement, quote, specifier) => {
-    check(imports.has(specifier) && !seen.has(specifier), 'WINDOWS_IMPORT',
-      'Unexpected or duplicate Windows runtime import');
-    seen.add(specifier);
-    return statement.replace(`${quote}${specifier}${quote}`, `${quote}${imports.get(specifier)}${quote}`);
-  });
-  const dynamicSeen = new Set();
-  const dynamicPattern = /\bimport\(\s*(['"])([^'"\r\n]+)\1\s*\)/g;
-  output = output.replace(dynamicPattern, (statement, quote, specifier) => {
-    check(dynamicImports.has(specifier), 'WINDOWS_IMPORT', 'Unexpected dynamic Windows runtime import');
-    dynamicSeen.add(specifier);
-    return statement.replace(`${quote}${specifier}${quote}`, `${quote}${dynamicImports.get(specifier)}${quote}`);
-  });
-  const rest = source.replace(pattern, '').replace(dynamicPattern, '').replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
-  check(seen.size === imports.size && dynamicSeen.size === dynamicImports.size &&
-    !/\bimport\b|\bexport\s+[^;]*\bfrom\b/.test(rest),
-    'WINDOWS_IMPORT', 'Windows runtime imports must match the explicit static closure');
+  const references = sourceReferences(source);
+  check(references.unresolvedImports.length === 0, 'WINDOWS_IMPORT',
+    'Windows runtime module specifiers must be statically resolvable');
+  const seen = new Set(), dynamicSeen = new Set(), replacements = [];
+  for (const reference of references.imports) {
+    check(reference.kind === 'import', 'WINDOWS_IMPORT', 'Windows runtime may not use CommonJS imports');
+    const dynamic = reference.type === 'ImportExpression';
+    const mapping = dynamic ? dynamicImports : imports;
+    const consumed = dynamic ? dynamicSeen : seen;
+    check(mapping.has(reference.specifier) && !consumed.has(reference.specifier),
+      'WINDOWS_IMPORT', dynamic ? 'Unexpected or duplicate dynamic Windows runtime import'
+        : 'Unexpected or duplicate Windows runtime import');
+    consumed.add(reference.specifier);
+    const raw = source.slice(reference.start, reference.end);
+    replacements.push({
+      start: reference.start,
+      end: reference.end,
+      value: `${raw[0]}${mapping.get(reference.specifier)}${raw.at(-1)}`,
+    });
+  }
+  check(seen.size === imports.size && dynamicSeen.size === dynamicImports.size,
+    'WINDOWS_IMPORT', 'Windows runtime imports must match the explicit source closure');
+  let output = source;
+  for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
+    output = output.slice(0, replacement.start) + replacement.value + output.slice(replacement.end);
+  }
   return Buffer.from(output);
 }
 

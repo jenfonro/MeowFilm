@@ -36,9 +36,9 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 .\scripts\windows\test.ps1 -All            # 显式完整原生测试
 ```
 
-- 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402、Node.js 24.21.0。
+- 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402，Node.js 版本以 `scripts/script-host-native.json` 的 `build.node` 为准。
 - 通用脚本宿主与影视规则共用 Node addon，需要 Python、Perl、NASM 与 MSVC x64 开发环境（`cl`／`nmake` 在 PATH）；首次构建按 `scripts/script-host-native.json` 下载校验依赖，后续复用默认缓存。
-- 随 App 发布的 Node 运行时由 `scripts/windows/node-runtime.json` 锁定，并与 `LICENSES/node-LICENSE.txt` 对应；构建时 PATH 上的 `node.exe` 须与其一致。
+- 随 App 发布的 Node 运行时版本与来源由 `scripts/script-host-native.json` 的 `build.node` 锁定；`scripts/windows/node-runtime.json` 固定运行时文件与许可证哈希，构建时 PATH 上的 `node.exe` 须符合该版本与哈希。
 - 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Desktop Runtime。
 
 ## 目录

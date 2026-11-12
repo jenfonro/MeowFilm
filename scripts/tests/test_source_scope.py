@@ -1,4 +1,4 @@
-"""Boundary checker fixtures. No SDK, network or reference execution."""
+"""Boundary checker fixtures use SwiftPM manifest evaluation, not SDK builds or network."""
 import importlib.util
 import hashlib
 from pathlib import Path
@@ -23,7 +23,12 @@ class SourceScopeTests(unittest.TestCase):
                 kind = "target" if folder == "Sources" else "testTarget"
                 targets.append('.{}(name: "{}", dependencies: [])'.format(kind, name))
         products = ['.library(name: "{}", targets: ["{}"])'.format(name, name) for name in sorted({"MeowUI", "MeowJSON", "MeowAccounts", "MeowMusicPlatform"})]
-        self.write("native/MeowKit/Package.swift", "\n".join(products + targets))
+        self.write("native/MeowKit/Package.swift", '''// swift-tools-version: 5.10
+import PackageDescription
+let package = Package(name: "Fixture", products: [
+''' + ",\n".join(products) + '''
+], dependencies: [], targets: [
+''' + ",\n".join(targets) + "\n])\n")
         objects = ["{{ isa = XCSwiftPackageProductDependency; productName = {}; }}".format(name)
                    for name in sorted({"MeowUI", "MeowJSON", "MeowAccounts", "MeowMusicPlatform"})]
         identity = lambda value: hashlib.sha256(value.encode()).hexdigest()[:24].upper()
@@ -57,6 +62,33 @@ class SourceScopeTests(unittest.TestCase):
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+
+    def add_package(self, text, path):
+        return text.replace("dependencies: [], targets:", f'dependencies: [.package(path: "{path}")], targets:')
+
+    def test_equivalent_manifest_syntax_uses_evaluated_targets_and_products(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        # Products and dependencies may be computed rather than inline literals.
+        text = path.read_text().replace('.target(name: "MeowUI", dependencies: [])',
+            '.target(\n    name: "MeowUI"\n)')
+        text = text.replace('let package =', 'let uiName = "MeowUI"\nlet package =')
+        text = text.replace('.library(name: "MeowUI", targets: ["MeowUI"])',
+            '.library(name: uiName, targets: [uiName])')
+        path.write_text(text)
+        self.assertEqual(scope.check(self.root), [])
+
+    def test_missing_and_wrong_evaluated_targets_are_rejected(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        text = path.read_text()
+        missing = text.replace('.target(name: "MeowUI", dependencies: []),', '')
+        missing = missing.replace('.library(name: "MeowUI", targets: ["MeowUI"])', '')
+        path.write_text(missing)
+        self.assertTrue(any("Sources directories:" in error for error in scope.check(self.root)))
+        wrong = text.replace('.target(name: "MeowUI", dependencies: [])', '.target(name: "OtherUI")')
+        wrong = wrong.replace('.library(name: "MeowUI", targets: ["MeowUI"])',
+            '.library(name: "MeowUI", targets: ["OtherUI"])')
+        path.write_text(wrong)
+        self.assertTrue(any("Sources directories:" in error for error in scope.check(self.root)))
 
     def test_valid_current_closure(self):
         self.assertEqual(scope.check(self.root), [])
@@ -141,7 +173,7 @@ class SourceScopeTests(unittest.TestCase):
         original = path.read_text()
         updated = original.replace('.target(name: "MeowJSON", dependencies: [])',
             '.target(name: "MeowJSON", dependencies: [.product(name: "MeowForeign", package: "foreign")])')
-        path.write_text('.package(path: "../Foreign")\n' + updated)
+        path.write_text(self.add_package(updated, "../Foreign"))
         errors = scope.check(self.root)
         self.assertIn("Unapproved local product: MeowForeign", errors)
         self.assertIn("Unapproved package path", errors)
@@ -158,8 +190,8 @@ class SourceScopeTests(unittest.TestCase):
         path = self.root / "native/MeowKit/Package.swift"
         declared = path.read_text().replace('.target(name: "MeowUI", dependencies: [])',
             '.target(name: "MeowUI", dependencies: ["MeowNovelFeature"])')
-        path.write_text(declared + '\n.target(name: "MeowNovelFeature", dependencies: [])\n'
-            '.library(name: "MeowNovelFeature", targets: ["MeowNovelFeature"])\n')
+        path.write_text(declared.replace('targets: [\n',
+            'targets: [\n.target(name: "MeowNovelFeature", dependencies: []),\n'))
         self.write("native/MeowKit/Sources/MeowNovelFeature/Fixture.swift", "")
         self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import MeowNovelFeature\n")
         self.assertIn("Shared target depends on business: MeowUI", scope.check(self.root))
@@ -168,16 +200,22 @@ class SourceScopeTests(unittest.TestCase):
         path = self.root / "native/MeowKit/Package.swift"
         text = path.read_text().replace('.target(name: "MeowUI", dependencies: [])',
             '.target(name: "MeowUI", dependencies: [.product(name: "MeowVideoKernel", package: "videokernel")])')
-        path.write_text('.package(path: "../VideoKernel")\n' + text)
+        path.write_text(self.add_package(text, "../VideoKernel"))
         self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "import MeowVideoKernel\n")
         self.assertEqual(scope.check(self.root), [])
-        path.write_text('.package(path: "../Foreign")\n' + text)
+        with_foreign_package = self.add_package(text, "../VideoKernel").replace(
+            'dependencies: [.package(path: "../VideoKernel")], targets:',
+            'dependencies: [.package(path: "../VideoKernel"), .package(path: "../Foreign")], targets:')
+        path.write_text(with_foreign_package)
         self.assertTrue(any("Unapproved" in error for error in scope.check(self.root)))
-        path.write_text('.package(path: "../VideoKernel")\n' + text.replace(
+        wrong_identity = self.add_package(text.replace(
             'name: "MeowVideoKernel", package: "videokernel"',
-            'name: "MeowVideoKernel", package: "foreign"'))
+            'name: "MeowVideoKernel", package: "foreign"'), "../VideoKernel").replace(
+                'dependencies: [.package(path: "../VideoKernel")], targets:',
+                'dependencies: [.package(path: "../VideoKernel"), .package(path: "../Foreign")], targets:')
+        path.write_text(wrong_identity)
         self.assertTrue(any("Unapproved local product" in error for error in scope.check(self.root)))
-        path.write_text('.package(path: "../VideoKernel")\n' + text)
+        path.write_text(self.add_package(text, "../VideoKernel"))
         self.write("native/MeowKit/Sources/MeowJSON/Fixture.swift", "import MeowVideoKernel\n")
         self.assertTrue(any("Undeclared imports for MeowJSON" in error for error in scope.check(self.root)))
 

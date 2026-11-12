@@ -2,26 +2,16 @@ import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from '
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isWindowsSource, sourceDirectories } from './source-scope.mjs';
+import { sourceReferences, publicPackageImport, SHARED_RUNTIME_BUILTINS, workspaceMap } from '../module-policy.mjs';
+import { discoverRuntimeSource } from '../runtime-source.mjs';
+import { discoverWorkspaces } from '../verify-dependency-lock.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runtimeTrees = new Map([
-  ['apps/runtime', {
-    files: ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
-      'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs',
-      'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs', 'modules/pan-runtime.mjs',
-      'modules/film-playback.mjs', 'modules/netease-token.mjs',
-      'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
-      'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs'],
-    directories: ['modules', 'modules/metadata'],
-  }],
   ['apps/windows/runtime', { files: ['bootstrap.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
 ]);
-const sharedImports = new Set([
-  'node:buffer', 'node:crypto', 'node:http', 'node:https', 'node:stream',
-  '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
-  '@meowfilm/novel-rules', '@meowfilm/script-host/native-json',
-  '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/netease-token',
-]);
+// The bootstrap may use only these platform capabilities; workspace subpaths
+// are checked against their package exports above, not this set.
 const windowsImports = new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge']);
 function fail(message) { throw new Error('Windows App structure: ' + message); }
 function samePath(a, b) {
@@ -38,6 +28,10 @@ function inside(base, target) {
 export function verifyAppStructure(directory = root) {
   directory = resolve(directory);
   if (lstatSync(directory).isSymbolicLink() || !samePath(realpathSync(directory), directory)) fail('source root alias');
+  const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+  const workspaces = discoverWorkspaces(directory, manifest);
+  const packages = workspaceMap(directory, workspaces);
+  const sharedRuntime = discoverRuntimeSource(directory);
   const files = [], directories = [];
   function walk(rel) {
     const path = join(directory, rel);
@@ -60,6 +54,10 @@ export function verifyAppStructure(directory = root) {
     if (!item.isFile() || !samePath(realpathSync(path), path)) fail('linked/non-regular source: ' + file);
     files.push(file);
   }
+  const sharedFiles = files.filter(file => file.startsWith('apps/runtime/'))
+    .map(file => file.slice('apps/runtime/'.length)).sort();
+  if (sharedFiles.join() !== sharedRuntime.files.join())
+    fail('unexpected runtime source: apps/runtime');
   for (const [source, expected] of runtimeTrees) {
     const authored = files.filter(file => file.startsWith(source + '/')).map(file => file.slice(source.length + 1));
     if (expected.files.some(file => !authored.includes(file))) fail('missing runtime source: ' + source);
@@ -108,16 +106,16 @@ export function verifyAppStructure(directory = root) {
     }
     if (/\.(?:mjs|js)$/.test(file) && !/(?:^|\/)(?:test|tests|fixtures)\//.test(file.replace(/^tests\/baselines\//, 'baseline/'))) {
       const text = readFileSync(join(directory, file), 'utf8');
-      const specs = [
-        ...text.matchAll(/^[ \t]*(?:import|export)\s+(?:[^;]*?\s+from\s+)(['"])([^'"\r\n]+)\1/gm),
-        ...text.matchAll(/^[ \t]*import\s*(['"])([^'"\r\n]+)\1/gm),
-        ...text.matchAll(/\bimport\(\s*(['"])([^'"\r\n]+)\1\s*\)/g),
-      ];
-      for (const match of specs) {
-        const specifier = match[2];
+      const references = sourceReferences(text);
+      const runtimeModule = file.startsWith('apps/runtime/') ||
+        file.startsWith('apps/windows/runtime/') || file.startsWith('packages/');
+      if (runtimeModule && references.unresolvedImports.length)
+        fail('module specifiers must be statically resolvable: ' + file);
+      for (const { specifier, kind } of references.imports) {
         sourceTarget(file, specifier);
         if (specifier.startsWith('.')) continue;
-        if (file.startsWith('apps/runtime/') && !sharedImports.has(specifier))
+        if (file.startsWith('apps/runtime/') &&
+            !SHARED_RUNTIME_BUILTINS.has(specifier) && !publicPackageImport(directory, packages, specifier, { kind }))
           fail('shared runtime platform import: ' + file + ' -> ' + specifier);
         if (file.startsWith('apps/windows/runtime/') &&
             (file !== 'apps/windows/runtime/bootstrap.mjs' || !windowsImports.has(specifier)))

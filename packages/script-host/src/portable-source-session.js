@@ -5,6 +5,19 @@ import { NativeEngine } from './native-engine.js';
 import { portableRealmSource } from './portable-realm.js';
 
 let sdkSource;
+export function sourceSDKPath(platform, arch, manifest) {
+  const target = manifest.target;
+  const isIOS = platform === 'ios' && manifest.platform === 'ios'
+    && ['iphoneos', 'iphonesimulator'].includes(target?.sdk)
+    && target.platform === 'ios' && target.arch === arch
+    && target.variant === (target.sdk === 'iphonesimulator' ? 'simulator' : null)
+    && ['arm64', 'x86_64'].includes(target.xcframeworkArchitecture)
+    && typeof target.minimumOS === 'string';
+  return isIOS
+    ? `.cache/ios-native/${target.sdk}-${target.xcframeworkArchitecture}/build/Release/source-sdk.js`
+    : 'packages/script-host/build/Release/source-sdk.js';
+}
+
 const loadSDK = () => sdkSource ??= (async () => {
   const file = new URL('../build/Release/source-sdk.js', import.meta.url);
   const [bytes, stat, manifest] = await Promise.all([
@@ -13,11 +26,7 @@ const loadSDK = () => sdkSource ??= (async () => {
     readFile(new URL('../build/Release/script-host-native.json', import.meta.url), 'utf8')
       .then(JSON.parse),
   ]);
-  const sdkPath = process.platform === 'ios' && manifest.platform === 'ios'
-    && ['iphoneos', 'iphonesimulator'].includes(manifest.target?.sdk)
-    && manifest.target.arch === process.arch && manifest.target.minimumOS === '17.0'
-    ? `.cache/ios-native/${manifest.target.sdk}-${manifest.target.arch === 'x64' ? 'x86_64' : manifest.target.arch}/build/Release/source-sdk.js`
-    : 'packages/script-host/build/Release/source-sdk.js';
+  const sdkPath = sourceSDKPath(process.platform, process.arch, manifest);
   requireValue(stat.isFile() && !stat.isSymbolicLink() &&
     manifest.sdk?.path === sdkPath &&
     manifest.sdk.bytes === bytes.length &&

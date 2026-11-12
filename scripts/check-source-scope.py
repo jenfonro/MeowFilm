@@ -1,6 +1,8 @@
 """Check the current native source/dependency boundary, without compiling code."""
 from pathlib import Path
+import json
 import re
+import subprocess
 import sys
 
 # App source directories are declared by the project generator, not duplicated here.
@@ -98,6 +100,14 @@ def runtime_membership(project_text):
     return failures
 
 
+def evaluate_package(package):
+    """Evaluate PackageDescription without resolving dependencies or building targets."""
+    result = subprocess.run(
+        ["swift", "package", "--package-path", str(package), "dump-package"],
+        check=True, capture_output=True, text=True, encoding="utf-8")
+    return json.loads(result.stdout)
+
+
 def check(root):
     # macOS exposes temporary directories through /var while their canonical
     # location is /private/var. Anchor every traversal to one canonical root so
@@ -105,31 +115,43 @@ def check(root):
     root = Path(root).resolve()
     failures = []
     package = root / "native/MeowKit"
-    manifest = (package / "Package.swift").read_text(encoding="utf-8")
-    local_paths = set(re.findall(r'\.package\(path: "([^"\n]+)"\)', manifest))
-    product_pattern = r'\.product\(name: "([^"\n]+)", package: "([^"\n]+)"\)'
-    external = set()
-    for name, identity in re.findall(product_pattern, manifest):
-        expected = LOCAL_PRODUCTS.get(name)
-        if expected is None or identity != expected[0] or expected[1] not in local_paths:
-            failures.append("Unapproved local product: " + name)
-        else:
-            external.add(name)
-    if local_paths - {path for _, path in LOCAL_PRODUCTS.values()}:
+    try:
+        manifest = evaluate_package(package)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+        return ["Cannot evaluate Swift package manifest: " + str(error)]
+    local_packages = {}
+    for dependency in manifest["dependencies"]:
+        for item in dependency.get("fileSystem", []):
+            local_packages[item["identity"]] = Path(item["path"]).resolve()
+        if set(dependency) != {"fileSystem"}:
+            failures.append("Unapproved package source")
+    allowed_paths = {(package / path).resolve() for _, path in LOCAL_PRODUCTS.values()}
+    if set(local_packages.values()) - allowed_paths:
         failures.append("Unapproved package path")
-    declarations = re.findall(
-        r'\.(target|testTarget)\(name: "([^"\n]+)", dependencies: \[([^\]]*)\]', manifest)
+    external = set()
     targets = {}
     kinds = {}
-    for kind, name, dependencies in declarations:
+    for declaration in manifest["targets"]:
+        name, kind = declaration["name"], declaration["type"]
         if name in targets:
             failures.append("Duplicate target: " + name)
-        product_dependencies = {product for product, _ in re.findall(product_pattern, dependencies)}
-        literals = re.sub(product_pattern, "", dependencies)
-        targets[name] = set(re.findall(r'"([^"\n]+)"', literals)) | product_dependencies
+        dependencies = set()
+        for dependency in declaration["dependencies"]:
+            if "product" in dependency:
+                product, identity = dependency["product"][:2]
+                expected = LOCAL_PRODUCTS.get(product)
+                if (expected is None or identity != expected[0]
+                        or local_packages.get(identity) != (package / expected[1]).resolve()):
+                    failures.append("Unapproved local product: " + product)
+                else:
+                    external.add(product)
+                dependencies.add(product)
+            else:
+                dependencies.add((dependency.get("target") or dependency["byName"])[0])
+        targets[name] = dependencies
         kinds[name] = kind
-    sources = {name for name, kind in kinds.items() if kind == "target"}
-    tests = {name for name, kind in kinds.items() if kind == "testTarget"}
+    sources = {name for name, kind in kinds.items() if kind == "regular"}
+    tests = {name for name, kind in kinds.items() if kind == "test"}
     if not sources:
         failures.append("No package source targets")
     for folder, expected in (("Sources", sources), ("Tests", tests)):
@@ -140,12 +162,12 @@ def check(root):
         for target in sorted(expected):
             if not list((parent / target).rglob("*.swift")):
                 failures.append("Empty target: " + target)
-    product_targets = re.findall(r'\.library\(name: "([^"\n]+)", targets: \[([^\]]*)\]', manifest)
+    product_targets = [(item["name"], item["targets"]) for item in manifest["products"]]
     products = {name for name, _ in product_targets}
     if len(products) != len(product_targets):
         failures.append("Duplicate package product")
     for name, members in product_targets:
-        linked = set(re.findall(r'"([^"\n]+)"', members))
+        linked = set(members)
         if not linked or not linked <= sources:
             failures.append("Invalid package product targets: " + name)
     for target, dependencies in targets.items():

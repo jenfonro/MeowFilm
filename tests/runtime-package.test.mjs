@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   symlinkSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -26,7 +26,7 @@ function write(base, rel, value) {
   writeFileSync(path, typeof value === 'string' || Buffer.isBuffer(value) ? value : `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function fixture({ missing = [], omitFiles = [] } = {}) {
+function fixture({ missing = [], omitFiles = [], runtimeImports = {} } = {}) {
   const area = mkdtempSync(join(temporary, 'case-'));
   const root = join(area, 'source');
   mkdirSync(root);
@@ -38,6 +38,9 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   function file(location, content) {
     if (!omitFiles.includes(location)
       && !missing.some(parent => location === parent || location.startsWith(`${parent}/`))) write(root, location, content);
+  }
+  function runtimeFile(location, fallback = sourceCode) {
+    file(`apps/runtime/${location}`, runtimeImports[location] ?? fallback);
   }
   function add(location, name, version, fields = {}, workspace = false) {
     const manifest = {
@@ -83,10 +86,11 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   add('packages/runtime-bridge', '@meowfilm/runtime-bridge', '0.1.0',
     { dependencies: { shared: '^1.0.0' } }, true);
   add('packages/script-host', '@meowfilm/script-host', '0.2.0',
-    { files: ['src'], dependencies: {
+    { files: ['src'], exports: { '.': './src/index.js', './native-json': './src/native-json.js' }, dependencies: {
       '@meowfilm/source-runtime': '0.1.0',
       'fixture-lib': '^1.0.0', 'host-lib': '1.x', 'music-lib': '~1.0.0', 'fixture-dom': '26.1.0', acorn: '8.18.0',
     } }, true);
+  file('packages/script-host/src/native-json.js', sourceCode);
   add('packages/source-runtime', '@meowfilm/source-runtime', '0.1.0',
     { files: ['src'] }, true);
   add('packages/pan-runtime', '@meowfilm/pan-runtime', '0.1.0', { files: ['src'] }, true);
@@ -100,14 +104,19 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
     { files: ['novel-rules.js'], main: './novel-rules.js', exports: './novel-rules.js' }, true);
   file('packages/novel-rules/novel-rules.js', sourceCode);
   add('packages/film-playback', '@meowfilm/film-playback', '0.1.0',
-    { files: ['src'], dependencies: {
+    { files: ['src'], exports: {
+      '.': './src/index.js', './metadata-query': './src/metadata-query.js',
+    }, dependencies: {
       '@meowfilm/film-rules': '0.1.0', '@meowfilm/film-search': '0.1.0', '@meowfilm/script-host': '0.2.0',
     } }, true);
+  file('packages/film-playback/src/metadata-query.js', sourceCode);
+  file('packages/film-playback/src/index.js',
+    `import '@meowfilm/film-rules';\nimport '@meowfilm/film-search';\nimport '@meowfilm/script-host';\n${sourceCode}`);
   add('packages/netease-token', '@meowfilm/netease-token', '0.1.0', { files: ['src'] }, true);
   add('packages/unused-core', '@meowfilm/unused-core', '0.2.0',
     { dependencies: { 'music-lib': '~1.0.0' } }, true);
   add('packages/inactive-core', '@meowfilm/inactive-core', '0.1.0',
-    { dependencies: { 'fixture-dom': '26.1.0', acorn: '8.18.0' } }, true);
+    {}, true);
   add('node_modules/shared', 'shared', '1.2.3');
   add('node_modules/host-lib', 'host-lib', '1.1.0', { peerDependencies: { 'peer-lib': '^2.0.0' } });
   add('node_modules/peer-lib', 'peer-lib', '2.4.1');
@@ -126,20 +135,35 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   add('packages/script-host/node_modules/fixture-leaf/node_modules/shared', 'shared', '3.1.0');
   add('packages/script-host/node_modules/required-fixture-peer', 'required-fixture-peer', '1.1.0');
   add('node_modules/dev-tool', 'dev-tool', '1.0.0');
+  file('packages/script-host/src/index.js', `import '@meowfilm/source-runtime';\n${sourceCode}`);
   file('node_modules/dev-tool/native.node', 'Unused developer dependency; must not be scanned/copied.');
   file('node_modules/unlocked-dev-only/package.json', { name: 'unlocked-dev-only', version: '9.0.0' });
-  file('apps/runtime/bootstrap.mjs', `import '@meowfilm/runtime-bridge';\n${sourceCode}`);
-  file('apps/runtime/modules/music-script.mjs', sourceCode);
-  file('apps/runtime/modules/cat-script.mjs', sourceCode);
-  file('apps/runtime/modules/source-runtime.mjs', sourceCode);
-  file('apps/runtime/modules/pan-runtime.mjs', sourceCode);
-  file('apps/runtime/modules/film-playback.mjs', `import '@meowfilm/film-playback';\n${sourceCode}`);
-  file('apps/runtime/modules/netease-token.mjs', sourceCode);
-  for (const path of ['entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
-    'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs',
-    'modules/metadata-data.mjs', 'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
-    'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs']) {
-    file(`apps/runtime/${path}`, sourceCode);
+  runtimeFile('bootstrap.mjs', `import '@meowfilm/runtime-bridge';\n${sourceCode}`);
+  runtimeFile('modules/music-script.mjs');
+  runtimeFile('modules/cat-script.mjs');
+  runtimeFile('modules/source-runtime.mjs',
+    `import '@meowfilm/source-runtime';\nimport './source-candidates.mjs';\nimport './source-library.mjs';\n` +
+    `import './source-web.mjs';\nimport './source-rules.mjs';\n${sourceCode}`);
+  runtimeFile('modules/pan-runtime.mjs', `import '@meowfilm/pan-runtime';\n${sourceCode}`);
+  runtimeFile('modules/film-playback.mjs', `import '@meowfilm/film-playback';\n${sourceCode}`);
+  runtimeFile('modules/netease-token.mjs', `import '@meowfilm/netease-token';\n${sourceCode}`);
+  runtimeFile('modules/source-rules.mjs',
+    `import '@meowfilm/novel-rules';\nimport '@meowfilm/script-host/native-json';\n${sourceCode}`);
+  runtimeFile('modules/metadata/tmdb.mjs', `import '@meowfilm/film-playback/metadata-query';\n${sourceCode}`);
+  runtimeFile('modules/metadata-data.mjs',
+    `import './metadata/settings.mjs';\nimport './metadata/network.mjs';\nimport './metadata/tmdb.mjs';\nimport './metadata/douban.mjs';\n${sourceCode}`);
+  for (const [path, content] of [
+    ['entry.mjs', `import './bootstrap.mjs';\nimport './modules/music-script.mjs';\nimport './modules/cat-script.mjs';\n` +
+      `import './modules/source-runtime.mjs';\nimport './modules/pan-runtime.mjs';\nimport './modules/metadata-data.mjs';\n` +
+      `import './modules/film-playback.mjs';\nimport './modules/netease-token.mjs';\n${sourceCode}`],
+    ['pan-entry.mjs', `import './modules/pan-runtime.mjs';\n${sourceCode}`],
+    ['client.mjs', sourceCode], ['contracts.mjs', sourceCode],
+    ['modules/source-candidates.mjs', sourceCode], ['modules/source-library.mjs', sourceCode],
+    ['modules/source-web.mjs', sourceCode],
+    ['modules/metadata/settings.mjs', sourceCode], ['modules/metadata/network.mjs', sourceCode],
+    ['modules/metadata/douban.mjs', sourceCode],
+  ]) {
+    runtimeFile(path, content);
   }
   function saveLock() { write(root, 'package-lock.json', lock); }
   function update(location, changes, updateLock = true) {
@@ -247,7 +271,8 @@ test('hashes and manifest bytes are reproducible across absolute output director
   await f.pack('aggregate', 'second');
   assert.deepEqual(readFileSync(join(f.output('first'), 'runtime-manifest.json')),
     readFileSync(join(f.output('second'), 'runtime-manifest.json')));
-  write(f.root, 'packages/script-host/src/index.js', `${sourceCode}// changed input\n`);
+  const hostFile = join(f.root, 'packages/script-host/src/index.js');
+  write(f.root, 'packages/script-host/src/index.js', `${readFileSync(hostFile, 'utf8')}// changed input\n`);
   await f.pack('aggregate', 'changed');
   const first = readJSON(join(f.output('first'), 'runtime-manifest.json'));
   const changed = readJSON(join(f.output('changed'), 'runtime-manifest.json'));
@@ -323,15 +348,23 @@ for (const [module, file] of [
   ['source library', 'source-library.mjs'], ['source Web broker', 'source-web.mjs'],
   ['source rules', 'source-rules.mjs'],
 ]) {
-  test(`missing shared ${module} module cannot leave a complete runtime`, async () => {
-    await fails(fixture({ omitFiles: [`apps/runtime/modules/${file}`] }), 'MISSING_SOURCE');
+  test(`a missing imported ${module} module cannot leave a complete runtime`, async () => {
+    const importer = module === 'source library' || module === 'source Web broker' || module === 'source rules'
+      ? 'modules/source-runtime.mjs'
+      : 'entry.mjs';
+    const target = `modules/${file}`;
+    const relativeTarget = importer === 'entry.mjs' ? `./${target}` : `./${file}`;
+    const runtimeImports = { [importer]: `import '${relativeTarget}';\n${sourceCode}` };
+    await fails(fixture({ omitFiles: [`apps/runtime/${target}`], runtimeImports }), 'MISSING_SOURCE');
   });
 }
 
-test('unlisted shared helpers are rejected rather than silently omitted', async () => {
+test('new shared helpers are automatically included in the runtime payload', async () => {
   const f = fixture();
-  f.file('apps/runtime/unlisted-helper.mjs', sourceCode);
-  await fails(f, 'SHARED_CLOSURE');
+  f.file('apps/runtime/modules/metadata/new-helper/unlisted-helper.mjs', sourceCode);
+  const manifest = await f.pack();
+  assert.ok(manifest.files.some(file =>
+    file.path === 'app/modules/metadata/new-helper/unlisted-helper.mjs'));
 });
 
 test('shared runtime packaging accepts ordinary method names named import', async () => {
@@ -620,14 +653,18 @@ test('missing advertised public files fail instead of producing a superficially 
 
 test('the App cannot pull in an unselected workspace through dependency metadata', async () => {
   const f = fixture();
-  f.update('packages/script-host', { dependencies: { '@meowfilm/inactive-core': '*' } });
+  const host = readJSON(join(f.root, 'packages/script-host/package.json'));
+  f.update('packages/script-host', { dependencies: {
+    ...host.dependencies, '@meowfilm/inactive-core': '*',
+  } });
   await fails(f, 'PRODUCT_CLOSURE', 'aggregate');
 });
 
 test('jsdom cannot silently enter the App script payload', async () => {
   const f = fixture();
   f.add('node_modules/jsdom', 'jsdom', '26.1.0');
-  f.update('packages/script-host', { dependencies: { jsdom: '26.1.0' } });
+  const dependencies = readJSON(join(f.root, 'packages/script-host/package.json')).dependencies;
+  f.update('packages/script-host', { dependencies: { ...dependencies, jsdom: '26.1.0' } });
   await fails(f, 'PRODUCT_CLOSURE', 'aggregate');
 });
 
@@ -641,7 +678,10 @@ test('only the token owner may package the exact Node 18 compatible jsdom', asyn
   for (const [owner, version] of [['script-host', '24.1.3'], ['netease-token', '26.1.0']]) {
     const denied = fixture();
     denied.add('node_modules/jsdom', 'jsdom', version);
-    denied.update(`packages/${owner}`, { dependencies: { jsdom: version } });
+    const dependencies = owner === 'script-host'
+      ? { ...readJSON(join(denied.root, 'packages/script-host/package.json')).dependencies, jsdom: version }
+      : { jsdom: version };
+    denied.update(`packages/${owner}`, { dependencies });
     await fails(denied, 'PRODUCT_CLOSURE', 'aggregate');
   }
 });
@@ -664,8 +704,13 @@ test('root manifest/lock drift and nested lock overrides are rejected', async ()
 
 test('CLI uses its own repository root and never imports fixture business code', () => {
   const f = fixture();
-  write(f.root, 'scripts/package-runtime.mjs', readFileSync(join(repository, 'scripts/package-runtime.mjs')));
-  write(f.root, 'scripts/quickjs/ios-target.mjs', readFileSync(join(repository, 'scripts/quickjs/ios-target.mjs')));
+  for (const path of [
+    'scripts/package-runtime.mjs', 'scripts/module-policy.mjs', 'scripts/runtime-source.mjs',
+    'scripts/verify-dependency-lock.mjs', 'scripts/script-host-native.json', 'scripts/quickjs/ios-target.mjs',
+    'scripts/quickjs/native-inputs.mjs',
+  ]) write(f.root, path, readFileSync(join(repository, path)));
+  const parser = join(repository, 'node_modules/acorn');
+  cpSync(parser, join(f.root, 'node_modules/acorn'), { recursive: true });
   const output = f.output('cli');
   const run = spawnSync(process.execPath, [join(f.root, 'scripts/package-runtime.mjs'),
     '--product', 'aggregate', '--output', output], { cwd: f.area, encoding: 'utf8', timeout: 20_000 });

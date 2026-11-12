@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { verifyAppStructure } from '../scripts/windows/verify-app-structure.mjs';
 import { temporaryRoot, assertOwnedPath } from '../scripts/windows/working-paths.mjs';
 
@@ -19,8 +19,22 @@ function fixture(t) {
   const write = (path, value) => {
     const file = assertOwnedPath(source, join(source, path), { allowMissing: true });
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, value);
+    writeFileSync(file, typeof value === 'string' || Buffer.isBuffer(value)
+      ? value : `${JSON.stringify(value, null, 2)}\n`);
   };
+  write('package.json', { workspaces: ['packages/*'] });
+  for (const [name, exports] of [
+    ['runtime-bridge', { '.': './src/index.js' }],
+    ['script-host', { '.': './src/index.js', './native-json': './src/native-json.js' }],
+    ['source-runtime', { '.': './src/index.js' }],
+    ['novel-rules', { '.': './src/index.js' }],
+    ['pan-runtime', { '.': './src/index.js' }],
+    ['film-playback', { '.': './src/index.js' }],
+    ['netease-token', { '.': './src/index.js' }],
+  ]) {
+    write(`packages/${name}/package.json`, { name: `@meowfilm/${name}`, exports });
+    for (const target of Object.values(exports)) write(`packages/${name}/${target.slice(2)}`, 'export {};');
+  }
   write('apps/runtime/bootstrap.mjs', "import './modules/music-script.mjs';");
   write('apps/runtime/entry.mjs', "export { createRuntime } from './bootstrap.mjs';");
   write('apps/runtime/pan-entry.mjs', 'export {};');
@@ -108,30 +122,54 @@ test('novel rule module uses the public program and native JSON entry', t => {
   assert.equal(verifyAppStructure(f.source).relativeImports, 4);
 });
 
-for (const file of [...metadataFiles, 'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'pan-entry.mjs',
-  'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs']) {
-  test(`shared runtime inventory requires ${file}`, t => {
+for (const [file, importer] of [
+  ['modules/metadata-data.mjs', 'entry.mjs'],
+  ...metadataFiles.filter(file => file !== 'modules/metadata-data.mjs')
+    .map(file => [file, 'modules/metadata-data.mjs']),
+  ['modules/pan-runtime.mjs', 'pan-entry.mjs'],
+  ['modules/film-playback.mjs', 'entry.mjs'],
+  ['modules/netease-token.mjs', 'entry.mjs'],
+  ['modules/source-library.mjs', 'modules/source-runtime.mjs'],
+  ['modules/source-web.mjs', 'modules/source-runtime.mjs'],
+  ['modules/source-rules.mjs', 'modules/source-runtime.mjs'],
+]) {
+  test(`shared runtime rejects a missing imported module ${file}`, t => {
     const f = fixture(t);
+    const target = `apps/runtime/${file}`;
+    const owner = `apps/runtime/${importer}`;
+    const specifier = posix.relative(posix.dirname(owner), target).startsWith('.')
+      ? posix.relative(posix.dirname(owner), target)
+      : `./${posix.relative(posix.dirname(owner), target)}`;
+    f.write(owner, `import '${specifier}';`);
     rmSync(join(f.source, 'apps/runtime', file));
-    assert.throws(() => verifyAppStructure(f.source), /missing runtime source: apps\/runtime/);
+    assert.throws(() => verifyAppStructure(f.source), /missing\/linked relative import/);
   });
 }
 
-for (const directory of ['unlisted', 'modules/unlisted', 'modules/metadata/unlisted']) {
-  test(`shared runtime rejects the empty unlisted directory ${directory}`, t => {
-    const f = fixture(t);
-    mkdirSync(join(f.source, 'apps/runtime', directory));
-    assert.throws(() => verifyAppStructure(f.source), /unexpected runtime source: apps\/runtime/);
-  });
-}
-
-for (const file of ['unlisted-helper.mjs', 'modules/metadata/unlisted-helper.mjs']) {
-  test(`shared runtime rejects the unlisted file ${file}`, t => {
+for (const file of [
+  'unlisted-helper.mjs', 'modules/metadata/unlisted-helper.mjs',
+  'modules/metadata/new-helper/unlisted-helper.mjs',
+]) {
+  test(`shared runtime automatically includes the new module ${file}`, t => {
     const f = fixture(t);
     f.write(`apps/runtime/${file}`, 'export {};');
-    assert.throws(() => verifyAppStructure(f.source), /unexpected runtime source: apps\/runtime/);
+    assert.ok(verifyAppStructure(f.source).sourceFiles.includes(`apps/runtime/${file}`));
   });
 }
+
+test('shared runtime rejects non-module assets instead of silently omitting them', t => {
+  const f = fixture(t);
+  f.write('apps/runtime/modules/metadata/fixture.json', '{}');
+  assert.throws(() => verifyAppStructure(f.source), /Unexpected shared runtime source/);
+});
+
+test('tool scripts may load runtime-selected modules but application imports stay statically checkable', t => {
+  const f = fixture(t);
+  f.write('scripts/accept-reader-sources.mjs', 'export const load = path => import(path);');
+  assert.ok(verifyAppStructure(f.source).sourceFiles.includes('scripts/accept-reader-sources.mjs'));
+  f.write('apps/runtime/bootstrap.mjs', 'export const load = path => import(path);');
+  assert.throws(() => verifyAppStructure(f.source), /statically resolvable/);
+});
 
 test('Windows scope ignores other-platform sources and generated-runtime templates', t => {
   const f = fixture(t);
