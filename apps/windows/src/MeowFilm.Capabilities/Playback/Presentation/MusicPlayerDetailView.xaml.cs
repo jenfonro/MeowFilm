@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -129,6 +130,8 @@ public partial class MusicPlayerDetailView : UserControl
 
     private void DelayLyric_Click(object sender, RoutedEventArgs e) => module.AdjustLyricOffset(.5);
     private void AdvanceLyric_Click(object sender, RoutedEventArgs e) => module.AdjustLyricOffset(-.5);
+    private async void Translation_Click(object sender, RoutedEventArgs e) =>
+        await module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
 
     private void Detail_PreviewKeyUp(object sender, KeyEventArgs e)
     {

@@ -197,14 +197,18 @@ public static partial class MusicUiTests
         });
     }
 
-    private static async Task AssertLyricTimingIconAsync(Button button)
+    private static async Task AssertLyricTimingIconAsync(Button button, bool expectCircle = true)
     {
         True(button.Content is System.Windows.FrameworkElement &&
             Visuals(button).OfType<System.Windows.Shapes.Path>().Any(path => path.Data is not null),
             "lyric timing uses directional vector artwork instead of a plain text button");
-        True(Visuals(button).OfType<Border>().Any(border =>
-            border.CornerRadius.TopLeft >= button.ActualHeight / 2 - 1),
-            "the timing control has the reference's circular outline");
+        if (expectCircle)
+            True(Visuals(button).OfType<Border>().Any(border =>
+                border.CornerRadius.TopLeft >= button.ActualHeight / 2 - 1),
+                "the full-player timing control retains its circular outline");
+        else
+            True(Visuals(button).OfType<Border>().All(border => border.BorderThickness == default),
+                "the desktop timing control has no circular outline");
         Equal("5", Visuals(button).OfType<TextBlock>().Single().Text);
         True(System.Windows.Automation.AutomationProperties.GetName(button).Contains("0.5") &&
             button.ToolTip?.ToString()?.Contains("0.5") == true,
@@ -221,8 +225,12 @@ public static partial class MusicUiTests
             button.SetCurrentValue(System.Windows.UIElement.IsEnabledProperty, false); await Drain();
             Equal(System.Windows.SystemColors.GrayTextColor,
                 ((System.Windows.Media.SolidColorBrush)button.Foreground).Color);
-            Equal(System.Windows.SystemColors.GrayTextColor,
-                ((System.Windows.Media.SolidColorBrush)button.BorderBrush).Color);
+            if (expectCircle)
+                Equal(System.Windows.SystemColors.GrayTextColor,
+                    ((System.Windows.Media.SolidColorBrush)button.BorderBrush).Color);
+            else
+                True(Visuals(button).OfType<Border>().All(border => border.BorderThickness == default),
+                    "high contrast and disabled state do not introduce a desktop timing outline");
         }
         finally
         {

@@ -7,6 +7,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
@@ -16,7 +17,8 @@ namespace MeowFilm.Windows.Tests;
 public static class MusicDesktopLyricsTests
 {
     public static IEnumerable<TestCase> Cases() =>
-        MusicUiTests.DesktopLyricsCases().Concat(MusicLyricDisplayTests.DesktopConsumerCases());
+        MusicUiTests.DesktopLyricsCases().Concat(MusicUiTests.DesktopLyricsThemeCases())
+            .Concat(MusicLyricDisplayTests.DesktopConsumerCases());
 }
 
 public static partial class MusicLyricDisplayTests
@@ -231,6 +233,50 @@ public static partial class MusicLyricDisplayTests
 
 public static partial class MusicUiTests
 {
+    internal static IEnumerable<TestCase> DesktopLyricsThemeCases()
+    {
+        yield return Case("desktop lyrics footer follows the player theme and state colors", () =>
+            WithDesktopLyrics(async (f, owner) =>
+            {
+                await SaveDesktopLyricFixture(f);
+                var player = (MusicPlayerView)f.Module.PlayerView;
+                owner.Content = player;
+                var button = (Button)player.FindName("DesktopLyricsButton");
+                var playlist = (Button)player.FindName("PlaylistButton");
+                var playButton = (Button)player.FindName("PlayButton");
+                var label = (TextBlock)button.Content;
+                Render(player, 1110, 80); await Drain();
+
+                static Color ColorOf(Brush? brush, string name) =>
+                    brush is SolidColorBrush solid
+                        ? solid.Color
+                        : throw new InvalidOperationException($"{name} did not resolve to a solid theme brush.");
+                Equal(ColorOf(playlist.Foreground, "playlist foreground"), ColorOf(button.Foreground, "desktop lyrics foreground"));
+                Equal(ColorOf(button.Foreground, "desktop lyrics foreground"), ColorOf(label.Foreground, "desktop lyrics label"));
+
+                Click(button);
+                await Until(() => f.Module.IsDesktopLyricsOpen); await Drain();
+                Equal(ColorOf(playButton.Background, "player accent"), ColorOf(button.Foreground, "desktop lyrics open foreground"));
+                Equal(ColorOf(button.Foreground, "desktop lyrics open foreground"), ColorOf(label.Foreground, "desktop lyrics open label"));
+
+                DesktopTheme.SetIsHighContrast(button, true); await Drain();
+                Equal(SystemColors.HighlightColor, ColorOf(button.Foreground, "desktop lyrics high-contrast open foreground"));
+                Equal(ColorOf(button.Foreground, "desktop lyrics high-contrast open foreground"),
+                    ColorOf(label.Foreground, "desktop lyrics high-contrast open label"));
+
+                Click(button);
+                await Until(() => !f.Module.IsDesktopLyricsOpen); await Drain();
+                Equal(SystemColors.WindowTextColor, ColorOf(button.Foreground, "desktop lyrics high-contrast foreground"));
+                Equal(ColorOf(button.Foreground, "desktop lyrics high-contrast foreground"),
+                    ColorOf(label.Foreground, "desktop lyrics high-contrast label"));
+
+                button.SetCurrentValue(UIElement.IsEnabledProperty, false); await Drain();
+                Equal(SystemColors.GrayTextColor, ColorOf(button.Foreground, "desktop lyrics disabled foreground"));
+                Equal(ColorOf(button.Foreground, "desktop lyrics disabled foreground"),
+                    ColorOf(label.Foreground, "desktop lyrics disabled label"));
+            }));
+    }
+
     internal static IEnumerable<TestCase> DesktopLyricsCases()
     {
         yield return Case("desktop lyrics button follows the playlist button at both footer widths", () =>
@@ -353,23 +399,52 @@ public static partial class MusicUiTests
                 owner.Content = detail;
                 await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
                 Render(detail, 1110, 800); await Drain();
+                GeneralAppearanceTests.SavePreview(detail, "full-player-lyric-control-rail", 1110, 800);
                 var detailFooter = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
                 var detailButton = (Button)detailFooter.FindName("DesktopLyricsButton");
+                var controlRail = (StackPanel)detail.FindName("LyricControlRail");
+                var timingRail = (StackPanel)detail.FindName("LyricTimingRail");
+                var translationButton = (Button)detail.FindName("LyricTranslationButton");
+                Equal(3, controlRail.Children.Count);
+                True(ReferenceEquals(controlRail.Children[0], timingRail) &&
+                    ReferenceEquals(controlRail.Children[2], translationButton) && timingRail.Children.Count == 2,
+                    "the translation switch is a separate lower group below the two lyric timing controls");
+                True(translationButton.IsEnabled &&
+                    AutomationProperties.GetName(translationButton) == "隐藏译文歌词" &&
+                    translationButton.ToolTip?.ToString() == "隐藏译文歌词",
+                    "the Windows translation button exposes its current shared state");
+                var translationPath = Visuals(translationButton).OfType<System.Windows.Shapes.Path>().Single();
+                True(translationPath.Data.ToString().StartsWith("M3,5", StringComparison.Ordinal),
+                    "the Windows control reuses the iOS PageIcon.translation vector path");
+                var lyricViewport = (FrameworkElement)detail.FindName("LyricList");
+                var viewportBounds = new Rect(lyricViewport.TranslatePoint(new(), detail), lyricViewport.RenderSize);
+                var railBounds = new Rect(controlRail.TranslatePoint(new(), detail), controlRail.RenderSize);
+                True(railBounds.Left >= viewportBounds.Right - .5 && railBounds.Right <= detail.ActualWidth + .5,
+                    "the lower translation control stays in the right rail without covering the lyric viewport");
                 Equal("关闭桌面歌词", AutomationProperties.GetName(detailButton));
                 var translated = Visuals(detail).OfType<TextBlock>().Where(text => text.Name == "LyricTranslation").ToArray();
                 True(translated.Any(text => text.Text == rows[1].Translation && text.IsVisible), "full detail displays provider translation by default");
                 int calls = f.Calls.Log.Count;
-                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation); await Drain();
+                double offset = f.Module.LyricOffsetSeconds;
+                int seeks = f.Playback.SeekCalls;
+                Click(translationButton);
+                await Until(() => !f.Module.ShowLyricTranslation); await Drain();
                 True(!f.Module.ShowLyricTranslation && !translation.IsVisible, "desktop translation is collapsed");
                 True(translated.All(text => !text.IsVisible), "full detail shares the same switch");
                 Equal(calls, f.Calls.Log.Count);
+                Equal(offset, f.Module.LyricOffsetSeconds); Equal(seeks, f.Playback.SeekCalls);
+                Equal("显示译文歌词", AutomationProperties.GetName(translationButton));
                 True(rows.SequenceEqual(f.Module.Lyrics) && ReferenceEquals(rows[0], f.Module.Lyrics[0]),
                     "visibility never rewrites source rows, timing, romanization or words");
                 Equal("first source translation", rows[0].Translation);
                 Equal(0d, rows[0].Time); Equal(5d, rows[1].Time);
-                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation); await Drain();
+                Click(translationButton);
+                await Until(() => f.Module.ShowLyricTranslation); await Drain();
                 True(f.Module.ShowLyricTranslation && translation.IsVisible, "source translation reappears without a request");
                 True(translated.Any(text => text.Text == rows[1].Translation && text.IsVisible), "full detail translation reappears");
+                Equal("隐藏译文歌词", AutomationProperties.GetName(translationButton));
+                Equal(calls, f.Calls.Log.Count);
+                Equal(offset, f.Module.LyricOffsetSeconds); Equal(seeks, f.Playback.SeekCalls);
                 window.Close(); await Drain();
                 Equal("打开桌面歌词", AutomationProperties.GetName(detailButton));
                 True(f.Module.IsLyrics && f.Module.NeedsLyrics, "closing desktop lyrics leaves the complete player active");
@@ -616,8 +691,19 @@ public static partial class MusicUiTests
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
                 var prior = f.Module.DesktopLyricsWindow!;
                 prior.Left += 29; prior.Top += 17;
+                var priorHandle = new WindowInteropHelper(prior).Handle;
+                True(MusicDesktopLyricsNative.GetWindowRect(priorHandle, out var priorBounds),
+                    "the current desktop lyric HWND has native bounds");
+                DesktopInteractionNative.SendMessage(priorHandle, 0x0231, 0, 0);
+                True(DesktopInteractionNative.SetWindowPos(priorHandle, 0, priorBounds.Left, priorBounds.Top,
+                    priorBounds.Right - priorBounds.Left + 80, priorBounds.Bottom - priorBounds.Top + 40, 0x10),
+                    "the user-sized window receives a native resize");
+                await Drain();
+                DesktopInteractionNative.SendMessage(priorHandle, 0x0232, 0, 0);
                 prior.SetLocked(true); await Drain();
                 var state = prior.CapturePresentationState();
+                True(state.UserSized && state.Width > 760 && state.Height > 144,
+                    "shutdown captures the user's independent width and height");
                 var unlockHandle = new WindowInteropHelper(prior.UnlockWindow!).Handle;
                 int closed = 0; prior.Closed += (_, _) => closed++;
                 await f.Module.PrepareShutdownAsync();

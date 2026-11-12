@@ -54,10 +54,10 @@
 ## Windows 桌面歌词与媒体动作
 
 - `AttachDesktopLyricsOwner(Window, Action? activate)` 显式连接主窗口生命周期及唤醒回调。App 将回调接入 Shell 既有 `RestoreFromTray()`，统一恢复隐藏到托盘、最小化和先前最大化状态，不另建主窗口。音乐能力持有至多一个桌面歌词窗口；底栏“收藏到歌单”右侧的系统字体“桌”按钮与 `ExecuteMediaShortcutAsync(ToggleDesktopLyrics)` 操作相同状态，关闭窗口即时同步普通／完整播放器按钮。
-- 底栏保留 80 DIP 总高和窗口居中的播放控制；来源模式与普通方式统一在中央播放模式入口；右侧保留音质、收藏到歌单、“桌”、音量和更多，不另放来源／续播或私人 FM 控件。1110／860 宽度下右侧控制保持在实际视口内、进度命中区之外，各控制命中区域不重叠。
-- 窗口置顶、不进任务栏，`ShowActivated=false`，并设置 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`、拒绝鼠标激活；可从歌词区域拖动。传入主窗口只用于定位和 `Closed` 生命周期，不设置 WPF `Owner`，因此主窗口最小化不隐藏桌面歌词，不通过 `Application.Current` 查找所有者。
-- 非悬停时背景 alpha=0，只有文字及其细描边；未锁定且可见时用低频光标位置观察整个矩形，悬停显半透明底与工具栏，隐藏、锁定、关闭停止观察。工具栏依次为唤醒主程序、歌词延后／提前 0.5s、上一首／播放暂停／下一首、设置、锁定、关闭。菜单和颜色编辑期间保留悬停态；菜单复用 `MeowFilm.ContextMenu/MenuItem`，自定义颜色通过短生命周期可聚焦窗口承载既有 `ColorSelection/ColorPicker`，取消只丢弃草稿。
-- 锁定为 layered 歌词 HWND 设置 `WS_EX_TRANSPARENT`，包括有字形像素在内都交由系统命中下层窗口；不是 WPF `IsHitTestVisible=false` 或同线程 `HTTRANSPARENT`。独立不激活的解锁 HWND 常显于原锁定按钮位置，并随移动、尺寸和 DPI 消息以屏幕物理坐标重定位；先确保解锁可用才进入穿透，解锁先恢复主 HWND 输入。关闭释放浮层、捕获、观察与两个 HWND。
+- 底栏保留 80 DIP 总高和窗口居中的播放控制；来源模式与普通方式统一在中央播放模式入口；右侧保留音质、收藏到歌单、“桌”、音量和更多，不另放来源／续播或私人 FM 控件。桌面歌词开关沿用 `Capability.Player.Foreground`、活动强调、禁用及高对比系统色，并将同一前景绑定到“桌”字，避免回退成黑色。全屏歌词右侧把两个 0.5 秒校正按钮和译文按钮分组；译文按钮复用 iOS `PageIcon.translation` 图形及共享 `ShowLyricTranslation` 状态，不发起歌词请求、不 seek 或重置校正。1110／860 宽度下右侧控制保持在实际视口内、进度命中区之外，各控制命中区域不重叠。
+- 窗口置顶、不进任务栏，`ShowActivated=false`，并设置 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`、拒绝鼠标激活；歌词面可拖动，八个原生边缘／角命中区域支持独立调整宽高。单行实际可见歌词块在可用区域居中；译文开关关闭或源译文为空时不保留空轨道。单行／双行切换不覆盖用户手动调整的窗口尺寸。传入主窗口只用于定位和 `Closed` 生命周期，不设置 WPF `Owner`，因此主窗口最小化不隐藏桌面歌词，不通过 `Application.Current` 查找所有者。
+- 非悬停时背景 alpha=0，只有文字及其细描边；未锁定且可见时用低频光标位置观察整个矩形，悬停显半透明底与工具栏，隐藏、锁定、关闭停止观察。工具栏整体居中，依次为唤醒主程序、歌词延后／提前 0.5s、上一首／播放暂停／下一首、设置、锁定、关闭；桌面校正按钮只保留环形图标和中心 `5`，无圆形描边。菜单和颜色编辑期间保留悬停态；菜单复用 `MeowFilm.ContextMenu/MenuItem`，自定义颜色通过短生命周期可聚焦窗口承载既有 `ColorSelection/ColorPicker`，取消只丢弃草稿。
+- 锁定为 layered 歌词 HWND 设置 `WS_EX_TRANSPARENT`，包括有字形像素在内都交由系统命中下层窗口；不是 WPF `IsHitTestVisible=false` 或同线程 `HTTRANSPARENT`。独立不激活的解锁 HWND 常显于居中工具栏原锁定按钮位置，并随移动、尺寸和 DPI 消息以屏幕物理坐标重定位；先确保解锁可用才进入穿透，解锁先恢复主 HWND 输入。关闭释放浮层、捕获、观察与两个 HWND。
 - `IsLyrics` 仍只表示完整播放器详情；内部 `NeedsLyrics` 表示模块未停止且任一歌词消费者活跃。选曲、来源变更、元数据平台保存与账号权威操作结算按此需求恢复现有读取。关闭一处不取消另一处；最后一处关闭取消读取并提升请求代次。
 - 显式导入本地歌词仍可在未打开歌词消费者时填充行；导入等待期间最后消费者关闭，沿既有 CTS／epoch 屏蔽迟到恢复。本地移除实际结算后仅在仍需歌词时恢复读取，不因移除回复迟到而重新启动已关闭的读取。
 - 桌面窗口使用当前播放 occurrence 的校正后 `LyricPositionSeconds` 与 `ActiveLyricIndex`，不跟随详情的手动预览。无媒体显示“未在播放”，等待首行显示“前奏”，空结果显示“暂无歌词”，读取和错误保留真实状态；不建立第二媒体时钟或重复歌词集合。
@@ -66,7 +66,7 @@
 - 准备关闭立即关闭桌面及解锁 HWND、取消读取并封住新媒体动作；取消关闭准备可使用仍有效的显式主窗口创建新 HWND，恢复当次位置／锁定及解锁入口，不能重新打开已关闭实例。Owner 关闭、Abort 与 Dispose 清除恢复意图并解绑 `Closed`，最终关闭还排空既有读取。
 - `ExecuteMediaShortcutAsync(MediaShortcutAction)` 只分派已确认的八项动作：播放／暂停、上一首、下一首、音量 ±5（沿用 0–100 夹取并 `SaveVolumeAsync`）、当前曲本地喜欢及既有同步、桌面歌词开关、源译文显隐。mini 不在动作契约中；未准入／失败走现有 `Status` 通知，不另建后台业务通道。
 - 完整播放器实际可见且业务准入时，裸 Space 走同一 `TogglePlaybackAsync`；详情预览路由消费首次、长按重复和配对 KeyUp，阻止焦点按钮默认 Space 点击。文本编辑、密码、可编辑组合框和菜单／Popup 输入不接管，普通页面不增加裸 Space。
-- `MusicLyricOffsetTests`、`MusicDesktopLyricSettingsTests`、`MusicDesktopLyricsInteractionTests` 与既有 `MusicDesktopLyricsTests`、`MusicMediaActionTests`、`MusicPlayerKeyboardTests` 覆盖校正、偏好、公开交互与资源边界；跨进程 fixture 用系统 `WindowFromPoint` 核对真实字形／空白命中下层另一进程与独立解锁命中，再以该目标的定向消息核对接收，不注入全局输入，也不将定向消息声称为物理鼠标投递。`MusicLyricDisplayTests` 按既有订阅取消／底层共享契约验证结算、旧行不发布和精确请求次数，不以 presentation 任务是否挂起判断物理排空；排空由真实应用 owner 及底层生命周期用例验证。视觉用例通过 `GeneralAppearanceTests.SavePreview` 在配置的 `MEOWFILM_SETTINGS_PREVIEW_ROOT` 输出底栏、桌面单双行及长句的 96／144／192 DPI PNG。合成路由／离屏窗口不是物理键盘、鼠标拖动、多显示器或媒体真实输出验收。
+- `MusicLyricOffsetTests`、`MusicDesktopLyricSettingsTests`、`MusicDesktopLyricsInteractionTests`、`MusicDesktopLyricsTests` 与 `MusicMediaActionTests`、`MusicPlayerKeyboardTests` 覆盖校正、偏好、主题／译文开关、桌面几何、尺寸与资源边界；跨进程 fixture 用系统 `WindowFromPoint` 核对真实字形／空白命中下层另一进程与独立解锁命中，再以该目标的定向消息核对接收，不注入全局输入，也不将定向消息声称为物理鼠标投递。`ShellWindowStartupSizeTests` 覆盖按 2560×1440 物理像素比例换算、DPI 与最小尺寸。`MusicLyricDisplayTests` 按既有订阅取消／底层共享契约验证结算、旧行不发布和精确请求次数，不以 presentation 任务是否挂起判断物理排空；排空由真实应用 owner 及底层生命周期用例验证。视觉用例通过 `GeneralAppearanceTests.SavePreview` 在配置的 `MEOWFILM_SETTINGS_PREVIEW_ROOT` 输出底栏、桌面单双行及长句的 96／144／192 DPI PNG。合成路由／离屏窗口不是物理键盘、鼠标拖动、多显示器或媒体真实输出验收。
 
 ## Windows 逐字呈现接口与生命周期
 

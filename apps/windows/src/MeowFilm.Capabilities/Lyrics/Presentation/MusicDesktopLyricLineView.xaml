@@ -3,28 +3,30 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  x:Name="Root" IsHitTestVisible="False" UseLayoutRounding="True">
- <StackPanel Margin="2">
-  <Viewbox Stretch="Uniform" StretchDirection="DownOnly" MaxHeight="50"
-           HorizontalAlignment="{Binding HorizontalContentAlignment,ElementName=Root}">
-   <Grid>
-    <local:MusicDesktopLyricTextView x:Name="PlainText" Text="{Binding Row.Text,ElementName=Root}" FontSize="32"
-                                   FontWeight="SemiBold" Foreground="{Binding Normal,ElementName=Root}"/>
-    <ItemsControl x:Name="Words" ItemsSource="{Binding Row.Words,ElementName=Root}" Visibility="Collapsed"
-                  Foreground="{Binding Normal,ElementName=Root}" FontSize="32" FontWeight="SemiBold">
-     <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-     <ItemsControl.ItemTemplate><DataTemplate>
-      <local:MusicLyricWordView Word="{Binding}"
-                               Foreground="{Binding Normal,RelativeSource={RelativeSource AncestorType=local:MusicDesktopLyricLineView}}"
-                               Highlight="{Binding Highlight,RelativeSource={RelativeSource AncestorType=local:MusicDesktopLyricLineView}}"
-                               Stroke="#E6191919" StrokeThickness="1.1"/>
-     </DataTemplate></ItemsControl.ItemTemplate>
-    </ItemsControl>
-   </Grid>
-  </Viewbox>
-  <Viewbox x:Name="TranslationFrame" Stretch="Uniform" StretchDirection="DownOnly" MaxHeight="27" Margin="0,3,0,0"
-           HorizontalAlignment="{Binding HorizontalContentAlignment,ElementName=Root}">
-   <local:MusicDesktopLyricTextView x:Name="TranslationText" Text="{Binding Row.Translation,ElementName=Root}" FontSize="17"
-                                  Foreground="{Binding Normal,ElementName=Root}"/>
-  </Viewbox>
- </StackPanel>
+ <Grid Margin="2" VerticalAlignment="Center">
+  <StackPanel>
+   <Viewbox Stretch="Uniform" StretchDirection="DownOnly" MaxHeight="50"
+            HorizontalAlignment="{Binding HorizontalContentAlignment,ElementName=Root}">
+    <Grid>
+     <local:MusicDesktopLyricTextView x:Name="PlainText" Text="{Binding Row.Text,ElementName=Root}" FontSize="32"
+                                    FontWeight="SemiBold" Foreground="{Binding Normal,ElementName=Root}"/>
+     <ItemsControl x:Name="Words" ItemsSource="{Binding Row.Words,ElementName=Root}" Visibility="Collapsed"
+                   Foreground="{Binding Normal,ElementName=Root}" FontSize="32" FontWeight="SemiBold">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate><DataTemplate>
+       <local:MusicLyricWordView Word="{Binding}"
+                                Foreground="{Binding Normal,RelativeSource={RelativeSource AncestorType=local:MusicDesktopLyricLineView}}"
+                                Highlight="{Binding Highlight,RelativeSource={RelativeSource AncestorType=local:MusicDesktopLyricLineView}}"
+                                Stroke="#E6191919" StrokeThickness="1.1"/>
+      </DataTemplate></ItemsControl.ItemTemplate>
+     </ItemsControl>
+    </Grid>
+   </Viewbox>
+   <Viewbox x:Name="TranslationFrame" Stretch="Uniform" StretchDirection="DownOnly" MaxHeight="27" Margin="0,3,0,0"
+            HorizontalAlignment="{Binding HorizontalContentAlignment,ElementName=Root}">
+    <local:MusicDesktopLyricTextView x:Name="TranslationText" Text="{Binding Row.Translation,ElementName=Root}" FontSize="17"
+                                   Foreground="{Binding Normal,ElementName=Root}"/>
+   </Viewbox>
+  </StackPanel>
+ </Grid>
 </UserControl>
