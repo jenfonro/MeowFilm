@@ -23,6 +23,7 @@ public static class ShellCloseBehaviorTests
         yield return Case("remember minimize waits for persistence and applies on later closes", RememberMinimize);
         yield return Case("remember exit persists across shell and preference recreation", RememberExit);
         yield return Case("tray restores maximized state and ordinary minimize keeps the window", RestoreMaximized);
+        yield return Case("explicit main-window restore shares tray hidden and maximized state", RestoreMainWindow);
         yield return Case("tray failure retains an operable window and Explorer failure restores it", TrayUnavailable);
         yield return Case("save failure keeps the dialog operable without applying the choice", SaveFailure);
         yield return Case("tray exit retires a pending remembered minimize before its save completes", PendingSaveExit);
@@ -196,6 +197,24 @@ public static class ShellCloseBehaviorTests
         await Until(() => f.Shell.IsVisible, "Explorer recovery failure restores a window");
         Check(f.Shell.WindowState == WindowState.Maximized && f.ShutdownCalls == 0 &&
             f.HasNotice("系统托盘不可用，主窗口保持打开"), "lost tray never strands a hidden application");
+    }
+
+    private static async Task RestoreMainWindow()
+    {
+        await using var f = await Fixture.Create(WindowCloseBehavior.MinimizeToTray, showActivated: true);
+        f.Shell.WindowState = WindowState.Maximized;
+        f.Shell.Close();
+        await Until(() => !f.Shell.IsVisible, "hide before desktop-lyrics restore");
+        f.Shell.RestoreFromTray();
+        await Until(() => f.Shell.IsVisible && f.Shell.WindowState == WindowState.Maximized, "explicit main restore");
+        f.Shell.Close();
+        await Until(() => !f.Shell.IsVisible, "explicit restore cleared the prior hidden state");
+        f.Shell.RestoreFromTray();
+        f.Shell.WindowState = WindowState.Minimized;
+        f.Shell.RestoreFromTray();
+        await Until(() => f.Shell.WindowState == WindowState.Maximized, "restore a normally minimized main window");
+        Check(f.ShutdownCalls == 0 && f.TrayCreations == 1 && !f.Dialog.IsOpen,
+            "desktop activation neither starts shutdown nor reconstructs tray/application owners");
     }
 
     private static async Task SaveFailure()

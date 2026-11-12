@@ -16,6 +16,6 @@ public static class DesktopTheme
     public static bool GetIsHighContrast(DependencyObject element) =>
         (bool)element.GetValue(IsHighContrastProperty);
 
-    internal static void SetIsHighContrast(DependencyObject element, bool value) =>
+    public static void SetIsHighContrast(DependencyObject element, bool value) =>
         element.SetValue(IsHighContrastPropertyKey, value);
 }

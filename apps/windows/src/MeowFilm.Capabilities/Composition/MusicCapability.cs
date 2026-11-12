@@ -216,6 +216,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             nameof(PlaybackRateText), nameof(CanSwitchSource) })
             Changed(name);
         OnlineBindings();
+        DesktopLyricSettingsBindings();
         CatalogSourceBindings();
         AccountBindings();
         CatalogBindings();

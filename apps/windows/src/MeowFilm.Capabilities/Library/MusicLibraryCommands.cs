@@ -35,6 +35,8 @@ public sealed partial class MusicLibraryOwner
             return await AppearanceCommand(method, parameters, document, cancellationToken).ConfigureAwait(false);
         if (method.StartsWith("music.device.settings.", StringComparison.Ordinal))
             return DeviceSettingsCommand(method, parameters, document);
+        if (method.StartsWith("music.lyrics.desktop.settings.", StringComparison.Ordinal))
+            return DesktopLyricSettingsCommand(method, parameters, document);
         if (method.StartsWith("music.sourceExclusions.", StringComparison.Ordinal))
             return SourceExclusionsCommand(method, parameters, document);
         if (method.StartsWith("music.search.settings.", StringComparison.Ordinal) ||

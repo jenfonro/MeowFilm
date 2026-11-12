@@ -8,7 +8,7 @@ public sealed partial class MusicLibraryOwner
     [
         "library", LibrarySyncArea, "queue", "history", "online-settings",
         CatalogSourceArea, OfficialSourcesArea, QualityPolicyArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
-        SourceExclusionsArea,
+        DesktopLyricSettingsArea, SourceExclusionsArea,
         SearchPolicyArea, SearchHistoryArea, LocalLyricsArea, "playback-settings"
     ];
 
@@ -82,6 +82,8 @@ public sealed partial class MusicLibraryOwner
             if (HasValue(doc, MetadataPolicyArea)) ValidateMetadataPolicy(LJ.Object(Value(doc, MetadataPolicyArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, AppearanceArea)) ValidateAppearance(LJ.Object(Value(doc, AppearanceArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, DeviceSettingsArea)) ValidateDeviceSettings(LJ.Object(Value(doc, DeviceSettingsArea), "CORRUPT_STORAGE"));
+            if (HasValue(doc, DesktopLyricSettingsArea))
+                ValidateDesktopLyricSettings(LJ.Object(Value(doc, DesktopLyricSettingsArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, SourceExclusionsArea))
                 ValidateSourceExclusions(LJ.Object(Value(doc, SourceExclusionsArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, SearchPolicyArea)) ValidateSearchPolicy(LJ.Object(Value(doc, SearchPolicyArea), "CORRUPT_STORAGE"));

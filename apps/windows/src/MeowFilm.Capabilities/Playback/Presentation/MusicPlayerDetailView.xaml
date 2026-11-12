@@ -65,6 +65,15 @@
      </ControlTemplate></Setter.Value>
     </Setter>
    </Style>
+   <Style x:Key="Player.LyricAdjust" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+    <Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/>
+    <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/>
+    <Setter Property="FontSize" Value="10"/><Setter Property="Foreground" Value="#EBEAED"/>
+    <Setter Property="IsEnabled" Value="{Binding CanAdjustLyricOffset}"/>
+    <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    </Trigger></Style.Triggers>
+   </Style>
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid>
@@ -94,7 +103,8 @@
     </Canvas>
    </Canvas>
   </Viewbox>
-  <Grid Grid.Column="1" Margin="16,18,68,20">
+  <Grid Grid.Column="1" Margin="16,18,20,20">
+   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <StackPanel>
     <TextBlock Text="{Binding CurrentTitle}" FontSize="26" FontWeight="SemiBold"
@@ -135,7 +145,7 @@
     <!-- OpacityMask composites the lyric viewport into an intermediate surface: use grayscale here only. -->
     <local:MusicLyricList Background="Transparent" BorderThickness="0" Padding="0"
      TextOptions.TextRenderingMode="Grayscale"
-     Position="{Binding PositionSeconds}" IsPlaying="{Binding IsPlaying}"
+     Position="{Binding LyricPositionSeconds}" IsPlaying="{Binding IsPlaying}"
      PlaybackRate="{Binding AcceptedPlaybackRate}" PresentationKey="{Binding PlaybackPresentationKey}"
      ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
      ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True"
@@ -224,6 +234,12 @@
                HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
 
    </Grid>
+   <StackPanel x:Name="LyricTimingRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
+    <Button x:Name="DelayLyricButton" Content="+0.5s" Click="DelayLyric_Click"
+            Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词延后 0.5 秒" AutomationProperties.Name="歌词延后 0.5 秒"/>
+    <Button x:Name="AdvanceLyricButton" Content="−0.5s" Click="AdvanceLyric_Click"
+            Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词提前 0.5 秒" AutomationProperties.Name="歌词提前 0.5 秒"/>
+   </StackPanel>
   </Grid>
  </Grid>
   <ContentControl x:Name="DetailPlayerHost" Grid.Row="1" HorizontalContentAlignment="Stretch"

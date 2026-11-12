@@ -91,6 +91,7 @@ native-device-settings
 native-search-policy
 native-search-history
 native-local-lyrics
+native-desktop-lyrics
 playback-settings
 ```
 
@@ -290,6 +291,7 @@ music.search.settings.get / save
 music.search.history.get / record / clear
 music.lyrics.local.get / save / remove
 music.lyrics.display.get / save
+music.lyrics.desktop.settings.get / save
 music.lyrics.parse
 music.online.song
 ```
@@ -298,11 +300,13 @@ music.online.song
 
 `native-appearance` 保持 schema 1、revision CAS 及原字段：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受既有预设键或严格不透明 `#RRGGBB`（UI提交统一大写）。读取旧预设不会重写数据，自定义颜色沿原外观保存/权威重读路径消费。本次不保证旧客户端能读取新的自定义值，不增加迁移或双写。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
 
+`native-desktop-lyrics` 是独立 schema 1 area，只含 `schema`、`revision`、`layout`（single/double）、`normalColor` 和 `highlightColor`。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision` 和三个设置值，返回权威 `settings`；未知字段拒绝，无变化不写盘。不保存歌词校正、锁定、位置或源译文开关。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
+
 ## CAS、取消与关闭
 
 - 所有持久写入在同一 owner gate 内对完整 envelope 执行 CAS。
 - CAS 准入后不把取消解释为回滚；丢失写入回执时保留内存候选并阻止后续写。
-- `appearance`、`metadata`、`quality`、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
+- `appearance`、`metadata`、`quality`、桌面歌词设置、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。桌面歌词通过 `music.lyrics.desktop.settings.get`，浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
 - 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
 - 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
 - `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；取消关闭只恢复当前 owner，不重放写入。

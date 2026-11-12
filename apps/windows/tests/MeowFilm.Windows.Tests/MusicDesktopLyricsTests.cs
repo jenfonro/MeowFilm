@@ -337,15 +337,17 @@ public static partial class MusicUiTests
                 await SaveDesktopLyricFixture(f);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 var window = f.Module.DesktopLyricsWindow!;
-                var original = (TextBlock)window.FindName("CurrentLine");
-                var translation = (TextBlock)window.FindName("CurrentTranslation");
+                var line = (MusicDesktopLyricLineView)window.FindName("TopLine");
+                var original = (MusicDesktopLyricTextView)line.FindName("PlainText");
+                var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
                 Equal("第一行原文", original.Text); Equal("first source translation", translation.Text);
                 f.Playback.Tick(6); await Drain();
                 Equal("第二行原文", original.Text); Equal("second source translation", translation.Text);
                 var rows = f.Module.Lyrics.ToArray();
                 f.Module.PreviewLyric(rows[0]);
                 Equal("第二行原文", f.Module.DesktopLyricText);
-                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "media-control-desktop-lyrics", 720, 112);
+                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "media-control-desktop-lyrics",
+                    (int)window.ActualWidth, (int)window.ActualHeight);
 
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 owner.Content = detail;
@@ -380,8 +382,9 @@ public static partial class MusicUiTests
                 await SaveDesktopLyricFixture(f);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 var window = f.Module.DesktopLyricsWindow!;
-                var original = (TextBlock)window.FindName("CurrentLine");
-                var translation = (TextBlock)window.FindName("CurrentTranslation");
+                var line = (MusicDesktopLyricLineView)window.FindName("TopLine");
+                var original = (MusicDesktopLyricTextView)line.FindName("PlainText");
+                var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 owner.Content = detail;
                 await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
@@ -433,7 +436,8 @@ public static partial class MusicUiTests
             {
                 await SaveDesktopLyricFixture(f, translated: false);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
-                var translation = (TextBlock)f.Module.DesktopLyricsWindow!.FindName("CurrentTranslation");
+                var line = (MusicDesktopLyricLineView)f.Module.DesktopLyricsWindow!.FindName("TopLine");
+                var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
                 True(!translation.IsVisible, "a source without translation leaves no empty second row");
                 int calls = f.Calls.Log.Count;
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
@@ -611,17 +615,28 @@ public static partial class MusicUiTests
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
                 var prior = f.Module.DesktopLyricsWindow!;
+                prior.Left += 29; prior.Top += 17;
+                prior.SetLocked(true); await Drain();
+                var state = prior.CapturePresentationState();
+                var unlockHandle = new WindowInteropHelper(prior.UnlockWindow!).Handle;
                 int closed = 0; prior.Closed += (_, _) => closed++;
                 await f.Module.PrepareShutdownAsync();
                 Equal(1, closed);
                 True(!f.Module.IsDesktopLyricsOpen && !f.Module.CanToggleDesktopLyrics && prior.DataContext is null,
                     "preparation releases the actual window without disposing the playback owner");
+                True(!DesktopLyricNative.IsWindow(unlockHandle) && !prior.IsPointerObserverRunning,
+                    "shutdown preparation also releases independent unlock and pointer observation");
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 True(!f.Module.IsDesktopLyricsOpen, "sealed media admission stays sealed");
                 await f.Module.CancelShutdownPreparationAsync();
                 True(f.Module.IsDesktopLyricsOpen && !ReferenceEquals(prior, f.Module.DesktopLyricsWindow),
                     "cancel preparation creates a new window rather than reopening the closed resource");
                 True(!f.Module.ShowLyricTranslation, "session display preference survives preparation");
+                await Drain();
+                var restored = f.Module.DesktopLyricsWindow!;
+                Equal(state, restored.CapturePresentationState());
+                True(restored.UnlockWindow is { IsVisible: true } && !restored.IsPointerObserverRunning,
+                    "cancelled exit restores position and locking with a fresh usable unlock HWND");
                 await f.Module.PrepareShutdownAsync();
                 owner.Close();
                 await f.Module.CancelShutdownPreparationAsync();
