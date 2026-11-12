@@ -106,10 +106,10 @@ final class FilmDataSourceFormController: FilmSettingsListController {
     }
     private func fieldRow(_ title: String, _ field: UITextField) -> FilmSettingsRow {
         let label = UILabel()
-        label.text = title; label.textColor = UIColor(theme.ink)
+        label.text = title; label.textColor = UIColor(theme.settings.ink)
         label.font = .preferredFont(forTextStyle: .body)
         label.adjustsFontForContentSizeCategory = true; label.numberOfLines = 0
-        field.textColor = UIColor(theme.ink)
+        field.textColor = UIColor(theme.settings.ink)
         field.placeholder = nil
         let stack = UIStackView(arrangedSubviews: [label, field])
         stack.axis = .vertical; stack.alignment = .fill; stack.spacing = 6
@@ -134,7 +134,7 @@ final class FilmDataSourceFormController: FilmSettingsListController {
                 fieldRow("TMDB API TOKEN", token), fieldRow("TMDB 数据代理地址", api), fieldRow("TMDB 图片代理地址", images),
                 fieldRow("语言", language), fieldRow("地区", region),
                 filmSwitchRow("包含成人内容", id: "film.tmdb.includeAdult", isOn: tmdb.includeAdult,
-                    enabled: tmdbEnabled, ink: UIColor(theme.ink)) { [weak self] in self?.tmdb.includeAdult = $0 },
+                    enabled: tmdbEnabled) { [weak self] in self?.tmdb.includeAdult = $0 },
                 .init(title: "保存", id: "film.tmdb.save", enabled: tmdbEnabled, action: { [weak self] in self?.save(isTMDB: true) }),
             ]))
         } else {

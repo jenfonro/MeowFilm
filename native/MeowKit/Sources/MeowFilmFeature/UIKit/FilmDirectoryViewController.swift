@@ -4,6 +4,7 @@ import MeowUI
 
 @MainActor
 final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybackPage {
+    override var usesSettingsColors: Bool { false }
     var filmPlaybackModel: FilmPlaybackModel? { model }
     private let model: FilmPlaybackModel
     private let sourceID: String

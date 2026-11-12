@@ -109,7 +109,7 @@ struct MusicAccountLoginContent: View {
                         if let status = state.status {
                             Text(status)
                                 .font(.subheadline)
-                                .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                                .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                                 .frame(maxWidth: .infinity)
                         }
                     }
@@ -135,7 +135,7 @@ struct MusicAccountLoginContent: View {
             if let status = state.status {
                 Text(status)
                     .font(.subheadline)
-                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                     .multilineTextAlignment(.center)
             }
             if state.canRetry {
@@ -161,7 +161,7 @@ private struct MusicLoginMethodTabs: View {
             tab(.qr, title: "扫码登录")
         }
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color(uiColor: UIColor(theme.border))).frame(height: 1)
+            Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(height: 1)
         }
         .disabled(!state.available)
     }
@@ -172,9 +172,9 @@ private struct MusicLoginMethodTabs: View {
             VStack(spacing: 8) {
                 Text(title)
                     .font(.subheadline.weight(selected ? .semibold : .regular))
-                    .foregroundStyle(Color(uiColor: UIColor(selected ? theme.ink : theme.muted)))
+                    .foregroundStyle(Color(uiColor: UIColor(selected ? theme.settings.ink : theme.settings.muted)))
                 Capsule()
-                    .fill(selected ? Color(uiColor: UIColor(theme.accent)) : Color.clear)
+                    .fill(selected ? Color(uiColor: UIColor(theme.settings.accent)) : Color.clear)
                     .frame(width: 40, height: 3)
             }
             .frame(maxWidth: .infinity, minHeight: 44)
@@ -232,7 +232,7 @@ private struct MusicSMSLoginForm: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color(uiColor: UIColor(actions.value.canSend ? theme.accent : theme.muted)))
+                .foregroundStyle(Color(uiColor: UIColor(actions.value.canSend ? theme.settings.accent : theme.settings.muted)))
                 .disabled(!actions.value.canSend)
             }
             Button("登录", action: actions.submit)
@@ -248,7 +248,7 @@ private struct MusicSMSLoginForm: View {
     }
 
     private var divider: some View {
-        Rectangle().fill(Color(uiColor: UIColor(theme.border))).frame(width: 1, height: 22)
+        Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(width: 1, height: 22)
     }
 
     @ViewBuilder
@@ -275,7 +275,7 @@ private struct MusicSMSLoginForm: View {
                     label
                     Image(systemName: "chevron.down").font(.caption2.weight(.semibold))
                 }
-                .foregroundStyle(Color(uiColor: UIColor(theme.ink)))
+                .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
                 .padding(.horizontal, 16)
                 .frame(minWidth: 44, minHeight: 48)
                 .contentShape(Rectangle())

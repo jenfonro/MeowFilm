@@ -298,7 +298,7 @@ struct MusicAccountsSettingsContent: View {
             Section {
                 if state.accounts == nil {
                     Text("账号服务不可用")
-                        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         .modifier(MusicSettingsRowStyle(theme: theme))
                 }
                 ForEach(MusicAccountPlatform.allCases) { platform in
@@ -319,9 +319,11 @@ struct MusicAccountsSettingsContent: View {
             }
             Section {
                 Button("导入账号", action: importAccounts)
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .accessibilityIdentifier("music.accounts.import")
                     .modifier(MusicSettingsRowStyle(theme: theme))
                 Button("导出账号", action: exportAccounts)
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .accessibilityIdentifier("music.accounts.export")
                     .modifier(MusicSettingsRowStyle(theme: theme))
                 if transfer.busy { ProgressView().accessibilityLabel("账号导入导出中") }
@@ -345,7 +347,7 @@ private struct MusicPlatformAccountRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(platform.title)
                     .font(.body.weight(.medium))
-                    .foregroundStyle(Color(uiColor: UIColor(theme.ink)))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
                 if loading {
                     ProgressView().accessibilityLabel("读取账号")
                 } else {
@@ -357,13 +359,13 @@ private struct MusicPlatformAccountRow: View {
                 if account.phase == .signedOut, account.canLogin {
                     Text("登录")
                         .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color(uiColor: UIColor(theme.accent)))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                         .frame(minWidth: 44, minHeight: 44)
                         .fixedSize(horizontal: true, vertical: false)
                 } else if account.phase != .unavailable {
                     Image(systemName: "chevron.right")
                         .font(.footnote.weight(.semibold))
-                        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         .frame(width: 16)
                         .accessibilityHidden(true)
                 }
@@ -377,7 +379,7 @@ private struct MusicPlatformAccountRow: View {
     @ViewBuilder
     private func accountDetail(_ detail: MusicAccountSettingsDetail) -> some View {
         let status = Text(detail.status)
-            .foregroundColor(detail.isNonVIP ? theme.settingsDanger : Color(uiColor: UIColor(theme.muted)))
+            .foregroundColor(detail.isNonVIP ? theme.settingsDanger : Color(uiColor: UIColor(theme.settings.muted)))
         Group {
             if let name = detail.name {
                 ViewThatFits(in: .horizontal) {
@@ -395,7 +397,7 @@ private struct MusicPlatformAccountRow: View {
             }
         }
         .font(.subheadline)
-        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+        .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
     }
 }
 #endif
