@@ -18,6 +18,8 @@ def application_membership(base, project_text):
     expected_app, expected_test, expected_runtime = set(), set(), set()
     for path in base.rglob("*.swift"):
         relative = path.relative_to(base)
+        if relative.parts[0] == ".cache":
+            continue
         if relative.parts[0] in APPLICATION_DIRECTORIES:
             expected_app.add(relative.as_posix())
         elif relative.parts[0] == "UITests":
@@ -173,6 +175,8 @@ def check(root):
         walk(name, [])
     for parent in (root / "apps/ios", package / "Sources", package / "Tests"):
         for path in parent.rglob("*"):
+            if parent == root / "apps/ios" and path.relative_to(parent).parts[0] == ".cache":
+                continue
             if path.is_symlink() or path.resolve() != path.absolute():
                 failures.append("Linked source: " + str(path.relative_to(root)))
     project = root / "apps/ios/Meowfilm.xcodeproj/project.pbxproj"

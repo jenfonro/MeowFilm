@@ -14,7 +14,7 @@ final class PanLoginViewController: HostingPageViewController<PanLoginContent> {
         let image = PanLoginImage(); qrImage = image
         model.validateChallenge = { image.value = try PanQRCode.image($0) }
         super.init(themeProvider: themeProvider, content: PanLoginContent(
-            model: model, qrImage: image, theme: PageTheme(palette: themeProvider.pageColorway), close: close))
+            model: model, qrImage: image, theme: PageTheme(colors: themeProvider.pagePalette), close: close))
         modalPresentationStyle = .overFullScreen; modalTransitionStyle = .crossDissolve
     }
     override func loadView() { view = AccountFloatingBackdrop() }

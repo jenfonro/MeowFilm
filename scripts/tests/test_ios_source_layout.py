@@ -1,6 +1,7 @@
 """Source membership and app composition contracts; no SDK or device use."""
 import importlib.util
 from pathlib import Path
+import plistlib
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -58,6 +59,19 @@ class IOSSourceLayoutTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "responsibility"):
                 generator.generate()
         self.assertFalse((self.root / "apps/ios/Meowfilm.xcodeproj").exists())
+
+    def test_build_cache_does_not_join_or_block_project_sources(self):
+        directories = generator.APPLICATION_DIRECTORIES + ("UITests", "RuntimeTests")
+        for directory in directories:
+            self.write(directory + "/Fixture.swift")
+        self.write(".cache/DerivedData/Meowfilm/Build/DerivedSources/GeneratedAssetSymbols.swift")
+        (self.root / "apps/ios/Info.plist").write_bytes(plistlib.dumps({}))
+        with patch.object(generator, "ROOT", self.root):
+            generator.generate()
+        project = (self.root / "apps/ios/Meowfilm.xcodeproj/project.pbxproj").read_text()
+        self.assertNotIn("GeneratedAssetSymbols.swift", project)
+        for directory in directories:
+            self.assertIn(f'path = "{directory}/Fixture.swift";', project)
 
 
 if __name__ == "__main__":

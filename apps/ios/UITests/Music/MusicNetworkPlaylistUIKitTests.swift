@@ -462,7 +462,8 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
         try intent.check(); try source.authorization.check()
         guard expectedRevision == playbackQueue.revision else { throw MusicServiceError.staleRevision }
         guard tracks.indices.contains(start.index), tracks[start.index].songId == start.songID,
-              tracks[start.index].sources.map(\.sourceKey) == start.sourceKeys else { throw MusicServiceError.targetChanged }
+              let primarySource = tracks[start.index].sources.first,
+              primarySource == start.primarySource else { throw MusicServiceError.targetChanged }
         playbackQueue = .init(revision: expectedRevision + 1, currentId: "entry-\(start.index)",
             entries: tracks.enumerated().map {
                 .init(id: "entry-\($0.offset)", track: $0.element, sourceTitle: source.context.title, remoteSessionID: source.id)
