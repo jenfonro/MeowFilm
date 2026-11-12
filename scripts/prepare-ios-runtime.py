@@ -16,6 +16,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "scripts/ios-node-mobile.json"
+NATIVE_POLICY = ROOT / "scripts/script-host-native.json"
 NODE_MOBILE = ROOT / ".cache/nodejs-mobile"
 SHARED_DOWNLOADS = (Path("E:/Developer") if os.name == "nt" else Path.home() / "Developer") / "cache/downloads"
 FRAMEWORK = "NodeMobile.xcframework"
@@ -29,16 +30,27 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def native_policy():
+    return json.loads(NATIVE_POLICY.read_text(encoding="utf-8"))
+
+
+def target_policy(sdk, arch):
+    return next((item for item in native_policy()["ios"]["targets"]
+                 if item["sdk"] == sdk and item["arch"] == arch), None)
+
+
 def target(sdk, arch):
     arch = {"x86_64": "x64", "aarch64": "arm64"}.get(arch, arch)
-    if sdk not in ("iphoneos", "iphonesimulator") or arch not in (("arm64",) if sdk == "iphoneos" else ("arm64", "x64")):
+    selected = target_policy(sdk, arch)
+    if (selected is None or selected["platform"] != "ios"
+            or sdk not in ("iphoneos", "iphonesimulator")
+            or selected["variant"] != ("simulator" if sdk == "iphonesimulator" else None)):
         raise ValueError("Unsupported iOS native target")
-    return {"sdk": sdk, "arch": arch, "minimumOS": "17.0"}
+    return {**selected, "minimumOS": native_policy()["ios"]["minimumOS"]}
 
 
 def runtime_path(selected):
-    arch = "x86_64" if selected["arch"] == "x64" else selected["arch"]
-    return ROOT / f'.cache/ios-runtime/{selected["sdk"]}-{arch}/Runtime'
+    return ROOT / f'.cache/ios-runtime/{selected["sdk"]}-{selected["xcframeworkArchitecture"]}/Runtime'
 
 
 def policy():
@@ -152,9 +164,9 @@ def node_mobile_inputs(pinned, selected):
     framework = node_mobile(pinned)
     info = plistlib.loads((framework / "Info.plist").read_bytes())
     candidates = [item for item in info["AvailableLibraries"]
-                  if item["SupportedPlatform"] == "ios"
-                  and item.get("SupportedPlatformVariant") == ("simulator" if selected["sdk"] == "iphonesimulator" else None)
-                  and ("x86_64" if selected["arch"] == "x64" else selected["arch"]) in item["SupportedArchitectures"]]
+                  if item["SupportedPlatform"] == selected["platform"]
+                  and item.get("SupportedPlatformVariant") == selected["variant"]
+                  and selected["xcframeworkArchitecture"] in item["SupportedArchitectures"]]
     if len(candidates) != 1:
         raise ValueError("Node Mobile has no exact target slice")
     item = candidates[0]
@@ -176,8 +188,9 @@ def node_mobile_inputs(pinned, selected):
 
 def payload(node, selected):
     version = subprocess.run([node, "--version"], check=True, capture_output=True, text=True).stdout.strip()
-    if version != "v24.21.0":
-        raise ValueError(f"The build tools require Node 24.21.0, found {version or 'none'}")
+    required = "v" + native_policy()["build"]["node"]
+    if version != required:
+        raise ValueError(f"The build tools require Node {required[1:]}, found {version or 'none'}")
     if not (ROOT / "node_modules/@meowfilm/script-host").exists():
         raise ValueError("Install the locked workspace first: npm ci --ignore-scripts")
     runtime = runtime_path(selected)

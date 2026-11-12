@@ -46,7 +46,7 @@ Windows 上运行 Python 脚本时将 `python3` 换为 `python -X utf8`。iOS �
 
 已同步的 Windows 业务采用随 App 启动公共宿主、恢复启用猫源的生命周期，官方原生业务不以 Node 为前置条件；Windows 使用私密管道启动握手和上述通用 HTTP 契约，不再通过管道发送业务 RPC。影视规则／搜索使用 Node 业务接口，无旧客户端引擎兜底；见 [Windows 影视设置](docs/windows/film-settings.md)与 [iOS 影视设置](docs/ios/film-settings.md)。
 
-通用运行器构建使用 Node 24.21.0、C/C++ 编译工具、Perl 和 make（Windows 为对应原生工具链）：
+通用运行器构建使用 `scripts/script-host-native.json` 的 `build.node` 所锁版本、C/C++ 编译工具、Perl 和 make（Windows 为对应原生工具链）：
 
 ```sh
 npm ci --ignore-scripts

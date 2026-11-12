@@ -1,16 +1,23 @@
+import { readFileSync } from 'node:fs';
+import { iosTargetPolicy } from './native-inputs.mjs';
+
+const nativePolicy = JSON.parse(readFileSync(new URL('../script-host-native.json', import.meta.url), 'utf8'));
+
 // One target identity is shared by the builder, offline packager and loader.
-export function iosTarget(sdk, arch, minimumOS = '17.0') {
+export function iosTarget(sdk, arch, minimumOS = nativePolicy.ios.minimumOS) {
+  const target = iosTargetPolicy(nativePolicy, sdk, arch);
   if (!['iphoneos', 'iphonesimulator'].includes(sdk)
-      || !(sdk === 'iphoneos' ? arch === 'arm64' : ['arm64', 'x64'].includes(arch))
-      || minimumOS !== '17.0') {
+      || !target || target.platform !== 'ios'
+      || target.variant !== (sdk === 'iphonesimulator' ? 'simulator' : null)
+      || minimumOS !== nativePolicy.ios.minimumOS) {
     throw Object.assign(new Error('Unsupported iOS native target'), { code: 'NATIVE_TARGET_MISMATCH' });
   }
-  return { sdk, arch, minimumOS };
+  return { ...target, minimumOS };
 }
 
 export function iosArtifacts(target) {
-  const { sdk, arch } = iosTarget(target.sdk, target.arch, target.minimumOS);
-  const directory = `.cache/ios-native/${sdk}-${arch === 'x64' ? 'x86_64' : arch}`;
+  const selected = iosTarget(target.sdk, target.arch, target.minimumOS);
+  const directory = `.cache/ios-native/${selected.sdk}-${selected.xcframeworkArchitecture}`;
   return {
     directory,
     framework: `${directory}/MeowScriptHost.framework`,
@@ -60,9 +67,11 @@ export const IOS_CAT_WEB_VALUES = Object.freeze({
 
 export function checkIOSMachO(bytes, target) {
   const fail = () => { throw Object.assign(new Error('iOS Mach-O target mismatch'), { code: 'NATIVE_TARGET_MISMATCH' }); };
-  iosTarget(target.sdk, target.arch, target.minimumOS);
+  const selected = iosTarget(target.sdk, target.arch, target.minimumOS);
+  const [major, minor] = selected.minimumOS.split('.').map(Number);
+  const minimum = (major << 16) | (minor << 8);
   if (bytes.length < 32 || bytes.readUInt32LE(0) !== 0xfeedfacf
-      || bytes.readUInt32LE(4) !== { x64: 0x01000007, arm64: 0x0100000c }[target.arch]
+      || bytes.readUInt32LE(4) !== { x86_64: 0x01000007, arm64: 0x0100000c }[selected.xcframeworkArchitecture]
       || bytes.readUInt32LE(12) !== 6) fail(); // MH_DYLIB, never a host .node bundle.
   const count = bytes.readUInt32LE(16), end = 32 + bytes.readUInt32LE(20);
   if (end > bytes.length) fail();
@@ -73,8 +82,8 @@ export function checkIOSMachO(bytes, target) {
     const command = bytes.readUInt32LE(offset), size = bytes.readUInt32LE(offset + 4);
     if (size < 8 || offset + size > end) fail();
     if (command === 0x32) { // LC_BUILD_VERSION
-      if (size < 24 || bytes.readUInt32LE(offset + 8) !== (target.sdk === 'iphoneos' ? 2 : 7)
-          || bytes.readUInt32LE(offset + 12) !== 0x00110000) fail();
+      if (size < 24 || bytes.readUInt32LE(offset + 8) !== (selected.variant === 'simulator' ? 7 : 2)
+          || bytes.readUInt32LE(offset + 12) !== minimum) fail();
       builds++;
     }
     if ([0xc, 0x80000018, 0x8000001f, 0x80000023].includes(command)) {

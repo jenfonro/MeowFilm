@@ -5,6 +5,7 @@ import {
 import { createHash } from 'node:crypto';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { sourceReferences } from '../module-policy.mjs';
 import { packageRuntime } from '../package-runtime.mjs';
 import { iosTarget } from '../quickjs/ios-target.mjs';
 
@@ -72,17 +73,21 @@ function inventory(root, relative = '', occupied = new Map()) {
 
 // Only the explicit platform imports are relocated. Shared modules and
 // dependencies stay byte-for-byte from packageRuntime.
-function relocate(source, imports) {
+function relocate(source, imports, references) {
   const seen = new Set();
-  const pattern = /^import\s+\{[^{}]+\}\s+from\s+(['"])([^'"\r\n]+)\1;[ \t]*\r?$/gm;
-  const output = source.replace(pattern, (statement, quote, specifier) => {
+  const replacements = [];
+  for (const { specifier, start, end } of references) {
     check(imports.has(specifier) && !seen.has(specifier), 'IOS_IMPORT', 'Unexpected or duplicate iOS runtime import');
     seen.add(specifier);
-    return statement.replace(`${quote}${specifier}${quote}`, `${quote}${imports.get(specifier)}${quote}`);
-  });
-  const rest = source.replace(pattern, '').replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
-  check(seen.size === imports.size && !/\bimport\b|\bexport\s+[^;]*\bfrom\b/.test(rest),
+    const raw = source.slice(start, end);
+    replacements.push({ start, end, value: `${raw[0]}${imports.get(specifier)}${raw.at(-1)}` });
+  }
+  check(seen.size === imports.size,
     'IOS_IMPORT', 'iOS runtime imports must match the explicit static closure');
+  let output = source;
+  for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
+    output = output.slice(0, replacement.start) + replacement.value + output.slice(replacement.end);
+  }
   return Buffer.from(output);
 }
 
@@ -194,10 +199,12 @@ export async function packageIOSRuntime({
       manifest.files.push({ path, bytes: bytes.length, sha256: digest(bytes) });
       delete manifest.incompleteFile;
     }
+    // These are platform capabilities imported by the bootstrap, not workspace package subpaths.
     const platformImports = new Set([
       'node:path', 'node:net', 'node:fs', 'node:crypto', 'node:buffer', 'node:util',
       '@meowfilm/runtime-bridge',
     ]);
+    // These are path rewrites for the thin iOS launchers, not package-subpath permissions.
     const sharedImports = new Map([
       ['../../../packages/script-host/src/native-engine.js', '../../node_modules/@meowfilm/script-host/src/native-engine.js'],
       ['../../runtime/bootstrap.mjs', '../bootstrap.mjs'],
@@ -214,14 +221,18 @@ export async function packageIOSRuntime({
       const source = `${IOS_SOURCE}/${relative}`, path = `${IOS_OUTPUT}/${relative}`;
       const input = readStable(root, source);
       const text = new TextDecoder('utf-8', { fatal: true }).decode(input);
+      const references = sourceReferences(text);
+      check(references.unresolvedImports.length === 0, 'IOS_IMPORT',
+        'iOS runtime module specifiers must be statically resolvable');
       const imports = new Map();
-      for (const match of text.matchAll(/^import\s+\{[^{}]+\}\s+from\s+(['"])([^'"\r\n]+)\1;[ \t]*\r?$/gm)) {
-        const specifier = match[2];
+      for (const { specifier, kind, type } of references.imports) {
+        check(kind === 'import' && type === 'ImportDeclaration',
+          'IOS_IMPORT', 'iOS runtime imports must be static declarations');
         check(!imports.has(specifier) && (sharedImports.has(specifier) || platformImports.has(specifier)),
           'IOS_IMPORT', 'Unexpected or duplicate iOS runtime import');
         imports.set(specifier, sharedImports.get(specifier) ?? specifier);
       }
-      const bytes = relocate(text, imports);
+      const bytes = relocate(text, imports, references.imports);
       sourceInputs.push({ path: source, sha256: digest(input) });
       appendFile(path, bytes);
       manifest.relocations.push({ source, path, imports: [...imports].map(([from, to]) => ({ from, to })) });

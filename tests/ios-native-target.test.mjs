@@ -4,29 +4,33 @@ import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols } from '../scri
 
 function executable({ sdk = 'iphonesimulator', arch = 'x64', minimum = 0x00110000,
   dependency = '@rpath/NodeMobile.framework/NodeMobile', platform, kind = 6 } = {}) {
+  const target = iosTarget(sdk, arch);
   const dylib = Buffer.alloc(Math.ceil((24 + Buffer.byteLength(dependency) + 1) / 8) * 8);
   dylib.writeUInt32LE(0xc); dylib.writeUInt32LE(dylib.length, 4);
   dylib.writeUInt32LE(24, 8); dylib.write(dependency, 24);
   const version = Buffer.alloc(24);
   version.writeUInt32LE(0x32); version.writeUInt32LE(version.length, 4);
-  version.writeUInt32LE(platform ?? (sdk === 'iphoneos' ? 2 : 7), 8);
+  version.writeUInt32LE(platform ?? (target.variant === null ? 2 : 7), 8);
   version.writeUInt32LE(minimum, 12);
   const header = Buffer.alloc(32);
-  header.writeUInt32LE(0xfeedfacf); header.writeUInt32LE(arch === 'x64' ? 0x01000007 : 0x0100000c, 4);
+  header.writeUInt32LE(0xfeedfacf);
+  header.writeUInt32LE(target.xcframeworkArchitecture === 'x86_64' ? 0x01000007 : 0x0100000c, 4);
   header.writeUInt32LE(kind, 12); header.writeUInt32LE(2, 16);
   header.writeUInt32LE(version.length + dylib.length, 20);
   return Buffer.concat([header, version, dylib]);
 }
 
-test('iOS targets preserve SDK identity and map Node x64 onto Xcode x86_64 cache paths', () => {
+test('iOS targets and framework paths use the shared native target policy', () => {
   assert.deepEqual(iosTarget('iphonesimulator', 'x64'),
-    { sdk: 'iphonesimulator', arch: 'x64', minimumOS: '17.0' });
+    { sdk: 'iphonesimulator', arch: 'x64', platform: 'ios', variant: 'simulator',
+      xcframeworkArchitecture: 'x86_64', minimumOS: '17.0' });
   assert.equal(iosArtifacts(iosTarget('iphonesimulator', 'x64')).artifact,
     '.cache/ios-native/iphonesimulator-x86_64/MeowScriptHost.framework/MeowScriptHost');
   for (const [sdk, arch] of [['iphoneos', 'arm64'], ['iphonesimulator', 'arm64'], ['iphonesimulator', 'x64']]) {
+    const target = iosTarget(sdk, arch);
     assert.equal(iosArtifacts(iosTarget(sdk, arch)).catWebValues,
-      `.cache/ios-native/${sdk}-${arch === 'x64' ? 'x86_64' : arch}/build/Release/cat-web-values.cjs`);
-    assert.doesNotThrow(() => checkIOSMachO(executable({ sdk, arch }), iosTarget(sdk, arch)));
+      `.cache/ios-native/${sdk}-${target.xcframeworkArchitecture}/build/Release/cat-web-values.cjs`);
+    assert.doesNotThrow(() => checkIOSMachO(executable({ sdk, arch }), target));
   }
   for (const [sdk, arch] of [['macosx', 'arm64'], ['iphoneos', 'x64'], ['iphonesimulator', 'x86_64']]) {
     assert.throws(() => iosTarget(sdk, arch), { code: 'NATIVE_TARGET_MISMATCH' });

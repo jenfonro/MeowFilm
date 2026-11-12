@@ -21,10 +21,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Resolve policy-locked Node version
+        id: node-version
+        run: python3 -c 'import json; print("version=" + json.load(open("scripts/script-host-native.json", encoding="utf-8"))["build"]["node"])' >> "$GITHUB_OUTPUT"
       - name: Set up runtime build tools
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 24.21.0
+          node-version: ${{ steps.node-version.outputs.version }}
           cache: npm
       - name: Restore locked runtime dependencies
         run: npm ci --ignore-scripts

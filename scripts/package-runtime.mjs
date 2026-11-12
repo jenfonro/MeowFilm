@@ -7,27 +7,17 @@ import { dirname, isAbsolute, join, matchesGlob, parse, posix, relative, resolve
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols, IOS_CAT_WEB_VALUES } from './quickjs/ios-target.mjs';
+import { packageNameFromSpecifier, sourceReferences, publicPackageImport, SHARED_RUNTIME_BUILTINS,
+  workspaceMap } from './module-policy.mjs';
+import { discoverRuntimeSource } from './runtime-source.mjs';
+import { discoverWorkspaces } from './verify-dependency-lock.mjs';
+import { iosTargetPolicy, lockedNodeHeaders, nativeSourceInputs } from './quickjs/native-inputs.mjs';
 
 const PRODUCTS = Object.freeze({
   aggregate: ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease'],
 });
-const MODULE_FILES = Object.freeze({
-  music: 'modules/music-script.mjs', cat: 'modules/cat-script.mjs', source: 'modules/source-runtime.mjs',
-  pan: 'modules/pan-runtime.mjs', film: 'modules/film-playback.mjs', netease: 'modules/netease-token.mjs',
-});
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
-const SHARED_FILES = ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
-  'modules/source-candidates.mjs', 'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs',
-  ...Object.values(MODULE_FILES), 'modules/metadata-data.mjs',
-  'modules/metadata/settings.mjs', 'modules/metadata/network.mjs',
-  'modules/metadata/tmdb.mjs', 'modules/metadata/douban.mjs'];
-const SHARED_IMPORTS = new Set([
-  'node:buffer', 'node:crypto', 'node:http', 'node:https', 'node:stream',
-  '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
-  '@meowfilm/pan-runtime', '@meowfilm/film-playback', '@meowfilm/film-playback/metadata-query', '@meowfilm/netease-token',
-  '@meowfilm/novel-rules', '@meowfilm/script-host/native-json',
-]);
 const NATIVE_POLICY = 'scripts/script-host-native.json';
 const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.node';
 const NATIVE_RECEIPT = 'packages/script-host/build/Release/script-host-native.json';
@@ -167,6 +157,7 @@ function checkNativeTarget(root, artifact) {
 function trustedNative(root, inputs, target) {
   const { value: policy, hash: policyHash } = readJSON(root, NATIVE_POLICY);
   const ios = target ? iosArtifacts(iosTarget(target.sdk, target.arch, target.minimumOS)) : undefined;
+  const nodeHeaders = lockedNodeHeaders(policy);
   const receiptPath = ios?.receipt ?? NATIVE_RECEIPT;
   const artifactPath = ios?.artifact ?? NATIVE_ARTIFACT;
   const sdkPath = ios?.sdk ?? SOURCE_SDK;
@@ -185,10 +176,11 @@ function trustedNative(root, inputs, target) {
       && policy.patches[index]?.source === 'quickjs' && digest(policy.patches[index]?.sha256))
     && Array.isArray(policy.mandatoryInputs) && Array.isArray(policy.inputDirectories)
     && policy.inputDirectories.includes('packages/script-host/native')
-    && policy.nodeHeaders?.version === '24.21.0'
-    && policy.nodeHeaders.url === 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-headers.tar.gz'
-    && policy.nodeHeaders.archivePath === 'tmp/build/runtime-native/node-headers.tar.gz'
-    && digest(policy.nodeHeaders.sha256),
+    && typeof policy.build?.node === 'string' && nodeHeaders.version === policy.build.node
+    && nodeHeaders.archivePath === 'tmp/build/runtime-native/node-headers.tar.gz'
+    && digest(nodeHeaders.sha256)
+    && Array.isArray(policy.ios?.targets)
+    && policy.ios.targets.every(entry => iosTargetPolicy(policy, entry.sdk, entry.arch) === entry),
   'INVALID_NATIVE_POLICY', 'Native policy must pin the reviewed ABI, sources, patch and artifact');
   const sources = {};
   for (const [name, expected] of Object.entries(NATIVE_SOURCES)) {
@@ -213,7 +205,7 @@ function trustedNative(root, inputs, target) {
   'NATIVE_LICENSE_MISMATCH', 'QuickJS Unicode license differs from policy');
   check(receipt.schemaVersion === 1 && receipt.abi === policy.abi && receipt.napi === policy.napi
     && isDeepStrictEqual(receipt.sources, sources)
-    && (ios || isDeepStrictEqual(receipt.nodeHeaders, policy.nodeHeaders))
+    && (ios || isDeepStrictEqual(receipt.nodeHeaders, nodeHeaders))
     && isObject(receipt.sourceTrees)
     && artifact(receipt.artifact, artifactPath) && artifact(receipt.sdk, sdkPath)
     && Array.isArray(receipt.inputs) && receipt.inputs.length > 0,
@@ -234,11 +226,10 @@ function trustedNative(root, inputs, target) {
     NATIVE_POLICY, 'packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
     'scripts/quickjs/build-source-sdk.mjs', 'package.json', 'package-lock.json',
     ...(ios ? ['scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs',
-      'scripts/prepare-ios-runtime.py', 'scripts/ios-node-mobile.json'] : [policy.nodeHeaders.archivePath]),
+      'scripts/prepare-ios-runtime.py', 'scripts/ios-node-mobile.json'] : [nodeHeaders.archivePath]),
     ...policy.mandatoryInputs,
     ...policy.patches.map(input => input.path),
-    ...Object.values(policy.sources).flatMap(source => [source.license.path, source.archivePath]),
-    unicode.path,
+    ...nativeSourceInputs(policy),
     ...policy.inputDirectories.flatMap(path => inputFiles(root, safeRelative(path))),
   ];
   for (const path of required) {
@@ -315,7 +306,8 @@ function trustedNative(root, inputs, target) {
       && digest(receipt.bindingIdentity)
       && isDeepStrictEqual(policy.ios, {
         framework: 'MeowScriptHost.framework/MeowScriptHost', cache: '.cache/ios-native',
-        minimumOS: '17.0', nodeMobilePolicy: 'scripts/ios-node-mobile.json',
+        minimumOS: policy.ios.minimumOS, targets: policy.ios.targets,
+        nodeMobilePolicy: 'scripts/ios-node-mobile.json',
         exports: ['_napi_register_module_v1', '_node_api_module_get_api_version_v1'],
       })
       && artifact(receipt.frameworkInfo, ios.info) && artifact(receipt.exports, ios.exports),
@@ -350,7 +342,7 @@ function trustedNative(root, inputs, target) {
     check(sha256(JSON.stringify(identity)) === receipt.bindingIdentity,
       'NATIVE_INPUT_MISMATCH', 'Framework compiled identity does not match its build inputs');
   } else {
-    check(recorded.get(policy.nodeHeaders.archivePath) === policy.nodeHeaders.sha256,
+    check(recorded.get(nodeHeaders.archivePath) === nodeHeaders.sha256,
       'NATIVE_INPUT_MISMATCH', 'Node headers differ from policy');
   }
   check(recorded.get(NATIVE_POLICY) === policyHash && policy.patches.every(patch =>
@@ -576,7 +568,7 @@ function fileDeclarations(root, manifest, location, workspace) {
   return required;
 }
 
-function buildGraph(root, product, target) {
+function buildGraph(root, product, target, runtimeSource) {
   const rootJSON = readJSON(root, 'package.json');
   const lockJSON = readJSON(root, 'package-lock.json');
   const manifest = rootJSON.value, lock = lockJSON.value;
@@ -596,9 +588,46 @@ function buildGraph(root, product, target) {
     check(isObject(value), 'INVALID_LOCK', `Invalid lock record: ${location}`);
     if (value.link) safeRelative(value.resolved);
   }
-  const selected = ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-    'film-rules', 'film-search', 'film-playback', 'netease-token', 'novel-rules'];
-  const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
+  const workspaces = discoverWorkspaces(root, manifest);
+  const packages = workspaceMap(root, workspaces);
+  const appRoots = new Set(), publicFiles = new Map();
+  function recordPublicImport(exported) {
+    if (!publicFiles.has(exported.name)) publicFiles.set(exported.name, new Set());
+    publicFiles.get(exported.name).add(exported.target.slice(2));
+  }
+  for (const file of runtimeSource.files) {
+    const location = `${SHARED_SOURCE}/${file}`;
+    const references = sourceReferences(readFileSync(sourcePath(root, location), 'utf8'));
+    check(references.unresolvedImports.length === 0, 'SHARED_IMPORT',
+      `${location}: module specifiers must be statically resolvable`);
+    for (const { specifier, kind } of references.imports) {
+      if (specifier.startsWith('.')) {
+        const target = posix.normalize(posix.join(posix.dirname(file), specifier));
+        check(target !== '..' && !target.startsWith('../') && !target.startsWith('/'),
+          'SHARED_IMPORT', `${location}: relative import escapes the shared runtime closure: ${specifier}`);
+        check(runtimeSource.files.includes(target), 'MISSING_SOURCE',
+          `${location}: missing shared runtime import: ${specifier}`);
+      } else if (!SHARED_RUNTIME_BUILTINS.has(specifier)) {
+        const name = packageNameFromSpecifier(specifier);
+        const workspace = name && packages.get(name);
+        if (workspace) fileDeclarations(root, workspace.manifest, workspace.location, true);
+        const exported = publicPackageImport(root, packages, specifier, { requireFile: false, kind });
+        if (!exported && name?.startsWith('@meowfilm/')) {
+          const link = lock.packages[`node_modules/${name}`];
+          if (link?.link) sourcePath(root, `${link.resolved}/package.json`);
+        }
+        check(exported, 'SHARED_IMPORT',
+          `${location}: import is not a public workspace package: ${specifier}`);
+        check(publicPackageImport(root, packages, specifier, { kind }), 'MISSING_PUBLIC_FILE',
+          `${location}: public workspace target is missing: ${specifier}`);
+        recordPublicImport(exported);
+        appRoots.add(exported.name);
+      }
+    }
+  }
+  const workspacePaths = new Map(Object.entries(lock.packages)
+    .filter(([, value]) => value.link === true)
+    .map(([location, value]) => [value.resolved, location]));
   const nodes = new Map(), edges = [], omitted = [];
   const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];
   function outputPath(location) {
@@ -618,12 +647,57 @@ function buildGraph(root, product, target) {
     const source = sourcePath(root, link.resolved);
     check(patterns.some(pattern => matchesGlob(link.resolved, pattern)),
       'WORKSPACE_MISMATCH', `${link.resolved}: not declared as a root workspace`);
-    sourcePath(root, posix.dirname(location));
     const installed = join(root, location);
     check(statOrMissing(installed)?.isSymbolicLink(), 'MISSING_WORKSPACE_LINK',
       `${location}: expected an installed workspace link`);
+    sourcePath(root, posix.dirname(location));
     check(realpathSync(installed) === source, 'UNSAFE_SYMLINK', `${location}: workspace link target mismatch`);
     return link.resolved;
+  }
+
+  function moduleFiles(node, rel = '') {
+    const directory = sourcePath(root, posix.join(node.location, rel));
+    return readdirSync(directory, { withFileTypes: true }).flatMap(item => {
+      if (item.name === 'node_modules' || OMIT_DIRECTORIES.has(item.name.toLowerCase())
+          || (item.name.startsWith('.') && !LEGAL_FILE.test(item.name))) return [];
+      const child = posix.join(rel, item.name);
+      if (item.isDirectory()) return moduleFiles(node, child);
+      return /\.(?:mjs|cjs|js)$/.test(item.name) && includedFile(child, node)
+        ? [child] : [];
+    });
+  }
+  const workspaceImports = new Map();
+  function readWorkspaceImports(node) {
+    const dependencies = new Set(Object.keys({
+      ...node.manifest.dependencies, ...node.manifest.optionalDependencies,
+      ...node.manifest.peerDependencies,
+    }));
+    const imported = new Set();
+    workspaceImports.set(node, imported);
+    for (const file of moduleFiles(node)) {
+      const location = posix.join(node.location, file);
+      const references = sourceReferences(readFileSync(sourcePath(root, location), 'utf8'));
+      check(references.unresolvedImports.length === 0, 'PACKAGE_IMPORT',
+        `${location}: module specifiers must be statically resolvable`);
+      for (const { specifier, kind } of references.imports) {
+        const name = packageNameFromSpecifier(specifier);
+        if (!name) continue;
+        if (!packages.has(name)) {
+          const link = lock.packages[`node_modules/${name}`];
+          if (link?.link) sourcePath(root, `${link.resolved}/package.json`);
+          continue;
+        }
+        check(dependencies.has(name), 'PACKAGE_IMPORT',
+          `${location}: undeclared workspace dependency ${name}`);
+        const exported = publicPackageImport(root, packages, specifier, { requireFile: false, kind });
+        check(exported, 'MISSING_PUBLIC_ENTRY',
+          `${location}: workspace private import ${specifier}`);
+        check(publicPackageImport(root, packages, specifier, { kind }), 'MISSING_PUBLIC_FILE',
+          `${location}: workspace public target is missing: ${specifier}`);
+        recordPublicImport(exported);
+        imported.add(name);
+      }
+    }
   }
 
   function visit(location, expectedName) {
@@ -648,8 +722,7 @@ function buildGraph(root, product, target) {
     check(pkg.name !== 'jsdom' || pkg.version === '24.1.3',
       'PRODUCT_CLOSURE', 'The token SDK requires the reviewed Node 18 compatible jsdom');
     if (pkg.name.startsWith('@meowfilm/')) {
-      check(workspace && selected.includes(pkg.name.slice('@meowfilm/'.length)),
-        'PRODUCT_CLOSURE', `${location}: workspace is not enabled`);
+      check(workspace, 'PRODUCT_CLOSURE', `${location}: workspace is not declared by the root manifest`);
     }
     if (workspace) {
       for (const file of ['package-lock.json', 'npm-shrinkwrap.json']) {
@@ -663,6 +736,7 @@ function buildGraph(root, product, target) {
       nativeBuild: pkg.gypfile ? trustedNative(root, inputs, target) : undefined,
     };
     nodes.set(location, node); // Register before traversal: real dependency cycles are legal.
+    if (workspace) readWorkspaceImports(node);
     const dependencies = dependencyMap(pkg, 'dependencies', location);
     const optional = dependencyMap(pkg, 'optionalDependencies', location);
     for (const name of Object.keys(optional)) delete dependencies[name];
@@ -678,11 +752,13 @@ function buildGraph(root, product, target) {
         let found;
         for (const candidate of candidates(location, name)) {
           const record = lock.packages[candidate];
-          let installed;
           if (record?.link) {
-            const parent = sourcePath(root, posix.dirname(candidate), true);
-            installed = parent && statOrMissing(join(root, candidate));
-          } else installed = sourcePath(root, candidate, true);
+            if (workspace) check(workspaceImports.get(node)?.has(name), 'PRODUCT_CLOSURE',
+              `${location}: workspace dependency is not referenced by packaged source: ${name}`);
+            found = visit(candidate, name);
+            break;
+          }
+          const installed = sourcePath(root, candidate, true);
           if (!installed && !record) continue;
           check(record, 'UNLOCKED_PACKAGE', `${candidate}: installed dependency is not locked`);
           if (installed) found = visit(candidate, name);
@@ -701,9 +777,10 @@ function buildGraph(root, product, target) {
     return node;
   }
 
-  for (const name of selected) visit(`node_modules/@meowfilm/${name}`, `@meowfilm/${name}`);
+  for (const name of appRoots) visit(`node_modules/${name}`, name);
   const destinations = new Map();
   for (const node of nodes.values()) {
+    for (const file of publicFiles.get(node.name) ?? []) node.required.add(file);
     check(!destinations.has(node.path), 'PATH_COLLISION', `Duplicate package destination: ${node.path}`);
     destinations.set(node.path, node);
   }
@@ -714,7 +791,7 @@ function buildGraph(root, product, target) {
   }
   return { nodes: [...nodes.values()].sort((a, b) => compare(a.path, b.path)),
     omitted: omitted.sort((a, b) => compare(`${a.from}/${a.name}/${a.kind}`, `${b.from}/${b.name}/${b.kind}`)),
-    inputs };
+    inputs, runtimeSource };
 }
 
 function newOutput(root, output) {
@@ -769,7 +846,6 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
   root = realpathSync(root);
   check(lstatSync(root).isDirectory(), 'INVALID_ROOT', 'Root must be a directory');
   const modules = PRODUCTS[product];
-  const sharedFiles = SHARED_FILES;
   output = newOutput(root, output);
   const outputIdentity = lstatSync(output);
   let manifestFD;
@@ -788,6 +864,7 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
     for (let offset = 0; offset < bytes.length;) offset += writeSync(manifestFD, bytes, offset, bytes.length - offset, offset);
     fsyncSync(manifestFD);
   }
+  let runtimeSource;
   function destination(rel) {
     safeRelative(rel);
     const rootStat = lstatSync(output);
@@ -872,40 +949,18 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       }
     }
   }
-  function copySharedRuntime(rel = '') {
-    const location = posix.join(SHARED_SOURCE, rel);
-    for (const item of readdirSync(sourcePath(root, location), { withFileTypes: true })) {
-      const child = posix.join(rel, item.name);
-      safeRelative(child);
-      check(!item.isSymbolicLink(), 'UNSAFE_SYMLINK', `Shared runtime symlink is not allowed: ${location}/${item.name}`);
-      if (item.isDirectory()) {
-        check(SHARED_FILES.some(file => file.startsWith(child + '/')),
-          'SHARED_CLOSURE', `Unexpected shared runtime directory: ${child}`);
-        copySharedRuntime(child);
-      } else {
-        check(item.isFile() && SHARED_FILES.includes(child), 'SHARED_CLOSURE', `Unexpected shared runtime source: ${child}`);
-      }
-    }
-    if (rel) return;
-    for (const file of sharedFiles) {
+  function copySharedRuntime() {
+    for (const file of runtimeSource.files) {
       const location = `${SHARED_SOURCE}/${file}`;
       const input = readFileSync(sourcePath(root, location)), hash = sha256(input);
-      const text = new TextDecoder('utf-8', { fatal: true }).decode(input);
-      // Quoted protocol method names (for example 'import') and member calls
-      // are not module specifiers. Keep compact import'x' and import('x') checks.
-      for (const match of text.matchAll(/(?<![\w$.'"])(?:from\s*|import\s*(?:\(\s*)?|require\s*\()\s*['"]([^'"]+)['"]/g)) {
-        const specifier = match[1];
-        const target = posix.normalize(posix.join(posix.dirname(file), specifier));
-        check(specifier.startsWith('.') ? sharedFiles.includes(target) : SHARED_IMPORTS.has(specifier),
-          'SHARED_IMPORT', `${location}: import escapes the shared runtime closure`);
-      }
       copy(location, `app/${file}`, hash);
     }
   }
   try {
     manifestFD = openSync(join(output, MANIFEST), 'wx', 0o644);
     saveManifest();
-    const graph = buildGraph(root, product, target);
+    runtimeSource = discoverRuntimeSource(root);
+    const graph = buildGraph(root, product, target, runtimeSource);
     manifest.inputs = graph.inputs;
     manifest.omittedOptionalDependencies = graph.omitted;
     manifest.dependencies = graph.nodes.map(node => ({

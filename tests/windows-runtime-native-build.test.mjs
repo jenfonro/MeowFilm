@@ -31,13 +31,15 @@ function fixture(t) {
     patches: [{ path: 'packages/script-host/native/fixture.patch' }],
     nodeHeaders: { archivePath: 'tmp/build/runtime-native/node-headers.tar.gz' },
     sources: { quickjs: { archivePath: 'tmp/build/runtime-native/quickjs.tar.gz',
-      license: { path: 'LICENSES/quickjs-ng-LICENSE.txt' } } } };
+      license: { path: 'LICENSES/quickjs-ng-LICENSE.txt' },
+      unicodeLicense: { path: 'LICENSES/Unicode-3.0.txt' } } } };
   write(policyPath, policy);
   for (const path of ['package.json', 'package-lock.json', 'packages/script-host/binding.gyp',
     'scripts/dependency-download.mjs',
     'scripts/quickjs/build-source-sdk.mjs', 'packages/script-host/native/binding.cc',
     'packages/script-host/native/fixture.patch', policy.nodeHeaders.archivePath,
-    policy.sources.quickjs.archivePath, policy.sources.quickjs.license.path])
+    policy.sources.quickjs.archivePath, policy.sources.quickjs.license.path,
+    policy.sources.quickjs.unicodeLicense.path])
     write(path, 'synthetic input');
   write('scripts/quickjs/build-native.mjs', `
     import { writeFileSync } from 'node:fs';
@@ -55,7 +57,8 @@ function fixture(t) {
     inputs: [policyPath, 'package.json', 'package-lock.json', 'scripts/quickjs/build-source-sdk.mjs',
       ...policy.mandatoryInputs, 'packages/script-host/native/binding.cc',
       'packages/script-host/native/fixture.patch', policy.nodeHeaders.archivePath,
-      policy.sources.quickjs.archivePath, policy.sources.quickjs.license.path].map(record),
+      policy.sources.quickjs.archivePath, policy.sources.quickjs.license.path,
+      policy.sources.quickjs.unicodeLicense.path].map(record),
     artifact: record(artifactPath), sdk: record(sdkPath) };
   write(receiptPath, receipt);
   return { root, write, receipt };
@@ -80,11 +83,14 @@ for (const [name, mutate] of [
   ['changed lock', f => f.write('package-lock.json', 'changed dependency graph')],
   ['changed upstream archive', f => f.write('tmp/build/runtime-native/quickjs.tar.gz', 'changed source')],
   ['changed license', f => f.write('LICENSES/quickjs-ng-LICENSE.txt', 'changed license')],
+  ['changed Unicode license', f => f.write('LICENSES/Unicode-3.0.txt', 'changed Unicode license')],
   ['changed Node headers', f => f.write('tmp/build/runtime-native/node-headers.tar.gz', 'changed headers')],
   ['missing required archive record', f => f.write(receiptPath, { ...f.receipt,
     inputs: f.receipt.inputs.filter(input => input.path !== 'tmp/build/runtime-native/quickjs.tar.gz') })],
   ['missing required license record', f => f.write(receiptPath, { ...f.receipt,
     inputs: f.receipt.inputs.filter(input => input.path !== 'LICENSES/quickjs-ng-LICENSE.txt') })],
+  ['missing required Unicode license record', f => f.write(receiptPath, { ...f.receipt,
+    inputs: f.receipt.inputs.filter(input => input.path !== 'LICENSES/Unicode-3.0.txt') })],
   ['missing required headers record', f => f.write(receiptPath, { ...f.receipt,
     inputs: f.receipt.inputs.filter(input => input.path !== 'tmp/build/runtime-native/node-headers.tar.gz') })],
   ['missing required download helper record', f => f.write(receiptPath, { ...f.receipt,
@@ -121,6 +127,8 @@ for (const scenario of ['current', 'failed', 'missing-builder', 'wrong-node', 'n
     const f = fixture(t);
     f.write('scripts/windows/ensure-runtime-native.mjs',
       readFileSync(new URL('../scripts/windows/ensure-runtime-native.mjs', import.meta.url), 'utf8'));
+    f.write('scripts/quickjs/native-inputs.mjs',
+      readFileSync(new URL('../scripts/quickjs/native-inputs.mjs', import.meta.url), 'utf8'));
     if (scenario === 'failed') f.write(artifactPath, 'stale artifact');
     if (scenario === 'missing-builder') rmSync(join(f.root, 'scripts/quickjs/build-native.mjs'));
     if (scenario === 'wrong-node') {

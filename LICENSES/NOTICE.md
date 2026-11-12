@@ -430,10 +430,9 @@ artifact locations are pinned in `scripts/script-host-native.json`. Reproduce wi
 ABI, platform, architecture and artifact hashes. The common packager verifies
 that inventory without building, fetching or changing the lock.
 
-The historical `quickjs-emscripten-LICENSE.txt` is retained for platform consumers
-that have not yet migrated. It is not a dependency or backend of the new common
-runtime or its iOS framework. The Windows packaging consumer is not migrated by
-the iOS adaptation, so its remaining attribution is retained.
+The historical `quickjs-emscripten-LICENSE.txt` is retained as source history.
+It is not a dependency or backend of the common native runtime, its Windows
+packaging consumer, or the iOS framework.
 
 ## Node compatibility npm dependencies
 

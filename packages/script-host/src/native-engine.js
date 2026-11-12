@@ -29,11 +29,14 @@ function loadBinding() {
         || Number(process.versions.napi) < 8
         || manifest.platform !== 'ios' || manifest.arch !== process.arch
         || !['iphoneos', 'iphonesimulator'].includes(target?.sdk)
-        || target.arch !== process.arch || target.minimumOS !== '17.0'
+        || target.platform !== 'ios' || target.arch !== process.arch
+        || target.variant !== (target.sdk === 'iphonesimulator' ? 'simulator' : null)
+        || !['arm64', 'x86_64'].includes(target.xcframeworkArchitecture)
+        || typeof target.minimumOS !== 'string'
         || (target.sdk === 'iphoneos' && target.arch !== 'arm64')
         || !['arm64', 'x64'].includes(target.arch)
         || !/^[a-f0-9]{64}$/.test(manifest.bindingIdentity ?? '')
-        || manifest.artifact?.path !== `.cache/ios-native/${target.sdk}-${target.arch === 'x64' ? 'x86_64' : target.arch}/MeowScriptHost.framework/MeowScriptHost`) {
+        || manifest.artifact?.path !== `.cache/ios-native/${target.sdk}-${target.xcframeworkArchitecture}/MeowScriptHost.framework/MeowScriptHost`) {
       throw fault('NATIVE_ARTIFACT_INVALID');
     }
     const self = fileURLToPath(import.meta.url);

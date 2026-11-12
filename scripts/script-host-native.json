@@ -100,6 +100,29 @@
     "framework": "MeowScriptHost.framework/MeowScriptHost",
     "cache": ".cache/ios-native",
     "minimumOS": "17.0",
+    "targets": [
+      {
+        "sdk": "iphoneos",
+        "arch": "arm64",
+        "platform": "ios",
+        "variant": null,
+        "xcframeworkArchitecture": "arm64"
+      },
+      {
+        "sdk": "iphonesimulator",
+        "arch": "arm64",
+        "platform": "ios",
+        "variant": "simulator",
+        "xcframeworkArchitecture": "arm64"
+      },
+      {
+        "sdk": "iphonesimulator",
+        "arch": "x64",
+        "platform": "ios",
+        "variant": "simulator",
+        "xcframeworkArchitecture": "x86_64"
+      }
+    ],
     "nodeMobilePolicy": "scripts/ios-node-mobile.json",
     "exports": [
       "_napi_register_module_v1",
@@ -110,15 +133,13 @@
     "packages/script-host/binding.gyp",
     "scripts/quickjs/build-native.mjs",
     "scripts/dependency-download.mjs",
+    "scripts/quickjs/native-inputs.mjs",
     "scripts/script-host-native.json"
   ],
   "inputDirectories": [
     "packages/script-host/native"
   ],
   "nodeHeaders": {
-    "version": "24.21.0",
-    "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-headers.tar.gz",
-    "checksumsUrl": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
     "sha256": "57c6bee2e30bbbee5bd51d6cc343eb992e174b56a2a1d0eab7a7510771c20ea2",
     "archivePath": "tmp/build/runtime-native/node-headers.tar.gz"
   }

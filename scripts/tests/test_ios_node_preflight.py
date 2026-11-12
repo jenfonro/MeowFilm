@@ -23,15 +23,16 @@ class NodePreflightTests(unittest.TestCase):
         (self.payload / "app").mkdir(parents=True)
         data = b"export const fixture = true;\n"
         (self.payload / "app/bootstrap.mjs").write_bytes(data)
+        target = preflight.PREPARE["target"]("iphonesimulator", "x64")
         self.manifest = {
             "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
             "platform": "ios", "transport": "runtime.http.v1",
             "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
-            "target": {"sdk": "iphonesimulator", "arch": "x64", "minimumOS": "17.0"},
+            "target": target,
             "trustedNative": [{"platform": "ios", "arch": "x64", "abi": 1, "napi": 8,
                                "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",
                                "bindingIdentity": "a" * 64,
-                               "target": {"sdk": "iphonesimulator", "arch": "x64", "minimumOS": "17.0"}}],
+                               "target": target}],
             "files": [{"path": "app/bootstrap.mjs", "bytes": len(data),
                        "sha256": hashlib.sha256(data).hexdigest()}],
         }
@@ -98,7 +99,7 @@ class NodePreflightTests(unittest.TestCase):
         self.manifest["trustedNative"] = [original]
         self.save()
         with self.assertRaisesRegex(ValueError, "target"):
-            preflight.validate_runtime(self.payload, {"sdk": "iphoneos", "arch": "arm64", "minimumOS": "17.0"})
+            preflight.validate_runtime(self.payload, preflight.PREPARE["target"]("iphoneos", "arm64"))
 
     def test_rejects_modified_or_missing_file(self):
         path = self.payload / "app/bootstrap.mjs"
@@ -141,13 +142,16 @@ class NodePreflightBuildTests(unittest.TestCase):
         self.inputs.mkdir(parents=True)
         (self.inputs / "probe.mjs").write_text("export {};")
         self.dependency = self.root / "NodeMobile.xcframework"
+        slice_for = lambda selected: f'fixture-{selected["sdk"]}-{selected["arch"]}'
         self.prepare = {**preflight.PREPARE,
                         "policy": Mock(return_value={}),
                         "node_mobile": Mock(return_value=self.dependency),
+                        "node_mobile_inputs": Mock(side_effect=lambda _pinned, selected:
+                                                   {"identity": {"slice": slice_for(selected)}}),
                         "runtime_path": self.runtime_path}
-        for sdk, arch, slice_name in (("iphonesimulator", "x86_64", "ios-arm64_x86_64-simulator"),
-                                      ("iphoneos", "arm64", "ios-arm64")):
+        for sdk, arch in (("iphonesimulator", "x86_64"), ("iphoneos", "arm64")):
             selected = self.prepare["target"](sdk, arch)
+            slice_name = slice_for(selected)
             mobile = self.dependency / slice_name / "NodeMobile.framework"
             mobile.mkdir(parents=True)
             (mobile / "NodeMobile").write_bytes(b"official-fixture")
@@ -188,8 +192,7 @@ class NodePreflightBuildTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def runtime_path(self, selected):
-        arch = "x86_64" if selected["arch"] == "x64" else selected["arch"]
-        return self.root / f".cache/ios-runtime/{selected['sdk']}-{arch}/Runtime"
+        return self.root / f".cache/ios-runtime/{selected['sdk']}-{selected['xcframeworkArchitecture']}/Runtime"
 
     def prepare_commands(self):
         return [[preflight.sys.executable, "-I", "-B", str(self.root / "scripts/prepare-ios-runtime.py"),
