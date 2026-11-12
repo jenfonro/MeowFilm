@@ -194,8 +194,6 @@ actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
             return try MusicNeteaseFixture.response(["code": 200, "data": ["timestamp": replyTime,
                 "signature": MusicNeteaseFixture.sign(timestamp, nonce),
                 "encryptedData": MusicNeteaseFixture.aes(data, key: MusicNeteaseFixture.staticKey, encrypt: true).base64EncodedString()]])
-        case "/xeapi/register/anonimous":
-            return try MusicNeteaseFixture.response(["code": 200], headers: ["set-cookie": "MUSIC_A=synthetic-visitor; Path=/; HttpOnly"])
         case "/eapi/login/qrcode/unikey":
             return try MusicNeteaseFixture.response(["code": 200, "unikey": "synthetic-qr-key"])
         case "/eapi/login/qrcode/client/login":

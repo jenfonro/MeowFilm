@@ -181,7 +181,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     public override func pageDidFinishAppearing() {
         showReadErrorIfNeeded()
-        showError(page?.actionError?.localizedDescription)
+        showActionErrorIfNeeded()
     }
 
     public override func applyTheme() {
@@ -502,7 +502,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         }
         configureActions()
         loadVisibleFMPreviews()
-        showError(page?.actionError?.localizedDescription)
+        showActionErrorIfNeeded()
         showReadErrorIfNeeded()
     }
 
@@ -604,6 +604,13 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         else { current = nil }
         let preview = fmPreviews[item.id]
         return current ?? (preview?.authorization.isActive == true ? preview?.artwork : nil) ?? item.artwork
+    }
+
+    private func showActionErrorIfNeeded() {
+        guard let page, let error = page.actionError, let id = page.actionErrorID else { return }
+        showError(error.message(operation: page.actionOperation, diagnosticID: page.actionDiagnosticID)) { [weak page] in
+            page?.dismissActionError(id: id)
+        }
     }
 
     private func showReadErrorIfNeeded() {

@@ -136,7 +136,10 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let reused = try await value.homePage(cursor: nil, refresh: false)
         XCTAssertEqual(try heartbeatAction(reused), .heartbeatSong(songID: "101"))
         let restored = try await value.restoredHome()
-        XCTAssertEqual(try heartbeatAction(XCTUnwrap(restored)), .heartbeatSong(songID: "101"))
+        XCTAssertFalse(try XCTUnwrap(restored).sections.flatMap(\.items).contains {
+            if case .action(.heartbeatSong) = $0.content { return true }
+            return false
+        }, "A display-only snapshot cannot restore a private heartbeat entrance")
         let beforeRefresh = await account.calls
         XCTAssertEqual(beforeRefresh.filter { $0 == .heartbeatSeed }.count, 1)
         let refreshed = try await value.homePage(cursor: nil, refresh: true)
@@ -645,6 +648,8 @@ final class MusicNativeHomeServiceTests: XCTestCase {
             {"resourceType":"dailySongs","title":"账号推荐"},
             {"resourceType":"star","title":"收藏"},
             {"resourceType":"similarSong","title":"相似推荐","action":"orpheus://nm/play/similarFM?sourceType=song&sourceId=%5B41%5D"},
+            {"resourceType":"similarArtist","title":"相似艺人","action":"orpheus://nm/play/similarFM?sourceType=artist&sourceId=%5B42%5D"},
+            {"lunaItemType":"heartRcmd","title":"心动","songData":{"id":"private-invalid-id"}},
             {"resourceType":"dragon_ball","title":"会员","action":"orpheus://rnpage?component=rn-vip-portal"},
             {"resourceType":"fm","title":"漫游"}
           ]}},
@@ -664,17 +669,49 @@ final class MusicNativeHomeServiceTests: XCTestCase {
             guard case .action(let action) = item.content else { return nil }
             return action
         }
-        XCTAssertEqual(page.sections[0].items.count, 3)
+        XCTAssertEqual(page.sections[0].items.count, 1)
         XCTAssertEqual(actions, [
-            .heartbeat, .similar(sourceIDs: ["41"], sourceName: ""),
             .fm(mode: .default, submode: "", entry: nil)
-        ], "valid account entrances remain visible; execution requests login")
+        ], "Guest home exposes only executable anonymous entrances")
         XCTAssertEqual(page.sections[1].items.count, 1)
         let calls = await account.calls
         XCTAssertTrue(calls.isEmpty, "Guest home must not read account recommendations or artist activity")
         let reads = await http.calls()
         XCTAssertEqual(reads.count, 2)
         XCTAssertEqual(reads[1].url.path, "/weapi/v3/song/detail")
+        await value.close()
+    }
+
+    func testRestoredDisplayKeepsPublicAlbumsButCannotRestoreAccountEntrances() async throws {
+        let store = HomeSnapshotFixture(), account = HomeAccountFixture(loggedIn: false)
+        let privateChannel = MusicPublicBrowseChannel(id: "artist-activity", title: "关注艺人",
+            kind: .artistActivity, platform: .netease)
+        let album = MusicPublicBrowseCollection(platform: .netease, nativeID: "7", kind: .album,
+            title: "公开专辑")
+        let page = MusicNativePublicBrowseDiscovery(sections: [
+            .init(id: "mixed", title: "推荐", items: [
+                .init(id: "album", title: album.title, content: .collection(album)),
+                .init(id: "similar", title: "相似歌曲", content: .action(.similar(sourceIDs: ["41"], sourceName: ""))),
+                .init(id: "similar-artist", title: "相似艺人", content: .action(.similarArtist(sourceIDs: ["42"], sourceName: ""))),
+                .init(id: "heartbeat", title: "心动", content: .action(.heartbeat)),
+                .init(id: "heartbeat-song", title: "心动歌曲", content: .action(.heartbeatSong(songID: "41"))),
+                .init(id: "daily", title: "每日推荐", content: .daily),
+                .init(id: "artist", title: "关注艺人", content: .channel(privateChannel)),
+                .init(id: "fm", title: "私人漫游", content: .action(.fm(mode: .default, submode: "", entry: nil))),
+            ], channel: privateChannel),
+            .init(id: "private-only", title: "私有栏目", items: [
+                .init(id: "private-daily", title: "每日推荐", content: .action(.daily(branch: .style))),
+            ]),
+        ])
+        store.write(try MusicNativeHomeSnapshot.encode(page, source: .netease))
+        let value = try await service(account, store: store)
+        let saved = try await value.restoredHome()
+        let restored = try XCTUnwrap(saved)
+        XCTAssertEqual(restored.sections.count, 1)
+        XCTAssertEqual(restored.sections[0].items.map(\.id), ["album", "fm"])
+        XCTAssertNil(restored.sections[0].channel)
+        let calls = await account.calls, bindingCalls = await account.bindingCalls
+        XCTAssertTrue(calls.isEmpty); XCTAssertEqual(bindingCalls, 0)
         await value.close()
     }
 
