@@ -334,7 +334,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
         XCTAssertEqual(detail.pageTitle, MusicAccountPlatform.qq.title)
         for card in [login, detail] as [UIViewController] {
             XCTAssertEqual(card.modalPresentationStyle, .overFullScreen, "Account login and details float over the list")
-            XCTAssertTrue(card.view is MusicAccountFloatingBackdrop)
+            XCTAssertTrue(card.view is AccountFloatingBackdrop)
         }
         XCTAssertNil(PageViewController(themeProvider: appearance).navigationItem.titleView)
         XCTAssertNil(HostingPageViewController(

@@ -147,8 +147,9 @@ final class MeowfilmAssembly: ObservableObject {
             try await resources.scriptSession.connection()
         })
         playbackSettings.playbackSnapshot = { [weak self] in self?.filmPlayback?.snapshot }
+        let pan = PanAccountsModel(service: PanAccountService(connection: { try await resources.scriptSession.connection() }))
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings,
-                                             tmdb: tmdb, douban: douban, playback: playbackSettings)
+                                             tmdb: tmdb, douban: douban, pan: pan, playback: playbackSettings)
         self.filmSettings = filmSettings
         filmSettings.start()
         guard !closed, !Task.isCancelled else { return }

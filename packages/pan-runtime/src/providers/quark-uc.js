@@ -130,6 +130,25 @@ function cookieRequired(ctx) {
   requireValue(typeof ctx.credentials.cookie === 'string' && ctx.credentials.cookie.trim(), 'NOT_CONFIGURED');
 }
 
+async function refresh(config, ctx) {
+  cookieRequired(ctx);
+  active(ctx);
+  const url = new URL('/account/info', `https://${config.host}`);
+  url.search = new URLSearchParams({ fr: 'pc', platform: 'pc' }).toString();
+  const response = await ctx.http.request({
+    url: url.href, method: 'GET', signal: ctx.signal, headers: webHeaders(config, ctx.credentials.cookie),
+  });
+  active(ctx);
+  httpOK(response);
+  const value = parseJSON(response.body);
+  requireValue(record(value) && typeof value.code === 'string' && typeof value.success === 'boolean', 'UPSTREAM_FORMAT');
+  requireValue(value.code === 'OK' && value.success, 'UPSTREAM_ERROR');
+  requireValue(record(value.data), 'UPSTREAM_FORMAT');
+  requireValue(Object.keys(value.data).length > 0, 'AUTH_REQUIRED');
+  await persistCookie(ctx, response.headers);
+  return { refreshed: true };
+}
+
 function firstText(root, names) {
   for (const name of names) {
     const value = field(root, [name], true);
@@ -424,14 +443,18 @@ function tvDevice(config, credentials, now) {
 async function tvRefresh(config, ctx) {
   const credentials = ctx.credentials;
   requireValue(stringField(credentials.refreshToken) && stringField(credentials.deviceId), 'NOT_CONFIGURED');
-  const response = await requestJSON(ctx, config.token, {
-    method: 'POST', headers: { 'User-Agent': tvUA, Accept: 'application/json, text/plain, */*' },
-    json: { ...tvDevice(config, credentials, ctx.now()), refresh_token: credentials.refreshToken.trim() },
+  active(ctx);
+  const response = await ctx.http.request({
+    url: config.token, method: 'POST', signal: ctx.signal,
+    headers: { 'User-Agent': tvUA, Accept: 'application/json, text/plain, */*', 'Content-Type': 'application/json' },
+    body: Buffer.from(JSON.stringify({ ...tvDevice(config, credentials, ctx.now()), refresh_token: credentials.refreshToken.trim() })),
   });
+  active(ctx);
   httpOK(response);
-  requireValue(record(response.value), 'UPSTREAM_FORMAT');
-  requireValue(stringField(response.value.code) === '200', 'AUTH_FAILED');
-  const data = response.value.data;
+  const value = parseJSON(response.body);
+  requireValue(record(value) && stringField(value.code), 'UPSTREAM_FORMAT');
+  requireValue(stringField(value.code) === '200', 'UPSTREAM_ERROR');
+  const data = value.data;
   if (record(data) && stringField(data.status) === '-1' && stringField(data.errno) === '11000') {
     throw new PanError('AUTH_FAILED');
   }
@@ -706,6 +729,7 @@ function ordinaryProvider(config) {
     list: (params, ctx) => list(config, params, ctx),
     prepare: (params, ctx) => prepare(config, params, ctx),
     play: (params, ctx) => ordinaryPlay(config, params, ctx),
+    refresh: (_params, ctx) => refresh(config, ctx),
     loginStart: (_params, ctx) => loginStart(config, ctx),
     loginPoll: (session, ctx) => loginPoll(config, session, ctx),
     loginCancel,

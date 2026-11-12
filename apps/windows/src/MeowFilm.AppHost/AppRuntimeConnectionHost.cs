@@ -94,6 +94,8 @@ internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageCl
 
     public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
         runtime.CallAsync(method, parameters, cancellationToken);
+    public Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout,
+        CancellationToken cancellationToken = default) => runtime.CallAsync(method, parameters, timeout, cancellationToken);
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
         ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
         runtime.UploadSourceAsync(module, installationId, sourceRevision, source, basename, cancellationToken);

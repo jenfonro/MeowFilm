@@ -30,7 +30,7 @@ final class MusicAccountDetailViewController: MusicSettingsPageViewController<Mu
         modalTransitionStyle = .crossDissolve
     }
 
-    override func loadView() { view = MusicAccountFloatingBackdrop() }
+    override func loadView() { view = AccountFloatingBackdrop() }
     override var usesPageHeader: Bool { false }
 
     override func viewDidLoad() {
@@ -56,7 +56,7 @@ struct MusicAccountDetailContent: View {
 
     var body: some View {
         let summary = state.rows.first { $0.id == platform }
-        MusicAccountFloatingCard(theme: theme) {
+        AccountFloatingCard(theme: theme) {
             VStack(alignment: .leading, spacing: 0) {
                 MusicAccountCardHeader(platform: platform, title: platform.title, theme: theme, close: actions.close) {
                     if let summary, let accounts = state.accounts {
@@ -118,10 +118,10 @@ struct MusicAccountDetailContent: View {
         }
         HStack(spacing: 12) {
             Button("刷新资料") { actions.perform(.refreshProfile) }
-                .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
                 .disabled(!signedIn || pending || state.accounts?.supportsProfileRefresh != true)
             Button("退出登录", action: actions.logout)
-                .buttonStyle(MusicAccountDestructiveButtonStyle(theme: theme))
+                .buttonStyle(AccountDestructiveButtonStyle(theme: theme))
                 .disabled(pending)
         }
         .padding(.top, 20)

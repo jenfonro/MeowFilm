@@ -38,7 +38,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = max(timeout, Self.neteaseTokenTimeout)
+        // Each read owns its complete deadline so a single call can extend it.
+        configuration.timeoutIntervalForResource = 0
         eventConfiguration = configuration.copy() as! URLSessionConfiguration
         // Events have an idle timeout, but no whole-observation RPC deadline.
         eventConfiguration.timeoutIntervalForResource = 0
@@ -153,7 +154,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                 state.start(continuation: continuation) {
                     let task = session.dataTask(with: outgoing)
                     task.delegate = read
-                    read.install(task, continuation: continuation)
+                    read.install(task, continuation: continuation, timeout: timeout)
                     task.resume()
                 }
             }
@@ -164,7 +165,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     public func call(module: RuntimeModule, operation: String,
-                     parameters: RuntimeValue = .object([:])) async throws -> RuntimeValue {
+                     parameters: RuntimeValue = .object([:]), timeout: TimeInterval? = nil) async throws -> RuntimeValue {
+        if let timeout, !timeout.isFinite || timeout <= 0 { throw RuntimeHTTPError.invalidRequest }
         guard operation.range(of: #"^[a-z]+(?:\.[a-z][A-Za-z]*)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
             throw RuntimeHTTPError.invalidRequest
         }
@@ -184,7 +186,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         }
         return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
                                  body: body, module: module,
-                                 timeout: module == .netease ? max(timeout, Self.neteaseTokenTimeout) : timeout,
+                                 timeout: timeout ?? (module == .netease ? max(self.timeout, Self.neteaseTokenTimeout) : self.timeout),
                                  preservingAcceptedReceipt: module == .source && operation == "library.image")
     }
 
@@ -251,7 +253,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
             throw RuntimeHTTPError.invalidRequest
         }
         let requestID = UUID().uuidString.lowercased()
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout ?? self.timeout)
+        let deadline = timeout ?? self.timeout
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: deadline)
         request.httpMethod = method
         request.httpBody = body
         request.httpShouldHandleCookies = false
@@ -267,10 +270,11 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
             try await withCheckedThrowingContinuation { continuation in
                 state.start(continuation: continuation) {
                     let task = session.dataTask(with: outgoingRequest) { data, response, error in
-                        let cancelled = owner.finish()
+                        let cancellation = owner.finish()
                         if state.isClosed { continuation.resume(throwing: RuntimeHTTPError.closed) }
-                        else if cancelled && !(preservingAcceptedReceipt && error == nil && data != nil && response is HTTPURLResponse) {
-                            continuation.resume(throwing: RuntimeHTTPError.cancelled)
+                        else if let cancellation, !(preservingAcceptedReceipt && cancellation == .cancelled
+                            && error == nil && data != nil && response is HTTPURLResponse) {
+                            continuation.resume(throwing: cancellation)
                         }
                         else if let error {
                             let code = (error as NSError).code
@@ -280,7 +284,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                             continuation.resume(returning: (data, response))
                         } else { continuation.resume(throwing: RuntimeHTTPError.invalidResponse) }
                     }
-                    owner.install(task)
+                    owner.install(task, timeout: deadline)
                     task.resume()
                 }
             }
@@ -327,26 +331,31 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
 private final class RuntimeHTTPRequest: @unchecked Sendable {
     private let lock = NSLock()
     private var task: URLSessionDataTask?
-    private var cancelled = false
-    func install(_ task: URLSessionDataTask) {
+    private var cancellation: RuntimeHTTPError?
+    private var timer: DispatchWorkItem?
+    func install(_ task: URLSessionDataTask, timeout: TimeInterval) {
         lock.lock()
         self.task = task
-        let cancelled = cancelled
+        let timer = timeout > 0 ? DispatchWorkItem { [weak self] in self?.cancel(.timeout) } : nil
+        self.timer = timer
+        let cancelled = cancellation != nil
         lock.unlock()
+        if let timer { DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer) }
         if cancelled { task.cancel() }
     }
-    func cancel() {
+    func cancel(_ reason: RuntimeHTTPError = .cancelled) {
         lock.lock()
-        cancelled = true
+        if cancellation == nil { cancellation = reason }
         let task = task
         lock.unlock()
         task?.cancel()
     }
-    func finish() -> Bool {
+    func finish() -> RuntimeHTTPError? {
         lock.lock()
         defer { lock.unlock() }
+        timer?.cancel(); timer = nil
         task = nil
-        return cancelled
+        return cancellation
     }
 }
 
@@ -462,15 +471,27 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     private var bytes = Data()
     private var failure: Error?
     private var cancelled = false
+    private var timer: DispatchWorkItem?
     init(requestID: String, provider: RuntimeModule, state: RuntimeHTTPState) {
         self.requestID = requestID; self.provider = provider; self.state = state
     }
-    func install(_ task: URLSessionDataTask, continuation: CheckedContinuation<Data, Error>) {
+    func install(_ task: URLSessionDataTask, continuation: CheckedContinuation<Data, Error>, timeout: TimeInterval) {
         lock.lock()
         self.task = task; self.continuation = continuation
+        let timer = DispatchWorkItem { [weak self] in self?.expire() }
+        self.timer = timer
         let cancelled = cancelled
         lock.unlock()
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
         if cancelled { task.cancel() }
+    }
+    private func expire() {
+        lock.lock()
+        guard continuation != nil else { lock.unlock(); return }
+        if failure == nil { failure = RuntimeHTTPError.timeout }
+        let task = task
+        lock.unlock()
+        task?.cancel()
     }
     func cancel() {
         lock.lock(); cancelled = true; let task = task; lock.unlock()
@@ -509,6 +530,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
         lock.lock()
         guard let continuation else { lock.unlock(); return }
         self.continuation = nil; self.task = nil
+        timer?.cancel(); timer = nil
         let result: Result<Data, Error>
         if state.isClosed { result = .failure(RuntimeHTTPError.closed) }
         else if cancelled { result = .failure(RuntimeHTTPError.cancelled) }

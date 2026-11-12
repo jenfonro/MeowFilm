@@ -33,6 +33,12 @@ final class FilmSettingsPlatformTests: XCTestCase {
         try await super.tearDown()
     }
 
+    private func panModel() -> PanAccountsModel {
+        PanAccountsModel(service: .init(request: { _, _, _ in
+            throw RuntimeHTTPError.closed
+        }))
+    }
+
     func testGroupDraftSurvivesNavigationAndRestoreAndInlineTestNeverSave() async throws {
         let fixture = try await makeFixture()
         let rules = fixture.rules
@@ -107,10 +113,12 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let playback = FilmPlaybackSettingsModel(transport: .init(request: { _, _ in
             XCTFail("Starting local settings must not request playback"); throw FilmPlaybackError(code: "CLOSED")
         }, observation: { _, _, _ in XCTFail("Settings must not observe a playback session") }))
+        let pan = panModel()
         let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources,
-                                      tmdb: tmdb, douban: douban, playback: playback)
+                                      tmdb: tmdb, douban: douban, pan: pan, playback: playback)
         XCTAssertTrue(model.tmdb === tmdb)
         XCTAssertTrue(model.douban === douban)
+        XCTAssertTrue(model.pan === pan)
         XCTAssertTrue(model.playback === playback)
         model.start()
         await eventually { model.rules.draft != nil && model.snapshot != nil }
@@ -123,6 +131,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         model.close()
         XCTAssertTrue(model.tmdb === tmdb)
         XCTAssertTrue(model.douban === douban)
+        XCTAssertTrue(model.pan === pan)
         XCTAssertTrue(model.playback === playback)
         XCTAssertNil(tmdb.saved)
         XCTAssertNil(douban.saved)
@@ -136,7 +145,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let fixture = try await makeFixture()
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {})
         let douban = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(connection: { throw FilmSearchError.unavailable }), didSave: {})
-        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb, douban: douban)
+        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb, douban: douban, pan: panModel())
         XCTAssertNil(model.playback)
         let page = FilmSettingsViewController(model: model, themeProvider: FilmSettingsTheme())
         let navigation = UINavigationController(rootViewController: page)
@@ -147,11 +156,11 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let rows = try XCTUnwrap(menu.sections.first).rows
         XCTAssertEqual(rows.map(\.id), [
             "film.settings.search", "film.settings.matching", "film.settings.cats", "film.settings.videos",
-            "film.settings.dataSources", "film.settings.preferences",
+            "film.settings.dataSources", "film.settings.pan", "film.settings.preferences",
         ])
-        XCTAssertTrue(rows.prefix(5).allSatisfy(\.enabled))
-        XCTAssertTrue(rows.dropFirst(5).allSatisfy { !$0.enabled })
-        for index in 5..<rows.count {
+        XCTAssertTrue(rows.prefix(6).allSatisfy(\.enabled))
+        XCTAssertTrue(rows.dropFirst(6).allSatisfy { !$0.enabled })
+        for index in 6..<rows.count {
             menu.tableView(menu.table, didSelectRowAt: IndexPath(row: index, section: 0))
             XCTAssertTrue(navigation.topViewController === page)
         }
@@ -167,6 +176,10 @@ final class FilmSettingsPlatformTests: XCTestCase {
         try selectRow(menu, "film.settings.dataSources")
         XCTAssertTrue(navigation.topViewController is FilmDataSourceSettingsViewController)
         XCTAssertEqual((navigation.topViewController as? PageViewController)?.pageTitle, "数据源")
+        navigation.setViewControllers([page], animated: false)
+        try selectRow(menu, "film.settings.pan")
+        XCTAssertTrue(navigation.topViewController is PanAccountsViewController)
+        XCTAssertEqual((navigation.topViewController as? PageViewController)?.pageTitle, "网盘账号")
         await fixture.rules.close(); await fixture.sources.close()
     }
 
@@ -177,18 +190,19 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let playback = FilmPlaybackSettingsModel(transport: .init(
             request: { _, _ in throw FilmPlaybackError(code: "CLOSED") },
             observation: { _, _, _ in XCTFail("Settings must not observe a playback session") }))
-        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb, douban: douban, playback: playback)
+        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb,
+                                      douban: douban, pan: panModel(), playback: playback)
         let page = FilmSettingsViewController(model: model, themeProvider: FilmSettingsTheme())
         let navigation = UINavigationController(rootViewController: page)
         defer { PageViewController.invalidatePages(in: navigation) }
         page.loadViewIfNeeded()
         let menu = try XCTUnwrap(page.children.compactMap { $0 as? FilmSettingsListController }.first)
         menu.loadViewIfNeeded()
-        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 6)
+        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 7)
         XCTAssertTrue(menu.sections.flatMap(\.rows).allSatisfy(\.enabled))
         for (id, title) in [
             ("search", "搜索净化设置"), ("matching", "智能匹配设置"), ("dataSources", "数据源"),
-            ("preferences", "智能播放设置"),
+            ("pan", "网盘账号"), ("preferences", "智能播放设置"),
         ] {
             navigation.setViewControllers([page], animated: false)
             try selectRow(menu, "film.settings.\(id)")
@@ -200,6 +214,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
                 XCTAssertEqual((destination as? FilmRulePageViewController)?.group, .search)
             case "matching": XCTAssertTrue(destination is FilmSmartMatchingViewController)
             case "dataSources": XCTAssertTrue(destination is FilmDataSourceSettingsViewController)
+            case "pan": XCTAssertTrue(destination is PanAccountsViewController)
             default: XCTAssertTrue(destination is FilmSmartPlaybackSettingsController)
             }
         }

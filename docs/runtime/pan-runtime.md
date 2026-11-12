@@ -2,7 +2,7 @@
 
 `@meowfilm/pan-runtime@0.1.0` 是通用运行器的内置 Node 能力，不运行外部脚本，不创建 Worker 或额外进程。它拥有网盘凭据、分享枚举、必要单文件转存、登录及取播放地址；不拥有影视搜索、播放选路、媒体代理、账号页面或客户端缓存。
 
-本模块仅提供 provider 能力。iOS／Windows 正式 App entry 已在八模块中装配 pan，film 复用同一个 owner；这不等于账号 UI、真实登录／转存或平台播放已验证，具体业务与边界见[影视播放契约](film-playback.md)。
+本模块仅提供 provider 能力。iOS／Windows 正式 App entry 已在八模块中装配 pan，film 与设置页的网盘账号复用同一个 owner；客户端页面不持久化另一份凭据。这不等于账号 UI、真实登录／转存或平台播放已验证，具体业务与边界见[影视播放契约](film-playback.md)。
 
 ## 受信装配
 
@@ -22,10 +22,10 @@ await runtime.close();
 
 | provider | 配置字段 | 分享 list | 必要 prepare | play 模式 | 登录／刷新 |
 | --- | --- | --- | --- | --- | --- |
-| `baidu` | `cookie` | 是 | 是 | `streaming` | 二维码 |
-| `quark` | `cookie` | 是 | 是 | `streaming`, `download` | 二维码 |
-| `uc` | `cookie` | 是 | 是 | `streaming`, `download` | 二维码 |
-| `tianyi` | `cookie`, `username`, `password` | 是 | 否 | `streaming`, `download` | Cookie／普通密码刷新 |
+| `baidu` | `cookie` | 是 | 是 | `streaming` | 二维码／Cookie 检测 |
+| `quark` | `cookie` | 是 | 是 | `streaming`, `download` | 二维码／Cookie 检测 |
+| `uc` | `cookie` | 是 | 是 | `streaming`, `download` | 二维码／Cookie 检测 |
+| `tianyi` | `cookie`, `username`, `password` | 是 | 否 | `streaming`, `download` | Cookie 检测／普通密码刷新 |
 | `yidong` | `authorization`, `refreshedAt` | 是 | 否 | `streaming`, `download` | Authorization 刷新 |
 | `quark_tv` | `refreshToken`, `deviceId`, `accessToken`, `expiresAt` | 否 | 否 | `streaming`, `download` | token 刷新 |
 | `uc_tv` | 同上 | 否 | 否 | `streaming`, `download` | token 刷新 |
@@ -35,12 +35,16 @@ await runtime.close();
 | operation | 请求 | 成功 value |
 | --- | --- | --- |
 | `providers` | `{}` | `{providers:[{provider,credentialFields,list,prepare,modes,login,refresh}]}` |
-| `settings.get` | `{}` | `{accounts:[{provider,revision,configured,fields}]}` |
+| `settings.get` | `{}` | `{accounts:[{provider,revision,configured,fields,status}]}` |
 | `settings.set` | `{provider,credentials:{...}}` | 对应账号状态 |
 | `settings.clear` | `{provider}` | 新 revision 的空账号状态 |
 | `refresh` | `{provider}` | `{refreshed:true,account:账号状态}` |
 
 每个 provider 只有一份当前账号。`settings.set` **整份替换**该账号配置，不是合并；clear 删除凭据但保留递增 revision。`configured/fields` 只说明哪些字段非空，不证明账号有效或具备会员资格。普通配置读取、刷新及登录结果不回传原始秘密；不存在“读取 Cookie”接口。不同 provider 不互相读写凭据。
+
+账号状态中的 `status` 只有 `signedIn/expired/signedOut`。无凭据为 `signedOut`；已有凭据且本进程未收到明确账号认证失败时为 `signedIn`，不是永久有效性保证。`refresh` 成功后为 `signedIn`，明确账号认证失败后为 `expired`；网络、超时、上游格式等错误不改变此前状态，也不删除凭据。此观察状态不另建持久库，重新启动后由设置页对已配置账号再次刷新确认。分享密码错误不作为账号失效依据。
+
+七个 provider 均支持 `refresh`。Cookie-only 账号使用只读账号接口检测，不列分享、不转存；支持密码或 token 的账号按其协议刷新。天翼只有 Cookie 时也可检测；用户名与密码仍用于普通登录，不绕过验证码。手动配置后由客户端显式刷新，只有成功回执才将本次登录视为完成。
 
 配置明文原子保存在 `<dataRoot>/pan/accounts.json`：
 
@@ -92,7 +96,15 @@ TV 只接受明确账号内的 `kind:"stored"` 引用，不 list、不转存、�
 - `login.poll({sessionId})` → `{sessionId,provider?,status:"pending"|"scanned"|"confirmed"|"expired"|"cancelled",account?}`。confirmed 只在凭据真实取得且原子持久化成功后发布，并发 poll 共用同一在途交换，不重复提交账号。
 - `login.cancel({sessionId})` 取消未完成会话；已确认的账号不会因此被清除。需要清除账号应使用 `settings.clear`。
 - 同 provider 新建登录会撤销旧挑战；换号、关闭与上游有效期结束均清理临时 Cookie／令牌和计时器。未知或已清除的过期 session 报 `LOGIN_EXPIRED`。
-- 不后台轮询、不引入 qrencode／浏览器／脚本引擎；页面与轮询交互由后续客户端任务实现。
+- 运行器不后台轮询、不引入 qrencode／浏览器／脚本引擎；客户端登录浮层可见时驱动轮询，离开、关闭或切换方式时取消会话，包括清理迟到的 `login.start` 回执。已经 confirmed 的账号不因关闭浮层退出登录。
+
+## 设置页
+
+两端影视设置中的「网盘账号」只展示平台、状态、操作三列，沿用音乐账号设置的主题和登录浮层元素。未登录显示登录；已登录显示刷新与退出登录；失效显示重新登录与退出登录。初次读取或操作中使用进度表示，不增加第四种账号状态；操作失败走应用统一通知。
+
+百度、夸克和 UC 默认扫码，可切换手动 Cookie；其余 provider 按其凭据字段手动登录。手动输入只持有当前浮层草稿，不读取或回显已有秘密，提交使用 `settings.set` 的整份替换语义。二维码 `url` 使用客户端二维码编码能力，`image` 解码运行器交付的 data URI，不套用音乐平台的域名约束。
+
+表格读取 `providers/settings.get`，对已配置账号调用 `refresh`；退出登录使用 `settings.clear`。客户端按页面及单行操作代次隔离迟到结果，不用本地按钮完成代替运行器持久化回执。已经发送的手动保存与退出保留真实写入回执；关闭后不继续该表单的验证，重新进入及后继账号操作需等待旧写入排空，避免迟到保存或清除覆盖换号。关闭浮层不会清除已经保存的账号，真正退出登录必须取得 clear 回执。
 
 百度未扫码时 `/channel/unicast` 可能等待超过 30 秒才返回 pending；该请求的上游预算为 40 秒，并取二维码 session 剩余有效期的较小值，仍受调用方取消控制。其他二维码请求保持 30 秒。调用百度 `pan.login.poll` 时使用现有单次调用 deadline 选项留出 45 秒：
 
