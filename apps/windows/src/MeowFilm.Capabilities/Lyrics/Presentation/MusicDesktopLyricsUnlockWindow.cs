@@ -66,6 +66,55 @@ internal sealed class MusicDesktopLyricsUnlockWindow : Window
 
 internal static class MusicDesktopLyricsNative
 {
+    internal readonly record struct Monitor(string Device, int Left, int Top, int Right, int Bottom,
+        int WorkLeft, int WorkTop, int WorkRight, int WorkBottom, bool Primary, nint Handle);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MonitorInfo
+    {
+        internal int Size;
+        internal int Left, Top, Right, Bottom;
+        internal int WorkLeft, WorkTop, WorkRight, WorkBottom;
+        internal uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] internal string Device;
+    }
+
+    private delegate bool MonitorCallback(nint monitor, nint dc, nint bounds, nint data);
+
+    internal static Monitor[] Monitors()
+    {
+        var monitors = new List<Monitor>();
+        int enumerationError = 0;
+        MonitorCallback callback = (handle, _, _, _) =>
+        {
+            var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+            if (!GetMonitorInfo(handle, ref info))
+            {
+                enumerationError = Marshal.GetLastWin32Error();
+                return false;
+            }
+            monitors.Add(new(info.Device, info.Left, info.Top, info.Right, info.Bottom,
+                info.WorkLeft, info.WorkTop, info.WorkRight, info.WorkBottom, (info.Flags & 1) != 0, handle));
+            return true;
+        };
+        if (!EnumDisplayMonitors(0, 0, callback, 0))
+            throw new Win32Exception(enumerationError != 0 ? enumerationError : Marshal.GetLastWin32Error());
+        GC.KeepAlive(callback);
+        return monitors.ToArray();
+    }
+
+    internal static Monitor MonitorForWindow(nint handle)
+    {
+        nint monitor = MonitorFromWindow(handle, 2);
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (monitor == 0 || !GetMonitorInfo(monitor, ref info)) throw new Win32Exception();
+        return new(info.Device, info.Left, info.Top, info.Right, info.Bottom,
+            info.WorkLeft, info.WorkTop, info.WorkRight, info.WorkBottom, (info.Flags & 1) != 0, monitor);
+    }
+
+    internal static bool SetLocation(nint handle, int x, int y) =>
+        SetWindowPos(handle, 0, x, y, 0, 0, 0x0215); // SWP_NOACTIVATE | NOOWNERZORDER | NOZORDER | NOSIZE
+
     internal static void SetResizableStyle(nint handle)
     {
         Marshal.SetLastPInvokeError(0);
@@ -140,4 +189,12 @@ internal static class MusicDesktopLyricsNative
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowPos(nint handle, nint after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumDisplayMonitors(nint dc, nint clip, MonitorCallback callback, nint data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMonitorInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(nint monitor, ref MonitorInfo info);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint MonitorFromWindow(nint window, uint flags);
 }

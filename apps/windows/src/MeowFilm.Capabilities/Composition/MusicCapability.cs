@@ -951,8 +951,19 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (resumption is { IsCompleted: false } recovering) return PrepareAfterResume(recovering);
         if (preparation is not null) return preparation;
         FinishFeedback("interrupt");
+        MusicDesktopLyricsWindowState? lyricsState = null;
+        if (desktopLyricsWindow is { } activeLyrics)
+        {
+            var state = activeLyrics.CapturePresentationState();
+            if (IsDesktopLyricsOpen) lyricsState = state;
+            if (desktopLyricSettingsLoaded && state.Geometry is { } geometry)
+                _ = activeLyrics.SaveGeometryForShutdown(geometry);
+        }
+        desktopLyricsOpenEpoch++;
+        desktopLyricsOpening = false;
+        desktopLyricsReopenAfterClose = false;
         stopping = true; // Seal admission synchronously, before yielding to any callback.
-        PrepareDesktopLyricsShutdown();
+        PrepareDesktopLyricsShutdown(lyricsState);
         RetireQueueSurfaceRequest();
         Presentation.DeactivateDetail();
         SealRecommendations();

@@ -20,6 +20,7 @@ public static class MusicDesktopLyricSettingsTests
             await using var f = new QualityFixture();
             var defaults = (await f.Ok(Get)).GetProperty("settings");
             Settings(defaults, 0, "single", Normal, Highlight);
+            Check(!defaults.TryGetProperty("geometry", out _), "the original settings shape remains readable without geometry");
             await f.Ok(Save, Draft());
             Check(f.Store.Writes == 0 && f.Runtime.Calls.Count == 0);
             await f.Ok("music.appearance.save", new { ifRevision = 0, playlistView = "list",
@@ -38,7 +39,9 @@ public static class MusicDesktopLyricSettingsTests
                     "saving desktop lyrics preserves each legacy area");
             Check(StoredSettings(current).Count == 5, "only schema, revision, layout and two colors are persisted");
             await using var reopened = new MusicLibraryOwner(f.Store);
-            Settings((await reopened.ExecuteAsync(Get)).GetProperty("settings"), 1, "double", "#12ABEF", "#000000");
+            var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
+            Settings(reopenedSettings, 1, "double", "#12ABEF", "#000000");
+            Check(!reopenedSettings.TryGetProperty("geometry", out _), "legacy settings do not acquire a placeholder geometry");
             Check((await reopened.ExecuteAsync("music.appearance.get")).GetProperty("settings")
                 .GetProperty("colorPalette").GetString() == "mint" && f.Runtime.Calls.Count == 0);
         });
@@ -50,6 +53,10 @@ public static class MusicDesktopLyricSettingsTests
                 ("normalColor", "pink"), ("normalColor", "#123"), ("normalColor", "#FF112233"),
                 ("normalColor", "#11223Z"), ("normalColor", null), ("highlightColor", "#AABB"),
                 ("highlightColor", " #112233"), ("highlightColor", 123),
+                ("geometry", new { monitor = "", x = 0d, y = 0d, width = 760d, height = 144d }),
+                ("geometry", new { monitor = @"\\.\DISPLAY1", x = 0d, y = 0d, width = 0d, height = 144d }),
+                ("geometry", new { monitor = @"\\.\DISPLAY1", x = "12", y = 0d, width = 760d, height = 144d }),
+                ("geometry", null),
                 ("ifRevision", -1), ("ifRevision", "0"), ("ifRevision", .5),
                 ("showTranslation", false), ("offset", .5), ("locked", true), ("left", 20) })
             {
@@ -71,6 +78,24 @@ public static class MusicDesktopLyricSettingsTests
             Check(f.Store.Writes == 1);
             Settings((await f.Ok(Get)).GetProperty("settings"), 1, "double", Normal, Highlight);
         });
+        yield return Case("window geometry uses the settings CAS and subsequent appearance changes preserve it", async () =>
+        {
+            await using var f = new QualityFixture();
+            var geometry = O(new { monitor = @"\\.\DISPLAY2", x = 143.5, y = 84.25, width = 920d, height = 232d });
+            await f.Ok(Save, Draft(geometry: geometry));
+            var saved = (await f.Ok(Get)).GetProperty("settings");
+            Settings(saved, 1, "single", Normal, Highlight);
+            Check(JsonNode.DeepEquals(JsonNode.Parse(saved.GetProperty("geometry").GetRawText()), geometry));
+            await f.Ok(Save, Draft(1, normal: "#000000"));
+            saved = (await f.Ok(Get)).GetProperty("settings");
+            Settings(saved, 2, "single", "#000000", Highlight);
+            Check(JsonNode.DeepEquals(JsonNode.Parse(saved.GetProperty("geometry").GetRawText()), geometry),
+                "a color write preserves the independently-owned window geometry");
+            Check(f.Store.Writes == 2);
+            await using var reopened = new MusicLibraryOwner(f.Store);
+            var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
+            Check(JsonNode.DeepEquals(JsonNode.Parse(reopenedSettings.GetProperty("geometry").GetRawText()), geometry));
+        });
         yield return Case("persisted desktop fields remain strict without weakening the old appearance schema", async () =>
         {
             await using var f = new QualityFixture();
@@ -83,6 +108,9 @@ public static class MusicDesktopLyricSettingsTests
                 foreach (var (field, value) in new (string, object?)[] {
                     ("schema", 2), ("revision", -1), ("layout", "triple"),
                     ("normalColor", "#123"), ("highlightColor", "#FFAABBCC"),
+                    ("geometry", new JsonObject { ["monitor"] = "DISPLAY1", ["x"] = "20",
+                        ["y"] = 0, ["width"] = 760, ["height"] = 144 }),
+                    ("geometry", null),
                     ("showTranslation", true), ("offset", 0), ("locked", false) })
                 {
                     var doc = (JsonObject)original.DeepClone();
@@ -115,6 +143,7 @@ public static class MusicDesktopLyricSettingsTests
         yield return UiCase("consumer selections persist independently and leave the shared translation switch in its session", ConsumerRoundTrip);
         yield return UiCase("failed reads are retryable and concurrent callers share the physical read", ReadRecovery);
         yield return UiCase("consumer unknown commits accept only the authority and report an uncommitted draft", UnknownConsumer);
+        yield return UiCase("window geometry reconciles unknown commits without replaying an unconfirmed write", GeometryUnknownConsumer);
         yield return UiCase("consumer revision conflicts adopt newer authority without replaying the draft", RevisionConflict);
         yield return UiCase("an unavailable authority after an unknown write keeps edits disabled until a real retry", UnknownReadFailure);
         yield return UiCase("a real document CAS conflict never publishes the rejected settings", StorageConflict);
@@ -139,6 +168,9 @@ public static class MusicDesktopLyricSettingsTests
                 "ordinary color changes do not publish a layout change");
             await module.SetDesktopLyricColorAsync("highlight", "#12abef");
             await module.SetDesktopLyricLayoutAsync("double");
+            var geometry = new MusicDesktopLyricsGeometry(@"\\.\DISPLAY1", 21.25, 34.5, 980, 254);
+            await module.SaveDesktopLyricGeometryAsync(geometry);
+            Check(module.DesktopLyricGeometry == geometry);
             await module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
             Check(!module.ShowLyricTranslation);
             int writes = store.Writes;
@@ -152,14 +184,16 @@ public static class MusicDesktopLyricSettingsTests
             await module.SetDesktopLyricLayoutAsync("double");
             Check(store.Writes == writes && scene.Runtime.Calls.Count == 0, "unchanged values do not save");
             Settings((await scene.Native.ExecuteAsync(Get)).GetProperty("settings"),
-                3, "double", "#000000", "#12ABEF");
-            Check(StoredSettings(Document(store)).Count == 5);
+                4, "double", "#000000", "#12ABEF");
+            Check(StoredSettings(Document(store)).Count == 6);
         }
         await using var next = new Scene(store);
         await next.Module.EnsureDesktopLyricSettingsAsync();
         Check(next.Module.DesktopLyricLayout == "double" && next.Module.DesktopLyricNormalColor == "#000000" &&
-            next.Module.DesktopLyricHighlightColor == "#12ABEF" && next.Module.ShowLyricTranslation,
-            "only the agreed layout and colors survive a new module session");
+            next.Module.DesktopLyricHighlightColor == "#12ABEF" &&
+            next.Module.DesktopLyricGeometry == new MusicDesktopLyricsGeometry(@"\\.\DISPLAY1", 21.25, 34.5, 980, 254) &&
+            next.Module.ShowLyricTranslation,
+            "layout, colors and window geometry survive a new module session while translation remains session-scoped");
     }
 
     private static async Task ReadRecovery()
@@ -197,6 +231,26 @@ public static class MusicDesktopLyricSettingsTests
         Check(module.CanEditDesktopLyricSettings && module.DesktopLyricNormalColor == Normal &&
             module.DesktopLyricLayout == "double" && module.Status == "桌面歌词设置保存失败" &&
             scene.Store.Writes == 2 && scene.App.Saves == 2);
+    }
+
+    private static async Task GeometryUnknownConsumer()
+    {
+        await using var scene = new Scene();
+        await scene.Module.EnsureDesktopLyricSettingsAsync();
+        var accepted = new MusicDesktopLyricsGeometry(@"\\.\DISPLAY1", 23.5, 48.25, 880, 144);
+        scene.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
+        scene.Store.Fault = true; scene.Store.FaultAfter = true;
+        await scene.Module.SaveDesktopLyricGeometryAsync(accepted);
+        Check(scene.Module.CanEditDesktopLyricSettings && scene.Module.DesktopLyricGeometry == accepted &&
+            scene.Module.Status.Length == 0 && scene.Store.Writes == 1 && scene.App.Saves == 1,
+            "an accepted-but-unknown geometry commit is adopted from the authority without replay");
+        var rejected = accepted with { X = 123.5, Y = 148.25 };
+        scene.Store.Fault = true; scene.Store.FaultAfter = false;
+        await scene.Module.SaveDesktopLyricGeometryAsync(rejected);
+        Check(scene.Module.CanEditDesktopLyricSettings && scene.Module.DesktopLyricGeometry == accepted &&
+            scene.Module.Status == "桌面歌词位置和大小保存失败" &&
+            scene.Store.Writes == 2 && scene.App.Saves == 2,
+            "an uncommitted geometry draft is not published when the authority retains the prior value");
     }
 
     private static async Task RevisionConflict()
@@ -281,8 +335,12 @@ public static class MusicDesktopLyricSettingsTests
     private static TestCase Case(string name, Func<Task> run) => new("desktop lyric settings " + name, run);
     private static TestCase UiCase(string name, Func<Task> run) => Case(name, () => MusicQualityConsumerTests.Sta(run));
     private static JsonObject Draft(long revision = 0, string layout = "single",
-        string normal = Normal, string highlight = Highlight) =>
-        O(new { ifRevision = revision, layout, normalColor = normal, highlightColor = highlight });
+        string normal = Normal, string highlight = Highlight, JsonObject? geometry = null)
+    {
+        var draft = O(new { ifRevision = revision, layout, normalColor = normal, highlightColor = highlight });
+        if (geometry is not null) draft["geometry"] = geometry.DeepClone();
+        return draft;
+    }
     private static void Settings(JsonElement value, long revision, string layout, string normal, string highlight) =>
         Check(value.GetProperty("schema").GetInt32() == 1 && value.GetProperty("revision").GetInt64() == revision &&
             value.GetProperty("layout").GetString() == layout && value.GetProperty("normalColor").GetString() == normal &&

@@ -27,6 +27,34 @@ public static partial class MusicUiTests
 
     internal static IEnumerable<TestCase> DesktopLyricsInteractionCases()
     {
+        yield return Case("desktop lyric toggles during settings load cancel stale opens without losing a later open request", () =>
+            WithDesktopLyrics(async (f, _) =>
+            {
+                var settings = f.Calls.HoldNext("music.lyrics.desktop.settings.get");
+                var canceledOpen = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                await settings.Arrived.Task;
+                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                True(!f.Module.IsDesktopLyricsOpen, "the second toggle cancels the pending first open");
+                var requestedOpen = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                settings.Release();
+                await Task.WhenAll(canceledOpen, requestedOpen);
+                await Until(() => f.Module.DesktopLyricsWindow is { IsVisible: true });
+                True(f.Module.IsDesktopLyricsOpen, "the later toggle opens after the shared settings read settles");
+            }, withCurrent: false));
+
+        yield return Case("shutdown during desktop lyric settings load cannot create a late window", () =>
+            WithDesktopLyrics(async (f, _) =>
+            {
+                var settings = f.Calls.HoldNext("music.lyrics.desktop.settings.get");
+                var opening = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                await settings.Arrived.Task;
+                var shutdown = f.Module.PrepareShutdownAsync();
+                True(!f.Module.IsDesktopLyricsOpen, "shutdown seals an opening request before settings settle");
+                settings.Release();
+                await Task.WhenAll(opening, shutdown);
+                True(!f.Module.IsDesktopLyricsOpen, "the stale settings reply cannot create a window after shutdown");
+            }, withCurrent: false));
+
         yield return Case("desktop overlay is alpha zero outside hover and retains chrome while its menu is open", () =>
             WithDesktopLyrics(async (f, _) =>
             {
@@ -53,6 +81,31 @@ public static partial class MusicUiTests
                 var toolbarBounds = new Rect(toolbar.TranslatePoint(new(), window), toolbar.RenderSize);
                 True(Math.Abs(toolbarBounds.Left + toolbarBounds.Width / 2 - window.ActualWidth / 2) <= 1,
                     $"the complete toolbar is horizontally centered; toolbar={toolbarBounds}, window={window.ActualWidth}x{window.ActualHeight}");
+                True(window.MinWidth >= toolbar.DesiredSize.Width,
+                    $"the hidden toolbar's full desired width remains available: minimum={window.MinWidth}, toolbar={toolbar.DesiredSize.Width}");
+                window.Width = window.MinWidth;
+                window.Height = window.MinHeight;
+                await Until(() => Math.Abs(window.ActualWidth - window.MinWidth) <= 1 &&
+                    Math.Abs(window.ActualHeight - window.MinHeight) <= 1);
+                window.UpdateLayout();
+                var minimumToolbarBounds = new Rect(toolbar.TranslatePoint(new(), window), toolbar.RenderSize);
+                True(minimumToolbarBounds.Left >= 0 && minimumToolbarBounds.Right <= window.ActualWidth &&
+                    toolbar.Children.OfType<Button>().All(button =>
+                    {
+                        var bounds = new Rect(button.TranslatePoint(new(), window), button.RenderSize);
+                        return bounds.Left >= 0 && bounds.Right <= window.ActualWidth;
+                    }),
+                    $"the toolbar and all buttons remain inside the minimum window width: toolbar={minimumToolbarBounds}, window={window.ActualWidth}");
+                var minimumLine = (MusicDesktopLyricLineView)window.FindName("TopLine");
+                var minimumLineBounds = new Rect(minimumLine.TranslatePoint(new(), window), minimumLine.RenderSize);
+                var minimumTranslation = (FrameworkElement)minimumLine.FindName("TranslationFrame");
+                var minimumTranslationBounds = minimumTranslation.TransformToAncestor(window)
+                    .TransformBounds(new Rect(minimumTranslation.RenderSize));
+                True(minimumLineBounds.Top >= 44 && minimumLineBounds.Bottom <= window.ActualHeight - 12 &&
+                    minimumTranslation.IsVisible && minimumTranslationBounds.Bottom <= window.ActualHeight - 12,
+                    $"the complete translated lyric fits at the minimum height: line={minimumLineBounds}, translation={minimumTranslationBounds}");
+                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-minimum",
+                    (int)window.ActualWidth, (int)window.ActualHeight);
                 var controls = toolbar.Children.OfType<Button>().Select(button => button.Name).ToArray();
                 True(controls.SequenceEqual(new[] { "ActivateButton", "DelayButton", "AdvanceButton",
                     "PreviousButton", "PlaybackButton", "NextButton", "SettingsButton", "LockButton", "CloseButton" }),
@@ -98,6 +151,7 @@ public static partial class MusicUiTests
                 await Until(() => window.ActualHeight > singleHeight && window.ActualHeight == window.Height);
                 window.UpdateLayout();
                 Equal(initialBottom, window.Top + window.ActualHeight);
+                double doubleHeight = window.ActualHeight;
                 var top = (MusicDesktopLyricLineView)window.FindName("TopLine");
                 var bottom = (MusicDesktopLyricLineView)window.FindName("BottomLine");
                 True(ReferenceEquals(top.Row, f.Module.Lyrics[0]) && ReferenceEquals(bottom.Row, f.Module.Lyrics[1]),
@@ -106,6 +160,21 @@ public static partial class MusicUiTests
                 Equal(HorizontalAlignment.Right, bottom.HorizontalContentAlignment);
                 True(((FrameworkElement)top.FindName("TranslationFrame")).IsVisible &&
                     ((FrameworkElement)bottom.FindName("TranslationFrame")).IsVisible, "each original owns its own translation");
+                var firstSource = f.Module.Lyrics[0];
+                var secondSource = f.Module.Lyrics[1];
+                f.Module.Lyrics[1] = secondSource with { Translation = "" };
+                await Drain();
+                Equal(224d, window.MinHeight);
+                f.Module.Lyrics[0] = firstSource with { Translation = "" };
+                await Drain();
+                Equal(180d, window.MinHeight);
+                f.Module.Lyrics[1] = secondSource;
+                await Drain();
+                Equal(240d, window.MinHeight);
+                f.Module.Lyrics[0] = firstSource;
+                await Drain();
+                Equal(240d, window.MinHeight);
+                Equal(doubleHeight, window.ActualHeight);
                 var bottomY = bottom.TranslatePoint(new(), window).Y;
                 foreach (var line in new[] { top, bottom })
                 {
@@ -128,7 +197,7 @@ public static partial class MusicUiTests
                 Equal(bottomY, bottom.TranslatePoint(new(), window).Y);
                 Equal(Visibility.Collapsed, ((FrameworkElement)window.FindName("Status")).Visibility);
                 await f.Module.SetDesktopLyricLayoutAsync("single"); await Drain();
-                await Until(() => window.ActualHeight == singleHeight);
+                Equal(doubleHeight, window.ActualHeight);
                 True(ReferenceEquals(top.Row, f.Module.Lyrics[1]) && !bottom.IsVisible,
                     "single mode presents the active original, not its translation or a pending track");
                 f.Module.PreviewLyric(f.Module.Lyrics[0]);
@@ -370,15 +439,31 @@ public static partial class MusicUiTests
                 DesktopInteractionNative.SendMessage(handle, 0x0232, 0, 0);
                 True(!window.CapturePresentationState().UserSized,
                     "a cancelled native resize does not become the user's preferred size");
+                True(f.Module.DesktopLyricGeometry is null,
+                    "a cancelled resize does not commit an intermediate window position or size");
                 await f.Module.SetDesktopLyricLayoutAsync("double"); await Drain();
                 Equal(240d, window.ActualHeight);
+                nint infoAddress = Marshal.AllocHGlobal(Marshal.SizeOf<DesktopInteractionNative.MinMaxInfo>());
+                try
+                {
+                    Marshal.StructureToPtr(new DesktopInteractionNative.MinMaxInfo(), infoAddress, false);
+                    DesktopInteractionNative.SendMessage(handle, 0x0024, 0, infoAddress);
+                    var limits = Marshal.PtrToStructure<DesktopInteractionNative.MinMaxInfo>(infoAddress);
+                    uint dpi = MusicDesktopLyricsNative.GetDpiForWindow(handle);
+                    True(dpi > 0 && limits.MinTrackSize.X == Math.Ceiling(window.MinWidth * dpi / 96d) &&
+                        limits.MinTrackSize.Y == Math.Ceiling(window.MinHeight * dpi / 96d),
+                        $"native resizing enforces complete toolbar and double translated rows: {limits.MinTrackSize.X}x{limits.MinTrackSize.Y}");
+                }
+                finally { Marshal.FreeHGlobal(infoAddress); }
                 await f.Module.SetDesktopLyricLayoutAsync("single"); await Drain();
-                Equal(144d, window.ActualHeight);
+                Equal(240d, window.ActualHeight);
 
                 double oldWidth = window.ActualWidth, oldHeight = window.ActualHeight;
+                True(MusicDesktopLyricsNative.GetWindowRect(handle, out var resizeBounds),
+                    "current native bounds reflect the content minimum before the next resize");
                 DesktopInteractionNative.SendMessage(handle, 0x0231, 0, 0);
-                True(DesktopInteractionNative.SetWindowPos(handle, 0, bounds.Left, bounds.Top,
-                    bounds.Right - bounds.Left + 120, bounds.Bottom - bounds.Top + 60, 0x10),
+                True(DesktopInteractionNative.SetWindowPos(handle, 0, resizeBounds.Left, resizeBounds.Top,
+                    resizeBounds.Right - resizeBounds.Left + 120, resizeBounds.Bottom - resizeBounds.Top + 60, 0x10),
                     "the owned window accepts a native width and height change");
                 await Drain();
                 DesktopInteractionNative.SendMessage(handle, 0x0232, 0, 0);
@@ -392,6 +477,104 @@ public static partial class MusicUiTests
                     "resizing does not weaken locked click-through");
                 window.SetLocked(false); await Drain();
                 Equal(resizedHeight, window.ActualHeight);
+
+                True(MusicDesktopLyricsNative.GetWindowRect(handle, out var beforeMove),
+                    "the window has bounds before the move-only persistence check");
+                var beforeMoveGeometry = window.CapturePresentationState().Geometry!.Value;
+                DesktopInteractionNative.SendMessage(handle, 0x0231, 0, 0);
+                True(DesktopInteractionNative.SetWindowPos(handle, 0, beforeMove.Left + 40, beforeMove.Top + 25,
+                    beforeMove.Right - beforeMove.Left, beforeMove.Bottom - beforeMove.Top, 0x10),
+                    "the native window accepts a move without a size change");
+                await Drain();
+                DesktopInteractionNative.SendMessage(handle, 0x0232, 0, 0);
+                await f.Module.EnsureDesktopLyricSettingsAsync();
+                var movedGeometry = window.CapturePresentationState().Geometry!.Value;
+                True(movedGeometry.X > beforeMoveGeometry.X && movedGeometry.Y > beforeMoveGeometry.Y,
+                    "a pure native move updates the persisted geometry");
+                Equal(movedGeometry, f.Module.DesktopLyricGeometry!.Value);
+
+                var savedGeometry = window.CapturePresentationState().Geometry!.Value;
+                window.Close();
+                await Until(() => !f.Module.IsDesktopLyricsOpen);
+                await f.Module.EnsureDesktopLyricSettingsAsync();
+                Equal(savedGeometry, f.Module.DesktopLyricGeometry!.Value);
+                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                await Drain();
+                var reopened = f.Module.DesktopLyricsWindow!;
+                var reopenedGeometry = reopened.CapturePresentationState().Geometry!.Value;
+                Equal(savedGeometry.Monitor, reopenedGeometry.Monitor);
+                True(Math.Abs(savedGeometry.X - reopenedGeometry.X) < 1 &&
+                    Math.Abs(savedGeometry.Y - reopenedGeometry.Y) < 1,
+                    "the same display restores the saved logical offset");
+                Equal(savedGeometry.Width, reopened.Width);
+                Equal(savedGeometry.Height, reopened.Height);
+                True(!reopened.IsLyricsLocked, "ordinary reopen retains size and placement but resets the lock");
+            }));
+
+        yield return Case("a missing saved display restores on the primary work area", () =>
+            WithDesktopLyrics(async (f, _) =>
+            {
+                await f.Module.EnsureDesktopLyricSettingsAsync();
+                await f.Module.SaveDesktopLyricGeometryAsync(new("missing-display", 2000000, 2000000, 760, 144));
+                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                await f.Module.EnsureDesktopLyricSettingsAsync();
+                var window = f.Module.DesktopLyricsWindow!;
+                var handle = new WindowInteropHelper(window).Handle;
+                var monitor = MusicDesktopLyricsNative.MonitorForWindow(handle);
+                True(monitor.Primary && MusicDesktopLyricsNative.GetWindowRect(handle, out var bounds) &&
+                    bounds.Left >= monitor.WorkLeft && bounds.Top >= monitor.WorkTop &&
+                    bounds.Left < monitor.WorkRight && bounds.Top < monitor.WorkBottom,
+                    "a disconnected saved display is restored within the primary work area");
+                Equal(monitor.Device, f.Module.DesktopLyricGeometry!.Value.Monitor);
+            }));
+
+        yield return Case("a rapid reopen waits for a closing window's final geometry save", () =>
+            WithDesktopLyrics(async (f, _) =>
+            {
+                await SaveDesktopLyricFixture(f, translated: false);
+                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                var closing = f.Module.DesktopLyricsWindow!;
+                closing.Left += 37;
+                closing.Top += 19;
+                var desiredGeometry = closing.CapturePresentationState().Geometry!.Value;
+
+                var save = f.Calls.HoldNext("music.lyrics.desktop.settings.save");
+                var close = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                await save.Arrived.Task;
+                True(closing.IsClosePending, "the first toggle begins its final asynchronous geometry save");
+                True(!closing.IsEnabled, "the closing window cannot move after its final geometry has been captured");
+                True(!close.IsCompleted && !f.Module.IsDesktopLyricsOpen && !f.Module.NeedsLyrics,
+                    "closing waits for the accepted write after retiring its lyric consumer");
+                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                save.Release();
+                await close;
+                await Until(() => f.Module.DesktopLyricsWindow is { IsVisible: true } current &&
+                    !ReferenceEquals(current, closing));
+
+                Equal(desiredGeometry, f.Module.DesktopLyricGeometry!.Value);
+                True(!closing.IsVisible, "the previous HWND closes before the requested replacement appears");
+            }));
+
+        yield return Case("shutdown cancellation cannot revive desktop lyrics already waiting to close", () =>
+            WithDesktopLyrics(async (f, _) =>
+            {
+                await SaveDesktopLyricFixture(f, translated: false);
+                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                var window = f.Module.DesktopLyricsWindow!;
+                window.Left += 31;
+                var geometry = window.CapturePresentationState().Geometry!.Value;
+                var save = f.Calls.HoldNext("music.lyrics.desktop.settings.save");
+                var close = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                await save.Arrived.Task;
+                True(!f.Module.IsDesktopLyricsOpen && !close.IsCompleted,
+                    "the desktop consumer retires while its accepted geometry write is still pending");
+                var shutdown = f.Module.PrepareShutdownAsync();
+                save.Release();
+                await Task.WhenAll(close, shutdown);
+                await f.Module.CancelShutdownPreparationAsync();
+                True(!f.Module.IsDesktopLyricsOpen && !window.IsVisible,
+                    "cancelling shutdown does not restore a window whose close was already accepted");
+                Equal(geometry, f.Module.DesktopLyricGeometry!.Value);
             }));
 
         yield return new(DesktopHitTestCase, () =>
@@ -615,6 +798,11 @@ public static partial class MusicUiTests
     {
         [StructLayout(LayoutKind.Sequential)]
         internal struct NativePoint { internal int X, Y; }
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct MinMaxInfo
+        {
+            internal NativePoint Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize;
+        }
         [DllImport("user32.dll")]
         internal static extern nint WindowFromPoint(NativePoint point);
         [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
