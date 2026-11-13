@@ -300,7 +300,7 @@ music.online.song
 
 `native-appearance` 保持 schema 1、revision CAS 及原字段：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受既有预设键或严格不透明 `#RRGGBB`（UI提交统一大写）。读取旧预设不会重写数据，自定义颜色沿原外观保存/权威重读路径消费。本次不保证旧客户端能读取新的自定义值，不增加迁移或双写。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
 
-`native-desktop-lyrics` 是独立 schema 1 area，只含 `schema`、`revision`、`layout`（single/double）、`normalColor` 和 `highlightColor`。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision` 和三个设置值，返回权威 `settings`；未知字段拒绝，无变化不写盘。不保存歌词校正、锁定、位置或源译文开关。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
+`native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未知字段拒绝，无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
 
 ## CAS、取消与关闭
 

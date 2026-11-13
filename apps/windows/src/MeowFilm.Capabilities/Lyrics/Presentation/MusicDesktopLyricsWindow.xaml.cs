@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -10,7 +11,8 @@ using MeowFilm.Desktop;
 namespace MeowFilm.Capabilities;
 
 internal readonly record struct MusicDesktopLyricsWindowState(
-    double Left, double Top, double Width, double Height, bool IsLocked, bool UserSized);
+    double Left, double Top, double Width, double Height, bool IsLocked, bool UserSized,
+    MusicDesktopLyricsGeometry? Geometry);
 
 internal partial class MusicDesktopLyricsWindow : Window
 {
@@ -22,19 +24,31 @@ internal partial class MusicDesktopLyricsWindow : Window
     private ContextMenu? settingsMenu;
     private DispatcherOperation? reposition;
     private bool locked, restoreLock, dragging, closed, sizing, userSized;
-    private Size sizeAtMove;
+    private bool closePending, closeReady;
+    private bool restoredGeometry;
+    private MusicDesktopLyricsGeometry? openingGeometry, geometryAtMove;
+    private Task closeWork = Task.CompletedTask;
 
     internal bool IsLyricsLocked => locked;
     internal bool IsPointerObserverRunning => pointerObserver.IsEnabled;
+    internal bool IsClosePending => closePending;
     internal MusicDesktopLyricsUnlockWindow? UnlockWindow => unlockWindow;
 
-    internal MusicDesktopLyricsWindow(MusicCapability module, Window anchor)
+    internal MusicDesktopLyricsWindow(MusicCapability module, Window anchor, MusicDesktopLyricsGeometry? geometry = null)
     {
         this.module = module;
+        openingGeometry = geometry;
         InitializeComponent();
         UnlockAnchor.RenderTransform = new System.Windows.Media.TranslateTransform();
         DataContext = module;
-        UpdateLayoutHeight();
+        if (geometry is { } saved)
+        {
+            Width = saved.Width;
+            Height = saved.Height;
+        }
+        else if (module.DesktopLyricLayout == "double") Height = 240;
+        UpdateMinimumWidth();
+        UpdateMinimumHeight();
         module.PropertyChanged += ModuleChanged;
         pointerObserver = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
         { Interval = TimeSpan.FromMilliseconds(100) };
@@ -52,18 +66,49 @@ internal partial class MusicDesktopLyricsWindow : Window
 
     private void ModuleChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MusicCapability.DesktopLyricLayout)) UpdateLayoutHeight();
+        if (closed || closePending) return;
+        if (e.PropertyName is nameof(MusicCapability.DesktopLyricLayout) or
+            nameof(MusicCapability.DesktopLyricTopRow) or nameof(MusicCapability.DesktopLyricBottomRow) or
+            nameof(MusicCapability.ShowLyricTranslation))
+            UpdateMinimumHeight();
     }
 
-    // Window's native resize publication takes local precedence over style setters.
-    private void UpdateLayoutHeight()
+    private void UpdateMinimumHeight()
     {
-        if (userSized || sizing) return;
-        double next = module.DesktopLyricLayout == "double" ? 240 : 144;
+        double track = 54;
+        bool topTranslation = module.ShowLyricTranslation &&
+            !string.IsNullOrWhiteSpace(module.DesktopLyricTopRow?.Translation);
+        // Each 50-DIP original may have a 27-DIP source translation, 3-DIP gap,
+        // and the line view's 2-DIP outer margin on both sides.
+        double topTrack = track + (topTranslation ? 30 : 0);
+        double rows = topTrack;
+        if (module.DesktopLyricLayout == "double")
+        {
+            bool bottomTranslation = module.ShowLyricTranslation &&
+                !string.IsNullOrWhiteSpace(module.DesktopLyricBottomRow?.Translation);
+            // The two star tracks are equal; the lower track also carries its
+            // 8-DIP top margin, so both tracks use the larger natural height.
+            double bottomTrack = track + (bottomTranslation ? 30 : 0) + 8;
+            rows = Math.Max(topTrack, bottomTrack) * 2;
+        }
+        double minimum = 44 + rows + 12;
+        if (MinHeight == minimum) return;
         double previous = Height;
-        Height = next;
-        // Keep the bottom anchor when loading a saved double layout near the screen edge.
-        if (IsLoaded) Top += previous - next;
+        MinHeight = minimum;
+        if (previous >= MinHeight) return;
+        Height = MinHeight;
+        if (IsLoaded) Top -= Height - previous;
+        if (IsVisible) Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(KeepReachableAndPersist));
+    }
+
+    private void UpdateMinimumWidth()
+    {
+        var visibility = Toolbar.Visibility;
+        Toolbar.Visibility = Visibility.Visible;
+        Toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        MinWidth = Toolbar.DesiredSize.Width;
+        Toolbar.Visibility = visibility;
+        if (Width < MinWidth) Width = MinWidth;
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -74,6 +119,12 @@ internal partial class MusicDesktopLyricsWindow : Window
         source.AddHook(WindowMessage);
         MusicDesktopLyricsNative.SetInputStyle(handle, clickThrough: false);
         MusicDesktopLyricsNative.SetResizableStyle(handle);
+        if (openingGeometry is { } geometry)
+        {
+            RestoreGeometry(handle, geometry);
+            restoredGeometry = true;
+            openingGeometry = null;
+        }
         ApplyHighContrast(SystemParameters.HighContrast);
         SystemParameters.StaticPropertyChanged += SystemSettingChanged;
     }
@@ -81,6 +132,12 @@ internal partial class MusicDesktopLyricsWindow : Window
     private nint WindowMessage(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
         if (message == 0x0021) { handled = true; return 3; } // WM_MOUSEACTIVATE / MA_NOACTIVATE
+        if (message == 0x0024 && lParam != 0)
+        {
+            ApplyMinimumTrackSize(hwnd, lParam);
+            handled = true;
+            return 0;
+        }
         if (message == 0x0084 && !locked)
         {
             var hit = MusicDesktopLyricsNative.ResizeHitTest(hwnd, lParam);
@@ -89,23 +146,142 @@ internal partial class MusicDesktopLyricsWindow : Window
         if (message == 0x0231)
         {
             sizing = true;
-            sizeAtMove = new(ActualWidth, ActualHeight);
+            if (TryCaptureGeometry(out var start)) geometryAtMove = start;
+            else
+            {
+                geometryAtMove = null;
+                _ = module.Notify("桌面歌词位置和大小保存失败");
+            }
         }
-        else if (message == 0x0232)
+        else if (message == 0x0232 && sizing)
         {
-            if (sizing && (Math.Abs(ActualWidth - sizeAtMove.Width) > .5 ||
-                Math.Abs(ActualHeight - sizeAtMove.Height) > .5))
-                userSized = true;
             sizing = false;
+            if (TryCaptureGeometry(out var current))
+            {
+                if (geometryAtMove is { } start &&
+                    (start.Width != current.Width || start.Height != current.Height))
+                    userSized = true;
+                if (geometryAtMove != current)
+                    PersistGeometry(current);
+            }
+            else _ = module.Notify("桌面歌词位置和大小保存失败");
+            geometryAtMove = null;
         }
         if (message == 0x02E0) QueueUnlockPlacement(); // Let WPF accept WM_DPICHANGED first.
         return 0;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint { internal int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MinMaxInfo
+    {
+        internal NativePoint Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize;
+    }
+
+    private void ApplyMinimumTrackSize(nint hwnd, nint address)
+    {
+        var info = Marshal.PtrToStructure<MinMaxInfo>(address);
+        uint dpi = MusicDesktopLyricsNative.GetDpiForWindow(hwnd);
+        if (dpi == 0) throw new Win32Exception("The window DPI is unavailable.");
+        // The layered WindowStyle.None surface has no non-client frame to add.
+        info.MinTrackSize.X = (int)Math.Ceiling(MinWidth * dpi / 96d);
+        info.MinTrackSize.Y = (int)Math.Ceiling(MinHeight * dpi / 96d);
+        Marshal.StructureToPtr(info, address, false);
+    }
+
+    private void RestoreGeometry(nint hwnd, MusicDesktopLyricsGeometry geometry)
+    {
+        var monitors = MusicDesktopLyricsNative.Monitors();
+        var monitor = monitors.FirstOrDefault(item => item.Device == geometry.Monitor);
+        if (monitor.Handle == 0) monitor = monitors.FirstOrDefault(item => item.Primary);
+        if (monitor.Handle == 0) throw new Win32Exception("No display monitor is available.");
+        // Move onto the saved monitor first so WPF processes its per-monitor DPI
+        // transition before converting the saved DIP offset.
+        if (!MusicDesktopLyricsNative.SetLocation(hwnd, monitor.WorkLeft, monitor.WorkTop))
+            throw new Win32Exception();
+        uint dpi = MusicDesktopLyricsNative.GetDpiForWindow(hwnd);
+        if (dpi == 0 || !MusicDesktopLyricsNative.GetWindowRect(hwnd, out var bounds))
+            throw new Win32Exception();
+        int width = bounds.Right - bounds.Left, height = bounds.Bottom - bounds.Top;
+        double x = monitor.WorkLeft + geometry.X * dpi / 96d;
+        double yOffset = geometry.Y - Math.Max(0, Height - geometry.Height);
+        double y = monitor.WorkTop + yOffset * dpi / 96d;
+        var position = ReachableOrigin(monitor, width, height, x, y);
+        if (!MusicDesktopLyricsNative.SetLocation(hwnd, position.X, position.Y)) throw new Win32Exception();
+    }
+
+    private static (int X, int Y) ReachableOrigin(MusicDesktopLyricsNative.Monitor monitor,
+        int width, int height, double x, double y)
+    {
+        int workWidth = monitor.WorkRight - monitor.WorkLeft,
+            workHeight = monitor.WorkBottom - monitor.WorkTop;
+        x = width > workWidth
+            ? (int)Math.Round(((long)monitor.WorkLeft + monitor.WorkRight - width) / 2d)
+            : Math.Clamp(x, monitor.WorkLeft, Math.Max(monitor.WorkLeft, monitor.WorkRight - width));
+        y = height > workHeight
+            ? monitor.WorkTop
+            : Math.Clamp(y, monitor.WorkTop, Math.Max(monitor.WorkTop, monitor.WorkBottom - height));
+        return ((int)Math.Round(x), (int)Math.Round(y));
+    }
+
+    private MusicDesktopLyricsGeometry CaptureGeometry()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        var monitor = MusicDesktopLyricsNative.MonitorForWindow(handle);
+        uint dpi = MusicDesktopLyricsNative.GetDpiForWindow(handle);
+        if (dpi == 0) throw new Win32Exception("The display DPI is unavailable.");
+        if (!MusicDesktopLyricsNative.GetWindowRect(handle, out var bounds)) throw new Win32Exception();
+        return new(monitor.Device, (bounds.Left - monitor.WorkLeft) * 96d / dpi,
+            (bounds.Top - monitor.WorkTop) * 96d / dpi,
+            (bounds.Right - bounds.Left) * 96d / dpi, (bounds.Bottom - bounds.Top) * 96d / dpi);
+    }
+
+    private bool TryCaptureGeometry(out MusicDesktopLyricsGeometry geometry)
+    {
+        try { geometry = CaptureGeometry(); return true; }
+        catch (Win32Exception) { geometry = default; return false; }
+    }
+
+    private void PersistGeometry(MusicDesktopLyricsGeometry geometry) =>
+        _ = module.SaveDesktopLyricGeometryAsync(geometry);
+
+    internal Task SaveGeometryForShutdown(MusicDesktopLyricsGeometry geometry) =>
+        module.SaveDesktopLyricGeometryAsync(geometry);
+
+    private void PersistCurrentGeometry()
+    {
+        if (closed || closePending || !IsVisible || !module.DesktopLyricSettingsLoaded) return;
+        if (TryCaptureGeometry(out var geometry)) PersistGeometry(geometry);
+        else _ = module.Notify("桌面歌词位置和大小保存失败");
+    }
+
+    private async void KeepReachableAndPersist()
+    {
+        if (closed || closePending || !IsVisible) return;
+        try
+        {
+            var handle = new WindowInteropHelper(this).Handle;
+            var monitor = MusicDesktopLyricsNative.MonitorForWindow(handle);
+            if (!MusicDesktopLyricsNative.GetWindowRect(handle, out var bounds)) throw new Win32Exception();
+            int width = bounds.Right - bounds.Left, height = bounds.Bottom - bounds.Top;
+            var (x, y) = ReachableOrigin(monitor, width, height, bounds.Left, bounds.Top);
+            if ((x != bounds.Left || y != bounds.Top) && !MusicDesktopLyricsNative.SetLocation(handle, x, y))
+                throw new Win32Exception();
+            PersistCurrentGeometry();
+        }
+        catch (Win32Exception) { await module.Notify("无法定位桌面歌词窗口。"); }
     }
 
     private void WindowLoaded(object sender, RoutedEventArgs e)
     {
         if (restoreLock) { restoreLock = false; _ = ChangeLockAsync(true); }
         else StartPointerObserver();
+        if (restoredGeometry)
+        {
+            restoredGeometry = false;
+            KeepReachableAndPersist();
+        }
     }
 
     private void SystemSettingChanged(object? sender, PropertyChangedEventArgs e)
@@ -189,7 +365,11 @@ internal partial class MusicDesktopLyricsWindow : Window
         e.Handled = true;
         dragging = true;
         try { DragMove(); }
-        finally { dragging = false; ObservePointer(null, EventArgs.Empty); }
+        finally
+        {
+            dragging = false;
+            ObservePointer(null, EventArgs.Empty);
+        }
     }
 
     private void Activate_Click(object sender, RoutedEventArgs e) => module.ActivateDesktopLyricsOwner();
@@ -337,12 +517,20 @@ internal partial class MusicDesktopLyricsWindow : Window
         }
     }
 
-    internal MusicDesktopLyricsWindowState CapturePresentationState() =>
-        new(Left, Top, Width, Height, locked, userSized);
+    internal MusicDesktopLyricsWindowState CapturePresentationState()
+    {
+        MusicDesktopLyricsGeometry? geometry = null;
+        if (TryCaptureGeometry(out var current)) geometry = current;
+        else _ = module.Notify("桌面歌词位置和大小保存失败");
+        return new(Left, Top, Width, Height, locked, userSized, geometry);
+    }
 
     internal void RestorePresentationState(MusicDesktopLyricsWindowState state)
     {
-        Left = state.Left; Top = state.Top; Width = state.Width; Height = state.Height;
+        Left = state.Left; Top = state.Top;
+        Width = Math.Max(state.Width, MinWidth);
+        Height = Math.Max(state.Height, MinHeight);
+        openingGeometry = state.Geometry;
         userSized = state.UserSized;
         if (IsLoaded) _ = ChangeLockAsync(state.IsLocked);
         else restoreLock = state.IsLocked;
@@ -409,12 +597,31 @@ internal partial class MusicDesktopLyricsWindow : Window
             ToolTipService.SetIsEnabled(button, false);
     }
 
-    private void Close_Click(object sender, RoutedEventArgs e) => Close();
+    private async void Close_Click(object sender, RoutedEventArgs e) => await CloseAsync();
+
+    internal Task CloseAsync()
+    {
+        Close();
+        return closeWork;
+    }
 
     protected override void OnClosing(CancelEventArgs e)
     {
         base.OnClosing(e);
         if (e.Cancel) return;
+        if (!closeReady && module.DesktopLyricSettingsLoaded && !closed)
+        {
+            e.Cancel = true;
+            if (!closePending)
+            {
+                closePending = true;
+                IsEnabled = false;
+                pointerObserver.Stop();
+                module.DesktopLyricsClosing();
+                closeWork = CloseAfterGeometrySaveAsync();
+            }
+            return;
+        }
         closed = true;
         pointerObserver.Stop();
         ClosePopups();
@@ -435,5 +642,30 @@ internal partial class MusicDesktopLyricsWindow : Window
         source = null;
         DataContext = null;
         base.OnClosed(e);
+    }
+
+    private async Task CloseAfterGeometrySaveAsync()
+    {
+        Task save = TryCaptureGeometry(out var geometry)
+            ? module.SaveDesktopLyricGeometryAsync(geometry)
+            : module.Notify("桌面歌词位置和大小保存失败");
+        // A deduplicated save can complete synchronously; leave OnClosing before
+        // issuing the final Close, while retaining the geometry captured above.
+        await Task.Yield();
+        try
+        {
+            await save;
+        }
+        finally
+        {
+            closeReady = true;
+            if (!closed) Close();
+        }
+    }
+
+    internal void CloseForShutdown()
+    {
+        closeReady = true;
+        Close();
     }
 }

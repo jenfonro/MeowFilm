@@ -180,7 +180,9 @@ public static partial class MusicLyricDisplayTests
 
     private static Window LyricConsumerOwner() => new()
     {
-        Width = 1110, Height = 800, Left = -32000, Top = -32000,
+        Width = Math.Min(1110, SystemParameters.WorkArea.Width - 48),
+        Height = Math.Min(800, SystemParameters.WorkArea.Height - 48),
+        Left = SystemParameters.WorkArea.Left + 24, Top = SystemParameters.WorkArea.Top + 24,
         ShowActivated = false, ShowInTaskbar = false
     };
 
@@ -322,7 +324,9 @@ public static partial class MusicUiTests
                 Equal("打开桌面歌词", AutomationProperties.GetName(button));
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 True(!ReferenceEquals(window, f.Module.DesktopLyricsWindow), "closed HWND is not revived");
-                Click((Button)f.Module.DesktopLyricsWindow!.FindName("CloseButton"));
+                var reopened = f.Module.DesktopLyricsWindow!;
+                Click((Button)reopened.FindName("CloseButton"));
+                await Until(() => !reopened.IsVisible);
                 True(!f.Module.IsDesktopLyricsOpen, "native window close synchronizes the single state");
                 Equal("打开桌面歌词", AutomationProperties.GetName(button));
             }));
@@ -503,22 +507,57 @@ public static partial class MusicUiTests
             await WithDesktopLyrics(async (f, _) =>
             {
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
+                var window = f.Module.DesktopLyricsWindow!;
                 Equal("未在播放", f.Module.DesktopLyricText);
                 Equal("", f.Module.DesktopLyricTranslation);
+                Equal(110d, window.MinHeight);
+                window.Height = window.MinHeight;
+                await Until(() => Math.Abs(window.ActualHeight - window.MinHeight) <= 1);
+                window.UpdateLayout();
+                var status = (FrameworkElement)window.FindName("Status");
+                var statusBounds = status.TransformToAncestor(window).TransformBounds(new Rect(status.RenderSize));
+                True(status.IsVisible && status.ActualHeight > 0 && statusBounds.Top >= 44 &&
+                    statusBounds.Bottom <= window.ActualHeight - 12,
+                    "the empty-state text remains fully inside the single-line minimum height");
+                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-minimum-state",
+                    (int)window.ActualWidth, (int)window.ActualHeight);
                 Equal(0, f.Calls.Count("music.lyrics.lookup"));
             }, withCurrent: false);
             await WithDesktopLyrics(async (f, _) =>
             {
                 await SaveDesktopLyricFixture(f, translated: false);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
-                var line = (MusicDesktopLyricLineView)f.Module.DesktopLyricsWindow!.FindName("TopLine");
+                var window = f.Module.DesktopLyricsWindow!;
+                var line = (MusicDesktopLyricLineView)window.FindName("TopLine");
                 var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
+                var plain = (MusicDesktopLyricTextView)line.FindName("PlainText");
+                Equal(110d, window.MinHeight);
+                window.Height = window.MinHeight;
+                await Until(() => Math.Abs(window.ActualHeight - window.MinHeight) <= 1);
+                window.UpdateLayout();
+                var plainBounds = plain.TransformToAncestor(window).TransformBounds(new Rect(plain.RenderSize));
+                True(plain.Text == "第一行原文" && plain.ActualHeight > 0 && plainBounds.Top >= 44 &&
+                    plainBounds.Bottom <= window.ActualHeight - 12,
+                    "a real source line remains fully visible at the single-line minimum height");
+                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-minimum-source",
+                    (int)window.ActualWidth, (int)window.ActualHeight);
                 True(!translation.IsVisible, "a source without translation leaves no empty second row");
                 int calls = f.Calls.Log.Count;
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
                 Equal("", f.Module.Lyrics[0].Translation); True(!translation.IsVisible, "switching cannot manufacture translation");
                 Equal(calls, f.Calls.Log.Count);
+                Equal(110d, window.MinHeight);
+                double bottom = window.Top + window.ActualHeight;
+                await f.Module.SetDesktopLyricLayoutAsync("double"); await Drain();
+                Equal(180d, window.MinHeight);
+                True(window.ActualHeight >= 180 && Math.Abs(window.Top + window.ActualHeight - bottom) <= 1,
+                    "the two untranslated tracks raise only to their content minimum and retain the bottom anchor");
+                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-minimum-double-source",
+                    (int)window.ActualWidth, (int)window.ActualHeight);
+                double expanded = window.ActualHeight;
+                await f.Module.SetDesktopLyricLayoutAsync("single"); await Drain();
+                Equal(expanded, window.ActualHeight);
                 f.Module.Lyrics.Clear(); await Drain();
                 Equal("暂无歌词", f.Module.DesktopLyricText);
                 await f.Playback.StopAsync(); await Drain();
@@ -708,6 +747,7 @@ public static partial class MusicUiTests
                 int closed = 0; prior.Closed += (_, _) => closed++;
                 await f.Module.PrepareShutdownAsync();
                 Equal(1, closed);
+                Equal(state.Geometry!.Value, f.Module.DesktopLyricGeometry!.Value);
                 True(!f.Module.IsDesktopLyricsOpen && !f.Module.CanToggleDesktopLyrics && prior.DataContext is null,
                     "preparation releases the actual window without disposing the playback owner");
                 True(!DesktopLyricNative.IsWindow(unlockHandle) && !prior.IsPointerObserverRunning,
@@ -757,7 +797,9 @@ public static partial class MusicUiTests
 
     private static Window DesktopLyricOwner() => new()
     {
-        Width = 1110, Height = 800, Left = -32000, Top = -32000,
+        Width = Math.Min(1110, SystemParameters.WorkArea.Width - 48),
+        Height = Math.Min(800, SystemParameters.WorkArea.Height - 48),
+        Left = SystemParameters.WorkArea.Left + 24, Top = SystemParameters.WorkArea.Top + 24,
         ShowActivated = false, ShowInTaskbar = false, Content = new Grid()
     };
 
