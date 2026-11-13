@@ -13,6 +13,7 @@ struct FilmSettingsRow {
     var destructive = false
     var action: (() -> Void)? = nil
     var content: UIView? = nil
+    var stylesContent = true
 }
 
 @MainActor
@@ -26,7 +27,8 @@ struct FilmSettingsSection {
 class FilmSettingsListController: PageViewController, UITableViewDataSource, UITableViewDelegate {
     var avoidsKeyboard: Bool { false }
     var usesSettingsColors: Bool { true }
-    let table = UITableView(frame: .zero, style: .insetGrouped)
+    var usesSettingsTable: Bool { true }
+    let table = SettingsTableView()
     var sections: [FilmSettingsSection] = []
     private var pendingFailure: (String, (() -> Void)?)?
     private var pendingNotice: (String, String?)?
@@ -35,7 +37,8 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        table.backgroundColor = .clear
+        guard usesSettingsTable else { return }
+        if !usesSettingsColors { table.separatorStyle = .singleLine }
         table.rowHeight = UITableView.automaticDimension
         table.estimatedRowHeight = 60
         table.keyboardDismissMode = .interactive
@@ -56,7 +59,6 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
         if isViewLoaded {
             if usesSettingsColors {
                 view.tintColor = UIColor(theme.settings.accent)
-                table.separatorColor = UIColor(theme.settings.separator)
             }
             table.reloadData()
         }
@@ -75,10 +77,27 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
     }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let row = sections[indexPath.section].rows[indexPath.row]
-        let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+        let first = indexPath.row == 0
+        let last = indexPath.row == sections[indexPath.section].rows.count - 1
+        let cell = SettingsTableCell(title: row.title, detail: row.detail, theme: theme,
+            first: first, last: last, destructive: row.destructive)
+        var content = cell.contentConfiguration as! UIListContentConfiguration
+        if !usesSettingsColors {
+            // The playback directory borrows this list but is not a settings page.
+            content = cell.defaultContentConfiguration()
+            content.text = row.title; content.secondaryText = row.detail
+            content.textProperties.font = .preferredFont(forTextStyle: .body)
+            content.secondaryTextProperties.font = .preferredFont(forTextStyle: .subheadline)
+            cell.tintColor = UIColor(theme.accent)
+            cell.backgroundView = SettingsRowBackgroundView(theme: theme, first: first, last: last, settings: false)
+            cell.selectedBackgroundView = nil
+            cell.contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
+        }
         if let field = row.content {
-            if usesSettingsColors { applyControlColors(in: field) }
+            if usesSettingsColors && row.stylesContent { applyControlColors(in: field) }
             cell.accessibilityIdentifier = row.id.isEmpty ? field.accessibilityIdentifier : row.id
+            cell.contentConfiguration = nil
+            cell.contentView.directionalLayoutMargins = content.directionalLayoutMargins
             field.removeFromSuperview()
             cell.contentView.addSubview(field)
             field.translatesAutoresizingMaskIntoConstraints = false
@@ -88,14 +107,9 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
                 field.leadingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.leadingAnchor),
                 field.trailingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.trailingAnchor),
             ])
-            applyBackground(cell, at: indexPath)
             cell.selectionStyle = .none
             return cell
         }
-        var content = cell.defaultContentConfiguration()
-        content.text = row.title; content.secondaryText = row.detail
-        content.textProperties.font = .preferredFont(forTextStyle: .body)
-        content.secondaryTextProperties.font = .preferredFont(forTextStyle: .subheadline)
         if usesSettingsColors {
             content.textProperties.color = UIColor(!row.enabled ? theme.settings.muted :
                 (row.destructive ? theme.settings.danger :
@@ -107,7 +121,6 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
         }
         content.textProperties.numberOfLines = 0; content.secondaryTextProperties.numberOfLines = 0
         cell.contentConfiguration = content
-        applyBackground(cell, at: indexPath)
         cell.isAccessibilityElement = true
         cell.accessibilityIdentifier = row.id
         cell.accessibilityLabel = row.title
@@ -119,21 +132,15 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
         if row.selected { cell.accessibilityTraits.insert(.selected) }
         return cell
     }
-    private func applyBackground(_ cell: UITableViewCell, at index: IndexPath) {
-        cell.backgroundColor = .clear
-        cell.backgroundView = SettingsRowBackgroundView(theme: theme, first: index.row == 0,
-            last: index.row == sections[index.section].rows.count - 1, settings: usesSettingsColors)
-        if usesSettingsColors {
-            cell.selectedBackgroundView = SettingsRowBackgroundView(theme: theme, first: index.row == 0,
-                last: index.row == sections[index.section].rows.count - 1, selected: true)
-        }
-        cell.contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
-    }
     private func applyControlColors(in view: UIView) {
         let colors = theme.settings
         if let field = view as? UITextField { colors.apply(to: field) }
         else if let field = view as? UITextView { colors.apply(to: field) }
         else if let toggle = view as? UISwitch { toggle.onTintColor = UIColor(colors.accent) }
+        else if let button = view as? PageHeaderTextButton {
+            button.setTitleColor(UIColor(colors.accent), for: .normal)
+            button.setTitleColor(UIColor(colors.muted), for: .disabled)
+        }
         else if let control = view as? UISegmentedControl {
             control.backgroundColor = UIColor(colors.input)
             control.selectedSegmentTintColor = UIColor(colors.surface)

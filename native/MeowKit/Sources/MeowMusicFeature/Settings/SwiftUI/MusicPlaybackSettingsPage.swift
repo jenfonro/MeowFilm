@@ -34,17 +34,20 @@ struct MusicPlaybackSettingsContent: View {
 
     var body: some View {
         List {
-            ForEach([false, true], id: \.self) { spatial in
-                Button { open(spatial) } label: {
-                    MusicSettingsLinkRow(theme: theme) {
-                        MusicSettingsIconLabel(
-                            symbol: spatial ? "headphones" : "waveform",
-                            title: spatial ? "空间／全景音频设置" : "音质设置", theme: theme
-                        )
+            Section {
+                ForEach([false, true], id: \.self) { spatial in
+                    Button { open(spatial) } label: {
+                        MusicSettingsLinkRow(theme: theme) {
+                            MusicSettingsIconLabel(
+                                symbol: spatial ? "headphones" : "waveform",
+                                title: spatial ? "空间／全景音频设置" : "音质设置", theme: theme
+                            )
+                        }
                     }
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: !spatial, last: spatial))
                 }
-                .modifier(MusicSettingsRowStyle(theme: theme))
             }
+            .listSectionSeparator(.hidden)
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }
@@ -99,8 +102,9 @@ struct MusicQualitySettingsContent: View {
                     }
                     .pickerStyle(.menu)
                     .disabled(!state.available || state.busy)
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
                 }
+                .listSectionSeparator(.hidden)
             }
             Section(spatial ? "空间／全景音频优先级" : "音质优先级") {
                 ForEach(order, id: \.self) { id in
@@ -113,7 +117,7 @@ struct MusicQualitySettingsContent: View {
                     .disabled(!state.available || state.busy || state.locked(id, spatial: spatial))
                     .moveDisabled(!state.available || state.busy)
                     .accessibilityIdentifier("music.settings." + (spatial ? "spatial." : "quality.") + id)
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: id == order.first, last: id == order.last))
                 }
                 .onMove { offsets, destination in
                     var values = order
@@ -122,6 +126,7 @@ struct MusicQualitySettingsContent: View {
                 }
             }
             .headerProminence(.increased)
+            .listSectionSeparator(.hidden)
         }
         .environment(\.editMode, .constant(.active))
         .modifier(MusicSettingsListStyle(theme: theme))

@@ -13,6 +13,7 @@ public sealed class PlayerDialogHost : Grid
     private FrameworkElement? anchor, panel;
     private Action? closed;
     private MouseButton? dismissButton;
+    private bool dismissOnOutside = true;
     public bool IsOpen => panel is not null;
     public bool HasOutsidePress => dismissButton is not null;
 
@@ -38,10 +39,10 @@ public sealed class PlayerDialogHost : Grid
     public static PlayerDialogHost? Find(DependencyObject owner) =>
         Window.GetWindow(owner)?.GetValue(HostProperty) as PlayerDialogHost;
 
-    public void Show(FrameworkElement owner, FrameworkElement content, Action onClosed)
+    public void Show(FrameworkElement owner, FrameworkElement content, Action onClosed, bool dismissOnOutside = true)
     {
         Close();
-        anchor = owner; panel = content; closed = onClosed;
+        anchor = owner; panel = content; closed = onClosed; this.dismissOnOutside = dismissOnOutside;
         owner.Unloaded += OwnerUnloaded;
         owner.IsVisibleChanged += OwnerVisibilityChanged;
         content.HorizontalAlignment = HorizontalAlignment.Center;
@@ -74,17 +75,29 @@ public sealed class PlayerDialogHost : Grid
         base.OnPreviewMouseDown(e);
         if (panel is null ||
             e.OriginalSource is DependencyObject node && (ReferenceEquals(node, panel) || panel.IsAncestorOf(node))) return;
+        if (!dismissOnOutside)
+        {
+            e.Handled = true;
+            return;
+        }
         HandleOutsidePointer(e, this);
     }
     protected override void OnPreviewMouseUp(MouseButtonEventArgs e)
     {
         base.OnPreviewMouseUp(e);
+        if (!dismissOnOutside && panel is not null &&
+            e.OriginalSource is DependencyObject node && (ReferenceEquals(node, panel) || panel.IsAncestorOf(node))) return;
         HandleOutsidePointer(e, this);
     }
     // The shell also routes application header controls here; native caption/drag areas remain untouched.
     public void HandleOutsidePointer(MouseButtonEventArgs e, FrameworkElement bounds)
     {
         if (!IsOpen) return;
+        if (!dismissOnOutside)
+        {
+            e.Handled = true;
+            return;
+        }
         if (e.RoutedEvent == Mouse.PreviewMouseDownEvent)
         {
             // Keep the barrier until release so neither half of the gesture reaches underlying controls.
@@ -120,6 +133,7 @@ public sealed class PlayerDialogHost : Grid
         Children.Remove(panel);
         panel = null;
         Visibility = Visibility.Collapsed;
+        dismissOnOutside = true;
         FocusManager.SetFocusedElement(this, null);
         var callback = closed; closed = null;
         callback?.Invoke();

@@ -46,6 +46,8 @@ public static partial class NovelTests
         yield return new("novel dialog save failure: open retry and closed failure or cancellation wait for the actual write", () => Sta(DialogSaveFailures));
         yield return new("novel dialog failure owners: closed save failures remain visible and cancellation stays silent", () => Sta(DialogFailureOwners));
         yield return new("novel dialog isolation: retired popup cannot cancel the next confirmation", () => Sta(DialogIsolation));
+        yield return new("novel dialog presentation: application host keeps themed surface compact and outside clicks inert", () => Sta(DialogHostPresentation));
+        yield return new("novel dialog isolation: retired application editor cannot close or refocus the next dialog", () => Sta(DialogHostIsolation));
         yield return new("novel Web lifecycle: actual environment exit releases profile before success cancellation and owner close", () => Sta(WebLifecycle));
         yield return new("novel session cancellation: continue selection and purchase refresh stay within one cancelled operation", () => Sta(SessionCancellation));
         yield return new("novel shared fixtures: real Node RPC ordered cleanup and final conversion", Fixtures);

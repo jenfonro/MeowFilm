@@ -10,11 +10,12 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
     UIDocumentPickerDelegate
 {
     private let model: MusicViewModel
-    private let state: MusicSourceManagementState
+    let state: MusicSourceManagementState
     private var pickerAccess: UUID?
     private var updatingID: String?
     private weak var detail: MusicScriptSourceDetailViewController?
     private var editWork: (id: UUID, task: Task<Void, Never>)?
+    private var presentationGeneration = UUID()
 
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         self.model = model
@@ -31,6 +32,8 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
         observe(model.accessChanges) { [weak self] in
             guard let self else { return }
             invalidateErrorPresentation()
+            presentationGeneration = UUID()
+            editWork?.task.cancel(); editWork = nil
             state.reconcileAccess()
         }
         observe(state.$error.removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher()) { [weak self] in
@@ -48,12 +51,14 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
 
     override func pageDidBecomeActive() { state.start() }
     override func pageDidBecomeInactive() {
+        presentationGeneration = UUID()
         pickerAccess = nil; updatingID = nil
         editWork?.task.cancel(); editWork = nil
         state.close()
     }
     override func pageDidBecomeVisible() { state.show(self); showFailure() }
     override func pageDidBecomeHidden() {
+        presentationGeneration = UUID()
         editWork?.task.cancel(); editWork = nil
         state.hide(self)
     }
@@ -64,7 +69,7 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
         setContent(MusicSourceManagementContent(
             state: state, theme: theme, openScript: { [weak self] in self?.openScript($0) },
             edit: { [weak self] in self?.edit($0) }, update: { [weak self] in self?.update($0) },
-            remove: { [weak self] in self?.confirmRemove($0) }, removeSelected: { [weak self] in self?.confirmRemove(nil) }
+            removeSelected: { [weak self] in self?.confirmRemoveSelected() }
         ))
     }
 
@@ -100,24 +105,22 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
         pickerAccess = nil; updatingID = nil
     }
 
-    private func openURL() {
+    func openURL() {
         guard isPageActive, state.available, !state.importing, presentedViewController == nil else { return }
-        let access = model.accountAccessGeneration
-        let alert = UIAlertController(title: "网络导入", message: nil, preferredStyle: .alert)
-        alert.addTextField { field in
-            field.keyboardType = .URL
-            field.textContentType = .URL
-            field.autocapitalizationType = .none
-            field.autocorrectionType = .no
-            field.accessibilityIdentifier = "music.sources.url"
-        }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "导入", style: .default) { [weak self, weak alert] _ in
-            guard let self, self.isPageActive, let text = alert?.textFields?.first?.text,
+        let access = model.accountAccessGeneration, presentation = presentationGeneration
+        let dialog = ManagementDialog(title: "网络导入", action: "导入", themeProvider: appearance)
+        let input = ManagementDialog.input(placeholder: "音源网络地址")
+        input.keyboardType = .URL; input.textContentType = .URL
+        input.autocapitalizationType = .none; input.autocorrectionType = .no
+        input.accessibilityLabel = "网络地址"; input.accessibilityIdentifier = "music.sources.url"
+        dialog.body.addArrangedSubview(input)
+        dialog.accepted = { [weak self] in
+            guard let self, self.isPageActive, self.isPageVisible, let text = input.text,
+                  presentation == self.presentationGeneration,
                   access == self.model.accountAccessGeneration else { return }
             self.state.download(text)
-        })
-        present(alert, animated: true)
+        }
+        present(dialog, animated: true)
     }
 
     private func update(_ id: String) {
@@ -126,7 +129,7 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
     }
     private func edit(_ id: String) {
         guard isPageActive, editWork == nil, presentedViewController == nil, let service = model.scriptSources else { return }
-        let access = model.accountAccessGeneration
+        let access = model.accountAccessGeneration, presentation = presentationGeneration
         let workID = UUID()
         let task = Task { [weak self] in
             defer { if self?.editWork?.id == workID { self?.editWork = nil } }
@@ -134,23 +137,36 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
             do {
                 let detail = try await service.scriptSourceDetail(id)
                 guard let self, !Task.isCancelled, self.isPageActive, self.canPresentPageAlert,
+                      presentation == self.presentationGeneration,
                       access == self.model.accountAccessGeneration else { return }
-                let alert = UIAlertController(title: "编辑音源", message: nil, preferredStyle: .alert)
-                alert.addTextField { $0.text = detail.item.name; $0.accessibilityLabel = "名称" }
-                if let url = detail.networkURL {
-                    alert.addTextField {
-                        $0.text = url; $0.keyboardType = .URL; $0.autocapitalizationType = .none
-                        $0.autocorrectionType = .no; $0.accessibilityLabel = "网络地址"
-                    }
+                let dialog = ManagementDialog(title: "编辑音源", action: "保存", themeProvider: self.appearance)
+                let name = ManagementDialog.input(placeholder: "名称")
+                name.text = detail.item.name; name.accessibilityLabel = "名称"
+                name.accessibilityIdentifier = "music.sources.edit.name"
+                let nameTitle = UILabel(); nameTitle.text = "名称"
+                nameTitle.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).ink) }
+                nameTitle.font = .preferredFont(forTextStyle: .subheadline)
+                nameTitle.adjustsFontForContentSizeCategory = true
+                dialog.body.addArrangedSubview(nameTitle); dialog.body.addArrangedSubview(name)
+                let address = detail.networkURL.map { url in
+                    let input = ManagementDialog.input(placeholder: "网络地址")
+                    input.text = url; input.keyboardType = .URL; input.textContentType = .URL
+                    input.autocapitalizationType = .none; input.autocorrectionType = .no
+                    input.accessibilityLabel = "网络地址"; input.accessibilityIdentifier = "music.sources.edit.url"
+                    let title = UILabel(); title.text = "网络地址"
+                    title.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).ink) }
+                    title.font = .preferredFont(forTextStyle: .subheadline)
+                    title.adjustsFontForContentSizeCategory = true
+                    dialog.body.addArrangedSubview(title); dialog.body.addArrangedSubview(input)
+                    return input
                 }
-                alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-                alert.addAction(UIAlertAction(title: "保存", style: .default) { [weak self, weak alert] _ in
-                    guard let self, self.isPageActive, access == self.model.accountAccessGeneration,
-                          let name = alert?.textFields?.first?.text else { return }
-                    let url = detail.networkURL == nil ? nil : alert?.textFields?.last?.text
-                    self.state.edit(id, name: name, url: url)
-                })
-                self.present(alert, animated: true)
+                dialog.accepted = { [weak self] in
+                    guard let self, self.isPageActive, self.isPageVisible,
+                          presentation == self.presentationGeneration,
+                          access == self.model.accountAccessGeneration, let text = name.text else { return }
+                    self.state.edit(id, name: text, url: address?.text)
+                }
+                self.present(dialog, animated: true)
             } catch {
                 guard let self, !Task.isCancelled, self.isPageActive,
                       access == self.model.accountAccessGeneration else { return }
@@ -159,18 +175,19 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
         }
         editWork = (workID, task)
     }
-    private func confirmRemove(_ id: String?) {
-        guard isPageActive, presentedViewController == nil else { return }
-        let access = model.accountAccessGeneration
-        let ids = id.map { [$0] } ?? state.scripts.filter { state.selected.contains($0.id) }.map(\.id)
-        let alert = UIAlertController(title: id == nil ? "删除所选音源？" : "删除音源？",
-                                      message: id.flatMap { state.item($0)?.name }, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in
-            guard let self, self.isPageActive, access == self.model.accountAccessGeneration else { return }
+    func confirmRemoveSelected() {
+        guard isPageActive, state.available, presentedViewController == nil else { return }
+        let access = model.accountAccessGeneration, presentation = presentationGeneration
+        let ids = state.scripts.filter { state.selected.contains($0.id) }.map(\.id)
+        guard !ids.isEmpty, !ids.contains(where: state.isPending) else { return }
+        let dialog = ManagementDialog(title: "删除所选 \(ids.count) 个音源？", action: "删除", themeProvider: appearance)
+        dialog.accepted = { [weak self] in
+            guard let self, self.isPageActive, self.isPageVisible,
+                  presentation == self.presentationGeneration,
+                  access == self.model.accountAccessGeneration else { return }
             for id in ids { self.state.remove(id) }
-        })
-        present(alert, animated: true)
+        }
+        present(dialog, animated: true)
     }
     private func openScript(_ id: String) {
         guard isPageActive, presentedViewController == nil, detail == nil, state.item(id) != nil else { return }
@@ -189,139 +206,11 @@ struct MusicSourceManagementContent: View {
     var openScript: (String) -> Void = { _ in }
     var edit: (String) -> Void = { _ in }
     var update: (String) -> Void = { _ in }
-    var remove: (String) -> Void = { _ in }
     var removeSelected: () -> Void = {}
-    @State private var selecting = false
-    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        List {
-            Section {
-                sourceLayout {
-                    Button { selecting.toggle() } label: {
-                        Text(selecting ? "完成选择" : "选择")
-                            .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .accessibilityIdentifier("music.sources.select")
-                    if selecting {
-                        Menu {
-                            Button("全选") {
-                                state.selected = Set(state.scripts.map(\.id) +
-                                    MusicAccountPlatform.allCases.map { "official:" + $0.rawValue })
-                            }
-                            Button("取消选择") { state.selected = [] }
-                            Button("检测", action: state.checkSelected).disabled(state.selected.isEmpty)
-                            Button("删除", role: .destructive, action: removeSelected)
-                                .disabled(!state.scripts.contains { state.selected.contains($0.id) })
-                        } label: {
-                            Text("已选 \(state.selected.count)").frame(minWidth: 44, minHeight: 44)
-                                .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
-                        }
-                        .accessibilityLabel("批量操作，已选 \(state.selected.count) 个音源")
-                        .accessibilityIdentifier("music.sources.batch")
-                    }
-                }
-                .modifier(MusicSettingsRowStyle(theme: theme))
-            }
-            Section {
-                ForEach(MusicAccountPlatform.allCases) { platform in
-                    let id = "official:" + platform.rawValue
-                    sourceLayout {
-                        HStack(spacing: 8) {
-                            if selecting { selection(id) }
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(platform.title).foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
-                                    .fixedSize(horizontal: false, vertical: true)
-                                health(state.officialChecks[platform].map { $0 ? "ok" : "failed" },
-                                       checking: state.checking.contains(id), prefix: "内置")
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        if !selecting {
-                            HStack(spacing: 8) {
-                                Toggle("启用", isOn: Binding(get: { state.officialEnabled(platform) },
-                                    set: { state.setOfficial(platform, enabled: $0) })).labelsHidden()
-                                    .disabled(state.savingOfficial)
-                                    .accessibilityLabel(platform.title + " 启用")
-                                    .frame(minHeight: 44)
-                                Menu {
-                                    Button("检测") { state.checkOfficial(platform) }.disabled(state.checking.contains(id))
-                                } label: { more(platform.title) }
-                            }
-                        }
-                    }
-                    .modifier(MusicSettingsRowStyle(theme: theme))
-                    .accessibilityIdentifier("music.sources.official." + platform.rawValue)
-                }
-                ForEach(state.scripts) { item in
-                    sourceLayout {
-                        HStack(spacing: 8) {
-                            if selecting { selection(item.id) }
-                            VStack(alignment: .leading, spacing: 4) {
-                                Button {
-                                    if selecting { state.select(item.id) } else { openScript(item.id) }
-                                } label: {
-                                    Text(item.name).foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
-                                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }.buttonStyle(.plain)
-                                health(item.check?.summary, checking: state.checking.contains(item.id),
-                                       prefix: state.isPending(item.id) && !state.checking.contains(item.id)
-                                        ? "处理中" : MusicScriptSourceDetailContent.status(item.state))
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        if !selecting {
-                            HStack(spacing: 8) {
-                                Toggle("启用", isOn: Binding(get: { state.scriptEnabled(item) },
-                                    set: { state.setScript(item.id, enabled: $0) })).labelsHidden()
-                                    .disabled(state.isPending(item.id))
-                                    .accessibilityLabel(item.name + " 启用")
-                                    .frame(minHeight: 44)
-                                Menu {
-                                    Button("检测") { state.checkScript(item.id) }
-                                    Button("编辑") { edit(item.id) }
-                                    Button("更新") { update(item.id) }
-                                    Button("删除", role: .destructive) { remove(item.id) }
-                                } label: { more(item.name) }
-                                .disabled(state.isPending(item.id))
-                            }
-                        }
-                    }
-                    .modifier(MusicSettingsRowStyle(theme: theme))
-                    .accessibilityIdentifier("music.sources.script." + item.id)
-                }
-                if state.importing { ProgressView().accessibilityLabel("正在导入音源") }
-            }
-        }
-        .buttonStyle(.borderless)
-        .disabled(!state.available)
-        .modifier(MusicSettingsListStyle(theme: theme))
-    }
-    private func sourceLayout<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        let layout = typeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(alignment: .trailing, spacing: 8))
-            : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
-        return layout { content() }
-    }
-    private func more(_ name: String) -> some View {
-        Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44)
-            .contentShape(Rectangle()).accessibilityLabel(name + " 更多操作")
-    }
-    private func selection(_ id: String) -> some View {
-        Button { state.select(id) } label: {
-            Image(systemName: state.selected.contains(id) ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(Color(uiColor: UIColor(state.selected.contains(id) ? theme.settings.accent : theme.settings.muted)))
-                .frame(minWidth: 44, minHeight: 44)
-        }.buttonStyle(.plain).accessibilityLabel((state.selected.contains(id) ? "取消选择 " : "选择 ") +
-            (state.item(id)?.name ?? MusicAccountPlatform.allCases.first { id == "official:" + $0.rawValue }?.title ?? "音源"))
-    }
-    private func health(_ value: String?, checking: Bool, prefix: String) -> some View {
-        Label(prefix + " · " + (checking ? "检测中" : Self.healthName(value)), systemImage: checking ? "clock" : "circle.fill")
-            .font(.caption).foregroundStyle(Color(uiColor: UIColor(checking ? theme.settings.muted : healthColor(value))))
-            .fixedSize(horizontal: false, vertical: true)
+        MusicSourceManagementList(state: state, theme: theme, openScript: openScript,
+                                  edit: edit, update: update, removeSelected: removeSelected)
     }
     static func origin(_ item: MusicScriptSourceItem) -> String { if case .file = item.origin { return "本地" }; return "网络" }
     static func detail(_ item: MusicScriptSourceItem) -> String { origin(item) + " · " + item.version }
@@ -329,14 +218,112 @@ struct MusicSourceManagementContent: View {
         switch value { case "ok", "normal": return "正常"; case "partial": return "部分可用"; case "failed", "abnormal": return "异常"
         case "unsupported": return "不支持"; default: return "未检测" }
     }
-    private func healthColor(_ value: String?) -> PageColor {
-        switch value {
-        case "ok", "normal": return theme.settings.success
-        case "partial": return theme.settings.warning
-        case "failed", "abnormal": return theme.settings.danger
-        default: return theme.settings.muted
+}
+
+@MainActor
+private struct MusicSourceManagementList: UIViewRepresentable {
+    @ObservedObject var state: MusicSourceManagementState
+    let theme: PageTheme
+    let openScript: (String) -> Void
+    let edit: (String) -> Void
+    let update: (String) -> Void
+    let removeSelected: () -> Void
+    @MainActor
+    final class Coordinator {
+        let importingIndicator = UIActivityIndicatorView(style: .medium)
+        var rows: [ManagementListView.Row] = []
+        var query = ""
+
+        func renderRows(in view: ManagementListView, state: MusicSourceManagementState) {
+            let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            let visible = needle.isEmpty ? rows : rows.filter {
+                [$0.title, $0.detail, $0.id].contains { $0.localizedCaseInsensitiveContains(needle) }
+            }
+            view.setRows(visible, total: rows.count, validIDs: Set(rows.map(\.id)),
+                         emptyMessage: state.importing ? "正在导入音源" :
+                            (rows.isEmpty ? "暂无音源" : "没有匹配的音源"))
+            view.setSelection(state.selected)
+            updateDeleteButton(view, state: state)
+        }
+
+        func updateDeleteButton(_ view: ManagementListView, state: MusicSourceManagementState) {
+            let selectedScripts = state.scripts.filter { view.selected.contains($0.id) }
+            view.deleteButton.isEnabled = state.available && !selectedScripts.isEmpty &&
+                !selectedScripts.contains { state.isPending($0.id) }
         }
     }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> ManagementListView {
+        let view = ManagementListView()
+        view.search.placeholder = "搜索音源"
+        view.configureToolbar(showsSearch: true, buttons: [], accessories:
+            state.importing ? [context.coordinator.importingIndicator] : [])
+        view.footerMoreNeedsSelection = true
+        let coordinator = context.coordinator
+        let state = state
+        view.onSearch = { [weak coordinator, weak view] query in
+            guard let coordinator, let view else { return }
+            coordinator.query = query
+            coordinator.renderRows(in: view, state: state)
+        }
+        view.onSelection = { [weak coordinator, weak view] in
+            guard let coordinator, let view else { return }
+            state.selected = view.selected
+            coordinator.updateDeleteButton(view, state: state)
+        }
+        view.onDelete = removeSelected
+        return view
+    }
+
+    func updateUIView(_ view: ManagementListView, context: Context) {
+        view.onDelete = removeSelected
+        view.applyTheme(theme)
+        let rows = MusicAccountPlatform.allCases.map { platform in
+            let id = "official:" + platform.rawValue
+            let checking = state.checking.contains(id)
+            let status = checking ? "检测中" : MusicSourceManagementContent.healthName(
+                state.officialChecks[platform].map { $0 ? "ok" : "failed" })
+            return ManagementListView.Row(id: id, title: platform.title,
+                detail: "内置 · \(status)", enabled: state.officialEnabled(platform),
+                failed: state.officialChecks[platform] == false, controlsEnabled: state.available,
+                toggleEnabled: !state.savingOfficial,
+                toggle: { state.setOfficial(platform, enabled: $0) }, menu: UIMenu(children: [
+                    UIAction(title: "检测", attributes: checking ? .disabled : []) { _ in state.checkOfficial(platform) },
+                ]))
+        } + state.scripts.map { item in
+            let checking = state.checking.contains(item.id)
+            let status = state.isPending(item.id) && !checking
+                ? "处理中" : MusicScriptSourceDetailContent.status(item.state)
+            let detail = "\(status) · \(checking ? "检测中" : MusicSourceManagementContent.healthName(item.check?.summary))"
+            return ManagementListView.Row(id: item.id, title: item.name, detail: detail,
+                enabled: state.scriptEnabled(item), failed: item.state == .failed ||
+                    item.check?.summary == "failed" || item.check?.summary == "abnormal",
+                controlsEnabled: state.available && !state.isPending(item.id),
+                edit: { edit(item.id) }, open: { openScript(item.id) },
+                toggle: { state.setScript(item.id, enabled: $0) },
+                menu: UIMenu(children: [
+                    UIAction(title: "检测", attributes: state.isPending(item.id) ? .disabled : []) { _ in state.checkScript(item.id) },
+                    UIAction(title: "更新", attributes: state.isPending(item.id) ? .disabled : []) { _ in update(item.id) },
+                ]))
+        }
+        context.coordinator.rows = rows
+        context.coordinator.renderRows(in: view, state: state)
+        let indicator = context.coordinator.importingIndicator
+        view.configureToolbar(showsSearch: true, buttons: [],
+                              accessories: state.importing ? [indicator] : [])
+        if state.importing { indicator.startAnimating() } else { indicator.stopAnimating() }
+        indicator.color = UIColor(theme.settings.accent)
+        context.coordinator.updateDeleteButton(view, state: state)
+        view.footerMore.isEnabled = state.available && !view.selected.isEmpty
+        view.footerMore.menu = UIMenu(children: [
+            UIAction(title: "检测", attributes: view.selected.isEmpty ? .disabled : []) {
+                _ in state.checkSelected()
+            },
+        ])
+    }
+
 }
 
 @MainActor
@@ -367,7 +354,7 @@ final class MusicScriptSourceDetailViewController: MusicSettingsPageViewControll
         super.applyTheme()
         guard contentThemeChanged() else { return }
         setContent(MusicScriptSourceDetailContent(
-            state: state, id: id, theme: theme, remove: { [weak self] in self?.confirmRemove() }
+            state: state, id: id, theme: theme
         ))
     }
 
@@ -382,18 +369,6 @@ final class MusicScriptSourceDetailViewController: MusicSettingsPageViewControll
         guard state.item(id) == nil || !state.available, navigationController?.topViewController === self else { return }
         navigationController?.popViewController(animated: true)
     }
-
-    private func confirmRemove() {
-        guard isPageActive, presentedViewController == nil, let item = state.item(id) else { return }
-        let access = state.model.accountAccessGeneration
-        let alert = UIAlertController(title: "删除音源？", message: item.name, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in
-            guard let self, self.isPageActive, access == self.state.model.accountAccessGeneration else { return }
-            self.state.remove(self.id)
-        })
-        present(alert, animated: true)
-    }
 }
 
 @MainActor
@@ -401,31 +376,37 @@ struct MusicScriptSourceDetailContent: View {
     @ObservedObject var state: MusicSourceManagementState
     let id: String
     let theme: PageTheme
-    var remove: () -> Void = {}
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         List {
             if let item = state.item(id) {
                 Section {
-                    row("版本", item.version)
+                    row("版本", item.version, first: true)
                     if !item.author.isEmpty { row("作者", item.author) }
                     if !item.summary.isEmpty { row("简介", item.summary) }
                     if !item.homepage.isEmpty { row("主页", item.homepage) }
                     row("来源", { if case .network(let host) = item.origin { return host }; return "本地文件" }())
                     if !item.platforms.isEmpty { row("支持平台", item.platforms.map(\.title).joined(separator: "、")) }
                     row("状态", MusicSourceManagementContent.healthName(item.check?.summary))
-                    row("运行状态", Self.status(item.state))
-                    if let detail = state.details[id], let url = detail.networkURL { row("网络地址", url) }
-                    if let check = item.check { row("检测时间", check.checkedAt.formatted()) }
+                    row("运行状态", Self.status(item.state),
+                        last: state.details[id]?.networkURL == nil && item.check == nil)
+                    if let detail = state.details[id], let url = detail.networkURL {
+                        row("网络地址", url, last: item.check == nil)
+                    }
+                    if let check = item.check { row("检测时间", check.checkedAt.formatted(), last: true) }
                 }
+                .listSectionSeparator(.hidden)
                 Section("平台检测") {
                     ForEach(MusicPublicBrowsePlatform.allCases) { platform in
-                        row(platform.title, MusicSourceManagementContent.healthName(item.check?.platforms[platform.rawValue]))
+                        row(platform.title, MusicSourceManagementContent.healthName(item.check?.platforms[platform.rawValue]),
+                            first: platform == MusicPublicBrowsePlatform.allCases.first,
+                            last: platform == MusicPublicBrowsePlatform.allCases.last)
                     }
                 }
-                Section {
-                    if state.details[id]?.rollbackAvailable == true {
+                .listSectionSeparator(.hidden)
+                if state.details[id]?.rollbackAvailable == true {
+                    Section {
                         Button { state.rollback(id) } label: {
                             Text("回退更新")
                                 .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
@@ -433,24 +414,18 @@ struct MusicScriptSourceDetailContent: View {
                                 .contentShape(Rectangle())
                         }
                         .disabled(!state.available || state.isPending(id))
-                        .modifier(MusicSettingsRowStyle(theme: theme))
+                        .accessibilityLabel("回退更新")
+                        .accessibilityIdentifier("music.sources.script.rollback")
+                        .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
                     }
-                    Button(role: .destructive, action: remove) {
-                        Text("删除音源")
-                            .foregroundStyle(theme.settingsDanger)
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .disabled(!state.available || state.isPending(id))
-                    .accessibilityIdentifier("music.sources.script.remove")
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .listSectionSeparator(.hidden)
                 }
             }
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }
 
-    private func row(_ title: String, _ value: String) -> some View {
+    private func row(_ title: String, _ value: String, first: Bool = false, last: Bool = false) -> some View {
         let layout = typeSize.isAccessibilitySize
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
             : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 12))
@@ -461,7 +436,7 @@ struct MusicScriptSourceDetailContent: View {
                 .textSelection(.enabled)
         }
         .accessibilityElement(children: .combine)
-        .modifier(MusicSettingsRowStyle(theme: theme))
+        .modifier(MusicSettingsRowStyle(theme: theme, first: first, last: last))
     }
 
     static func status(_ value: MusicScriptSourceItem.State) -> String {

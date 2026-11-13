@@ -68,20 +68,21 @@ struct MusicSourceExclusionsContent: View {
             Section("添加错源") {
                 Picker("歌曲", selection: $state.song) {
                     ForEach(state.model.queue) { entry in Text(entry.track.title + " — " + entry.track.artist).tag(entry.id) }
-                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme))
+                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme, first: true, last: false))
                 Picker("音源", selection: $state.provider) {
                     Text("官方音源").tag("official:")
                     ForEach(state.scripts) { item in Text(item.name).tag(item.id) }
-                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme))
+                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme, first: false, last: false))
                 Picker("平台", selection: $state.platform) {
                     ForEach(MusicPublicBrowsePlatform.allCases) { Text($0.title).tag($0.rawValue) }
-                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme))
+                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme, first: false, last: false))
                 Button("添加", action: add).disabled(state.song.isEmpty)
                     .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: true))
             }
+            .listSectionSeparator(.hidden)
             Section("已排除") {
-                if state.rows.isEmpty { Text("暂无错源").foregroundStyle(Color(uiColor: UIColor(theme.settings.muted))).modifier(MusicSettingsRowStyle(theme: theme)) }
+                if state.rows.isEmpty { Text("暂无错源").foregroundStyle(Color(uiColor: UIColor(theme.settings.muted))).modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true)) }
                 ForEach(state.rows) { row in
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
@@ -92,9 +93,11 @@ struct MusicSourceExclusionsContent: View {
                         Spacer()
                         Button("恢复") { restore(row.id) }
                             .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
-                    }.modifier(MusicSettingsRowStyle(theme: theme))
+                    }.modifier(MusicSettingsRowStyle(theme: theme,
+                        first: row.id == state.rows.first?.id, last: row.id == state.rows.last?.id))
                 }
             }
+            .listSectionSeparator(.hidden)
         }
         .disabled(state.busy || !state.model.isAvailable)
         .modifier(MusicSettingsListStyle(theme: theme))

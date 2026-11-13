@@ -97,7 +97,7 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
         let statuses = rules.map { NovelRuleImport.status($0, existing: current[$0.id]) }
         let selection = ManagementImportView(items: rules.enumerated().map { index, rule in .init(title: rule.name.isEmpty ? rule.pattern : rule.name, detail: rule.group, status: statuses[index]) }, selected: Set(rules.indices.filter { statuses[$0] != "已有" }))
         let dialog = ManagementDialog(title: "导入替换规则", action: "确定导入", themeProvider: themeProvider); dialog.body.addArrangedSubview(selection)
-        if !failures.isEmpty { let label = UILabel(); label.text = failures.joined(separator: "\n"); label.numberOfLines = 0; label.textColor = .systemRed; label.font = .systemFont(ofSize: 12); dialog.body.addArrangedSubview(label) }
+        if !failures.isEmpty { let label = UILabel(); label.text = failures.joined(separator: "\n"); label.numberOfLines = 0; label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).danger) }; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; dialog.body.addArrangedSubview(label) }
         dialog.submit = { [feature] in
             guard !selection.selected.isEmpty else { throw NovelError.invalidRule(["请选择要导入的替换规则"]) }
             var next = feature.local.rules

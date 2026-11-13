@@ -10,7 +10,7 @@ public final class FilmDataSourceSettingsViewController: PageViewController {
     public init(tmdb: FilmTMDBSettingsModel, douban: FilmDoubanSettingsModel, themeProvider: any PageThemeProviding) {
         self.tmdb = tmdb; self.douban = douban
         super.init(themeProvider: themeProvider)
-        pageTitle = "数据源"
+        pageTitle = "刮削设置"
     }
     public override func viewDidLoad() {
         super.viewDidLoad()

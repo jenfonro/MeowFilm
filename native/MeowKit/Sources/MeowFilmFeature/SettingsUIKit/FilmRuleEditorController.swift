@@ -4,82 +4,60 @@ import MeowUI
 
 /// One rule's fields stay together inside the page, including at accessibility sizes.
 @MainActor
-final class FilmRuleEditorView: UIStackView, UITextViewDelegate {
-    let pattern = UITextView()
-    let replacement: UITextField
-    let flags: UITextField
-    let delete = UIButton(type: .system)
-    private let options = UIStackView()
-    private var flagsWidth: NSLayoutConstraint?
+final class FilmRuleEditorView: UIStackView {
+    private(set) var pattern: UITextView!
+    private(set) var replacement: UITextField?
+    private let preservedFlags: String
+    private(set) var deleteButton: PageHeaderTextButton!
     var change: ((FilmMatchRule) -> Void)?
-    var resize: (() -> Void)?
+    var delete: (() -> Void)?
 
-    init(rule: FilmMatchRule, group: FilmRuleGroup, index: Int, theme: PageTheme) {
+    init(rule: FilmMatchRule, group: FilmRuleGroup, index: Int,
+         theme: PageTheme, form: ManagementFormView) {
         let id = "film.rules.\(group.rawValue).\(index)"
-        replacement = filmTextField("replace", id: id + ".replace", value: rule.replace)
-        flags = filmTextField("flags", id: id + ".flags", value: rule.flags)
+        // `flags` is intentionally not a presentation field. An empty value
+        // remains valid in the wire contract and the runtime resolves it to
+        // its existing default (`i`); preserving the received value also
+        // prevents an unrelated edit from rewriting a stored rule.
+        preservedFlags = rule.flags
         super.init(frame: .zero)
-        axis = .vertical; spacing = 8
-        let patternLabel = UILabel()
-        patternLabel.text = "pattern"; patternLabel.font = .preferredFont(forTextStyle: .caption1)
-        patternLabel.adjustsFontForContentSizeCategory = true; patternLabel.textColor = UIColor(theme.settings.muted)
-        addArrangedSubview(patternLabel)
-        pattern.text = rule.pattern
-        pattern.accessibilityLabel = "pattern"; pattern.accessibilityIdentifier = id + ".pattern"
-        pattern.font = .preferredFont(forTextStyle: .body)
-        pattern.adjustsFontForContentSizeCategory = true
-        pattern.isScrollEnabled = false; pattern.backgroundColor = .clear
-        pattern.autocorrectionType = .no; pattern.autocapitalizationType = .none
-        pattern.smartQuotesType = .no; pattern.smartDashesType = .no
-        pattern.heightAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
-        pattern.delegate = self
-        pattern.textColor = UIColor(theme.settings.ink)
-        addArrangedSubview(pattern)
+        axis = .vertical; spacing = 0
+        let title = UILabel()
+        title.text = "规则 \(index + 1)"
+        title.font = .preferredFont(forTextStyle: .subheadline)
+        title.adjustsFontForContentSizeCategory = true
+        title.textColor = UIColor(theme.settings.ink)
+        let remove = PageHeaderTextButton(title: "删除") { }
+        deleteButton = remove
+        remove.setTitleColor(UIColor(theme.settings.danger), for: .normal)
+        remove.setTitleColor(UIColor(theme.settings.muted), for: .disabled)
+        remove.titleLabel?.font = .preferredFont(forTextStyle: .subheadline)
+        remove.titleLabel?.adjustsFontForContentSizeCategory = true
+        remove.accessibilityLabel = "删除规则 \(index + 1)"
+        remove.accessibilityIdentifier = id + ".delete"
+        remove.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        remove.addAction(UIAction { [weak self] _ in self?.delete?() }, for: .touchUpInside)
+        let heading = UIStackView(arrangedSubviews: [title, UIView(), remove])
+        heading.axis = .horizontal
+        heading.alignment = .center
+        heading.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        addArrangedSubview(heading)
+
+        pattern = form.text("匹配规则", value: rule.pattern, rows: 4,
+            id: id + ".pattern", theme: theme, in: self) { [weak self] _ in
+                self?.changed()
+            } as! UITextView
         if !group.isClean {
-            options.spacing = 12; options.distribution = .fill
-            for (name, field) in [("replace", replacement), ("flags", flags)] {
-                field.textColor = UIColor(theme.settings.ink)
-                field.addAction(UIAction { [weak self] _ in self?.changed() }, for: .editingChanged)
-                let label = UILabel()
-                label.text = name; label.font = .preferredFont(forTextStyle: .caption1)
-                label.adjustsFontForContentSizeCategory = true; label.textColor = UIColor(theme.settings.muted)
-                let stack = UIStackView(arrangedSubviews: [label, field])
-                stack.axis = .vertical; stack.spacing = 4
-                if name == "flags" {
-                    flagsWidth = stack.widthAnchor.constraint(equalToConstant: 72)
-                    flagsWidth?.isActive = true
-                } else {
-                    stack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-                    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-                }
-                options.addArrangedSubview(stack)
-            }
-            addArrangedSubview(options)
+            replacement = form.text("替换内容", value: rule.replace,
+                id: id + ".replace", theme: theme, in: self) { [weak self] _ in self?.changed() } as! UITextField
         }
-        delete.setTitle("删除", for: .normal)
-        delete.tintColor = UIColor(theme.settings.danger)
-        delete.accessibilityIdentifier = id + ".delete"
-        delete.titleLabel?.font = .preferredFont(forTextStyle: .body)
-        delete.titleLabel?.adjustsFontForContentSizeCategory = true
-        delete.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        addArrangedSubview(delete)
     }
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func layoutSubviews() {
-        let axis: NSLayoutConstraint.Axis = bounds.width < 300 || traitCollection.preferredContentSizeCategory.isAccessibilityCategory
-            ? .vertical : .horizontal
-        if options.axis != axis {
-            flagsWidth?.isActive = axis == .horizontal
-            options.axis = axis
-        }
-        super.layoutSubviews()
-    }
-    func textViewDidChange(_ textView: UITextView) { changed(); resize?() }
     private func changed() {
-        change?(.init(pattern: pattern.text, replace: replacement.text ?? "", flags: flags.text ?? ""))
+        change?(.init(pattern: pattern.text, replace: replacement?.text ?? "", flags: preservedFlags))
     }
     func setEnabled(_ enabled: Bool) {
-        pattern.isEditable = enabled; replacement.isEnabled = enabled; flags.isEnabled = enabled; delete.isEnabled = enabled
+        pattern.isEditable = enabled; replacement?.isEnabled = enabled; deleteButton.isEnabled = enabled
     }
 }
 #endif

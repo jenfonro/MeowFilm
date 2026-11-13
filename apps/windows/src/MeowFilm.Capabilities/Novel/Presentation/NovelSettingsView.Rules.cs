@@ -32,8 +32,8 @@ public sealed partial class NovelSettingsView
     }
     private async Task EditRuleAsync(NovelRule rule, CancellationToken token)
     {
-        var editor = new NovelRuleEditor(rule, module.Notify) { Height = Math.Max(300, Window.GetWindow(this)?.ActualHeight - 220 ?? 520) };
-        await NovelUi.DialogAsync(this, "替换规则编辑", editor, "保存", async ct => { await SaveRuleAsync(editor.Read(), ct); return true; }, token);
+        var editor = new NovelRuleEditor(rule, module.Notify);
+        await NovelUi.DialogAsync(this, "替换规则编辑", editor, "保存", async ct => { await SaveRuleAsync(editor.Read(), ct); return true; }, token, applicationOverlay: true);
     }
     private async Task SaveRuleAsync(NovelRule rule, CancellationToken token)
     {
@@ -51,7 +51,7 @@ public sealed partial class NovelSettingsView
     }
     private async Task RemoveRulesAsync(NovelRule[] rules, CancellationToken token)
     {
-        if (rules.Length == 0 || !await NovelUi.ConfirmAsync(this, "删除替换规则", $"删除所选 {rules.Length} 条规则？", "删除", token)) return;
+        if (rules.Length == 0 || !await NovelUi.ConfirmAsync(this, "删除替换规则", $"删除所选 {rules.Length} 条规则？", "删除", token, applicationOverlay: true)) return;
         var ids = rules.Select(r => r.Id).ToHashSet(); await SaveRulesAsync(module.Library.Rules.Where(r => !ids.Contains(r.Id)).ToArray(), token);
     }
     private async Task ImportRuleFileAsync(CancellationToken token)
@@ -83,7 +83,7 @@ public sealed partial class NovelSettingsView
         {
             if (!Uri.TryCreate(input.Text.Trim(), UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https") || url.UserInfo.Length > 0) throw new InvalidDataException("网络地址无效");
             using var http = new HttpClient(new HttpClientHandler { UseCookies = false }); text = await http.GetStringAsync(url, ct); return true;
-        }, token);
+        }, token, applicationOverlay: true);
         if (accepted) await PreviewRulesAsync(text, token);
     }
     private async Task<(NovelRule[] Rules, string[] Failures)> ParseRulesAsync(string text, CancellationToken token)
@@ -110,7 +110,7 @@ public sealed partial class NovelSettingsView
         {
             if (selection.Selected.Count == 0) throw new InvalidDataException("请选择要导入的替换规则");
             await MergeRulesAsync(rules.Where((_, index) => selection.Selected.Contains(index)).ToArray(), ct); return true;
-        }, token);
+        }, token, applicationOverlay: true);
     }
     // The accepted import operation is separate from the preview UI and retains
     // stable external IDs. It is also used by the rule-consumer integration tests.
@@ -146,7 +146,7 @@ public sealed partial class NovelSettingsView
             if (list.Children.Count == 0) list.Children.Add(NovelUi.Text("暂无分组", muted: true));
             // Close and await one modal before opening the next. Every edit and
             // its physical drain remains owned by this settings operation.
-            await NovelUi.DialogAsync(this, "分组管理", panel, "完成", _ => Task.FromResult(true), choice.Token);
+            await NovelUi.DialogAsync(this, "分组管理", panel, "完成", _ => Task.FromResult(true), choice.Token, applicationOverlay: true);
             if (selected is not { } next || token.IsCancellationRequested) return;
             if (next.Remove) await RemoveAsync(next.Group!); else await EditAsync(next.Group);
         }
@@ -157,11 +157,11 @@ public sealed partial class NovelSettingsView
             {
                 string name = input.Text.Trim(); if (NovelGroups.Split(name).Length != 1) throw new InvalidDataException("请填写单个分组名称");
                 await ChangeAsync(old, name, ct); return true;
-            }, token);
+            }, token, applicationOverlay: true);
         }
         async Task RemoveAsync(string group)
         {
-            await NovelUi.DialogAsync(this, "删除分组", NovelUi.Text($"移除分组“{group}”？"), "删除", async ct => { await ChangeAsync(group, null, ct); return true; }, token);
+            await NovelUi.DialogAsync(this, "删除分组", NovelUi.Text($"移除分组“{group}”？"), "删除", async ct => { await ChangeAsync(group, null, ct); return true; }, token, applicationOverlay: true);
         }
         async Task ChangeAsync(string? old, string? next, CancellationToken ct)
         {

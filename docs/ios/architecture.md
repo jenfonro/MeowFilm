@@ -24,6 +24,8 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 设置窗口背景和 App 页头仍使用原 `PageTheme` 渐变；首页、播放器、原始播放目录、FM 选择器和阅读正文的配色契约不变。原始目录复用影视列表布局但显式不采用设置语义色。该投影不读写偏好，不新增主题模式或存储。
 
+`SettingsVisualMetrics`、`SettingsRowBackgroundView` 共同定义卡片轮廓、行内间距和分割线；UIKit 设置表使用 `SettingsTableView`／`SettingsTableCell`，SwiftUI 音乐设置保留 `List` 并使用薄适配绘制同一底板。设置根页及其下级页面隐藏胶囊播放器，同时撤销其底部占位；返回设置栈外恢复原播放器状态，不停止播放。
+
 ### 启动与首页发布
 
 `MeowfilmLaunchController` 只持有用户清除数据的冷启动屏障。屏障成功后才创建 `MeowfilmAssembly`，业务本地恢复不进入清除流程。Coordinator 继续使用已有 `startupPage`，通过原生 `UIActivityIndicatorView` 表示等待，并保留设置入口；不增加品牌画面或最低停留时长。

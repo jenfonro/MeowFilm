@@ -65,14 +65,17 @@ internal static class NovelWebInteraction
         if ((input.Mode is "verificationCode" or "getVerificationCode") && input.Url.Length == 0)
         {
             var code = NovelUi.Input("验证码");
-            if (!await NovelUi.DialogAsync(owner, "验证码", code, "确认", _ => Task.FromResult(code.Text.Length > 0), token)) throw new OperationCanceledException(token);
+            if (!await NovelUi.DialogAsync(owner, "验证码", NovelUi.Field("验证码", code), "确认", _ => Task.FromResult(code.Text.Length > 0), token)) throw new OperationCanceledException(token);
             return code.Text;
         }
         if (input.Url.Length == 0) throw new InvalidDataException("WEB_REQUEST_UNSUPPORTED");
         var web = new WebView2(); var panel = new DockPanel();
         var codeInput = NovelUi.Input("验证码");
         if (input.Mode is "verificationCode" or "getVerificationCode")
-        { DockPanel.SetDock(codeInput, Dock.Bottom); panel.Children.Add(codeInput); }
+        {
+            var codeField = NovelUi.Field("验证码", codeInput);
+            DockPanel.SetDock(codeField, Dock.Bottom); panel.Children.Add(codeField);
+        }
         web.MinHeight = 320; panel.Children.Add(web);
         var navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var selectedUrl = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);

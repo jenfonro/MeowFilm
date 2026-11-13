@@ -106,7 +106,9 @@ private struct MusicMetadataPlatformsContent: View {
                     }
                     .disabled(state.busy)
                     .moveDisabled(state.busy)
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .modifier(MusicSettingsRowStyle(theme: theme,
+                        first: platform == state.value?.platforms.first,
+                        last: platform == state.value?.platforms.last))
                 }
                 .onMove { offsets, destination in
                     guard var platforms = state.value?.platforms else { return }
@@ -115,6 +117,7 @@ private struct MusicMetadataPlatformsContent: View {
                 }
             }
             .headerProminence(.increased)
+            .listSectionSeparator(.hidden)
         }
         .environment(\.editMode, .constant(.active))
         .modifier(MusicSettingsListStyle(theme: theme))

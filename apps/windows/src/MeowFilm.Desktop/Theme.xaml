@@ -372,6 +372,24 @@
     </Style>
     <Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}" />
 
+    <Style x:Key="MeowFilm.Text" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
+        <Style.Triggers>
+            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="MeowFilm.MutedText" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}">
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}" />
+    </Style>
+    <Style x:Key="MeowFilm.ErrorText" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}">
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Error}" />
+    </Style>
+    <Style x:Key="MeowFilm.AccentText" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}">
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.AccentText}" />
+    </Style>
+
     <Style x:Key="MeowFilm.Heading" TargetType="TextBlock">
         <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" />
         <Setter Property="FontSize" Value="26" />
@@ -596,17 +614,26 @@
   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
  </Style>
  <Style x:Key="MeowFilm.ManagementInput" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
-  <Setter Property="SelectionBrush" Value="#007AFF"/>
+  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
+  <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TextBox">
    <Border CornerRadius="12" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
     <Grid>
      <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
-     <TextBlock x:Name="Hint" Text="{TemplateBinding Tag}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" Foreground="{DynamicResource MeowFilm.Brush.Muted}" IsHitTestVisible="False" Visibility="Collapsed"/>
+     <TextBlock x:Name="Hint" Text="{TemplateBinding Tag}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" Style="{StaticResource MeowFilm.MutedText}" IsHitTestVisible="False" Visibility="Collapsed"/>
     </Grid>
    </Border>
    <ControlTemplate.Triggers><Trigger Property="Text" Value=""><Setter TargetName="Hint" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
   </ControlTemplate></Setter.Value></Setter>
-  <Style.Triggers><Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter Property="BorderBrush" Value="#007AFF"/></Trigger></Style.Triggers>
+ </Style>
+ <Style x:Key="MeowFilm.ImportStatusBadge" TargetType="Border">
+  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/>
+  <Style.Triggers>
+   <Trigger Property="Tag" Value="existing"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/></Trigger>
+   <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+   </Trigger>
+  </Style.Triggers>
  </Style>
  <Style x:Key="MeowFilm.ManagementSearch" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
   <Setter Property="Height" Value="38"/><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>

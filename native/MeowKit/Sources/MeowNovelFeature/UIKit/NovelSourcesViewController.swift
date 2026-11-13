@@ -126,7 +126,7 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
         let dialog = ManagementDialog(title: "导入书源", action: "确定导入", themeProvider: themeProvider)
         let selection = ManagementImportView(items: preview.items.map { .init(title: $0.name, detail: [NovelSourceProtocol(rawValue: $0.protocol)?.title ?? $0.protocol, $0.group].filter { !$0.isEmpty }.joined(separator: " · "), status: $0.exists ? "已存在" : "新增") })
         dialog.body.addArrangedSubview(selection)
-        if !preview.failures.isEmpty { let label = UILabel(); label.text = preview.failures.map { "条目 \($0.index + 1) · \($0.code)" }.joined(separator: "\n"); label.numberOfLines = 0; label.font = .systemFont(ofSize: 12); label.textColor = .systemRed; dialog.body.addArrangedSubview(label) }
+        if !preview.failures.isEmpty { let label = UILabel(); label.text = preview.failures.map { "条目 \($0.index + 1) · \($0.code)" }.joined(separator: "\n"); label.numberOfLines = 0; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).danger) }; dialog.body.addArrangedSubview(label) }
         var failures: [String] = []
         dialog.submit = { [feature] in
             guard !selection.selected.isEmpty else { throw NovelError.invalidRule(["请选择要导入的书源"]) }

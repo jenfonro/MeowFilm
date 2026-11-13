@@ -22,14 +22,19 @@ final class PanAccountsUIKitTests: XCTestCase {
         let page = PanAccountsViewController(model: model, themeProvider: theme)
         page.loadViewIfNeeded()
         defer { PageViewController.invalidatePages(in: page); model.close() }
+        XCTAssertTrue(page.table is SettingsTableView)
+        XCTAssertEqual(page.table.separatorStyle, .none)
         XCTAssertEqual(page.tableView(page.table, numberOfRowsInSection: 0), 8)
         let header = page.tableView(page.table, cellForRowAt: IndexPath(row: 0, section: 0))
         XCTAssertEqual(descendants(header).compactMap { ($0 as? UILabel)?.text }, ["平台", "状态", "操作"])
+        XCTAssertTrue(descendants(header).compactMap { $0 as? UILabel }.allSatisfy(\.adjustsFontForContentSizeCategory))
+        XCTAssertTrue((header.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
         for (index, status, titles) in [(1, "已登录", ["刷新", "退出登录"]), (2, "失效", ["重新登录", "退出登录"]), (3, "未登录", ["登录"])] {
             let cell = page.tableView(page.table, cellForRowAt: IndexPath(row: index, section: 0))
             let columns = try XCTUnwrap(descendants(cell).compactMap { $0 as? PanAccountColumns }.first)
             XCTAssertEqual(columns.arrangedSubviews.count, 3)
             XCTAssertEqual(descendants(columns.columns[1]).compactMap { ($0 as? UILabel)?.text }, [status])
+            XCTAssertTrue(descendants(columns.columns[1]).compactMap { $0 as? UILabel }.allSatisfy(\.adjustsFontForContentSizeCategory))
             XCTAssertEqual(descendants(columns.columns[2]).compactMap { ($0 as? UIButton)?.configuration?.title }, titles)
             for width in [CGFloat(320), 390, 430] {
                 cell.frame = CGRect(x: 0, y: 0, width: width - 32, height: 120)
@@ -48,9 +53,65 @@ final class PanAccountsUIKitTests: XCTestCase {
         page.overrideUserInterfaceStyle = .dark
         theme.setColorway(.sky); page.applyTheme()
         let darkCell = page.tableView(page.table, cellForRowAt: IndexPath(row: 1, section: 0))
-        XCTAssertEqual(darkCell.backgroundColor, UIColor(page.theme.surface))
+        let darkBackground = try XCTUnwrap(darkCell.backgroundView as? SettingsRowBackgroundView)
+        let fill = try XCTUnwrap(darkBackground.layer.sublayers?.compactMap { $0 as? CAShapeLayer }.first?.fillColor)
+        XCTAssertTrue(UIColor(cgColor: fill).isEqual(UIColor(page.theme.settings.surface)))
         let status = try XCTUnwrap(descendants(darkCell).first { $0.accessibilityIdentifier == "pan.accounts.status" } as? UILabel)
-        XCTAssertEqual(status.textColor, UIColor(page.theme.muted))
+        XCTAssertEqual(status.textColor, UIColor(page.theme.settings.muted))
+    }
+
+    func testTableSemanticColorsAndBusyActionsFollowStyleWithoutFollowingPalette() async throws {
+        let runtime = PanUIKitRuntime()
+        await runtime.set(.baidu, status: .signedIn)
+        await runtime.set(.quark, status: .expired)
+        let model = PanAccountsModel(service: runtime.service)
+        await model.start()?.value
+        let theme = PanAccountsTheme()
+        let page = PanAccountsViewController(model: model, themeProvider: theme)
+        page.loadViewIfNeeded()
+        defer { PageViewController.invalidatePages(in: page); model.close() }
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            page.overrideUserInterfaceStyle = style
+            let settings = SettingsTheme(dark: style == .dark)
+            for colorway in [PageColorway.lilac, .sky] {
+                theme.setColorway(colorway); page.applyTheme()
+                let header = page.tableView(page.table, cellForRowAt: IndexPath(row: 0, section: 0))
+                let headings = descendants(header).compactMap { $0 as? UILabel }
+                XCTAssertEqual(headings.count, 3)
+                for heading in headings { XCTAssertEqual(heading.textColor, UIColor(settings.muted)) }
+                for index in 1...3 {
+                    let cell = page.tableView(page.table, cellForRowAt: IndexPath(row: index, section: 0))
+                    let status = try XCTUnwrap(descendants(cell).first {
+                        $0.accessibilityIdentifier == "pan.accounts.status"
+                    } as? UILabel)
+                    XCTAssertEqual(status.textColor, UIColor(index == 2 ? settings.danger : settings.muted))
+                    let actions = descendants(cell).compactMap { $0 as? UIButton }
+                    XCTAssertEqual(actions.count, index == 3 ? 1 : 2)
+                    for action in actions {
+                        XCTAssertTrue(action.isEnabled)
+                        XCTAssertEqual(action.configuration?.baseForegroundColor, UIColor(settings.accent))
+                        XCTAssertEqual(try titleColor(action), UIColor(settings.accent))
+                    }
+                }
+                XCTAssertNotNil(model.openLogin(.baidu))
+                let busyCell = page.tableView(page.table, cellForRowAt: IndexPath(row: 1, section: 0))
+                let busyActions = descendants(busyCell).compactMap { $0 as? UIButton }
+                XCTAssertEqual(busyActions.count, 2)
+                for action in busyActions {
+                    XCTAssertFalse(action.isEnabled)
+                    XCTAssertEqual(action.configuration?.baseForegroundColor, UIColor(settings.muted))
+                    XCTAssertEqual(try titleColor(action), UIColor(settings.muted))
+                }
+                model.closeLogin()
+                let restoredCell = page.tableView(page.table, cellForRowAt: IndexPath(row: 1, section: 0))
+                let restoredActions = descendants(restoredCell).compactMap { $0 as? UIButton }
+                XCTAssertEqual(restoredActions.count, 2)
+                for action in restoredActions {
+                    XCTAssertTrue(action.isEnabled)
+                    XCTAssertEqual(try titleColor(action), UIColor(settings.accent))
+                }
+            }
+        }
     }
 
     func testTableRefreshAndLogoutButtonsCallRuntimeAndLoginOpensSharedFloatingCard() async throws {
@@ -182,6 +243,15 @@ final class PanAccountsUIKitTests: XCTestCase {
 
     private func button(_ id: String, in view: UIView) throws -> UIButton {
         try XCTUnwrap(descendants(view).first { $0.accessibilityIdentifier == id } as? UIButton)
+    }
+    private func titleColor(_ button: UIButton) throws -> UIColor {
+        button.setNeedsLayout(); button.layoutIfNeeded()
+        let label = try XCTUnwrap(button.titleLabel)
+        if let text = label.attributedText, text.length > 0,
+           let color = text.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor {
+            return color
+        }
+        return label.textColor
     }
     private func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
     private func mount(_ page: UIViewController) -> UIWindow {

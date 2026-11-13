@@ -29,19 +29,22 @@ public sealed class ManagementList : Grid
         RowDefinitions.Add(new() { Height = GridLength.Auto }); RowDefinitions.Add(new());
         var toolbar = new DockPanel { Margin = new(0, 4, 0, 10) }; DockPanel.SetDock(Tools, Dock.Right); toolbar.Children.Add(Tools); toolbar.Children.Add(Search); Children.Add(toolbar);
         Search.Tag = "搜索"; Search.SetResourceReference(StyleProperty, "MeowFilm.ManagementSearch"); AutomationProperties.SetName(Search, "搜索");
-        var card = new Border { CornerRadius = new(22), Padding = new(8, 8, 8, 76), ClipToBounds = true }; card.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface");
+        var card = new Border { CornerRadius = new(22), BorderThickness = new(1), Padding = new(8, 8, 8, 76), ClipToBounds = true };
+        card.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
         var items = new Grid(); items.Children.Add(list); items.Children.Add(empty); card.Child = items; SetRow(card, 1); Children.Add(card);
         var template = new DataTemplate(typeof(ManagementRow)) { VisualTree = new FrameworkElementFactory(typeof(ManagementRowView)) }; list.ItemTemplate = template;
         list.SetValue(VirtualizingPanel.IsVirtualizingProperty, true); list.SetValue(VirtualizingPanel.VirtualizationModeProperty, VirtualizationMode.Recycling);
         list.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Disabled);
         var container = new Style(typeof(ListBoxItem)); container.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch)); container.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0))); list.ItemContainerStyle = container;
-        list.SetValue(ScrollViewer.CanContentScrollProperty, true); list.SetResourceReference(Control.ForegroundProperty, "MeowFilm.Brush.Text"); empty.SetResourceReference(TextBlock.ForegroundProperty, "MeowFilm.Brush.Muted");
+        list.SetValue(ScrollViewer.CanContentScrollProperty, true); empty.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.MutedText");
         var footer = new DockPanel { LastChildFill = true }; var actions = new StackPanel { Orientation = Orientation.Horizontal };
         inverse = Button("反选", () => { selected.SymmetricExceptWith(rows.Select(r => r.Id)); Changed(); });
         remove = Button("删除", () => Delete?.Invoke()); More = Button("···", () => OpenMenu(More!));
         AutomationProperties.SetName(More, "批量更多操作"); actions.Children.Add(inverse); actions.Children.Add(remove); actions.Children.Add(More); DockPanel.SetDock(actions, Dock.Right); footer.Children.Add(actions); footer.Children.Add(all);
-        var floating = new Border { CornerRadius = new(26), Padding = new(14, 8, 12, 8), Margin = new(12, 0, 12, 12), Height = 52, VerticalAlignment = VerticalAlignment.Bottom, Child = footer,
-            Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 22, ShadowDepth = 6, Opacity = .12 } }; floating.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface"); SetRow(floating, 1); Children.Add(floating);
+        var floating = new Border { CornerRadius = new(26), BorderThickness = new(1), Padding = new(14, 8, 12, 8), Margin = new(12, 0, 12, 12), Height = 52, VerticalAlignment = VerticalAlignment.Bottom, Child = footer,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 22, ShadowDepth = 6, Opacity = .12 } };
+        floating.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
+        SetRow(floating, 1); Children.Add(floating);
         foreach (var button in new[] { inverse, remove, More }) { button.Height = 32; button.MinHeight = 32; button.Padding = new(16, 0, 16, 0); button.SetResourceReference(Control.BackgroundProperty, "MeowFilm.Brush.InputSurface"); }
         all.Tag = "round"; all.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck");
         all.Click += (_, _) => { selected.Clear(); if (all.IsChecked == true) selected.UnionWith(rows.Select(r => r.Id)); Changed(); };
@@ -92,8 +95,8 @@ public sealed class ManagementRowView : Grid
         var check = new CheckBox { IsChecked = state.Selected, Tag = "round", Margin = new(12, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center }; check.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck");
         AutomationProperties.SetName(check, "选择 " + row.Title); check.Click += (_, _) => state.Select(check.IsChecked == true); Children.Add(check);
         var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 8, 12, 8) };
-        var title = new TextBlock { Text = row.Title, FontSize = 15, FontWeight = FontWeights.Medium, TextTrimming = TextTrimming.CharacterEllipsis }; title.SetResourceReference(TextBlock.ForegroundProperty, "MeowFilm.Brush.Text"); text.Children.Add(title);
-        if (row.Detail.Length > 0) { var detail = new TextBlock { Text = row.Detail, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(0, 4, 0, 0) }; detail.SetResourceReference(TextBlock.ForegroundProperty, row.Failed ? "MeowFilm.Brush.Error" : "MeowFilm.Brush.Muted"); text.Children.Add(detail); }
+        var title = new TextBlock { Text = row.Title, FontSize = 15, FontWeight = FontWeights.Medium, TextTrimming = TextTrimming.CharacterEllipsis }; title.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.Text"); text.Children.Add(title);
+        if (row.Detail.Length > 0) { var detail = new TextBlock { Text = row.Detail, FontSize = 12, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(0, 4, 0, 0) }; detail.SetResourceReference(FrameworkElement.StyleProperty, row.Failed ? "MeowFilm.ErrorText" : "MeowFilm.MutedText"); text.Children.Add(detail); }
         SetColumn(text, 1); Children.Add(text);
         var enabled = new CheckBox { IsChecked = row.Enabled, VerticalAlignment = VerticalAlignment.Center, Margin = new(8, 0, 12, 0) }; enabled.SetResourceReference(StyleProperty, "MeowFilm.ManagementSwitch"); AutomationProperties.SetName(enabled, "启用 " + row.Title); enabled.Click += (_, _) => row.Toggle(enabled.IsChecked == true); SetColumn(enabled, 2); Children.Add(enabled);
         var edit = ManagementList.Button("编辑", row.Edit); AutomationProperties.SetName(edit, "编辑 " + row.Title); SetColumn(edit, 3); Children.Add(edit);

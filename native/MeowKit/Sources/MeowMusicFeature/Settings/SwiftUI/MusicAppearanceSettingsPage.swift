@@ -71,8 +71,9 @@ public struct MusicAppearanceSettingsContent: View {
                     }
                 }
                 .accessibilityIdentifier("settings.colors")
-                .modifier(MusicSettingsRowStyle(theme: theme))
+                .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
             }
+            .listSectionSeparator(.hidden)
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }
@@ -130,19 +131,23 @@ struct MusicColorSettingsContent: View {
                 }
                 .pickerStyle(.menu)
                 .accessibilityIdentifier("settings.colors.mode")
-                .modifier(MusicSettingsRowStyle(theme: theme))
+                .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
             }
+            .listSectionSeparator(.hidden)
             if state.value.colorMode == .fixed {
                 Section("固定配色") {
                     ForEach(PageColorway.allCases, id: \.rawValue) { palette in
                         option(palette.title, selected: state.value.colorPalette == .preset(palette),
-                               id: "music.settings.palette." + palette.rawValue) {
+                               id: "music.settings.palette." + palette.rawValue,
+                               first: palette == PageColorway.allCases.first, last: false) {
                             state.selectPalette(.preset(palette))
                         }
                     }
-                    option("自定义颜色", selected: isCustom, id: "settings.colors.custom", action: customize)
+                    option("自定义颜色", selected: isCustom, id: "settings.colors.custom",
+                           first: false, last: true, action: customize)
                 }
                 .headerProminence(.increased)
+                .listSectionSeparator(.hidden)
             }
         }
         .modifier(MusicSettingsListStyle(theme: theme))
@@ -153,7 +158,8 @@ struct MusicColorSettingsContent: View {
         return false
     }
 
-    private func option(_ title: String, selected: Bool, id: String, action: @escaping () -> Void) -> some View {
+    private func option(_ title: String, selected: Bool, id: String, first: Bool, last: Bool,
+                        action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Text(title).fixedSize(horizontal: false, vertical: true)
@@ -164,12 +170,11 @@ struct MusicColorSettingsContent: View {
                         .accessibilityHidden(true)
                 }
             }
-            .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier(id)
-        .modifier(MusicSettingsRowStyle(theme: theme))
+        .modifier(MusicSettingsRowStyle(theme: theme, first: first, last: last))
     }
 }
 

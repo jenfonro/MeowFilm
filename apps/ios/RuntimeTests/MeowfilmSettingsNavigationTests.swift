@@ -40,6 +40,38 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         attach(page, "settings-root-phone")
     }
 
+    func testSettingsPagesShareCardRowsAndUseTheirOwnVisibleHeaderTitle() throws {
+        let store = MusicAppearancePreferencesStore()
+        let root = MeowfilmSettingsViewController(themeProvider: store, resetUserData: {})
+        let novel = NovelTablePage(themeProvider: store)
+        novel.pageTitle = "小说设置"
+        novel.rows = [.init(title: "书源管理", detail: "启用") {}, .init(title: "阅读排版") {}]
+        _ = try host(root); _ = try host(novel)
+
+        let rootTable = try XCTUnwrap(descendants(root.view).compactMap { $0 as? SettingsTableView }.first)
+        let novelTable = try XCTUnwrap(descendants(novel.view).compactMap { $0 as? SettingsTableView }.first)
+        XCTAssertEqual(root.pageHeader.title, "设置")
+        XCTAssertEqual(novel.pageHeader.title, "小说设置")
+        XCTAssertNil(root.navigationItem.title)
+        XCTAssertNil(novel.navigationItem.title)
+        XCTAssertEqual(rootTable.separatorStyle, .none)
+        XCTAssertEqual(novelTable.separatorStyle, .none)
+
+        let rootFirst = root.tableView(rootTable, cellForRowAt: IndexPath(row: 0, section: 0))
+        let rootLast = root.tableView(rootTable, cellForRowAt: IndexPath(row: 2, section: 0))
+        let novelFirst = novel.tableView(novelTable, cellForRowAt: IndexPath(row: 0, section: 0))
+        let novelLast = novel.tableView(novelTable, cellForRowAt: IndexPath(row: 1, section: 0))
+        XCTAssertTrue(rootFirst is SettingsTableCell)
+        XCTAssertTrue(novelFirst is SettingsTableCell)
+        XCTAssertEqual((rootFirst.contentConfiguration as? UIListContentConfiguration)?.text, "音乐设置")
+        XCTAssertEqual((novelFirst.contentConfiguration as? UIListContentConfiguration)?.text, "书源管理")
+        XCTAssertEqual((novelFirst.contentConfiguration as? UIListContentConfiguration)?.secondaryText, "启用")
+        XCTAssertTrue((rootFirst.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
+        XCTAssertFalse((rootLast.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
+        XCTAssertTrue((novelFirst.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
+        XCTAssertFalse((novelLast.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
+    }
+
     func testUserDataResetRequiresDestructiveConfirmationAndCancelDoesNotRequestIt() throws {
         var requests = 0
         let page = MeowfilmSettingsViewController(themeProvider: MusicAppearancePreferencesStore(),
@@ -197,10 +229,12 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
                 XCTAssertEqual((danger.contentConfiguration as? UIListContentConfiguration)?.textProperties.color,
                     UIColor(colors.danger))
                 let novelRow = novel.tableView(novelTable, cellForRowAt: IndexPath(row: 0, section: 0))
-                XCTAssertEqual(novelRow.textLabel?.textColor, UIColor(colors.ink))
-                XCTAssertEqual(novelRow.detailTextLabel?.textColor, UIColor(colors.muted))
+                let novelContent = try XCTUnwrap(novelRow.contentConfiguration as? UIListContentConfiguration)
+                XCTAssertEqual(novelContent.textProperties.color, UIColor(colors.ink))
+                XCTAssertEqual(novelContent.secondaryTextProperties.color, UIColor(colors.muted))
                 XCTAssertEqual(novel.view.tintColor, UIColor(colors.accent))
-                XCTAssertEqual(novel.tableView(novelTable, cellForRowAt: IndexPath(row: 1, section: 0)).textLabel?.textColor,
+                let novelDanger = novel.tableView(novelTable, cellForRowAt: IndexPath(row: 1, section: 0))
+                XCTAssertEqual((novelDanger.contentConfiguration as? UIListContentConfiguration)?.textProperties.color,
                     UIColor(colors.danger))
             }
             attach(root, "settings-semantic-root-\(dark ? "dark" : "light")")

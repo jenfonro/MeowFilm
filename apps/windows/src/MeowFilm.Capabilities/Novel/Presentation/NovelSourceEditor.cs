@@ -11,11 +11,17 @@ internal sealed class NovelSourceEditor : DockPanel
     internal NovelSourceEditor(string protocol, string? definition)
     {
         Draft = new(protocol, definition);
-        var panel = new DockPanel(); var card = new Border { CornerRadius = new(22), Child = panel, ClipToBounds = true }; card.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface"); Children.Add(card);
+        var panel = new DockPanel();
+        var card = new Border { CornerRadius = new(22), BorderThickness = new(1), Child = panel, ClipToBounds = true };
+        card.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
+        Children.Add(card);
         var controls = new WrapPanel { Margin = new(16, 8, 16, 8), MinHeight = 48 };
-        controls.Children.Add(new TextBlock { Text = NovelSourceFields.Title(protocol), FontSize = 12, Foreground = SystemColors.GrayTextBrush, VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 0, 12, 0) });
-        controls.Children.Add(new TextBlock { Text = "类型", FontSize = 13, Foreground = SystemColors.GrayTextBrush, VerticalAlignment = VerticalAlignment.Center });
-        var type = new ComboBox { ItemsSource = new[] { "文本", "音频", "图片", "文件" }, MinWidth = 80, Height = 30, MinHeight = 30, Margin = new(8, 0, 16, 0) }; type.SetResourceReference(StyleProperty, "MeowFilm.SettingsComboBox");
+        var sourceType = new TextBlock { Text = NovelSourceFields.Title(protocol), FontSize = 12, VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 0, 12, 0) };
+        sourceType.SetResourceReference(FrameworkElement.StyleProperty, "Capability.Muted"); controls.Children.Add(sourceType);
+        var typeLabel = new TextBlock { Text = "类型", FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
+        typeLabel.SetResourceReference(FrameworkElement.StyleProperty, "Capability.Muted"); controls.Children.Add(typeLabel);
+        var type = new ComboBox { ItemsSource = new[] { "文本", "音频", "图片", "文件" }, MinWidth = 80, Height = 30, MinHeight = 30, Margin = new(8, 0, 16, 0) };
+        type.SetResourceReference(StyleProperty, "Novel.ComboBox");
         type.SelectedIndex = int.TryParse(Draft.Text(new("bookSourceType", "内容类型")), out int current) && current is >= 0 and < 4 ? current : 0;
         AutomationProperties.SetName(type, "内容类型"); type.SelectionChanged += (_, _) => Draft.Set(new("bookSourceType", "内容类型", Kind: NovelSourceFieldKind.Number), type.SelectedIndex.ToString()); controls.Children.Add(type);
         foreach (var (key, title) in new[] { (Draft.EnabledKey, "启用"), ("enabledExplore", "发现"), ("enabledCookieJar", "CookieJar") })

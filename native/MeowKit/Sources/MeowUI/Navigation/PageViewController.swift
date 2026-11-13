@@ -11,6 +11,7 @@ open class PageViewController: UIViewController {
     /// so its native navigation item remains empty, including lazy creation.
     public var pageTitle: String? {
         didSet {
+            navigationItem.title = nil
             if hasOwnHeader { pageHeader.title = pageTitle }
         }
     }
@@ -66,6 +67,7 @@ open class PageViewController: UIViewController {
     open override func viewDidLoad() {
         super.viewDidLoad()
         guard !invalidated else { return }
+        navigationItem.title = nil
         if usesPageHeader, !hasHeaderAncestor {
             hasOwnHeader = true
             installHeader()

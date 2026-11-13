@@ -20,6 +20,8 @@ final class MeowfilmDockView: UIView {
     private var surfaceHeight: NSLayoutConstraint!
     private var navigationHeight: NSLayoutConstraint!
     private var stackBottom: NSLayoutConstraint!
+    private var playerSurfaceVisible = true
+    var occupiesBottom: Bool { navigationVisible || playerSurfaceVisible }
 
     private enum NavigationColors {
         static let selected = UIColor.black
@@ -84,7 +86,7 @@ final class MeowfilmDockView: UIView {
         surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         surface.onSizeChanged = { [weak self] in
             guard let self else { return }
-            self.surfaceHeight.constant = self.surface.dockHeight
+            self.surfaceHeight.constant = self.playerSurfaceVisible ? self.surface.dockHeight : 0
             self.superview?.setNeedsLayout()
             self.superview?.layoutIfNeeded()
         }
@@ -131,7 +133,14 @@ final class MeowfilmDockView: UIView {
         navigationHost.isUserInteractionEnabled = visible
         navigationHost.accessibilityElementsHidden = !visible
         navigationHeight.constant = visible ? PageLayoutMetrics.navigation : 0
-        surfaceHeight.constant = surface.dockHeight
+        surfaceHeight.constant = playerSurfaceVisible ? surface.dockHeight : 0
+    }
+
+    func setPlayerSurfaceVisible(_ visible: Bool) {
+        playerSurfaceVisible = visible
+        surfaceHost.isHidden = !visible
+        surfaceHeight.constant = visible ? surface.dockHeight : 0
+        setNeedsLayout()
     }
 
     /// The recommend page fades its content out beside the capsule; every other

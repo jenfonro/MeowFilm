@@ -4,73 +4,125 @@ import MeowUI
 
 @MainActor
 final class FilmCatSourcesViewController: FilmSourcePageController {
-    private var selecting = false
+    override var usesSettingsTable: Bool { false }
+    let manager = ManagementListView()
     private var selected = Set<String>()
+    private var query = ""
     private var updateGeneration = UUID()
-    override func viewDidLoad() { pageTitle = "猫源"; super.viewDidLoad(); view.accessibilityIdentifier = "film.cats" }
-    override func render() {
-        let cats = snapshot?.cats ?? []
-        selected.formIntersection(cats.map(\.installationId))
-        let add = PageHeaderButton(image: PageIcon.image(.plus), accessibilityLabel: "导入猫源",
-            menu: UIMenu(children: [
-                UIAction(title: "本地导入") { [weak self] _ in self?.importSource(local: true) },
-                UIAction(title: "网络导入") { [weak self] _ in self?.importSource(local: false) },
-            ]))
-        add.isEnabled = !busy; add.accessibilityIdentifier = "film.cats.import"
-        let refresh = PageHeaderButton(image: UIImage(systemName: "arrow.clockwise")!, accessibilityLabel: "刷新猫源") { [weak self] in
-            guard let self else { return }; perform({ [service] in try await service.refresh() })
+    private lazy var addButton: UIButton = {
+        let button = ManagementListView.icon("plus", label: "导入猫源")
+        button.menu = UIMenu(children: [
+            UIAction(title: "本地导入") { [weak self] _ in self?.importSource(local: true) },
+            UIAction(title: "网络导入") { [weak self] _ in self?.importSource(local: false) },
+        ])
+        button.showsMenuAsPrimaryAction = true
+        return button
+    }()
+    private lazy var refreshButton = ManagementListView.icon("arrow.clockwise", label: "刷新猫源") { [weak self] in
+        guard let self else { return }; perform({ [service] in try await service.refresh() })
+    }
+
+    override func viewDidLoad() {
+        pageTitle = "猫源"
+        super.viewDidLoad()
+        view.accessibilityIdentifier = "film.cats"
+        manager.accessibilityIdentifier = "film.cats.managementList"
+        manager.search.placeholder = "搜索猫源"
+        manager.onSearch = { [weak self] in self?.query = $0; self?.render() }
+        manager.onSelection = { [weak self] in
+            guard let self else { return }
+            selected = manager.selected
+            updateFooterMenu()
         }
-        refresh.isEnabled = !busy; refresh.accessibilityIdentifier = "film.cats.refresh"
-        pageHeader.setTrailing([refresh, add])
-        var rows = cats.map { cat in
-            sourceRow(title: cat.name,
-                status: "\(filmSourceState(cat.state)) · \(filmSourceState(cat.updateState))",
-                id: "film.cat.\(cat.installationId)", isOn: cat.enabled, enabled: !busy,
-                selecting: selecting, selected: selected.contains(cat.installationId),
+        manager.onDelete = { [weak self] in self?.removeSelected() }
+        manager.configureToolbar(showsSearch: true, buttons: [refreshButton, addButton])
+        view.addSubview(manager)
+        manager.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            manager.topAnchor.constraint(equalTo: contentTopAnchor),
+            manager.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            manager.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            manager.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        manager.applyTheme(theme)
+        render()
+    }
+    override func render() {
+        guard isViewLoaded else { return }
+        let cats = snapshot?.cats ?? []
+        selected.formIntersection(cats.map { rowID($0.installationId) })
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visible = normalizedQuery.isEmpty ? cats : cats.filter {
+            [$0.name, $0.installationId].contains { $0.localizedCaseInsensitiveContains(normalizedQuery) }
+        }
+        let rows = visible.map { cat in
+            ManagementListView.Row(id: rowID(cat.installationId), title: cat.name,
+                detail: "\(filmSourceState(cat.state)) · \(filmSourceState(cat.updateState))",
+                enabled: cat.enabled, failed: cat.state == "failed" || cat.updateState == "failed",
+                controlsEnabled: !busy,
+                edit: { [weak self] in self?.edit(cat) },
                 open: { [weak self] in
-                    guard let self else { return }
-                    if selecting {
-                        if !selected.insert(cat.installationId).inserted { selected.remove(cat.installationId) }
-                        render()
-                    } else {
-                        navigationController?.pushViewController(FilmCatDetailController(service: service,
-                            installationId: cat.installationId, themeProvider: themeProvider), animated: true)
-                    }
-                }, change: { [weak self] enabled in
-                    guard let self else { return }
+                    guard let self, isPageActive, isPageVisible else { return }
+                    navigationController?.pushViewController(FilmCatDetailController(service: service,
+                        installationId: cat.installationId, themeProvider: themeProvider), animated: true)
+                }, toggle: { [weak self] enabled in
+                    guard let self, !busy else { return }
                     perform({ [service] in _ = try await service.enableCat(cat.installationId, enabled: enabled) })
-                }, actions: [
-                    UIAction(title: "编辑") { [weak self] _ in self?.edit(cat) },
+                }, menu: UIMenu(children: [
                     UIAction(title: "更新") { [weak self] _ in self?.update([cat]) },
                     UIAction(title: "重启", attributes: cat.canRestart ? [] : .disabled) { [weak self] _ in
                         guard let self else { return }
                         perform({ [service] in _ = try await service.restartCat(cat.installationId) }, success: "已重启")
                     },
-                    UIAction(title: "删除", attributes: .destructive) { [weak self] _ in self?.remove([cat]) },
-                ])
+                ]))
         }
-        rows += sourceStateRows(empty: cats.isEmpty)
-        sections = [.init(title: "", rows: [
-            .init(title: selecting ? "完成选择" : "选择", id: "film.cats.select", enabled: !busy && (selecting || !cats.isEmpty),
-                action: { [weak self] in self?.selecting.toggle(); self?.render() }),
-        ]), .init(title: "", rows: rows)]
-        if selecting {
-            sections.append(.init(title: "已选 \(selected.count)", rows: [
-                .init(title: "全选", id: "film.cats.selectAll", enabled: !busy, action: { [weak self] in self?.selected = Set(cats.map(\.installationId)); self?.render() }),
-                .init(title: "取消选择", id: "film.cats.deselectAll", enabled: !busy, action: { [weak self] in self?.selected.removeAll(); self?.render() }),
-            ] + ["启用", "停用", "更新", "重启", "删除"].enumerated().map { index, title in
-                .init(title: title, id: "film.cats.batch.\(index)", enabled: !busy && !selected.isEmpty,
-                      action: { [weak self] in self?.batch(index) })
-            }))
+        var allRows = rows
+        if let runtimeError = snapshot?.runtimeError {
+            allRows.append(.init(id: "film.sources.runtimeError", title: "运行器不可用",
+                detail: runtimeError, enabled: false, controlsEnabled: !busy,
+                showsSelection: false, showsToggle: false,
+                open: { [weak self] in
+                    guard let self else { return }
+                    retryNotice("运行器不可用", message: runtimeError) { [weak self] in
+                        guard let self, isPageActive, isPageVisible else { return }
+                        perform({ [service] in try await service.start() })
+                    }
+                }, toggle: { _ in }, menu: UIMenu(children: [])))
         }
-        let runtime = runtimeRows()
-        if !runtime.isEmpty { sections.append(.init(title: "", rows: runtime)) }
-        super.render()
+        manager.setRows(allRows, total: cats.count,
+                        validIDs: Set(cats.map { rowID($0.installationId) }),
+                        emptyMessage: snapshot == nil ? "加载中" :
+                            (cats.isEmpty ? "暂无猫源" : "没有匹配的猫源"))
+        manager.setSelection(selected)
+        refreshButton.isEnabled = !busy
+        addButton.isEnabled = !busy
+        updateFooterMenu()
     }
-    private func importSource(local: Bool) {
+    override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        manager.applyTheme(theme)
+        render()
+    }
+    func importSource(local: Bool) {
         guard isPageActive, isPageVisible, !busy else { return }
-        navigationController?.pushViewController(FilmCatEditorController(service: service, mode: .importSource(local: local),
-            themeProvider: themeProvider), animated: true)
+        let editor = FilmCatEditorController(service: service, mode: .importSource(local: local),
+            themeProvider: themeProvider)
+        if local {
+            navigationController?.pushViewController(editor, animated: true)
+        } else {
+            editor.isFloating = true
+            let modal = FilmFloatingEditorController(editor: editor, themeProvider: themeProvider)
+            let close = { [weak self, weak modal] in
+                guard let self, let modal else { return }
+                dismissPageModal(modal)
+            }
+            editor.onSaved = close
+            editor.onCancel = close
+            modal.modalPresentationStyle = .overFullScreen
+            modal.modalTransitionStyle = .crossDissolve
+            present(modal, animated: true)
+        }
     }
     private func edit(_ cat: FilmCatSource) {
         guard isPageActive, isPageVisible, !busy else { return }
@@ -78,6 +130,7 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
             themeProvider: themeProvider), animated: true)
     }
     private func remove(_ cats: [FilmCatSource]) {
+        guard !cats.isEmpty else { return }
         confirm("删除选中的 \(cats.count) 个猫源？", message: "关联视频源也将删除。") { [weak self] in
             guard let self else { return }
             deleteBatch(cats, isPresent: { cat, snapshot in
@@ -85,8 +138,8 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
             }) { [service] in try await service.deleteCat($0.installationId) }
         }
     }
-    private func batch(_ action: Int) {
-        let cats = (snapshot?.cats ?? []).filter { selected.contains($0.installationId) }
+    func batch(_ action: Int) {
+        let cats = (snapshot?.cats ?? []).filter { selected.contains(rowID($0.installationId)) }
         let generation = sourcePageGeneration
         if action == 4 {
             remove(cats)
@@ -113,6 +166,22 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
                 }
             })
         }
+    }
+    private func rowID(_ id: String) -> String { "film.cat.\(id)" }
+    private func removeSelected() {
+        guard !busy else { return }
+        remove((snapshot?.cats ?? []).filter { selected.contains(rowID($0.installationId)) })
+    }
+    private func updateFooterMenu() {
+        let values = (snapshot?.cats ?? []).filter { selected.contains(rowID($0.installationId)) }
+        manager.deleteButton.isEnabled = !busy && !values.isEmpty
+        manager.footerMore.isEnabled = !busy && !values.isEmpty
+        manager.footerMore.menu = UIMenu(children: [
+            UIAction(title: "启用所选", attributes: values.isEmpty || busy ? .disabled : []) { [weak self] _ in self?.batch(0) },
+            UIAction(title: "停用所选", attributes: values.isEmpty || busy ? .disabled : []) { [weak self] _ in self?.batch(1) },
+            UIAction(title: "更新所选", attributes: values.isEmpty || busy ? .disabled : []) { [weak self] _ in self?.batch(2) },
+            UIAction(title: "重启所选", attributes: values.isEmpty || busy ? .disabled : []) { [weak self] _ in self?.batch(3) },
+        ])
     }
     private func update(_ cats: [FilmCatSource]) {
         guard let first = cats.first else { return }
@@ -170,18 +239,6 @@ final class FilmCatDetailController: FilmSourcePageController {
             .init(title: "重启", id: "film.cat.restart", enabled: !busy && cat.canRestart, action: { [weak self] in
                 guard let self else { return }; perform({ [service] in _ = try await service.restartCat(cat.installationId) }, success: "已重启")
             }),
-            .init(title: "删除", id: "film.cat.delete", enabled: !busy, destructive: true, action: { [weak self] in
-                self?.confirm("删除猫源？", message: "关联视频源也将删除。") { [weak self] in
-                    guard let self else { return }
-                    deleteBatch([cat], isPresent: { cat, snapshot in
-                        snapshot.cats.contains { $0.installationId == cat.installationId }
-                    }, completed: { [weak self] in
-                        guard let self, isPageActive, isPageVisible,
-                              navigationController?.topViewController === self else { return }
-                        navigationController?.popViewController(animated: true)
-                    }) { [service] in try await service.deleteCat($0.installationId) }
-                }
-            }),
         ])]
         if let error = cat.error ?? cat.updateError {
             sections.append(.init(title: "", rows: [.init(title: "查看错误", id: "film.cat.error", action: { [weak self] in self?.notice("错误", message: error) })]))
@@ -193,6 +250,75 @@ final class FilmCatDetailController: FilmSourcePageController {
         guard let navigationController, navigationController.topViewController === self else { return }
         let editor = FilmCatEditorController(service: service, mode: mode, themeProvider: themeProvider)
         navigationController.setViewControllers(Array(navigationController.viewControllers.dropLast()) + [editor], animated: true)
+    }
+}
+
+@MainActor
+final class FilmFloatingEditorController: PageViewController {
+    override var usesPageHeader: Bool { false }
+    private let editor: FilmCatEditorController
+    private weak var card: UIView?
+
+    init(editor: FilmCatEditorController, themeProvider: any PageThemeProviding) {
+        self.editor = editor
+        super.init(themeProvider: themeProvider)
+    }
+
+    override func loadView() {
+        let root = UIView()
+        view = root
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.accessibilityIdentifier = "film.cat.networkImport.modal"
+
+        let card = UIView()
+        card.backgroundColor = UIColor(theme.settings.surface)
+        card.layer.cornerRadius = 24
+        card.layer.borderColor = UIColor(theme.settings.border).cgColor
+        card.layer.borderWidth = 0.5
+        card.clipsToBounds = true
+        card.accessibilityIdentifier = "film.cat.networkImport.card"
+        self.card = card
+        view.addSubview(card)
+        card.translatesAutoresizingMaskIntoConstraints = false
+        let preferredWidth = card.widthAnchor.constraint(equalTo: view.safeAreaLayoutGuide.widthAnchor, constant: -32)
+        preferredWidth.priority = .defaultHigh
+        let preferredHeight = card.heightAnchor.constraint(equalToConstant: 520)
+        preferredHeight.priority = .defaultHigh
+        let center = card.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor)
+        center.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            preferredWidth,
+            card.widthAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.widthAnchor, constant: -32),
+            card.widthAnchor.constraint(lessThanOrEqualToConstant: 560),
+            preferredHeight,
+            card.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            center,
+            card.topAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.topAnchor, constant: 24),
+            card.bottomAnchor.constraint(lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor, constant: -16),
+        ])
+
+        addChild(editor)
+        card.addSubview(editor.view)
+        editor.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            editor.view.topAnchor.constraint(equalTo: card.topAnchor),
+            editor.view.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            editor.view.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            editor.view.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+        ])
+        editor.didMove(toParent: self)
+    }
+
+    override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        view.backgroundColor = UIColor.black.withAlphaComponent(0.28)
+        card?.backgroundColor = UIColor(theme.settings.surface)
+        card?.layer.borderColor = UIColor(theme.settings.border).cgColor
+        editor.applyTheme()
     }
 }
 #endif

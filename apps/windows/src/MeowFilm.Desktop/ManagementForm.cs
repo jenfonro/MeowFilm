@@ -11,16 +11,17 @@ public sealed class ManagementForm(bool boxedInputs = false) : StackPanel
     public TextBox Field(string label, string value, int rows = 1, string? id = null, string? placeholder = null)
     {
         var section = new StackPanel { Margin = boxedInputs ? new(0, 0, 0, 14) : new(14, 11, 14, 10) };
-        var heading = new TextBlock { Text = label, Foreground = new SolidColorBrush(Color.FromRgb(255, 59, 48)), FontSize = boxedInputs ? 13 : 12, Margin = new(0, 0, 0, boxedInputs ? 8 : 5), TextWrapping = TextWrapping.Wrap };
-        if (boxedInputs) heading.SetResourceReference(TextBlock.ForegroundProperty, "MeowFilm.Brush.Muted");
+        var heading = new TextBlock { Text = label, FontSize = boxedInputs ? 13 : 12, Margin = new(0, 0, 0, boxedInputs ? 8 : 5), TextWrapping = TextWrapping.Wrap };
+        heading.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.MutedText");
         section.Children.Add(heading);
         var input = new TextBox { Text = value, AcceptsReturn = rows > 1, AcceptsTab = rows > 1, TextWrapping = TextWrapping.Wrap,
             Height = rows > 1 ? Math.Max(72, rows * 23) : 25, MinHeight = 0,
             VerticalContentAlignment = rows > 1 ? VerticalAlignment.Top : VerticalAlignment.Center,
             VerticalScrollBarVisibility = rows > 1 ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden,
-            BorderThickness = new(0), Padding = new(0), Background = Brushes.Transparent, FontSize = 17 };
-        input.SetResourceReference(Control.ForegroundProperty, "MeowFilm.Brush.Text"); AutomationProperties.SetName(input, label); if (id is not null) AutomationProperties.SetAutomationId(input, id);
-        if (boxedInputs) { input.SetResourceReference(StyleProperty, "MeowFilm.ManagementInput"); input.SetResourceReference(Control.BackgroundProperty, "MeowFilm.Brush.InputSurface"); input.SetResourceReference(Control.BorderBrushProperty, "MeowFilm.Brush.Border"); input.BorderThickness = new(1); input.Padding = new(12, 9, 12, 9); input.FontSize = 13; input.Height = rows > 1 ? Math.Max(92, rows * 19.5 + 18) : 40; }
+            BorderThickness = new(0), Padding = new(0), FontSize = 17 };
+        AutomationProperties.SetName(input, label); if (id is not null) AutomationProperties.SetAutomationId(input, id);
+        if (boxedInputs) { input.SetResourceReference(StyleProperty, "MeowFilm.ManagementInput"); input.BorderThickness = new(1); input.Padding = new(12, 9, 12, 9); input.FontSize = 13; input.Height = rows > 1 ? Math.Max(92, rows * 19.5 + 18) : 40; }
+        else { input.SetResourceReference(StyleProperty, "MeowFilm.TextBox"); input.Background = Brushes.Transparent; }
         input.Tag = placeholder;
         section.Children.Add(input); Section(section); return input;
     }
@@ -33,9 +34,16 @@ public sealed class ManagementForm(bool boxedInputs = false) : StackPanel
     public void Section(UIElement value)
     {
         Children.Add(value);
-        if (!boxedInputs) { var line = new Border { Height = 0.5, Opacity = .5 }; line.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Border"); Children.Add(line); }
+        var line = new Border { Height = 0.5, Opacity = .5 };
+        line.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Border"); Children.Add(line);
     }
-    public Border Card() { var card = new Border { CornerRadius = new(boxedInputs ? 22 : 18), Padding = boxedInputs ? new(16, 16, 16, 2) : new(0), Child = this, ClipToBounds = true }; card.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface"); return card; }
+    public Border Card()
+    {
+        var card = new Border { CornerRadius = new(boxedInputs ? 22 : 18), BorderThickness = new(1),
+            Padding = boxedInputs ? new(16, 16, 16, 2) : new(0), Child = this, ClipToBounds = true };
+        card.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
+        return card;
+    }
 }
 
 public sealed record ManagementImportItem(string Title, string Detail, string Status);
@@ -57,11 +65,13 @@ public sealed class ManagementImportSelection : DockPanel
             AutomationProperties.SetName(check, "选择 " + item.Title); check.Click += (_, _) => { if (check.IsChecked == true) selected.Add(at); else selected.Remove(at); Count(); };
             SetDock(check, Dock.Left); line.Children.Add(check);
             bool existing = item.Status is "已有" or "已存在";
-            var status = new TextBlock { Text = item.Status, FontSize = 12, Foreground = new SolidColorBrush(existing ? Color.FromRgb(176, 119, 36) : Color.FromRgb(0, 122, 255)) };
-            var badge = new Border { Child = status, CornerRadius = new(10), Padding = new(8, 3, 8, 3), VerticalAlignment = VerticalAlignment.Center, Background = new SolidColorBrush(existing ? Color.FromArgb(30, 255, 179, 64) : Color.FromArgb(30, 0, 122, 255)) }; SetDock(badge, Dock.Right); line.Children.Add(badge);
+            var status = new TextBlock { Text = item.Status, FontSize = 12 };
+            status.SetResourceReference(FrameworkElement.StyleProperty, existing ? "MeowFilm.MutedText" : "MeowFilm.AccentText");
+            var badge = new Border { Child = status, Tag = existing ? "existing" : "new", CornerRadius = new(10), Padding = new(8, 3, 8, 3), VerticalAlignment = VerticalAlignment.Center };
+            badge.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.ImportStatusBadge"); SetDock(badge, Dock.Right); line.Children.Add(badge);
             var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 0, 12, 0) };
-            var title = new TextBlock { Text = item.Title, FontSize = 14, FontWeight = FontWeights.Medium, TextWrapping = TextWrapping.Wrap }; title.SetResourceReference(TextBlock.ForegroundProperty, "MeowFilm.Brush.Text"); text.Children.Add(title);
-            var detail = new TextBlock { Text = item.Detail, FontSize = 12, Margin = new(0, 4, 0, 0), TextWrapping = TextWrapping.Wrap }; detail.SetResourceReference(TextBlock.ForegroundProperty, "MeowFilm.Brush.Muted"); text.Children.Add(detail);
+            var title = new TextBlock { Text = item.Title, FontSize = 14, FontWeight = FontWeights.Medium, TextWrapping = TextWrapping.Wrap }; title.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.Text"); text.Children.Add(title);
+            var detail = new TextBlock { Text = item.Detail, FontSize = 12, Margin = new(0, 4, 0, 0), TextWrapping = TextWrapping.Wrap }; detail.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.MutedText"); text.Children.Add(detail);
             line.Children.Add(text);
             var divider = new Border { Child = line, BorderThickness = new(0, 0, 0, 1) }; divider.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.Border"); rows.Children.Add(divider);
         }

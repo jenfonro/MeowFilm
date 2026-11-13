@@ -299,7 +299,7 @@ struct MusicAccountsSettingsContent: View {
                 if state.accounts == nil {
                     Text("账号服务不可用")
                         .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
-                        .modifier(MusicSettingsRowStyle(theme: theme))
+                        .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: false))
                 }
                 ForEach(MusicAccountPlatform.allCases) { platform in
                     let summary = state.rows.first { $0.id == platform }
@@ -314,21 +314,28 @@ struct MusicAccountsSettingsContent: View {
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("music.accounts." + platform.rawValue)
                     .disabled(summary == nil || !state.available || transfer.busy || state.pendingAccounts.contains(platform))
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .modifier(MusicSettingsRowStyle(theme: theme,
+                        first: state.accounts != nil && platform == MusicAccountPlatform.allCases.first,
+                        last: platform == MusicAccountPlatform.allCases.last))
                 }
             }
+            .listSectionSeparator(.hidden)
             Section {
                 Button("导入账号", action: importAccounts)
                     .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .accessibilityIdentifier("music.accounts.import")
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: false))
                 Button("导出账号", action: exportAccounts)
                     .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .accessibilityIdentifier("music.accounts.export")
-                    .modifier(MusicSettingsRowStyle(theme: theme))
-                if transfer.busy { ProgressView().accessibilityLabel("账号导入导出中") }
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: !transfer.busy))
+                if transfer.busy {
+                    ProgressView().accessibilityLabel("账号导入导出中")
+                        .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: true))
+                }
             }
             .disabled(!state.available || transfer.service == nil || transfer.busy)
+            .listSectionSeparator(.hidden)
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }
@@ -371,7 +378,6 @@ private struct MusicPlatformAccountRow: View {
                 }
             }
         }
-        .frame(minHeight: 56)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }

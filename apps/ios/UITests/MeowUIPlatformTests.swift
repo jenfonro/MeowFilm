@@ -1,12 +1,375 @@
 import XCTest
 import UIKit
 import Combine
+import SwiftUI
 @testable import MeowUI
 
 @MainActor
 final class MeowUIPlatformTests: XCTestCase {
     private var window: UIWindow?
     private weak var previousKeyWindow: UIWindow?
+
+    func testSettingsCardsRoundOnlyOuterCornersAndKeepDividersInsideTheGroup() throws {
+        for dark in [false, true] {
+            let theme = PageTheme(palette: .coral, dark: dark)
+            for width: CGFloat in [288, 358] {
+                for selected in [false, true] {
+                    let card = UIView(frame: CGRect(x: 0, y: 0, width: width, height: 168))
+                    card.isOpaque = false
+                    for index in 0..<3 {
+                        let row = SettingsRowBackgroundView(theme: theme, first: index == 0,
+                            last: index == 2, selected: selected, showsSeparator: index < 2)
+                        row.frame = CGRect(x: 0, y: CGFloat(index) * 56, width: width, height: 56)
+                        card.addSubview(row)
+                        row.layoutIfNeeded()
+                    }
+                    let image = renderSettingsCard(card)
+                    let surface = selected ? theme.settings.selected : theme.settings.surface
+                    let surfacePixel = [surface.red, surface.green, surface.blue, surface.alpha]
+                    let divider = theme.settings.separator
+                    let dividerPixel = [divider.red, divider.green, divider.blue, divider.alpha]
+                    for x in [CGFloat(1), width - 1] {
+                        XCTAssertEqual(try settingsPixel(image, x: x, y: 1)[3], 0)
+                        XCTAssertEqual(try settingsPixel(image, x: x, y: 167)[3], 0)
+                    }
+                    XCTAssertEqual(try settingsPixel(image, x: 2.5, y: 8.5)[3], 255)
+                    XCTAssertEqual(try settingsPixel(image, x: 2.5, y: 159.5)[3], 255)
+                    for y: CGFloat in [55.75, 111.75] {
+                        XCTAssertEqual(try settingsPixel(image, x: 8, y: y), surfacePixel,
+                            "An internal row must not add a full-width border")
+                        XCTAssertEqual(try settingsPixel(image, x: width / 2, y: y), dividerPixel)
+                        XCTAssertEqual(try settingsPixel(image, x: 8, y: y + 0.5), surfacePixel,
+                            "The next row must join the card without another rounded corner")
+                    }
+                }
+            }
+        }
+    }
+
+    func testSwiftUISettingsBackgroundMatchesUIKitAfterThemeAndGroupPositionChanges() async throws {
+        let light = PageTheme(palette: .sky)
+        let host = UIHostingController(rootView:
+            SettingsRowBackground(theme: light, first: true, last: false, showsSeparator: true)
+                .frame(width: 288, height: 56))
+        host.view.backgroundColor = .clear
+        try display(host)
+        for (theme, first, last, separator) in [
+            (light, true, false, true),
+            (PageTheme(palette: .coral, dark: true), false, true, false),
+            (light, true, true, false),
+        ] {
+            let reference = SettingsRowBackgroundView(theme: theme, first: first, last: last,
+                showsSeparator: separator)
+            reference.frame = CGRect(x: 0, y: 0, width: 288, height: 56)
+            reference.layoutIfNeeded()
+            let expected = try XCTUnwrap(renderSettingsCard(reference).pngData())
+            host.rootView = SettingsRowBackground(theme: theme, first: first, last: last,
+                showsSeparator: separator).frame(width: 288, height: 56)
+            let rendered = expectation(for: NSPredicate { _, _ in
+                MainActor.assumeIsolated {
+                    host.view.layoutIfNeeded()
+                    guard let background = self.descendants(host.view)
+                        .compactMap({ $0 as? SettingsRowBackgroundView }).first,
+                          background.bounds.size == reference.bounds.size else { return false }
+                    return self.renderSettingsCard(background).pngData() == expected
+                }
+            }, evaluatedWith: host)
+            await fulfillment(of: [rendered], timeout: 2)
+        }
+    }
+
+    func testManagementRowsPreserveReaderLayoutAndActionsAcrossThemesAndDynamicTypeAt320Points() async throws {
+        let host = UIViewController(), manager = ManagementListView()
+        host.loadViewIfNeeded(); host.view.addSubview(manager)
+        manager.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            manager.centerXAnchor.constraint(equalTo: host.view.centerXAnchor),
+            manager.topAnchor.constraint(equalTo: host.view.safeAreaLayoutGuide.topAnchor),
+            manager.widthAnchor.constraint(equalToConstant: 320),
+            manager.heightAnchor.constraint(equalToConstant: 620),
+        ])
+        let window = try display(host)
+        var edits = 0, changes: [Bool] = [], deletions = 0
+        manager.onDelete = { deletions += 1 }
+        let rows: [ManagementListView.Row] = [
+            .init(id: "a", title: "书源", detail: "正常", enabled: true,
+                  edit: { edits += 1 }, toggle: { changes.append($0) },
+                  menu: UIMenu(children: [UIAction(title: "检测") { _ in }])),
+            .init(id: "b", title: "来源二", detail: "失败", enabled: false, failed: true,
+                  edit: {}, toggle: { _ in }, menu: UIMenu(children: [UIAction(title: "检测") { _ in }])),
+        ]
+        let table = try XCTUnwrap(descendants(manager).compactMap { $0 as? UITableView }.first)
+        for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+            host.traitOverrides.preferredContentSizeCategory = category
+            await Task.yield()
+            for dark in [false, true] {
+                window.overrideUserInterfaceStyle = dark ? .dark : .light
+                let theme = PageTheme(palette: .coral, dark: dark)
+                manager.applyTheme(theme)
+                manager.setRows(rows, total: 2, validIDs: ["a", "b"], emptyMessage: "无来源")
+                host.view.layoutIfNeeded(); table.layoutIfNeeded()
+                XCTAssertEqual(table.frame.minX, 24, accuracy: 0.5)
+                XCTAssertEqual(table.backgroundColor, UIColor(theme.settings.surface))
+                XCTAssertEqual(table.separatorStyle, .singleLine)
+                XCTAssertEqual(table.separatorColor, UIColor(theme.settings.separator))
+                XCTAssertEqual(table.layer.cornerRadius, 22)
+                XCTAssertTrue(table.clipsToBounds)
+                for index in 0..<2 {
+                    let cell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: index, section: 0)))
+                    let labels = descendants(cell.contentView).compactMap { $0 as? UILabel }
+                    let title = try XCTUnwrap(labels.first { $0.text == rows[index].title })
+                    let detail = try XCTUnwrap(labels.first { $0.text == rows[index].detail })
+                    XCTAssertTrue(title.adjustsFontForContentSizeCategory)
+                    XCTAssertTrue(detail.adjustsFontForContentSizeCategory)
+                    XCTAssertEqual(title.font.pointSize,
+                        UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14), compatibleWith: cell.traitCollection).pointSize)
+                    XCTAssertEqual(detail.font.pointSize,
+                        UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 11), compatibleWith: cell.traitCollection).pointSize)
+                    XCTAssertEqual(title.textColor, UIColor(theme.settings.ink))
+                    XCTAssertEqual(detail.textColor, UIColor(index == 1 ? theme.settings.danger : theme.settings.muted))
+                    for label in [title, detail] {
+                        let needed = label.sizeThatFits(.init(width: label.bounds.width, height: .greatestFiniteMagnitude))
+                        XCTAssertGreaterThanOrEqual(label.bounds.height + 1, needed.height)
+                    }
+                    let controls = descendants(cell.contentView).compactMap { $0 as? UIControl }
+                    let toggle = try XCTUnwrap(controls.compactMap { $0 as? UISwitch }.first)
+                    XCTAssertEqual(toggle.transform, CGAffineTransform(scaleX: 0.7, y: 0.7))
+                    XCTAssertEqual(toggle.isOn, index == 0)
+                    XCTAssertEqual(toggle.onTintColor, UIColor(theme.settings.accent))
+                    let edit = try XCTUnwrap(controls.compactMap { $0 as? UIButton }
+                        .first { $0.accessibilityLabel == "编辑 \(rows[index].title)" })
+                    let more = try XCTUnwrap(controls.compactMap { $0 as? UIButton }.first { $0.menu != nil })
+                    let select = try XCTUnwrap(controls.compactMap { $0 as? UIButton }
+                        .first { $0.accessibilityLabel == "选择 \(rows[index].title)" })
+                    for button in [edit, more] {
+                        XCTAssertEqual(button.bounds.size, CGSize(width: 38, height: 38))
+                        XCTAssertEqual(button.tintColor, UIColor(theme.settings.accent))
+                    }
+                    XCTAssertEqual(select.bounds.size, CGSize(width: 32, height: 44))
+                    XCTAssertEqual(more.convert(more.bounds, to: cell.contentView).minX -
+                        edit.convert(edit.bounds, to: cell.contentView).maxX, 4, accuracy: 0.5)
+                    for control in [select as UIControl, toggle, edit, more] {
+                        let frame = control.convert(control.bounds, to: cell.contentView)
+                        XCTAssertGreaterThanOrEqual(frame.minX, 10 - 0.5)
+                        XCTAssertLessThanOrEqual(frame.maxX, cell.contentView.bounds.width - 10 + 0.5)
+                        XCTAssertFalse(control.isHidden); XCTAssertTrue(control.isEnabled)
+                    }
+                }
+                XCTAssertEqual(manager.search.searchTextField.textColor, UIColor(theme.settings.ink))
+                XCTAssertEqual(manager.search.searchTextField.backgroundColor, UIColor(theme.settings.input))
+                XCTAssertTrue(manager.search.searchTextField.adjustsFontForContentSizeCategory)
+                for button in descendants(manager).compactMap({ $0 as? UIButton }).filter({
+                    ["management.selectAll", "management.invert", "management.delete"].contains($0.accessibilityIdentifier ?? "")
+                }) {
+                    XCTAssertTrue(button.titleLabel?.adjustsFontForContentSizeCategory == true)
+                    let parent = try XCTUnwrap(button.superview)
+                    let frame = button.convert(button.bounds, to: parent)
+                    XCTAssertGreaterThanOrEqual(frame.minX, -0.5)
+                    XCTAssertLessThanOrEqual(frame.maxX, parent.bounds.width + 0.5)
+                    XCTAssertGreaterThanOrEqual(frame.minY, -0.5)
+                    XCTAssertLessThanOrEqual(frame.maxY, parent.bounds.height + 0.5)
+                }
+            }
+        }
+        let cell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)))
+        let edit = try XCTUnwrap(descendants(cell).compactMap { $0 as? UIButton }
+            .first { $0.accessibilityLabel == "编辑 书源" })
+        edit.sendActions(for: .touchUpInside); XCTAssertEqual(edits, 1)
+        let toggle = try XCTUnwrap(descendants(cell).compactMap { $0 as? UISwitch }.first)
+        toggle.setOn(false, animated: false); toggle.sendActions(for: .valueChanged)
+        XCTAssertEqual(changes, [false])
+        let select = try XCTUnwrap(descendants(cell).compactMap { $0 as? UIButton }
+            .first { $0.accessibilityLabel == "选择 书源" })
+        select.sendActions(for: .touchUpInside); XCTAssertEqual(manager.selected, ["a"])
+        XCTAssertTrue(manager.deleteButton.isEnabled)
+        manager.deleteButton.sendActions(for: .touchUpInside); XCTAssertEqual(deletions, 1)
+        let selectAll = try XCTUnwrap(descendants(manager).compactMap { $0 as? UIButton }
+            .first { $0.accessibilityIdentifier == "management.selectAll" })
+        selectAll.sendActions(for: .touchUpInside); XCTAssertEqual(manager.selected, ["a", "b"])
+        let invert = try XCTUnwrap(descendants(manager).compactMap { $0 as? UIButton }
+            .first { $0.accessibilityIdentifier == "management.invert" })
+        invert.sendActions(for: .touchUpInside); XCTAssertTrue(manager.selected.isEmpty)
+        XCTAssertFalse(manager.deleteButton.isEnabled)
+        manager.setRows([rows[0], .init(id: "status", title: "运行器不可用", enabled: false,
+            showsSelection: false, showsToggle: false, toggle: { _ in }, menu: UIMenu(children: []))],
+            total: 1, validIDs: ["a"], emptyMessage: "无来源")
+        selectAll.sendActions(for: .touchUpInside)
+        XCTAssertEqual(manager.selected, ["a"], "Status rows must never join batch selection")
+    }
+
+    func testManagementFormsKeepFieldsAndChecksReadableAt320PointsAcrossDynamicTypeAndThemes() async throws {
+        let host = UIViewController(), window = try display(host)
+        let longLabel = "排除范围，选填书名或者书源 URL（excludeScope），较长的字段标签需要完整显示"
+        let longValue = String(repeating: "https://example.invalid/很长的规则内容/没有空格的文本\n", count: 60)
+        for boxed in [false, true] {
+            host.traitOverrides.preferredContentSizeCategory = .large
+            let form = ManagementFormView(); form.boxedInputs = boxed
+            let name = try XCTUnwrap(form.text(longLabel, value: "书源名称", id: "form.name", changed: { _ in }) as? UITextField)
+            let pattern = try XCTUnwrap(form.text("替换规则（pattern）", value: longValue, rows: 3,
+                id: "form.pattern", changed: { _ in }) as? UITextView)
+            let result = try XCTUnwrap(form.text("替换为（replacement）", value: longValue, rows: 6,
+                id: "form.replacement", changed: { _ in }) as? UITextView)
+            let enabled = ManagementFormView.check("使用正则表达式，较长的复选标签仍需完整显示并允许勾选",
+                value: true, round: boxed, changed: { _ in })
+            form.addSection(enabled)
+            let titleScope = ManagementFormView.check("作用于标题", value: true, round: true, changed: { _ in })
+            let contentScope = ManagementFormView.check("作用于正文", value: false, round: true, changed: { _ in })
+            let checks = UIStackView(arrangedSubviews: [titleScope, contentScope, UIView()])
+            checks.spacing = 14; form.addSection(checks)
+            let tail = form.text("超时毫秒数（timeoutMillisecond）", value: "3000", id: "form.timeout", changed: { _ in })
+            installManagementForm(form, in: host)
+            for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+                host.traitOverrides.preferredContentSizeCategory = category
+                await Task.yield()
+                for dark in [false, true] {
+                    window.overrideUserInterfaceStyle = dark ? .dark : .light
+                    let theme = PageTheme(palette: .coral, dark: dark), settings = theme.settings
+                    form.applyTheme(theme)
+                    window.layoutIfNeeded(); host.view.layoutIfNeeded(); form.layoutIfNeeded()
+                    XCTAssertEqual(form.bounds.width, 320, accuracy: 0.5)
+                    XCTAssertEqual(form.traitCollection.preferredContentSizeCategory, category)
+                    XCTAssertFalse(form.fields.hasAmbiguousLayout)
+                    XCTAssertLessThanOrEqual(form.contentSize.width, form.bounds.width + 0.5)
+                    XCTAssertGreaterThan(form.contentSize.height, form.bounds.height)
+                    XCTAssertEqual(form.keyboardDismissMode, .interactive)
+                    XCTAssertEqual(form.fields.backgroundColor, UIColor(settings.surface))
+                    let fieldLabels = [longLabel, "替换规则（pattern）", "替换为（replacement）", "超时毫秒数（timeoutMillisecond）"]
+                    let labels = descendants(form.fields).compactMap { $0 as? UILabel }
+                        .filter { fieldLabels.contains($0.text ?? "") }
+                        + [enabled, titleScope, contentScope].compactMap(\.titleLabel)
+                    XCTAssertEqual(labels.count, 7)
+                    for label in labels where !(label.text ?? "").isEmpty {
+                        XCTAssertTrue(label.adjustsFontForContentSizeCategory)
+                        XCTAssertGreaterThan(label.bounds.width, 0)
+                        let needed = label.sizeThatFits(CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
+                        XCTAssertGreaterThanOrEqual(label.bounds.height + 1, needed.height,
+                            "Labels and check titles must fit their full text")
+                        if let parent = label.superview as? UIButton {
+                            let frame = label.convert(label.bounds, to: parent)
+                            XCTAssertGreaterThanOrEqual(frame.minX, -0.5)
+                            XCTAssertLessThanOrEqual(frame.maxX, parent.bounds.width + 0.5)
+                            XCTAssertGreaterThanOrEqual(frame.minY, -0.5)
+                            XCTAssertLessThanOrEqual(frame.maxY, parent.bounds.height + 0.5)
+                        }
+                    }
+                    let label = try XCTUnwrap(labels.first { $0.text == longLabel })
+                    let baseInputSize: CGFloat = boxed ? 13 : 17, baseLabelSize: CGFloat = boxed ? 13 : 12
+                    if category == .large {
+                        XCTAssertEqual(name.font?.pointSize, baseInputSize)
+                        XCTAssertEqual(pattern.font?.pointSize, baseInputSize)
+                        XCTAssertEqual(label.font.pointSize, baseLabelSize)
+                        XCTAssertEqual(enabled.titleLabel?.font.pointSize, boxed ? 14 : 13)
+                    } else {
+                        XCTAssertGreaterThan(try XCTUnwrap(name.font).pointSize, baseInputSize)
+                        XCTAssertGreaterThan(try XCTUnwrap(pattern.font).pointSize, baseInputSize)
+                        XCTAssertGreaterThan(label.font.pointSize, baseLabelSize)
+                        XCTAssertGreaterThan(try XCTUnwrap(enabled.titleLabel?.font).pointSize, boxed ? 14 : 13)
+                    }
+                    XCTAssertTrue(name.adjustsFontForContentSizeCategory); XCTAssertTrue(name.isEnabled)
+                    XCTAssertGreaterThanOrEqual(name.bounds.height + 1, try XCTUnwrap(name.font).lineHeight)
+                    XCTAssertEqual(name.textColor, UIColor(settings.ink))
+                    XCTAssertEqual(label.textColor, UIColor(settings.muted))
+                    for (text, rows) in [(pattern, 3), (result, 6)] {
+                        XCTAssertTrue(text.adjustsFontForContentSizeCategory)
+                        XCTAssertTrue(text.isEditable); XCTAssertTrue(text.isScrollEnabled)
+                        XCTAssertGreaterThanOrEqual(text.bounds.height + 1,
+                            try XCTUnwrap(text.font).lineHeight * CGFloat(rows) + text.textContainerInset.top + text.textContainerInset.bottom)
+                        XCTAssertGreaterThan(text.contentSize.height, text.bounds.height)
+                        XCTAssertLessThanOrEqual(text.contentSize.width, text.bounds.width + 1)
+                        XCTAssertEqual(text.textColor, UIColor(settings.ink))
+                    }
+                    XCTAssertGreaterThan(result.bounds.height, pattern.bounds.height)
+                    for input in [name as UIView, pattern, result, enabled, titleScope, contentScope, tail] {
+                        let frame = input.convert(input.bounds, to: form.fields)
+                        XCTAssertGreaterThanOrEqual(frame.minX, -0.5)
+                        XCTAssertLessThanOrEqual(frame.maxX, form.fields.bounds.width + 0.5)
+                        XCTAssertGreaterThan(input.bounds.height, 0)
+                    }
+                    let titleFrame = titleScope.convert(titleScope.bounds, to: checks)
+                    let contentFrame = contentScope.convert(contentScope.bounds, to: checks)
+                    XCTAssertEqual(checks.axis, category.isAccessibilityCategory ? .vertical : .horizontal)
+                    XCTAssertEqual(checks.arrangedSubviews.last?.isHidden, category.isAccessibilityCategory)
+                    XCTAssertTrue(titleFrame.intersection(contentFrame).isNull)
+                    for button in [enabled, titleScope, contentScope] {
+                        XCTAssertTrue(button.isEnabled)
+                        XCTAssertEqual(button.titleColor(for: .normal), UIColor(settings.ink))
+                    }
+                    if boxed {
+                        for input in [name as UIView, pattern, result] {
+                            XCTAssertEqual(input.backgroundColor, UIColor(settings.input))
+                            XCTAssertEqual(input.layer.borderColor, UIColor(settings.inputBorder).cgColor)
+                        }
+                    } else {
+                        let separators = form.fields.arrangedSubviews.filter { !($0 is UIStackView) && !($0 is UIButton) }
+                        XCTAssertFalse(separators.isEmpty)
+                        for separator in separators {
+                            XCTAssertEqual(separator.backgroundColor?.resolvedColor(with: form.traitCollection), UIColor(settings.separator))
+                            XCTAssertGreaterThan(separator.bounds.height, 0)
+                            XCTAssertEqual(separator.bounds.width, form.fields.bounds.width, accuracy: 0.5)
+                        }
+                    }
+                    form.scrollRectToVisible(tail.convert(tail.bounds, to: form), animated: false)
+                    form.layoutIfNeeded()
+                    let tailFrame = tail.convert(tail.bounds, to: form)
+                    XCTAssertGreaterThanOrEqual(tailFrame.minY, form.bounds.minY - 0.5)
+                    XCTAssertLessThanOrEqual(tailFrame.maxY, form.bounds.maxY + 0.5)
+                }
+            }
+            form.removeFromSuperview()
+        }
+    }
+
+    func testManagementFormEditingCallbacksKeepValuesForSaveAcrossTypeAndThemeChanges() async throws {
+        let host = UIViewController(), window = try display(host)
+        for boxed in [false, true] {
+            host.traitOverrides.preferredContentSizeCategory = .large
+            let form = ManagementFormView(); form.boxedInputs = boxed
+            var values: [String: String] = [:], changes: [String] = [], selections: [Bool] = []
+            let name = try XCTUnwrap(form.text("名称", value: "原名称", id: "form.name") {
+                values["name"] = $0; changes.append("name")
+            } as? UITextField)
+            let pattern = try XCTUnwrap(form.text("替换规则", value: "原规则", rows: 3, id: "form.pattern") {
+                values["pattern"] = $0; changes.append("pattern")
+            } as? UITextView)
+            let check = ManagementFormView.check("使用正则表达式", value: true, round: boxed) { selections.append($0) }
+            form.addSection(check); installManagementForm(form, in: host)
+            window.layoutIfNeeded(); host.view.layoutIfNeeded()
+            name.text = "已编辑名称"; name.sendActions(for: .editingChanged)
+            pattern.text = "第一行\n第二行"; pattern.delegate?.textViewDidChange?(pattern)
+            check.sendActions(for: .touchUpInside)
+            XCTAssertEqual(values, ["name": "已编辑名称", "pattern": "第一行\n第二行"])
+            XCTAssertEqual(changes, ["name", "pattern"]); XCTAssertEqual(selections, [false])
+            host.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+            window.overrideUserInterfaceStyle = .dark
+            await Task.yield()
+            form.applyTheme(PageTheme(dark: true))
+            window.layoutIfNeeded(); host.view.layoutIfNeeded(); form.layoutIfNeeded()
+            XCTAssertEqual(name.text, "已编辑名称"); XCTAssertEqual(pattern.text, "第一行\n第二行")
+            XCTAssertFalse(check.isSelected); XCTAssertEqual(check.accessibilityValue, "未勾选")
+            XCTAssertEqual(changes, ["name", "pattern"]); XCTAssertEqual(selections, [false])
+            name.text = "最终保存名称"; name.sendActions(for: .editingChanged)
+            pattern.text = #"广告\s+"#; pattern.delegate?.textViewDidChange?(pattern)
+            check.sendActions(for: .touchUpInside)
+            XCTAssertEqual(values, ["name": "最终保存名称", "pattern": #"广告\s+"#],
+                "The consumer must receive every edited value used to save its draft")
+            host.traitOverrides.preferredContentSizeCategory = .large
+            window.overrideUserInterfaceStyle = .light
+            await Task.yield()
+            form.applyTheme(PageTheme())
+            window.layoutIfNeeded(); host.view.layoutIfNeeded(); form.layoutIfNeeded()
+            XCTAssertTrue(descendants(form).first { $0.accessibilityIdentifier == "form.name" } === name)
+            XCTAssertTrue(descendants(form).first { $0.accessibilityIdentifier == "form.pattern" } === pattern)
+            XCTAssertEqual(name.text, "最终保存名称"); XCTAssertEqual(pattern.text, #"广告\s+"#)
+            XCTAssertEqual(values, ["name": "最终保存名称", "pattern": #"广告\s+"#])
+            XCTAssertEqual(name.font?.pointSize, boxed ? 13 : 17)
+            XCTAssertEqual(pattern.font?.pointSize, boxed ? 13 : 17)
+            XCTAssertEqual(check.titleLabel?.font.pointSize, boxed ? 14 : 13)
+            XCTAssertEqual(changes, ["name", "pattern", "name", "pattern"])
+            XCTAssertEqual(selections, [false, true]); XCTAssertTrue(check.isSelected)
+            XCTAssertEqual(check.accessibilityValue, "已勾选")
+            form.removeFromSuperview()
+        }
+    }
 
     func testNavigationOwnsPageLifetimeAndDisablesSystemPopGestures() async throws {
         let theme = TestPageTheme()
@@ -530,6 +893,16 @@ final class MeowUIPlatformTests: XCTestCase {
         return navigation.popViewController(animated: false)
     }
 
+    private func installManagementForm(_ form: ManagementFormView, in host: UIViewController) {
+        host.view.addSubview(form); form.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            form.centerXAnchor.constraint(equalTo: host.view.centerXAnchor),
+            form.topAnchor.constraint(equalTo: host.view.safeAreaLayoutGuide.topAnchor),
+            form.widthAnchor.constraint(equalToConstant: 320),
+            form.heightAnchor.constraint(equalToConstant: 420),
+        ])
+    }
+
     @discardableResult
     private func display(_ controller: UIViewController) throws -> UIWindow {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -562,6 +935,30 @@ final class MeowUIPlatformTests: XCTestCase {
 
     private func descendants(_ view: UIView) -> [UIView] {
         view.subviews.flatMap { [$0] + descendants($0) }
+    }
+
+    private func renderSettingsCard(_ view: UIView) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        format.preferredRange = .standard
+        return UIGraphicsImageRenderer(bounds: view.bounds, format: format).image {
+            view.layer.render(in: $0.cgContext)
+        }
+    }
+
+    private func settingsPixel(_ image: UIImage, x: CGFloat, y: CGFloat) throws -> [UInt8] {
+        let imageData = try XCTUnwrap(image.cgImage)
+        let pixel = try XCTUnwrap(imageData.cropping(to: CGRect(
+            x: (x * image.scale).rounded(.down), y: (y * image.scale).rounded(.down),
+            width: 1, height: 1)))
+        var bytes = [UInt8](repeating: 0, count: 4)
+        try bytes.withUnsafeMutableBytes { buffer in
+            let context = try XCTUnwrap(CGContext(data: buffer.baseAddress, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(pixel, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return bytes
     }
 
     override func tearDown() {

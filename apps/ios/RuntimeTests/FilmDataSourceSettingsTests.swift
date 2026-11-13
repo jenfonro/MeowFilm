@@ -170,7 +170,7 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         let page = FilmDataSourceSettingsViewController(tmdb: tmdb, douban: douban, themeProvider: DataSourceSettingsTheme())
         page.loadViewIfNeeded()
         defer { PageViewController.invalidatePages(in: page) }
-        XCTAssertEqual(page.pageTitle, "数据源")
+        XCTAssertEqual(page.pageTitle, "刮削设置")
         let form = try XCTUnwrap(page.children.compactMap { $0 as? FilmDataSourceFormController }.first)
         let provider = try XCTUnwrap(form.sections.first?.rows.first?.content as? UISegmentedControl)
         XCTAssertEqual(provider.numberOfSegments, 2)

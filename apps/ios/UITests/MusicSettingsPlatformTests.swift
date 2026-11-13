@@ -285,7 +285,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
             window.layoutIfNeeded(); host.view.layoutIfNeeded()
             return host.view.window === window && host.view.bounds.width == 320 &&
                 host.traitCollection.preferredContentSizeCategory == .accessibilityExtraExtraExtraLarge &&
-                !views(host.view).compactMap { $0 as? UICollectionView }.flatMap(\.visibleCells).isEmpty &&
+                !views(host.view).compactMap { $0 as? UITableView }.flatMap(\.visibleCells).isEmpty &&
                 !views(host.view).compactMap { $0 as? UISwitch }.isEmpty
         }
         for toggle in views(host.view).compactMap({ $0 as? UISwitch }) {
