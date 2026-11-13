@@ -6,6 +6,7 @@ import { licenseFiles } from '../scripts/windows/package-licenses.mjs';
 import { temporaryRoot, assertOwnedPath } from '../scripts/windows/working-paths.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const nodeVersion = JSON.parse(readFileSync(new URL('../scripts/script-host-native.json', import.meta.url), 'utf8')).build.node;
 
 // Synthetic publish content only. No application is run, and no user's data
 // directory is accepted, read or changed by these packaging fixtures.
@@ -43,7 +44,7 @@ export function installerFixture(t) {
     schemaVersion: 1, status: 'complete', product: 'aggregate', platform: 'win32', transport: 'windows-http-v1',
     modules: ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease'],
     assemblyProfile: 'common-native', entry: 'app/windows/entries/aggregate.mjs', files: records('runtime', runtimeFiles),
-    node: { version: '24.21.0', sha256: hash('runtime/node.exe'), licenseSha256: hash('runtime/node-LICENSE.txt') },
+    node: { version: nodeVersion, sha256: hash('runtime/node.exe'), licenseSha256: hash('runtime/node-LICENSE.txt') },
   });
   for (const file of licenseFiles) write(`licenses/${file}`);
   write('licenses/licenses-manifest.json', { status: 'complete', files: records('licenses', licenseFiles) });

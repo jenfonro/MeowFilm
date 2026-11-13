@@ -83,26 +83,33 @@ struct MusicSearchSettingsContent: View {
                         MusicPlatformLabel(platform: platform, theme: theme)
                     }
                         .accessibilityIdentifier("music.search.platform.\(platform.rawValue)")
-                        .modifier(MusicSettingsRowStyle(theme: theme))
+                        .modifier(MusicSettingsRowStyle(theme: theme,
+                            first: platform == MusicSearchPreferences.platforms.first,
+                            last: platform == MusicSearchPreferences.platforms.last))
                 }
             }
             .headerProminence(.increased)
+            .listSectionSeparator(.hidden)
             Section {
                 Toggle("搜索歌曲同时搜索歌单", isOn: Binding(
                     get: { state.value.searchPlaylists },
                     set: { if !state.setSearchPlaylists($0) { state.reload() } }
                 ))
-                .modifier(MusicSettingsRowStyle(theme: theme))
+                .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
             }
+            .listSectionSeparator(.hidden)
             Section("歌单搜索平台") {
                 ForEach(MusicSearchPreferences.platforms, id: \.rawValue) { platform in
                     Toggle(isOn: platformBinding(platform, songs: false)) {
                         MusicPlatformLabel(platform: platform, theme: theme)
                     }
-                        .modifier(MusicSettingsRowStyle(theme: theme))
+                        .modifier(MusicSettingsRowStyle(theme: theme,
+                            first: platform == MusicSearchPreferences.platforms.first,
+                            last: platform == MusicSearchPreferences.platforms.last))
                 }
             }
             .headerProminence(.increased)
+            .listSectionSeparator(.hidden)
             ForEach(["songs", "playlists"], id: \.self) { kind in
                 Section(kind == "songs" ? "歌曲搜索" : "歌单搜索") {
                     let settings = kind == "songs" ? state.value.songs : state.value.playlists
@@ -114,6 +121,7 @@ struct MusicSearchSettingsContent: View {
                             state.reload()
                         } }
                     ), in: 1...Int.max)
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: false))
                     Stepper("平台并发数 \(settings.concurrency)", value: Binding(
                         get: { kind == "songs" ? state.value.songs.concurrency : state.value.playlists.concurrency },
                         set: { if !state.setAdvanced(kind,
@@ -123,6 +131,7 @@ struct MusicSearchSettingsContent: View {
                             state.reload()
                         } }
                     ), in: 1...Int.max)
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: false))
                     Stepper("结果缓存 \(settings.cacheMinutes) 分钟", value: Binding(
                         get: { kind == "songs" ? state.value.songs.cacheMinutes : state.value.playlists.cacheMinutes },
                         set: { if !state.setAdvanced(kind,
@@ -132,8 +141,10 @@ struct MusicSearchSettingsContent: View {
                             state.reload()
                         } }
                     ), in: 1...MusicSearchPreferences.maximumCacheMinutes)
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: true))
                 }
                 .headerProminence(.increased)
+                .listSectionSeparator(.hidden)
             }
         }
         .modifier(MusicSettingsListStyle(theme: theme))

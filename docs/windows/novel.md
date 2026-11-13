@@ -35,6 +35,12 @@ dotnet build apps/windows/app/MeowFilm.Windows.App.csproj --configuration Releas
 
 `NovelTests` 包括原子存储失败与第二进程恢复、保留会话删除历史后加书架、冷书架直读、真实 App Node 书源仓库重启、真实规则 RPC 超时与恢复、保留多书重处理／失败取消／最新设置与普通设置返回、共享 fixtures、多源搜索、换源／章节上下文、目录显式及自动重载的整体提交／失败／取消、购章确认、真实 WebView2 自动动态获取／隔离／退休及 Cookie scope 双向 owner 回传、封面裁剪视口与迟到隔离／关闭实际排空／同控件恢复／失败布局不重试／隐藏卸载隔离、原生四模式和长图晚到锚点、布局刷新标签且不新增进度保存。规则行为用例通过独立测试 owner 借用实际 Node HTTP 运行器；输入快照、RPC 错误、owner 排空及清数据隔离另用显式回执检查。共享 fixtures 只嵌入测试项目，不进入产品。运行器单次预算和排队预算回归归公共 source／NativeJsonProgram 测试所有。
 
-小说弹窗的操作回执等待真实 `Popup.Closed` 和提交任务实际结束，再一次性解绑及释放取消源；`IsOpen=false` 只是关闭请求，不作为收口回执。仍打开的手工弹窗在原位显示错误并允许重试；已关闭弹窗的非取消真实写失败交回页面或设置 owner 的现有通知，普通取消不报保存失败。Web交互先排空初始化及资源请求，释放WebView后等待环境级 `BrowserProcessExited` 确认整个进程组和用户目录资源释放，再删除临时profile并返回；不以主browser PID退出、固定延时或文件删除重试代替。`NovelTests` 的 dialog closure/cancellation/isolation、保存失败／owner 通知与 Web lifecycle 用例覆盖这些边界。
+小说阅读流程中仍使用 WPF `Popup` 的操作回执等待真实 `Popup.Closed` 和提交任务实际结束，再一次性解绑及释放取消源；`IsOpen=false` 只是关闭请求，不作为收口回执。设置内多字段编辑、导入和确认使用 Shell 内的 `PlayerDialogHost` 覆盖层，宽度不超过 520 DIP，点击浮层外不会关闭；它保留同一提交排空、失败通知与取消语义。仍打开的手工弹窗在原位显示错误并允许重试；已关闭弹窗的非取消真实写失败交回页面或设置 owner 的现有通知，普通取消不报保存失败。Web交互先排空初始化及资源请求，释放WebView后等待环境级 `BrowserProcessExited` 确认整个进程组和用户目录资源释放，再删除临时profile并返回；不以主browser PID退出、固定延时或文件删除重试代替。`NovelTests` 的 dialog closure/cancellation/isolation、保存失败／owner 通知与 Web lifecycle 用例覆盖这些边界。
 
-`NovelTests` 的 composition、reader、image-anchor、shell、purchase components 和 Web lifecycle 用例自动把离屏截图写入测试 DataRoot 的 `novel-previews/`，包含空／带书首页与书架、详情、设置、净化、阅读、长图位置、沉浸壳、购章确认和受控Web浮层，文件后缀为 `-96.png/-144.png/-192.png`。WebView原生窗口另由 `CapturePreviewAsync` 写入 `novel-web-lifecycle-browser.png`，不把WPF离屏图当作网页内容截图。可用 `MEOWFILM_SETTINGS_PREVIEW_ROOT` 改为测试 DataRoot 内的其他目录。此前定向验证及截图记录见[验证记录](../../tmp/test-results/novel/verification-notes.md)和[视觉核对](../../tmp/test-results/novel/windows-visual-review.md)；这些历史证据不代表本次 Node 规则迁移及最新 main 适配已验证。本轮未执行测试或构建，未使用第三方真实书源、账号或付费操作，未发行或安装应用。
+`NovelTests` 的 composition、reader、image-anchor、shell、purchase components 和 Web lifecycle 用例自动把 WPF 渲染快照写入测试 DataRoot 的 `novel-previews/`，包含空／带书首页与书架、详情、设置、净化、阅读、长图位置、沉浸壳、购章确认和受控Web浮层，文件后缀为 `-96.png/-144.png/-192.png`。WebView原生窗口另由 `CapturePreviewAsync` 写入 `novel-web-lifecycle-browser.png`，不把 WPF 渲染快照当作真实桌面或网页内容截图。可用 `MEOWFILM_SETTINGS_PREVIEW_ROOT` 改为测试 DataRoot 内的其他目录。测试选择、执行结果及截图核对记录保留在本次任务的 `tmp/`，不以历史证据代表当前源码已验证；这些用例不使用第三方真实书源、账号或付费操作，也不发行或安装应用。
+
+## 原生书源与替换管理
+
+管理与导入行为、三协议字段和净化表单遵循[共同管理契约](../common/novel/reading.md#书源与替换管理)。
+
+`NovelSettingsView` 的书源与替换标签使用 Desktop 的 `ManagementList`、`ManagementForm`、`ManagementImportSelection`。列表为虚拟化 WPF 控件，编辑器为原生 TabControl／表单，行启用控件使用共享开关样式。设置编辑与网络导入由 `NovelUi.DialogAsync` 挂入 Shell 的 `PlayerDialogHost`，复用桌面浮层的主题边框／表面、恢复输入行分隔、在应用窗口内居中且最大宽度 520 DIP；具体流程保留原提交、取消及 Escape 语义，点击编辑器外不关闭。阅读器内章节选择、换源及 Web 验证交互仍保留各自的 Popup 定位与生命周期。二维码图片由锁定的 ZXing.Net 0.16.11 本地解码，Apache-2.0 许可随 Windows 清单发布。

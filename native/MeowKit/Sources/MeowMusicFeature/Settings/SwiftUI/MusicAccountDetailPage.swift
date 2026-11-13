@@ -30,7 +30,7 @@ final class MusicAccountDetailViewController: MusicSettingsPageViewController<Mu
         modalTransitionStyle = .crossDissolve
     }
 
-    override func loadView() { view = MusicAccountFloatingBackdrop() }
+    override func loadView() { view = AccountFloatingBackdrop() }
     override var usesPageHeader: Bool { false }
 
     override func viewDidLoad() {
@@ -56,7 +56,7 @@ struct MusicAccountDetailContent: View {
 
     var body: some View {
         let summary = state.rows.first { $0.id == platform }
-        MusicAccountFloatingCard(theme: theme) {
+        AccountFloatingCard(theme: theme) {
             VStack(alignment: .leading, spacing: 0) {
                 MusicAccountCardHeader(platform: platform, title: platform.title, theme: theme, close: actions.close) {
                     if let summary, let accounts = state.accounts {
@@ -103,7 +103,7 @@ struct MusicAccountDetailContent: View {
         .accessibilityElement(children: .combine)
         .padding(.top, 16)
         .padding(.bottom, 18)
-        Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(height: 1)
+        MusicSettingsDivider(theme: theme)
         HStack {
             Text("会员有效期").foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
             Spacer(minLength: 8)
@@ -118,10 +118,10 @@ struct MusicAccountDetailContent: View {
         }
         HStack(spacing: 12) {
             Button("刷新资料") { actions.perform(.refreshProfile) }
-                .buttonStyle(MusicAccountPrimaryButtonStyle(theme: theme))
+                .buttonStyle(AccountPrimaryButtonStyle(theme: theme))
                 .disabled(!signedIn || pending || state.accounts?.supportsProfileRefresh != true)
             Button("退出登录", action: actions.logout)
-                .buttonStyle(MusicAccountDestructiveButtonStyle(theme: theme))
+                .buttonStyle(AccountDestructiveButtonStyle(theme: theme))
                 .disabled(pending)
         }
         .padding(.top, 20)
@@ -181,10 +181,10 @@ private struct MusicAccountSyncSection: View {
                 .padding(.top, 12)
                 .padding(.bottom, 4)
             Toggle("收藏歌曲", isOn: Binding(get: { selection.favorites }, set: { perform(.favorites($0)) }))
-                .frame(minHeight: 48)
-            Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(height: 1)
+                .frame(minHeight: SettingsVisualMetrics.rowHeight)
+            MusicSettingsDivider(theme: theme)
             Toggle("歌单", isOn: Binding(get: { selection.playlists }, set: { perform(.playlists($0)) }))
-                .frame(minHeight: 48)
+                .frame(minHeight: SettingsVisualMetrics.rowHeight)
         }
         .disabled(!ready)
     }

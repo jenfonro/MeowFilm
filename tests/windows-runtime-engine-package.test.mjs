@@ -6,7 +6,7 @@ import {
   cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packageRuntime } from '../scripts/package-runtime.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
@@ -94,7 +94,13 @@ function packagingFixture({
         '@meowfilm/film-rules': '1.0.0', '@meowfilm/film-search': '1.0.0' } } : {}),
     };
     write(source, `${location}/package.json`, pkg);
-    if (!(missingShared && name === 'script-host')) write(source, `${location}/src/index.js`, inert);
+    const packageImports = {
+      'script-host': "import '@meowfilm/source-runtime';\n",
+      'film-playback': "import '@meowfilm/film-rules';\nimport '@meowfilm/film-search';\n",
+    };
+    if (!(missingShared && name === 'script-host')) {
+      write(source, `${location}/src/index.js`, `${packageImports[name] ?? ''}${inert}`);
+    }
     write(source, `${location}/LICENSE`, 'Synthetic fixture license\n');
     lock.packages[location] = { version: pkg.version, ...(pkg.dependencies ? { dependencies: pkg.dependencies } : {}) };
     lock.packages[installed] = { resolved: location, link: true };
@@ -112,6 +118,12 @@ function packagingFixture({
   }
   if (!missingSourceModule) write(source, 'apps/runtime/modules/source-runtime.mjs', inert);
   for (const file of metadataFiles) write(source, `apps/runtime/${file}`, inert);
+  if (missingShared) write(source, 'apps/runtime/modules/metadata/network.mjs',
+    "import '@meowfilm/script-host';");
+  if (missingCommonModule) write(source, 'apps/runtime/entry.mjs',
+    "import './modules/music-script.mjs';");
+  if (missingSourceModule) write(source, 'apps/runtime/entry.mjs',
+    "import './modules/source-runtime.mjs';");
   for (const path of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
     if (missingBootstrap && path === 'bootstrap.mjs') continue;
     let text = readFileSync(join(root, 'apps/windows/runtime', path), 'utf8');
@@ -155,6 +167,29 @@ for (const [option, code] of [
   });
 }
 
+test('Windows wrapper relocation ignores import-shaped comments, strings and method names', async () => {
+  const f = packagingFixture();
+  const path = join(f.root, 'apps/windows/runtime/bootstrap.mjs');
+  const pseudo = `// import { unexpected } from './not-a-module.mjs';
+const example = "require('node:child_process'); import('./not-a-module.mjs')";
+const methods = { import() {} };
+methods.import();
+`;
+  write(f.root, 'apps/windows/runtime/bootstrap.mjs', `${readFileSync(path, 'utf8')}\n${pseudo}`);
+  await packageWindowsRuntime({ ...f, product: 'aggregate' });
+  const output = readFileSync(join(f.output, 'app/windows/bootstrap.mjs'), 'utf8');
+  assert.ok(output.includes(pseudo));
+});
+
+for (const statement of ["require('node:child_process');", "import('./unexpected.mjs');", 'import(moduleName);']) {
+  test(`Windows wrapper rejects actual unsupported import syntax: ${statement}`, async () => {
+    const f = packagingFixture();
+    const path = join(f.root, 'apps/windows/runtime/bootstrap.mjs');
+    write(f.root, 'apps/windows/runtime/bootstrap.mjs', `${readFileSync(path, 'utf8')}\n${statement}`);
+    await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code: 'WINDOWS_IMPORT' });
+  });
+}
+
 test('Windows source junctions are rejected, not dereferenced or silently omitted', async () => {
   const f = packagingFixture();
   const entries = join(f.root, 'apps/windows/runtime/entries'), relocated = join(f.root, 'saved-entries');
@@ -186,6 +221,13 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
   assert.ok(readFileSync(join(f.output, first.entry), 'utf8').includes("from '../../entry.mjs'"));
 });
 
+test('Windows packaging automatically includes a new shared runtime helper', async () => {
+  const f = packagingFixture();
+  write(f.root, 'apps/runtime/modules/metadata/new-helper.mjs', 'export const value = 1;\n');
+  const manifest = await packageWindowsRuntime({ ...f, product: 'aggregate' });
+  assert.ok(manifest.files.some(file => file.path === 'app/modules/metadata/new-helper.mjs'));
+});
+
 test('Windows packaging accepts optional metadata and pan closures and neutral HTTP imports', async () => {
   const f = packagingFixture();
   write(f.root, 'apps/runtime/modules/metadata-data.mjs', `
@@ -213,15 +255,33 @@ test('Windows packaging accepts optional metadata and pan closures and neutral H
   verifyManifest(f.output, await packageWindowsRuntime({ ...f, product: 'aggregate' }));
 });
 
+for (const [target, importer] of [
+  ['modules/music-script.mjs', 'entry.mjs'],
+  ['modules/cat-script.mjs', 'entry.mjs'],
+  ['modules/source-runtime.mjs', 'entry.mjs'],
+  ['modules/metadata-data.mjs', 'entry.mjs'],
+  ...metadataFiles.filter(file => file !== 'modules/metadata-data.mjs')
+    .map(file => [file, 'modules/metadata-data.mjs']),
+  ['modules/pan-runtime.mjs', 'pan-entry.mjs'],
+  ['modules/film-playback.mjs', 'entry.mjs'],
+  ['modules/netease-token.mjs', 'entry.mjs'],
+  ['modules/source-library.mjs', 'modules/source-runtime.mjs'],
+  ['modules/source-web.mjs', 'modules/source-runtime.mjs'],
+  ['modules/source-rules.mjs', 'modules/source-runtime.mjs'],
+]) {
+  test(`Windows packaging rejects a missing imported shared module ${target}`, async () => {
+    const f = packagingFixture();
+    const specifier = posix.relative(posix.dirname(importer), target);
+    write(f.root, `apps/runtime/${importer}`, `import '${specifier.startsWith('.') ? specifier : `./${specifier}`}';`);
+    rmSync(join(f.root, 'apps/runtime', target));
+    await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code: 'MISSING_SOURCE' });
+    const manifest = readJSON(join(f.output, 'runtime-manifest.json'));
+    assert.equal(manifest.status, 'failed');
+    assert.equal(manifest.error.code, 'MISSING_SOURCE');
+  });
+}
+
 for (const [name, mutate, code] of [
-  ...[...metadataFiles, 'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'pan-entry.mjs'].map(file => [`missing shared ${file}`, f =>
-    rmSync(join(f.root, 'apps/runtime', file)), 'MISSING_SOURCE']),
-  ...['unlisted', 'modules/unlisted', 'modules/metadata/unlisted'].map(path =>
-    [`unlisted shared directory ${path}`, f =>
-      mkdirSync(join(f.root, 'apps/runtime', path)), 'SHARED_CLOSURE']),
-  ...['unlisted-helper.mjs', 'modules/metadata/unlisted-helper.mjs'].map(file =>
-    [`unlisted shared file ${file}`, f =>
-      write(f.root, `apps/runtime/${file}`, 'export {};'), 'SHARED_CLOSURE']),
   ...['node:net', 'node:fs', '@meowfilm/script-host/src/host.js', '@meowfilm/pan-runtime/src/index.js',
     '../../../windows/runtime/bootstrap.mjs', '../../../ios/runtime/bootstrap.mjs'].map(specifier =>
     [`metadata import ${specifier}`, f =>

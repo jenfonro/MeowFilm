@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
@@ -29,13 +30,25 @@ public static class MusicKgAccountUiTests
         yield return Case("loaded-unloaded-and-context-change-stop-polling", Unload);
         yield return Case("minimized-cancels-no-background-recreation", Minimized);
         yield return Case("explicit-confirm-selected-PNG-roundtrip-no-URL-metadata", Save);
+        yield return Case("saved-QR-notice-survives-internal-account-read", SavedNotice);
         yield return Case("save-denied-or-picker-cancel-no-files", SaveCancelled);
         yield return Case("save-modal-epoch-change-rejects-retired-image", SaveStale);
         yield return Case("save-existing-file-no-overwrite-and-invalid-destination-denied", SaveBoundary);
         yield return Case("save-modal-query-admission-paused", SaveSingleFlight);
     }
     private static TestCase Case(string name, Func<Task> action) => new("music.accounts.kg.ui." + name, () => Sta(action));
-    private static void Check(bool test) => MusicNativeKgAccountTests.Check(test);
+    private static void Check(bool condition,
+        [CallerArgumentExpression(nameof(condition))] string expression = "",
+        [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
+    { if (!condition) throw new InvalidOperationException($"KG account assertion at {member}:{line}: {expression}"); }
+    private static async Task Until(Func<bool> predicate,
+        [CallerArgumentExpression(nameof(predicate))] string expression = "",
+        [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
+    {
+        try { await MusicNativeKgAccountTests.Until(predicate); }
+        catch (OperationCanceledException)
+        { throw new TimeoutException($"KG account wait at {member}:{line}: {expression}"); }
+    }
     private static async Task Sta(Func<Task> action)
     {
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -103,9 +116,9 @@ public static class MusicKgAccountUiTests
             await Task.Delay(2200); Check(f.Transport.Calls == 0);
             OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
-            await MusicNativeKgAccountTests.Until(() => f.Transport.Polls == 1);
+            await Until(() => f.Transport.Polls == 1);
             window.Hide();
-            await MusicNativeKgAccountTests.Until(() => !f.Module.HasAccountQr && !f.Module.AccountBusy);
+            await Until(() => !f.Module.HasAccountQr && !f.Module.AccountBusy);
             int calls = f.Transport.Calls;
             await Task.Delay(2200); window.Show(); await Task.Delay(2200);
             Check(f.Transport.Calls == calls && !f.Module.HasAccountQr);
@@ -182,12 +195,12 @@ public static class MusicKgAccountUiTests
             window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
             view.DataContext = other.Module;
-            await MusicNativeKgAccountTests.Until(() => !f.Module.HasAccountQr);
+            await Until(() => !f.Module.HasAccountQr);
             await Task.Delay(2200); Check(other.Transport.Calls == 0);
             OpenLogin(view);
             await other.Module.BeginAccountQrAsync();
             window.Content = new Border();
-            await MusicNativeKgAccountTests.Until(() => !other.Module.HasAccountQr);
+            await Until(() => !other.Module.HasAccountQr);
             int calls = other.Transport.Calls; window.Content = view; await Task.Delay(2200);
             Check(!other.Module.HasAccountQr && other.Transport.Calls == calls);
         }
@@ -203,7 +216,7 @@ public static class MusicKgAccountUiTests
             window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
             window.WindowState = WindowState.Minimized;
-            await MusicNativeKgAccountTests.Until(() => !f.Module.HasAccountQr);
+            await Until(() => !f.Module.HasAccountQr);
             int calls = f.Transport.Calls; window.WindowState = WindowState.Normal; await Task.Delay(2200);
             Check(!f.Module.HasAccountQr && f.Transport.Calls == calls);
         }
@@ -228,6 +241,15 @@ public static class MusicKgAccountUiTests
             Check(png.Frames[0].Metadata is null || !((BitmapMetadata)png.Frames[0].Metadata).ContainsQuery("/tEXt"));
         }
         finally { window.Close(); }
+    }
+    private static async Task SavedNotice()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.BeginAccountQrAsync();
+        await f.Module.SaveAccountQrAsync();
+        Check(f.Module.AccountStatus == "二维码已保存");
+        await f.Calls.CompleteInternalAccountReadAsync(f.Module, "tx");
+        Check(f.Module.AccountStatus == "二维码已保存" && f.Module.HasAccountQr && f.Transport.Calls == 1);
     }
     private static async Task SaveCancelled()
     {
@@ -276,12 +298,14 @@ public static class MusicKgAccountUiTests
         internal readonly KgAccountHandler Transport = new();
         internal readonly KgAccountStore Store;
         internal readonly Dialogs Dialogs;
+        internal readonly MusicAccountFixtureApplication Calls;
         internal readonly MusicCapability Module;
         private Fixture()
         {
             Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Dialogs = new() { Path = System.IO.Path.Combine(Root, "explicit-qr.png") };
-            Module = new(new MusicNativeApplication(Store, Runtime, Transport), Store, new Output(), Dialogs);
+            Calls = new(new MusicNativeApplication(Store, Runtime, Transport));
+            Module = new(Calls, Store, new Output(), Dialogs);
         }
         internal static async Task<Fixture> Create(bool seedDevice = true)
         {
@@ -290,6 +314,8 @@ public static class MusicKgAccountUiTests
             {
                 if (seedDevice) await KgAccountFixture.SeedDevice(f.Store.Inner);
                 await f.Module.InitializeAsync(default);
+                // Account fixtures stay on a local page instead of refreshing an unrelated home.
+                await f.Module.NavigateAsync("favorites", default);
                 f.Module.SelectedAccount = f.Module.Accounts[2]; return f;
             }
             catch { await f.DisposeAsync(); throw; }

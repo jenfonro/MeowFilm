@@ -7,6 +7,15 @@ enum MusicNativePublicBrowseContent: Sendable {
     case collection(MusicPublicBrowseCollection), song(MusicNativeTrackData), songID(String)
     case channel(MusicPublicBrowseChannel), daily, unavailable
     case action(MusicHomeAction)
+
+    var requiresAccount: Bool {
+        switch self {
+        case .action(let action): return action.requiresAccount
+        case .daily: return true
+        case .channel(let channel): return [.vip, .artistActivity].contains(channel.kind)
+        default: return false
+        }
+    }
 }
 struct MusicNativePublicBrowseItem: Sendable {
     let id: String
@@ -183,7 +192,7 @@ enum MusicNativePublicBrowseParser {
         return .init(id: id, title: title, kind: kind, pageCode: link.page, platform: .netease)
     }
     private static func hiddenWhenLoggedOut(_ link: Action) -> Bool {
-        if let action = link.homeAction { return action.requiresAccount && !action.isSimilar && !action.isHeartbeat }
+        if let action = link.homeAction { return action.requiresAccount }
         guard let channel = channel(link, title: "") else { return false }
         return [.vip, .artistActivity].contains(channel.kind)
     }
@@ -192,7 +201,8 @@ enum MusicNativePublicBrowseParser {
         guard row.isObject else { return nil }
         let kind = text(row["resourceType"], row["targetType"], row["type"], row["creativeType"]).lowercased()
         if ["video", "podcast", "voice", "djradio", "djprogram", "mv"].contains(where: kind.contains) { return nil }
-        if !loggedIn, kind == "dailysongs" { return nil }
+        if !loggedIn, ["dailysongs", "star", "similarsong", "similarartist"].contains(kind) ||
+            row["lunaItemType"].string == "heartRcmd" { return nil }
         let play = MusicNativeHomePresentation.hasValue(row["playBtnData"]) ? try object(row["playBtnData"]) : .null
         let primary = MusicNativeHomePresentation.primaryAction(row)
         var link = try action(primary)
@@ -271,6 +281,7 @@ enum MusicNativePublicBrowseParser {
         } else if link != nil {
             content = .unavailable; stable = index
         } else { return nil }
+        if !loggedIn, content.requiresAccount { return nil }
         return .init(id: stable, title: name, subtitle: sub, artwork: cover, content: content, isEntrance: entrance,
                      ranking: try MusicNativeHomePresentation.ranking(row),
                      coverLabel: kind == "fm" ? String(row["fmLogoTextContent"].string.prefix(200)) : "",

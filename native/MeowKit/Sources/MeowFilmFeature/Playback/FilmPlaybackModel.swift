@@ -17,13 +17,12 @@ public final class FilmPlaybackModel: ObservableObject {
     @Published public private(set) var mediaStopError: FilmPlaybackError?
     @Published public private(set) var sessionReleaseError: FilmPlaybackError?
     @Published public private(set) var mediaState = FilmMediaState()
-    @Published public private(set) var requiresExplicitPlay = false
     public var sessionID: UUID? { allocatedSessionID }
     public var isReleased: Bool { released && mediaStopped }
     /// A dead runtime cannot acknowledge release. Keep that failure visible,
     /// but do not trap navigation after the precise local resources have drained.
     public var canLeave: Bool {
-        isReleased || canLeaveExternalPlayback || runtimeClosed && closeDrained &&
+        isReleased || runtimeClosed && closeDrained &&
             (allocatedSessionID.map { media.isLocallyDrained(sessionID: $0) } ?? true)
     }
 
@@ -37,7 +36,6 @@ public final class FilmPlaybackModel: ObservableObject {
     private var searchRevision = -1
     private var reentryTarget: FilmPlaybackTarget?
     private let media: any FilmPlaybackMediaControlling
-    private let openExternalURL: @MainActor (URL) async -> Bool
     private var allocatedSessionID: UUID?
     private var openingTask: Task<Void, Never>?
     private var observationTask: Task<Void, Never>?
@@ -68,18 +66,10 @@ public final class FilmPlaybackModel: ObservableObject {
     private var activePreparation: Task<Void, Never>?
     private var cancellingPreparation: Task<Void, Never>?
     private var stoppingMedia: Task<Void, Never>?
-    private var stoppingCommand = false
     private var commandWorker: Task<Void, Never>?
     private var queuedCommands: [Command] = []
     private var mediaStopped = true
     private var closeDrained = false
-    private var externalPlaybackTask: Task<Void, Never>?
-    private var externalPlaybackAdmission = UUID()
-    private var externalOwner: ExternalPlayback?
-    // A previous handoff's native drain may finish after the next handoff opens.
-    // Keep each exact receipt until its real final ACK, independent of the UI owner.
-    private var externalReceipts: [Preparation] = []
-    private var externalReleaseTask: Task<Void, Error>?
 
     @MainActor
     private final class Preparation {
@@ -97,16 +87,14 @@ public final class FilmPlaybackModel: ObservableObject {
         var retired = false
         var resourceID: String?
         var state: FilmMediaState?
-        var nativeHeld = false
-        var externalHeld = false
         private var resourceReleased = false
         private var releaseTask: Task<Void, Error>?
         init(attempt: FilmPlaybackAttempt, target: FilmPlaybackTarget, sessionID: UUID, admission: UUID, generation: UUID) {
             self.attempt = attempt; self.target = target; self.sessionID = sessionID
             self.admission = admission; self.generation = generation
         }
-        func releaseIfUnheld(transport: FilmPlaybackTransport) async throws {
-            guard !nativeHeld, !externalHeld, !resourceReleased, let resourceID else { return }
+        func releaseResource(transport: FilmPlaybackTransport) async throws {
+            guard !resourceReleased, let resourceID else { return }
             if let releaseTask { try await releaseTask.value; return }
             let task = Task { [self] in
                 try await FilmPlaybackModel.releaseMedia(transport: transport, sessionID: sessionID,
@@ -129,28 +117,16 @@ public final class FilmPlaybackModel: ObservableObject {
         let intent: UUID?
         let ui: Bool
     }
-    @MainActor
-    private final class ExternalPlayback {
-        let current: Preparation
-        let mediaAdmission: UUID
-        let commandAdmission: UUID
-        var keepAcknowledged = false
-        init(current: Preparation, mediaAdmission: UUID, commandAdmission: UUID) {
-            self.current = current; self.mediaAdmission = mediaAdmission; self.commandAdmission = commandAdmission
-        }
-    }
-
     public init(transport: FilmPlaybackTransport, media: any FilmPlaybackMediaControlling,
-                openExternalURL: @escaping @MainActor (URL) async -> Bool,
                 searchContext: FilmSearchContext? = nil,
                 request: @escaping @Sendable () async throws -> FilmPlaybackRequest) {
-        self.transport = transport; self.media = media; self.openExternalURL = openExternalURL; makeRequest = request
+        self.transport = transport; self.media = media; makeRequest = request
         self.searchContext = searchContext
     }
 
     @discardableResult
     public func open() -> Task<Void, Never>? {
-        guard !requiresExplicitPlay, !runtimeClosed else { return nil }
+        guard !runtimeClosed else { return nil }
         if closingTask != nil { return reopenAfterDrain() }
         if let openingTask { return openingTask }
         guard !closed else { return nil }
@@ -406,24 +382,17 @@ public final class FilmPlaybackModel: ObservableObject {
     @discardableResult
     public func send(_ action: String, parameters: RuntimeObject = [:]) -> Task<Void, Never>? {
         guard !runtimeClosed else { return nil }
-        if action == "stop", closed || closingTask != nil || openingTask != nil || reopeningTask != nil ||
-            externalOwner != nil || externalPlaybackTask != nil {
-            revokeExternalPlayback()
-            if closed || closingTask != nil || openingTask != nil || reopeningTask != nil {
-                let admission = UUID(); commandAdmission = admission
-                let generation = generation
-                return Task { [weak self] in
-                    guard let self, self.generation == generation, self.commandAdmission == admission else { return }
-                    await self.close()
-                }
+        if action == "stop", closed || closingTask != nil || openingTask != nil || reopeningTask != nil {
+            let admission = UUID(); commandAdmission = admission
+            let generation = generation
+            return Task { [weak self] in
+                guard let self, self.generation == generation, self.commandAdmission == admission else { return }
+                await self.close()
             }
         }
         let explicitPlayback = action == "play" || action == "select.episode" || action == "select.candidate"
-        if explicitPlayback, requiresExplicitPlay || closed || openingTask != nil || reopeningTask != nil {
-            revokeExternalPlayback()
-            requiresExplicitPlay = false
-            // Admit the explicit intent synchronously, before an in-flight
-            // system-open completion can act on its older command fence.
+        if explicitPlayback, closed || openingTask != nil || reopeningTask != nil {
+            // Admit the explicit intent before drain/reopen can publish an older attempt.
             commandAdmission = UUID(); awaitingIntent = commandAdmission
             let opening = open()
             let reopeningAdmission = reopeningAdmission, commandAdmission = commandAdmission
@@ -433,7 +402,7 @@ public final class FilmPlaybackModel: ObservableObject {
                 defer {
                     if self.commandAdmission == commandAdmission { self.awaitingIntent = nil }
                 }
-                guard !Task.isCancelled, !self.closed, !self.requiresExplicitPlay,
+                guard !Task.isCancelled, !self.closed,
                       self.reopeningAdmission == reopeningAdmission, self.commandAdmission == commandAdmission else { return }
                 guard self.allocatedSessionID != nil else { return }
                 await self.enqueueAction(action, parameters: parameters, ui: true)?.value
@@ -456,8 +425,6 @@ public final class FilmPlaybackModel: ObservableObject {
     private func enqueueAction(_ action: String, parameters: RuntimeObject, ui: Bool) -> Task<Void, Never>? {
         var intent: UUID?
         if Self.mediaActions.contains(action) || action == "browse.metadata" {
-            revokeExternalPlayback()
-            requiresExplicitPlay = false
             commandAdmission = UUID(); awaitingIntent = commandAdmission
             intent = commandAdmission
             // Blocking or retry may reject without replacing anything.
@@ -493,16 +460,11 @@ public final class FilmPlaybackModel: ObservableObject {
             if let intent = command.intent, command.key == "media.intent", intent != commandAdmission { continue }
             do {
                 if command.action == "stop" {
-                    stoppingCommand = true
-                    defer { stoppingCommand = false }
-                    let pendingExternalRelease = externalReleaseTask
                     await preparationWorker?.value
                     await cancellingPreparation?.value
                     await stoppingMedia?.value
                     try await media.stop(sessionID: sessionID)
                     mediaStopped = true
-                    try await pendingExternalRelease?.value
-                    try await drainRevokedExternalPlayback()
                     // Native disposal may precede its terminal callback. Those
                     // captured facts must reach Node before stop replaces them.
                     try await drainFeedback(sessionID: sessionID)
@@ -652,7 +614,6 @@ public final class FilmPlaybackModel: ObservableObject {
             guard ownsPending(request) else { throw CancellationError() }
             let transport = transport
             request.resourceID = input.resourceID
-            request.nativeHeld = true
             handedToMedia = true
             mediaStopped = false
             try await media.play(input, preservePosition: preservesPosition(request), waitForCommit: { [weak self] in
@@ -661,15 +622,8 @@ public final class FilmPlaybackModel: ObservableObject {
             }, canCommit: { [weak self] in
                 self?.admits(request) == true
             }, release: { [weak self] in
-                request.retired = true; request.nativeHeld = false
-                if let self, self.externalReceipts.contains(where: { $0 === request }) {
-                    // The external owner retains the final Node receipt, even
-                    // after revocation. Keep its retryable RPC out of the
-                    // native lease's immutable physical-drain result.
-                    if !self.closed, !self.stoppingCommand { self.releaseRevokedExternalPlayback() }
-                } else {
-                    try await request.releaseIfUnheld(transport: transport)
-                }
+                request.retired = true
+                try await request.releaseResource(transport: transport)
                 if let self, self.committed === request { self.mediaState = FilmMediaState() }
             }) { [weak self] event in
                 self?.receiveMedia(event, request: request)
@@ -689,8 +643,7 @@ public final class FilmPlaybackModel: ObservableObject {
                 }
             }
             do {
-                request.nativeHeld = false
-                try await request.releaseIfUnheld(transport: transport)
+                try await request.releaseResource(transport: transport)
             } catch { actionError = Self.failure(error) }
         }
     }
@@ -774,11 +727,6 @@ public final class FilmPlaybackModel: ObservableObject {
             // The shared owner's started callback is synchronous with its final
             // cancelled-task fence and real output commit. No second commit shim.
             committed = request; request.didCommit = true; request.started = true
-            if externalOwner?.current !== request {
-                revokeExternalPlayback()
-                releaseRevokedExternalPlayback()
-                requiresExplicitPlay = false
-            }
             if let state = request.state { mediaState = state }
             feedback("media.started", attemptID: id)
             if let state = request.state { queueProgress(state) }
@@ -796,7 +744,6 @@ public final class FilmPlaybackModel: ObservableObject {
             feedback("media.ended", attemptID: id)
         case .ownerEnded(let id):
             guard id == request.attempt.id, committed === request else { return }
-            revokeExternalPlayback()
             Task { [weak self] in
                 guard let self, self.committed === request else { return }
                 await self.close()
@@ -835,7 +782,6 @@ public final class FilmPlaybackModel: ObservableObject {
 
     public func pauseOrResume() {
         guard !runtimeClosed else { return }
-        if requiresExplicitPlay { send("play"); return }
         guard let current = committed, current.started, !current.retired, !current.terminal,
               media.isCurrent(sessionID: current.sessionID, attemptID: current.attempt.id) else {
             send("play"); return
@@ -849,135 +795,13 @@ public final class FilmPlaybackModel: ObservableObject {
     public func startPictureInPicture() { if !runtimeClosed, let sessionID { media.startPictureInPicture(sessionID: sessionID) } }
     public func stopPictureInPicture() { if let sessionID { media.stopPictureInPicture(sessionID: sessionID) } }
     public var hasSystemOwner: Bool {
-        guard !ownsExternalPlayback, let committed, committed.started, !committed.terminal, !committed.retired, !released,
+        guard let committed, committed.started, !committed.terminal, !committed.retired, !released,
               let sessionID else { return false }
         return media.hasSystemOwner(sessionID: sessionID)
     }
 
-    @discardableResult
-    public func openExternalPlayer(_ player: FilmExternalPlayer) -> Task<Void, Never>? {
-        if let externalPlaybackTask { return externalPlaybackTask }
-        guard let current = committed else {
-            actionError = .init(code: "EXTERNAL_PLAYER_NO_CURRENT"); return nil
-        }
-        let handoff = ExternalPlayback(current: current, mediaAdmission: mediaAdmission, commandAdmission: commandAdmission)
-        guard admitsExternalPlayback(handoff) else {
-            actionError = .init(code: "EXTERNAL_PLAYER_NO_CURRENT"); return nil
-        }
-        actionError = nil
-        let admission = UUID(); externalPlaybackAdmission = admission
-        externalPlaybackTask = Task { [self] in
-            defer { if externalPlaybackAdmission == admission { externalPlaybackTask = nil } }
-            do {
-                _ = await externalReleaseTask?.result
-                try await drainRevokedExternalPlayback()
-                guard externalPlaybackAdmission == admission, admitsExternalPlayback(handoff) else { return }
-                // This rereads the existing receipt, not a second native lease.
-                let value = try await transport.call("session.attempt", parameters: .object([
-                    "sessionId": .string(current.sessionID.uuidString.lowercased()),
-                    "attemptId": .string(current.attempt.id),
-                ]))
-                try Task.checkCancellation()
-                guard admitsExternalPlayback(handoff) else { return }
-                let input = try FilmPlaybackMediaInput(value: value, sessionID: current.sessionID, attemptID: current.attempt.id)
-                guard input.resourceID == current.resourceID else { throw FilmPlaybackError.invalidResponse }
-                guard input.drm == nil || input.drm == .null else { throw FilmPlaybackError(code: "EXTERNAL_PLAYER_DRM") }
-                let url = try player.url(for: input.url)
-                current.externalHeld = true
-                if !externalReceipts.contains(where: { $0 === current }) { externalReceipts.append(current) }
-                externalOwner = handoff
-                requiresExplicitPlay = true
-                let paused = media.pause(sessionID: current.sessionID, attemptID: current.attempt.id)
-                let accepted = await openExternalURL(url)
-                guard ownsExternalPlayback(handoff) else { return }
-                if accepted {
-                    commandAdmission = UUID(); awaitingIntent = nil
-                    await closeSession(allowExternalOwner: true)
-                } else {
-                    let restore = admitsExternalPlayback(handoff)
-                    revokeExternalPlayback()
-                    let rejectionAdmission = externalPlaybackAdmission
-                    if restore {
-                        requiresExplicitPlay = false
-                        if paused { media.resume(sessionID: current.sessionID, attemptID: current.attempt.id, userInitiated: false) }
-                    } else {
-                        commandAdmission = UUID(); awaitingIntent = nil
-                        await closeSession()
-                    }
-                    if generation == current.generation, externalPlaybackAdmission == rejectionAdmission,
-                       actionError == nil {
-                        actionError = .init(code: "EXTERNAL_PLAYER_OPEN_FAILED")
-                    }
-                }
-            } catch {
-                if externalPlaybackAdmission == admission, admitsExternalPlayback(handoff),
-                   !Self.cancelled(error) { actionError = Self.failure(error) }
-            }
-        }
-        return externalPlaybackTask
-    }
-
-    private var ownsExternalPlayback: Bool {
-        externalOwner.map { ownsExternalPlayback($0) } == true
-    }
-    private func ownsExternalPlayback(_ handoff: ExternalPlayback) -> Bool {
-        externalOwner === handoff && handoff.current.externalHeld && !runtimeClosed && !released &&
-            generation == handoff.current.generation && allocatedSessionID == handoff.current.sessionID
-    }
-    private var canLeaveExternalPlayback: Bool {
-        guard let externalOwner, ownsExternalPlayback(externalOwner), externalOwner.keepAcknowledged,
-              closeDrained, mediaStopped, mediaStopError == nil, sessionReleaseError == nil else { return false }
-        return media.isLocallyDrained(sessionID: externalOwner.current.sessionID)
-    }
-    /// Revoke synchronously: a late system-open result cannot reacquire this share.
-    private func revokeExternalPlayback() {
-        externalPlaybackAdmission = UUID(); externalPlaybackTask = nil
-        guard let owner = externalOwner else { return }
-        owner.current.externalHeld = false
-    }
-    private func drainRevokedExternalPlayback() async throws {
-        var attempted: Set<ObjectIdentifier> = []
-        var failure: Error?
-        while let current = externalReceipts.first(where: {
-            !$0.externalHeld && !$0.nativeHeld && !attempted.contains(ObjectIdentifier($0))
-        }) {
-            attempted.insert(ObjectIdentifier(current))
-            do {
-                try await current.releaseIfUnheld(transport: transport)
-                externalReceipts.removeAll { $0 === current }
-                if externalOwner?.current === current { externalOwner = nil }
-            } catch { failure = failure ?? error }
-        }
-        if let failure { throw failure }
-    }
-    private func releaseRevokedExternalPlayback() {
-        guard externalReleaseTask == nil,
-              externalReceipts.contains(where: { !$0.externalHeld && !$0.nativeHeld }) else { return }
-        externalReleaseTask = Task { [self] in
-            defer { externalReleaseTask = nil }
-            do { try await drainRevokedExternalPlayback() }
-            catch {
-                actionError = Self.failure(error)
-                throw error
-            }
-        }
-    }
-
     public func applicationDidEnterBackground() async {
         await close(allowSystemOwner: true)
-    }
-    public func applicationDidBecomeActive() async {
-        guard ownsExternalPlayback || externalPlaybackTask != nil || closed && externalOwner != nil else { return }
-        await close()
-    }
-
-    private func admitsExternalPlayback(_ handoff: ExternalPlayback) -> Bool {
-        let current = handoff.current
-        return !closed && !released && closingTask == nil && committed === current && current.started &&
-            !current.retired && !current.terminal && generation == current.generation &&
-            allocatedSessionID == current.sessionID && mediaAdmission == handoff.mediaAdmission &&
-            commandAdmission == handoff.commandAdmission && awaitingIntent == nil &&
-            media.isCurrent(sessionID: current.sessionID, attemptID: current.attempt.id)
     }
     #if os(iOS)
     public func makeVideoView() -> UIView? { sessionID.map { media.makeVideoView(sessionID: $0) } }
@@ -990,11 +814,10 @@ public final class FilmPlaybackModel: ObservableObject {
         reopeningTask?.cancel()
         reopeningTask = nil; reopeningAdmission = UUID()
         commandAdmission = UUID(); awaitingIntent = nil
-        if !allowSystemOwner { revokeExternalPlayback() }
-        await closeSession(allowSystemOwner: allowSystemOwner, allowExternalOwner: allowSystemOwner)
+        await closeSession(allowSystemOwner: allowSystemOwner)
     }
 
-    private func closeSession(allowSystemOwner: Bool = false, allowExternalOwner: Bool = false) async {
+    private func closeSession(allowSystemOwner: Bool = false) async {
         let generation = generation
         let reopeningAdmission = reopeningAdmission
         while let closingTask {
@@ -1003,10 +826,9 @@ public final class FilmPlaybackModel: ObservableObject {
             guard self.generation == generation, self.reopeningAdmission == reopeningAdmission else { return }
             if closingAdmission != admission { continue }
             let keep = allowSystemOwner && !runtimeClosed && hasSystemOwner && committed?.started == true
-            if retained && keep || allowExternalOwner && canLeaveExternalPlayback || isReleased { return }
+            if retained && keep || isReleased { return }
             self.closingTask = nil
         }
-        let handoff = allowExternalOwner && ownsExternalPlayback ? externalOwner : nil
         let needsNativeStop = !closeDrained || !mediaStopped ||
             (sessionID.map { !media.isLocallyDrained(sessionID: $0) } ?? false)
         closed = true
@@ -1024,7 +846,6 @@ public final class FilmPlaybackModel: ObservableObject {
             await preparationWorker?.value
             await cancellingPreparation?.value
             await stoppingMedia?.value; stoppingMedia = nil
-            _ = await externalReleaseTask?.result
             await openingTask?.value
             queuedCommands.removeAll { $0.ui || !keepNative && $0.intent != nil }
             await commandWorker?.value
@@ -1045,24 +866,15 @@ public final class FilmPlaybackModel: ObservableObject {
             if !keepNative, media.isLocallyDrained(sessionID: sessionID) {
                 committed = nil; mediaState = FilmMediaState()
             }
-            if mediaStopped {
-                do { try await drainRevokedExternalPlayback() }
-                catch {
-                    mediaStopped = false; mediaStopError = Self.failure(error)
-                    failure = failure ?? mediaStopError
-                }
-            }
-            let keepMedia = keepNative || handoff.map { ownsExternalPlayback($0) } == true
-            if !released, keepMedia || externalReceipts.isEmpty || runtimeClosed {
+            if !released {
                 do {
                     let receipt = try await transport.call("session.release", parameters: .object([
-                        "sessionId": .string(sessionID.uuidString.lowercased()), "keepMedia": .bool(keepMedia),
+                        "sessionId": .string(sessionID.uuidString.lowercased()), "keepMedia": .bool(keepNative),
                     ]))
-                    guard receipt.filmObject?[keepMedia ? "retained" : "released"] == .bool(true) else {
+                    guard receipt.filmObject?[keepNative ? "retained" : "released"] == .bool(true) else {
                         throw FilmPlaybackError.invalidResponse
                     }
-                    released = !keepMedia
-                    if let handoff, ownsExternalPlayback(handoff) { handoff.keepAcknowledged = keepMedia }
+                    released = !keepNative
                     sessionReleaseError = nil
                 } catch {
                     sessionReleaseError = Self.failure(error)
@@ -1071,7 +883,7 @@ public final class FilmPlaybackModel: ObservableObject {
             }
             if let failure { actionError = failure }
             if keepNative { observe() }
-            if !keepMedia, isReleased {
+            if !keepNative, isReleased {
                 let wait = runtimeClosureTask
                 runtimeClosureTask = nil
                 wait?.cancel()
@@ -1087,10 +899,9 @@ public final class FilmPlaybackModel: ObservableObject {
         await reopeningTask?.value
         await closingTask?.value
         while openingTask != nil || commandWorker != nil || searchUpdateTask != nil || preparationWorker != nil ||
-            cancellingPreparation != nil || stoppingMedia != nil || externalReleaseTask != nil {
+            cancellingPreparation != nil || stoppingMedia != nil {
             await openingTask?.value; await searchUpdateTask?.value; await commandWorker?.value; await preparationWorker?.value
             await cancellingPreparation?.value; await stoppingMedia?.value
-            _ = await externalReleaseTask?.result
         }
     }
 

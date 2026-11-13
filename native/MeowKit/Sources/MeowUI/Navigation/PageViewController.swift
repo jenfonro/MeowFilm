@@ -11,6 +11,7 @@ open class PageViewController: UIViewController {
     /// so its native navigation item remains empty, including lazy creation.
     public var pageTitle: String? {
         didSet {
+            navigationItem.title = nil
             if hasOwnHeader { pageHeader.title = pageTitle }
         }
     }
@@ -66,6 +67,7 @@ open class PageViewController: UIViewController {
     open override func viewDidLoad() {
         super.viewDidLoad()
         guard !invalidated else { return }
+        navigationItem.title = nil
         if usesPageHeader, !hasHeaderAncestor {
             hasOwnHeader = true
             installHeader()
@@ -189,12 +191,13 @@ open class PageViewController: UIViewController {
     /// The content is laid out below the app-owned header. Pages with their own
     /// full-screen layout (the player) override `usesPageHeader`.
     open var usesPageHeader: Bool { true }
+    open var headerContentHeight: CGFloat { PageLayoutMetrics.navigation }
 
     private func installHeader() {
         view.addSubview(pageHeader)
         pageHeader.accessibilityIdentifier = "page.header"
         pageHeader.translatesAutoresizingMaskIntoConstraints = false
-        let height = pageHeader.heightAnchor.constraint(equalToConstant: PageLayoutMetrics.navigation)
+        let height = pageHeader.heightAnchor.constraint(equalToConstant: headerContentHeight)
         headerHeight = height
         NSLayoutConstraint.activate([
             pageHeader.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -248,7 +251,7 @@ open class PageViewController: UIViewController {
         guard hasOwnHeader else { return }
         let statusBar = view.safeAreaInsets.top
         pageHeader.statusBarHeight = statusBar
-        let height = statusBar + PageLayoutMetrics.navigation
+        let height = statusBar + headerContentHeight
         if headerHeight?.constant != height { headerHeight?.constant = height }
     }
 
@@ -343,7 +346,10 @@ open class PageViewController: UIViewController {
     private func presentError(_ message: String?, retry: (() -> Void)?, acknowledged: (() -> Void)?) -> Bool {
         guard let message, !message.isEmpty, canPresentPageAlert else { return false }
         let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "确定", style: .cancel) { _ in acknowledged?() })
+        alert.addAction(UIAlertAction(title: "确定", style: .cancel) { [weak self, weak alert] _ in
+            guard let self, let alert else { return }
+            dismissPageModal(alert, completion: acknowledged)
+        })
         if let retry {
             alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self, weak alert] _ in
                 guard let self, let alert else { return }

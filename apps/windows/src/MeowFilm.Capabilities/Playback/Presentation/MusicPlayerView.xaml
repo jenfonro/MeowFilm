@@ -200,15 +200,25 @@
      <Button x:Name="DesktopLyricsButton" Click="DesktopLyrics_Click" IsEnabled="{Binding CanToggleDesktopLyrics}"
              ToolTip="{Binding DesktopLyricsLabel}" AutomationProperties.Name="{Binding DesktopLyricsLabel}">
       <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+       <Setter Property="Foreground" Value="{DynamicResource Capability.Player.Foreground}"/>
        <Style.Triggers>
         <DataTrigger Binding="{Binding IsDesktopLyricsOpen}" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Accent}"/></DataTrigger>
+        <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Disabled}"/></Trigger>
+        <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+         <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+        </Trigger>
         <MultiDataTrigger><MultiDataTrigger.Conditions>
          <Condition Binding="{Binding IsDesktopLyricsOpen}" Value="True"/>
          <Condition Binding="{Binding (desktop:DesktopTheme.IsHighContrast),RelativeSource={RelativeSource Self}}" Value="True"/>
         </MultiDataTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiDataTrigger>
+        <MultiTrigger><MultiTrigger.Conditions>
+         <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
+         <Condition Property="IsEnabled" Value="False"/>
+        </MultiTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/></MultiTrigger>
        </Style.Triggers>
       </Style></Button.Style>
-      <TextBlock Text="桌" FontSize="15" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+      <TextBlock Text="桌" FontSize="15" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
+                 Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
      </Button>
      <Button x:Name="VolumeButton" Content="&#xE767;" Click="Volume_Click" AutomationProperties.Name="音量"/>
      <Button x:Name="MoreButton" Content="&#xE712;" Click="More_Click" AutomationProperties.Name="更多"/>

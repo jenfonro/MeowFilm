@@ -369,14 +369,14 @@ public sealed class NovelView : UserControl, IDesktopHeaderSource, IDisposable
     private async Task AppearanceAsync(CancellationToken token)
     {
         PauseReading(); var editor = new NovelAppearanceEditor(module.Library.Appearance);
-        await NovelUi.DialogAsync(this, "阅读排版", NovelUi.Scroll(editor), "保存", async ct =>
+        await NovelUi.DialogAsync(this, "阅读排版", editor, "保存", async ct =>
         {
             await SavePositionAsync(); var next = editor.Read(); var prior = module.Library.Appearance;
             await module.Library.SaveAppearanceAsync(next, ct);
             if (next.Conversion != prior.Conversion && module.Session?.Chapter is not null)
                 await module.Session.ReprocessAsync(ct);
             return true;
-        }, token);
+        }, token, applicationOverlay: true);
     }
     internal Task<object?> InteractAsync(System.Text.Json.JsonElement request, CancellationToken token)
     { PauseReading(); return NovelWebInteraction.ShowAsync(this, module.Rules, request, token); }

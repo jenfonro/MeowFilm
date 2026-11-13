@@ -22,8 +22,10 @@ internal static class MusicLyricScroll
         internal Action? Settled;
     }
 
+    // Virtualized reflow can shrink the range while the manual destination is still in flight.
     internal static double ManualTarget(ScrollViewer viewer) =>
-        State(viewer) is { Moving: true, Manual: true, Target: { } target } ? target : PresentedOffset(viewer);
+        State(viewer) is { Moving: true, Manual: true, Target: { } target }
+            ? Math.Clamp(target, 0, viewer.ScrollableHeight) : PresentedOffset(viewer);
 
     private static double PresentedOffset(ScrollViewer viewer) =>
         viewer.VerticalOffset - (State(viewer).Presentation?.Y ?? 0);

@@ -2,11 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { iosTarget } from '../scripts/quickjs/ios-target.mjs';
+import { sourceSDKPath } from '../packages/script-host/src/portable-source-session.js';
 
 // A VM supplies only filesystem/process/dlopen doubles. No native code is loaded
 // and process.platform is never changed in the actual test process.
+test('portable source SDK paths follow the shared XCFramework architecture identity', () => {
+  const simulator = iosTarget('iphonesimulator', 'x64');
+  assert.equal(sourceSDKPath('ios', 'x64', { platform: 'ios', target: simulator }),
+    '.cache/ios-native/iphonesimulator-x86_64/build/Release/source-sdk.js');
+  const device = iosTarget('iphoneos', 'arm64');
+  assert.equal(sourceSDKPath('ios', 'arm64', { platform: 'ios', target: device }),
+    '.cache/ios-native/iphoneos-arm64/build/Release/source-sdk.js');
+  assert.equal(sourceSDKPath('ios', 'x64', {
+    platform: 'ios', target: { ...simulator, xcframeworkArchitecture: 'armv7' },
+  }), 'packages/script-host/build/Release/source-sdk.js');
+});
+
 test('loader enforces bundle identity on iOS and preserves desktop byte-hash admission', () => {
   const source = fileURLToPath(new URL('../packages/script-host/src/native-engine.js', import.meta.url));
+  const policy = fileURLToPath(new URL('../scripts/script-host-native.json', import.meta.url));
   const result = spawnSync(process.execPath, ['--experimental-vm-modules', '--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import { SourceTextModule, SyntheticModule, createContext } from 'node:vm';
@@ -15,6 +30,7 @@ test('loader enforces bundle identity on iOS and preserves desktop byte-hash adm
     import * as path from 'node:path';
     import * as url from 'node:url';
     const text = readFileSync(${JSON.stringify(source)}, 'utf8');
+    const nativePolicy = JSON.parse(readFileSync(${JSON.stringify(policy)}, 'utf8'));
     const sha = data => crypto.createHash('sha256').update(data).digest('hex');
     const artifact = Buffer.from('desktop-native-fixture');
     const nativePath = 'packages/script-host/build/Release/script_host_native.node';
@@ -26,14 +42,17 @@ test('loader enforces bundle identity on iOS and preserves desktop byte-hash adm
       const reads = [], loads = [], copies = [];
       let creates = 0;
       const nativeFailure = Object.assign(new Error('duplicate failed'), { code: 'DESCRIPTOR_UNAVAILABLE' });
-      const target = { sdk: 'iphonesimulator', arch, minimumOS: '17.0' };
+      const targetPolicy = nativePolicy.ios.targets.find(value =>
+        value.sdk === 'iphonesimulator' && value.arch === arch);
+      const target = { ...targetPolicy, minimumOS: nativePolicy.ios.minimumOS };
+      const loadedTarget = { ...target };
       const manifest = { schemaVersion: 1, abi: 1, napi: 8, platform, arch,
         artifact: platform === 'ios'
-          ? { path: '.cache/ios-native/iphonesimulator-' + (arch === 'x64' ? 'x86_64' : arch) + '/MeowScriptHost.framework/MeowScriptHost' }
+          ? { path: '.cache/ios-native/iphonesimulator-' + target.xcframeworkArchitecture + '/MeowScriptHost.framework/MeowScriptHost' }
           : { path: nativePath, bytes: artifact.length, sha256: sha(artifact) },
         target, bindingIdentity: identity };
       edit(manifest);
-      const loaded = { abi: 1, napi: 8, bindingIdentity: identity, ...target,
+      const loaded = { abi: 1, napi: 8, bindingIdentity: identity, ...loadedTarget,
         create() { creates++; throw Object.assign(new Error('loaded'), { code: 'FIXTURE_LOADED' }); },
         duplicateBootstrapDescriptor(descriptor) {
           copies.push(descriptor);
@@ -100,11 +119,14 @@ test('loader enforces bundle identity on iOS and preserves desktop byte-hash adm
     await scenario({ arch: 'arm64' });
     await scenario({ arch: 'arm64', edit: value => {
       value.target.sdk = 'iphoneos';
+      value.target.variant = null;
       value.artifact.path = '.cache/ios-native/iphoneos-arm64/MeowScriptHost.framework/MeowScriptHost';
-    } });
+    }, loadedEdit: value => { value.sdk = 'iphoneos'; } });
     await scenario({ napiVersion: '7', expected: 'NATIVE_ARTIFACT_INVALID' });
     await scenario({ edit: value => { value.arch = 'arm64'; }, expected: 'NATIVE_ARTIFACT_INVALID' });
-    await scenario({ edit: value => { value.target.minimumOS = '16.0'; }, expected: 'NATIVE_ARTIFACT_INVALID' });
+    await scenario({ edit: value => { value.target.minimumOS = '16.0'; }, expected: 'NATIVE_ABI_MISMATCH' });
+    await scenario({ arch: 'arm64', edit: value => { value.target.xcframeworkArchitecture = 'armv7'; },
+      expected: 'NATIVE_ARTIFACT_INVALID' });
     await scenario({ edit: value => { value.artifact.path = '/arbitrary/native'; }, expected: 'NATIVE_ARTIFACT_INVALID' });
     await scenario({ edit: value => { value.target.sdk = 'macosx'; }, expected: 'NATIVE_ARTIFACT_INVALID' });
     await scenario({ linked: 'Frameworks/MeowScriptHost.framework', expected: 'NATIVE_ARTIFACT_INVALID' });

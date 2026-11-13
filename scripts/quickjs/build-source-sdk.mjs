@@ -8,26 +8,38 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
 const sourceDirectory = resolve(root, 'packages/script-host/src');
+const hostRequire = createRequire(resolve(sourceDirectory, 'source-native-runtime.js'));
 const outputDirectory = resolve(root, 'packages/script-host/build/Release');
 
 export async function buildSourceSDK({ directory = outputDirectory } = {}) {
   const captured = new Map();
   const readInput = async path => {
-    const bytes = await readFile(path);
+    const bytes = await readFile(resolve(root, path));
     captured.set(resolve(root, path), createHash('sha256').update(bytes).digest('hex'));
     return bytes;
   };
   await readInput(fileURLToPath(import.meta.url));
-  const versionFiles = [];
-  for (const [name, version] of [
-    ['esbuild', '0.28.1'], ['iconv-lite', '0.6.3'], ['buffer', '6.0.3'], ['whatwg-url', '14.2.0'],
-    ['string_decoder', '1.3.0'], ['safe-buffer', '5.2.1'],
-  ]) {
-    const versionFile = require.resolve(`${name}/package.json`);
+  const lockPath = 'package-lock.json';
+  const lock = JSON.parse((await readInput(lockPath)).toString('utf8'));
+  const versionFiles = new Set();
+  async function checkDependency(path) {
+    const parts = relative(root, path).split(sep);
+    const index = parts.lastIndexOf('node_modules');
+    if (index < 0) return;
+    const length = parts[index + 1].startsWith('@') ? index + 3 : index + 2;
+    const location = parts.slice(0, length).join('/');
+    const versionFile = resolve(root, location, 'package.json');
+    if (versionFiles.has(versionFile)) return;
+    versionFiles.add(versionFile);
     const installed = JSON.parse((await readInput(versionFile)).toString('utf8'));
-    if (installed.version !== version) throw new Error(`Unexpected source SDK dependency: ${name}`);
-    versionFiles.push(versionFile);
+    const locked = lock.packages?.[location];
+    if (!locked || locked.link || locked.version !== installed.version
+        || locked.name !== undefined && locked.name !== installed.name) {
+      throw new Error(`Source SDK dependency differs from package lock: ${location}`);
+    }
   }
+  await checkDependency(require.resolve('esbuild/package.json'));
+  const domWorkers = new Set();
   const result = await build({
     absWorkingDir: root,
     entryPoints: [resolve(sourceDirectory, 'source-native-runtime.js')],
@@ -49,18 +61,20 @@ export async function buildSourceSDK({ directory = outputDirectory } = {}) {
           throw new Error(`Node dependency in source SDK: ${input.path}`);
         });
         plugin.onResolve({ filter: /^(?:buffer|safer-buffer)$/ }, () => ({
-          path: require.resolve('buffer/'),
+          path: hostRequire.resolve('buffer/'),
         }));
         plugin.onResolve({ filter: /^string_decoder$/ }, () => ({
-          path: require.resolve('string_decoder/'),
+          path: hostRequire.resolve('string_decoder/'),
         }));
-        plugin.onResolve({ filter: /^linkedom$/ }, () => ({
-          path: resolve(dirname(require.resolve('linkedom/package.json')), 'worker.js'),
-        }));
+        plugin.onResolve({ filter: /^linkedom$/ }, input => {
+          const worker = resolve(dirname(createRequire(input.importer).resolve('linkedom/package.json')), 'worker.js');
+          domWorkers.add(worker);
+          return { path: worker };
+        });
         // Linkedom's optional require must remain absent in the Node-free SDK.
         // Installing jsdom for another module must not change this DOM implementation.
         plugin.onResolve({ filter: /^cssstyle$/ }, input => {
-          if (input.importer !== resolve(dirname(require.resolve('linkedom/package.json')), 'worker.js')) {
+          if (!domWorkers.has(input.importer)) {
             throw new Error('Unexpected cssstyle import in source SDK');
           }
           return { path: input.path, external: true };
@@ -70,6 +84,7 @@ export async function buildSourceSDK({ directory = outputDirectory } = {}) {
           loader: 'js',
         }));
         plugin.onLoad({ filter: /.*/, namespace: 'file' }, async input => {
+          await checkDependency(input.path);
           const extension = extname(input.path);
           if (!['.js', '.cjs', '.mjs', '.json'].includes(extension)) {
             throw new Error(`Non-JavaScript source SDK input: ${input.path}`);
@@ -92,7 +107,7 @@ export async function buildSourceSDK({ directory = outputDirectory } = {}) {
   };
   const paths = [...new Set([
     ...Object.keys(result.metafile.inputs).filter(path => !path.startsWith('source-sdk:')),
-    ...versionFiles,
+    lockPath, ...versionFiles,
     fileURLToPath(import.meta.url),
   ].map(relativePath))].sort();
   const inputs = await Promise.all(paths.map(async path => {

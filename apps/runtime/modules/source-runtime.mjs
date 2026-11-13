@@ -528,6 +528,7 @@ export function createSourceRuntimeModule({
   const libraryFields = {
     'library.list': [[], []],
     'library.get': [['installationId'], ['installationId']],
+    'library.previewImport': [['text', 'url', 'fileName'], []],
     'library.import': [['text', 'url', 'fileName'], []],
     'library.save': [['installationId', 'expectedRevision', 'definition'],
       ['installationId', 'expectedRevision', 'definition']],
@@ -546,7 +547,7 @@ export function createSourceRuntimeModule({
       if (params.installationId !== undefined) identifier(params.installationId);
       if (params.expectedRevision !== undefined) integer(params.expectedRevision, 1);
       if (params.revision !== undefined) integer(params.revision, 1);
-      if (name === 'library.import') {
+      if (name === 'library.import' || name === 'library.previewImport') {
         requireValue((typeof params.text === 'string') !== (typeof params.url === 'string'));
         requireValue(params.text === undefined || typeof params.text === 'string');
         requireValue(params.url === undefined || typeof params.url === 'string');

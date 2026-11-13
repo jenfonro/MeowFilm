@@ -32,9 +32,10 @@ final class MusicNeteaseProtocolTests: XCTestCase {
             let http = MusicNeteaseTestHTTP(clock: clock)
             await http.useNumericHandshakeTimestamp(numeric)
             let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() })
-            let audio = try await adapter.publicStandardAudio(nativeID: "101")
+            let audio = try await adapter.resolveAudio(id: "101", quality: "flac", level: "lossless",
+                context: try await adapter.publicAudioRequestContext())
             guard case .object(let fields) = audio else { return XCTFail("Missing audio fields") }
-            XCTAssertEqual(fields["actualQuality"], .string("128k"))
+            XCTAssertEqual(fields["actualQuality"], .string("flac"))
             let calls = await http.recorded()
             XCTAssertEqual(calls.map(\.request.url.path), [
                 "/api/bsr/sk/get", "/xeapi/song/enhance/player/url/v1"
@@ -42,7 +43,7 @@ final class MusicNeteaseProtocolTests: XCTestCase {
         }
     }
 
-    func testInvalidHandshakeTimestampCannotReachAnonymousOrAudioEndpoints() async throws {
+    func testInvalidHandshakeTimestampCannotReachAudioEndpoint() async throws {
         let invalid: [Any] = [true, 0, -1, 1.5, 9_007_199_254_740_992, "001700000000000", "1e12", "not-a-time"]
         for timestamp in invalid {
             let clock = MusicAccountTestClock()
@@ -52,12 +53,24 @@ final class MusicNeteaseProtocolTests: XCTestCase {
             ])
             let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() })
             do {
-                _ = try await adapter.publicStandardAudio(nativeID: "101")
+                _ = try await adapter.resolveAudio(id: "101", quality: "flac", level: "lossless",
+                context: try await adapter.publicAudioRequestContext())
                 XCTFail("Invalid handshake time accepted")
             } catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
             let calls = await http.recorded()
             XCTAssertEqual(calls.map(\.request.url.path), ["/api/bsr/sk/get"])
         }
+    }
+    func testInvalidHandshakeSignatureCannotReachAudioEndpoint() async throws {
+        let clock = MusicAccountTestClock(), http = MusicNeteaseTestHTTP(clock: clock)
+        await http.replies("/api/bsr/sk/get", [try MusicNeteaseFixture.response(["code": 200,
+            "data": ["timestamp": "1800000000000", "signature": "not-a-signature", "encryptedData": "bad"]])])
+        let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() })
+        do { _ = try await adapter.resolveAudio(id: "101", quality: "flac", level: "lossless",
+                context: try await adapter.publicAudioRequestContext()); XCTFail("Invalid handshake accepted") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+        let calls = await http.recorded()
+        XCTAssertEqual(calls.map(\.request.url.path), ["/api/bsr/sk/get"])
     }
 
     func testAllAccountProtocolsRejectCRLFAndNULBeforeNetworking() async throws {
@@ -67,7 +80,7 @@ final class MusicNeteaseProtocolTests: XCTestCase {
         transport.close()
         for url in ["https://u.y.qq.com/cgi-bin/musicu.fcg", "https://music.163.com/weapi/w/nuser/account/get",
                     "https://interfacepc.music.163.com/eapi/login/qrcode/unikey",
-                    "https://interface3.music.163.com/xeapi/register/anonimous"] {
+                    "https://interface3.music.163.com/xeapi/song/enhance/player/url/v1"] {
             do {
                 _ = try await transport.send(.init(url: URL(string: url)!, headers: ["X-Synthetic": "safe"]))
                 XCTFail("Closed transport accepted a request")
@@ -165,11 +178,13 @@ final class MusicNeteaseProtocolTests: XCTestCase {
             let clock = MusicAccountTestClock(), key = String(repeating: "A", count: count)
             let http = MusicNeteaseTestHTTP(clock: clock)
             let path = "/xeapi/song/enhance/player/url/v1"
-            await http.replies(path, [try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "standard"),
+            await http.replies(path, [try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "lossless"),
                 headers: ["x-encr-ssid": "synthetic-reuse", "x-encr-sskey": key])])
             let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() })
-            _ = try await adapter.publicStandardAudio(nativeID: "101")
-            _ = try await adapter.publicStandardAudio(nativeID: "101")
+            _ = try await adapter.resolveAudio(id: "101", quality: "flac", level: "lossless",
+                context: try await adapter.publicAudioRequestContext())
+            _ = try await adapter.resolveAudio(id: "101", quality: "flac", level: "lossless",
+                context: try await adapter.publicAudioRequestContext())
             var calls = await http.recorded()
             XCTAssertEqual(calls.map(\.request.url.path), ["/api/bsr/sk/get", path, path])
             let form = try MusicNeteaseFixture.form(calls[2].request.body)
@@ -178,7 +193,8 @@ final class MusicNeteaseProtocolTests: XCTestCase {
             let r = try MusicNeteaseFixture.aes(MusicNeteaseFixture.base64(form["R"]!), key: MusicNeteaseFixture.staticKey)
             XCTAssertEqual(String(decoding: r, as: UTF8.self), "1|synthetic-reuse")
             await adapter.revoke()
-            _ = try await adapter.publicStandardAudio(nativeID: "101")
+            _ = try await adapter.resolveAudio(id: "101", quality: "flac", level: "lossless",
+                context: try await adapter.publicAudioRequestContext())
             calls = await http.recorded()
             XCTAssertEqual(calls.map(\.request.url.path), ["/api/bsr/sk/get", path, path, "/api/bsr/sk/get", path])
             XCTAssertTrue(calls.allSatisfy { !($0.request.headers["Cookie"] ?? "").contains("MUSIC_U") })
@@ -191,11 +207,12 @@ final class MusicNeteaseProtocolTests: XCTestCase {
             let clock = MusicAccountTestClock()
             let http = MusicNeteaseTestHTTP(clock: clock)
             let path = "/xeapi/song/enhance/player/url/v1"
-            await http.replies(path, [try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "standard"),
+            await http.replies(path, [try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "lossless"),
                 headers: ["x-encr-ssid": session, "x-encr-sskey": key])])
             let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() })
             do {
-                _ = try await adapter.publicStandardAudio(nativeID: "101")
+                _ = try await adapter.resolveAudio(id: "101", quality: "flac", level: "lossless",
+                context: try await adapter.publicAudioRequestContext())
                 XCTFail("Malformed session field accepted")
             } catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
             let calls = await http.recorded()

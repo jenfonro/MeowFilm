@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -84,6 +85,8 @@ public partial class MusicPlayerDetailView : UserControl
             if (e.WidthChanged) InvalidateLyricCenter();
             UpdateLyricViewport();
         };
+        LyricFadeViewport.SizeChanged += (_, _) =>
+            ((LinearGradientBrush)LyricFadeViewport.OpacityMask).EndPoint = new(0, LyricFadeViewport.ActualHeight);
         IsVisibleChanged += (_, _) =>
         {
             if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }
@@ -124,6 +127,11 @@ public partial class MusicPlayerDetailView : UserControl
         e.Handled = true;
         if (!e.IsRepeat) await module.TogglePlaybackAsync();
     }
+
+    private void DelayLyric_Click(object sender, RoutedEventArgs e) => module.AdjustLyricOffset(.5);
+    private void AdvanceLyric_Click(object sender, RoutedEventArgs e) => module.AdjustLyricOffset(-.5);
+    private async void Translation_Click(object sender, RoutedEventArgs e) =>
+        await module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
 
     private void Detail_PreviewKeyUp(object sender, KeyEventArgs e)
     {
@@ -227,6 +235,7 @@ public partial class MusicPlayerDetailView : UserControl
     {
         UnwatchCenteredRow();
         lyricMotionEpoch++;
+        snappingLyric = false;
         centeredLyric = centeringLyric = -1;
         if (Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
     }
@@ -344,6 +353,18 @@ public partial class MusicPlayerDetailView : UserControl
         MusicLyricScroll.MoveManual(scroll, scroll.VerticalOffset + correction, () =>
         {
             if (epoch != lyricMotionEpoch || !module.HasLyricPreview) return;
+            // Virtualized row reflow can adjust the offset after the original target.
+            LyricList.UpdateLayout();
+            if (LyricList.ItemContainerGenerator.ContainerFromIndex(index) is FrameworkElement settledRow)
+            {
+                var gap = settledRow.TranslatePoint(new Point(0, settledRow.ActualHeight / 2), scroll).Y -
+                    scroll.ViewportHeight * MusicLyricRowMarginConverter.ReadingAnchor;
+                if (Math.Abs(gap) >= .5)
+                {
+                    MusicLyricScroll.Settle(scroll, scroll.VerticalOffset + gap);
+                    scroll.UpdateLayout();
+                }
+            }
             snappingLyric = false;
             UpdatePreviewFrame();
             UnwatchCenteredRow();

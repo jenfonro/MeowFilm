@@ -11,6 +11,7 @@ from unittest.mock import patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
+NODE_VERSION = json.loads((ROOT / "scripts/script-host-native.json").read_text(encoding="utf-8"))["build"]["node"]
 spec = importlib.util.spec_from_file_location("prepare_ios_runtime", ROOT / "scripts/prepare-ios-runtime.py")
 prepare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
@@ -133,7 +134,10 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
 
     def test_target_mapping_keeps_node_x64_identity_and_xcode_x86_64_paths(self):
         selected = prepare.target("iphonesimulator", "x86_64")
-        self.assertEqual(selected, {"sdk": "iphonesimulator", "arch": "x64", "minimumOS": "17.0"})
+        self.assertEqual(selected, {
+            "sdk": "iphonesimulator", "arch": "x64", "platform": "ios", "variant": "simulator",
+            "xcframeworkArchitecture": "x86_64", "minimumOS": "17.0",
+        })
         self.assertEqual(prepare.runtime_path(selected), ROOT / ".cache/ios-runtime/iphonesimulator-x86_64/Runtime")
         self.assertEqual(prepare.target("iphonesimulator", "arm64")["arch"], "arm64")
         self.assertEqual(prepare.target("iphoneos", "arm64")["sdk"], "iphoneos")
@@ -148,8 +152,9 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
             cache.mkdir(parents=True)
             archive = cache / "fixture.zip"
             info = {"AvailableLibraries": [
-                {"LibraryIdentifier": "ios-arm64", "SupportedPlatform": "ios", "SupportedArchitectures": ["arm64"]},
-                {"LibraryIdentifier": "ios-arm64_x86_64-simulator", "SupportedPlatform": "ios",
+                {"LibraryIdentifier": "fixture-device-slice", "SupportedPlatform": "ios",
+                 "SupportedArchitectures": ["arm64"]},
+                {"LibraryIdentifier": "fixture-simulator-slice", "SupportedPlatform": "ios",
                  "SupportedPlatformVariant": "simulator", "SupportedArchitectures": ["arm64", "x86_64"]},
             ]}
             with zipfile.ZipFile(archive, "w") as package:
@@ -164,7 +169,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                       "archive": {"url": "https://download.invalid/fixture.zip", "sha256": prepare.sha256(archive)}}
             with patch.dict(prepare.node_mobile_inputs.__globals__, ROOT=root, NODE_MOBILE=cache):
                 value = prepare.node_mobile_inputs(pinned, prepare.target("iphonesimulator", "x64"))
-            self.assertEqual(value["identity"]["slice"], "ios-arm64_x86_64-simulator")
+            self.assertEqual(value["identity"]["slice"], "fixture-simulator-slice")
             self.assertEqual(value["headers"], [{"path": ".cache/nodejs-mobile/ios/include/node/node_api.h",
                                                 "sha256": prepare.hashlib.sha256(b"pinned-header").hexdigest()}])
             self.assertTrue(any(item["path"].endswith("NodeMobile.framework/NodeMobile") for item in value["inputs"]))
@@ -180,7 +185,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
             def run(command, **kwargs):
                 if "--version" in command:
                     class Result:
-                        stdout = "v24.21.0\n"
+                        stdout = f"v{NODE_VERSION}\n"
                     return Result()
                 raise prepare.subprocess.CalledProcessError(1, command)
             with patch.dict(prepare.payload.__globals__, ROOT=root), patch.object(prepare.subprocess, "run", run):
@@ -206,7 +211,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 if "--version" in command:
-                    return SimpleNamespace(stdout="v24.21.0\n")
+                    return SimpleNamespace(stdout=f"v{NODE_VERSION}\n")
                 self.assertEqual(command[1], str(root / "scripts/ios/package-runtime.mjs"))
                 staging = Path(command[command.index("--output") + 1])
                 staging.mkdir()
@@ -252,7 +257,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 def run(command, **kwargs):
                     commands.append(command)
                     if "--version" in command:
-                        return prepare.subprocess.CompletedProcess(command, 0, stdout="v24.21.0\n")
+                        return prepare.subprocess.CompletedProcess(command, 0, stdout=f"v{NODE_VERSION}\n")
                     staging = Path(command[command.index("--output") + 1])
                     staging.mkdir()
                     (staging / "runtime-manifest.json").write_text(json.dumps(manifest))

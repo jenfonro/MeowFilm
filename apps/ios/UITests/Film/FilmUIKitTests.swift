@@ -1116,9 +1116,8 @@ final class FilmUIKitTests: XCTestCase {
     }
 
     private func playbackModel(_ server: FilmUIKitPlaybackServer, _ media: FilmUIKitPlaybackMedia) -> FilmPlaybackModel {
-        let model = FilmPlaybackModel(transport: server.transport, media: media, openExternalURL: { _ in
-            XCTFail("Unexpected external-player launch"); return false
-        }, request: { FilmUIKitPlaybackFixture.request() })
+        let model = FilmPlaybackModel(transport: server.transport, media: media,
+                                     request: { FilmUIKitPlaybackFixture.request() })
         addTeardownBlock { await model.close() }
         return model
     }

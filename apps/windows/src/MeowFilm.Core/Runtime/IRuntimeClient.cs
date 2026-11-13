@@ -6,6 +6,9 @@ public interface IRuntimeClient
 {
     /// <summary>Returns the validated complete {ok, contract, value|code} HTTP envelope.</summary>
     Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default);
+    /// <summary>Overrides the deadline for one HTTP call; does not change the host default.</summary>
+    Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout,
+        CancellationToken cancellationToken = default) => throw new BridgeException("METHOD_UNAVAILABLE");
     /// <summary>Borrows source until the returned task settles, including cancellation;
     /// returns the validated complete HTTP envelope.</summary>
     Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,

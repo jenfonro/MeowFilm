@@ -1881,6 +1881,65 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertTrue(model.queue.isEmpty, "This fixture rejects queue opening; it does not simulate successful audio")
     }
 
+    func testHomeActionErrorIsAcknowledgedOnceAcrossReturnAndSameNewFailureStillPresents() async throws {
+        func runnerAction(_ action: @escaping @MainActor (XCUIApplication) -> Void) async throws {
+            let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+            await withCheckedContinuation { continuation in
+                RunLoop.main.perform {
+                    MainActor.assumeIsolated { action(XCUIApplication(bundleIdentifier: identifier)) }
+                    continuation.resume()
+                }
+            }
+        }
+        try await runnerAction { $0.activate() }
+        let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "fm", title: "", items: [
+                .init(id: "fm", title: "私人漫游", content: .action(action)),
+            ], layout: .featureRail),
+        ]))
+        await service.observeFMChoice {}
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        addTeardownBlock { await model.close() }
+        await model.load()
+        let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
+        defer { withExtendedLifetime(router) {} }
+        let page = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: appearance, router: router, embedded: true)
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([page], animated: false)
+        let window = mount(navigation)
+        defer { page.dismiss(animated: false); release(navigation, window: window) }
+        let collection = try XCTUnwrap(page.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        await waitForResult {
+            collection.layoutIfNeeded()
+            return collection.visibleCells.count == 1 && page.canPresentPageAlert
+        }
+        var messages: [String?] = []
+        for count in 1...2 {
+            let play = try resultButton(id: "music.browse.play.fm", in: page.view)
+            play.sendActions(for: .touchUpInside)
+            await waitForResult {
+                guard let alert = page.presentedViewController as? UIAlertController else { return false }
+                return alert.view.window != nil && !alert.isBeingPresented
+            }
+            let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+            messages.append(alert.message?.components(separatedBy: "（诊断 ").first)
+            XCTAssertEqual(alert.actions.map(\.title), ["确定"])
+            try await runnerAction { $0.alerts["错误"].buttons["确定"].tap() }
+            await waitForResult { page.presentedViewController == nil && page.canPresentPageAlert }
+            navigation.pushViewController(UIViewController(), animated: false)
+            await waitForResult { !page.isPageVisible }
+            navigation.popViewController(animated: false)
+            await waitForResult { page.isPageVisible && page.canPresentPageAlert }
+            await deliverMainRunLoop(); await deliverMainRunLoop()
+            XCTAssertNil(page.presentedViewController, "Confirmed operation errors must not replay on return")
+            let choices = await service.fmChoices()
+            XCTAssertEqual(choices.count, count)
+        }
+        XCTAssertEqual(messages[0], messages[1], "The same failure can be shown again with a new diagnostic ID")
+    }
+
     func testFMArtworkOnlyUpdatesForEffectiveCoverWithoutReconfiguringCard() async throws {
         let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
         let appearance = MusicAppearancePreferencesStore()

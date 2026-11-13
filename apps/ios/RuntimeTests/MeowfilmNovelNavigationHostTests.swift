@@ -63,34 +63,55 @@ final class MeowfilmNovelNavigationHostTests: XCTestCase {
         root.navigation.popViewController(animated: false); try await wait { root.navigation.topViewController === main }; try await settle(root)
         coordinator.showSettings(); try await wait { root.navigation.topViewController is MeowfilmSettingsViewController }; try await settle(root)
         let settings = try XCTUnwrap(root.navigation.topViewController as? MeowfilmSettingsViewController)
+        root.view.layoutIfNeeded()
+        XCTAssertTrue(root.dock?.surfaceHost.isHidden == true)
+        XCTAssertEqual(root.navigation.additionalSafeAreaInsets.bottom, 0, accuracy: 1)
         let settingsTable = try XCTUnwrap(views(settings.view).compactMap { $0 as? UITableView }.first)
         XCTAssertEqual(settings.tableView(settingsTable, numberOfRowsInSection: 0), 3)
         settings.tableView(settingsTable, didSelectRowAt: .init(row: 2, section: 0))
         try await wait { root.navigation.topViewController is NovelSettingsViewController }; try await settle(root)
         let novelSettings = try XCTUnwrap(root.navigation.topViewController as? NovelSettingsViewController)
+        root.view.layoutIfNeeded()
+        XCTAssertTrue(root.dock?.surfaceHost.isHidden == true)
+        XCTAssertEqual(root.navigation.additionalSafeAreaInsets.bottom, 0, accuracy: 1)
         let options = try XCTUnwrap(views(novelSettings.view).compactMap { $0 as? UITableView }.first)
         XCTAssertEqual(options.numberOfRows(inSection: 0), 3)
         novelSettings.tableView(options, didSelectRowAt: .init(row: 1, section: 0))
         try await wait { root.navigation.topViewController?.view.accessibilityIdentifier == "novel.rules" }
         withExtendedLifetime(coordinator) {}
     }
-    private func settle(_ root: MeowfilmRootContainerViewController) async throws {
-        if let alert = root.presentedViewController as? UIAlertController {
+    private func settle(_ root: MeowfilmRootContainerViewController,
+                        file: StaticString = #filePath, line: UInt = #line) async throws {
+        try await wait({
+            let presenters = [root] + self.controllers(root)
+            let alert = presenters.compactMap { $0.presentedViewController as? UIAlertController }.first
+            return alert.map { !$0.isBeingPresented } ??
+                ((root.navigation.topViewController as? PageViewController)?.canPresentPageAlert == true)
+        }, file: file, line: line)
+        let presenters = [root] + controllers(root)
+        if let alert = presenters.compactMap({ $0.presentedViewController as? UIAlertController }).first {
             let known = alert.title == "错误" && alert.actions.map(\.title) == ["取消", "重试"] &&
                 alert.message?.contains(MusicServiceError.storagePolicyMismatch.localizedDescription) == true
-            XCTAssertTrue(known, "An unexpected alert must remain visible as a test failure")
+            XCTAssertTrue(known, "An unexpected alert must remain visible as a test failure: " +
+                "\(alert.title ?? "-"); \(alert.actions.map { $0.title ?? "-" }); \(alert.message ?? "-")")
             guard known else { throw NovelError.invalidResponse }
             try await wait { !alert.isBeingPresented }
             let dismissed = expectation(description: "known unrelated music notice dismissed")
-            alert.dismiss(animated: false) { dismissed.fulfill() }; await fulfillment(of: [dismissed], timeout: 5)
+            let presenter = try XCTUnwrap(alert.presentingViewController as? PageViewController)
+            presenter.dismissPageModal(alert) { dismissed.fulfill() }
+            await fulfillment(of: [dismissed], timeout: 5)
         }
-        try await wait { (root.navigation.topViewController as? PageViewController)?.canPresentPageAlert == true }
+        try await wait({
+            (root.navigation.topViewController as? PageViewController)?.canPresentPageAlert == true
+        }, file: file, line: line)
     }
-    private func wait(_ condition: @escaping @MainActor () -> Bool) async throws {
+    private func wait(_ condition: @escaping @MainActor () -> Bool,
+                      file: StaticString = #filePath, line: UInt = #line) async throws {
         if condition() { return }
         let done = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { condition() } }, evaluatedWith: nil)
-        await fulfillment(of: [done], timeout: 10)
-        guard condition() else { throw NovelError.invalidResponse }
+        let result = await XCTWaiter.fulfillment(of: [done], timeout: 10)
+        XCTAssertEqual(result, .completed, file: file, line: line)
+        guard result == .completed, condition() else { throw NovelError.invalidResponse }
     }
     private func controllers(_ root: UIViewController) -> [UIViewController] { root.children.flatMap { [$0] + controllers($0) } }
     private func views(_ root: UIView) -> [UIView] { [root] + root.subviews.flatMap(views) }

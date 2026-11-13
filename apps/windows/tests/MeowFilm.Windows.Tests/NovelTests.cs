@@ -46,6 +46,8 @@ public static partial class NovelTests
         yield return new("novel dialog save failure: open retry and closed failure or cancellation wait for the actual write", () => Sta(DialogSaveFailures));
         yield return new("novel dialog failure owners: closed save failures remain visible and cancellation stays silent", () => Sta(DialogFailureOwners));
         yield return new("novel dialog isolation: retired popup cannot cancel the next confirmation", () => Sta(DialogIsolation));
+        yield return new("novel dialog presentation: application host keeps themed surface compact and outside clicks inert", () => Sta(DialogHostPresentation));
+        yield return new("novel dialog isolation: retired application editor cannot close or refocus the next dialog", () => Sta(DialogHostIsolation));
         yield return new("novel Web lifecycle: actual environment exit releases profile before success cancellation and owner close", () => Sta(WebLifecycle));
         yield return new("novel session cancellation: continue selection and purchase refresh stay within one cancelled operation", () => Sta(SessionCancellation));
         yield return new("novel shared fixtures: real Node RPC ordered cleanup and final conversion", Fixtures);
@@ -296,7 +298,7 @@ public static partial class NovelTests
             await module.NavigateAsync(NovelCapability.ShelfRoute, default); Check(!module.IsImmersive);
             host.Content = module.SettingsView; await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Preview(module.SettingsView, "novel-settings", 1000, 700);
-            var labels = Find<Button>(module.SettingsView).Select(b => b.Content as string).ToArray(); Check(labels.Contains("书源 ✓") && labels.Contains("替换净化"));
+            var labels = Find<Button>(module.SettingsView).Select(b => b.Content as string).ToArray(); Check(labels.Contains("书源管理") && labels.Contains("替换净化"));
             Find<Button>(module.SettingsView).Single(b => b.Content as string == "替换净化").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             Preview(module.SettingsView, "novel-settings-rules", 1000, 700);
             await module.PrepareShutdownAsync(); await module.CancelShutdownPreparationAsync();
@@ -352,6 +354,7 @@ public static partial class NovelTests
                 case "library.get": result = Json(new { source = Records[0], definition = "{\"bookSourceName\":\"合成\"}" }); break;
                 case "library.export": result = Json(new { text = "[]" }); break;
                 case "library.import": result = Json(new { sources = Records, failures = new object[0] }); break;
+                case "library.save": Records = [Records[0] with { Revision = Records[0].Revision + 1 }]; result = Json(new { source = Records[0] }); break;
                 case "library.update": Records = [Records[0] with { Enabled = false, Revision = Records[0].Revision + 1 }]; PendingWeb = []; result = Json(new { source = Records[0] }); break;
                 case "library.image":
                     string reference = "/v1/source/images/" + Guid.NewGuid().ToString("N"); ImageReferences.Add(reference); result = Json(new { reference }); break;

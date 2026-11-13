@@ -33,7 +33,13 @@ final class FilmSettingsPlatformTests: XCTestCase {
         try await super.tearDown()
     }
 
-    func testGroupDraftSurvivesNavigationAndRestoreAndInlineTestNeverSave() async throws {
+    private func panModel() -> PanAccountsModel {
+        PanAccountsModel(service: .init(request: { _, _, _ in
+            throw RuntimeHTTPError.closed
+        }))
+    }
+
+    func testGroupDraftSurvivesNavigationAndRestoreAndSeparateTestNeverSave() async throws {
         let fixture = try await makeFixture()
         let rules = fixture.rules
         try await rules.initialize()
@@ -46,7 +52,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let window = try await host(page)
         defer { unhost(window) }
         let editor = try XCTUnwrap(page.editors.first)
-        editor.pattern.text = "^草稿"; editor.textViewDidChange(editor.pattern)
+        editor.pattern.text = "^草稿"; editor.pattern.delegate?.textViewDidChange?(editor.pattern)
         owner.edit(.movie, index: 0, rule: .init(pattern: "(电影)", replace: "$1", flags: "i"))
         let reopened = FilmRulePageViewController(owner: owner, group: .episodeClean, themeProvider: FilmSettingsTheme())
         reopened.loadViewIfNeeded()
@@ -62,8 +68,10 @@ final class FilmSettingsPlatformTests: XCTestCase {
         XCTAssertNotEqual(owner.rules(.movie).first?.pattern, "(电影)")
         owner.edit(.movie, index: 0, rule: .init(pattern: "["))
         let before = try await fixture.ruleRPC.saved()
-        let test = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
-        test.loadViewIfNeeded(); test.toggleTest(); test.testFields.input.text = "电影 2026"; test.runTest()
+        let test = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let testWindow = try await host(test)
+        defer { unhost(testWindow) }
+        test.testFields.input.text = "电影 2026"; test.runTest()
         await eventually { !test.testing && test.result != nil }
         XCTAssertFalse(try XCTUnwrap(test.result).errors.isEmpty)
         let after = try await fixture.ruleRPC.saved()
@@ -107,10 +115,12 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let playback = FilmPlaybackSettingsModel(transport: .init(request: { _, _ in
             XCTFail("Starting local settings must not request playback"); throw FilmPlaybackError(code: "CLOSED")
         }, observation: { _, _, _ in XCTFail("Settings must not observe a playback session") }))
+        let pan = panModel()
         let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources,
-                                      tmdb: tmdb, douban: douban, playback: playback)
+                                      tmdb: tmdb, douban: douban, pan: pan, playback: playback)
         XCTAssertTrue(model.tmdb === tmdb)
         XCTAssertTrue(model.douban === douban)
+        XCTAssertTrue(model.pan === pan)
         XCTAssertTrue(model.playback === playback)
         model.start()
         await eventually { model.rules.draft != nil && model.snapshot != nil }
@@ -123,6 +133,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         model.close()
         XCTAssertTrue(model.tmdb === tmdb)
         XCTAssertTrue(model.douban === douban)
+        XCTAssertTrue(model.pan === pan)
         XCTAssertTrue(model.playback === playback)
         XCTAssertNil(tmdb.saved)
         XCTAssertNil(douban.saved)
@@ -136,7 +147,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let fixture = try await makeFixture()
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: { throw FilmSearchError.unavailable }), didSave: {})
         let douban = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(connection: { throw FilmSearchError.unavailable }), didSave: {})
-        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb, douban: douban)
+        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb, douban: douban, pan: panModel())
         XCTAssertNil(model.playback)
         let page = FilmSettingsViewController(model: model, themeProvider: FilmSettingsTheme())
         let navigation = UINavigationController(rootViewController: page)
@@ -147,11 +158,11 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let rows = try XCTUnwrap(menu.sections.first).rows
         XCTAssertEqual(rows.map(\.id), [
             "film.settings.search", "film.settings.matching", "film.settings.cats", "film.settings.videos",
-            "film.settings.dataSources", "film.settings.preferences",
+            "film.settings.dataSources", "film.settings.pan", "film.settings.preferences",
         ])
-        XCTAssertTrue(rows.prefix(5).allSatisfy(\.enabled))
-        XCTAssertTrue(rows.dropFirst(5).allSatisfy { !$0.enabled })
-        for index in 5..<rows.count {
+        XCTAssertTrue(rows.prefix(6).allSatisfy(\.enabled))
+        XCTAssertTrue(rows.dropFirst(6).allSatisfy { !$0.enabled })
+        for index in 6..<rows.count {
             menu.tableView(menu.table, didSelectRowAt: IndexPath(row: index, section: 0))
             XCTAssertTrue(navigation.topViewController === page)
         }
@@ -166,7 +177,11 @@ final class FilmSettingsPlatformTests: XCTestCase {
         navigation.setViewControllers([page], animated: false)
         try selectRow(menu, "film.settings.dataSources")
         XCTAssertTrue(navigation.topViewController is FilmDataSourceSettingsViewController)
-        XCTAssertEqual((navigation.topViewController as? PageViewController)?.pageTitle, "数据源")
+        XCTAssertEqual((navigation.topViewController as? PageViewController)?.pageTitle, "刮削设置")
+        navigation.setViewControllers([page], animated: false)
+        try selectRow(menu, "film.settings.pan")
+        XCTAssertTrue(navigation.topViewController is PanAccountsViewController)
+        XCTAssertEqual((navigation.topViewController as? PageViewController)?.pageTitle, "网盘账号")
         await fixture.rules.close(); await fixture.sources.close()
     }
 
@@ -177,18 +192,19 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let playback = FilmPlaybackSettingsModel(transport: .init(
             request: { _, _ in throw FilmPlaybackError(code: "CLOSED") },
             observation: { _, _, _ in XCTFail("Settings must not observe a playback session") }))
-        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb, douban: douban, playback: playback)
+        let model = FilmSettingsModel(rules: fixture.rules, sources: fixture.sources, tmdb: tmdb,
+                                      douban: douban, pan: panModel(), playback: playback)
         let page = FilmSettingsViewController(model: model, themeProvider: FilmSettingsTheme())
         let navigation = UINavigationController(rootViewController: page)
         defer { PageViewController.invalidatePages(in: navigation) }
         page.loadViewIfNeeded()
         let menu = try XCTUnwrap(page.children.compactMap { $0 as? FilmSettingsListController }.first)
         menu.loadViewIfNeeded()
-        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 6)
+        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 7)
         XCTAssertTrue(menu.sections.flatMap(\.rows).allSatisfy(\.enabled))
         for (id, title) in [
-            ("search", "搜索净化设置"), ("matching", "智能匹配设置"), ("dataSources", "数据源"),
-            ("preferences", "智能播放设置"),
+            ("search", "搜索净化设置"), ("matching", "智能匹配设置"), ("dataSources", "刮削设置"),
+            ("pan", "网盘账号"), ("preferences", "智能播放设置"),
         ] {
             navigation.setViewControllers([page], animated: false)
             try selectRow(menu, "film.settings.\(id)")
@@ -200,6 +216,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
                 XCTAssertEqual((destination as? FilmRulePageViewController)?.group, .search)
             case "matching": XCTAssertTrue(destination is FilmSmartMatchingViewController)
             case "dataSources": XCTAssertTrue(destination is FilmDataSourceSettingsViewController)
+            case "pan": XCTAssertTrue(destination is PanAccountsViewController)
             default: XCTAssertTrue(destination is FilmSmartPlaybackSettingsController)
             }
         }
@@ -237,6 +254,56 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let site = try XCTUnwrap(navigation.topViewController as? FilmPlaybackPreferencesController)
         XCTAssertEqual(site.pageTitle, "站点净化设置")
         await fixture.rules.close(); await fixture.sources.close()
+    }
+
+    func testSettingsMenusFieldsSelectionAndDangerUseSharedCardRows() throws {
+        let page = FilmSettingsListController(themeProvider: FilmSettingsTheme())
+        defer { PageViewController.invalidatePages(in: page) }
+        let field = filmTextField("名称", id: "fixture.name")
+        var disabledInvocations = 0
+        page.sections = [.init(title: "", rows: [
+            .init(title: "菜单", detail: "详情", id: "fixture.menu", disclosure: true, action: {}),
+            .init(title: "已选", id: "fixture.selected", selected: true, action: {}),
+            .init(title: "不可用", id: "fixture.disabled", enabled: false, action: { disabledInvocations += 1 }),
+            .init(title: "删除", id: "fixture.danger", destructive: true, action: {}),
+            .init(title: "名称", id: "fixture.name", content: field),
+        ])]
+        page.loadViewIfNeeded()
+        let table: UITableView = page.table
+        XCTAssertTrue(table is SettingsTableView)
+        XCTAssertEqual(table.separatorStyle, .none)
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            page.traitOverrides.userInterfaceStyle = style
+            page.applyTheme()
+            let cells = (0..<5).map {
+                page.tableView(page.table, cellForRowAt: IndexPath(row: $0, section: 0))
+            }
+            for (index, cell) in cells.enumerated() {
+                XCTAssertTrue(cell is SettingsTableCell)
+                let background = try XCTUnwrap(cell.backgroundView as? SettingsRowBackgroundView)
+                let selected = try XCTUnwrap(cell.selectedBackgroundView as? SettingsRowBackgroundView)
+                XCTAssertEqual(background.drawsSeparator, index < 4)
+                XCTAssertEqual(selected.drawsSeparator, index < 4)
+            }
+            let menu = try XCTUnwrap(cells[0].contentConfiguration as? UIListContentConfiguration)
+            XCTAssertEqual(menu.textProperties.font, .preferredFont(forTextStyle: .body))
+            XCTAssertTrue(menu.textProperties.adjustsFontForContentSizeCategory)
+            XCTAssertEqual(menu.textProperties.color, UIColor(page.theme.settings.ink))
+            XCTAssertEqual(menu.secondaryTextProperties.color, UIColor(page.theme.settings.muted))
+            XCTAssertEqual(cells[0].accessoryType, .disclosureIndicator)
+            XCTAssertEqual(cells[1].accessoryType, .checkmark)
+            XCTAssertTrue(cells[1].accessibilityTraits.contains(.selected))
+            XCTAssertTrue(cells[2].accessibilityTraits.contains(.notEnabled))
+            let disabled = try XCTUnwrap(cells[2].contentConfiguration as? UIListContentConfiguration)
+            let danger = try XCTUnwrap(cells[3].contentConfiguration as? UIListContentConfiguration)
+            XCTAssertEqual(disabled.textProperties.color, UIColor(page.theme.settings.muted))
+            XCTAssertEqual(danger.textProperties.color, UIColor(page.theme.settings.danger))
+            XCTAssertEqual(cells[4].contentView.directionalLayoutMargins, menu.directionalLayoutMargins)
+            XCTAssertTrue(field.superview === cells[4].contentView)
+            XCTAssertEqual(field.backgroundColor, UIColor(page.theme.settings.input))
+            page.tableView(page.table, didSelectRowAt: IndexPath(row: 2, section: 0))
+            XCTAssertEqual(disabledInvocations, 0)
+        }
     }
 
     func testFilePickerSnapshotRejectsMalformedUTF8AndKeepsCopiedContent() async throws {
@@ -329,10 +396,9 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let cats = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
         let window = try await host(cats); defer { unhost(window) }
         await eventually { cats.snapshot?.cats.count == 2 }
-        try row(cats, "film.cats.select").action?()
-        try row(cats, "film.cats.selectAll").action?()
-        XCTAssertTrue(try row(cats, "film.cats.batch.4").enabled)
-        try row(cats, "film.cats.batch.4").action?()
+        try ManagementListTestUI.button("management.selectAll", in: cats.manager).sendActions(for: .touchUpInside)
+        XCTAssertTrue(cats.manager.deleteButton.isEnabled)
+        cats.manager.deleteButton.sendActions(for: .touchUpInside)
         let alert = try XCTUnwrap(cats.presentedViewController as? UIAlertController)
         XCTAssertEqual(alert.actions.map(\.style), [.cancel, .destructive])
         let calls = await fixture.runtime.calls
@@ -341,9 +407,10 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let detail = FilmCatDetailController(service: fixture.sources, installationId: "a", themeProvider: FilmSettingsTheme())
         detail.loadViewIfNeeded(); detail.beginAppearanceTransition(true, animated: false); detail.endAppearanceTransition()
         await eventually { detail.snapshot?.cats.count == 2 }
-        for action in ["edit", "update", "restart", "delete", "enabled"] {
+        for action in ["edit", "update", "restart", "enabled"] {
             XCTAssertNotNil(try row(detail, "film.cat.\(action)").action)
         }
+        XCTAssertFalse(detail.sections.flatMap(\.rows).contains { $0.title == "删除" })
         _ = try await fixture.sources.enableCat("a", enabled: false)
         await eventually { detail.snapshot?.cats.first?.enabled == false }
         XCTAssertFalse(try row(detail, "film.cat.restart").enabled)
@@ -361,6 +428,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
             let pages: [FilmSettingsListController] = [
                 FilmRulePageViewController(owner: owner, group: .search, themeProvider: FilmSettingsTheme()),
                 FilmRulePageViewController(owner: owner, group: .episode, themeProvider: FilmSettingsTheme()),
+                FilmRuleTestController(owner: owner, group: .search, themeProvider: FilmSettingsTheme()),
                 FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme()),
                 FilmVideoSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme()),
             ]
@@ -372,39 +440,43 @@ final class FilmSettingsPlatformTests: XCTestCase {
                 }
                 await settle()
                 page.view.layoutIfNeeded()
-                XCTAssertGreaterThan(page.table.bounds.width, 0)
-                XCTAssertLessThanOrEqual(page.table.frame.maxX, page.view.bounds.maxX)
-                XCTAssertGreaterThanOrEqual(page.table.frame.minY, page.pageHeader.frame.maxY)
-                XCTAssertEqual(page.table.frame.maxY, page.view.safeAreaLayoutGuide.layoutFrame.maxY, accuracy: 1)
-                for cell in page.table.visibleCells {
+                let manager = (page as? FilmCatSourcesViewController)?.manager
+                    ?? (page as? FilmVideoSourcesViewController)?.manager
+                let table = manager?.table ?? page.table
+                let frame = table.convert(table.bounds, to: page.view)
+                XCTAssertGreaterThan(table.bounds.width, 0)
+                XCTAssertLessThanOrEqual(frame.maxX, page.view.bounds.maxX)
+                XCTAssertGreaterThanOrEqual(frame.minY, page.pageHeader.frame.maxY)
+                XCTAssertEqual(frame.maxY, page.view.safeAreaLayoutGuide.layoutFrame.maxY - (manager == nil ? 0 : 8), accuracy: 1)
+                for cell in table.visibleCells {
                     XCTAssertGreaterThanOrEqual(cell.bounds.height, 44)
                     XCTAssertFalse(cell.accessibilityIdentifier?.isEmpty ?? true)
                 }
                 attach(page, "film-settings-\(index)-\(Int(width))-AXXXL")
-                if let lastSection = page.sections.indices.last,
-                   let lastRow = page.sections[lastSection].rows.indices.last,
-                   page.table.contentSize.height > page.table.bounds.height {
+                if let lastSection = (0..<table.numberOfSections).last,
+                   let lastRow = (0..<table.numberOfRows(inSection: lastSection)).last,
+                   table.contentSize.height > table.bounds.height {
                     let last = IndexPath(row: lastRow, section: lastSection)
                     // Self-sizing rows update contentSize while UIKit lays them
                     // out. Walk actual rows instead of trusting estimated height.
-                    for section in page.sections.indices {
-                        for row in page.sections[section].rows.indices {
-                            page.table.scrollToRow(at: IndexPath(row: row, section: section), at: .bottom, animated: false)
-                            page.table.layoutIfNeeded()
+                    for section in 0..<table.numberOfSections {
+                        for row in 0..<table.numberOfRows(inSection: section) {
+                            table.scrollToRow(at: IndexPath(row: row, section: section), at: .bottom, animated: false)
+                            table.layoutIfNeeded()
                         }
                     }
-                    page.table.scrollToRow(at: last, at: .bottom, animated: false)
-                    page.table.layoutIfNeeded()
+                    table.scrollToRow(at: last, at: .bottom, animated: false)
+                    table.layoutIfNeeded()
                     // Trailing section spacing can overflow while the last row
                     // already fits. Check content reachability, not a positive offset.
-                    let lastFrame = page.table.rectForRow(at: last)
-                    let viewport = page.table.bounds.inset(by: page.table.adjustedContentInset)
+                    let lastFrame = table.rectForRow(at: last)
+                    let viewport = table.bounds.inset(by: table.adjustedContentInset)
                     let context = "page=\(index), width=\(width)"
                     XCTAssertLessThanOrEqual(lastFrame.maxY, viewport.maxY + 1, context)
                     if lastFrame.height <= viewport.height {
                         XCTAssertGreaterThanOrEqual(lastFrame.minY, viewport.minY - 1, context)
                     }
-                    XCTAssertTrue(page.table.indexPathsForVisibleRows?.contains(last) == true)
+                    XCTAssertTrue(table.indexPathsForVisibleRows?.contains(last) == true)
                     attach(page, "film-settings-\(index)-\(Int(width))-AXXXL-bottom")
                 }
                 unhost(window)
@@ -438,7 +510,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
             let expected = index == 2 ? ["first", "middle"] : ["first", "last"]
             XCTAssertEqual(owner.draft?.episodeCleanRegexRules, expected)
             XCTAssertFalse(editor.pattern.isEditable)
-            editor.pattern.text = "stale"; editor.textViewDidChange(editor.pattern)
+            editor.pattern.text = "stale"; editor.pattern.delegate?.textViewDidChange?(editor.pattern)
             XCTAssertEqual(owner.draft?.episodeCleanRegexRules, expected)
             let saved = try await fixture.rules.savedSnapshot()
             XCTAssertEqual(saved.episodeCleanRegexRules, expected)
@@ -450,11 +522,12 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testInlineAddDeleteAndDefaultsOnlyChangeCurrentGroupDraft() async throws {
+    func testAddAndDefaultsOnlyChangeCurrentGroupDraftAndTestOpensSeparatePage() async throws {
         let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
         let before = try await fixture.ruleRPC.saved()
+        let initialEpisode = owner.rules(.episodeClean)
         let initialMovie = owner.rules(.movie)
         let page = FilmRulePageViewController(owner: owner, group: .episodeClean, themeProvider: FilmSettingsTheme())
         let navigation = UINavigationController(rootViewController: page)
@@ -464,28 +537,37 @@ final class FilmSettingsPlatformTests: XCTestCase {
         try selectRow(page, "film.rules.episodeClean.add")
         XCTAssertEqual(page.editors.count, count + 1)
         page.editors[count].pattern.text = "new rule"
-        page.editors[count].textViewDidChange(page.editors[count].pattern)
-        page.editors[count].delete.sendActions(for: .touchUpInside)
-        XCTAssertEqual(page.editors.count, count)
-        try await owner.restore(.episodeClean)
+        page.editors[count].pattern.delegate?.textViewDidChange?(page.editors[count].pattern)
+        XCTAssertEqual(owner.rules(.episodeClean).last?.pattern, "new rule")
         XCTAssertEqual(owner.rules(.movie), initialMovie)
-        page.toggleTest()
-        XCTAssertTrue(page.testExpanded)
-        XCTAssertTrue(navigation.topViewController === page)
+        let remove = try XCTUnwrap(descendants(page.editors[count]).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "film.rules.episodeClean.\(count).delete"
+        })
+        XCTAssertEqual(remove.title(for: .normal), "删除")
+        remove.sendActions(for: .touchUpInside)
+        XCTAssertEqual(page.editors.count, count)
+        XCTAssertEqual(owner.rules(.episodeClean), initialEpisode)
+        try selectRow(page, "film.rules.restore")
+        try await activateAlert(page, title: "确认")
+        await eventually { !page.writing && page.editors.count == count }
+        XCTAssertEqual(owner.rules(.movie), initialMovie)
+        try selectRow(page, "film.rules.test")
+        let test = try XCTUnwrap(navigation.topViewController as? FilmRuleTestController)
+        XCTAssertEqual(test.group, .episodeClean)
+        XCTAssertEqual(test.pageTitle, "\(FilmRuleGroup.episodeClean.title)测试")
         let after = try await fixture.ruleRPC.saved()
         XCTAssertEqual(after, before)
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testInlineRuleTestCancellationOnHiddenPageDoesNotPublishOrSave() async throws {
+    func testSeparateRuleTestCancellationOnHiddenPageDoesNotPublishOrSave() async throws {
         let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
         owner.edit(.movie, index: 0, rule: .init(pattern: "^(a+)+$", replace: "x"))
-        let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let page = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         let before = try await fixture.ruleRPC.saved()
-        page.toggleTest()
         page.testFields.input.text = String(repeating: "a", count: 100_000) + "!"
         page.runTest()
         try await Task.sleep(nanoseconds: 25_000_000)
@@ -502,7 +584,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testInlineEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly() async throws {
+    func testSeparateEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly() async throws {
         let fixture = try await makeFixture()
         let saved = FilmRuleSet(episodeCleanRegexRules: ["^广告"],
                                 episodeRules: [.init(pattern: "^第([0-9]+)集$", replace: "E$1")])
@@ -512,9 +594,8 @@ final class FilmSettingsPlatformTests: XCTestCase {
         owner.edit(.episode, index: 0, rule: .init(pattern: "^第([0-9]+)集$", replace: "Draft$1"))
         let before = try await fixture.ruleRPC.saved()
         for group in [FilmRuleGroup.episodeClean, .episode] {
-            let page = FilmRulePageViewController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
+            let page = FilmRuleTestController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
             let window = try await host(page)
-            page.toggleTest()
             page.testFields.input.text = group == .episodeClean ? "草稿第12集" : "广告第12集"
             page.runTest()
             await eventually { !page.testing && page.result != nil }
@@ -577,30 +658,70 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testInlineRuleFieldsUseCompactFlagsAndStackOnlyForNarrowOrLargeType() async throws {
+    func testRuleFieldsHideFlagsAndKeepReplacementInTheSameEditor() async throws {
         let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
-        for (width, largeType) in [(CGFloat(390), false), (CGFloat(320), false), (CGFloat(390), true)] {
-            let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
-            if largeType { page.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge }
-            let window = try await host(page, size: CGSize(width: width, height: 844))
-            await settle(); page.table.layoutIfNeeded()
-            let editor = try XCTUnwrap(page.editors.first)
-            editor.layoutIfNeeded()
-            let replace = editor.replacement.convert(editor.replacement.bounds, to: editor)
-            let flags = editor.flags.convert(editor.flags.bounds, to: editor)
-            XCTAssertGreaterThanOrEqual(flags.width, 44)
-            XCTAssertTrue(editor.pattern.superview === editor)
-            if width == 390 && !largeType {
-                XCTAssertGreaterThanOrEqual(editor.bounds.width, 300)
-                XCTAssertEqual(replace.minY, flags.minY, accuracy: 1)
-                XCTAssertGreaterThan(replace.width, flags.width)
-            } else {
-                XCTAssertGreaterThan(flags.minY, replace.maxY)
+        for group in [FilmRuleGroup.episode, .movie] {
+            owner.edit(group, index: 0, rule: .init(pattern: "original", replace: "before", flags: "g"))
+            for (width, largeType) in [(CGFloat(390), false), (CGFloat(320), false), (CGFloat(390), true)] {
+                let page = FilmRulePageViewController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
+                if largeType { page.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge }
+                let window = try await host(page, size: CGSize(width: width, height: 844))
+                await settle(); page.table.layoutIfNeeded()
+                let editor = try XCTUnwrap(page.editors.first)
+                editor.layoutIfNeeded()
+                let replacement = try XCTUnwrap(editor.replacement)
+                XCTAssertEqual(editor.pattern.layer.borderWidth, 0)
+                XCTAssertEqual(replacement.layer.borderWidth, 0)
+                XCTAssertEqual(editor.pattern.backgroundColor, .clear)
+                XCTAssertNil(replacement.backgroundColor)
+                XCTAssertEqual(editor.deleteButton.titleColor(for: .normal), UIColor(page.theme.settings.danger))
+                XCTAssertEqual(editor.pattern.font?.pointSize,
+                    UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 17), compatibleWith: editor.traitCollection).pointSize)
+                let replace = replacement.convert(replacement.bounds, to: editor)
+                editor.pattern.text = "changed"
+                editor.pattern.delegate?.textViewDidChange?(editor.pattern)
+                replacement.text = "replacement"
+                replacement.sendActions(for: .editingChanged)
+                XCTAssertEqual(owner.rules(group).first, .init(pattern: "changed", replace: "replacement", flags: "g"))
+                XCTAssertTrue(editor.pattern.isDescendant(of: editor))
+                XCTAssertTrue(replacement.isDescendant(of: editor))
+                XCTAssertGreaterThanOrEqual(replace.width, editor.bounds.width - 32)
+                XCTAssertFalse(descendants(editor).contains { $0.accessibilityIdentifier?.contains(".flags") == true })
+                unhost(window)
             }
-            unhost(window)
+            try await owner.save(group)
+            let saved = try await fixture.rules.savedSnapshot()
+            XCTAssertEqual(saved.rules(in: group).first, .init(pattern: "changed", replace: "replacement", flags: "g"))
         }
+        await fixture.rules.close(); await fixture.sources.close()
+    }
+
+    func testNewMatchingRuleWithoutFlagsFieldKeepsRuntimeCaseInsensitiveDefault() async throws {
+        let fixture = try await makeFixture()
+        _ = try await fixture.rules.save(.movie, rules: [])
+        let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
+        let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let window = try await host(page); defer { unhost(window) }
+        try selectRow(page, "film.rules.movie.add")
+        let editor = try XCTUnwrap(page.editors.first)
+        editor.pattern.text = "^movie$"; editor.pattern.delegate?.textViewDidChange?(editor.pattern)
+        let replacement = try XCTUnwrap(editor.replacement)
+        replacement.text = "matched"; replacement.sendActions(for: .editingChanged)
+        try await owner.save(.movie)
+        let saved = try await fixture.rules.savedSnapshot()
+        XCTAssertEqual(saved.movieRules.first?.pattern, "^movie$")
+        XCTAssertEqual(saved.movieRules.first?.replace, "matched")
+        let test = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let testWindow = try await host(test); defer { unhost(testWindow) }
+        test.testFields.input.text = "MOVIE"
+        test.runTest()
+        await eventually { !test.testing && test.result != nil }
+        XCTAssertEqual(test.result?.outputText.displayString, "matched")
+        XCTAssertEqual(test.result?.matched, true)
+        let after = try await fixture.rules.savedSnapshot()
+        XCTAssertEqual(after, saved)
         await fixture.rules.close(); await fixture.sources.close()
     }
 
@@ -612,9 +733,8 @@ final class FilmSettingsPlatformTests: XCTestCase {
             let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
             let window = try await host(page)
             await eventually { page.snapshot?.cats.count == 2 && page.canPresentPageAlert }
-            try selectRow(page, "film.cats.select")
-            try selectRow(page, "film.cats.selectAll")
-            try selectRow(page, "film.cats.batch.4")
+            try ManagementListTestUI.button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside)
+            page.manager.deleteButton.sendActions(for: .touchUpInside)
             try await activateAlert(page, title: "确认")
             await eventually { !page.busy && (page.presentedViewController as? UIAlertController)?.title == "错误" }
             let partial = await fixture.sources.snapshot
@@ -661,9 +781,8 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         await eventually { page.snapshot?.cats.count == 2 && page.canPresentPageAlert }
-        try selectRow(page, "film.cats.select")
-        try selectRow(page, "film.cats.selectAll")
-        try selectRow(page, "film.cats.batch.4")
+        try ManagementListTestUI.button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside)
+        page.manager.deleteButton.sendActions(for: .touchUpInside)
         try await activateAlert(page, title: "确认")
         await eventually { !page.busy && (page.presentedViewController as? UIAlertController)?.title == "错误" }
         let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
@@ -686,13 +805,12 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let page = FilmVideoSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         await eventually { page.snapshot?.videos.count == 2 && page.canPresentPageAlert }
-        try selectRow(page, "film.videos.select")
-        try selectRow(page, "film.videos.selectAll")
-        try selectRow(page, "film.videos.delete")
+        try ManagementListTestUI.button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside)
+        page.manager.deleteButton.sendActions(for: .touchUpInside)
         try await activateAlert(page, title: "取消")
         let cancelled = await fixture.sources.snapshot
         XCTAssertEqual(cancelled.videos.count, 2)
-        try selectRow(page, "film.videos.delete")
+        page.manager.deleteButton.sendActions(for: .touchUpInside)
         try await activateAlert(page, title: "确认")
         await eventually { !page.busy && page.snapshot?.videos.isEmpty == true }
         let saved = await fixture.sources.snapshot
@@ -706,15 +824,13 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let page = FilmVideoSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         await eventually { page.snapshot?.videos.count == 2 }
-        try selectRow(page, "film.videos.select")
-        try selectRow(page, "film.videos.selectAll")
-        try selectRow(page, "film.videos.detect")
+        try ManagementListTestUI.button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside)
+        try ManagementListTestUI.activateMenu("检测所选", on: page.manager.footerMore)
         await fixture.runtime.waitForProbe()
-        for id in ["a", "b"] { try selectRow(page, "film.video.\(id).site") }
+        for id in ["a", "b"] { try ManagementListTestUI.select("film.video.\(id).site", in: page.manager) }
         XCTAssertTrue(page.detecting)
-        XCTAssertTrue(try row(page, "film.videos.detect").enabled)
-        XCTAssertEqual(try row(page, "film.videos.detect").title, "取消检测")
-        try selectRow(page, "film.videos.detect")
+        XCTAssertTrue(page.manager.selected.isEmpty)
+        try ManagementListTestUI.activateMenu("取消检测", on: page.manager.footerMore)
         XCTAssertFalse(page.detecting)
         await fixture.runtime.waitForProbeCancellation()
         await fixture.runtime.releaseProbe()
@@ -724,9 +840,8 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let snapshot = await fixture.sources.snapshot
         XCTAssertTrue(snapshot.videos.allSatisfy { $0.detection == nil })
         try await fixture.sources.resume()
-        try selectRow(page, "film.video.a.site")
-        XCTAssertTrue(try row(page, "film.videos.detect").enabled)
-        XCTAssertEqual(try row(page, "film.videos.detect").title, "检测")
+        try ManagementListTestUI.select("film.video.a.site", in: page.manager)
+        _ = try ManagementListTestUI.menuAction("检测所选", on: page.manager.footerMore)
         await fixture.sources.close(); await fixture.rules.close()
     }
 
@@ -741,9 +856,8 @@ final class FilmSettingsPlatformTests: XCTestCase {
             navigation.setViewControllers([page], animated: false)
             let window = try await host(navigation)
             await eventually { page.snapshot?.cats.count == 2 }
-            try selectRow(page, "film.cats.select")
-            try selectRow(page, "film.cats.selectAll")
-            try selectRow(page, "film.cats.batch.2")
+            try ManagementListTestUI.button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside)
+            try ManagementListTestUI.activateMenu("更新所选", on: page.manager.footerMore)
             await eventually { navigation.topViewController is FilmCatEditorController }
             let editor = try XCTUnwrap(navigation.topViewController as? FilmCatEditorController)
             await eventually { editor.isPageVisible }
@@ -783,11 +897,11 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         await eventually { page.snapshot?.runtimeError != nil && page.canPresentPageAlert }
-        try selectRow(page, "film.sources.runtimeError")
+        try ManagementListTestUI.open("film.sources.runtimeError", in: page.manager)
         let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
         XCTAssertEqual(alert.title, "运行器不可用")
         XCTAssertEqual(alert.actions.map(\.title), ["取消", "重试"])
-        XCTAssertFalse(page.sections.flatMap(\.rows).contains { $0.id == "film.sources.retry" })
+        XCTAssertFalse(ManagementListTestUI.rowIDs(in: page.manager).contains("management.row.film.sources.retry"))
         try await activateAlert(page, title: "重试")
         await eventually { !page.busy && (page.presentedViewController as? UIAlertController)?.title == "错误" }
         try await activateAlert(page, title: "重试")
@@ -802,16 +916,29 @@ final class FilmSettingsPlatformTests: XCTestCase {
         try await fixture.rules.initialize()
         _ = try await fixture.rules.save(.init(movieRules: [.init(pattern: "^.", replace: "x")]))
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
-        let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let page = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         let before = try await fixture.ruleRPC.saved()
-        page.toggleTest()
+        XCTAssertEqual(try row(page, "film.rule.test.output.row").detail, "尚未测试")
+        let inputCell = try XCTUnwrap(try cell(page, "film.rule.test.fields") as? SettingsTableCell)
+        let pendingCell = try XCTUnwrap(try cell(page, "film.rule.test.output.row") as? SettingsTableCell)
+        XCTAssertEqual(inputCell.contentView.directionalLayoutMargins,
+                       try XCTUnwrap(pendingCell.contentConfiguration as? UIListContentConfiguration).directionalLayoutMargins)
+        XCTAssertEqual(page.testFields.input.layer.borderWidth, 0)
         page.testFields.input.becomeFirstResponder(); page.testFields.input.insertText("🎬")
-        try selectRow(page, "film.rule.test.run")
+        let run = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "film.rule.test.run"
+        })
+        XCTAssertTrue(run.isEnabled); run.sendActions(for: .touchUpInside)
         await eventually { !page.testing && page.result != nil }
         let result = try XCTUnwrap(page.result)
         XCTAssertEqual(result.outputText.utf16, [0x0078, 0xDFAC])
-        XCTAssertEqual(try row(page, "film.rule.test.output").title, "x\u{FFFD}")
+        let outputCell = try XCTUnwrap(try cell(page, "film.rule.test.output.row") as? SettingsTableCell)
+        let output = try XCTUnwrap(outputCell.contentConfiguration as? UIListContentConfiguration)
+        XCTAssertEqual(output.text, "最终结果")
+        XCTAssertEqual(output.secondaryText, "x\u{FFFD}")
+        XCTAssertEqual(outputCell.accessibilityValue, "x\u{FFFD}")
+        XCTAssertFalse(descendants(outputCell).contains { $0 is UITextView })
         XCTAssertEqual(page.testFields.input.text, "🎬")
         XCTAssertEqual(owner.rules(.movie).first?.pattern, "^.")
         let after = try await fixture.ruleRPC.saved()
@@ -827,9 +954,8 @@ final class FilmSettingsPlatformTests: XCTestCase {
             let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
             let window = try await host(page)
             await eventually { page.snapshot?.cats.count == 2 && page.canPresentPageAlert }
-            try selectRow(page, "film.cats.select")
-            try selectRow(page, "film.cats.selectAll")
-            try selectRow(page, "film.cats.batch.3")
+            try ManagementListTestUI.button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside)
+            try ManagementListTestUI.activateMenu("重启所选", on: page.manager.footerMore)
             await eventually { !page.busy && (page.presentedViewController as? UIAlertController)?.title == "错误" }
             XCTAssertEqual((page.presentedViewController as? UIAlertController)?.message, "RESTART_FAILED")
             let firstCalls = await fixture.runtime.restarts
@@ -865,78 +991,74 @@ final class FilmSettingsPlatformTests: XCTestCase {
         }
     }
 
-    func testCatDetailCommittedDeletionStatusFailureRetriesOrCancelsWithoutAnotherUninstall() async throws {
-        for choice in ["成功", "重试", "取消"] {
-            let fixture = try await makeFixture()
-            try await fixture.sources.refresh()
-            if choice != "成功" { await fixture.runtime.failStatusAfterDeletion("a") }
-            let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
-            let navigation = PageNavigationController(themeProvider: FilmSettingsTheme())
-            navigation.setViewControllers([page], animated: false)
-            let window = try await host(navigation)
-            await eventually { page.snapshot?.cats.count == 2 }
-            try selectRow(page, "film.cat.a")
-            let detail = try XCTUnwrap(navigation.topViewController as? FilmCatDetailController)
-            await eventually { detail.snapshot?.cats.count == 2 && detail.canPresentPageAlert }
-            try selectRow(detail, "film.cat.delete")
-            try await activateAlert(detail, title: "确认")
-            if choice != "成功" {
-                await eventually { !detail.busy && (detail.presentedViewController as? UIAlertController)?.title == "错误" }
-                XCTAssertEqual((detail.presentedViewController as? UIAlertController)?.message, "STATUS_FAILED")
-                XCTAssertTrue(navigation.topViewController === detail)
-                try await assertOnlyCatBRemainsOnDisk(fixture)
-                let initialCalls = await fixture.runtime.deletions
-                XCTAssertEqual(initialCalls, ["a"])
-                try await activateAlert(detail, title: choice)
-            }
-            if choice == "取消" {
-                await eventually { !detail.busy && detail.presentedViewController == nil }
-                XCTAssertTrue(navigation.topViewController === detail)
-                navigation.popViewController(animated: false)
-            }
-            await eventually { navigation.topViewController === page && page.canPresentPageAlert }
-            XCTAssertNil(detail.presentedViewController)
-            await eventually { page.snapshot?.cats.map(\.installationId) == ["b"] }
-            XCTAssertFalse(page.sections.flatMap(\.rows).contains { $0.id == "film.cat.a" })
-            try await assertOnlyCatBRemainsOnDisk(fixture)
-            // Re-enter an existing detail after the old deletion settles.
-            try selectRow(page, "film.cat.b")
-            let other = try XCTUnwrap(navigation.topViewController as? FilmCatDetailController)
-            await eventually { other.canPresentPageAlert }
-            XCTAssertEqual(other.installationId, "b")
-            XCTAssertTrue(navigation.topViewController === other)
-            let calls = await fixture.runtime.deletions
-            XCTAssertEqual(calls, ["a"])
-            unhost(window)
-            await fixture.sources.close(); await fixture.rules.close()
-        }
+    func testCatDetailKeepsEditingButDeletionIsOnlyAvailableThroughBatchSelection() async throws {
+        let fixture = try await makeFixture()
+        try await fixture.sources.refresh()
+        let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
+        let navigation = PageNavigationController(themeProvider: FilmSettingsTheme())
+        navigation.setViewControllers([page], animated: false)
+        let window = try await host(navigation)
+        await eventually { page.snapshot?.cats.count == 2 }
+        try ManagementListTestUI.open("film.cat.a", in: page.manager)
+        let detail = try XCTUnwrap(navigation.topViewController as? FilmCatDetailController)
+        await eventually { detail.snapshot?.cats.count == 2 && detail.canPresentPageAlert }
+        XCTAssertFalse(detail.sections.flatMap(\.rows).contains { $0.title == "删除" })
+        XCTAssertTrue(detail.sections.flatMap(\.rows).contains { $0.id == "film.cat.edit" })
+        XCTAssertTrue(detail.sections.flatMap(\.rows).contains { $0.id == "film.cat.update" })
+        navigation.popViewController(animated: false)
+        await eventually { page.canPresentPageAlert }
+        try ManagementListTestUI.select("film.cat.a", in: page.manager)
+        XCTAssertEqual(page.manager.selected, ["film.cat.a"])
+        XCTAssertTrue(page.manager.deleteButton.isEnabled)
+        page.manager.deleteButton.sendActions(for: .touchUpInside)
+        try await activateAlert(page, title: "取消")
+        XCTAssertEqual(page.snapshot?.cats.map(\.installationId), ["a", "b"])
+        let calls = await fixture.runtime.deletions
+        XCTAssertTrue(calls.isEmpty)
+        unhost(window)
+        await fixture.sources.close(); await fixture.rules.close()
     }
 
-    func testCatDetailDeletionReceiptAfterReturningDoesNotPopAnotherDetail() async throws {
+    func testEmptyRuleResultKeepsTheSharedOutputRow() async throws {
+        let fixture = try await makeFixture()
+        _ = try await fixture.rules.save(.movie, rules: [.init(pattern: "^nonempty$")])
+        let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
+        let page = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let window = try await host(page); defer { unhost(window) }
+        page.testFields.input.text = ""
+        page.runTest()
+        await eventually { !page.testing && page.result != nil }
+        XCTAssertEqual(page.result?.outputText.displayString, "")
+        let outputCell = try XCTUnwrap(try cell(page, "film.rule.test.output.row") as? SettingsTableCell)
+        let output = try XCTUnwrap(outputCell.contentConfiguration as? UIListContentConfiguration)
+        XCTAssertEqual(output.text, "空结果")
+        XCTAssertEqual(output.secondaryText, "")
+        XCTAssertEqual(outputCell.accessibilityValue, "")
+        await fixture.sources.close(); await fixture.rules.close()
+    }
+
+    func testCatBatchDeletionReceiptDoesNotNavigateOrAlertOverAnotherDetail() async throws {
         for statusFails in [false, true] {
             let fixture = try await makeFixture()
             try await fixture.sources.refresh()
             await fixture.runtime.pauseDeletion()
+            addTeardownBlock { await fixture.runtime.releaseDeletion() }
             if statusFails { await fixture.runtime.failStatusAfterDeletion("a") }
             let page = FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
             let navigation = PageNavigationController(themeProvider: FilmSettingsTheme())
             navigation.setViewControllers([page], animated: false)
             let window = try await host(navigation)
-            await eventually { page.snapshot?.cats.count == 2 }
-            try selectRow(page, "film.cat.a")
-            let detail = try XCTUnwrap(navigation.topViewController as? FilmCatDetailController)
-            await eventually { detail.snapshot?.cats.count == 2 && detail.canPresentPageAlert }
-            try selectRow(detail, "film.cat.delete")
-            try await activateAlert(detail, title: "确认")
+            await eventually { page.snapshot?.cats.count == 2 && page.canPresentPageAlert }
+            try ManagementListTestUI.select("film.cat.a", in: page.manager)
+            page.manager.deleteButton.sendActions(for: .touchUpInside)
+            try await activateAlert(page, title: "确认")
             await fixture.runtime.waitForDeletion()
-            XCTAssertTrue(detail.busy)
-            navigation.popViewController(animated: false)
-            await eventually { !detail.isPageActive && page.canPresentPageAlert }
-            try selectRow(page, "film.cat.b")
-            let other = try XCTUnwrap(navigation.topViewController as? FilmCatDetailController)
+            XCTAssertTrue(page.busy)
+            let other = FilmCatDetailController(service: fixture.sources, installationId: "b", themeProvider: FilmSettingsTheme())
+            navigation.pushViewController(other, animated: false)
             await eventually { other.canPresentPageAlert }
             await fixture.runtime.releaseDeletion()
-            await eventually { !detail.busy }
+            await eventually { !page.busy }
             await settle()
             XCTAssertTrue(navigation.topViewController === other)
             XCTAssertEqual(navigation.viewControllers.count, 2)
@@ -946,8 +1068,15 @@ final class FilmSettingsPlatformTests: XCTestCase {
             XCTAssertEqual(calls, ["a"])
             try await assertOnlyCatBRemainsOnDisk(fixture)
             navigation.popViewController(animated: false)
-            await eventually { page.canPresentPageAlert && page.snapshot?.cats.map(\.installationId) == ["b"] }
-            XCTAssertNil(page.presentedViewController)
+            await eventually { page.snapshot?.cats.map(\.installationId) == ["b"] }
+            if statusFails {
+                await eventually { (page.presentedViewController as? UIAlertController)?.message == "STATUS_FAILED" }
+                try await activateAlert(page, title: "取消")
+            }
+            await eventually { page.canPresentPageAlert }
+            XCTAssertTrue(navigation.topViewController === page)
+            let finalCalls = await fixture.runtime.deletions
+            XCTAssertEqual(finalCalls, ["a"])
             unhost(window)
             await fixture.sources.close(); await fixture.rules.close()
         }
@@ -970,9 +1099,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
 
     private func selectRow(_ page: FilmSettingsListController, _ id: String) throws {
         page.loadViewIfNeeded()
-        let location = try XCTUnwrap(page.sections.enumerated().compactMap { section, value -> IndexPath? in
-            value.rows.firstIndex { $0.id == id }.map { IndexPath(row: $0, section: section) }
-        }.first)
+        let location = try indexPath(page, id)
         XCTAssertTrue(page.sections[location.section].rows[location.row].enabled)
         page.tableView(page.table, didSelectRowAt: location)
     }
@@ -990,6 +1117,20 @@ final class FilmSettingsPlatformTests: XCTestCase {
     private func row(_ page: FilmSettingsListController, _ id: String) throws -> FilmSettingsRow {
         try XCTUnwrap(page.sections.flatMap(\.rows).first { $0.id == id })
     }
+    private func indexPath(_ page: FilmSettingsListController, _ id: String) throws -> IndexPath {
+        try XCTUnwrap(page.sections.enumerated().compactMap { section, value -> IndexPath? in
+            value.rows.firstIndex { $0.id == id }.map { IndexPath(row: $0, section: section) }
+        }.first)
+    }
+    private func cell(_ page: FilmSettingsListController, _ id: String) throws -> UITableViewCell {
+        let location = try indexPath(page, id)
+        page.table.layoutIfNeeded()
+        if let cell = page.table.cellForRow(at: location) { return cell }
+        page.table.scrollToRow(at: location, at: .top, animated: false)
+        page.table.layoutIfNeeded()
+        return try XCTUnwrap(page.table.cellForRow(at: location))
+    }
+    private func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
     private func eventually(_ predicate: @escaping @MainActor () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
         let expected = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { predicate() } }, evaluatedWith: nil)
         await fulfillment(of: [expected], timeout: 5)

@@ -14,7 +14,7 @@ const require = createRequire(import.meta.url);
 const gypPackage = require.resolve('node-gyp/package.json');
 const gypRequire = createRequire(gypPackage);
 const tar = gypRequire('tar');
-const version = policy.nodeHeaders.version;
+const version = policy.build.node;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 function environment(t, values) {

@@ -18,10 +18,12 @@ internal sealed class NovelAppearanceEditor : StackPanel
         initial = value;
         mode = Select("阅读模式", new[] { "覆盖", "平移", "无动画分页", "上下连续滚动" }, Array.IndexOf(new[] { "cover", "slide", "none", "scroll" }, value.Mode));
         conversion = Select("简繁转换", new[] { "原文", "简体", "繁体" }, Array.IndexOf(new[] { "none", "simplified", "traditional" }, value.Conversion));
-        Children.Add(NovelUi.Text("字体"));
-        fonts = new ComboBox { IsEditable = true, Text = value.FontFamily, ItemsSource = Fonts.SystemFontFamilies.Select(f => f.Source).Order().ToArray(), Margin = new(0, 0, 0, 12) };
-        Children.Add(fonts);
-        bold = new CheckBox { Content = "加粗", IsChecked = value.Bold, Margin = new(0, 0, 0, 12) }; Children.Add(bold);
+        fonts = new ComboBox { IsEditable = true, Text = value.FontFamily, ItemsSource = Fonts.SystemFontFamilies.Select(f => f.Source).Order().ToArray() };
+        fonts.SetResourceReference(FrameworkElement.StyleProperty, "Novel.ComboBox");
+        Children.Add(NovelUi.Field("字体", fonts));
+        bold = new CheckBox { Content = "加粗", IsChecked = value.Bold, Margin = new(0, 0, 0, 0) };
+        bold.SetResourceReference(FrameworkElement.StyleProperty, "Novel.CheckBox");
+        Children.Add(NovelUi.Row(bold));
         Number("字号", value.FontSize); Number("行距倍数", value.LineHeight); Number("段距", value.ParagraphSpacing);
         Number("页边距", value.Margin); Number("正文宽度", value.ContentWidth); Number("自动阅读速度（1–10）", value.AutoSpeed);
         theme = Select("主题", NovelAppearance.Themes.Select(t => t.Name).ToArray(), value.Theme);
@@ -39,11 +41,12 @@ internal sealed class NovelAppearanceEditor : StackPanel
     }
     private ComboBox Select(string label, string[] values, int selected)
     {
-        Children.Add(NovelUi.Text(label)); var box = new ComboBox { ItemsSource = values, SelectedIndex = Math.Max(0, selected), Margin = new(0, 0, 0, 12) };
-        System.Windows.Automation.AutomationProperties.SetName(box, label); Children.Add(box); return box;
+        var box = new ComboBox { ItemsSource = values, SelectedIndex = Math.Max(0, selected) };
+        box.SetResourceReference(FrameworkElement.StyleProperty, "Novel.ComboBox");
+        System.Windows.Automation.AutomationProperties.SetName(box, label); Children.Add(NovelUi.Field(label, box)); return box;
     }
     private void Number(string label, double value) => Field(label, value.ToString(CultureInfo.CurrentCulture));
-    private void Field(string label, string value) { Children.Add(NovelUi.Text(label)); var box = NovelUi.Input(label, value, 420); fields.Add(label, box); Children.Add(box); }
+    private void Field(string label, string value) { var box = NovelUi.Input(label, value, double.NaN); fields.Add(label, box); Children.Add(NovelUi.Field(label, box)); }
     internal NovelAppearance Read()
     {
         double Get(string name, bool positive = true)

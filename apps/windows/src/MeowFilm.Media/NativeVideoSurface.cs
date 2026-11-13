@@ -9,7 +9,8 @@ namespace MeowFilm.Media;
 /// <summary>
 /// A picture-only WPF/native surface. An owned, invisible HWND prevents libVLC
 /// from falling back to a separate video window when the view is not mounted.
-/// Mount the view before opening video; no overlay, controls or explanatory text.
+/// Mount the view before opening video. Content uses VideoView's foreground window
+/// for native-client controls; never place WPF siblings above the video HWND.
 /// </summary>
 internal sealed class NativeVideoSurface : VideoView
 {

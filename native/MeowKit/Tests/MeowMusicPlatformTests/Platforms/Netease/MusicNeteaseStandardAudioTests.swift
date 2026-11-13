@@ -6,7 +6,8 @@ import MeowMusicFeature
 /// Synthetic official transport only. These assertions are not real-world
 /// listening, login, membership or Simulator evidence.
 final class MusicNeteaseStandardAudioTests: XCTestCase {
-    private let playerPath = "/xeapi/song/enhance/player/url/v1"
+    private let playerPath = "/eapi/song/enhance/player/url"
+    private let highPath = "/xeapi/song/enhance/player/url/v1"
 
     func testGuestOffersStandardWithoutMembershipAndNeverCreatesLogin() async throws {
         let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
@@ -22,7 +23,8 @@ final class MusicNeteaseStandardAudioTests: XCTestCase {
         let calls = await f.http.recorded()
         XCTAssertEqual(calls.filter { $0.request.url.path == playerPath }.count, 1)
         XCTAssertFalse(calls.contains {
-            $0.request.url.path.contains("vip") || $0.request.url.path.contains("nuser") ||
+            $0.request.url.path.hasPrefix("/xeapi/") || $0.request.url.path.contains("detail/get") ||
+                $0.request.url.path.contains("handshake") || $0.request.url.path.contains("vip") || $0.request.url.path.contains("nuser") ||
                 $0.request.url.path.contains("/register/")
         })
         XCTAssertTrue(calls.allSatisfy { !($0.request.headers["Cookie"] ?? "").contains("MUSIC_U") })
@@ -34,19 +36,23 @@ final class MusicNeteaseStandardAudioTests: XCTestCase {
         XCTAssertEqual(audio.playbackAuthorization?.isActive, false)
     }
 
-    func testNonMemberUsesResourceMetadataAndActualResponseWithoutVIPPreflight() async throws {
+    func testSignedInStandardSkipsResourceMetadataAndHighTierKeepsItsProtocol() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
         XCTAssertTrue(options.first?.qualities.contains("flac") == true)
         let standard = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: options[0].selection(quality: "128k"))
         XCTAssertEqual(standard.delivery?.quality, "128k")
-        await f.http.replies(playerPath, [try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "lossless"))])
+        let standardCalls = await f.http.recorded()
+        XCTAssertFalse(standardCalls.contains { $0.request.url.path.contains("detail/get") ||
+            $0.request.url.path.contains("handshake") || $0.request.url.path.hasPrefix("/xeapi/") })
+        await f.http.replies(highPath, [try MusicNeteaseFixture.response(MusicNeteaseFixture.audio(level: "lossless"))])
         let audio = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: options[0].selection(quality: "flac"))
         XCTAssertEqual(audio.delivery?.quality, "flac")
         let calls = await f.http.recorded()
         XCTAssertFalse(calls.contains { $0.request.url.path.contains("vip/info") })
         XCTAssertTrue(calls.contains { $0.request.url.path.contains("music/detail/get") })
-        XCTAssertEqual(calls.filter { $0.request.url.path == playerPath }.count, 2)
+        XCTAssertEqual(calls.filter { $0.request.url.path == playerPath }.count, 1)
+        XCTAssertEqual(calls.filter { $0.request.url.path == highPath }.count, 1)
         _ = await f.service.close()
     }
 
@@ -78,12 +84,39 @@ final class MusicNeteaseStandardAudioTests: XCTestCase {
         for level in ["standard", "unknown-upstream-level"] {
             let f = try MusicNeteaseNativeFixture(); try await f.enable()
             let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
-            await f.http.replies(playerPath, [try MusicNeteaseFixture.response(
+            await f.http.replies(highPath, [try MusicNeteaseFixture.response(
                 MusicNeteaseFixture.audio(level: level, trial: ["resConsumable": true, "userConsumable": true]))])
             let audio = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: options[0].selection(quality: "flac"))
             XCTAssertEqual(audio.delivery?.quality, level == "standard" ? "128k" : nil)
             let calls = await f.http.recorded()
-            XCTAssertEqual(calls.filter { $0.request.url.path == playerPath }.count, 1)
+            XCTAssertEqual(calls.filter { $0.request.url.path == highPath }.count, 1)
+            _ = await f.service.close()
+        }
+    }
+
+    func testStandardUsesActualBitrateNotRequestedLevelAndRejectsUnsupportedContainer() async throws {
+        for bitrate in [128000, 192000, 320000, 0] {
+            let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
+            let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
+            let row: [String: Any] = ["id": 101, "code": 200, "url": "https://m801.music.126.net/synthetic.mp3",
+                "expi": 120, "type": "mp3", "br": bitrate, "level": "lossless"]
+            await f.http.replies(playerPath, [try MusicNeteaseFixture.response(["code": 200, "data": [row]])])
+            let audio = try await f.service.nativeResolve(platform: .netease, nativeID: "101",
+                selection: options[0].selection(quality: "128k"))
+            XCTAssertEqual(audio.delivery?.quality, [128000: "128k", 192000: "192k", 320000: "320k"][bitrate])
+            _ = await f.service.close()
+        }
+        for container in [NSNull(), "wav"] as [Any] {
+            let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
+            let options = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
+            let row: [String: Any] = ["id": 101, "code": 200, "url": "https://m801.music.126.net/synthetic.mp3",
+                "expi": 120, "type": container, "br": 128000]
+            await f.http.replies(playerPath, [try MusicNeteaseFixture.response(["code": 200, "data": [row]])])
+            do {
+                _ = try await f.service.nativeResolve(platform: .netease, nativeID: "101",
+                    selection: options[0].selection(quality: "128k"))
+                XCTFail("Unsupported official container was accepted")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .audioUnavailable) }
             _ = await f.service.close()
         }
     }
@@ -92,7 +125,7 @@ final class MusicNeteaseStandardAudioTests: XCTestCase {
         let matrix: [(Int, MusicServiceError)] = [
             (301, .authRequired), (401, .authRequired), (403, .requestRejected), (404, .notFound),
             (429, .rateLimited), (509, .rateLimited), (250, .verificationRequired),
-            (460, .verificationRequired), (461, .verificationRequired), (-1, .audioUnavailable)
+            (460, .verificationRequired), (461, .verificationRequired), (-1, .audioUnavailable), (0, .audioUnavailable)
         ]
         for (code, expected) in matrix {
             let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
@@ -113,7 +146,7 @@ final class MusicNeteaseStandardAudioTests: XCTestCase {
 
     func testGuestAudioShapeTrialAndMissingURLAreNotMisreportedAsLogin() async throws {
         let base: [String: Any] = ["id": 101, "code": 200, "url": "https://m801.music.126.net/synthetic.mp3",
-                                   "expi": 120, "level": "standard"]
+                                   "expi": 120, "type": "mp3", "br": 128000, "level": "standard"]
         var scenarios: [([String: Any], MusicServiceError)] = []
         for value in [NSNull(), ""] as [Any] {
             var row = base; row["url"] = value; scenarios.append((row, .audioUnavailable))

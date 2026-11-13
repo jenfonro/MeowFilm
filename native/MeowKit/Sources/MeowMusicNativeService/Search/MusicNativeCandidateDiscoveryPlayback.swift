@@ -5,11 +5,12 @@ extension NativeMusicService {
     /// Uses the existing attempt/spent/work/media/fact owner. This is a pinned
     /// entry, not a second player, resolver fallback or persistence path.
     func candidateResolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String,
-        seed: MusicNativeCandidateDiscoverySeed, label: String) async throws -> MusicPlaybackCandidate {
+        seed: MusicNativeCandidateDiscoverySeed, recording: MJ, label: String) async throws -> MusicPlaybackCandidate {
         let d = try candidateCheck(seed), selection = target.selection
+        let accepted = try playbackRecording(original: seed.song, expanded: recording, state: d)
         try admitSource(seed.song, selection: selection)
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID && !spent.contains(attemptID), .staleResult)
-        let (source, info) = try self.target(seed.song, selection.sourceKey)
+        let (source, info) = try self.target(recording, selection.sourceKey)
         try musicRequire(source.platform == selection.siteId && target.option.playback.qualities.contains(selection.quality), .targetChanged)
         try requirePlatform(source.platform)
         let official = selection.installationId.hasPrefix("official:")
@@ -25,7 +26,7 @@ extension NativeMusicService {
         retireAudioCacheAttempt()
         cancelWork("playback"); spent.insert(attemptID)
         attempt = Attempt(id: attemptID, occurrence: seed.occurrenceID, sourceKey: selection.sourceKey,
-            selection: selection, started: seed.cacheRecovery?.started ?? false,
+            selection: selection, recording: accepted, started: seed.cacheRecovery?.started ?? false,
             cacheRecoveryID: seed.cacheRecovery?.id)
         do {
             let audio: MusicNativeAudio
@@ -62,13 +63,13 @@ extension NativeMusicService {
             try candidateAttemptCheck(seed, attemptID: attemptID)
             attempt?.selection = resolvedSelection
             let valid = try media(audio)
-            try validateDelivery(valid, song: seed.song, playback: d.playback)
+            try validateDelivery(valid, song: recording, playback: d.playback)
             let authorization = valid.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
-            audioCacheAttempt = try await prepareAudioCache(audio: valid, song: seed.song,
+            audioCacheAttempt = try await prepareAudioCache(audio: valid, song: recording,
                 selection: resolvedSelection, attemptID: attemptID, playbackAuthorization: authorization)
             observeAudioCacheCapture(audioCacheAttempt)
             let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: seed.occurrenceID, resourceId: "music:" + attemptID,
-                url: valid.url, headers: valid.headers, title: seed.song["title"].string,
+                url: valid.url, headers: valid.headers, title: recording["title"].string,
                 startPosition: seed.cacheRecovery?.position ?? d.playback["position"]["seconds"].number,
                 requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
                 expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
@@ -77,7 +78,7 @@ extension NativeMusicService {
             try await admitRecordingSource(seed.song, sourceKey: selection.sourceKey)
             let latest = try candidateAttemptCheck(seed, attemptID: attemptID)
             try admitSource(seed.song, selection: selection)
-            try pinPlaybackRecovery(candidate: candidate, song: seed.song, state: latest)
+            try pinPlaybackRecovery(candidate: candidate, song: recording, state: latest)
             let publish = {
                 self.attempt?.authorization = authorization
                 self.attempt?.ready = true

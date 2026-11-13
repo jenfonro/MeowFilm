@@ -94,7 +94,7 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         }
     }
 
-    func testParallelNativeDiscoveryCASAndExactPlaybackUseExistingFactWriter() async throws {
+    func testParallelNativeDiscoveryAndExactPlaybackUseExistingFactWriter() async throws {
         let barrier = MusicNativeCandidateDiscoveryBarrier(), store = try MusicNativeCandidateDiscoveryFixture.store()
         let scripts = MusicNativeCandidateDiscoveryScripts()
         let qq = MusicNativeCandidateDiscoveryQQ(barrier: barrier), http = MusicNativeCandidateDiscoveryHTTP(barrier: barrier)
@@ -111,11 +111,10 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         XCTAssertEqual(searchedQQ.count, 1)
         XCTAssertFalse(snapshot.issues.contains { $0.stage == .search })
         XCTAssertEqual(store.snapshot().0, before, "discovery is staged, not an asynchronous writer")
-        try await session.commitDiscovery()
         let queue = try await service.queue()
-        XCTAssertEqual(queue.revision, 2); XCTAssertEqual(queue.currentId, "entry-1")
+        XCTAssertEqual(queue.revision, 1); XCTAssertEqual(queue.currentId, "entry-1")
         XCTAssertEqual(queue.entries[0].track.songId, snapshot.track.songId)
-        let cached = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 2)
+        let cached = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let cachedSnapshot = try await cached.snapshot(discover: true, force: false)
         XCTAssertEqual(cachedSnapshot.track.sources.count, 5)
         await cached.close(retainingAttemptID: nil)
@@ -154,25 +153,23 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         await second.close(retainingAttemptID: nil)
         await service.close()
     }
-    func testFailedCASLeavesQueueAndAllCandidateMetadataUntouched() async throws {
+    func testDiscoveryDoesNotNeedQueueWriteAuthority() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store()
         let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
         let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
             qq: MusicNativeCandidateDiscoveryQQ(), http: MusicNativeCandidateDiscoveryHTTP(), sourceDiscovery: cache)
-        let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
-        _ = try await session.snapshot(discover: true, force: false)
-        let before = store.snapshot().0
+        let before = store.snapshot()
         store.fail(.storageConflict)
-        do { try await session.commitDiscovery(); XCTFail("CAS must fail") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .storageConflict) }
-        XCTAssertEqual(store.snapshot().0, before)
-        store.fail(nil)
-        try await session.commitDiscovery()
-        let updated = try await service.queue(); XCTAssertEqual(updated.revision, 2)
-        let refreshed = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 2)
-        let cached = try await refreshed.snapshot(discover: true, force: false)
+        let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let snapshot = try await session.snapshot(discover: true, force: false)
+        XCTAssertEqual(snapshot.track.sources.count, 5)
+        XCTAssertEqual(store.snapshot().0, before.0)
+        XCTAssertEqual(store.snapshot().2, before.2)
+        let next = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let cached = try await next.snapshot(discover: false, force: false)
         XCTAssertEqual(cached.track.sources.count, 5)
-        await refreshed.close(retainingAttemptID: nil)
+        await next.close(retainingAttemptID: nil)
+        store.fail(nil)
         await session.close(retainingAttemptID: nil); await service.close()
     }
     func testChangedScriptVersionAndConfigurationAreRejectedBeforeAnyURLRequest() async throws {
@@ -202,7 +199,7 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         let played = try await service.playedSongs(); XCTAssertTrue(played.isEmpty)
         await session.close(retainingAttemptID: nil); await service.close()
     }
-    func testProductionConsumerFindsMissingSourceCommitsAndResolvesItWithoutAnotherWriter() async throws {
+    func testProductionConsumerFindsMissingSourceAndResolvesWithoutQueueWrite() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store(), scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["wy"])
         let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeCandidateDiscoveryHTTP()
@@ -220,10 +217,10 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         // Only the platform the injected script can play is searched.
         XCTAssertEqual(searchedHTTP, ["wy"])
         let queue = try await service.queue()
-        XCTAssertEqual(queue.revision, 2); XCTAssertEqual(queue.entries[0].track.sources.count, 2)
+        XCTAssertEqual(queue.revision, 1); XCTAssertEqual(queue.entries[0].track.sources.count, 2)
         XCTAssertEqual(queue.entries[0].track.sources.first?.platform, "tx", "the seed stays the primary recording")
-        XCTAssertEqual(store.snapshot().2, 1, "one CAS; resolution itself does not write history")
-        let again = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 2)
+        XCTAssertEqual(store.snapshot().2, 0, "source discovery and resolution do not write the queue")
+        let again = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let known = try await again.snapshot(discover: true, force: false)
         XCTAssertEqual(known.track.sources.count, 2)
         await again.close(retainingAttemptID: nil)
@@ -259,7 +256,7 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         XCTAssertEqual(result.target.selection.siteId, "tx"); XCTAssertEqual(result.attempts, 1)
         let httpCalls = await http.calls(), qqCalls = await qq.calls()
         XCTAssertTrue(httpCalls.isEmpty); XCTAssertTrue(qqCalls.isEmpty)
-        XCTAssertEqual(store.snapshot().2, 0, "no discovery CAS")
+        XCTAssertEqual(store.snapshot().2, 0, "source discovery never writes the queue")
         await service.close()
     }
     func testAutomaticScopeSkipsSignedOutAccountsButRefreshSearchesEveryEnabledPlatform() async throws {

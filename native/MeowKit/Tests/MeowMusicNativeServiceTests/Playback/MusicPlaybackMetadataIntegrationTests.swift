@@ -103,7 +103,7 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
         XCTAssertEqual(calls, 0, "Saving a reference does not search for song metadata")
         await source.close(); await service.close()
     }
-    @MainActor func testCurrentDiscoveryMayProjectFactsIntoOtherOccurrencesWithoutCancellingPlayback() async throws {
+    @MainActor func testCurrentDiscoveryKeepsFeatureQueueStableAndProjectsMetadataOnExplicitRead() async throws {
         let original = try seed(), store = try MusicNativeCandidateDiscoveryFixture.store(song: original)
         var document = try MusicDocument(store.read(), runID: "metadata-consumer")
         document.queue["entries"] = .array(document.queue["entries"].array + [
@@ -116,7 +116,9 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
         XCTAssertEqual(model.queue[1].track.sources.map(\.platform), ["wy"])
         await model.prepareCurrent()
         XCTAssertNotNil(model.activeResourceID); XCTAssertNil(model.error); XCTAssertEqual(player.resources.count, 1)
-        XCTAssertEqual(Set(model.queue[1].track.sources.map(\.platform)), ["wy", "tx"])
+        XCTAssertEqual(model.queue[1].track.sources.map(\.platform), ["wy"])
+        let projected = try await service.queue()
+        XCTAssertEqual(Set(projected.entries[1].track.sources.map(\.platform)), ["wy", "tx"])
         let raw = try await service.read()
         XCTAssertEqual(raw.queue["entries"].array[1]["song"], original)
         await model.close(); await service.close()

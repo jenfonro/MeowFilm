@@ -29,6 +29,7 @@
      <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="猫源管理"/>
      <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="视频源管理"/>
      <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="数据源设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+     <RadioButton Content="网盘账号" Tag="pan" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="网盘账号"/>
      <StackPanel x:Name="BusinessNavigation" Orientation="Horizontal" Visibility="Collapsed">
       <RadioButton Content="智能播放设置" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
      </StackPanel>
@@ -44,7 +45,10 @@
    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="数据源配置">
     <StackPanel IsEnabled="{Binding CanEditMetadata}" Visibility="{Binding MetadataLoaded,Converter={StaticResource MeowFilm.BoolToVisibility}}" Margin="0,0,12,0">
      <Border Style="{StaticResource Settings.Section}"><StackPanel>
-      <TextBlock Text="豆瓣配置" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+       <TextBlock Text="豆瓣配置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
+       <Button Content="保存" Tag="douban" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" Margin="12,0,0,0" AutomationProperties.Name="保存豆瓣设置"/>
+      </StackPanel>
       <TextBlock Text="豆瓣数据代理" Margin="0,0,0,8"/>
       <ComboBox x:Name="DoubanDataProxy" ItemsSource="{Binding DoubanDataRoutes}" DisplayMemberPath="Label" SelectedValuePath="Id" SelectionChanged="DoubanRoute_Changed" Style="{StaticResource Settings.ComboBox}" AutomationProperties.Name="豆瓣数据代理"/>
       <StackPanel x:Name="DoubanDataAddressField" Visibility="Collapsed">
@@ -59,10 +63,12 @@
       </StackPanel>
       <TextBlock Text="豆瓣搜索 Cookie" Margin="0,12,0,8"/>
       <TextBox x:Name="DoubanCookie" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣搜索 Cookie"/>
-      <Button Content="保存" Tag="douban" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" HorizontalAlignment="Right" Margin="0,16,0,0" AutomationProperties.Name="保存豆瓣设置"/>
      </StackPanel></Border>
      <Border Style="{StaticResource Settings.Section}"><StackPanel>
-      <TextBlock Text="TMDB 设置" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12"/>
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+       <TextBlock Text="TMDB 设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
+       <Button x:Name="MetadataSave" Content="保存" Tag="tmdb" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" Margin="12,0,0,0" AutomationProperties.Name="保存 TMDB 设置"/>
+      </StackPanel>
       <TextBlock Text="TMDB API TOKEN" Margin="0,0,0,8"/>
       <TextBox x:Name="MetadataApiToken" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB API TOKEN"/>
       <TextBlock Text="TMDB 数据代理地址" Margin="0,12,0,8"/>
@@ -79,12 +85,12 @@
        <TextBlock Text="包含成人内容" VerticalAlignment="Center" Margin="0,0,12,0"/>
        <CheckBox x:Name="MetadataIncludeAdult" Style="{StaticResource Settings.Switch}" AutomationProperties.Name="包含成人内容"/>
       </StackPanel>
-      <Button x:Name="MetadataSave" Content="保存" Tag="tmdb" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" HorizontalAlignment="Right" Margin="0,16,0,0" AutomationProperties.Name="保存 TMDB 设置"/>
      </StackPanel></Border>
     </StackPanel>
    </ScrollViewer>
   </Grid>
   <Grid x:Name="BusinessPage" Grid.Row="1" Visibility="Collapsed"/>
+  <local:PanAccountsView x:Name="PanPage" Grid.Row="1" Visibility="Collapsed"/>
   <Grid x:Name="RulesPage" Grid.Row="1">
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">

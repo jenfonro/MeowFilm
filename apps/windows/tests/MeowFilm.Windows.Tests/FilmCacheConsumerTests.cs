@@ -26,7 +26,8 @@ public static class FilmCacheConsumerTests
         yield return Test("accepted address retry reacquires the exact candidate and preserves output until replacement", RetryAccepted);
         yield return Test("rejected pending address retry leaves the admitted native preparation alive", RetryPending);
         yield return Test("retry without an attempt delegates the most recent failed candidate to owner", RetryLastFailed);
-        yield return Test("existing action rows route refresh and retry errors through notices", ActionControls);
+        yield return Test("browse refresh and picture settings retry route errors through notices", ActionControls);
+        yield return Test("failed media exposes picture recovery without covering healthy output", RecoveryControl);
         yield return Test("runtime-relative Douban image identity uses the existing native artwork cache", ImageCache);
     }
 
@@ -385,10 +386,17 @@ public static class FilmCacheConsumerTests
                     ? FilmRuntimeProbe.Failure("UPSTREAM_ERROR") : rig.Runtime.Handle(method, input));
             var refresh = (Button)view.FindName("RefreshBrowsingButton");
             var retry = (Button)view.FindName("RetryMediaButton");
-            Check(refresh.IsEnabled && retry.IsEnabled, "the existing browse and player action rows expose both exact operations");
+            var settings = (Border)view.FindName("SettingsPanel");
+            Check(refresh.IsEnabled && retry.IsEnabled && !settings.IsVisible,
+                "browse refresh remains available while the media retry action belongs to the closed picture settings");
             refresh.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Until(() => notices.Count == 1);
             ((NoticeOutlet)view.FindName("Notices")).Message = "";
+            ((Button)view.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => settings.IsVisible && retry.IsVisible);
+            Check(retry.IsDescendantOf(settings) &&
+                !((Button)view.FindName("RetryMediaRecoveryButton")).IsVisible,
+                "manual address retry is available inside the picture without covering healthy video");
             retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Until(() => notices.Count == 2);
             Check(notices.All(message => message == "上游服务请求失败") &&
@@ -396,6 +404,37 @@ public static class FilmCacheConsumerTests
                 rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "media.retry") == 1 &&
                 rig.Native.Commits == 1 && rig.Native.Stops == 0 && rig.Session.HasOutput,
                 "actual button input reports rejection through the existing notice outlet and preserves playback");
+        }
+        finally { view.DataContext = null; window.Content = null; window.Close(); }
+    }
+
+    private static async Task RecoveryControl()
+    {
+        await using var rig = new FilmPlaybackRig();
+        await rig.OpenAsync();
+        rig.Runtime.Change(root => root["stage"] = "searching");
+        await Until(() => !rig.Page.CanRetryMedia);
+        var view = new FilmPlaybackView { DataContext = rig.Page };
+        var window = new Window { Content = view, Width = 1150, Height = 850, Left = -10000, Top = -10000,
+            ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+        try
+        {
+            window.Show(); window.UpdateLayout();
+            var retry = (Button)view.FindName("RetryMediaRecoveryButton");
+            Check(!retry.IsVisible && retry.IsDescendantOf((Grid)view.FindName("PlayerOverlay")),
+                "picture recovery starts hidden when there is no failed or pending media occurrence");
+            rig.Runtime.Change(root => root["stage"] = "error");
+            await Until(() => retry.IsVisible);
+            retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "media.retry"));
+            var call = rig.Runtime.Calls.Single(call => FilmJson.Text(call.Parameters, "action") == "media.retry");
+            Check(FilmJson.Member(call.Parameters, "attemptId").ValueKind == JsonValueKind.Undefined &&
+                !rig.Runtime.Calls.Any(item => FilmJson.Text(item.Parameters, "action") is "play" or "switch" or "search.more"),
+                "the visible recovery action delegates the exact last failed candidate without rematching");
+            await Play(rig);
+            await Until(() => !retry.IsVisible);
+            Check(rig.Session.HasOutput && rig.Native.Commits == 1,
+                "healthy output removes the central recovery action without replacing or pausing media");
         }
         finally { view.DataContext = null; window.Content = null; window.Close(); }
     }

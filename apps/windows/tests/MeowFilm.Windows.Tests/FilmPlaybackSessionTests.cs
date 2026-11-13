@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Windows;
 using MeowFilm.Capabilities;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
@@ -610,82 +611,74 @@ public static class FilmPlaybackSessionTests
             Check(rig.Page.Title != "过期资料" && rig.Native.Commits == 1, "a stale sequence cannot overwrite current metadata or output");
             rig.Runtime.Intercept = null; rig.Runtime.Value = latest;
         });
-        yield return Test("an explicit external owner retains observation and receives live same-episode controls plus next-episode zero", async () =>
+        yield return Test("a visible PiP owner retains observation and native same-episode controls plus next-episode zero", async () =>
         {
-            var players = new List<FilmExternalProbe>();
-            await using var rig = new FilmPlaybackRig((_, receipt, _, _) =>
-            {
-                var player = new FilmExternalProbe(receipt); players.Add(player);
-                return Task.FromResult<IFilmExternalPlayer>(player);
-            });
+            await using var rig = new FilmPlaybackRig();
             await rig.OpenAsync(); await Play(rig);
-            await rig.Session.ExternalAsync("isolated-mpv.exe");
             await rig.Session.SeekAsync(81); await rig.Session.SetPausedAsync(true);
             await rig.Session.RateAsync(2); await rig.Session.AspectAsync("1:1");
-            await rig.Session.LeaveAsync(retainedOwner: true);
-            Check(rig.Session.HasSession && rig.Session.CanRetainMedia &&
-                rig.Runtime.Calls.Any(call => call.Method == "film.session.release" && FilmJson.Bool(call.Parameters, "keepMedia")),
-                "only an actual external output keeps the stable owner and snapshots");
-            rig.Runtime.Attempt("external-same", Candidate("external-same"));
-            await Until(() => players.Count == 2 && players[0].Disposals == 1 &&
-                players[1].Volume == rig.Native.Volume && rig.Session.HasExternalPlayer &&
-                Called(rig, "media.started", "external-same"));
-            Check(players[0].Disposals == 1 && players[1].Position == 81 && players[1].Paused &&
-                players[1].Rate == 2 && players[1].Aspect == "1:1" && rig.Native.Paused,
-                "same-episode external replacement preserves the actual donor and silences native output");
-            await Play(rig, "external-next", 2);
-            await Until(() => players.Count == 3 && players[1].Disposals == 1 &&
-                players[2].Volume == rig.Native.Volume && rig.Session.HasExternalPlayer);
-            Check(players[2].Position == 0 && !players[2].Paused && players[2].Rate == 2 &&
-                players[2].Aspect == "1:1" && rig.Native.Paused, "new episode keeps selected controls without inheriting old progress");
-            await rig.Session.CommandAsync("stop");
-            Check(players[2].Disposals == 1 && !rig.Session.HasOutput, "stop drains the retained external output");
-        });
-        yield return Test("external drain failure is preserved across repeated stop and disposal instead of becoming success", async () =>
-        {
-            FilmExternalProbe? player = null;
-            var rig = new FilmPlaybackRig((_, receipt, _, _) =>
+            var owner = new Window
             {
-                player = new(receipt) { Draining = () => Task.FromException(new FilmPlaybackException("DRAIN_FAILED")) };
-                return Task.FromResult<IFilmExternalPlayer>(player);
-            });
+                WindowStartupLocation = WindowStartupLocation.Manual, Left = -10000, Top = -10000,
+                ShowActivated = false, ShowInTaskbar = false, Content = rig.Native.View
+            };
             try
             {
-                await rig.OpenAsync(); await Play(rig); await rig.Session.ExternalAsync("isolated-mpv.exe");
-                await Error("DRAIN_FAILED", () => rig.Session.CommandAsync("stop"));
-                await Error("DRAIN_FAILED", () => rig.Session.CommandAsync("stop"));
-                Check(player!.Disposals == 1, "the same failed physical drain is never fabricated as a new success");
+                owner.Show(); rig.Page.RetainOwner(owner);
+                await rig.Session.LeaveAsync(retainedOwner: true);
+                Check(rig.Session.HasSession && rig.Session.CanRetainMedia &&
+                    rig.Runtime.Calls.Any(call => call.Method == "film.session.release" && FilmJson.Bool(call.Parameters, "keepMedia")),
+                    "the visible PiP owner keeps the same stable native owner and snapshots");
+                await Play(rig, "pip-same");
+                Check(rig.Runtime.Released.Contains("first") && rig.Native.Position == 81 && rig.Native.Paused &&
+                    rig.Native.Rate == 2 && rig.Native.Aspect == "1:1" && rig.Session.OwnsNativeMedia &&
+                    rig.Session.CanRetainMedia && rig.Session.Position == 81 && !rig.Session.IsPlaying &&
+                    ReferenceEquals(owner.Content, rig.Session.MediaView),
+                    "observed same-episode replacement preserves native clock and controls in the same retained view");
+                await Play(rig, "pip-next", 2);
+                Check(rig.Runtime.Released.Contains("pip-same") && rig.Native.Position == 0 && !rig.Native.Paused &&
+                    rig.Native.Rate == 2 && rig.Native.Aspect == "1:1" && rig.Session.CanRetainMedia,
+                    "a new observed episode keeps the selected controls without inheriting progress");
+                await rig.Session.CommandAsync("stop");
+                Check(rig.Native.Stops == 1 && rig.Runtime.Released.Contains("pip-next") &&
+                    !rig.Session.HasOutput && !rig.Session.CanRetainMedia && !Called(rig, "media.failed"),
+                    "stop drains the retained native occurrence and its exact receipt");
             }
-            finally { await Error("DRAIN_FAILED", () => rig.DisposeAsync().AsTask()); }
+            finally { rig.Page.RetainOwner(null); owner.Close(); }
         });
-        yield return Test("external direct output drains before a music takeover and stale film controls cannot touch music", async () =>
+        yield return Test("native direct output releases its exact receipt after music takeover and stale film controls cannot touch music", async () =>
         {
-            FilmExternalProbe? player = null;
             var entered = Gate(); var finish = Gate();
-            await using var rig = new FilmPlaybackRig((_, receipt, _, _) =>
-            {
-                player = new(receipt) { Draining = async () => { entered.TrySetResult(); await finish.Task; } };
-                return Task.FromResult<IFilmExternalPlayer>(player);
-            });
+            await using var rig = new FilmPlaybackRig();
             await rig.OpenAsync();
             rig.Runtime.Controlled = false;
             await Play(rig);
-            await rig.Session.ExternalAsync("isolated-mpv.exe");
-            await rig.Session.LeaveAsync(retainedOwner: true);
+            rig.Runtime.Intercept = async (method, input, _) =>
+            {
+                if (method == "film.session.media.release")
+                {
+                    Check(FilmJson.Text(input, "attemptId") == "first", "takeover releases the exact Film occurrence");
+                    entered.TrySetResult(); await finish.Task;
+                }
+                return rig.Runtime.Handle(method, input);
+            };
             try
             {
-                var takeover = rig.Native.TakeMusicAsync();
-                await entered.Task;
-                var externalPlayer = player ?? throw new InvalidOperationException("The external output must exist before music takeover");
-                Check(!takeover.IsCompleted && !externalPlayer.Running,
-                    "the shared owner waits for actual external disposal before admitting music");
-                finish.TrySetResult(); await takeover;
+                await rig.Native.TakeMusicAsync();
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(!rig.Session.HasOutput && !rig.Runtime.Released.Contains("first"),
+                    "retiring the old Film output does not fabricate its business receipt release");
+                finish.TrySetResult();
                 await Until(() => !rig.Session.HasSession);
-                int musicVolume = rig.Native.Volume;
+                int musicVolume = rig.Native.Volume, controls = rig.Native.Controls.Count;
                 rig.Session.Volume = 12;
-                Check(rig.Native.Volume == musicVolume && externalPlayer.Disposals == 1 &&
-                    !rig.Session.HasOutput && !rig.Session.CanRetainMedia,
-                    "late film sliders and retention cannot affect the replacing owner or resurrect external output");
+                await Error("STALE_SESSION", () => rig.Session.SetPausedAsync(true));
+                await Error("STALE_SESSION", () => rig.Session.SeekAsync(81));
+                Check(rig.Native.Volume == musicVolume && rig.Native.Controls.Count == controls &&
+                    !rig.Session.HasOutput && !rig.Session.CanRetainMedia && !Called(rig, "media.failed") &&
+                    rig.Runtime.Calls.Count(call => call.Method == "film.session.media.release" &&
+                        FilmJson.Text(call.Parameters, "attemptId") == "first") == 1,
+                    "late Film controls cannot affect the replacing owner or duplicate the former receipt release");
             }
             finally { finish.TrySetResult(); }
         });

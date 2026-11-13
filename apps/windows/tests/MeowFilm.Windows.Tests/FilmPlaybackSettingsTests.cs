@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
@@ -22,7 +23,7 @@ public static class FilmPlaybackSettingsTests
         {
             await using var scene = await Scene.Create();
             scene.Element<TextBox>("Keywords").Text = "";
-            Click(scene.Button("保存智能播放偏好"));
+            Click(scene.Button("保存关键字匹配规则"));
             await Until(() => scene.View.Idle);
             Check(FilmPreferences.Read(scene.Preferences).Keywords.Length == 0 &&
                 FilmPreferences.Read(scene.Preferences).PanOrder[0] == "baidu", "empty is legal and other groups survive the full save");
@@ -79,7 +80,7 @@ public static class FilmPlaybackSettingsTests
             try
             {
                 scene.Element<TextBox>("Keywords").Text = " first,，second, ";
-                Click(scene.Button("保存智能播放偏好")); await entered.Task;
+                Click(scene.Button("保存关键字匹配规则")); await entered.Task;
                 var switching = scene.View.ShowAsync("clean");
                 var close = scene.View.PrepareShutdownAsync();
                 Check(!close.IsCompleted && !writeToken.IsCancellationRequested && !scene.View.Idle,
@@ -99,13 +100,152 @@ public static class FilmPlaybackSettingsTests
             await using var scene = await Scene.Create();
             scene.FailWrite = true;
             scene.Element<TextBox>("Keywords").Text = "unsaved";
-            Click(scene.Button("保存智能播放偏好")); await Until(() => scene.View.Idle);
+            Click(scene.Button("保存关键字匹配规则")); await Until(() => scene.View.Idle);
             Check(scene.Notices.Contains("保存失败") && !scene.Notices.Contains("设置已保存") &&
                 !FilmPreferences.Read(scene.Preferences).Keywords.Contains("unsaved"),
                 "failed storage never becomes a successful preference snapshot");
             await scene.View.PrepareShutdownAsync(); await scene.View.PrepareShutdownAsync();
             scene.FailWrite = false; scene.View.Resume();
             await Until(() => scene.View.Idle && scene.Element<TextBox>("Keywords").Text == "fixture-keyword");
+        });
+        yield return Test("ordering saves exactly once per real move without saving or discarding keyword drafts", async () =>
+        {
+            await using var scene = await Scene.Create();
+            scene.Element<TextBox>("Keywords").Text = "not-saved-yet";
+            int writes = scene.Writes;
+            foreach (var name in new[] { "RuleOrder", "PanOrder" })
+            {
+                var priority = scene.Element<SettingsPriorityList>(name);
+                priority.BringIntoView(); await Until(() => priority.CanEdit);
+                var list = (ListBox)priority.FindName("PriorityItems");
+                var original = list.Items.Cast<object>().ToArray();
+                var first = Grip(list, 0);
+                ComponentCommands.MoveUp.Execute(null, first);
+                Check(scene.Writes == writes, "moving the first row up is a no-op, not a save");
+                ComponentCommands.MoveDown.Execute(null, first); await Until(() => scene.View.Idle);
+                Check(scene.Writes == ++writes && ReferenceEquals(list.Items[1], original[0]),
+                    "one keyboard move saves once and retains the moved item identity");
+                Check(scene.Element<TextBox>("Keywords").Text == "not-saved-yet" &&
+                    FilmPreferences.Read(scene.Preferences).Keywords.SequenceEqual(["fixture-keyword"]),
+                    "ordering neither persists nor clears a separate keyword draft");
+            }
+            var saved = FilmPreferences.Read(scene.Preferences);
+            Check(saved.RuleOrder.SequenceEqual(["pan", "keyword", "quality"]) &&
+                saved.PanOrder.SequenceEqual(["uc", "baidu", "quark", "tianyi", "yidong"]),
+                "both order controls save the exact chosen position without resetting each other");
+            Click(scene.Button("恢复优先片源默认规则")); await Until(() => scene.View.Idle);
+            Check(scene.Element<TextBox>("Keywords").Text == "not-saved-yet" &&
+                FilmPreferences.Read(scene.Preferences).Keywords.SequenceEqual(["fixture-keyword"]) &&
+                FilmPreferences.Read(scene.Preferences).PanOrder.SequenceEqual(saved.PanOrder),
+                "restoring an order also leaves every unrelated draft and saved group alone");
+            scene.Element<TextBox>("Keywords").Text = "";
+            await Until(() => scene.Element<TextBlock>("KeywordsPlaceholder").IsVisible);
+            Check(scene.Element<TextBlock>("KeywordsPlaceholder").Text == "DDP,H.265",
+                "the server keyword example is visible only for an empty field");
+            Click(scene.Button("保存关键字匹配规则")); await Until(() => scene.View.Idle);
+            Check(FilmPreferences.Read(scene.Preferences).Keywords.Length == 0, "the placeholder is never submitted as data");
+        });
+        yield return Test("drag cancellation and same-position release do not save but an actual drop does", async () =>
+        {
+            await using var scene = await Scene.Create();
+            var priority = scene.Element<SettingsPriorityList>("RuleOrder");
+            var list = (ListBox)priority.FindName("PriorityItems");
+            var first = list.Items[0]; int writes = scene.Writes;
+            Point Begin(int destination)
+            {
+                var grip = Grip(list, 0);
+                var row = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(destination);
+                var drop = row.TranslatePoint(new Point(60, row.ActualHeight - 2), priority.DragViewport);
+                priority.Drag.Begin(grip, list, grip.TranslatePoint(new Point(18, 18), priority.DragViewport));
+                priority.Drag.Update(drop);
+                Check(priority.IsDragging, "the real shared control owns a captured gesture");
+                return drop;
+            }
+            priority.CompleteDrag(Begin(2), true);
+            priority.CompleteDrag(Begin(0), false);
+            Check(scene.Writes == writes && ReferenceEquals(list.Items[0], first), "cancel and in-place release do not mutate");
+            var point = Begin(2);
+            priority.CompleteDrag(point, false); await Until(() => scene.View.Idle);
+            priority.CompleteDrag(point, false);
+            Check(scene.Writes == writes + 1 && ReferenceEquals(list.Items[2], first) &&
+                FilmPreferences.Read(scene.Preferences).RuleOrder.SequenceEqual(["pan", "quality", "keyword"]),
+                "one accepted drop saves exactly its final order, duplicate release does nothing");
+        });
+        yield return Test("failed ordering restores the authoritative sequence and preserves the keyword draft", async () =>
+        {
+            await using var scene = await Scene.Create();
+            var priority = scene.Element<SettingsPriorityList>("RuleOrder");
+            var list = (ListBox)priority.FindName("PriorityItems");
+            var original = list.Items.Cast<object>().ToArray();
+            scene.Element<TextBox>("Keywords").Text = "keep-draft";
+            scene.FailWrite = true; int writes = scene.Writes;
+            ComponentCommands.MoveDown.Execute(null, Grip(list, 0)); await Until(() => scene.View.Idle);
+            Check(scene.Writes == writes + 1 && list.Items.Cast<object>().SequenceEqual(original) &&
+                FilmPreferences.Read(scene.Preferences).RuleOrder.SequenceEqual(["keyword", "pan", "quality"]),
+                "failure rolls back displayed order using the same row identities");
+            Check(scene.Notices.Contains("保存失败") && !scene.Notices.Contains("设置已保存") &&
+                scene.Element<TextBox>("Keywords").Text == "keep-draft", "failure is visible and does not discard the text draft");
+        });
+        yield return Test("an admitted order keeps keyboard ownership and drains on section retirement without stale success", async () =>
+        {
+            await using var scene = await Scene.Create();
+            var priority = scene.Element<SettingsPriorityList>("RuleOrder");
+            var list = (ListBox)priority.FindName("PriorityItems");
+            var moved = list.Items[0];
+            var entered = Gate(); var finish = Gate(); CancellationToken writeToken = default;
+            scene.Runtime.Intercept = async (method, input, token) =>
+            {
+                if (method == "film.settings.set") { writeToken = token; entered.TrySetResult(); await finish.Task; }
+                return scene.Response(method, input);
+            };
+            try
+            {
+                scene.Window.Focus(); var handle = Grip(list, 0); handle.Focus();
+                Check(ReferenceEquals(Keyboard.FocusedElement, handle), "the actual handle initially owns keyboard focus");
+                ComponentCommands.MoveDown.Execute(null, handle); await entered.Task;
+                Check(!priority.CanEdit && priority.IsEnabled && ReferenceEquals(Keyboard.FocusedElement, priority),
+                    "only list editing pauses while the shared control retains its focus-restoration owner");
+                finish.TrySetResult(); await Until(() => scene.View.Idle);
+                Check(ReferenceEquals(list.Items[1], moved) && ReferenceEquals(Keyboard.FocusedElement, Grip(list, 1)),
+                    "the original row regains its handle after the automatic save");
+                var retired = Gate(); var settle = Gate();
+                scene.Runtime.Intercept = async (method, input, token) =>
+                {
+                    if (method == "film.settings.set") { writeToken = token; retired.TrySetResult(); await settle.Task; }
+                    return scene.Response(method, input);
+                };
+                try
+                {
+                    int notices = scene.Notices.Count;
+                    ComponentCommands.MoveDown.Execute(null, Grip(list, 1)); await retired.Task;
+                    var switching = scene.View.ShowAsync("clean");
+                    var closing = scene.View.PrepareShutdownAsync();
+                    Check(!closing.IsCompleted && !writeToken.IsCancellationRequested,
+                        "a durable order write is drained, not cancelled with its page");
+                    settle.TrySetResult(); await Task.WhenAll(switching, closing); await Until(() => !priority.CanEdit);
+                    Check(FilmPreferences.Read(scene.Preferences).RuleOrder.SequenceEqual(["pan", "quality", "keyword"]) &&
+                        scene.Notices.Count == notices, "the exact order settles without publishing success to a retired section");
+                }
+                finally { settle.TrySetResult(); }
+            }
+            finally { finish.TrySetResult(); }
+        });
+        yield return Test("read failure exposes only a retry action and successful retry never writes preferences", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.View.ShowAsync("clean");
+            bool fail = true; int writes = scene.Writes;
+            scene.Runtime.Intercept = (method, input, _) => Task.FromResult(method == "film.settings.get" && fail
+                ? FilmRuntimeProbe.Failure("STORAGE_FAILED") : scene.Response(method, input));
+            await scene.View.ShowAsync("preferences");
+            var retry = scene.Button("重新读取智能播放设置");
+            await Until(() => scene.View.ReadFailed && retry.IsVisible);
+            Check(scene.View.ReadFailed && retry.IsVisible && scene.Notices.Contains("影视设置读取失败"),
+                "failed reads have an explicit visible retry");
+            fail = false; Click(retry);
+            await Until(() => scene.View.Idle && !scene.View.ReadFailed);
+            Check(!retry.IsVisible && scene.Writes == writes &&
+                scene.Element<TextBox>("Keywords").Text == "fixture-keyword", "recovery only reads the authoritative settings");
         });
         yield return Test("clear collections and typed block identities reach the one business owner", async () =>
         {
@@ -177,6 +317,7 @@ public static class FilmPlaybackSettingsTests
         internal readonly Window Window;
         internal readonly List<string> Notices = [];
         internal bool FailWrite;
+        internal int Writes => Runtime.Calls.Count(call => call.Method == "film.settings.set");
         internal JsonElement Preferences = FilmJson.Encode(new FilmPreferences(["keyword", "pan", "quality"],
             ["baidu", "uc", "quark", "tianyi", "yidong"], ["fixture-keyword"], ["fixture-clean"], false));
         internal JsonElement LibraryValue = FilmJson.Encode(new
@@ -224,6 +365,11 @@ public static class FilmPlaybackSettingsTests
             foreach (Window owned in Window.OwnedWindows.Cast<Window>().ToArray()) owned.Close();
             Window.Content = null; Window.Close(); await Runtime.DisposeAsync();
         }
+    }
+    private static Thumb Grip(ListBox list, int index)
+    {
+        list.UpdateLayout();
+        return Visuals((ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(index)).OfType<Thumb>().Single();
     }
     private static void Click(ButtonBase button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
     private static async Task Until(Func<bool> condition)

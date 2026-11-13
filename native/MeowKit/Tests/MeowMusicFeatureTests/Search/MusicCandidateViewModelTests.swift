@@ -10,7 +10,7 @@ final class MusicCandidateViewModelTests: XCTestCase {
         await model.load()
         return (service, player, model)
     }
-    @MainActor func testExplicitPlayDiscoversRefreshesCASAndPlaysResolvedCandidateExactlyOnce() async throws {
+    @MainActor func testExplicitPlayDiscoversWithoutQueueWriteAndPlaysResolvedCandidateExactlyOnce() async throws {
         let (service, player, model) = await setup()
         var requests: [MusicPlaybackDestination] = []
         model.onRequestPresentation = { requests.append($0) }
@@ -18,9 +18,9 @@ final class MusicCandidateViewModelTests: XCTestCase {
         XCTAssertTrue(player.resources.isEmpty)
         await model.play(MusicCandidateViewModelService.track("entry-1"))
         let counts = await service.metrics()
-        XCTAssertEqual(counts.begins, 1); XCTAssertEqual(counts.commits, 1)
+        XCTAssertEqual(counts.begins, 1)
         XCTAssertEqual(counts.automatic, 1); XCTAssertEqual(counts.manual, 0); XCTAssertEqual(counts.options, 0)
-        XCTAssertEqual(model.state.revision, 3); XCTAssertEqual(model.queue[0].track.sources.count, 2)
+        XCTAssertEqual(model.state.revision, 2); XCTAssertEqual(model.queue[0].track.sources.count, 1)
         XCTAssertEqual(model.position, 23); XCTAssertEqual(player.resources.count, 1)
         XCTAssertEqual(player.resources[0].id, model.activeResourceID)
         XCTAssertEqual(model.activeOccurrenceID, "entry-3"); XCTAssertTrue(requests.isEmpty)
@@ -47,13 +47,13 @@ final class MusicCandidateViewModelTests: XCTestCase {
         await model.close()
     }
 
-    @MainActor func testExhaustedDiscoveryRefreshesCommittedRevisionWithoutPlaying() async throws {
+    @MainActor func testExhaustedDiscoveryKeepsQueueUnchanged() async throws {
         let (service, player, model) = await setup()
         await service.configure(discovery: true, automaticFailure: .upstreamFailed)
         await model.prepareCurrent()
         let counts = await service.metrics()
-        XCTAssertEqual(counts.commits, 1); XCTAssertEqual(counts.automatic, 1)
-        XCTAssertEqual(model.state.revision, 2); XCTAssertEqual(model.queue[0].track.sources.count, 2)
+        XCTAssertEqual(counts.automatic, 1)
+        XCTAssertEqual(model.state.revision, 1); XCTAssertEqual(model.queue[0].track.sources.count, 1)
         XCTAssertTrue(player.resources.isEmpty)
         XCTAssertMusicDiagnosticMessage(model.error, "QQ 音乐 · 播放歌曲：音源不可用")
         await model.close()
@@ -64,7 +64,7 @@ final class MusicCandidateViewModelTests: XCTestCase {
         await service.configure(automaticFailure: .authRequired)
         await model.togglePlayback()
         let counts = await service.metrics()
-        XCTAssertEqual(counts.automatic, 1); XCTAssertEqual(counts.commits, 0)
+        XCTAssertEqual(counts.automatic, 1)
         XCTAssertMusicDiagnosticMessage(model.error, "QQ 音乐 · 播放歌曲：此操作需要登录对应平台")
         XCTAssertTrue(player.resources.isEmpty)
         await model.close()
@@ -87,12 +87,12 @@ final class MusicCandidateViewModelTests: XCTestCase {
         await model.close()
     }
 
-    @MainActor func testReturnedCandidateIsReleasedAfterCloseLockSettingsOrCallerCancellationDuringRefresh() async {
+    @MainActor func testReturnedCandidateIsReleasedAfterCloseLockSettingsOrCallerCancellationDuringResolution() async {
         for action in ["close", "lock", "settings", "cancel"] {
             let (service, player, model) = await setup()
-            let began = expectation(description: "returned candidate refresh \(action)")
+            let began = expectation(description: "candidate resolution \(action)")
             let gate = MusicCandidateViewModelGate { began.fulfill() }
-            await service.configure(refresh: gate)
+            await service.configure(resolve: gate)
             let task = Task { await model.prepareCurrent() }
             await fulfillment(of: [began], timeout: 2)
             switch action {
@@ -103,7 +103,8 @@ final class MusicCandidateViewModelTests: XCTestCase {
             }
             await gate.release(); await task.value
             let counts = await service.metrics(), ready = await service.activeAttempt()
-            XCTAssertEqual(counts.retained.count, 1)
+            XCTAssertEqual(counts.automatic, 1)
+            XCTAssertFalse(counts.cancelled.isEmpty)
             XCTAssertTrue(counts.retained.allSatisfy { counts.cancelled.contains($0) }, action)
             XCTAssertNil(ready); XCTAssertNil(model.activeResourceID); XCTAssertTrue(player.resources.isEmpty)
             XCTAssertFalse(model.isResolving)
@@ -111,11 +112,11 @@ final class MusicCandidateViewModelTests: XCTestCase {
         }
     }
 
-    @MainActor func testLateOldRefreshCannotCancelOrReplaceNewOccurrence() async {
+    @MainActor func testLateOldResolutionCannotCancelOrReplaceNewOccurrence() async {
         let (service, player, model) = await setup()
-        let began = expectation(description: "old refresh")
+        let began = expectation(description: "old resolution")
         let gate = MusicCandidateViewModelGate { began.fulfill() }
-        await service.configure(refresh: gate)
+        await service.configure(resolve: gate)
         let old = Task { await model.prepareCurrent() }
         await fulfillment(of: [began], timeout: 2)
         await model.selectOccurrence("entry-2")
@@ -128,19 +129,17 @@ final class MusicCandidateViewModelTests: XCTestCase {
         await model.close()
     }
 
-    @MainActor func testMismatchedStateAndQueueRefreshNeverPublishesPartialSnapshotOrPlays() async {
+    @MainActor func testSuccessfulDiscoveryDoesNotRefreshStateOrQueue() async {
         let (service, player, model) = await setup()
-        let began = expectation(description: "state captured")
-        let gate = MusicCandidateViewModelGate { began.fulfill() }
-        await service.configure(refresh: gate)
-        let oldQueue = model.queue
-        let task = Task { await model.prepareCurrent() }
-        await fulfillment(of: [began], timeout: 2)
-        await service.mutateQueueDuringRefresh()
-        await gate.release(); await task.value
-        XCTAssertEqual(model.queue, oldQueue); XCTAssertEqual(model.state.revision, 1)
-        XCTAssertTrue(player.resources.isEmpty); XCTAssertNotNil(model.error)
-        let ready = await service.activeAttempt(); XCTAssertNil(ready)
+        let before = await service.metrics(), queue = model.queue
+        await service.configure(discovery: true)
+        await model.prepareCurrent()
+        let after = await service.metrics()
+        XCTAssertEqual(after.stateReads, before.stateReads)
+        XCTAssertEqual(after.queueReads, before.queueReads)
+        XCTAssertEqual(model.queue, queue)
+        XCTAssertEqual(player.resources.count, 1)
+        XCTAssertNil(model.error)
         await model.close()
     }
 }

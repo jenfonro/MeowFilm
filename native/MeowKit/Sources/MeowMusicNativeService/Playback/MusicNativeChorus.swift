@@ -9,7 +9,7 @@ extension NativeMusicService: MusicChorusProviding {
               let owner = accounts as? any MusicNativeChorusProviding else { return nil }
         let own = epoch, d = try read(), selection = current.selection
         guard d.queue["currentId"].string == current.occurrence else { return nil }
-        let song = try self.song(.init(kind: .queue, id: current.occurrence), d)
+        let song = try playbackSong(.init(kind: .queue, id: current.occurrence), d)
         let (source, info) = try target(song, selection.sourceKey)
         guard platformEnabled(source.platform), selection.siteId == source.platform,
               ["wy", "kg"].contains(source.platform),

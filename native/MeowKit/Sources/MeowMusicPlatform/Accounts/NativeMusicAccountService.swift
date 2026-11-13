@@ -2008,6 +2008,10 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
                                        lease: AccountCredentialUpdateLease, own: UUID, revision: Int) async throws -> [String] {
         try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
         guard let provider = providers[platform] else { throw MusicServiceError.unsupported }
+        // NetEase options declare protocol tiers, not membership. The actual
+        // response admits playback; only a high-tier resolve reads resources.
+        // Standard playback/renewal never depends on that resource endpoint.
+        if platform == .netease { return NeteaseMusicAccountAdapter.formats.map(\.quality) }
         return try await provider.capabilities(mid: nativeID, credential: lease.credential)
     }
     public func nativeRefreshAudio(platform: MusicAccountPlatform, nativeID: String,
@@ -2527,7 +2531,7 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
                 let snapshot = await accounts.snapshot(for: identity)
                 try check(own)
                 switch (snapshot.phase, snapshot.failure) {
-                case (.signedOut, nil), (.invalidated, .invalidated?): break
+                case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): break
                 default: throw error
                 }
                 return try await makeNativeHomeGuest(identity, own: own)
@@ -2565,10 +2569,10 @@ extension NativeMusicAccountService: MusicNativeHomeProviding {
               login?.platform != .netease, !requiresExplicitRestore.contains(.netease) else {
             throw MusicServiceError.staleResult
         }
-        // Only confirmed logout or authentication invalidation allows guest
-        // browsing. Missing/replaced records and storage failures still fail.
+        // Confirmed absence also includes a finished failed/cancelled login.
+        // Missing/replaced records and storage failures still fail.
         switch (snapshot.phase, snapshot.failure) {
-        case (.signedOut, nil), (.invalidated, .invalidated?): break
+        case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): break
         default: throw MusicServiceError.authRequired
         }
         if let existing = homeBinding {

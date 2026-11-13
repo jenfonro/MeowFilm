@@ -92,7 +92,7 @@ internal static class FilmPlaybackError
     };
 }
 
-/// <summary>Only an actual native/external occurrence, never selected UI metadata or a prepared URL.</summary>
+/// <summary>Only an actual native occurrence, never selected UI metadata or a prepared URL.</summary>
 public sealed record FilmPlaybackMediaState(string? Identity, string Title, bool HasMedia, bool IsPlaying,
     double Position, double Duration);
 

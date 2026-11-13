@@ -23,17 +23,20 @@ function fixture(t) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, '<Project><Import Project="common.props"/></Project>');
   }
-  const configurations = [];
-  const verify = () => verifyWindowsProjects(root, { configuration: 'Debug', evaluate: (path, configuration) => {
-    configurations.push(configuration); return entries.get(path);
+  const contexts = [];
+  const properties = { Configuration: 'Debug', RuntimeIdentifier: 'win-x64', SelfContained: 'false',
+    VlcWindowsX64Enabled: 'true' };
+  const verify = () => verifyWindowsProjects(root, { properties, evaluate: (path, properties) => {
+    contexts.push(properties); return entries.get(path);
   } });
-  return { app, core, feature, entries, verify, configurations };
+  return { app, core, feature, entries, verify, properties, contexts };
 }
 
 test('uses the evaluated graph and configuration instead of a fixed project list', t => {
   const f = fixture(t), policy = f.verify();
   assert.deepEqual(policy.application.assemblies, ['MeowFilm.Capabilities', 'MeowFilm.Core', 'meowfilm']);
-  assert.deepEqual(f.configurations, ['Debug', 'Debug', 'Debug']);
+  assert.deepEqual(f.contexts, [f.properties, f.properties, f.properties]);
+  assert.deepEqual(policy.properties, f.properties);
 });
 
 test('rejects dependency cycles and shared-to-business dependencies', t => {
@@ -55,11 +58,41 @@ test('published output matches evaluated projects and managed runtime assets', t
   const policy = fixture(t).verify(), names = policy.application.assemblies;
   const target = 'net10.0/win-x64';
   const deps = { libraries: Object.fromEntries(names.map(name => [name + '/1.0.0', { type: 'project' }])),
-    runtimeTarget: { name: target }, targets: { [target]: { 'Dependency/1': { runtime: { 'lib/Dependency.dll': {} } } } } };
-  const files = [...names.map(name => name + '.dll'), 'meowfilm.exe', 'Dependency.dll'];
+    runtimeTarget: { name: target }, targets: { [target]: { 'Dependency/1': {
+      runtime: { 'lib/Dependency.dll': {} }, native: { 'runtimes/win-x64/native/Native.dll': {} },
+      runtimeTargets: {
+        'runtimes/win-x64/native/RuntimeTarget.dll': { rid: 'win-x64', assetType: 'native' },
+        'runtimes/win-arm64/native/OtherRuntimeTarget.dll': { rid: 'win-arm64', assetType: 'native' },
+      },
+    } } } };
+  const files = [...names.map(name => name + '.dll'), 'meowfilm.exe', 'Dependency.dll', 'Native.dll',
+    'RuntimeTarget.dll'];
   assert.deepEqual(verifyPublishedGraph('aggregate', deps, files, policy).projects, names);
   assert.throws(() => verifyPublishedGraph('different', deps, files, policy), /data identity/);
   assert.throws(() => verifyPublishedGraph('aggregate', deps, files.filter(n => n !== 'meowfilm.exe'), policy), /assemblies/);
   assert.throws(() => verifyPublishedGraph('aggregate', deps, [...files, 'MeowFilm.Unlisted.dll'], policy), /assemblies/);
+  assert.throws(() => verifyPublishedGraph('aggregate', deps, [...files, 'RetiredLibrary.dll'], policy), /assemblies/);
   assert.throws(() => verifyPublishedGraph('aggregate', deps, files.filter(n => n !== 'Dependency.dll'), policy), /runtime asset/);
+  assert.throws(() => verifyPublishedGraph('aggregate', deps, files.filter(n => n !== 'Native.dll'), policy),
+    /missing native runtime asset/);
+  assert.throws(() => verifyPublishedGraph('aggregate', deps, files.filter(n => n !== 'RuntimeTarget.dll'), policy),
+    /missing runtime target asset/);
+  assert.throws(() => verifyPublishedGraph('aggregate', {
+    ...deps, runtimeTarget: { name: 'net10.0/win-arm64' },
+  }, files, policy), /runtime identifier/);
+});
+
+test('published assemblies follow custom evaluated identities rather than product name prefixes', t => {
+  const f = fixture(t);
+  f.entries.get(f.app).Properties.AssemblyName = 'Viewer';
+  f.entries.get(f.core).Properties.AssemblyName = 'FoundationKit';
+  f.entries.get(f.feature).Properties.AssemblyName = 'FilmExperience';
+  const policy = f.verify(), names = policy.application.assemblies;
+  const target = 'net10.0/win-x64';
+  const deps = { libraries: Object.fromEntries(names.map(name => [name + '/1.0.0', { type: 'project' }])),
+    runtimeTarget: { name: target }, targets: { [target]: {} } };
+  const files = [...names.map(name => name + '.dll'), 'Viewer.exe'];
+  assert.deepEqual(verifyPublishedGraph('aggregate', deps, files, policy).projects, names);
+  assert.throws(() => verifyPublishedGraph('aggregate', deps, files.filter(name => name !== 'FoundationKit.dll'), policy),
+    /assemblies/);
 });

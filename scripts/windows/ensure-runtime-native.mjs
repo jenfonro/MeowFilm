@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { lstat, readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { nativeSourceInputs } from '../quickjs/native-inputs.mjs';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const policyPath = 'scripts/script-host-native.json';
@@ -28,7 +29,7 @@ export async function runtimeNativeNeedsBuild(root = repository) {
     const required = [policyPath, 'package.json', 'package-lock.json',
       'scripts/quickjs/build-source-sdk.mjs', ...policy.mandatoryInputs,
       ...policy.patches.map(input => input.path), policy.nodeHeaders.archivePath,
-      ...Object.values(policy.sources).flatMap(source => [source.archivePath, source.license.path])];
+      ...nativeSourceInputs(policy)];
     async function inventory(directory) {
       for (const item of await readdir(resolve(root, directory), { withFileTypes: true })) {
         const path = `${directory}/${item.name}`;

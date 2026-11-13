@@ -124,7 +124,7 @@ internal static class Program
                 _ = film.StartSourcesAsync();
                 var settings = shell.MediaControls ?? throw new InvalidOperationException("MEDIA_CONTROLS_MISSING");
                 var attachment = pendingMediaAttachment = new AppMediaWindowAttachment(window, settings);
-                music.AttachDesktopLyricsOwner(window);
+                music.AttachDesktopLyricsOwner(window, shell.RestoreFromTray);
                 var systemMedia = new AppSystemMediaAttachment(window, playback!, film,
                     [new("music", _ => music.StepAsync(true), _ => music.StepAsync(false),
                         Play: _ => music.ResumePlaybackAsync()),

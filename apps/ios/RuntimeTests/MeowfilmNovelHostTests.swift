@@ -39,7 +39,7 @@ final class MeowfilmNovelHostTests: XCTestCase {
         XCTAssertEqual(sourceModule["version"], .string("0.3.0"))
         XCTAssertEqual(sourceModule["contract"], .string("source.runtime.v2"))
         let sourceMethods = ["load", "unload", "invoke", "status", "close",
-            "library.list", "library.get", "library.import", "library.save", "library.update", "library.remove",
+            "library.list", "library.get", "library.previewImport", "library.import", "library.save", "library.update", "library.remove",
             "library.export", "library.invoke", "library.image", "library.releaseImage", "web.pending", "web.respond",
             "rules.process"].map { "source.runtime." + $0 }
         XCTAssertEqual(sourceModule["methods"].array?.compactMap(\.string), sourceMethods.sorted())
@@ -47,7 +47,8 @@ final class MeowfilmNovelHostTests: XCTestCase {
         let filmMethods = ["session.open", "session.command", "session.snapshot", "session.release", "session.attempt",
             "session.media.release", "settings.get", "settings.set", "library.get", "library.remove", "manual.update",
             "data.catalog", "data.search", "data.detail", "data.metadata", "data.metadata.entry", "data.cache.entry", "data.invalidate",
-            "rules.get", "rules.set", "rules.restore", "rules.preview", "rules.normalize", "rules.clear",
+            "rules.get", "rules.set", "rules.group.set", "rules.group.defaults", "rules.group.preview",
+            "rules.restore", "rules.preview", "rules.normalize", "rules.clear",
             "search.open", "search.snapshot", "search.command", "search.release", "search.handoff"].map { "film." + $0 }
         XCTAssertEqual(film["methods"].array?.compactMap(\.string), filmMethods.sorted())
         let source = NovelSource(installationId: "rules-fixture", revision: 1, name: "fixture",
@@ -87,9 +88,14 @@ final class MeowfilmNovelHostTests: XCTestCase {
             XCTAssertEqual(body.content.blocks.first?.text, "正文 1")
             let second = try await sources.content(catalog.book, source: source, chapter: catalog.chapters[0], nextChapterURL: catalog.chapters[1].chapterUrl)
             XCTAssertEqual(second.content.blocks.first?.text, "正文 2")
-            let definition = try await sources.definition(source)
-            XCTAssertEqual(try RuntimeJSON.decode(Data(definition.utf8)),
-                try RuntimeJSON.decode(Data(novelHostDefinition(url: url).utf8)), "Private runtime state cannot rewrite the installed definition")
+            let current = try await sources.definition(source)
+            XCTAssertEqual(current.source, source)
+            guard case .object(var expected) = try RuntimeJSON.decode(Data(novelHostDefinition(url: url).utf8)) else { throw NovelError.invalidResponse }
+            expected["bookSourceName"] = .string(source.name); expected["bookSourceUrl"] = .string(source.sourceUrl)
+            expected["bookSourceGroup"] = .string(source.group); expected["customOrder"] = .number(source.order)
+            expected["enabled"] = .bool(source.enabled); expected["enabledExplore"] = .bool(source.enabledExplore)
+            XCTAssertEqual(try RuntimeJSON.decode(Data(current.definition.utf8)), .object(expected),
+                "Management metadata is current; private runtime state cannot rewrite definition fields")
             try await sources.update(source, patch: ["enabled": .bool(false)])
             do { _ = try await sources.search(source, keyword: "迟到", page: 1); XCTFail("An old revision must not remain callable") }
             catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("STALE_SOURCE")) }

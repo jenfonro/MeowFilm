@@ -3,11 +3,12 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
+using System.Windows.Controls;
 
 namespace MeowFilm.Capabilities;
 
 /// <summary>Presentation of one real Node snapshot. Only layout/expanded UI state is native-owned.</summary>
-public sealed class FilmPlaybackPage : INotifyPropertyChanged
+public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
 {
     private readonly FilmPlaybackSession? session;
     private readonly FilmLibrary? library;
@@ -228,7 +229,6 @@ public sealed class FilmPlaybackPage : INotifyPropertyChanged
     public bool HasOutput => session?.HasOutput == true;
     public bool NoOutput => !HasOutput;
     public bool OwnsNativeMedia => session?.OwnsNativeMedia == true;
-    public bool HasExternalPlayer => session?.HasExternalPlayer == true;
     public bool IsPlaying => session?.IsPlaying == true;
     public string PlayLabel => IsPlaying ? "暂停" : "播放";
     public double Position => session?.Position ?? 0;
@@ -244,7 +244,7 @@ public sealed class FilmPlaybackPage : INotifyPropertyChanged
         get => session?.Volume ?? 0;
         set { if (HasOutput) RequireSession().Volume = value; Changed(nameof(Volume)); }
     }
-    public FrameworkElement? MediaView => session?.MediaView;
+    public ContentControl? MediaView => session?.MediaView;
     public bool ShortVideo => FilmJson.Bool(snapshot?.Raw ?? default, "shortVideo");
     public bool PreviewEpisodes => FilmJson.Bool(snapshot?.Raw ?? default, "previewEpisodes");
     public bool HasCurrent => snapshot?.CurrentId.Length > 0;
@@ -381,7 +381,6 @@ public sealed class FilmPlaybackPage : INotifyPropertyChanged
     internal Task RateAsync(double value) => RequireSession().RateAsync(value);
     internal Task AspectAsync(string? value) => RequireSession().AspectAsync(value);
     internal Task ReconnectAsync() => RequireSession().ReconnectAsync();
-    internal Task ExternalAsync(string executable) => RequireSession().ExternalAsync(executable);
     internal void RetainOwner(Window? owner) => session?.RetainOwner(this, owner);
     internal Task EndRetainedOwnerAsync() => session?.EndRetainedOwnerAsync(this) ?? Task.CompletedTask;
     internal Task SelectEpisodeAsync(FilmEpisodeItem item)

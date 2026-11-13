@@ -6,7 +6,8 @@ namespace MeowFilm.Capabilities;
 
 public sealed record NovelSource(string InstallationId, long Revision, string Name, string SourceUrl,
     string Group, long Order, bool Enabled, bool EnabledExplore, string Protocol, string[] Actions,
-    string? ErrorCode = null)
+    string? ErrorCode = null, double Weight = 0, double LastUpdateTime = 0,
+    double RespondTime = 180000, bool HasExplore = false)
 {
     public override string ToString() => Name;
 }

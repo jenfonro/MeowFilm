@@ -32,8 +32,13 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     const { installationId, revision, name, sourceUrl, group, order, enabled, enabledExplore,
       protocol, actions } = item;
     const state = states.get(installationId);
+    const raw = definitionObject(item.definition);
+    const number = (key, fallback) => Number.isFinite(Number(raw[key])) ? Number(raw[key]) : fallback;
     return { installationId, revision, name, sourceUrl, group, order, enabled, enabledExplore,
-      protocol, actions: [...actions], ...(state?.errorCode ? { errorCode: state.errorCode } : {}) };
+      protocol, weight: number('weight', 0), lastUpdateTime: number('lastUpdateTime', 0),
+      respondTime: number('respondTime', 180000),
+      hasExplore: Boolean(raw.exploreUrl || raw.ruleFindUrl || actions.includes('explore')),
+      actions: [...actions], ...(state?.errorCode ? { errorCode: state.errorCode } : {}) };
   }
   function persist(next = records) {
     if (readFailure) throw readFailure;
@@ -323,6 +328,44 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       state.accepting && live(item.installationId)?.generation === generation, 'STALE_SOURCE');
     return value ?? null;
   }
+  async function importEntries(params, signal) {
+    let input = params.text;
+    if (params.url !== undefined) {
+      let target;
+      try { target = new URL(params.url); } catch { throw fail('INVALID_REQUEST'); }
+      require(['http:', 'https:'].includes(target.protocol) && !target.username && !target.password);
+      const response = await network({ url: target.href,
+        options: { method: 'GET', encoding: null, timeout: 60_000 }, signal });
+      guard(signal);
+      require(response.statusCode >= 200 && response.statusCode < 300, 'HTTP_ERROR');
+      const body = Buffer.from(response.body);
+      require(isUtf8(body), 'SOURCE_ENCODING');
+      input = body.toString('utf8');
+    }
+    require(typeof input === 'string' && input.trim().length > 0);
+    input = input.replace(/^\uFEFF/, '');
+    const entriesOf = parsed => {
+      if (Array.isArray(parsed)) return parsed;
+      if (object(parsed)) {
+        for (const key of ['sources', 'bookSources', 'data']) {
+          if (Array.isArray(parsed[key])) return parsed[key];
+        }
+      }
+      return [parsed];
+    };
+    try { return entriesOf(JSON.parse(input)); }
+    catch {
+      // HTML is a complete QYSG definition, not a line-delimited document.
+      if (input.trimStart().startsWith('<')) return [input];
+      const lines = input.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      try { return lines.flatMap(line => entriesOf(JSON.parse(line))); }
+      catch { return [input]; }
+    }
+  }
+  function importCandidate(entry, params) {
+    const definition = typeof entry === 'string' ? entry : JSON.stringify(entry);
+    return build(definition, undefined, params.fileName, params.url);
+  }
   const methods = {
     async 'library.list'(_params, signal) {
       await access(signal);
@@ -332,33 +375,36 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     async 'library.get'(params, signal) {
       await access(signal);
       const item = record(params.installationId);
-      return { source: publicRecord(item), definition: item.definition };
+      return { source: publicRecord(item), definition: JSON.stringify(managedDefinition(item)) };
     },
-    'library.import': (params, signal) => manage(signal, async () => {
-      let input = params.text;
-      if (params.url !== undefined) {
-        let target;
-        try { target = new URL(params.url); } catch { throw fail('INVALID_REQUEST'); }
-        require(['http:', 'https:'].includes(target.protocol) && !target.username && !target.password);
-        const response = await network({ url: target.href,
-          options: { method: 'GET', encoding: null, timeout: 60_000 }, signal });
+    'library.previewImport': (params, signal) => operations.run(Symbol('preview'), async () => {
+      await access(signal);
+      const entries = await importEntries(params, signal), items = [], failures = [];
+      const existing = new Set([...records.values()].map(item => item.sourceUrl));
+      for (const [index, entry] of entries.entries()) {
         guard(signal);
-        require(response.statusCode >= 200 && response.statusCode < 300, 'HTTP_ERROR');
-        const body = Buffer.from(response.body);
-        require(isUtf8(body), 'SOURCE_ENCODING');
-        input = body.toString('utf8');
+        try {
+          const item = importCandidate(entry, params);
+          items.push({ index, name: item.name, sourceUrl: item.sourceUrl, group: item.group,
+            protocol: item.protocol, exists: existing.has(item.sourceUrl),
+            // Canonical metadata makes a later text import retain HTML's URL/file identity.
+            definition: JSON.stringify(managedDefinition(item)) });
+        } catch (error) {
+          failures.push({ index, name: String(object(entry) ? entry.bookSourceName ?? '' : params.fileName ?? ''),
+            code: errorCode(error) });
+        }
       }
-      require(typeof input === 'string' && input.trim().length > 0);
-      input = input.replace(/^\uFEFF/, '');
-      let parsed;
-      try { parsed = JSON.parse(input); } catch { parsed = input; }
-      const entries = Array.isArray(parsed) ? parsed : [parsed];
+      guard(signal);
+      return { items, failures };
+    }),
+    'library.import': (params, signal) => manage(signal, async () => {
+      const entries = await importEntries(params, signal);
       const imported = [], failures = [];
       for (const [index, entry] of entries.entries()) {
         guard(signal);
         const definition = typeof entry === 'string' ? entry : JSON.stringify(entry);
         try {
-          const candidate = build(definition, undefined, params.fileName, params.url);
+          const candidate = importCandidate(entry, params);
           const old = [...records.values()].find(value => value.sourceUrl === candidate.sourceUrl);
           const next = old ? build(definition, old, params.fileName) : candidate;
           imported.push((await replace(next, old, signal)).source);

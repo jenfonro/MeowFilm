@@ -5,8 +5,9 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicCapability
 {
     private Window? desktopLyricsOwner;
+    private Action? activateDesktopLyricsOwner;
     private MusicDesktopLyricsWindow? desktopLyricsWindow;
-    private bool restoreDesktopLyrics;
+    private MusicDesktopLyricsWindowState? restoreDesktopLyrics;
     private bool showLyricTranslation = true;
 
     public bool IsDesktopLyricsOpen => desktopLyricsWindow is not null;
@@ -21,13 +22,26 @@ public sealed partial class MusicCapability
         Lyrics.Count > 0 ? "前奏" : "暂无歌词";
     public string DesktopLyricTranslation => showLyricTranslation && OwnsCurrent && playback.HasMedia &&
         ActiveLyricIndex is var index && index >= 0 ? Lyrics[index].Translation : "";
+    public MusicLyricRow? DesktopLyricTopRow => DesktopLyricRow(bottom: false);
+    public MusicLyricRow? DesktopLyricBottomRow => DesktopLyricRow(bottom: true);
 
-    public void AttachDesktopLyricsOwner(Window window)
+    private MusicLyricRow? DesktopLyricRow(bool bottom)
+    {
+        var index = ActiveLyricIndex;
+        if (!OwnsCurrent || !playback.HasMedia || index < 0) return null;
+        if (DesktopLyricLayout != "double") return bottom ? null : Lyrics[index];
+        // Each fixed track becomes the next line after its current line finishes.
+        var row = (index & 1) == (bottom ? 1 : 0) ? index : index + 1;
+        return row < Lyrics.Count ? Lyrics[row] : null;
+    }
+
+    public void AttachDesktopLyricsOwner(Window window, Action? activate = null)
     {
         ArgumentNullException.ThrowIfNull(window);
         Presentation.Dispatcher.VerifyAccess();
         window.Dispatcher.VerifyAccess();
         if (stopping || disposed) throw new InvalidOperationException("CLOSED");
+        activateDesktopLyricsOwner = activate;
         if (ReferenceEquals(desktopLyricsOwner, window)) return;
         if (desktopLyricsOwner is not null) desktopLyricsOwner.Closed -= DesktopLyricsOwnerClosed;
         desktopLyricsOwner = window;
@@ -35,17 +49,23 @@ public sealed partial class MusicCapability
         Changed(nameof(CanToggleDesktopLyrics));
     }
 
-    private async Task ToggleDesktopLyricsAsync()
+    public void ActivateDesktopLyricsOwner()
+    {
+        if (CanToggleDesktopLyrics) activateDesktopLyricsOwner?.Invoke();
+    }
+
+    private async Task ToggleDesktopLyricsAsync(MusicDesktopLyricsWindowState? restore = null)
     {
         if (desktopLyricsWindow is not null) { CloseDesktopLyrics(); return; }
         if (!CanToggleDesktopLyrics) { await Notify("桌面歌词尚未绑定主窗口"); return; }
         var window = new MusicDesktopLyricsWindow(this, desktopLyricsOwner!);
+        if (restore is { } state) window.RestorePresentationState(state);
         desktopLyricsWindow = window;
         window.Closed += DesktopLyricsClosed;
         try { window.Show(); }
         catch { CloseDesktopLyrics(); throw; }
         DesktopLyricsBindings();
-        await RestoreLyricsAsync();
+        await Task.WhenAll(EnsureDesktopLyricSettingsAsync(), RestoreLyricsAsync());
     }
 
     private void CloseDesktopLyrics() => desktopLyricsWindow?.Close();
@@ -72,6 +92,7 @@ public sealed partial class MusicCapability
     private void DesktopLyricBindings()
     {
         Changed(nameof(DesktopLyricText)); Changed(nameof(DesktopLyricTranslation));
+        Changed(nameof(DesktopLyricTopRow)); Changed(nameof(DesktopLyricBottomRow));
     }
 
     private void ToggleLyricTranslation()
@@ -83,26 +104,30 @@ public sealed partial class MusicCapability
 
     private void PrepareDesktopLyricsShutdown()
     {
-        restoreDesktopLyrics = IsDesktopLyricsOpen;
+        restoreDesktopLyrics = desktopLyricsWindow?.CapturePresentationState();
         CloseDesktopLyrics();
         Changed(nameof(CanToggleDesktopLyrics));
     }
 
     private async Task ResumeDesktopLyricsAsync()
     {
-        bool reopen = restoreDesktopLyrics;
-        restoreDesktopLyrics = false;
+        var restore = restoreDesktopLyrics;
+        restoreDesktopLyrics = null;
         if (stopping || disposed || disposal is not null || abortion is not null) return;
-        if (reopen && CanToggleDesktopLyrics) await ToggleDesktopLyricsAsync();
+        if (restore is { } state && CanToggleDesktopLyrics)
+        {
+            await ToggleDesktopLyricsAsync(state);
+        }
         else if (NeedsLyrics) await RestoreLyricsAsync();
         Changed(nameof(CanToggleDesktopLyrics));
     }
 
     private void ReleaseDesktopLyrics()
     {
-        restoreDesktopLyrics = false;
+        restoreDesktopLyrics = null;
         if (desktopLyricsOwner is not null) desktopLyricsOwner.Closed -= DesktopLyricsOwnerClosed;
         desktopLyricsOwner = null;
+        activateDesktopLyricsOwner = null;
         CloseDesktopLyrics();
         Changed(nameof(CanToggleDesktopLyrics));
     }

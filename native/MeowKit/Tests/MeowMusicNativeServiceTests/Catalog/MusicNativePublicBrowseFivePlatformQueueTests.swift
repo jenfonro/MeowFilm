@@ -18,7 +18,7 @@ final class MusicNativePublicBrowseFivePlatformQueueTests: XCTestCase {
             while let cursor = page.cursor { page = try await service.remoteQueuePage(source, cursor: cursor) }
             XCTAssertEqual(page.items.count, 20)
             let start = MusicRemoteQueueStart(index: 647, track: page.items[17])
-            let wrong = MusicRemoteQueueStart(index: 647, songID: "not-this-recording", sourceKeys: start.sourceKeys)
+            let wrong = MusicRemoteQueueStart(index: 647, songID: "not-this-recording", primarySource: try XCTUnwrap(start.primarySource))
             do { _ = try await service.replaceRemoteQueue(source, start: wrong, expectedRevision: old.revision, intent: .init()); XCTFail("wrong row") }
             catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
             store.fail(.storageConflict)

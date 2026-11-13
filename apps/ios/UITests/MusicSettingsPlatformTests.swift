@@ -285,7 +285,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
             window.layoutIfNeeded(); host.view.layoutIfNeeded()
             return host.view.window === window && host.view.bounds.width == 320 &&
                 host.traitCollection.preferredContentSizeCategory == .accessibilityExtraExtraExtraLarge &&
-                !views(host.view).compactMap { $0 as? UICollectionView }.flatMap(\.visibleCells).isEmpty &&
+                !views(host.view).compactMap { $0 as? UITableView }.flatMap(\.visibleCells).isEmpty &&
                 !views(host.view).compactMap { $0 as? UISwitch }.isEmpty
         }
         for toggle in views(host.view).compactMap({ $0 as? UISwitch }) {
@@ -334,7 +334,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
         XCTAssertEqual(detail.pageTitle, MusicAccountPlatform.qq.title)
         for card in [login, detail] as [UIViewController] {
             XCTAssertEqual(card.modalPresentationStyle, .overFullScreen, "Account login and details float over the list")
-            XCTAssertTrue(card.view is MusicAccountFloatingBackdrop)
+            XCTAssertTrue(card.view is AccountFloatingBackdrop)
         }
         XCTAssertNil(PageViewController(themeProvider: appearance).navigationItem.titleView)
         XCTAssertNil(HostingPageViewController(

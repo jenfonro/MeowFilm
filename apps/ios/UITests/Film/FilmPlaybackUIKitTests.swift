@@ -330,8 +330,17 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             let model = makeModel(server, media)
             await model.open()?.value
             let page = try blockPage(model, player: player), window = try mount(page)
-            try await visible(page)
             let alert = try await presentedAlert(page, title: "错误", style: .alert)
+            XCTAssertTrue(page.isPageVisible)
+            XCTAssertTrue(page.view.window?.isKeyWindow == true)
+            if player {
+                try await waitFor("The error notice remains visible after the player's landscape transition") {
+                    page.presentedViewController === alert &&
+                        page.view.window?.windowScene?.interfaceOrientation.isLandscape == true &&
+                        page.view.bounds.width > page.view.bounds.height
+                }
+                XCTAssertGreaterThan(page.view.bounds.width, page.view.bounds.height)
+            }
             XCTAssertEqual(alert.message, FilmPlaybackError(code: "NO_MATCH").localizedDescription)
             XCTAssertEqual(alert.actions.map(\.title), ["确定"])
             try await runnerAction { $0.alerts.buttons["确定"].tap() }
@@ -442,6 +451,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             let page = try blockPage(model, player: player), window = try mount(page)
             defer { unmount(page, window) }
             try await visible(page)
+            try await waitFor("The normal entry refresh completes before confirming a source") { model.snapshot!.sequence > 1 }
             try button(player ? "film.player.block" : "film.detail.block", page.view).sendActions(for: .touchUpInside)
             let confirmation = try await presentedAlert(page, title: "片源错误", style: .alert)
             let before = await server.calls().filter { $0.action == "block" }
@@ -477,6 +487,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
                 let page = try blockPage(model, player: player), window = try mount(page)
                 defer { unmount(page, window) }
                 try await visible(page)
+                try await waitFor("The normal entry refresh completes before confirming a source") { model.snapshot!.sequence > 1 }
                 let control = try button(player ? "film.player.block" : "film.detail.block", page.view)
                 control.sendActions(for: .touchUpInside)
                 let cancellation = try await presentedAlert(page, title: "片源错误", style: .alert)
@@ -514,6 +525,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             let page = try blockPage(model, player: player), window = try mount(page)
             defer { unmount(page, window) }
             try await visible(page)
+            try await waitFor("The normal entry refresh completes before confirming a source") { model.snapshot!.sequence > 1 }
             try button(player ? "film.player.block" : "film.detail.block", page.view).sendActions(for: .touchUpInside)
             await model.waitForPendingWork()
             XCTAssertNil(page.presentedViewController)
@@ -535,12 +547,19 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(page)
         XCTAssertEqual(media.inputs.count, 1, "Mounting/fullscreen presentation must not create another engine")
         XCTAssertEqual(media.surface.superview?.accessibilityIdentifier, "film.player.video")
+        attachWindow(window, name: "film-player-capsules-with-session")
         try button("film.player.play-pause", page.view).sendActions(for: .touchUpInside)
         try button("film.player.play-pause", page.view).sendActions(for: .touchUpInside)
         XCTAssertEqual(media.paused, 1); XCTAssertEqual(media.resumed, 1)
         let seek = try XCTUnwrap(view("film.player.seek", page.view) as? UISlider)
         seek.sendActions(for: .touchDown); seek.value = 92; seek.sendActions(for: .touchUpInside)
         XCTAssertEqual(media.seeks, [92])
+        try button("film.player.volume-menu", page.view).sendActions(for: .touchUpInside)
+        XCTAssertFalse(try XCTUnwrap(view("film.player.settings-panel", page.view)).isHidden)
+        try button("film.player.settings", page.view).sendActions(for: .touchUpInside)
+        XCTAssertTrue(try XCTUnwrap(view("film.player.settings-panel", page.view)).isHidden)
+        try button("film.player.settings", page.view).sendActions(for: .touchUpInside)
+        XCTAssertFalse(try XCTUnwrap(view("film.player.settings-panel", page.view)).isHidden)
         invoke(try menuAction("1.5×", button("film.player.rate", page.view).menu))
         invoke(try menuAction("填满", button("film.player.scale", page.view).menu))
         let volume = try XCTUnwrap(view("film.player.volume", page.view) as? UISlider)
@@ -567,60 +586,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let calls = await server.calls()
         XCTAssertEqual(calls.compactMap(\.action).suffix(3), ["shortvideo", "next", "previous"])
         XCTAssertEqual(calls.first { $0.action == "shortvideo" }?.input.filmObject?["enabled"], .bool(true))
-        try button("film.player.fullscreen", page.view).sendActions(for: .touchUpInside)
-        XCTAssertTrue(page.prefersHomeIndicatorAutoHidden)
+        XCTAssertEqual(page.modalPresentationStyle, .fullScreen)
+        XCTAssertEqual(page.supportedInterfaceOrientations, .landscape)
+        XCTAssertEqual(page.preferredInterfaceOrientationForPresentation, .landscapeRight)
+        XCTAssertTrue(page.prefersStatusBarHidden)
         XCTAssertEqual(media.inputs.count, 1)
-    }
-
-    func testExternalPlayerMenuInvokesBothRealLaunchConsumersAndPreservesTheInternalOwnerOnRejection() async throws {
-        for player in FilmExternalPlayer.allCases {
-            let server = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(attemptID: "external"))
-            let media = FilmUIKitPlaybackMedia()
-            var opened: [URL] = []
-            let model = makeModel(server, media, opener: { opened.append($0); return false })
-            await model.open()?.value
-            await model.waitForPendingWork()
-            let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
-            let window = try mount(page)
-            try await visible(page)
-            let external = try button("film.player.external", page.view)
-            XCTAssertTrue(external.isEnabled); XCTAssertTrue(external.showsMenuAsPrimaryAction)
-            XCTAssertEqual(external.menu?.children.compactMap { ($0 as? UIAction)?.title }, ["Infuse", "nPlayer"])
-            let before = await server.calls()
-            external.sendActions(for: .touchUpInside)
-            XCTAssertTrue(opened.isEmpty, "Opening the menu itself must not export a URL")
-            let menuCalls = await server.calls()
-            XCTAssertEqual(menuCalls.count, before.count)
-            invoke(try menuAction(player.title, external.menu))
-            try await waitFor { model.actionError?.code == "EXTERNAL_PLAYER_OPEN_FAILED" && !model.requiresExplicitPlay }
-            await model.waitForPendingWork()
-            XCTAssertEqual(opened.map(\.scheme), [player == .infuse ? "infuse" : "nplayer-https"])
-            XCTAssertEqual(media.paused, 1); XCTAssertEqual(media.resumed, 1)
-            XCTAssertEqual(media.stops, 0); XCTAssertEqual(model.mediaState.attemptID, "external")
-            let calls = await server.calls()
-            XCTAssertEqual(calls.filter { $0.operation == "session.attempt" }.count, 2)
-            XCTAssertFalse(calls.contains { $0.operation == "session.release" || $0.action == "media.ended" })
-            unmount(page, window)
-            await model.close()
-        }
-    }
-
-    func testExternalPlayerMenuHasAnHonestNoCurrentErrorInsteadOfADisabledConsumer() async throws {
-        let server = FilmUIKitPlaybackServer(), media = FilmUIKitPlaybackMedia()
-        let model = makeModel(server, media)
-        await model.open()?.value
-        let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
-        let window = try mount(page)
-        defer { unmount(page, window) }
-        try await visible(page)
-        let external = try button("film.player.external", page.view)
-        XCTAssertTrue(external.isEnabled)
-        invoke(try menuAction("Infuse", external.menu))
-        try await waitFor { page.presentedViewController is UIAlertController }
-        XCTAssertEqual((page.presentedViewController as? UIAlertController)?.message, "当前没有可交接的播放")
-        let calls = await server.calls()
-        XCTAssertFalse(calls.contains { $0.operation == "session.attempt" })
-        XCTAssertEqual(media.paused, 0); XCTAssertEqual(media.stops, 0)
     }
 
     func testTheSamePlayerModalReturnsFromOrdinaryBackgroundWithoutAutoplayAndOneTapFormallyPlays() async throws {
@@ -648,13 +618,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             try await visible(page)
             await model.waitForPendingWork()
             await settle()
-            XCTAssertTrue(window.rootViewController === page, "The modal and its controls are not reconstructed")
+            XCTAssertTrue(window.rootViewController?.presentedViewController === page, "The modal and its controls are not reconstructed")
             XCTAssertEqual(model.snapshot?.stage, autoPrepare ? "prepared" : "idle")
             XCTAssertEqual(model.snapshot?.preferences.iosAutoPrepare, autoPrepare)
             XCTAssertNil(model.mediaState.attemptID)
             XCTAssertEqual(media.inputs.map(\.attemptID), ["before-background"])
             let play = try button("film.player.play-pause", page.view)
-            XCTAssertTrue(play.isEnabled); XCTAssertEqual(play.title(for: .normal), "播放")
+            XCTAssertTrue(play.isEnabled); XCTAssertEqual(play.accessibilityLabel, "播放")
             var calls = await server.calls()
             XCTAssertFalse(calls.contains { $0.action == "play" })
             var formal = try FilmUIKitPlaybackFixture.snapshot(101, attemptID: "after-background").filmRequiredObject()
@@ -674,6 +644,119 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         }
     }
 
+    func testPlayerOverlayIdlesAndTapsWithoutChangingPlaybackAndPausedControlsStayVisible() async throws {
+        let server = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(attemptID: "overlay"))
+        let media = FilmUIKitPlaybackMedia(), model = makeModel(server, media)
+        await model.open()?.value
+        await model.waitForPendingWork()
+        let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
+        let window = try mount(page)
+        defer { unmount(page, window) }
+        try await visible(page)
+        let top = try XCTUnwrap(view("film.player.top-controls", page.view))
+        let bottom = try XCTUnwrap(view("film.player.bottom-controls", page.view))
+        try await waitFor("Playing controls automatically hide") { top.alpha == 0 }
+        XCTAssertEqual(bottom.alpha, 0)
+        XCTAssertFalse(top.isUserInteractionEnabled)
+        XCTAssertTrue(page.prefersHomeIndicatorAutoHidden)
+        try await tapVideo()
+        try await waitFor("A video tap reveals controls") { top.alpha == 1 }
+        XCTAssertEqual(media.paused, 0); XCTAssertEqual(media.resumed, 0)
+        try await tapVideo()
+        try await waitFor("A second tap hides controls") { top.alpha == 0 }
+        try await tapVideo()
+        try button("film.player.play-pause", page.view).sendActions(for: .touchUpInside)
+        await settle()
+        XCTAssertTrue(model.mediaState.paused)
+        try await tapVideo()
+        try await Task.sleep(for: .milliseconds(2400))
+        XCTAssertEqual(top.alpha, 1); XCTAssertEqual(bottom.alpha, 1)
+        XCTAssertEqual(media.paused, 1); XCTAssertEqual(media.resumed, 0)
+    }
+
+    func testSettingsMenusAndScrubbingKeepControlsUntilInteractionFinishes() async throws {
+        let server = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(attemptID: "interactions"))
+        let media = FilmUIKitPlaybackMedia(), model = makeModel(server, media)
+        await model.open()?.value
+        await model.waitForPendingWork()
+        let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
+        let window = try mount(page)
+        defer { unmount(page, window) }
+        try await visible(page)
+        let top = try XCTUnwrap(view("film.player.top-controls", page.view))
+        try button("film.player.settings", page.view).sendActions(for: .touchUpInside)
+        let panel = try XCTUnwrap(view("film.player.settings-panel", page.view))
+        XCTAssertFalse(panel.isHidden)
+        try await Task.sleep(for: .milliseconds(2400))
+        XCTAssertEqual(top.alpha, 1)
+        invoke(try menuAction("1.5×", button("film.player.rate", page.view).menu))
+        await settle()
+        XCTAssertEqual(try menuAction("1.5×", button("film.player.rate", page.view).menu).state, .on)
+        try await tapVideo()
+        XCTAssertTrue(panel.isHidden)
+        let seek = try XCTUnwrap(view("film.player.seek", page.view) as? UISlider)
+        seek.sendActions(for: .touchDown)
+        try await Task.sleep(for: .milliseconds(2400))
+        XCTAssertEqual(top.alpha, 1)
+        seek.sendActions(for: .touchCancel)
+        XCTAssertTrue(media.seeks.isEmpty, "Cancelled scrubbing does not seek")
+        try await waitFor("Controls hide after scrubbing ends") { top.alpha == 0 }
+        try await tapVideo()
+        try await runnerAction { $0.buttons["film.player.pan"].tap() }
+        try await Task.sleep(for: .milliseconds(2400))
+        XCTAssertEqual(top.alpha, 1, "A real native menu suspends idle hiding")
+        try await runnerAction { $0.buttons["百度网盘"].tap() }
+        await model.waitForPendingWork()
+        let calls = await server.calls()
+        XCTAssertEqual(calls.last?.action, "pan")
+        XCTAssertEqual(calls.last?.input.filmObject?["provider"], .string("baidu"))
+        XCTAssertEqual(media.paused, 0, "Menus must not toggle video playback")
+        try await waitFor("Dismissing the native menu resumes idle hiding") { top.alpha == 0 }
+    }
+
+    func testPlayerControlsRemainInTheVideoSafeAreaAcrossBothLandscapeLayouts() async throws {
+        let server = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(attemptID: "layout"))
+        let media = FilmUIKitPlaybackMedia(), model = makeModel(server, media)
+        await model.open()?.value
+        await model.waitForPendingWork()
+        let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
+        let window = try mount(page)
+        defer { unmount(page, window) }
+        try await visible(page)
+        for size in [CGSize(width: 844, height: 390), CGSize(width: 667, height: 375), CGSize(width: 480, height: 320)] {
+            page.view.frame = CGRect(origin: .zero, size: size)
+            page.view.layoutIfNeeded()
+            let safe = page.view.safeAreaLayoutGuide.layoutFrame
+            for id in ["top-controls", "bottom-controls", "transport-controls", "source-controls"] {
+                let overlay = try XCTUnwrap(view("film.player." + id, page.view))
+                XCTAssertTrue(safe.insetBy(dx: -0.5, dy: -0.5).contains(overlay.convert(overlay.bounds, to: page.view)), id)
+                XCTAssertFalse(overlay.hasAmbiguousLayout, id)
+            }
+            let transport = try XCTUnwrap(view("film.player.transport-controls", page.view))
+            let sources = try XCTUnwrap(view("film.player.source-controls", page.view))
+            let transportFrame = transport.convert(transport.bounds, to: page.view)
+            let sourcesFrame = sources.convert(sources.bounds, to: page.view)
+            if size.width == 844 {
+                XCTAssertEqual(transportFrame.minY, sourcesFrame.minY, accuracy: 0.5)
+                XCTAssertLessThan(transportFrame.maxX, sourcesFrame.minX)
+            } else {
+                XCTAssertLessThan(transportFrame.maxY, sourcesFrame.minY,
+                                  "Narrow layouts wrap complete capsules instead of crushing the buttons")
+            }
+            for id in ["close", "pip", "settings", "previous", "play-pause", "next", "volume-menu", "pan", "quality", "switch", "block", "seek"] {
+                let control = try XCTUnwrap(view("film.player." + id, page.view))
+                XCTAssertGreaterThanOrEqual(control.bounds.width, 44, id)
+                XCTAssertGreaterThanOrEqual(control.bounds.height, 44, id)
+            }
+            for id in ["switch", "block"] {
+                let title = try XCTUnwrap(try button("film.player." + id, page.view).titleLabel)
+                XCTAssertGreaterThanOrEqual(title.bounds.width, title.intrinsicContentSize.width,
+                                           "Variable source names must not truncate fixed action titles")
+            }
+        }
+        XCTAssertEqual(media.inputs.count, 1)
+    }
+
     func testBufferingPlayerShowsTheActualPlayingIntentAndPauseControlDoesNotResumeIt() async throws {
         let server = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(attemptID: "buffering"))
         let media = FilmUIKitPlaybackMedia(), model = makeModel(server, media)
@@ -686,12 +769,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         media.setBuffering(true)
         await settle()
         let play = try button("film.player.play-pause", page.view)
-        XCTAssertEqual(play.title(for: .normal), "暂停")
+        XCTAssertEqual(play.accessibilityLabel, "暂停")
         XCTAssertTrue(try XCTUnwrap(descendants(page.view).compactMap { $0 as? UIActivityIndicatorView }.first).isAnimating)
         play.sendActions(for: .touchUpInside)
         await settle()
         XCTAssertEqual(media.paused, 1); XCTAssertEqual(media.resumed, 0)
-        XCTAssertEqual(play.title(for: .normal), "播放")
+        XCTAssertEqual(play.accessibilityLabel, "播放")
         XCTAssertTrue(model.mediaState.paused)
     }
 
@@ -712,24 +795,17 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             $0.direction == .down
         })
         XCTAssertFalse(up.isEnabled); XCTAssertFalse(down.isEnabled)
-        let app = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
-        try await runnerAction { $0.buttons["film.player.fullscreen"].tap() }
-        try await waitFor("Fullscreen exposes the video surface to touch") {
-            page.view.layoutIfNeeded()
-            let center = CGPoint(x: video.bounds.midX, y: video.bounds.midY)
-            let point = video.convert(center, to: window)
-            guard let hit = window.hitTest(point, with: nil) else { return false }
-            return hit === video || hit.isDescendant(of: video)
-        }
-        try await runnerAction { _ in app.otherElements["film.player.video"].swipeUp() }
+        try await swipeVideo(up: true, in: page)
         var calls = await server.calls()
         XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh"])
         try await server.publish(FilmUIKitPlaybackFixture.snapshot(10, shortVideo: true))
         await settle()
         XCTAssertTrue(up.isEnabled); XCTAssertTrue(down.isEnabled)
-        try await runnerAction { _ in app.otherElements["film.player.video"].swipeUp() }
+        try await swipeVideo(up: true, in: page)
         await model.waitForPendingWork()
-        try await runnerAction { _ in app.otherElements["film.player.video"].swipeDown() }
+        calls = await server.calls()
+        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "next"])
+        try await swipeVideo(up: false, in: page)
         await model.waitForPendingWork()
         calls = await server.calls()
         XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "next", "previous"])
@@ -747,7 +823,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(host)
         let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
         defer { PageViewController.invalidatePages(in: page) }
-        host.present(page, animated: true)
+        page.present(from: host)
         try await waitFor { page.presentedViewController is UIAlertController }
         let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
         XCTAssertEqual(alert.message, "MEDIA_OUTPUT_FAILED")
@@ -1026,12 +1102,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         if player { return FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme()) }
         return try detailPage(model)
     }
-    private func makeModel(_ server: FilmUIKitPlaybackServer, _ media: FilmUIKitPlaybackMedia,
-                           opener: @escaping @MainActor (URL) async -> Bool = { _ in
-                               XCTFail("Unexpected external-player launch"); return false
-                           }) -> FilmPlaybackModel {
+    private func makeModel(_ server: FilmUIKitPlaybackServer, _ media: FilmUIKitPlaybackMedia) -> FilmPlaybackModel {
         let model = FilmPlaybackModel(transport: server.transport, media: media,
-            openExternalURL: opener, request: { FilmUIKitPlaybackFixture.request() })
+            request: { FilmUIKitPlaybackFixture.request() })
         addTeardownBlock { await model.close() }
         return model
     }
@@ -1117,7 +1190,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
         mountedWindows.append((page, window, previous))
-        window.rootViewController = page; window.makeKeyAndVisible(); window.layoutIfNeeded()
+        let host = page is FilmPlayerViewController ? UIViewController() : page
+        window.rootViewController = host; window.makeKeyAndVisible(); window.layoutIfNeeded()
+        if let player = page as? FilmPlayerViewController { player.present(from: host, animated: false) }
         page.view.layoutIfNeeded()
         return window
     }
@@ -1131,11 +1206,61 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await waitFor("The page is visible in the real active key window") {
             UIApplication.shared.applicationState == .active &&
                 page.view.window?.windowScene?.activationState == .foregroundActive &&
-                page.view.window?.isKeyWindow == true && page.isPageVisible && page.canPresentPageAlert
+                page.view.window?.isKeyWindow == true && page.isPageVisible && page.canPresentPageAlert &&
+                (!(page is FilmPlayerViewController) ||
+                    page.view.window?.windowScene?.interfaceOrientation.isLandscape == true &&
+                    page.view.bounds.width > page.view.bounds.height)
         }
     }
     private func settle() async {
         await withCheckedContinuation { continuation in RunLoop.main.perform { continuation.resume() } }
+    }
+    private func attachWindow(_ window: UIWindow, name: String) {
+        XCTAssertTrue(window.isKeyWindow)
+        window.layoutIfNeeded()
+        var rendered = false
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        XCTAssertTrue(rendered)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name; attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+    private func swipeVideo(up: Bool, in page: FilmPlayerViewController) async throws {
+        let video = try XCTUnwrap(view("film.player.video", page.view))
+        let top = try XCTUnwrap(view("film.player.top-controls", page.view))
+        let bottom = try XCTUnwrap(view("film.player.bottom-controls", page.view))
+        let window = try XCTUnwrap(video.window)
+        var upper = CGPoint.zero, lower = CGPoint.zero
+        try await waitFor("The swipe uses uncovered video between the actual control groups") {
+            page.view.layoutIfNeeded()
+            let start = top.convert(top.bounds, to: video).maxY
+            let end = bottom.convert(bottom.bounds, to: video).minY
+            let length = end - start
+            guard length > 44 else { return false }
+            upper = CGPoint(x: video.bounds.width * 0.2, y: start + length * 0.1)
+            lower = CGPoint(x: upper.x, y: start + length * 0.9)
+            return [upper, lower].allSatisfy { point in
+                let hit = window.hitTest(video.convert(point, to: window), with: nil)
+                return hit === video || hit?.isDescendant(of: video) == true
+            }
+        }
+        let upperOffset = CGVector(dx: upper.x / video.bounds.width, dy: upper.y / video.bounds.height)
+        let lowerOffset = CGVector(dx: lower.x / video.bounds.width, dy: lower.y / video.bounds.height)
+        try await runnerAction { app in
+            let video = app.otherElements["film.player.video"]
+            let upper = video.coordinate(withNormalizedOffset: upperOffset)
+            let lower = video.coordinate(withNormalizedOffset: lowerOffset)
+            (up ? lower : upper).press(forDuration: 0.05, thenDragTo: up ? upper : lower,
+                                       withVelocity: .fast, thenHoldForDuration: 0)
+        }
+    }
+    private func tapVideo() async throws {
+        try await runnerAction { app in
+            app.otherElements["film.player.video"]
+                .coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.4)).tap()
+        }
     }
     private enum FixtureFailure: Error { case prerequisite(String) }
     private func waitFor(_ description: String = "UIKit prerequisite", file: StaticString = #filePath, line: UInt = #line,

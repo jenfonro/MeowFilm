@@ -69,16 +69,18 @@ public struct MusicSettingsContent: View {
                     .pickerStyle(.menu)
                     .disabled(savingCatalogSource)
                     .accessibilityIdentifier("music.settings.catalogSource")
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: true))
                 }
             }
             .headerProminence(.increased)
+            .listSectionSeparator(.hidden)
             Section("歌词") {
                 Toggle("锁屏歌词", isOn: Binding(get: { lockLyric }, set: setLockLyric))
                     .accessibilityIdentifier("music.settings.lockLyric")
-                    .modifier(MusicSettingsRowStyle(theme: theme))
+                    .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
             }
             .headerProminence(.increased)
+            .listSectionSeparator(.hidden)
         }
         .modifier(MusicSettingsListStyle(theme: theme))
     }
@@ -90,7 +92,9 @@ public struct MusicSettingsContent: View {
             }
         }
         .accessibilityIdentifier(destination.accessibilityIdentifier)
-        .modifier(MusicSettingsRowStyle(theme: theme))
+        .modifier(MusicSettingsRowStyle(theme: theme,
+            first: destination == .aggregation,
+            last: destination == .metadata && (catalogSource?.available.isEmpty ?? true)))
     }
 }
 
@@ -118,19 +122,7 @@ struct MusicPlatformLogo: View {
     var theme: PageTheme
 
     var body: some View {
-        Group {
-            if let assetName {
-                Image(assetName, bundle: .main)
-                    .renderingMode(.original)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                Image(systemName: "music.note")
-                    .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+        AccountPlatformMark(assetName: assetName, symbol: "music.note", size: size, theme: theme)
     }
 }
 
@@ -140,11 +132,8 @@ struct MusicPlatformLabel: View {
     let theme: PageTheme
 
     var body: some View {
-        HStack(spacing: 12) {
-            MusicPlatformLogo(assetName: platform.settingsLogoName, theme: theme)
-            Text(platform.title)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        AccountPlatformLabel(title: platform.title, assetName: platform.settingsLogoName,
+                             symbol: "music.note", theme: theme)
     }
 }
 
@@ -177,31 +166,38 @@ struct MusicSettingsLinkRow<Label: View>: View {
                 .frame(width: 16)
                 .accessibilityHidden(true)
         }
-        .frame(minHeight: 44)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
 }
 
+struct MusicSettingsDivider: View {
+    let theme: PageTheme
+
+    var body: some View {
+        Rectangle()
+            .fill(Color(uiColor: UIColor(theme.settings.separator)))
+            .frame(height: SettingsVisualMetrics.separatorHeight)
+            .accessibilityHidden(true)
+    }
+}
+
 struct MusicSettingsRowStyle: ViewModifier {
     let theme: PageTheme
+    let first, last: Bool
 
     func body(content: Content) -> some View {
         content
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-            .listRowSeparatorTint(Color(uiColor: UIColor(theme.settings.separator)))
-            .listRowBackground(
-                Color(uiColor: UIColor(theme.settings.surface))
-                    .overlay {
-                        Rectangle().strokeBorder(
-                            LinearGradient(colors: [0.55, 0.72, 1].map {
-                                Color(uiColor: UIColor(theme.settings.border)).opacity($0)
-                            }, startPoint: .top, endPoint: .bottom),
-                            lineWidth: 0.7
-                        )
-                    }
-            )
+            .font(.body)
+            .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
+            .padding(.horizontal, SettingsVisualMetrics.rowHorizontalPadding)
+            .padding(.vertical, SettingsVisualMetrics.rowVerticalPadding)
+            .frame(maxWidth: .infinity, minHeight: SettingsVisualMetrics.rowHeight,
+                   alignment: .leading)
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(SettingsRowBackground(theme: theme, first: first, last: last,
+                showsSeparator: !last))
     }
 }
 
@@ -210,11 +206,12 @@ struct MusicSettingsListStyle: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .listStyle(.insetGrouped)
+            .listStyle(.grouped)
             .scrollContentBackground(.hidden)
-            .contentMargins(.horizontal, 16, for: .scrollContent)
-            .listSectionSpacing(24)
-            .environment(\.defaultMinListRowHeight, 56)
+            .contentMargins(.horizontal, SettingsVisualMetrics.cardHorizontalInset,
+                            for: .scrollContent)
+            .listSectionSpacing(SettingsVisualMetrics.sectionSpacing)
+            .environment(\.defaultMinListRowHeight, SettingsVisualMetrics.rowHeight)
             .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
             .tint(Color(uiColor: UIColor(theme.settings.accent)))
             .background(Color.clear)

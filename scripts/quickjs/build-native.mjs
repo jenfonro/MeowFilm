@@ -8,6 +8,7 @@ import {
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dependencyCacheRoot, downloadDependency } from '../dependency-download.mjs';
+import { lockedNodeHeaders, nativeSourceInputs } from './native-inputs.mjs';
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -20,6 +21,8 @@ export const loadedBuildInputs = [
     sha256: createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex') },
   { path: 'scripts/dependency-download.mjs',
     sha256: createHash('sha256').update(await readFile(new URL('../dependency-download.mjs', import.meta.url))).digest('hex') },
+  { path: 'scripts/quickjs/native-inputs.mjs',
+    sha256: createHash('sha256').update(await readFile(fileURLToPath(new URL('./native-inputs.mjs', import.meta.url)))).digest('hex') },
 ];
 const cache = resolve(root, policy.build.cache);
 const sha256 = data => createHash('sha256').update(data).digest('hex');
@@ -281,7 +284,7 @@ export async function sdkDependencyInputs() {
   // Preserve each workspace's actual resolution, including its nested acorn version.
   for (const manifest of workspaceManifests) await visit(manifest);
   // Build tools and explicit SDK plugin/version-check imports resolve from this script.
-  for (const name of ['node-gyp', 'esbuild', 'iconv-lite', 'buffer', 'whatwg-url', 'linkedom']) {
+  for (const name of ['node-gyp', 'esbuild']) {
     const manifest = await resolveManifest(name, require);
     if (!manifest) throw new Error(`Missing SDK dependency: ${name}`);
     await visit(manifest);
@@ -346,9 +349,7 @@ async function buildNative() {
   const trackedPaths = [
     'package.json', 'package-lock.json', ...policy.mandatoryInputs,
     'scripts/quickjs/build-source-sdk.mjs', ...nativeInputs, ...sourceInputs,
-    ...Object.values(policy.sources).flatMap(source => [source.archivePath, source.license.path]),
-    ...policy.patches.map(patch => patch.path),
-    ...Object.values(policy.sources).flatMap(source => source.unicodeLicense ? [source.unicodeLicense.path] : []),
+    ...nativeSourceInputs(policy), ...policy.patches.map(patch => patch.path),
     ...sdkCandidates,
   ];
   // Snapshot source/lock/tool inputs BEFORE any native compilation or SDK bundling.
@@ -356,13 +357,14 @@ async function buildNative() {
   const beforeMap = new Map(before.map(input => [input.path, input.sha256]));
   await unchanged(loadedBuildInputs);
   const { buildSourceSDK } = await import('./build-source-sdk.mjs');
-  const nodeArchive = resolve(root, policy.nodeHeaders.archivePath);
-  await downloadDependency(policy.nodeHeaders, { snapshot: nodeArchive });
-  const headerArchiveInput = await hashInputs([policy.nodeHeaders.archivePath]);
+  const nodeHeaders = lockedNodeHeaders(policy);
+  const nodeArchive = resolve(root, nodeHeaders.archivePath);
+  await downloadDependency(nodeHeaders, { snapshot: nodeArchive });
+  const headerArchiveInput = await hashInputs([nodeHeaders.archivePath]);
   const gyp = resolve(dirname(gypPackage), 'bin/node-gyp.js');
   const gypCache = nodeGypCache(gypPackage);
   headerCache = gypCache.directory;
-  const headerRoot = resolve(gypCache.directory, policy.nodeHeaders.version);
+  const headerRoot = resolve(gypCache.directory, nodeHeaders.version);
   const devdir = `--devdir=${gypCache.directory}`;
   // node-gyp owns its version/architecture layout; --tarball pins the exact input.
   await run(process.execPath, [gyp, 'install', '--ensure', devdir, `--tarball=${nodeArchive}`],
@@ -428,10 +430,8 @@ async function buildNative() {
   const paths = [
     'package.json', 'package-lock.json', ...policy.mandatoryInputs,
     'scripts/quickjs/build-source-sdk.mjs', ...nativeInputs, ...sourceInputs, ...sdkInputs,
-    ...Object.values(policy.sources).flatMap(source => [source.archivePath, source.license.path]),
-    ...policy.patches.map(patch => patch.path),
-    ...Object.values(policy.sources).flatMap(source => source.unicodeLicense ? [source.unicodeLicense.path] : []),
-    policy.nodeHeaders.archivePath, ...sdkDependencies,
+    ...nativeSourceInputs(policy), ...policy.patches.map(patch => patch.path),
+    nodeHeaders.archivePath, ...sdkDependencies,
   ];
   const sdkHashes = new Map(sdkResult.inputs.map(input => [input.path, input.sha256]));
   const inputs = await hashInputs(paths);
@@ -450,7 +450,7 @@ async function buildNative() {
     sources: Object.fromEntries(Object.entries(policy.sources).map(([name, { version, commit, url, sha256 }]) =>
       [name, { version, commit, url, sha256 }])),
     inputs, artifact: await artifact(policy.artifact.path), sdk,
-    nodeHeaders: { ...policy.nodeHeaders },
+    nodeHeaders,
     nodeHeaderFiles: headers.inputs,
     sourceTrees: Object.fromEntries(Object.entries(policy.sources).map(([name, source]) =>
       [name, { path: source.sourcePath, files: sourceInputs.filter(path => path.startsWith(`${source.sourcePath}/`)) }])),

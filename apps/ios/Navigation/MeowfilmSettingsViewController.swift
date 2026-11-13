@@ -12,7 +12,7 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
     var openCache: (() -> Void)?
     private let resetUserData: (@MainActor () async throws -> Void)?
     private var requestingReset = false
-    private let table = UITableView(frame: .zero, style: .insetGrouped)
+    private let table = SettingsTableView()
 
     init(themeProvider: any PageThemeProviding, resetUserData: (@MainActor () async throws -> Void)? = nil) {
         self.resetUserData = resetUserData
@@ -22,7 +22,7 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        table.backgroundColor = .clear; table.dataSource = self; table.delegate = self
+        table.dataSource = self; table.delegate = self
         table.rowHeight = UITableView.automaticDimension; table.estimatedRowHeight = 56
         view.addSubview(table); table.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -42,7 +42,6 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
     func numberOfSections(in tableView: UITableView) -> Int { resetUserData == nil ? 2 : 3 }
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 0 ? 3 : section == 1 ? 2 : 1 }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         let label: String, identifier: String
         switch (indexPath.section, indexPath.row) {
         case (0, 0): label = "音乐设置"; identifier = "settings.category.music"
@@ -52,18 +51,11 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
         case (1, _): label = "缓存管理"; identifier = "settings.cache"
         default: label = requestingReset ? "正在记录清除请求…" : "清空本机数据"; identifier = "settings.clearUserData"
         }
-        var content = cell.defaultContentConfiguration()
-        content.text = label
-        content.textProperties.font = .preferredFont(forTextStyle: .body)
-        content.textProperties.color = UIColor(indexPath.section == 2 ? theme.settings.danger : theme.settings.ink)
-        content.textProperties.numberOfLines = 0
-        cell.contentConfiguration = content
-        cell.backgroundColor = .clear
-        cell.backgroundView = SettingsRowBackgroundView(theme: theme,
-            first: indexPath.row == 0, last: indexPath.row == tableView.numberOfRows(inSection: indexPath.section) - 1)
-        cell.selectedBackgroundView = SettingsRowBackgroundView(theme: theme, first: indexPath.row == 0,
-            last: indexPath.row == tableView.numberOfRows(inSection: indexPath.section) - 1, selected: true)
+        let isLast = indexPath.row == tableView.numberOfRows(inSection: indexPath.section) - 1
+        let cell = SettingsTableCell(title: label, theme: theme,
+            first: indexPath.row == 0, last: isLast, destructive: indexPath.section == 2)
         cell.accessoryType = indexPath.section == 2 ? .none : .disclosureIndicator
+        cell.selectionStyle = indexPath.section == 2 && requestingReset ? .none : .default
         cell.accessibilityTraits = .button
         cell.isAccessibilityElement = true
         cell.accessibilityLabel = label; cell.accessibilityIdentifier = identifier

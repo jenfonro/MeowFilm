@@ -434,3 +434,9 @@ SameSite=None 采用用户接受的公开API投影边界；None精确延续、�
 [verification-notes.md](../../tmp/test-results/novel/verification-notes.md)。
 未使用第三方真实书源、账号、支付或用户真机；未做长时间后台恢复与发行安装，
 不承诺全部未知第三方／QYSG扩展。
+
+## 原生书源与替换管理
+
+管理与导入行为、三协议字段和净化表单遵循[共同管理契约](../common/novel/reading.md#书源与替换管理)。
+
+`NovelSourcesViewController`、`NovelRulesViewController` 使用 MeowUI 的 `ManagementListView`、`ManagementFormView`、`ManagementDialog` 与 `ManagementImportView`。管理／编辑页使用公共 App 页头，页面背景和表面遵循[设置语义配色](architecture.md#设置语义配色)。来源管理保留原有搜索／圆形工具栏、24 点外距、22 点整表圆角、紧凑行和底部批量栏，仅做主题与必要的动态字体／窄屏适配；同一列表供视频源、音源复用。源字段横向标签与垂直表单分离，键盘不覆盖输入。地址与导入确认以居中浮窗覆盖当前页面，保留后方内容而不另建空白页面；取消等待当前操作实际排空。排版数字／颜色输入也复用该浮窗，无效值留在窗内提示；二维码图片使用系统 CoreImage 解码。

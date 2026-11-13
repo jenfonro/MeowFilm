@@ -201,7 +201,7 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         }
     }
 
-    @MainActor func testNativeServiceDiscoveryCASViewModelPlayerAndFactOwnerAreOneChain() async throws {
+    @MainActor func testNativeServiceDiscoveryKeepsQueueAndUsesExistingPlayerAndFactOwner() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store(), scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["wy"]) // Seed is tx; the existing-only picker cannot resolve it.
         let service = try await NativeMusicFixture.service(store, scripts: scripts,
@@ -210,15 +210,21 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         var requests: [MusicPlaybackDestination] = []
         model.onRequestPresentation = { requests.append($0) }
         await model.load(); XCTAssertTrue(player.resources.isEmpty)
+        let original = try await service.read(), writes = store.snapshot().2, queue = model.queue
         await model.togglePlayback()
         let calls = await scripts.calls(), snapshot = try await service.queue()
         XCTAssertEqual(calls.count, 1, "No choose/second resolve after discovery")
         XCTAssertEqual(calls.first?.siteID, "wy")
-        XCTAssertEqual(model.state.revision, 2); XCTAssertEqual(model.queue, snapshot.entries)
+        XCTAssertEqual(model.state.revision, original.queue["revision"].int)
+        XCTAssertEqual(model.queue, queue)
+        XCTAssertEqual(snapshot.entries.map(\.id), queue.map(\.id))
+        XCTAssertEqual(snapshot.entries[0].track.sources.map(\.platform), ["tx", "wy"])
+        let prepared = try await service.read()
+        XCTAssertEqual(prepared.queue, original.queue)
         XCTAssertEqual(model.position, 0, "Cold restoration does not restore playback time")
         XCTAssertEqual(player.resources.count, 1)
         XCTAssertTrue(requests.isEmpty); XCTAssertFalse(model.isResolving)
-        XCTAssertEqual(store.snapshot().2, 1)
+        XCTAssertEqual(store.snapshot().2, writes)
         let before = try await service.playedSongs(); XCTAssertTrue(before.isEmpty)
         let resource = try XCTUnwrap(model.activeResourceID), occurrence = try XCTUnwrap(model.activeOccurrenceID)
         model.onPlayback(.init(attemptId: String(resource.dropFirst(6)), occurrenceId: occurrence,

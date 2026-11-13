@@ -79,7 +79,8 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
     const account = accounts.get(id);
     const configured = Object.entries(account.credentials).filter(([, value]) => value !== '' && value !== 0)
       .map(([name]) => name);
-    return { provider: id, revision: account.revision, configured: configured.length > 0, fields: configured };
+    return { provider: id, revision: account.revision, configured: configured.length > 0, fields: configured,
+      status: configured.length ? account.status ?? 'signedIn' : 'signedOut' };
   }
   function persist(id, next) {
     const nextDocument = { version: 1, accounts: { ...document.accounts,
@@ -131,7 +132,17 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
       },
       async refresh() {
         requireValue(typeof provider.refresh === 'function', 'UNSUPPORTED_OPERATION');
-        await together(provider, account, 'refresh', signal, async ctx => provider.refresh({}, ctx));
+        await together(provider, account, 'refresh', signal, async ctx => {
+          try {
+            await provider.refresh({}, ctx);
+            assertCurrent(id, account, ctx.signal);
+            account.status = 'signedIn';
+          } catch (error) {
+            assertCurrent(id, account, ctx.signal);
+            if (error?.code === 'AUTH_REQUIRED' || error?.code === 'AUTH_FAILED') account.status = 'expired';
+            throw error;
+          }
+        });
         assertCurrent(id, account, signal);
         return clone(account.credentials);
       },

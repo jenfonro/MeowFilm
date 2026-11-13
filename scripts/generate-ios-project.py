@@ -58,7 +58,8 @@ def generate():
     test_sources = source_paths(ROOT, ("UITests",))
     runtime_test_sources = source_paths(ROOT, ("RuntimeTests",))
     all_sources = {p.relative_to(ROOT / "apps/ios").as_posix()
-                   for p in (ROOT / "apps/ios").rglob("*.swift")}
+                   for p in (ROOT / "apps/ios").rglob("*.swift")
+                   if p.relative_to(ROOT / "apps/ios").parts[0] != ".cache"}
     if all_sources != set(app_sources + test_sources + runtime_test_sources):
         raise ValueError("App Swift sources must belong to an application responsibility or a test directory")
     bundle_identifier = "dev.meowfilm.aggregate"

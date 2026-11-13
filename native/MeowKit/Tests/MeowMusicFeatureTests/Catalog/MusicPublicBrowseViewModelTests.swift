@@ -448,6 +448,30 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         await model.perform(intent: cancelled) { throw CancellationError() }
         XCTAssertNil(model.actionError); XCTAssertNil(model.actionDiagnosticID)
     }
+    func testActionErrorAcknowledgementConsumesOnlyThatFailureAndAllowsSameNewFailure() async throws {
+        let service = MusicPublicBrowseFeatureService(), model = model(service)
+        await model.refresh()
+        let first = try XCTUnwrap(model.makeActionIntent())
+        await model.perform(intent: first) { throw MusicServiceError.staleResult }
+        let oldID = try XCTUnwrap(model.actionErrorID)
+        // Covering and returning must retain an error that was never presented.
+        model.setDisplayVisible(false); model.setDisplayVisible(true)
+        await model.loadIfNeeded()
+        XCTAssertEqual(model.actionErrorID, oldID)
+        model.dismissActionError(id: oldID)
+        XCTAssertNil(model.actionError); XCTAssertNil(model.actionDiagnosticID)
+        XCTAssertNil(model.actionErrorID)
+        let second = try XCTUnwrap(model.makeActionIntent())
+        await model.perform(intent: second) { throw MusicServiceError.staleResult }
+        let newID = try XCTUnwrap(model.actionErrorID)
+        XCTAssertNotEqual(newID, oldID)
+        model.dismissActionError(id: oldID)
+        XCTAssertEqual(model.actionErrorID, newID)
+        XCTAssertEqual(model.actionError, .staleResult)
+        model.dismissActionError(id: newID)
+        await model.loadIfNeeded()
+        XCTAssertNil(model.actionError); XCTAssertNil(model.actionErrorID)
+    }
     func testCatalogPlatformsDoNotInventAccountsAndExistingCollectionIDsStayStable() async throws {
         XCTAssertEqual(MusicPublicBrowsePlatform.allCases.map(\.rawValue), ["wy", "tx", "kg", "kw", "mg"])
         XCTAssertEqual(MusicAccountPlatform.allCases.map(\.rawValue), ["wy", "tx", "kg"])

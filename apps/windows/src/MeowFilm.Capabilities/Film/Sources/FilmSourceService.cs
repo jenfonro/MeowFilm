@@ -33,11 +33,13 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     {
         ArgumentNullException.ThrowIfNull(runtime);
         ArgumentNullException.ThrowIfNull(store);
+        Runtime = runtime;
         transport = new(runtime);
         recovery = runtime as IRuntimeRecovery;
         this.store = store;
     }
 
+    internal IRuntimeClient Runtime { get; }
     public IReadOnlyList<FilmCatSource> Cats => Volatile.Read(ref snapshot).Cats;
     public IReadOnlyList<FilmVideoSource> Videos => Volatile.Read(ref snapshot).Videos;
     public string? RuntimeError => Volatile.Read(ref runtimeError);

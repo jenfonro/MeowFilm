@@ -131,7 +131,7 @@ async function assertRealBusiness(client) {
     cat: ['start', 'status', 'refresh', 'install', 'import', 'edit', 'update', 'restart',
       'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
     source: ['load', 'unload', 'invoke', 'status', 'close',
-      'library.list', 'library.get', 'library.import', 'library.save', 'library.update', 'library.remove',
+      'library.list', 'library.get', 'library.previewImport', 'library.import', 'library.save', 'library.update', 'library.remove',
       'library.export', 'library.invoke', 'library.image', 'library.releaseImage', 'web.pending', 'web.respond', 'rules.process'],
     pan: ['providers', 'settings.get', 'settings.set', 'settings.clear', 'login.start',
       'login.poll', 'login.cancel', 'list', 'prepare', 'play', 'refresh'],

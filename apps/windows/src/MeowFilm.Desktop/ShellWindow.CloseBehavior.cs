@@ -126,8 +126,9 @@ public sealed partial class ShellWindow
         Hide();
     }
 
-    private void RestoreFromTray()
+    public void RestoreFromTray()
     {
+        Dispatcher.VerifyAccess();
         if (_isClosed || _sessionEnding) return;
         var restore = _trayRestoreState;
         bool restoreState = _hiddenToTray || WindowState == WindowState.Minimized;

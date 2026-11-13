@@ -5,153 +5,145 @@ import MeowUI
 import MeowRuntime
 
 @MainActor
-final class NovelSourcesViewController: NovelTablePage, UIDocumentPickerDelegate, UISearchBarDelegate {
-    private let feature: NovelFeature
-    private let filter = UISearchBar()
-    private var selected: Set<String> = []
-    private var visible: [NovelSource] { feature.sources.filter { filter.text?.isEmpty != false || [$0.name, $0.group, $0.sourceUrl].contains { $0.localizedCaseInsensitiveContains(filter.text ?? "") } } }
-    init(feature: NovelFeature, themeProvider: any PageThemeProviding) { self.feature = feature; super.init(themeProvider: themeProvider); pageTitle = "书源管理" }
+final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDelegate {
+    private var query = "", sort = 0, reverse = false, group: String?, family: String?, status = 0
+    private let sortButton = ManagementListView.icon("management.sort", label: "排序")
+    private let groupButton = ManagementListView.icon("management.group", label: "分组与协议")
+    private let moreButton = ManagementListView.icon("management.more", label: "更多")
+    private var groups: [String] { Array(Set(feature.sources.flatMap { NovelGroups.split($0.group) })).sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
+    private var visible: [NovelSource] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        var result = feature.sources.filter { source in
+            (family == nil || family == source.protocol) && (group == nil || NovelGroups.split(source.group).contains(group!)) &&
+            (status == 0 || status == 1 && source.enabled || status == 2 && !source.enabled || status == 3 && source.enabledExplore || status == 4 && !source.enabledExplore) &&
+            (query.isEmpty || [source.name, source.sourceUrl, source.group].contains { $0.localizedCaseInsensitiveContains(query) })
+        }
+        result.sort { a, b in
+            switch sort {
+            case 1: if (a.weight ?? 0) != (b.weight ?? 0) { return (a.weight ?? 0) > (b.weight ?? 0) }
+            case 3: if a.sourceUrl != b.sourceUrl { return a.sourceUrl.localizedStandardCompare(b.sourceUrl) == .orderedAscending }
+            case 4: if (a.lastUpdateTime ?? 0) != (b.lastUpdateTime ?? 0) { return (a.lastUpdateTime ?? 0) > (b.lastUpdateTime ?? 0) }
+            case 5: if (a.respondTime ?? 180000) != (b.respondTime ?? 180000) { return (a.respondTime ?? 180000) < (b.respondTime ?? 180000) }
+            case 6: if a.enabled != b.enabled { return a.enabled }
+            default: break
+            }
+            if sort == 0, a.order != b.order { return a.order < b.order }
+            let name = a.name.localizedStandardCompare(b.name)
+            return name == .orderedSame ? a.id < b.id : name == .orderedAscending
+        }
+        return reverse ? result.reversed() : result
+    }
+    override init(feature: NovelFeature, themeProvider: any PageThemeProviding) { super.init(feature: feature, themeProvider: themeProvider); pageTitle = "书源管理" }
     override func viewDidLoad() {
         super.viewDidLoad(); view.accessibilityIdentifier = "novel.sources"
-        filter.delegate = self; filter.placeholder = "搜索书源、分组"; filter.sizeToFit(); table.tableHeaderView = filter
-        pageHeader.setTrailing([PageHeaderTextButton(title: "操作") { [weak self] in self?.actions() }])
-        observe(feature) { [weak self] in self?.render() }; render()
+        manager.search.placeholder = "搜索书源"; manager.onSearch = { [weak self] in self?.query = $0; self?.render() }
+        for button in [sortButton, groupButton, moreButton] { button.showsMenuAsPrimaryAction = true; manager.tools.addArrangedSubview(button) }
+        manager.onSelection = { [weak self] in self?.menus() }
+        manager.onDelete = { [weak self] in guard let self else { return }; remove(feature.sources.filter { self.manager.selected.contains($0.id) }) }
+        render()
     }
-    override func pageDidBecomeVisible() { refresh() }
-    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) { render() }
-    private func refresh() { perform { [feature] in try await feature.refreshSources() } }
-    private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
-        runPageTask { [weak self] in do { try await operation(); self?.render() } catch { self?.showError(error.localizedDescription) } }
+    override func pageDidBecomeVisible() { perform { [feature] in try await feature.refreshSources() } }
+    override func render() {
+        manager.setRows(visible.map { source in .init(id: source.id, title: source.name,
+            detail: ([NovelSourceProtocol(rawValue: source.protocol)?.title ?? source.protocol, source.group, source.errorCode ?? ""].filter { !$0.isEmpty }).joined(separator: " · "), enabled: source.enabled, failed: source.errorCode != nil,
+            edit: { [weak self] in self?.edit(source) }, toggle: { [weak self] value in self?.update(source, ["enabled": .bool(value)]) }, menu: rowMenu(source)) },
+            total: feature.sources.count, validIDs: Set(feature.sources.map(\.id)), emptyMessage: feature.sources.isEmpty ? "暂无书源，请先导入" : "没有匹配的书源")
+        menus()
     }
-    private func render() {
-        selected.formIntersection(Set(feature.sources.map(\.id)))
-        rows = visible.map { source in
-            .init(title: (selected.contains(source.id) ? "✓ " : "") + source.name,
-                detail: [source.enabled ? "启用" : "停用", source.enabledExplore ? "发现" : "", source.group].filter { !$0.isEmpty }.joined(separator: " · ")) { [weak self] in self?.sourceActions(source) }
-        }
+    private func menus() {
+        let names = ["手动", "智能", "名称", "地址", "更新时间", "响应时间", "启用"]
+        sortButton.menu = UIMenu(children: [action("反序", selected: reverse) { [weak self] in self?.reverse.toggle(); self?.render() }] + names.enumerated().map { index, title in action(title, selected: sort == index) { [weak self] in self?.sort = index; self?.render() } })
+        let protocols = UIMenu(title: "书源协议", children: [action("全部协议", selected: family == nil) { [weak self] in self?.family = nil; self?.render() }] + NovelSourceProtocol.allCases.map { value in action(value.title, selected: family == value.rawValue) { [weak self] in self?.family = value.rawValue; self?.render() } })
+        groupButton.menu = UIMenu(children: [action("分组管理") { [weak self] in self?.manageGroups() }, protocols,
+            action("全部分组", selected: group == nil && status == 0) { [weak self] in self?.group = nil; self?.status = 0; self?.render() }] + ["已启用", "已禁用", "已启用发现", "已禁用发现"].enumerated().map { index, title in action(title, selected: status == index + 1) { [weak self] in self?.status = index + 1; self?.group = nil; self?.render() } } + groups.map { name in action(name, selected: group == name) { [weak self] in self?.group = name; self?.status = 0; self?.render() } })
+        moreButton.menu = UIMenu(children: [UIMenu(title: "新建书源", children: NovelSourceProtocol.allCases.map { value in action(value.title) { [weak self] in self?.newSource(value) } }), action("本地导入") { [weak self] in self?.fileImport() }, action("网络导入") { [weak self] in self?.networkImport() }, action("粘贴导入") { [weak self] in guard let self else { return }; perform { [weak self] in guard let self else { return }; showPreview(try await feature.sourcesClient.previewImport(text: UIPasteboard.general.string ?? "")) } }, action("导出书源") { [weak self] in self?.export(self?.feature.sources ?? []) }])
+        manager.footerMore.menu = UIMenu(children: [action("导出选中书源") { [weak self] in guard let self else { return }; export(feature.sources.filter { self.manager.selected.contains($0.id) }) }, action("启用所选") { [weak self] in self?.batchEnabled(true) }, action("禁用所选") { [weak self] in self?.batchEnabled(false) }])
     }
-    private func sheet(_ title: String, actions: [UIAlertAction]) {
-        let sheet = UIAlertController(title: title, message: nil, preferredStyle: .actionSheet)
-        for action in actions { sheet.addAction(action) }; sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
-        sheet.popoverPresentationController?.sourceView = view; present(sheet, animated: true)
+    private func rowMenu(_ source: NovelSource) -> UIMenu {
+        var actions = [action("置顶") { [weak self] in self?.move(source, top: true) }, action("置底") { [weak self] in self?.move(source, top: false) }]
+        if source.hasExplore == true { actions.append(action(source.enabledExplore ? "禁用发现" : "启用发现") { [weak self] in self?.update(source, ["enabledExplore": .bool(!source.enabledExplore)]) }) }
+        if source.enabled && source.actions.contains("login") { actions.append(action("登录") { [weak self] in self?.perform { [weak self] in _ = try await self?.feature.sourcesClient.invoke(source, action: "login") } }) }
+        actions += [action("导出") { [weak self] in self?.export([source]) }, action("删除", destructive: true) { [weak self] in self?.remove([source]) }]
+        return UIMenu(children: actions)
     }
-    private func actions() {
-        sheet("书源管理", actions: [
-            UIAlertAction(title: "从文件导入", style: .default) { [weak self] _ in
-                guard let self else { return }; let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json, .plainText], asCopy: true)
-                picker.allowsMultipleSelection = true; picker.delegate = self; present(picker, animated: true)
-            },
-            UIAlertAction(title: "从 URL 导入", style: .default) { [weak self] _ in self?.importURL() },
-            UIAlertAction(title: "粘贴导入", style: .default) { [weak self] _ in
-                guard let self else { return }
-                let page = NovelJSONEditor(title: "导入书源", text: "", themeProvider: themeProvider) { [weak self] text in
-                    guard let self else { return }; let receipt = try await feature.sourcesClient.importSources(text: text)
-                    try await feature.refreshSources()
-                    if !receipt.failures.isEmpty { throw NovelError.importFailures(receipt.failures.map { "\($0.index + 1) · \($0.name) · \($0.code)" }) }
-                }; navigationController?.pushViewController(page, animated: true)
-            },
-            UIAlertAction(title: "全选 / 取消全选", style: .default) { [weak self] _ in
-                guard let self else { return }; let ids = Set(visible.map(\.id)); selected = ids.isSubset(of: selected) ? selected.subtracting(ids) : selected.union(ids); render()
-            },
-            UIAlertAction(title: "导出", style: .default) { [weak self] _ in self?.export() },
-            UIAlertAction(title: "启用所选", style: .default) { [weak self] _ in self?.batch(enabled: true) },
-            UIAlertAction(title: "停用所选", style: .default) { [weak self] _ in self?.batch(enabled: false) },
-            UIAlertAction(title: "删除所选", style: .destructive) { [weak self] _ in self?.confirmRemove(self?.feature.sources.filter { self?.selected.contains($0.id) == true } ?? []) }])
+    private func mutate(_ operation: @escaping @MainActor () async throws -> Void) async throws {
+        do { try await operation() }
+        catch { try? await feature.refreshSources(); throw error }
+        try await feature.refreshSources()
     }
-    private func sourceActions(_ source: NovelSource) {
-        sheet(source.name, actions: [
-            UIAlertAction(title: selected.contains(source.id) ? "取消选择" : "选择", style: .default) { [weak self] _ in
-                guard let self else { return }; if selected.contains(source.id) { selected.remove(source.id) } else { selected.insert(source.id) }; render()
-            },
-            UIAlertAction(title: "编辑", style: .default) { [weak self] _ in self?.edit(source) },
-            UIAlertAction(title: "名称", style: .default) { [weak self] _ in self?.metadata(source, field: "name", title: "名称", value: source.name) },
-            UIAlertAction(title: "分组", style: .default) { [weak self] _ in self?.metadata(source, field: "group", title: "分组", value: source.group) },
-            UIAlertAction(title: "排序", style: .default) { [weak self] _ in
-                self?.textPrompt(title: "排序", value: String(format: "%g", source.order), keyboard: .numbersAndPunctuation) { [weak self] value in
-                    guard let self, let order = Double(value), order.isFinite else { self?.showError("排序数值无效"); return }
-                    perform { [feature] in try await feature.sourcesClient.update(source, patch: ["order": .number(order)]); try await feature.refreshSources() }
+    private func update(_ source: NovelSource, _ patch: RuntimeObject) { perform { [weak self, feature] in try await self?.mutate { try await feature.sourcesClient.update(source, patch: patch) } } }
+    private func move(_ source: NovelSource, top: Bool) {
+        let ordered = feature.sources.sorted { $0.order < $1.order }.filter { $0.id != source.id }
+        let next = top ? [source] + ordered : ordered + [source]
+        guard let edge = top ? feature.sources.map(\.order).min() : feature.sources.map(\.order).max() else { return }
+        perform { [weak self, feature] in
+            try await self?.mutate {
+                // JSON safe integers are the runtime's ordering contract.
+                if edge > -9007199254740991 && edge < 9007199254740991 {
+                    try await feature.sourcesClient.update(source, patch: ["order": .number(Double(edge + (top ? -1 : 1)))])
+                } else {
+                    for (index, item) in next.enumerated() { try await feature.sourcesClient.update(item, patch: ["order": .number(Double(index))]) }
                 }
-            },
-            UIAlertAction(title: source.enabled ? "停用" : "启用", style: .default) { [weak self] _ in
-                self?.perform { [weak self] in guard let self else { return }; try await feature.sourcesClient.update(source, patch: ["enabled": .bool(!source.enabled)]); try await feature.refreshSources() }
-            },
-            UIAlertAction(title: source.enabledExplore ? "关闭发现" : "启用发现", style: .default) { [weak self] _ in
-                self?.perform { [weak self] in guard let self else { return }; try await feature.sourcesClient.update(source, patch: ["enabledExplore": .bool(!source.enabledExplore)]); try await feature.refreshSources() }
-            },
-            loginAction(source),
-            UIAlertAction(title: "导出", style: .default) { [weak self] _ in self?.export([source]) },
-            UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in self?.confirmRemove([source]) }])
-    }
-    private func loginAction(_ source: NovelSource) -> UIAlertAction {
-        let action = UIAlertAction(title: "登录", style: .default) { [weak self] _ in
-                self?.perform { [weak self] in guard let self else { return }; _ = try await feature.sourcesClient.invoke(source, action: "login") }
-        }
-        action.isEnabled = source.enabled && source.actions.contains("login")
-        return action
-    }
-    private func metadata(_ source: NovelSource, field: String, title: String, value: String) {
-        textPrompt(title: title, value: value) { [weak self] text in
-            self?.perform { [weak self] in guard let self else { return }; try await feature.sourcesClient.update(source, patch: RuntimeObject([field: .string(text)])); try await feature.refreshSources() }
+            }
         }
     }
+    private func batchEnabled(_ enabled: Bool) {
+        let selected = feature.sources.filter { self.manager.selected.contains($0.id) }
+        perform { [weak self, feature] in try await self?.mutate { for item in selected { try await feature.sourcesClient.update(item, patch: ["enabled": .bool(enabled)]) } } }
+    }
+    private func remove(_ sources: [NovelSource]) {
+        confirmDelete(sources.count) { [feature, weak self] in
+            defer { self?.render() }
+            do { for source in sources { try await feature.sourcesClient.remove(source) } }
+            catch { try? await feature.refreshSources(); throw error }
+            try await feature.refreshSources()
+        }
+    }
+    private func export(_ sources: [NovelSource]) { perform { [weak self] in guard let self else { return }; try share(try await feature.sourcesClient.export(sources), name: "book-sources.json") } }
+    private func newSource(_ protocol: NovelSourceProtocol) { do { let page = try NovelSourceEditor(source: nil, protocol: `protocol`, definition: nil, feature: feature, themeProvider: themeProvider); navigationController?.pushViewController(page, animated: true) } catch { showError(error.localizedDescription) } }
     private func edit(_ source: NovelSource) {
         perform { [weak self] in
-            guard let self else { return }; let definition = try await feature.sourcesClient.definition(source)
-            guard !Task.isCancelled else { return }
-            let editor = NovelJSONEditor(title: source.name, text: definition, themeProvider: themeProvider) { [feature] text in
-                try await feature.sourcesClient.save(source, definition: text); try await feature.refreshSources()
-            }; navigationController?.pushViewController(editor, animated: true)
+            guard let self, let family = NovelSourceProtocol(rawValue: source.protocol) else { return }
+            let current = try await feature.sourcesClient.definition(source); try Task.checkCancellation()
+            let page = try NovelSourceEditor(source: current.source, protocol: family, definition: current.definition, feature: feature, themeProvider: themeProvider)
+            navigationController?.pushViewController(page, animated: true)
         }
     }
-    private func importURL() {
-        textPrompt(title: "书源 URL（多项用空格分隔）", value: "", keyboard: .URL) { [weak self] text in
-            self?.perform { [weak self] in
-                guard let self else { return }; var failures: [String] = []
-                for url in text.split(whereSeparator: \.isWhitespace).map(String.init) {
-                    do { let receipt = try await feature.sourcesClient.importSources(url: url); failures += receipt.failures.map { "\($0.index + 1) · \($0.name) · \($0.code)" } }
-                    catch { failures.append(error.localizedDescription) }
-                }
-                try await feature.refreshSources(); if !failures.isEmpty { showError(failures.joined(separator: "\n")) }
-            }
-        }
+    private func fileImport() { let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json, .plainText, .html], asCopy: true); picker.delegate = self; present(picker, animated: true) }
+    private func networkImport() {
+        var preview: NovelSourceImportPreview?
+        addressDialog(label: "书源地址", placeholder: "请输入网络书源地址", load: { [feature] url in preview = try await feature.sourcesClient.previewImport(url: url) }, completed: { [weak self] in if let preview { self?.showPreview(preview) } })
     }
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        perform { [weak self] in
-            guard let self else { return }; var failures: [String] = []
-            for url in urls {
-                do {
-                    let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    let text = try String(contentsOf: url, encoding: .utf8)
-                    let receipt = try await feature.sourcesClient.importSources(text: text, fileName: url.lastPathComponent)
-                    failures += receipt.failures.map { "\(url.lastPathComponent) · \($0.index + 1) · \($0.name) · \($0.code)" }
-                } catch { failures.append(url.lastPathComponent + " · " + error.localizedDescription) }
-            }
-            try await feature.refreshSources(); if !failures.isEmpty { showError(failures.joined(separator: "\n")) }
+        guard let url = urls.first else { return }
+        dismissPageModal(controller) { [weak self] in self?.perform { [weak self] in
+            guard let self else { return }; let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
+            let preview = try await feature.sourcesClient.previewImport(text: String(contentsOf: url, encoding: .utf8), fileName: url.lastPathComponent)
+            showPreview(preview)
+        } }
+    }
+    private func showPreview(_ preview: NovelSourceImportPreview) {
+        let dialog = ManagementDialog(title: "导入书源", action: "确定导入", themeProvider: themeProvider)
+        let selection = ManagementImportView(items: preview.items.map { .init(title: $0.name, detail: [NovelSourceProtocol(rawValue: $0.protocol)?.title ?? $0.protocol, $0.group].filter { !$0.isEmpty }.joined(separator: " · "), status: $0.exists ? "已存在" : "新增") })
+        dialog.body.addArrangedSubview(selection)
+        if !preview.failures.isEmpty { let label = UILabel(); label.text = preview.failures.map { "条目 \($0.index + 1) · \($0.code)" }.joined(separator: "\n"); label.numberOfLines = 0; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).danger) }; dialog.body.addArrangedSubview(label) }
+        var failures: [String] = []
+        dialog.submit = { [feature] in
+            guard !selection.selected.isEmpty else { throw NovelError.invalidRule(["请选择要导入的书源"]) }
+            let definitions = try preview.items.enumerated().filter { selection.selected.contains($0.offset) }.map { try RuntimeJSON.decode(Data($0.element.definition.utf8)) }
+            let receipt = try await feature.sourcesClient.importSources(text: String(decoding: RuntimeJSON.encode(.array(definitions)), as: UTF8.self))
+            try await feature.refreshSources(); failures = receipt.failures.map { "\($0.name) · \($0.code)" }; return true
         }
+        dialog.accepted = { [weak self] in if !failures.isEmpty { self?.showError(failures.joined(separator: "\n")) } }
+        present(dialog, animated: true)
     }
-    private func export(_ selection: [NovelSource]? = nil) {
-        let sources = selection ?? (selected.isEmpty ? feature.sources : feature.sources.filter { selected.contains($0.id) })
-        perform { [weak self] in guard let self else { return }; share(text: try await feature.sourcesClient.export(sources), name: "sources.json") }
-    }
-    private func batch(enabled: Bool) {
-        let sources = feature.sources.filter { selected.contains($0.id) }
-        perform { [weak self] in
-            guard let self else { return }; var failures: [String] = []
-            for source in sources { do { try await feature.sourcesClient.update(source, patch: ["enabled": .bool(enabled)]) } catch { failures.append(source.name + " · " + error.localizedDescription) } }
-            try await feature.refreshSources(); if !failures.isEmpty { showError(failures.joined(separator: "\n")) }
-        }
-    }
-    private func confirmRemove(_ sources: [NovelSource]) {
-        guard !sources.isEmpty else { return }
-        let alert = UIAlertController(title: "删除书源", message: sources.map(\.name).joined(separator: "\n"), preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in
-            self?.perform { [weak self] in
-                guard let self else { return }; var failures: [String] = []
-                for source in sources { do { try await feature.sourcesClient.remove(source) } catch { failures.append(source.name + " · " + error.localizedDescription) } }
-                try await feature.refreshSources(); if !failures.isEmpty { showError(failures.joined(separator: "\n")) }
-            }
-        }); present(alert, animated: true)
+    private func manageGroups() {
+        let selected = manager.selected
+        groupsPage(groups: { [self] in groups }, create: { [self, feature] name in
+            try await mutate { for source in feature.sources.filter({ selected.contains($0.id) }) { try await feature.sourcesClient.update(source, patch: ["group": .string(NovelGroups.replacing(source.group, old: "", new: name))]) } }
+        }, change: { [self, feature] old, next in
+            try await mutate { for source in feature.sources.filter({ NovelGroups.split($0.group).contains(old) }) { try await feature.sourcesClient.update(source, patch: ["group": .string(NovelGroups.replacing(source.group, old: old, new: next))]) } }
+        })
     }
 }
 #endif

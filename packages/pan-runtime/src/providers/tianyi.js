@@ -58,6 +58,30 @@ function canLogin(credentials) {
     && typeof credentials.password === 'string' && credentials.password.trim().length > 0;
 }
 
+async function confirmCookie(ctx) {
+  const original = ctx.credentials.cookie;
+  requireValue(typeof original === 'string' && original.trim(), 'NOT_CONFIGURED');
+  const jar = new CookieJar();
+  jar.set(`${cloud}/`, original.split(';').map(value => `${value.trim()}; Path=/`));
+  try {
+    const target = new URL('/api/portal/loginUrl.action', cloud);
+    target.search = new URLSearchParams({ redirectURL: `${cloud}/main.action` }).toString();
+    const response = await loginRequest(ctx, jar, target.href, {
+      authentication: true, headers: { Referer: `${cloud}/`, Accept: 'text/html,application/xhtml+xml' },
+    });
+    const terminal = url(response.url);
+    if (terminal.origin === authOrigin && terminal.pathname === '/api/logbox/separate/web/index.html') {
+      throw new PanError('AUTH_REQUIRED');
+    }
+    requireValue(terminal.origin === cloud && terminal.pathname === '/web/main', 'UPSTREAM_FORMAT');
+    const cookie = jar.header(`${cloud}/`);
+    if (cookie !== original) await ctx.updateCredentials({ cookie });
+    return { refreshed: true };
+  } finally {
+    jar.clear();
+  }
+}
+
 function shareInput(share) {
   requireValue(share && typeof share.url === 'string');
   requireValue(share.password === undefined || typeof share.password === 'string');
@@ -142,7 +166,7 @@ async function loginRequest(ctx, jar, value, options = {}) {
     requireValue(!seen.has(target.href), 'UPSTREAM_FORMAT');
     seen.add(target.href);
     const response = await ctx.http.request({
-      url: target.href, method, body, signal: ctx.signal,
+      url: target.href, method, body, signal: ctx.signal, redirect: 'manual',
       headers: {
         'User-Agent': ua, 'Accept-Encoding': 'identity',
         ...(body === undefined ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' }),
@@ -161,16 +185,18 @@ async function loginRequest(ctx, jar, value, options = {}) {
       target = next;
       continue;
     }
-    requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
+    requireValue(response.status >= 200 && response.status < 300,
+      options.authentication && response.status === 401 ? 'AUTH_REQUIRED' : 'UPSTREAM_HTTP');
     return { ...response, url: target.href };
   }
 }
 
 function loginJSON(response) {
   const value = record(parseJSON(response.body));
+  requireValue(/^-?\d+$/.test(text(value.result).trim()), 'UPSTREAM_FORMAT');
   if (!resultOK(value.result)) {
     if (/captcha|验证码|validatecode|challenge|短信|otp/i.test(text(value.msg))) throw new PanError('CHALLENGE_REQUIRED');
-    throw new PanError('AUTH_FAILED');
+    throw new PanError('UPSTREAM_ERROR');
   }
   return value;
 }
@@ -228,8 +254,8 @@ export const tianyi = {
   modes: ['streaming', 'download'],
 
   async refresh({}, ctx) {
+    if (!canLogin(ctx.credentials)) return confirmCookie(ctx);
     const { username, password } = ctx.credentials;
-    requireValue(canLogin(ctx.credentials), 'NOT_CONFIGURED');
     const jar = new CookieJar();
     try {
       const encryption = loginJSON(await loginRequest(ctx, jar,
@@ -253,7 +279,7 @@ export const tianyi = {
       const paramId = identity(app.paramId);
       const prefix = text(config.pre).trim() || '{RSA}';
       const submit = loginJSON(await loginRequest(ctx, jar, `${authOrigin}/api/logbox/oauth2/loginSubmit.do`, {
-        method: 'POST', headers, form: {
+        method: 'POST', headers, authentication: true, form: {
           appKey: appId, version: 'v2.0', apToken: '', accountType: text(app.accountType).trim() || '01',
           userName: prefix + encrypt(publicKey, username.trim()), password: prefix + encrypt(publicKey, password),
           validateCode: '', captchaToken: '', returnUrl, mailSuffix: text(app.mailSuffix).trim() || '@189.cn',
@@ -263,7 +289,7 @@ export const tianyi = {
       }));
       await loginRequest(ctx, jar, identity(submit.toUrl));
       const cookie = jar.header(`${cloud}/`) || jar.header(`${authOrigin}/`);
-      requireValue(cookie, 'AUTH_FAILED');
+      requireValue(cookie, 'UPSTREAM_FORMAT');
       await ctx.updateCredentials({ cookie });
       return { refreshed: true };
     } finally {

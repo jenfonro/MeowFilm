@@ -7,7 +7,7 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { verifyDependencyLock } from '../scripts/verify-dependency-lock.mjs';
+import { discoverWorkspaces, verifyDependencyLock } from '../scripts/verify-dependency-lock.mjs';
 import { temporaryRoot } from '../scripts/windows/working-paths.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -69,21 +69,21 @@ function fixture(t, mutate = () => {}, input = {
 
 test('the repository lock can be audited offline without any installed modules', t => {
   const lock = read(join(root, 'package-lock.json'));
+  const manifest = read(join(root, 'package.json'));
+  const declared = discoverWorkspaces(root, manifest);
   const workspaces = Object.fromEntries(Object.keys(lock.packages)
     .filter(path => path && !path.includes('node_modules/'))
     .map(path => [path, read(join(root, path, 'package.json'))]));
-  const project = fixture(t, () => {}, { lock, manifest: read(join(root, 'package.json')), workspaces });
+  const project = fixture(t, () => {}, { lock, manifest, workspaces });
   const report = verifyDependencyLock(project.directory);
   assert.deepEqual(report, verifyDependencyLock(root));
-  assert.deepEqual(Object.keys(workspaces).sort(), [
-    'packages/pan-runtime',
-    'packages/runtime-bridge',
-    'packages/script-host',
-    'packages/source-runtime',
-  ]);
+  assert.deepEqual(Object.keys(workspaces).sort(), [...declared.keys()].sort());
+  for (const [location, workspace] of declared) {
+    assert.deepEqual(lock.packages[`node_modules/${workspace.name}`], { link: true, resolved: location });
+  }
   assert.equal(report.registry.length, Object.values(lock.packages)
     .filter(entry => !entry.link && typeof entry.resolved === 'string' && entry.resolved.startsWith('https://registry.npmjs.org/')).length);
-  assert.equal(report.workspaceLinks, 4);
+  assert.equal(report.workspaceLinks, declared.size);
   assert.equal(report.bundled.length, 0);
   assert.ok(!existsSync(join(project.directory, 'node_modules')));
 });

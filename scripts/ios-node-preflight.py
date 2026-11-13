@@ -84,20 +84,22 @@ def build(simulator_only=False):
     if sys.platform != "darwin":
         raise RuntimeError("This preflight requires macOS with Xcode and an iOS Simulator.")
     architectures = [
-        ("simulator", "iphonesimulator", platform.machine(), "ios-arm64_x86_64-simulator"),
-        ("device", "iphoneos", "arm64", "ios-arm64"),
+        ("simulator", "iphonesimulator", platform.machine()),
+        ("device", "iphoneos", "arm64"),
     ]
     if simulator_only:
         architectures = architectures[:1]
-    for _, sdk, arch, _ in architectures:
+    for _, sdk, arch in architectures:
         run([sys.executable, "-I", "-B", ROOT / "scripts/prepare-ios-runtime.py",
              "--sdk", sdk, "--arch", arch], cwd=ROOT)
-    dependency = PREPARE["node_mobile"](PREPARE["policy"]())
-    for name, sdk, arch, slice_name in architectures:
+    node_mobile_policy = PREPARE["policy"]()
+    dependency = PREPARE["node_mobile"](node_mobile_policy)
+    for name, sdk, arch in architectures:
         selected = PREPARE["target"](sdk, arch)
+        slice_name = PREPARE["node_mobile_inputs"](node_mobile_policy, selected)["identity"]["slice"]
         payload = PREPARE["runtime_path"](selected)
         manifest = validate_runtime(payload, selected)
-        node_arch = "x86_64" if selected["arch"] == "x64" else selected["arch"]
+        node_arch = selected["xcframeworkArchitecture"]
         native = ROOT / f".cache/ios-native/{sdk}-{node_arch}/MeowScriptHost.framework"
         receipt_path = ROOT / f".cache/ios-native/{sdk}-{node_arch}/build/Release/script-host-native.json"
         receipt = json.loads(receipt_path.read_text())
@@ -131,14 +133,16 @@ def build(simulator_only=False):
             "CFBundleIdentifier": BUNDLE, "CFBundleName": "NodePreflight",
             "CFBundleExecutable": "NodePreflight", "CFBundlePackageType": "APPL",
             "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
-            "MinimumOSVersion": "17.0", "LSRequiresIPhoneOS": True,
+            "MinimumOSVersion": selected["minimumOS"], "LSRequiresIPhoneOS": True,
             "UIDeviceFamily": [1, 2], "UILaunchScreen": {},
             "UISupportedInterfaceOrientations": ["UIInterfaceOrientationPortrait"],
-            "CFBundleSupportedPlatforms": ["iPhoneSimulator" if name == "simulator" else "iPhoneOS"],
+            "CFBundleSupportedPlatforms": [
+                "iPhoneSimulator" if selected["variant"] == "simulator" else "iPhoneOS"],
         }
         with (app / "Info.plist").open("wb") as stream:
             plistlib.dump(plist, stream)
-        target = f"{arch}-apple-ios17.0" + ("-simulator" if name == "simulator" else "")
+        target = f'{selected["xcframeworkArchitecture"]}-apple-ios{selected["minimumOS"]}' + (
+            "-simulator" if selected["variant"] == "simulator" else "")
         run(["xcrun", "--sdk", sdk, "clang", "-fobjc-arc", "-fmodules",
              "-target", target, "-isysroot", output(["xcrun", "--sdk", sdk, "--show-sdk-path"]),
              "-framework", "UIKit", "-framework", "Foundation", "-framework", "NodeMobile",

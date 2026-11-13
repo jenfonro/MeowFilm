@@ -36,9 +36,9 @@ open class NovelTablePage: PageViewController, UITableViewDataSource, UITableVie
         var action: () -> Void
     }
     var rows: [Row] = [] { didSet { if isViewLoaded { table.reloadData() } } }
-    let table = UITableView(frame: .zero, style: .insetGrouped)
+    let table = SettingsTableView()
     open override func viewDidLoad() {
-        super.viewDidLoad(); table.backgroundColor = .clear; table.dataSource = self; table.delegate = self
+        super.viewDidLoad(); table.dataSource = self; table.delegate = self
         table.rowHeight = UITableView.automaticDimension; table.estimatedRowHeight = 54
         view.addSubview(table); table.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([table.topAnchor.constraint(equalTo: contentTopAnchor), table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -54,23 +54,23 @@ open class NovelTablePage: PageViewController, UITableViewDataSource, UITableVie
     }
     public func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows.count }
     public func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let row = rows[indexPath.row], cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
-        cell.backgroundColor = .clear; cell.textLabel?.text = row.title; cell.detailTextLabel?.text = row.detail
-        cell.backgroundView = SettingsRowBackgroundView(theme: theme, first: indexPath.row == 0, last: indexPath.row == rows.count - 1)
-        cell.selectedBackgroundView = SettingsRowBackgroundView(theme: theme, first: indexPath.row == 0,
-            last: indexPath.row == rows.count - 1, selected: true)
-        cell.textLabel?.textColor = UIColor(row.destructive ? theme.settings.danger : theme.settings.ink)
-        cell.detailTextLabel?.textColor = UIColor(theme.settings.muted)
-        cell.textLabel?.numberOfLines = 0; cell.detailTextLabel?.numberOfLines = 0; cell.accessoryType = .disclosureIndicator
+        let row = rows[indexPath.row]
+        let isLast = indexPath.row == rows.count - 1
+        let cell = SettingsTableCell(title: row.title, detail: row.detail.isEmpty ? nil : row.detail,
+            theme: theme, first: indexPath.row == 0, last: isLast, destructive: row.destructive)
+        cell.accessoryType = .disclosureIndicator
         cell.accessibilityIdentifier = row.id; return cell
     }
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) { tableView.deselectRow(at: indexPath, animated: true); rows[indexPath.row].action() }
-    func textPrompt(title: String, value: String, keyboard: UIKeyboardType = .default, save: @escaping (String) -> Void) {
-        let alert = UIAlertController(title: title, message: nil, preferredStyle: .alert)
-        alert.addTextField { $0.text = value; $0.keyboardType = keyboard; $0.autocapitalizationType = .none }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "保存", style: .default) { _ in save(alert.textFields?.first?.text ?? "") })
-        present(alert, animated: true)
+    func textPrompt(title: String, value: String, keyboard: UIKeyboardType = .default,
+                    save: @escaping (String) throws -> Void) {
+        let dialog = ManagementDialog(title: title, action: "保存", themeProvider: themeProvider)
+        let input = ManagementDialog.input(placeholder: title)
+        input.text = value; input.keyboardType = keyboard; input.autocapitalizationType = .none
+        input.accessibilityLabel = title; input.accessibilityIdentifier = "novel.settings.input"
+        dialog.body.addArrangedSubview(input)
+        dialog.submit = { try save(input.text ?? ""); return true }
+        present(dialog, animated: true)
     }
     func share(text: String, name: String) {
         do {
@@ -102,7 +102,9 @@ public final class NovelAppearanceViewController: NovelTablePage, PHPickerViewCo
         .init(title: title, detail: String(format: "%g", value)) { [weak self] in
             self?.textPrompt(title: title, value: String(format: "%g", value), keyboard: .decimalPad) { [weak self] text in
                 guard let self else { return }
-                guard let value = Double(text), value.isFinite, valid(value) else { showError("数值无效"); return }
+                guard let value = Double(text), value.isFinite, valid(value) else {
+                    throw NovelError.invalidRule(["数值无效"])
+                }
                 draft[keyPath: key] = value; save()
             }
         }
@@ -155,7 +157,9 @@ public final class NovelAppearanceViewController: NovelTablePage, PHPickerViewCo
             guard let self else { return }; textPrompt(title: title, value: draft[keyPath: key]) { [weak self] text in
                 guard let self else { return }
                 let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard value.isEmpty || value.count == 7 && value.first == "#" && UInt64(value.dropFirst(), radix: 16) != nil else { showError("颜色格式为 #RRGGBB"); return }
+                guard value.isEmpty || value.count == 7 && value.first == "#" && UInt64(value.dropFirst(), radix: 16) != nil else {
+                    throw NovelError.invalidRule(["颜色格式为 #RRGGBB"])
+                }
                 draft[keyPath: key] = value; save()
             }
         }
@@ -182,36 +186,4 @@ final class NovelChoiceList: NovelTablePage {
     }
 }
 
-@MainActor
-final class NovelJSONEditor: PageViewController {
-    private let text = UITextView()
-    private let original: String
-    private let save: (String) async throws -> Void
-    private var saving = false
-    init(title: String, text: String, themeProvider: any PageThemeProviding, save: @escaping (String) async throws -> Void) {
-        original = text; self.save = save; super.init(themeProvider: themeProvider); pageTitle = title
-    }
-    override func viewDidLoad() {
-        super.viewDidLoad(); text.text = original; text.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
-        text.autocorrectionType = .no; text.autocapitalizationType = .none
-        view.addSubview(text); text.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([text.topAnchor.constraint(equalTo: contentTopAnchor), text.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-            text.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor), text.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor)])
-        pageHeader.setTrailing([PageHeaderTextButton(title: "保存") { [weak self] in self?.commit() }])
-    }
-    override func applyTheme() {
-        super.applyTheme()
-        guard isViewLoaded else { return }
-        view.tintColor = UIColor(theme.settings.accent)
-        theme.settings.apply(to: text)
-    }
-    private func commit() {
-        guard !saving else { return }; saving = true; let value = text.text ?? ""
-        runPageTask { [weak self] in
-            guard let self else { return }; defer { saving = false }
-            do { try await save(value); navigationController?.popViewController(animated: true) }
-            catch { showError(error.localizedDescription) }
-        }
-    }
-}
 #endif

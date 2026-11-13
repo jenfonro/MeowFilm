@@ -14,6 +14,12 @@
         "resolved": "3.2.1",
         "contentHash": "MLseDo4x2T8+7gbXDt5vLjC4b6v4SavtrwoM+adKjlicnTHAqII4zAWy8VL5D94oB3VA8qz7bvMyOxfVLJnARg=="
       },
+      "ZXing.Net": {
+        "type": "Direct",
+        "requested": "[0.16.11, 0.16.11]",
+        "resolved": "0.16.11",
+        "contentHash": "OZfAVu88hl87BffQ+rlWCj/vLvAhhCK4QnFaoveeF/MY8SjHNSYBQ3qyUEWlPKNgBQGh1syXhCDg10vUnCsqkg=="
+      },
       "LibVLCSharp": {
         "type": "Transitive",
         "resolved": "3.10.2",

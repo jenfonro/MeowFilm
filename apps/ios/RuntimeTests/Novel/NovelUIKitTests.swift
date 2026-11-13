@@ -3,6 +3,7 @@ import XCTest
 import UIKit
 import WebKit
 import Combine
+import CoreImage
 import MeowUI
 import MeowRuntime
 import MeowStorage
@@ -50,6 +51,21 @@ final class NovelUIKitTests: XCTestCase {
     }
     private func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
     private func button(_ id: String, in view: UIView) throws -> UIButton { try XCTUnwrap(descendants(view).first { $0.accessibilityIdentifier == id } as? UIButton) }
+    private func assertLabelFits(_ label: UILabel, in container: UIView, file: StaticString = #filePath, line: UInt = #line) {
+        let size = label.sizeThatFits(CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
+        let frame = label.convert(label.bounds, to: container)
+        XCTAssertGreaterThan(label.bounds.width, 0, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(label.bounds.height + 1, size.height, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(frame.minX, -1, file: file, line: line)
+        XCTAssertLessThanOrEqual(frame.maxX, container.bounds.width + 1, file: file, line: line)
+    }
+    private func assertReachableEdges(_ content: UIView, in scroll: UIScrollView, file: StaticString = #filePath, line: UInt = #line) {
+        for y in [content.bounds.minY, content.bounds.maxY - 1] {
+            let edge = CGRect(x: content.bounds.minX, y: y, width: content.bounds.width, height: 1)
+            scroll.scrollRectToVisible(content.convert(edge, to: scroll), animated: false); scroll.layoutIfNeeded()
+            XCTAssertTrue(scroll.bounds.insetBy(dx: -1, dy: -1).contains(content.convert(edge, to: scroll)), file: file, line: line)
+        }
+    }
     private func attach(_ window: UIWindow, _ name: String) {
         window.layoutIfNeeded()
         XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
@@ -57,6 +73,391 @@ final class NovelUIKitTests: XCTestCase {
         let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in drawn = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
         XCTAssertTrue(drawn, "The native window hierarchy must actually render for its screenshot")
         let attachment = XCTAttachment(image: image); attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+    }
+    private func attachManagement(_ window: UIWindow, _ name: String) async throws {
+        window.layoutIfNeeded(); XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
+        // App-hosted XCTest is not an XCUITest runner, so XCUIScreen is intentionally
+        // unavailable here.  Render the visible UIWindow hierarchy itself instead of using
+        // a detached view or a second-process screenshot bridge.  drawHierarchy preserves
+        // safe-area layout and UIVisualEffectView composition for the native page and sheets.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "screen-" + name; attachment.lifetime = .keepAlways; add(attachment)
+    }
+    func testManagementPagesUsePublicHeadersAndLiveApplicationTheme() async throws {
+        let (feature, _) = try await fixture(), provider = NovelManagementPageTheme()
+        let reference = PageViewController(themeProvider: provider)
+        let navigation = PageNavigationController(themeProvider: provider); navigation.setViewControllers([reference], animated: false)
+        let window = try mount(navigation)
+        let pages: [(PageViewController, Int)] = [
+            (NovelSourcesViewController(feature: feature, themeProvider: provider), 0),
+            (try NovelSourceEditor(source: nil, protocol: .legado, definition: nil, feature: feature, themeProvider: provider), 2),
+            (NovelRulesViewController(feature: feature, themeProvider: provider), 0),
+            (NovelRuleEditor(rule: NovelRule(), feature: feature, themeProvider: provider), 2)
+        ]
+        for (index, entry) in pages.enumerated() {
+            let (page, actions) = entry
+            navigation.pushViewController(page, animated: false); await wait { page.isPageVisible }
+            let canvas = try XCTUnwrap(page.view as? WindowGradientView)
+            window.overrideUserInterfaceStyle = .dark
+            await wait { page.traitCollection.userInterfaceStyle == .dark && canvas.backgroundColor == UIColor(page.theme.bottom) }
+            provider.setPalette(index.isMultiple(of: 2) ? .preset(.mint) : .preset(.lilac))
+            let darkTheme = PageTheme(colors: provider.pagePalette, dark: true)
+            await wait { canvas.backgroundColor == UIColor(darkTheme.bottom) }
+            XCTAssertEqual(canvas.theme, darkTheme)
+            XCTAssertEqual(page.pageHeader.background.theme, darkTheme)
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                window.overrideUserInterfaceStyle = style
+                await wait { page.traitCollection.userInterfaceStyle == style && canvas.backgroundColor == UIColor(page.theme.bottom) }
+                window.layoutIfNeeded(); page.view.layoutIfNeeded()
+                XCTAssertEqual(page.headerContentHeight, reference.headerContentHeight)
+                XCTAssertEqual(page.pageHeader.horizontalInset, reference.pageHeader.horizontalInset)
+                XCTAssertEqual(page.pageHeader.contentFrame.height, reference.headerContentHeight, accuracy: 0.5)
+                XCTAssertEqual(page.pageHeader.trailingCount, actions)
+                XCTAssertFalse(page.pageHeader.background.isHidden)
+                let back = try button("page.header.back", in: page.view)
+                XCTAssertTrue(back is PageHeaderButton)
+                XCTAssertEqual(back.bounds.size, back.intrinsicContentSize)
+                XCTAssertEqual(back.tintColor, UIColor(page.theme.ink))
+                let settings = page.theme.settings
+                if let manager = page as? NovelManagementPage {
+                    let table = try XCTUnwrap(descendants(manager.manager).first { $0.accessibilityIdentifier == "management.list" } as? UITableView)
+                    XCTAssertEqual(table.backgroundColor, UIColor(settings.surface))
+                    XCTAssertEqual(table.separatorStyle, .singleLine)
+                    XCTAssertEqual(table.separatorColor, UIColor(settings.separator))
+                    XCTAssertEqual(table.frame.minX, 24, accuracy: 0.5)
+                    XCTAssertEqual(table.layer.cornerRadius, 22)
+                    XCTAssertTrue(table.clipsToBounds)
+                    XCTAssertEqual(manager.manager.search.searchTextField.backgroundColor, UIColor(settings.input))
+                    XCTAssertEqual(manager.manager.search.searchTextField.textColor, UIColor(settings.ink))
+                    let remove = try button("management.delete", in: manager.manager)
+                    XCTAssertEqual(remove.backgroundColor, UIColor(settings.input))
+                    XCTAssertEqual(remove.titleColor(for: .normal), UIColor(settings.danger))
+                    XCTAssertEqual(remove.titleColor(for: .disabled), UIColor(settings.muted))
+                }
+                for form in descendants(page.view).compactMap({ $0 as? ManagementFormView }) {
+                    XCTAssertEqual(form.fields.backgroundColor, UIColor(settings.surface))
+                    for input in descendants(form) {
+                        if let field = input as? UITextField {
+                            XCTAssertEqual(field.textColor, UIColor(settings.ink))
+                            if form.boxedInputs { XCTAssertEqual(field.backgroundColor, UIColor(settings.input)); XCTAssertEqual(field.layer.borderColor, UIColor(settings.inputBorder).cgColor) }
+                        } else if let field = input as? UITextView {
+                            XCTAssertEqual(field.textColor, UIColor(settings.ink))
+                            if form.boxedInputs { XCTAssertEqual(field.backgroundColor, UIColor(settings.input)); XCTAssertEqual(field.layer.borderColor, UIColor(settings.inputBorder).cgColor) }
+                        }
+                    }
+                }
+                if page is NovelSourceEditor {
+                    let panel = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "novel.source.panel" })
+                    XCTAssertEqual(panel.backgroundColor, UIColor(settings.surface))
+                    let type = try XCTUnwrap(descendants(panel).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == "内容类型" })
+                    XCTAssertEqual(type.configuration?.baseForegroundColor, UIColor(settings.ink))
+                    XCTAssertEqual(type.configuration?.background.backgroundColor, UIColor(settings.input))
+                }
+            }
+        }
+    }
+    func testNativeSourceAndRuleManagersKeepSelectionTabsFieldsAndImportLayout() async throws {
+        let (feature, _) = try await fixture(), theme = NovelTestPageTheme()
+        let page = NovelSourcesViewController(feature: feature, themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme); navigation.setViewControllers([page], animated: false)
+        let window = try mount(navigation); await wait { page.isPageVisible }
+        page.render(); window.layoutIfNeeded()
+        XCTAssertEqual(descendants(page.manager).compactMap { $0 as? UISearchBar }.count, 1)
+        let table = try XCTUnwrap(descendants(page.manager).first { $0.accessibilityIdentifier == "management.list" } as? UITableView)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 1); try await attachManagement(window, "source-manager")
+        page.manager.setRows([], total: 0, validIDs: [], emptyMessage: "暂无书源，请先导入")
+        try await attachManagement(window, "source-manager-empty")
+        let selectAll = try button("management.selectAll", in: page.manager)
+        XCTAssertEqual(selectAll.title(for: .normal), "  全选 (0/0)"); XCTAssertGreaterThan(selectAll.titleLabel?.bounds.width ?? 0, 0)
+        page.render()
+        try button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside); XCTAssertEqual(page.manager.selected, ["fixture"])
+        page.manager.setRows([], total: 1, validIDs: ["fixture"], emptyMessage: "没有匹配的书源")
+        try button("management.invert", in: page.manager).sendActions(for: .touchUpInside); XCTAssertEqual(page.manager.selected, ["fixture"])
+        page.render(); try button("management.invert", in: page.manager).sendActions(for: .touchUpInside); XCTAssertTrue(page.manager.selected.isEmpty)
+        let editor = try NovelSourceEditor(source: nil, protocol: .legado, definition: #"{"bookSourceName":"全本同人小说网","bookSourceUrl":"https://www.qbtr.org","bookSourceGroup":"同人","bookSourceType":0,"enabled":true,"enabledExplore":true,"enabledCookieJar":false,"ruleSearch":{}}"#, feature: feature, themeProvider: theme)
+        navigation.pushViewController(editor, animated: false); await wait { editor.isPageVisible }; try await attachManagement(window, "source-basic")
+        let basic = try XCTUnwrap(descendants(editor.view).first { $0.accessibilityIdentifier == "novel.source.field.bookSourceName" } as? UITextField)
+        basic.text = "书源名称"; basic.sendActions(for: .editingChanged)
+        try button("novel.source.tab.1", in: editor.view).sendActions(for: .touchUpInside)
+        XCTAssertNotNil(descendants(editor.view).first { $0.accessibilityIdentifier == "novel.source.field.ruleSearch.bookList" } as? UITextView)
+        try await attachManagement(window, "source-search")
+        for index in 2..<6 {
+            try button("novel.source.tab.\(index)", in: editor.view).sendActions(for: .touchUpInside)
+            XCTAssertFalse(descendants(editor.view).filter { $0.accessibilityIdentifier?.hasPrefix("novel.source.field.") == true }.isEmpty)
+            try await attachManagement(window, "source-tab-\(index)")
+        }
+        try button("novel.source.tab.0", in: editor.view).sendActions(for: .touchUpInside)
+        XCTAssertEqual((descendants(editor.view).first { $0.accessibilityIdentifier == "novel.source.field.bookSourceName" } as? UITextField)?.text, "书源名称")
+        navigation.popViewController(animated: false)
+        let rules = NovelRulesViewController(feature: feature, themeProvider: theme); navigation.pushViewController(rules, animated: false)
+        await wait { rules.isPageVisible }; try await attachManagement(window, "rule-manager")
+        var rule = NovelRule(); rule.name = "净化广告"; rule.pattern = "广告"; rule.isRegex = true
+        let ruleEditor = NovelRuleEditor(rule: rule, feature: feature, themeProvider: theme); navigation.pushViewController(ruleEditor, animated: false)
+        await wait { ruleEditor.isPageVisible }; try await attachManagement(window, "rule-editor")
+        XCTAssertEqual(descendants(ruleEditor.view).filter { $0.accessibilityIdentifier?.hasPrefix("novel.rule.field.") == true }.count, 7)
+        let scopeChecks = descendants(ruleEditor.view).compactMap { $0 as? UIButton }.filter { ["作用于标题", "作用于正文"].contains($0.accessibilityLabel ?? "") }
+        XCTAssertEqual(scopeChecks.count, 2); XCTAssertTrue(scopeChecks.allSatisfy { $0.buttonType == .custom && $0.bounds.width > 0 })
+        let form = try XCTUnwrap(descendants(ruleEditor.view).first { $0 is ManagementFormView } as? ManagementFormView)
+        let timeout = try XCTUnwrap(descendants(form).first { $0.accessibilityIdentifier == "novel.rule.field.timeoutMillisecond" })
+        form.scrollRectToVisible(timeout.convert(timeout.bounds, to: form), animated: false)
+        try await attachManagement(window, "rule-editor-bottom")
+        try button("novel.rule.save", in: ruleEditor.view).sendActions(for: .touchUpInside)
+        await wait { feature.local.rules.contains { $0.id == rule.id } && navigation.topViewController === rules }
+        let dialog = ManagementDialog(title: "导入书源", action: "确定导入", themeProvider: theme)
+        let names = ["全本同人小说网", "南极小说（优）", "🍊淘小说吧🍊", "小原文学网", "错层小说", "思兔阅读", "猫眼看书", "未来天王", "梦想家文学", "📚 梦书中文", "搬山人小说网", "书包书库", "阅读源 13", "阅读源 14", "阅读源 15", "异次元", "阅读源 17", "阅读源 18"]
+        let selection = ManagementImportView(items: names.map { .init(title: $0, detail: "阅读源 · 常规", status: "已存在") })
+        dialog.body.addArrangedSubview(selection); rules.present(dialog, animated: false)
+        await wait { dialog.view.window === window && !dialog.isBeingPresented }
+        window.layoutIfNeeded(); dialog.view.layoutIfNeeded()
+        XCTAssertEqual(selection.selected, Set(names.indices)); XCTAssertGreaterThan(selection.bounds.height, 0); try await attachManagement(window, "source-import-confirm")
+        let panel = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.dialog.panel" })
+        let importTable = try XCTUnwrap(descendants(selection).compactMap { $0 as? UITableView }.first)
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            window.overrideUserInterfaceStyle = style
+            let settings = SettingsTheme(dark: style == .dark)
+            await wait { panel.backgroundColor == UIColor(settings.surface) && importTable.separatorColor == UIColor(settings.separator) }
+            XCTAssertEqual(panel.layer.borderColor, UIColor(settings.border).cgColor)
+            XCTAssertEqual(try button("management.dialog.confirm", in: dialog.view).backgroundColor, UIColor(settings.accent))
+            XCTAssertEqual(try button("management.dialog.confirm", in: dialog.view).titleColor(for: .normal), UIColor(settings.onAccent))
+            XCTAssertEqual(selection.selected, Set(names.indices))
+            let cell = try XCTUnwrap(importTable.dataSource?.tableView(importTable, cellForRowAt: .init(row: 0, section: 0)))
+            let labels = descendants(cell).compactMap { $0 as? UILabel }
+            XCTAssertEqual(labels.first { $0.text == names[0] }?.textColor, UIColor(settings.ink))
+            XCTAssertEqual(labels.first { $0.text == "已存在" }?.textColor, UIColor(settings.warning))
+        }
+        try button("management.dialog.cancel", in: dialog.view).sendActions(for: .touchUpInside); await wait { rules.presentedViewController == nil }
+    }
+    func testManagementModalCancellationWaitsForActualOperationDrain() async throws {
+        let (feature, _) = try await fixture(), theme = NovelTestPageTheme()
+        let page = NovelSourcesViewController(feature: feature, themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme); navigation.setViewControllers([page], animated: false)
+        let window = try mount(navigation); await wait { page.isPageVisible }
+        let table = try XCTUnwrap(descendants(page.manager).first { $0.accessibilityIdentifier == "management.list" } as? UITableView)
+        let rows = table.numberOfRows(inSection: 0)
+        let entered = expectation(description: "preview entered"), cancelled = expectation(description: "preview cancelled")
+        var drain: CheckedContinuation<Void, Never>?, accepted = false
+        page.addressDialog(label: "书源地址", placeholder: "请输入网络书源地址", load: { _ in
+            entered.fulfill()
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) }
+            catch { cancelled.fulfill(); await withCheckedContinuation { drain = $0 }; throw error }
+        }, completed: { accepted = true })
+        let dialog = try XCTUnwrap(page.presentedViewController as? ManagementDialog)
+        let input = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.import.url" } as? UITextField)
+        await wait { dialog.view.window === window && !dialog.isBeingPresented }
+        window.layoutIfNeeded(); try await attachManagement(window, "source-network-import")
+        XCTAssertEqual(dialog.modalPresentationStyle, .overFullScreen)
+        XCTAssertEqual(dialog.view.backgroundColor, .clear)
+        XCTAssertTrue(page.view.window === window && page.manager.window === window)
+        XCTAssertFalse(page.view.isHidden); XCTAssertFalse(page.manager.isHidden); XCTAssertEqual(page.view.alpha, 1)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), rows); XCTAssertGreaterThan(rows, 0)
+        let panel = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.dialog.panel" })
+        let backdrop = dialog.view.subviews.filter { $0 !== panel }.flatMap(descendants)
+        XCTAssertFalse(backdrop.contains { ($0 as? UIVisualEffectView)?.effect is UIBlurEffect }, "Network import must keep the underlying source list clear")
+        let scrim = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.dialog.scrim" })
+        XCTAssertGreaterThan(try XCTUnwrap(scrim.backgroundColor).cgColor.alpha, 0)
+        XCTAssertLessThan(try XCTUnwrap(scrim.backgroundColor).cgColor.alpha, 1)
+        let settings = page.theme.settings
+        XCTAssertEqual(input.backgroundColor, UIColor(settings.input)); XCTAssertEqual(input.textColor, UIColor(settings.ink))
+        XCTAssertEqual(input.layer.borderColor, UIColor(settings.inputBorder).cgColor)
+        input.text = "https://source.invalid/book-sources.json"
+        try button("management.dialog.confirm", in: dialog.view).sendActions(for: .touchUpInside); await fulfillment(of: [entered], timeout: 5)
+        try button("management.dialog.cancel", in: dialog.view).sendActions(for: .touchUpInside); await fulfillment(of: [cancelled], timeout: 5)
+        XCTAssertTrue(page.presentedViewController === dialog); XCTAssertFalse(accepted)
+        let receipt = try XCTUnwrap(drain); receipt.resume(); await wait { page.presentedViewController == nil && page.isPageVisible }; XCTAssertFalse(accepted)
+        XCTAssertTrue(page.isPageActive && page.isPageVisible && page.manager.window === window)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), rows)
+    }
+
+    func testManagementDialogLargeTypeKeepsLongContentAndSubmitResultsReachableAt320() async throws {
+        let page = PageViewController(themeProvider: NovelTestPageTheme())
+        let window = try mount(page); window.frame = CGRect(x: 0, y: 0, width: 320, height: 568)
+        window.layoutIfNeeded(); await wait { page.canPresentPageAlert }
+        let heading = "网络导入：" + String(repeating: "包含很长名称的书源分组", count: 3)
+        let message = String(repeating: "无法导入，请检查网络地址和书源内容后重新提交。", count: 8)
+        let dialog = ManagementDialog(title: heading, action: "确定导入", themeProvider: NovelTestPageTheme())
+        dialog.traitOverrides.preferredContentSizeCategory = .large
+        let label = UILabel(); label.text = String(repeating: "书源网络地址", count: 4); label.font = .systemFont(ofSize: 14)
+        let input = ManagementDialog.input(placeholder: "网络地址")
+        let address = "https://source.invalid/" + String(repeating: "long-path/", count: 20)
+        input.keyboardType = .URL; input.text = address
+        dialog.body.addArrangedSubview(label); dialog.body.addArrangedSubview(input)
+        var submissions: [String] = [], accepted = 0
+        dialog.submit = {
+            submissions.append(input.text ?? "")
+            if submissions.count == 1 { throw NSError(domain: "ManagementDialogDynamicType", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+            return submissions.count > 2
+        }
+        dialog.accepted = { accepted += 1 }
+        page.present(dialog, animated: false)
+        await wait { dialog.view.window === window && !dialog.isBeingPresented }
+        let headingLabel = try XCTUnwrap(descendants(dialog.view).compactMap { $0 as? UILabel }.first { $0.text == heading })
+        let error = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.dialog.error" } as? UILabel)
+        let scroll = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.dialog.scroll" } as? UIScrollView)
+        let panel = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.dialog.panel" })
+        let confirm = try button("management.dialog.confirm", in: dialog.view)
+        let cancel = try button("management.dialog.cancel", in: dialog.view)
+        XCTAssertEqual(headingLabel.font.pointSize, 17, accuracy: 0.1)
+        XCTAssertEqual(error.font.pointSize, 13, accuracy: 0.1)
+        XCTAssertEqual(input.font?.pointSize ?? 0, 14, accuracy: 0.1)
+        XCTAssertEqual(confirm.titleLabel?.font.pointSize ?? 0, 14, accuracy: 0.1)
+        dialog.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        await wait {
+            headingLabel.font.pointSize > 17 && error.font.pointSize > 13 &&
+                (input.font?.pointSize ?? 0) > 14 && (confirm.titleLabel?.font.pointSize ?? 0) > 14 && label.font.pointSize > 14
+        }
+        dialog.view.setNeedsLayout(); dialog.view.layoutIfNeeded()
+        confirm.sendActions(for: .touchUpInside)
+        await wait { error.text == message && !error.isHidden && confirm.isEnabled }
+        dialog.view.layoutIfNeeded()
+        XCTAssertEqual(dialog.view.bounds.width, 320, accuracy: 0.5)
+        XCTAssertEqual(dialog.modalPresentationStyle, .overFullScreen)
+        XCTAssertTrue(page.view.window === window && !page.view.isHidden)
+        XCTAssertGreaterThanOrEqual(panel.frame.minY, dialog.view.safeAreaLayoutGuide.layoutFrame.minY)
+        XCTAssertLessThanOrEqual(panel.frame.maxY, dialog.view.keyboardLayoutGuide.layoutFrame.minY)
+        XCTAssertLessThanOrEqual(scroll.contentSize.width, scroll.bounds.width + 1)
+        XCTAssertGreaterThan(scroll.contentSize.height, scroll.bounds.height)
+        for text in [headingLabel, label, error] {
+            XCTAssertTrue(text.adjustsFontForContentSizeCategory); XCTAssertEqual(text.numberOfLines, 0)
+            assertLabelFits(text, in: panel); assertReachableEdges(text, in: scroll)
+        }
+        XCTAssertTrue(input.adjustsFontForContentSizeCategory)
+        XCTAssertGreaterThanOrEqual(input.bounds.height, 44)
+        XCTAssertGreaterThanOrEqual(input.bounds.height, input.intrinsicContentSize.height)
+        XCTAssertEqual(input.keyboardType, .URL); XCTAssertEqual(input.text, address)
+        assertReachableEdges(input, in: scroll)
+        for action in [cancel, confirm] {
+            XCTAssertGreaterThanOrEqual(action.bounds.width, 44); XCTAssertGreaterThanOrEqual(action.bounds.height, 44)
+            XCTAssertTrue(action.titleLabel?.adjustsFontForContentSizeCategory == true)
+            assertLabelFits(try XCTUnwrap(action.titleLabel), in: action); assertReachableEdges(action, in: scroll)
+        }
+        XCTAssertLessThan(cancel.convert(cancel.bounds, to: panel).maxY, confirm.convert(confirm.bounds, to: panel).minY)
+        XCTAssertEqual(submissions, [address]); XCTAssertEqual(accepted, 0)
+        confirm.sendActions(for: .touchUpInside)
+        await wait { submissions.count == 2 && confirm.isEnabled }
+        XCTAssertTrue(page.presentedViewController === dialog); XCTAssertTrue(error.isHidden); XCTAssertEqual(accepted, 0)
+        confirm.sendActions(for: .touchUpInside)
+        await wait { page.presentedViewController == nil && accepted == 1 }
+        XCTAssertEqual(submissions, [address, address, address])
+    }
+
+    func testManagementImportLargeTypeWrapsLongRowsAndReachesLastSelectionAt320() async throws {
+        let page = PageViewController(themeProvider: NovelTestPageTheme())
+        let window = try mount(page); window.frame = CGRect(x: 0, y: 0, width: 320, height: 568)
+        window.layoutIfNeeded(); await wait { page.canPresentPageAlert }
+        let items = (0..<14).map { index in
+            ManagementImportView.Item(title: "书源 \(index) " + String(repeating: "包含完整名称的阅读来源", count: 3),
+                detail: "https://source.invalid/" + String(repeating: "long-description/", count: 5),
+                status: "新增：" + String(repeating: "需要完整显示的导入状态", count: 3))
+        }
+        let preview = ManagementImportView(items: items, selected: [0])
+        let dialog = ManagementDialog(title: "导入书源", action: "确定导入", themeProvider: NovelTestPageTheme())
+        dialog.body.addArrangedSubview(preview); page.present(dialog, animated: false)
+        await wait { dialog.view.window === window && !dialog.isBeingPresented }
+        let table = try XCTUnwrap(descendants(preview).compactMap { $0 as? UITableView }.first)
+        let all = try XCTUnwrap(descendants(preview).compactMap { $0 as? UIButton }.first { $0.title(for: .normal) == "   全选" })
+        let count = try XCTUnwrap(descendants(preview).compactMap { $0 as? UILabel }.first { $0.text == "1/14" })
+        let scroll = try XCTUnwrap(descendants(dialog.view).first { $0.accessibilityIdentifier == "management.dialog.scroll" } as? UIScrollView)
+        var defaultRowHeight: CGFloat = 0
+        for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+            dialog.traitOverrides.preferredContentSizeCategory = category
+            await wait { preview.traitCollection.preferredContentSizeCategory == category }
+            dialog.view.setNeedsLayout(); dialog.view.layoutIfNeeded(); preview.layoutIfNeeded(); table.layoutIfNeeded()
+            XCTAssertEqual(dialog.view.bounds.width, 320, accuracy: 0.5)
+            XCTAssertEqual(table.numberOfRows(inSection: 0), items.count)
+            XCTAssertEqual(preview.selected, [0])
+            XCTAssertTrue(all.titleLabel?.adjustsFontForContentSizeCategory == true); XCTAssertTrue(count.adjustsFontForContentSizeCategory)
+            XCTAssertGreaterThanOrEqual(all.bounds.width, 44); XCTAssertGreaterThanOrEqual(all.bounds.height, 44)
+            assertLabelFits(count, in: preview)
+            for index in items.indices {
+                table.scrollToRow(at: IndexPath(row: index, section: 0), at: .top, animated: false); table.layoutIfNeeded()
+            }
+            let first = IndexPath(row: 0, section: 0)
+            table.scrollToRow(at: first, at: .top, animated: false); table.layoutIfNeeded()
+            let cell = try XCTUnwrap(table.cellForRow(at: first))
+            let labels = descendants(cell.contentView).compactMap { $0 as? UILabel }
+            let title = try XCTUnwrap(labels.first { $0.text == items[0].title })
+            let detail = try XCTUnwrap(labels.first { $0.text == items[0].detail })
+            let status = try XCTUnwrap(labels.first { $0.text == items[0].status })
+            for label in [title, detail, status] {
+                XCTAssertTrue(label.adjustsFontForContentSizeCategory); XCTAssertEqual(label.numberOfLines, 0)
+                assertLabelFits(label, in: cell.contentView); assertReachableEdges(label, in: table)
+                let frame = label.convert(label.bounds, to: cell.contentView)
+                XCTAssertGreaterThanOrEqual(frame.minY, -1)
+                XCTAssertLessThanOrEqual(frame.maxY, cell.contentView.bounds.height + 1)
+            }
+            XCTAssertGreaterThanOrEqual(status.convert(status.bounds, to: cell.contentView).minY, detail.convert(detail.bounds, to: cell.contentView).maxY)
+            XCTAssertGreaterThan(cell.bounds.height, 58)
+            if category == .large { defaultRowHeight = cell.bounds.height }
+            else {
+                XCTAssertGreaterThan(cell.bounds.height, defaultRowHeight)
+                XCTAssertGreaterThan(title.font.pointSize, 14); XCTAssertGreaterThan(detail.font.pointSize, 12)
+                XCTAssertGreaterThan(status.font.pointSize, 12); XCTAssertGreaterThan(count.font.pointSize, 13)
+                XCTAssertGreaterThan(all.titleLabel?.font.pointSize ?? 0, 14)
+            }
+        }
+        let last = IndexPath(row: items.count - 1, section: 0)
+        table.scrollToRow(at: last, at: .top, animated: false); table.layoutIfNeeded()
+        let lastCell = try XCTUnwrap(table.cellForRow(at: last))
+        let check = try XCTUnwrap(descendants(lastCell).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == "选择 " + items[last.row].title })
+        XCTAssertGreaterThanOrEqual(check.bounds.width, 44); XCTAssertGreaterThanOrEqual(check.bounds.height, 44)
+        assertReachableEdges(check, in: table)
+        check.sendActions(for: .touchUpInside)
+        XCTAssertEqual(preview.selected, [0, last.row]); XCTAssertEqual(count.text, "2/14")
+        all.sendActions(for: .touchUpInside); XCTAssertEqual(preview.selected, Set(items.indices))
+        all.sendActions(for: .touchUpInside); XCTAssertTrue(preview.selected.isEmpty); XCTAssertEqual(count.text, "0/14")
+        let cancel = try button("management.dialog.cancel", in: dialog.view)
+        let confirm = try button("management.dialog.confirm", in: dialog.view)
+        assertReachableEdges(confirm, in: scroll); assertReachableEdges(cancel, in: scroll)
+        cancel.sendActions(for: .touchUpInside); await wait { page.presentedViewController == nil && page.isPageVisible }
+    }
+
+    func testNovelAppearanceInputUsesThemedDialogAndKeepsInvalidValueOpen() async throws {
+        let (feature, _) = try await fixture(), theme = NovelTestPageTheme()
+        let initialFontSize = feature.local.settings.fontSize
+        let page = NovelAppearanceViewController(feature: feature, themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme)
+        navigation.setViewControllers([page], animated: false)
+        let window = try mount(navigation)
+        await wait { page.isPageVisible && page.rows.count > 1 }
+        page.tableView(page.table, didSelectRowAt: .init(row: 1, section: 0))
+
+        let dialog = try XCTUnwrap(page.presentedViewController as? ManagementDialog)
+        let input = try XCTUnwrap(descendants(dialog.view).first {
+            $0.accessibilityIdentifier == "novel.settings.input"
+        } as? UITextField)
+        await wait { dialog.view.window === window && !dialog.isBeingPresented }
+        let settings = SettingsTheme(dark: input.traitCollection.userInterfaceStyle == .dark)
+        XCTAssertEqual(input.backgroundColor, UIColor(settings.input))
+        XCTAssertEqual(input.layer.borderColor, UIColor(settings.inputBorder).cgColor)
+        input.text = "-1"
+        try button("management.dialog.confirm", in: dialog.view).sendActions(for: .touchUpInside)
+        await wait {
+            (self.descendants(dialog.view).first {
+                $0.accessibilityIdentifier == "management.dialog.error"
+            } as? UILabel)?.text == "数值无效"
+        }
+        XCTAssertTrue(page.presentedViewController === dialog)
+        XCTAssertEqual(feature.local.settings.fontSize, initialFontSize)
+
+        input.text = "25"
+        try button("management.dialog.confirm", in: dialog.view).sendActions(for: .touchUpInside)
+        await wait { page.presentedViewController == nil && feature.local.settings.fontSize == 25 }
+        XCTAssertEqual(feature.local.settings.fontSize, 25)
+    }
+
+    func testReplacementQrImageDecodesTheOriginalRuleTextAndRejectsNonImages() throws {
+        let text = #"{"id":42,"pattern":"advertisement","replacement":""}"#
+        let filter = try XCTUnwrap(CIFilter(name: "CIQRCodeGenerator"))
+        filter.setValue(Data(text.utf8), forKey: "inputMessage")
+        let output = try XCTUnwrap(filter.outputImage).transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+        let pixels = try XCTUnwrap(CIContext().createCGImage(output, from: output.extent))
+        let data = try XCTUnwrap(UIImage(cgImage: pixels).pngData())
+        XCTAssertEqual(try NovelRulesViewController.readRuleQr(data), text)
+        XCTAssertThrowsError(try NovelRulesViewController.readRuleQr(Data("not an image".utf8)))
     }
     func testEmptyAndPopulatedShelfKeepNativeSelectorsAndReturnToSameBook() async throws {
         let (feature, _) = try await fixture(), theme = NovelTestPageTheme()
@@ -358,6 +759,15 @@ final class NovelUIKitTests: XCTestCase {
         await wait { table.refreshControl?.isRefreshing == false }
         let afterHiddenRefresh = await runtime.exploreCalls; XCTAssertEqual(afterHiddenRefresh, hidden)
     }
+}
+
+@MainActor
+private final class NovelManagementPageTheme: PageThemeProviding {
+    private(set) var pagePalette: PagePalette = .preset(.lilac)
+    let animatesPageColorway = false
+    private let changes = PassthroughSubject<Void, Never>()
+    var pageThemeChanges: AnyPublisher<Void, Never> { changes.eraseToAnyPublisher() }
+    func setPalette(_ palette: PagePalette) { pagePalette = palette; changes.send(()) }
 }
 
 private actor NovelUIKitRuntime: NovelRuntimeServing {

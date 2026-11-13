@@ -12,11 +12,16 @@ public sealed class NoticeOutlet : FrameworkElement
         "Notice", RoutingStrategy.Bubble, typeof(EventHandler<DesktopNoticeEventArgs>), typeof(NoticeOutlet));
     public static readonly DependencyProperty MessageProperty = DependencyProperty.Register(
         nameof(Message), typeof(string), typeof(NoticeOutlet),
-        new PropertyMetadata("", (d, _) => ((NoticeOutlet)d).Schedule()));
-    public string Message { get => (string)GetValue(MessageProperty); set => SetValue(MessageProperty, value); }
+        new PropertyMetadata("", (d, _) => ((NoticeOutlet)d).Queue()));
+    public string Message
+    {
+        get => (string)GetValue(MessageProperty);
+        set { if (Message == value) Queue(); else SetValue(MessageProperty, value); }
+    }
     private FrameworkElement? parent;
     private UIElement? root;
     private long generation;
+    private bool pending;
     public NoticeOutlet()
     {
         Visibility = Visibility.Collapsed;
@@ -46,13 +51,18 @@ public sealed class NoticeOutlet : FrameworkElement
         };
     }
     private void ParentVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) => Schedule();
+    private void Queue() { pending = true; Schedule(); }
     private void Schedule()
     {
         var ticket = ++generation;
         if (!IsLoaded || Dispatcher.HasShutdownStarted) return;
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
-            if (ticket == generation && IsLoaded) Publish(parent?.IsVisible == true ? Message : "");
+            if (ticket != generation || !IsLoaded) return;
+            if (parent?.IsVisible != true) { Publish(""); return; }
+            if (!pending) return;
+            pending = false;
+            Publish(Message);
         }));
     }
     private void Publish(string message) => root?.RaiseEvent(new DesktopNoticeEventArgs(this, message ?? ""));

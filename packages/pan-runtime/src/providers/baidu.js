@@ -281,6 +281,28 @@ export const baidu = {
   credentialFields: { cookie: 'string' },
   modes: ['streaming'],
 
+  async refresh({}, ctx) {
+    const auth = authorization(ctx);
+    active(ctx);
+    const url = new URL('/api/loginStatus', pan);
+    url.search = new URLSearchParams({ clienttype: '1', web: '1', channel: 'web', version: '0' }).toString();
+    const response = await ctx.http.request({
+      url: url.href, method: 'GET', signal: ctx.signal,
+      headers: { 'User-Agent': webUA, Referer: `${pan}/`, Accept: 'application/json, text/plain, */*', Cookie: auth.cookie },
+    });
+    active(ctx);
+    requireValue(response.status >= 200 && response.status < 300,
+      response.status === 401 ? 'AUTH_REQUIRED' : 'UPSTREAM_HTTP');
+    const value = record(parseJSON(response.body));
+    requireValue(text(value.errno) !== '-6', 'AUTH_REQUIRED');
+    if (value.errno !== undefined) success(value);
+    const info = record(value.login_info);
+    requireValue(typeof info.bdstoken === 'string' && info.bdstoken.trim(), 'UPSTREAM_FORMAT');
+    const cookie = mergeCookie(ctx.credentials.cookie, response.headers['set-cookie'] || []);
+    if (cookie !== ctx.credentials.cookie) await ctx.updateCredentials({ cookie });
+    return { refreshed: true };
+  },
+
   async list({ share }, ctx) {
     const parsed = shareInput(share);
     const auth = authorization(ctx);

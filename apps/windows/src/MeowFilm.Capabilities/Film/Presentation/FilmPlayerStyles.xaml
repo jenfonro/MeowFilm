@@ -1,0 +1,433 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:sys="clr-namespace:System;assembly=System.Runtime">
+ <Style x:Key="Film.PlayerFocus" TargetType="Control">
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Control">
+   <Rectangle x:Name="Outline" Margin="-3" RadiusX="5" RadiusY="5"
+              Stroke="White" StrokeThickness="2" StrokeDashArray="2,1"
+              IsHitTestVisible="False" SnapsToDevicePixels="True"/>
+   <ControlTemplate.Triggers>
+    <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+     <Setter TargetName="Outline" Property="Stroke" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    </DataTrigger>
+   </ControlTemplate.Triggers>
+  </ControlTemplate></Setter.Value></Setter>
+ </Style>
+
+ <Style x:Key="Film.PlayerButton" TargetType="Button">
+  <Setter Property="Width" Value="34"/><Setter Property="Height" Value="34"/>
+  <Setter Property="MinWidth" Value="0"/><Setter Property="MinHeight" Value="0"/>
+  <Setter Property="Padding" Value="0"/>
+  <Setter Property="Background" Value="#0FFFFFFF"/>
+  <Setter Property="BorderBrush" Value="#14FFFFFF"/>
+  <Setter Property="BorderThickness" Value="1"/>
+  <Setter Property="Foreground" Value="#EBFFFFFF"/>
+  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="HorizontalContentAlignment" Value="Center"/>
+  <Setter Property="VerticalContentAlignment" Value="Center"/>
+  <Setter Property="Cursor" Value="Hand"/>
+  <Setter Property="SnapsToDevicePixels" Value="True"/>
+  <Setter Property="FocusVisualStyle" Value="{StaticResource Film.PlayerFocus}"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+   <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+           BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="17"
+           Padding="{TemplateBinding Padding}">
+    <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                      VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                      RecognizesAccessKey="True"/>
+   </Border>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#1AFFFFFF"/></Trigger>
+   <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="White"/></Trigger>
+   <Trigger Property="AutomationProperties.ItemStatus" Value="已展开">
+    <Setter Property="BorderBrush" Value="#8C22C55E"/><Setter Property="Background" Value="#2E22C55E"/>
+    <Setter Property="Foreground" Value="#FF4ADE80"/>
+   </Trigger>
+   <Trigger Property="AutomationProperties.ItemStatus" Value="已开启">
+    <Setter Property="BorderBrush" Value="#8C22C55E"/><Setter Property="Background" Value="#2E22C55E"/>
+    <Setter Property="Foreground" Value="#FF4ADE80"/>
+   </Trigger>
+   <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".45"/></Trigger>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </DataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsMouseOver,RelativeSource={RelativeSource Self}}" Value="True"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+   </MultiDataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding Path=(AutomationProperties.ItemStatus),RelativeSource={RelativeSource Self}}" Value="已展开"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+   </MultiDataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding Path=(AutomationProperties.ItemStatus),RelativeSource={RelativeSource Self}}" Value="已开启"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+   </MultiDataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsEnabled,RelativeSource={RelativeSource Self}}" Value="False"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="Opacity" Value="1"/>
+   </MultiDataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerTextButton" TargetType="Button" BasedOn="{StaticResource Film.PlayerButton}">
+  <Setter Property="Width" Value="Auto"/><Setter Property="MinWidth" Value="48"/>
+  <Setter Property="Padding" Value="12,0"/>
+ </Style>
+
+ <Style x:Key="Film.PlayerPill" TargetType="Border">
+  <Setter Property="Padding" Value="10,8"/><Setter Property="CornerRadius" Value="25"/>
+  <Setter Property="Background" Value="#73141414"/>
+  <Style.Triggers>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+   </DataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerIcon" TargetType="Path">
+  <Setter Property="Width" Value="24"/><Setter Property="Height" Value="24"/>
+  <Setter Property="Stretch" Value="None"/>
+  <Setter Property="LayoutTransform"><Setter.Value><ScaleTransform ScaleX=".75" ScaleY=".75"/></Setter.Value></Setter>
+  <Setter Property="Fill" Value="{Binding Foreground,RelativeSource={RelativeSource AncestorType={x:Type Button}}}"/>
+  <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="VerticalAlignment" Value="Center"/>
+  <Setter Property="IsHitTestVisible" Value="False"/>
+ </Style>
+
+ <Style x:Key="Film.PlayerTime" TargetType="TextBlock">
+  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="Foreground" Value="#D1FFFFFF"/>
+  <Setter Property="VerticalAlignment" Value="Center"/>
+  <Setter Property="Typography.NumeralAlignment" Value="Tabular"/>
+  <Style.Triggers>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </DataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerTrackButton" TargetType="RepeatButton">
+  <Setter Property="Focusable" Value="False"/><Setter Property="IsTabStop" Value="False"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RepeatButton">
+   <Grid Background="Transparent">
+    <Border Height="{DynamicResource Film.PlayerTrackHeight}" CornerRadius="{DynamicResource Film.PlayerTrackRadius}"
+            VerticalAlignment="Center" Background="{TemplateBinding Background}"/>
+   </Grid>
+  </ControlTemplate></Setter.Value></Setter>
+ </Style>
+
+ <Style x:Key="Film.PlayerSeek" TargetType="Slider">
+  <Style.Resources>
+   <sys:Double x:Key="Film.PlayerTrackHeight">8</sys:Double>
+   <CornerRadius x:Key="Film.PlayerTrackRadius">4</CornerRadius>
+   <sys:Double x:Key="Film.PlayerThumbSize">14</sys:Double>
+  </Style.Resources>
+  <Setter Property="Height" Value="14"/><Setter Property="MinHeight" Value="0"/>
+  <Setter Property="Minimum" Value="0"/><Setter Property="SmallChange" Value=".1"/>
+  <Setter Property="Orientation" Value="Horizontal"/>
+  <Setter Property="Background" Value="#40FFFFFF"/><Setter Property="Foreground" Value="#FFFF0033"/>
+  <Setter Property="IsMoveToPointEnabled" Value="True"/>
+  <Setter Property="IsSnapToTickEnabled" Value="False"/>
+  <Setter Property="SnapsToDevicePixels" Value="True"/>
+  <Setter Property="FocusVisualStyle" Value="{StaticResource Film.PlayerFocus}"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Slider">
+   <Grid Background="Transparent">
+    <Border Height="{DynamicResource Film.PlayerTrackHeight}" CornerRadius="{DynamicResource Film.PlayerTrackRadius}"
+            VerticalAlignment="Center" Background="{TemplateBinding Background}"/>
+    <Track x:Name="PART_Track" Orientation="{TemplateBinding Orientation}"
+           IsDirectionReversed="{TemplateBinding IsDirectionReversed}"
+           Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+           Value="{Binding Value,RelativeSource={RelativeSource TemplatedParent},Mode=TwoWay}">
+     <Track.DecreaseRepeatButton>
+      <RepeatButton Style="{StaticResource Film.PlayerTrackButton}"
+                    Background="{TemplateBinding Foreground}" Command="{x:Static Slider.DecreaseSmall}"
+                    CommandTarget="{Binding RelativeSource={RelativeSource AncestorType={x:Type Slider}}}"/>
+     </Track.DecreaseRepeatButton>
+     <Track.Thumb>
+      <Thumb Width="{DynamicResource Film.PlayerThumbSize}" Height="{DynamicResource Film.PlayerThumbSize}"
+             Background="{TemplateBinding Foreground}" Focusable="False" IsTabStop="False">
+       <Thumb.Template><ControlTemplate TargetType="Thumb">
+        <Grid Background="Transparent">
+         <Ellipse Fill="{TemplateBinding Background}" IsHitTestVisible="False"/>
+        </Grid>
+       </ControlTemplate></Thumb.Template>
+      </Thumb>
+     </Track.Thumb>
+     <Track.IncreaseRepeatButton>
+      <RepeatButton Style="{StaticResource Film.PlayerTrackButton}"
+                    Background="Transparent" Command="{x:Static Slider.IncreaseSmall}"
+                    CommandTarget="{Binding RelativeSource={RelativeSource AncestorType={x:Type Slider}}}"/>
+     </Track.IncreaseRepeatButton>
+    </Track>
+   </Grid>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".45"/></Trigger>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+   </DataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsEnabled,RelativeSource={RelativeSource Self}}" Value="False"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="Opacity" Value="1"/>
+   </MultiDataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerVolume" TargetType="Slider" BasedOn="{StaticResource Film.PlayerSeek}">
+  <Style.Resources>
+   <sys:Double x:Key="Film.PlayerTrackHeight">4</sys:Double>
+   <CornerRadius x:Key="Film.PlayerTrackRadius">2</CornerRadius>
+   <sys:Double x:Key="Film.PlayerThumbSize">10</sys:Double>
+  </Style.Resources>
+  <Setter Property="Width" Value="86"/>
+  <Setter Property="Maximum" Value="1"/><Setter Property="SmallChange" Value=".01"/>
+  <Setter Property="Foreground" Value="#E6FFFFFF"/>
+ </Style>
+
+ <Style x:Key="Film.PlayerOption" TargetType="ListBoxItem">
+  <Setter Property="Height" Value="32"/><Setter Property="Margin" Value="4"/>
+  <Setter Property="Padding" Value="8,0"/>
+  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="Background" Value="#0AFFFFFF"/><Setter Property="Foreground" Value="#E0FFFFFF"/>
+  <Setter Property="BorderBrush" Value="#1AFFFFFF"/><Setter Property="BorderThickness" Value="1"/>
+  <Setter Property="HorizontalContentAlignment" Value="Center"/>
+  <Setter Property="VerticalContentAlignment" Value="Center"/>
+  <Setter Property="Cursor" Value="Hand"/>
+  <Setter Property="FocusVisualStyle" Value="{StaticResource Film.PlayerFocus}"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+   <Border CornerRadius="8" Background="{TemplateBinding Background}"
+           BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+           Padding="{TemplateBinding Padding}">
+    <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                      VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+   </Border>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#1AFFFFFF"/></Trigger>
+   <Trigger Property="IsSelected" Value="True">
+    <Setter Property="BorderBrush" Value="#8C22C55E"/><Setter Property="Background" Value="#2E22C55E"/>
+    <Setter Property="Foreground" Value="#FF4ADE80"/>
+   </Trigger>
+   <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".45"/></Trigger>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </DataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsMouseOver,RelativeSource={RelativeSource Self}}" Value="True"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+   </MultiDataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsSelected,RelativeSource={RelativeSource Self}}" Value="True"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+   </MultiDataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsEnabled,RelativeSource={RelativeSource Self}}" Value="False"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="Opacity" Value="1"/>
+   </MultiDataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerOptions" TargetType="ListBox">
+  <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
+  <Setter Property="Padding" Value="0"/>
+  <Setter Property="SelectionMode" Value="Single"/>
+  <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
+  <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled"/>
+  <Setter Property="KeyboardNavigation.DirectionalNavigation" Value="Contained"/>
+  <Setter Property="KeyboardNavigation.TabNavigation" Value="Once"/>
+  <Setter Property="FocusVisualStyle" Value="{StaticResource Film.PlayerFocus}"/>
+  <Setter Property="ItemContainerStyle" Value="{StaticResource Film.PlayerOption}"/>
+  <Setter Property="ItemsPanel"><Setter.Value>
+   <ItemsPanelTemplate><UniformGrid Columns="3"/></ItemsPanelTemplate>
+  </Setter.Value></Setter>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBox">
+   <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+    <ItemsPresenter/>
+   </Border>
+  </ControlTemplate></Setter.Value></Setter>
+ </Style>
+
+ <Style x:Key="Film.PlayerMenuItem" TargetType="MenuItem">
+  <Setter Property="Height" Value="34"/><Setter Property="MinWidth" Value="100"/>
+  <Setter Property="Padding" Value="10,0"/><Setter Property="Margin" Value="0,4"/>
+  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="Background" Value="#0AFFFFFF"/><Setter Property="Foreground" Value="#E0FFFFFF"/>
+  <Setter Property="BorderBrush" Value="#1AFFFFFF"/><Setter Property="BorderThickness" Value="1"/>
+  <Setter Property="HorizontalContentAlignment" Value="Center"/>
+  <Setter Property="VerticalContentAlignment" Value="Center"/>
+  <Setter Property="Cursor" Value="Hand"/>
+  <Setter Property="FocusVisualStyle" Value="{StaticResource Film.PlayerFocus}"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="MenuItem">
+   <Border CornerRadius="8" Background="{TemplateBinding Background}"
+           BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+           Padding="{TemplateBinding Padding}">
+    <ContentPresenter ContentSource="Header" RecognizesAccessKey="True"
+                      HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                      VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+   </Border>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <Trigger Property="IsHighlighted" Value="True"><Setter Property="Background" Value="#14FFFFFF"/></Trigger>
+   <Trigger Property="IsChecked" Value="True">
+    <Setter Property="BorderBrush" Value="#8C22C55E"/><Setter Property="Background" Value="#2E22C55E"/>
+    <Setter Property="Foreground" Value="#FF4ADE80"/>
+   </Trigger>
+   <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".45"/></Trigger>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </DataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsHighlighted,RelativeSource={RelativeSource Self}}" Value="True"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+   </MultiDataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsChecked,RelativeSource={RelativeSource Self}}" Value="True"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+   </MultiDataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True"/>
+    <Condition Binding="{Binding IsEnabled,RelativeSource={RelativeSource Self}}" Value="False"/>
+   </MultiDataTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="Opacity" Value="1"/>
+   </MultiDataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerMenu" TargetType="ContextMenu">
+  <Setter Property="Background" Value="#EB121212"/><Setter Property="BorderBrush" Value="#1FFFFFFF"/>
+  <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="8"/>
+  <Setter Property="Foreground" Value="#E0FFFFFF"/>
+  <Setter Property="ItemContainerStyle" Value="{StaticResource Film.PlayerMenuItem}"/>
+  <Setter Property="SnapsToDevicePixels" Value="True"/>
+  <Setter Property="KeyboardNavigation.DirectionalNavigation" Value="Cycle"/>
+  <Setter Property="KeyboardNavigation.TabNavigation" Value="Cycle"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ContextMenu">
+   <Border CornerRadius="14" Background="{TemplateBinding Background}"
+           BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+           Padding="{TemplateBinding Padding}">
+    <ItemsPresenter/>
+   </Border>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </DataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerSettingsPanel" TargetType="Border">
+  <Setter Property="Width" Value="240"/><Setter Property="Padding" Value="10"/>
+  <Setter Property="CornerRadius" Value="14"/><Setter Property="Background" Value="#EB121212"/>
+  <Setter Property="BorderBrush" Value="#1FFFFFFF"/><Setter Property="BorderThickness" Value="1"/>
+  <Setter Property="TextElement.Foreground" Value="#E0FFFFFF"/>
+  <Style.Triggers>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </DataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerSettingsTitle" TargetType="TextBlock">
+  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="Foreground" Value="#C7FFFFFF"/><Setter Property="Margin" Value="0,0,0,8"/>
+  <Style.Triggers>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </DataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerStatus" TargetType="TextBlock">
+  <Setter Property="FontSize" Value="26"/><Setter Property="FontWeight" Value="ExtraBold"/>
+  <Setter Property="Foreground" Value="White"/>
+  <Setter Property="TextWrapping" Value="Wrap"/><Setter Property="TextAlignment" Value="Center"/>
+  <Style.Triggers>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   </DataTrigger>
+  </Style.Triggers>
+ </Style>
+
+ <Style x:Key="Film.PlayerStage" TargetType="ProgressBar">
+  <Setter Property="Height" Value="6"/><Setter Property="MinHeight" Value="0"/>
+  <Setter Property="Minimum" Value="0"/><Setter Property="Maximum" Value="1"/>
+  <Setter Property="IsIndeterminate" Value="False"/>
+  <Setter Property="Background" Value="#FF23252C"/>
+  <Setter Property="Foreground"><Setter.Value>
+   <LinearGradientBrush StartPoint="0,.5" EndPoint="1,.5">
+    <GradientStop Color="#FF0EA5E9" Offset="0"/>
+    <GradientStop Color="#FF22C55E" Offset=".5"/>
+    <GradientStop Color="#FF6366F1" Offset="1"/>
+   </LinearGradientBrush>
+  </Setter.Value></Setter>
+  <Setter Property="SnapsToDevicePixels" Value="True"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ProgressBar">
+   <Grid>
+    <Border x:Name="PART_Track" CornerRadius="3" Background="{TemplateBinding Background}"/>
+    <Border x:Name="PART_Indicator" CornerRadius="3" HorizontalAlignment="Left"
+            Background="{TemplateBinding Foreground}"/>
+   </Grid>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+   </DataTrigger>
+  </Style.Triggers>
+ </Style>
+</ResourceDictionary>

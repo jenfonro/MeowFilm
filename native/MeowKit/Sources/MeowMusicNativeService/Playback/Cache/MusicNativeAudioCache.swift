@@ -74,7 +74,10 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         try musicRequire(d.queue["currentId"].string == occurrenceID, .targetChanged)
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID &&
             !spent.contains(attemptID), .staleResult)
-        let song = try self.song(.init(kind: .queue, id: occurrenceID), d)
+        let original = try self.song(.init(kind: .queue, id: occurrenceID), d)
+        let song = try await sharedSongMetadata(original)
+        try check(own)
+        let recording = try playbackRecording(original: original, expanded: song, state: read())
         let excluded = try recordingSourceExclusions(song)
         try check(own)
         let sources = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
@@ -143,13 +146,13 @@ extension NativeMusicService: MusicCachedPlaybackServing {
                     expectedDuration: hit.duration, audio: nil, playbackAuthorization: MusicQueueAuthorization())
                 cache.fileVersion = hit.version
                 preparedCacheSources[attemptID] = .init(playback: .init(candidate: candidate, selection: selected),
-                    cache: cache, queueRevision: d.queue["revision"].int, settingsRevision: d.playback["revision"].int)
+                    recording: recording, cache: cache, queueRevision: d.queue["revision"].int, settingsRevision: d.playback["revision"].int)
                 return .init(candidate: candidate, selection: selected)
             }
             try authorization.perform {
                 spent.insert(attemptID)
                 attempt = Attempt(id: attemptID, occurrence: occurrenceID, sourceKey: selected.sourceKey,
-                                  selection: selected, ready: true, authorization: authorization)
+                                  selection: selected, recording: recording, ready: true, authorization: authorization)
                 audioCacheAttempt = .init(attemptID: attemptID, identity: hit.identity,
                     authorization: authorization, scopeAuthorization: scope.authorization, accessRegistration: registration,
                     expectedDuration: hit.duration, audio: nil, playbackAuthorization: MusicQueueAuthorization())
