@@ -23,11 +23,14 @@ public static partial class DesktopTests
         foreach (var test in VisualChromeCases()) yield return test;
         foreach (var test in PresentationCases()) yield return test;
         foreach (var test in HeaderPresentationCases()) yield return test;
-        yield return Case("unified sidebar retains visited visual trees and back crosses content types", async () =>
+        foreach (var test in MediaNavigationCases()) yield return test;
+        yield return Case("owner scoped sidebar retains visited visual trees and back crosses content types", async () =>
         {
             var a = new ProbeModule("music"); var b = new ProbeModule("film", hasPlayer: false);
             await using var f = new Fixture([a,b]); await f.LoadAsync();
-            Equal(10, f.Navigation.Items.Count, "all declared visible destinations share one sidebar");
+            Equal(4, f.Navigation.Items.Count, "current owner exposes its four non-home destinations");
+            True(f.Navigation.Items.OfType<ShellNavigationEntry>().All(item => ReferenceEquals(item.Owner.Module, a)),
+                "inactive owner destinations are excluded");
             await f.NavigateAsync(a, "two"); await f.NavigateAsync(b, "three");
             Same(a.PlayerView, f.Element<ContentControl>("PlayerHost").Content,
                 "the last real player remains in the global host");
@@ -35,13 +38,18 @@ public static partial class DesktopTests
                 "the retained player remains attached once");
             Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
                 "a playerless capability keeps the global player visible");
-            Click(f.Back); await UntilAsync(() => f.SelectedRoute == "two" && f.Status == "", "cross-type back");
+            Click(f.Back); await UntilAsync(() => f.SelectedOwner == b && f.SelectedRoute == "one" && f.Status == "", "back to selected media home");
+            Click(f.Back); await UntilAsync(() => f.SelectedOwner == a && f.SelectedRoute == "two" && f.Status == "", "cross-type back");
             Same(a, f.SelectedOwner, "restored owner");
             Same(a.PlayerView, f.Element<ContentControl>("PlayerHost").Content,
                 "restored owner reuses the same global player");
             var hidden = new ObservableCollection<NavigationItem>(b.Navigation) { new("new", "new", "\uE8F1") };
             b.ReplaceNavigation(hidden); await DrainAsync();
-            True(f.Navigation.Items.OfType<ShellNavigationEntry>().Any(x => x.Owner.Module == b && x.Route == "new"), "inactive owner dynamic data visible");
+            False(f.Navigation.Items.OfType<ShellNavigationEntry>().Any(x => x.Owner.Module == b),
+                "inactive owner dynamic data stays outside the current sidebar");
+            await f.SwitchAsync(b);
+            True(f.Navigation.Items.OfType<ShellNavigationEntry>().Any(x => x.Owner.Module == b && x.Route == "new"),
+                "switching media reveals that owner's current dynamic data");
             Equal("\uE8F1", f.Navigation.Items.OfType<ShellNavigationEntry>().Single(x => x.Route == "new").Glyph,
                 "current navigation glyph is preserved");
         });
@@ -714,14 +722,16 @@ public static partial class DesktopTests
             Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "visited capability surfaces remain mounted");
             Equal(1, a.InitializeCount, "no reinitialize");
         });
-        yield return Case("Ctrl F routed keyboard event selects search without native input", async () =>
+        foreach (var shortcut in new[] { Key.F, Key.K })
+        yield return Case("Ctrl " + shortcut + " routed keyboard event selects search without native input", async () =>
         {
             await using var f = new Fixture([new ProbeModule("keyboard-find")]);
             f.Shell.PrepareForRender(); f.Search.Text = "test-search-text"; f.Search.Select(2, 0);
-            var key = RaiseKey(f.Shell, Key.F, ModifierKeys.Control, true);
-            True(key.Handled, "Ctrl+F must be handled"); Equal(f.Search.Text.Length, f.Search.SelectionLength, "Ctrl+F selects all");
+            var key = RaiseKey(f.Shell, shortcut, ModifierKeys.Control, true);
+            True(key.Handled, "Ctrl+" + shortcut + " must be handled");
+            Equal(f.Search.Text.Length, f.Search.SelectionLength, "Ctrl+" + shortcut + " selects all");
             Equal(0, f.Probes[0].InitializeCount, "focus command is not a business request");
-            False(RaiseKey(f.Shell, Key.F, ModifierKeys.Control | ModifierKeys.Shift, true).Handled, "unassigned modifiers left alone");
+            False(RaiseKey(f.Shell, shortcut, ModifierKeys.Control | ModifierKeys.Shift, true).Handled, "unassigned modifiers left alone");
         });
         yield return Case("Alt Left routes back while system chords remain unhandled", async () =>
         {
@@ -1034,7 +1044,7 @@ public static partial class DesktopTests
         True(content.ActualWidth > 400 && content.ActualHeight > 200, "usable main viewport");
         True(player.ActualHeight >= 64, "player measured into own row");
         True(contentTop.Y + content.ActualHeight <= playerTop.Y + 0.5, "player must not cover content");
-        Equal(203d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].ActualWidth, "sidebar width");
+        Equal(216d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].ActualWidth, "sidebar width");
         var bitmap = new RenderTargetBitmap((int)size.Width, (int)size.Height, 96, 96, PixelFormats.Pbgra32); bitmap.Render(root);
         var pixels = new byte[(int)size.Width * (int)size.Height * 4]; bitmap.CopyPixels(pixels, (int)size.Width * 4, 0);
         var opaque = 0; for (var index = 3; index < pixels.Length; index += 4) if (pixels[index] > 240) opaque++;
@@ -1051,13 +1061,18 @@ public static partial class DesktopTests
         public int ClosedCount { get; private set; }
         public int ShutdownCalls { get; private set; }
         public int ForceCalls { get; private set; }
+        public ListBox Modules => Element<ListBox>("ModuleNavigationList");
         public ListBox Navigation => Element<ListBox>("NavigationList");
         public TextBox Search => Element<TextBox>("SearchBox");
         public Button Back => Element<Button>("BackButton");
+        public Button Forward => Element<Button>("ForwardButton");
         public string Status => Element<TextBlock>("StatusText").Text;
-        public string? SelectedRoute => (Navigation.SelectedItem as ShellNavigationEntry)?.Route ?? (Element<ListBox>("CollectionNavigationList").SelectedItem as ShellNavigationEntry)?.Route;
+        public string? SelectedRoute => (Navigation.SelectedItem as ShellNavigationEntry)?.Route ??
+            (Element<ListBox>("CollectionNavigationList").SelectedItem as ShellNavigationEntry)?.Route ??
+            (Modules.SelectedItem as ModuleSession)?.Module.Navigation[0].Route;
         public ProbeModule? SelectedOwner => ((Navigation.SelectedItem as ShellNavigationEntry) ??
-            (Element<ListBox>("CollectionNavigationList").SelectedItem as ShellNavigationEntry))?.Owner.Module as ProbeModule;
+            (Element<ListBox>("CollectionNavigationList").SelectedItem as ShellNavigationEntry))?.Owner.Module as ProbeModule ??
+            (Modules.SelectedItem as ModuleSession)?.Module as ProbeModule;
         public Fixture(ProbeModule[] modules, Func<Fixture, Task>? shutdown = null, IReadOnlyList<IDesktopPage>? pages = null,
             Func<Fixture, Task>? force = null, Func<Fixture, Task>? cancel = null)
         {
@@ -1085,12 +1100,22 @@ public static partial class DesktopTests
         }
         public void Select(ProbeModule module, string route)
         {
+            if (route == module.Navigation[0].Route)
+            {
+                Modules.SelectedItem = Modules.Items.OfType<ModuleSession>().Single(session => ReferenceEquals(session.Module, module));
+                return;
+            }
             var item = module.Navigation.Single(item => item.Route == route);
             var list = item.Group is null ? Navigation : Element<ListBox>("CollectionNavigationList");
             list.SelectedItem = list.Items.OfType<ShellNavigationEntry>().Single(entry => ReferenceEquals(entry.Owner.Module, module) && entry.Route == route);
         }
         public async Task NavigateAsync(ProbeModule module, string route)
         {
+            if (route != module.Navigation[0].Route &&
+                !Navigation.Items.OfType<ShellNavigationEntry>()
+                    .Concat(Element<ListBox>("CollectionNavigationList").Items.OfType<ShellNavigationEntry>())
+                    .Any(entry => ReferenceEquals(entry.Owner.Module, module)))
+                await SwitchAsync(module);
             Select(module, route);
             await UntilAsync(() => SelectedOwner == module && SelectedRoute == route && Status == "", "navigate " + route);
         }

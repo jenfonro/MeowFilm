@@ -154,13 +154,20 @@ public static class AppCompositionTests
                 CheckRecommendationPage(music);
                 shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
                 await Until(() => music.IsCatalogHome && !music.Busy && ShellStatus(shell).Length == 0 &&
-                    ((ListBox)shell.FindName("NavigationList")).SelectedItem is ShellNavigationEntry { Route: "catalog-home" });
+                    ((ListBox)shell.FindName("ModuleNavigationList")).SelectedItem is ModuleSession session &&
+                    ReferenceEquals(session.Module, music));
                 Check(music.Status.Length == 0 && music.CatalogSections.Sum(section => section.Items.Count) > 0,
                     "default recommendation must contain native platform data");
                 Check(music.CatalogSourcePlatform == "wy" && !music.HasCatalogSourceError,
                     "cold shell startup consumes the source settings get contract before home");
-                Check(((ListBox)shell.FindName("NavigationList")).SelectedItem is ShellNavigationEntry { Route: "catalog-home" },
-                    "Shell must commit its actual default route");
+                Check(((ListBox)shell.FindName("ModuleNavigationList")).SelectedItem is ModuleSession selected &&
+                    ReferenceEquals(selected.Module, music) && music.CaptureNavigationLocation() == "catalog-home",
+                    "Shell commits its actual home through the selected media item");
+                var destinations = new[] { "NavigationList", "CollectionNavigationList" }
+                    .SelectMany(name => ((ListBox)shell.FindName(name)).Items.OfType<ShellNavigationEntry>()).ToArray();
+                Check(destinations.Length > 0 && destinations.All(item =>
+                    ReferenceEquals(item.Owner.Module, music) && item.Route != "catalog-home"),
+                    "the current owner keeps its content navigation without a second home entry");
                 RenderComponent((FrameworkElement)shell.Content, 1244, 848);
                 shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
                 await Dispatcher.Yield(DispatcherPriority.Background);

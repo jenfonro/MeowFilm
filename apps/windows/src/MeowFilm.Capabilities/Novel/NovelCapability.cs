@@ -7,9 +7,9 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopImmersiveSource
+public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopImmersiveSource, IDesktopSidebarSource
 {
-    public const string HomeRoute = "novel-home", ShelfRoute = "novel-shelf", BookRoute = "novel-book", ReaderRoute = "novel-reader";
+    public const string HomeRoute = "novel-home", CategoriesRoute = "novel-categories", BookRoute = "novel-book", ReaderRoute = "novel-reader";
     private readonly NovelWork work = new();
     private CancellationTokenSource presentation = new();
     private readonly Dictionary<string, NovelBookSession> sessions = [];
@@ -20,15 +20,15 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
     private bool stopping, disposed;
     private Task? preparation, disposal;
     private string route = HomeRoute;
-    private CancellationTokenSource? discovery;
-    private long discoveryGeneration;
-    private int explorePage;
     public NovelCapability(IRuntimeClient runtime, IDocumentStore store) : this(new NovelSourceService(runtime),
         new NovelLibrary(store), new NovelRuleProgram(runtime)) { }
     public NovelCapability(NovelSourceService sources, NovelLibrary library, NovelRuleProgram rules)
     {
         Sources = sources; Library = library; Rules = rules; Search = new(sources, rules);
-        Navigation = [new(HomeRoute, "小说", "\uE8F1"), new(ShelfRoute, "书架", "\uE82D"),
+        Navigation = [new(HomeRoute, "小说", "\uE8F1", ShowInSidebar: false)
+            { IconData = "M12,5 C9,3 6,3 3,4 L3,19 C6,18 9,18 12,20 C15,18 18,18 21,19 L21,4 C18,3 15,3 12,5 L12,20" },
+            new(CategoriesRoute, "分类", "\uE80A")
+            { IconData = "M3,3 L10,3 10,10 3,10 Z M14,3 L21,3 21,10 14,10 Z M3,14 L10,14 10,21 3,21 Z M14,14 L21,14 21,21 14,21 Z" },
             new(BookRoute, "书籍详情", "\uE8F1", ShowInSidebar: false), new(ReaderRoute, "阅读", "\uE8F1", ShowInSidebar: false)];
         view = new(this); settings = new(this);
         Library.Changed += LibraryChanged; Sources.Changed += SourcesChanged;
@@ -45,6 +45,7 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
     public string Version => "0.1.0";
     public ObservableCollection<NavigationItem> Navigation { get; }
     public FrameworkElement View => view;
+    public FrameworkElement SidebarView => view.SidebarView;
     public FrameworkElement SettingsView => settings;
     public FrameworkElement? PlayerView => null;
     public bool IsImmersive => route == ReaderRoute;
@@ -55,15 +56,10 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
     public NovelRuleProgram Rules { get; }
     public NovelSearch Search { get; }
     public NovelBookSession? Session { get; private set; }
-    public NovelSource? ExploreSource { get; private set; }
-    public NovelKind? ExploreKind { get; private set; }
-    public IReadOnlyList<NovelKind> Kinds { get; private set; } = [];
-    public ObservableCollection<NovelBook> DiscoverBooks { get; } = [];
-    public bool MoreDiscovery { get; private set; }
-    public bool LoadingDiscovery { get; private set; }
-    public string DiscoveryError { get; private set; } = "";
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
+    public event EventHandler? SettingsRequested;
+    internal void RequestSettings() => SettingsRequested?.Invoke(this, EventArgs.Empty);
     private void LibraryChanged(object? sender, EventArgs e) { settings.Refresh(); Publish(); }
     private void SourcesChanged(object? sender, EventArgs e)
     {
@@ -71,8 +67,7 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
         if (e is not NovelSourceProjectionChange { Initial: true } && Session is { } book &&
             !Sources.Sources.Any(s => s.InstallationId == book.Book.InstallationId && s.Enabled && s.Revision == book.Book.Revision))
         { book.Cancel(); view.PauseReading(); }
-        if (ExploreSource is { } source && !Sources.IsCurrent(source))
-        { CancelDiscovery(); ExploreSource = null; ExploreKind = null; Kinds = []; DiscoverBooks.Clear(); MoreDiscovery = false; }
+        InvalidateDiscoverySource();
         settings.Refresh(); Publish();
     }
     public async Task InitializeAsync(CancellationToken token)
@@ -91,9 +86,10 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
         token.ThrowIfCancellationRequested();
         if (changed) CancelPresentation();
         if (!ReferenceEquals(Session, session)) { Session?.Cancel(); Session = session; }
-        if (next != HomeRoute) CancelDiscovery();
+        if (next is not (HomeRoute or CategoriesRoute)) CancelDiscovery();
         route = next; Publish();
-        if (route == HomeRoute && ExploreSource is null) await LoadDiscoveryAsync(null, null, true, token);
+        if (route is HomeRoute or CategoriesRoute && discoveryNeedsReload)
+            await LoadDiscoveryAsync(ExploreSource, ExploreKind, true, token);
         if (route == BookRoute && Session is { Chapters.Count: 0 }) await Session.LoadMetadataAsync(token);
         Publish();
     }
@@ -104,12 +100,22 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
         string key = await Rules.IdentityAsync(book, token);
         token.ThrowIfCancellationRequested();
         var entry = Library.Find(book, key) ?? new(Guid.NewGuid().ToString("N"), key, book);
+        ReceiveEntry(entry);
+    }
+    private void ReceiveEntry(NovelEntry entry)
+    {
         if (!sessions.TryGetValue(entry.BookId, out var session))
         {
             session = new(Sources, Library, Rules, entry); sessions.Add(entry.BookId, session);
             session.Changed += SessionChanged; session.SelectChapterAsync = view.SelectChapterAsync;
         }
         if (!ReferenceEquals(Session, session)) { Session?.Cancel(); Session = session; }
+    }
+    internal Task ContinueReadingAsync(NovelEntry entry, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        ReceiveEntry(entry);
+        return StartReadingAsync(token);
     }
     public async Task OpenBookAsync(NovelBook book, CancellationToken token = default)
     {
@@ -153,44 +159,6 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
             !locations.Contains(BookRoute + ":" + p.Key) && !locations.Contains(ReaderRoute + ":" + p.Key)).ToArray())
         { pair.Value.Cancel(); pair.Value.Changed -= SessionChanged; sessions.Remove(pair.Key); }
     }
-    public Task LoadDiscoveryAsync(NovelSource? source, NovelKind? kind, bool reset, CancellationToken token = default)
-    {
-        CancelDiscovery(); discovery?.Dispose(); discovery = CancellationTokenSource.CreateLinkedTokenSource(token);
-        long id = discoveryGeneration; var ct = discovery.Token;
-        return work.Run(async cancellation =>
-        {
-            LoadingDiscovery = true; DiscoveryError = ""; Publish();
-            try
-            {
-                if (Sources.Sources.Count == 0) await Sources.RefreshAsync(cancellation);
-                source ??= Sources.Sources.FirstOrDefault(s => s.Enabled && s.EnabledExplore && s.Actions.Contains("explore"));
-                if (source is null) { ExploreSource = null; ExploreKind = null; Kinds = []; DiscoverBooks.Clear(); MoreDiscovery = false; return true; }
-                if (reset || ExploreSource?.InstallationId != source.InstallationId)
-                {
-                    var result = await Sources.InvokeAsync(source, "exploreKinds", new { }, cancellation);
-                    cancellation.ThrowIfCancellationRequested(); if (id != discoveryGeneration) return false;
-                    Kinds = NovelJson.Decode<NovelKind[]>(result.GetProperty("kinds"));
-                    ExploreSource = source; ExploreKind = kind ?? Kinds.FirstOrDefault(k => k.Url.Length > 0);
-                    explorePage = 0; DiscoverBooks.Clear();
-                }
-                else if (kind is not null && kind != ExploreKind) { ExploreKind = kind; explorePage = 0; DiscoverBooks.Clear(); }
-                if (ExploreKind is null || ExploreKind.Url.Length == 0) { MoreDiscovery = false; return true; }
-                var page = await Sources.InvokeAsync(source, "explore", new { url = ExploreKind.Url, page = explorePage + 1 }, cancellation);
-                cancellation.ThrowIfCancellationRequested(); if (id != discoveryGeneration) return false;
-                int before = DiscoverBooks.Count;
-                foreach (var item in page.GetProperty("books").EnumerateArray())
-                {
-                    var book = NovelBook.From(item, source);
-                    if (!DiscoverBooks.Any(b => b.SourceIdentity == book.SourceIdentity)) DiscoverBooks.Add(book);
-                }
-                explorePage++; MoreDiscovery = DiscoverBooks.Count > before; return true;
-            }
-            catch (OperationCanceledException) { throw; }
-            catch { if (id == discoveryGeneration) DiscoveryError = "发现加载失败"; throw; }
-            finally { if (id == discoveryGeneration) { LoadingDiscovery = false; Publish(); } }
-        }, ct);
-    }
-    public void CancelDiscovery() { ++discoveryGeneration; discovery?.Cancel(); LoadingDiscovery = false; Publish(); }
     internal void CancelPresentation()
     {
         if (disposed) return;
@@ -245,7 +213,7 @@ public sealed class NovelCapability : IDesktopModule, IDesktopNavigationSource, 
         try { await PrepareShutdownAsync(); }
         finally
         {
-            disposed = true; presentation.Cancel(); presentation.Dispose(); discovery?.Dispose(); view.Dispose(); settings.Dispose();
+            disposed = true; presentation.Cancel(); presentation.Dispose(); view.Dispose(); settings.Dispose();
             Sources.Changed -= SourcesChanged; Library.Changed -= LibraryChanged;
             await Rules.DisposeAsync();
         }

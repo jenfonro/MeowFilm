@@ -9,6 +9,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -55,10 +56,10 @@ public static class FilmMetadataPlaybackIntegrationTests
         var request = Handoff(target, read);
         await module.OpenPlaybackAsync(new(target.Id, target.Title, "", ""), request);
         var page = module.Playback!;
-        var root = module.View;
+        var root = PlaybackWithPosterCard(module, out var poster);
         ArtworkScope.SetLoader(root, artwork);
         using var surface = Mount(root);
-        var view = (FilmPlaybackView)((FilmView)root).FindName("PlaybackView");
+        var view = (FilmPlaybackView)((FilmView)module.View).FindName("PlaybackView");
         await Until(upstream, () => page.Episodes.Count == 1 && page.Episodes[0].Title == "已播首集" &&
             page.Season == 1 && upstream.Count("/douban/movie/subject_search") == 1);
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
@@ -67,11 +68,10 @@ public static class FilmMetadataPlaybackIntegrationTests
             ((TextBlock)view.FindName("CastNames")).Text == "完整演员" &&
             Visuals(view).OfType<TextBlock>().Any(text => text.Text == "完整导演"),
             "append-loaded cast and director reach the actual playback page and visible text, not a search-only projection");
-        var hero = HeroArtwork(view);
-        using var presentation = await hero.PrepareForPresentationAsync();
-        Check(hero.Source is { IsFrozen: true, PixelWidth: > 0 } &&
+        using var presentation = await poster.PrepareForPresentationAsync();
+        Check(poster.Source is { IsFrozen: true, PixelWidth: > 0 } &&
             trusted.Contains("/v1/tmdb/images/original/poster.png") && direct.Reads == 0,
-            "the real playback poster decodes the original reference through the App's trusted artwork owner");
+            "a normal poster card bound to the real playback metadata decodes the original reference through the App's trusted artwork owner");
         CompleteTmdb(await host.Metadata.DetailAsync("tv", 7, default), 7);
         Check(upstream.Count("/tmdb/3/tv/7") == 1 && upstream.Count("/tmdb/3/tv/7/season/1") == 1 &&
             upstream.Count("/tmdb/3/tv/7/season/2") == 0 && upstream.Count("/tmdb/3/tv/7/season/0") == 0,
@@ -190,20 +190,19 @@ public static class FilmMetadataPlaybackIntegrationTests
         var target = new FilmPlaybackTarget("douban:tv:77", "tv", MetadataUpstream.DoubanTitle, "douban", "77");
         await module.OpenPlaybackAsync(new(target.Id, target.Title, "", ""), Handoff(target, read));
         var page = module.Playback!;
-        var root = module.View;
+        var root = PlaybackWithPosterCard(module, out var poster);
         ArtworkScope.SetLoader(root, artwork);
         using var surface = Mount(root);
-        var view = (FilmPlaybackView)((FilmView)root).FindName("PlaybackView");
-        var hero = HeroArtwork(view);
-        using var failedPresentation = await hero.PrepareForPresentationAsync();
-        await Until(upstream, () => hero.Source is null && AutomationProperties.GetHelpText(hero) == "图片加载失败" &&
+        var view = (FilmPlaybackView)((FilmView)module.View).FindName("PlaybackView");
+        using var failedPresentation = await poster.PrepareForPresentationAsync();
+        await Until(upstream, () => poster.Source is null && AutomationProperties.GetHelpText(poster) == "图片加载失败" &&
             upstream.DoubanImageRequests > 1 && upstream.SuccessfulDoubanImages == 1 &&
             upstream.Count("/tmdb/3/search/multi") == 1);
         Check(page.Title == MetadataUpstream.DoubanTitle && page.Overview == "来自真实公开资料接口的简介" &&
             page.Cast == "豆瓣演员" && page.Directors == "豆瓣导演" &&
             ((TextBlock)view.FindName("CastNames")).Text == "豆瓣演员" && page.Poster == reference &&
-            !hero.ShowRetry && hero.ToolTip as string == "图片加载失败",
-            "the actual Douban playback view displays provider facts and safe image failure without inventing an image retry button");
+            !poster.ShowRetry && poster.ToolTip as string == "图片加载失败",
+            "the actual Douban playback view displays provider facts while its normal poster card exposes safe image failure without an image retry button");
         Check(page.ActiveTarget.Kind == "group" && page.EntryTarget.MetadataProvider == "douban" &&
             page.EntryResolution == "unmatched" && page.RequiresSourceSearch &&
             page.ActiveTarget.Members!.Value.GetArrayLength() == 0 && page.Sources.Count == 0 &&
@@ -221,20 +220,20 @@ public static class FilmMetadataPlaybackIntegrationTests
         int failures = upstream.DoubanImageRequests;
         surface.RootVisual = null;
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-        Check(hero.Source is null, "unmounting the real view retires its failed artwork presentation");
+        Check(poster.Source is null, "unmounting the real view and normal card retires its failed artwork presentation");
         upstream.AllowDoubanImages = true;
         surface.RootVisual = root;
         Layout(root);
-        using var recoveredPresentation = await hero.PrepareForPresentationAsync();
-        await Until(upstream, () => hero.Source is { IsFrozen: true, PixelWidth: > 0 });
-        Check(AutomationProperties.GetHelpText(hero).Length == 0 && hero.ToolTip is null &&
+        using var recoveredPresentation = await poster.PrepareForPresentationAsync();
+        await Until(upstream, () => poster.Source is { IsFrozen: true, PixelWidth: > 0 });
+        Check(AutomationProperties.GetHelpText(poster).Length == 0 && poster.ToolTip is null &&
             trusted.All(address => address == reference) && trusted.Count >= 2 &&
             upstream.DoubanImageRequests > failures && upstream.SuccessfulDoubanImages == 2 && direct.Reads == 0 &&
             upstream.Count("/douban/rexxar/api/v2/tv/77") == 1 && ReferenceEquals(view.DataContext, page),
-            "the same real view reload retries the failed relative image through the original App artwork owner, clears failure and shares decoded pixels without reloading detail");
+            "remounting the same real view and normal card retries the failed relative image through the original App artwork owner, clears failure and shares decoded pixels without reloading detail");
         var imageReads = upstream.DoubanImageRequests;
         using (var borrowed = await artwork.AcquireAsync(reference))
-            Check(ReferenceEquals(borrowed.Image, hero.Source), "the real image consumer borrows the same decoded artwork, not a second image cache");
+            Check(ReferenceEquals(borrowed.Image, poster.Source), "the real image consumer borrows the same decoded artwork, not a second image cache");
         Check(upstream.DoubanImageRequests == imageReads && upstream.Requests.All(item =>
             !item.Path.Contains("/season/", StringComparison.Ordinal) && !item.Path.EndsWith("/episodes", StringComparison.Ordinal) &&
             !item.Path.Contains("/celebrity/", StringComparison.Ordinal)),
@@ -274,8 +273,23 @@ public static class FilmMetadataPlaybackIntegrationTests
             request.Query["append_to_response"] == "credits,similar,images", "full detail has the exact production append and language key");
     private static Button SeasonButton(FilmPlaybackView view, int number) =>
         Visuals(view).OfType<Button>().Single(button => button.Tag is FilmSelection choice && choice.Season == number);
-    private static ArtworkImage HeroArtwork(FilmPlaybackView view) =>
-        Visuals((FilmPlaybackPoster)view.FindName("Backdrop")).OfType<ArtworkImage>().Single();
+    private static Grid PlaybackWithPosterCard(FilmCapability module, out ArtworkImage image)
+    {
+        // Keep the real metadata consumer and a normal poster card, without restoring a page backdrop
+        // or inventing episodes/recommendations just to host an image for incomplete metadata.
+        var poster = new FilmPlaybackPoster
+            { Width = 156, Height = 234, Margin = new Thickness(12, 0, 12, 0), VerticalAlignment = VerticalAlignment.Top };
+        poster.SetBinding(FilmPlaybackPoster.AddressProperty, new Binding("Playback.Poster") { Source = module });
+        module.View.Width = 1180; module.View.Height = 1300;
+        var root = new Grid { Width = 1360, Height = 1300 };
+        root.ColumnDefinitions.Add(new() { Width = new GridLength(1180) });
+        root.ColumnDefinitions.Add(new() { Width = new GridLength(180) });
+        root.Children.Add(module.View);
+        Grid.SetColumn(poster, 1);
+        root.Children.Add(poster);
+        image = Visuals(poster).OfType<ArtworkImage>().Single();
+        return root;
+    }
     private static void Click(Button button)
     {
         Check(button.IsEnabled, "the actual requested button is enabled");
@@ -317,7 +331,6 @@ public static class FilmMetadataPlaybackIntegrationTests
     }
     private static HwndSource Mount(FrameworkElement view)
     {
-        view.Width = 1180; view.Height = 1300;
         view.Resources.MergedDictionaries.Add(new ResourceDictionary
             { Source = new Uri("/MeowFilm.Desktop;component/Theme.xaml", UriKind.Relative) });
         var surface = new HwndSource(new HwndSourceParameters("film-metadata-playback-offscreen")

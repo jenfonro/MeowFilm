@@ -26,11 +26,15 @@ public static partial class DesktopTests
             var source = f.Element<Border>("ApplicationBackground");
             var material = f.Element<SidebarBackdrop>("SidebarMaterial");
             var sidebar = f.Element<Border>("SidebarBackground");
+            var tint = f.Element<Border>("SidebarTint");
             Same(source, material.Source, "the only sampled visual is the dedicated background sibling");
             False(source.IsAncestorOf(material), "background source excludes the sidebar and its foreground");
             True(material.Effect is BlurEffect { Radius: 12 }, "actual material applies a light background blur");
             True(sidebar.Background is null && !sidebar.IsHitTestVisible && sidebar.ClipToBounds,
-                "material has no independent tint or pointer target and clips only its background");
+                "the backdrop owner remains unpainted and clips only its background layers");
+            Equal(Color.FromArgb(0x66, 255, 255, 255), ((SolidColorBrush)tint.Background).Color,
+                "the design tint is a separate translucent white layer");
+            True(tint.Effect is null && !tint.IsHitTestVisible, "tint cannot blur foreground or receive input");
             var previewRoot = TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot,
                 Path.Combine(TestWorkspace.ResultsRoot, "playlist-pages-shell"));
             Directory.CreateDirectory(previewRoot);
@@ -72,12 +76,14 @@ public static partial class DesktopTests
                         bitmap.CopyPixels(new Int32Rect((int)(x * scale), (int)(y * scale), 1, 1), bytes, 4, 0);
                         return Color.FromArgb(bytes[3], bytes[2], bytes[1], bytes[0]);
                     }
+                    double Untinted(byte channel) => (channel - 102d) / .6;
                     int boundary = (int)size.Height / 2;
-                    True(Pixel(190, boundary - 2).R is > 20 and < 235 &&
-                        Pixel(190, boundary + 2).R is > 20 and < 235,
+                    True(Untinted(Pixel(190, boundary - 2).R) is > 20 and < 235 &&
+                        Untinted(Pixel(190, boundary + 2).R) is > 20 and < 235,
                         "the controlled sharp background edge is truly blurred at the full-window midpoint");
-                    True(Pixel(190, boundary - 24).R < 5 && Pixel(190, boundary + 24).R > 250,
-                        "blur stays local rather than stretching the background into the shorter sidebar");
+                    True(Math.Abs(Pixel(190, boundary - 24).R - 102) <= 3 &&
+                        Untinted(Pixel(190, boundary + 24).R) > 250,
+                        "the exact white alpha tint preserves local blur and full-window background coordinates");
                     True(Pixel(350, boundary - 2).R < 5 && Pixel(350, boundary + 2).R > 250,
                         "the content background retains the sharp source edge");
 
@@ -92,18 +98,20 @@ public static partial class DesktopTests
                     layout.Children.Add(foreground); root.UpdateLayout();
                     bitmap.Clear(); bitmap.Render(root);
                     Equal(Colors.Red, Pixel(180, boundary), "foreground starts at its exact pixel edge without blur");
-                    True(Pixel(178, boundary).G > 20, "foreground does not bleed into the sampled background");
+                    True(Untinted(Pixel(178, boundary).G) > 20, "foreground does not bleed into the sampled background");
                     layout.Children.Remove(foreground); root.UpdateLayout();
                 }
             }
             DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
             Equal(Visibility.Collapsed, material.Visibility, "high contrast removes the blurred layer");
+            Equal(Visibility.Collapsed, tint.Visibility, "high contrast removes the tint layer");
             True(material.Effect is null, "high contrast retires the blur");
             Equal(SystemColors.WindowBrush, sidebar.Background, "system backdrop remains opaque");
             Equal(SystemColors.WindowTextBrush, sidebar.BorderBrush, "system boundary remains legible");
             True(sidebar.BorderThickness.Right > 0, "high contrast keeps the navigation boundary");
             DesktopTheme.SetIsHighContrast(root, false); root.UpdateLayout(); await DrainAsync();
             Equal(Visibility.Visible, material.Visibility, "ordinary theme restores the same retained material");
+            Equal(Visibility.Visible, tint.Visibility, "ordinary theme restores the retained design tint");
             Same(source, material.Source, "accessibility changes preserve the application source");
         });
         yield return Case("shell text follows system typography and search and navigation retain accessible focus", async () =>
@@ -119,8 +127,8 @@ public static partial class DesktopTests
                 "shell header and caption share one compact height");
             Equal(new Thickness(0), f.Element<Grid>("ContentRegion").Margin,
                 "content starts directly below the header row");
-            Equal(8d, f.Element<ScrollViewer>("SidebarScroll").Margin.Top,
-                "sidebar navigation uses the same compact top rhythm");
+            Equal(22d, f.Element<ScrollViewer>("SidebarScroll").Margin.Top,
+                "media selector uses the design's sidebar top inset");
             Equal(76d, f.Element<Border>("QueueSurface").Margin.Top,
                 "queue offset follows the compact header");
             Equal(76d, f.Element<StackPanel>("NotificationOverlay").Margin.Top,
@@ -310,7 +318,7 @@ public static partial class DesktopTests
             Equal(Visibility.Visible, f.Element<ScrollViewer>("SidebarScroll").Visibility, "underlying sidebar remains");
             Equal(Visibility.Visible, f.Element<Grid>("SearchChrome").Visibility, "underlying search remains");
             Equal(Visibility.Visible, f.Element<Button>("PlayerDetailBackButton").Visibility, "collapse available");
-            Equal(203d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "underlying layout unchanged");
+            Equal(216d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "underlying layout unchanged");
             True(f.Element<Grid>("RootLayout").Background is null, "overlay does not repaint the shell");
             Same(ordinaryBackdrop, f.Element<SidebarBackdrop>("SidebarMaterial"),
                 "player expansion retains the background material rather than rebuilding the shell");
@@ -324,7 +332,7 @@ public static partial class DesktopTests
             Equal(ordinaryPlayerBounds, Bounds(f.Element<Border>("PlayerFrame")), "no footer relayout on dismissal");
             Equal(ordinaryContentBounds, Bounds(f.Element<Grid>("ContentRegion")), "no content relayout on dismissal");
             True(escape.Handled, "escape handled");
-            Equal(203d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "sidebar width restored");
+            Equal(216d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "sidebar width restored");
             Equal(1, module.Deactivations, "detail owner deactivated once");
 
             await f.SwitchAsync(passive);
