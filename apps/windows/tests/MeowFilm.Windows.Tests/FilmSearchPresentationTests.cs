@@ -50,25 +50,35 @@ public static partial class MusicUiTests
         True(f.Page.Cards.Count == 6 && f.Page.Cards.Select(card => card.Subtitle).Take(4).SequenceEqual(["来源甲", "聚合", "剧集", "电影"]),
             "the actual search projection retains site, aggregate, television and movie label semantics");
         using var source = SearchRenderSource(f.Shell, out var root);
-        foreach (int width in new[] { 1110, 860 })
+        var columnCounts = new HashSet<int>();
+        var posterWidths = new HashSet<double>();
+        int requests = f.Runtime.SearchOpens;
+        foreach (int width in new[] { 1110, 1450, 860 })
         {
             SearchLayout(root, width, 800); await Drain(); SearchLayout(root, width, 800);
             var cards = Visuals(f.Page.View).OfType<FilmCard>().ToArray();
             Equal(6, cards.Length);
+            var panel = Visuals(f.Page.View).OfType<AdaptiveCardPanel>().Single();
+            columnCounts.Add(cards.Count(card => card.TranslatePoint(new Point(), panel).Y < 1));
             foreach (var card in cards)
             {
                 var item = (FilmCardItem)card.DataContext;
                 var poster = (Grid)card.FindName("PosterFrame");
                 var label = (Border)card.FindName("SiteLabel");
                 var subtitle = (TextBlock)card.FindName("Subtitle");
-                Equal(new Size(176, 264), poster.RenderSize); Equal(item.HasSubtitle ? 318d : 294d, card.ActualHeight);
+                True(poster.ActualWidth >= 143.5 && poster.ActualWidth <= 176.5 &&
+                    Math.Abs(poster.ActualHeight - poster.ActualWidth * 1.5) <= 1,
+                    "search posters shrink within readable bounds and retain the maximum reference ratio");
+                posterWidths.Add(poster.ActualWidth);
+                True(Math.Abs(card.ActualHeight - poster.ActualHeight - (item.HasSubtitle ? 54 : 30)) <= 1,
+                    "caption and source-chip rows keep their native height while the poster changes size");
                 Equal(item.Subtitle, subtitle.Text);
                 Equal(item.HasSubtitle ? Visibility.Visible : Visibility.Collapsed, label.Visibility);
                 if (item.HasSubtitle)
                 {
                     True(label.ActualWidth <= 176 && label.TranslatePoint(new Point(), card).Y >= poster.ActualHeight &&
                         label.TranslatePoint(new Point(0, label.ActualHeight), card).Y <= card.ActualHeight + .5 &&
-                        Math.Abs(label.TranslatePoint(new Point(label.ActualWidth / 2, 0), card).X - 88) < 1,
+                        Math.Abs(label.TranslatePoint(new Point(label.ActualWidth / 2, 0), card).X - card.ActualWidth / 2) < 1,
                         $"bounded source/type chip stays centered below the poster without overlap or clipping: {label.RenderSize} at {label.TranslatePoint(new Point(), card)}, card {card.RenderSize}");
                     Equal(new Thickness(1), label.BorderThickness); Equal(new CornerRadius(8), label.CornerRadius);
                     Equal(Color.FromRgb(0xE2, 0xE8, 0xF0), ((SolidColorBrush)label.BorderBrush).Color);
@@ -86,7 +96,8 @@ public static partial class MusicUiTests
                     var text = (TextBlock)badge.Child;
                     Equal(item.TextBadge, text.Text);
                     var badgePosition = badge.TranslatePoint(new Point(), poster);
-                    True(Math.Abs(badgePosition.Y - 8) < .5 && Math.Abs(badgePosition.X + badge.ActualWidth - 168) < .5 &&
+                    True(Math.Abs(badgePosition.Y - 8) < .5 &&
+                        Math.Abs(badgePosition.X + badge.ActualWidth - (poster.ActualWidth - 8)) < .5 &&
                         badge.ActualWidth <= poster.ActualWidth * .7 + .5, "text badge sits at the server top-right inset with a seventy-percent width cap");
                     Equal(Color.FromRgb(0xF9, 0x73, 0x16), ((SolidColorBrush)badge.Background).Color);
                     Equal(Colors.White, ((SolidColorBrush)text.Foreground).Color);
@@ -96,12 +107,22 @@ public static partial class MusicUiTests
                 }
                 var title = Visuals(card).OfType<TextBlock>().Single(text => text.Text == item.Title);
                 True(title.TextTrimming == TextTrimming.CharacterEllipsis && title.ActualWidth <= 176,
-                    "long titles trim within the unchanged card width");
+                    "long titles trim within the bounded native card width");
+                var transform = title.TransformToAncestor(root);
+                Point origin = transform.Transform(new Point()), unit = transform.Transform(new Point(1, 1));
+                True(title.FontSize == 15 && title.FontWeight == FontWeights.Normal &&
+                    title.FontFamily.Equals(SystemFonts.MessageFontFamily) &&
+                    TextOptions.GetTextFormattingMode(title) == TextFormattingMode.Display &&
+                    TextOptions.GetTextRenderingMode(title) == TextRenderingMode.Auto &&
+                    Math.Abs(unit.X - origin.X - 1) < .001 && Math.Abs(unit.Y - origin.Y - 1) < .001,
+                    "search captions retain system typography at native scale across widths");
                 var bounds = new Rect(card.TranslatePoint(new Point(), f.Page.View), card.RenderSize);
                 True(bounds.Left >= 0 && bounds.Right <= f.Page.View.ActualWidth + .5, "narrow layout wraps real cards inside its viewport");
             }
             SaveSearchEvidence(root, width, 800, $"cards-{width}.png");
         }
+        True(columnCounts.Count > 1 && posterWidths.Count > 1 && f.Runtime.SearchOpens == requests,
+            "resizing changes complete column count and poster size without another search");
         DesktopTheme.SetIsHighContrast(root, true); await Drain();
         foreach (var card in Visuals(f.Page.View).OfType<FilmCard>())
         {
@@ -236,7 +257,10 @@ public static partial class MusicUiTests
         ((Border)root).Background = shell.Background;
         root.SetValue(TextElement.FontFamilyProperty, shell.FontFamily);
         root.SetValue(TextElement.FontSizeProperty, shell.FontSize);
+        root.SetValue(TextElement.FontWeightProperty, shell.FontWeight);
         root.SetValue(TextElement.ForegroundProperty, shell.Foreground);
+        TextOptions.SetTextFormattingMode(root, TextOptions.GetTextFormattingMode(shell));
+        TextOptions.SetTextRenderingMode(root, TextOptions.GetTextRenderingMode(shell));
         root.UseLayoutRounding = shell.UseLayoutRounding;
         shell.Content = null;
         return new(new HwndSourceParameters("film-search-offscreen")

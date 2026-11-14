@@ -151,13 +151,15 @@ public static class FilmPresentationTests
                 TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto &&
                 text.FontFamily.Equals(SystemFonts.MessageFontFamily)) && card.UseLayoutRounding && card.SnapsToDevicePixels,
                 "film card captions and scores retain system fonts and Auto through artwork composition");
-            Check(Math.Abs(card.ActualWidth - 176) < .5 && Math.Abs(card.ActualHeight - 294) < .5,
-                "desktop card dimensions");
+            Check(card.ActualWidth >= 143.5 && card.ActualWidth <= 176.5 &&
+                Math.Abs(card.ActualHeight - (card.ActualWidth * 1.5 + 30)) <= 1,
+                "desktop cards use bounded native artwork with a fixed caption role");
             var poster = (Grid)card.FindName("PosterFrame");
             var score = (Border)card.FindName("ScoreBadge");
             var hitButton = (Button)card.FindName("HitButton");
             var shade = (Border)card.FindName("HoverShade");
-            Check(Math.Abs(poster.ActualWidth - 176) < .5 && Math.Abs(poster.ActualHeight - 264) < .5,
+            Check(Math.Abs(poster.ActualWidth - card.ActualWidth) < .5 &&
+                Math.Abs(poster.ActualHeight - poster.ActualWidth * 1.5) <= 1,
                 "poster keeps the two-to-three ratio");
             Check(Math.Abs(score.ActualWidth - 32) < .5 && Math.Abs(score.ActualHeight - 32) < .5,
                 "score badge is circular and fixed");
@@ -289,12 +291,11 @@ public static class FilmPresentationTests
                 .Single(option => option.Label == "最新电影").IsSelected &&
                 source.Calls.Last().Section.Category == "最新",
                 "filter interaction refreshes the bound data page");
-            var grid = Visuals(items).OfType<UniformGrid>().Single();
-            Check(grid.Columns == 5, "desktop data cards use the responsive five-column grid");
-            var converter = new FilmGridColumnsConverter();
-            Check((int)converter.Convert(610d, typeof(int), null!, CultureInfo.InvariantCulture) == 3 &&
-                (int)converter.Convert(150d, typeof(int), null!, CultureInfo.InvariantCulture) == 1,
-                "responsive grid retains usable card widths");
+            var grid = Visuals(items).OfType<AdaptiveCardPanel>().Single();
+            var firstRow = Visuals(items).OfType<FilmCard>().Where(card =>
+                card.TranslatePoint(new Point(), grid).Y < 1).ToArray();
+            Check(firstRow.Length > 5 && firstRow.All(card => card.ActualWidth >= 143.5 && card.ActualWidth <= 176.5),
+                "the data grid uses readable smaller posters to fit another complete column");
 
             var pageAction = (Button)view.FindName("DataPageAction");
             pageAction.ApplyTemplate();

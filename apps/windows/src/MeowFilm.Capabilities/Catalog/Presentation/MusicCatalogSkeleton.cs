@@ -31,7 +31,7 @@ public sealed class MusicCatalogSkeleton : Panel
         }
         bounds.Add(new(0, y, Math.Min(132, width), 20));
         y += 42;
-        y = Cards(width, y, IsHome ? 124 : 150, footer: !IsHome);
+        y = Cards(width, y, 124, footer: false);
         while (Children.Count > bounds.Count) Children.RemoveAt(Children.Count - 1);
         while (Children.Count < bounds.Count) Children.Add(new LoadingSkeleton { CornerRadius = new(8) });
         for (int i = 0; i < bounds.Count; i++) Children[i].Measure(bounds[i].Size);
@@ -41,7 +41,7 @@ public sealed class MusicCatalogSkeleton : Panel
     private double Cards(double width, double y, double minimum, bool footer)
     {
         var (count, pitch) = Shelf.MeasureCards(width, minimum, 16);
-        double cardWidth = Math.Max(0, pitch - 16);
+        double cardWidth = Math.Max(0, Math.Min(168, pitch - 16));
         for (int i = 0; i < count; i++)
         {
             bounds.Add(new(i * pitch, y, cardWidth, cardWidth + (footer ? 48 : 0)));

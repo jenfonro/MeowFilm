@@ -174,7 +174,7 @@ public static partial class MusicUiTests
                     "the initial row source is an observable collection");
                 rowSource = (ObservableCollection<MusicCatalogPlaylistRow>)source;
                 rowSource.CollectionChanged += OnRowSourceReset;
-                int columns = Math.Max(1, (int)Math.Floor(list.ActualWidth / 168d));
+                int columns = ((MusicCatalogPlaylistRow)list.Items[0]).Items.Count;
                 AssertSearchPlaylistRows(list, f.Module, 30);
 
                 scroll.ScrollToEnd(); await Drain(); window.UpdateLayout();
@@ -185,7 +185,7 @@ public static partial class MusicUiTests
                 window.Width = 802;
                 await SearchUntil(() => list.ActualWidth < oldWidth - 1);
                 window.UpdateLayout(); await Drain();
-                int nextColumns = Math.Max(1, (int)Math.Floor(list.ActualWidth / 168d));
+                int nextColumns = ((MusicCatalogPlaylistRow)list.Items[0]).Items.Count;
                 True(nextColumns < columns, $"the narrower viewport changes columns from {columns} to {nextColumns}");
                 AssertSearchPlaylistRows(list, f.Module, 30);
                 True(ReferenceEquals(source, list.ItemsSource), "a reflow does not replace ItemsSource");
@@ -222,6 +222,157 @@ public static partial class MusicUiTests
                 if (rowSource is not null) rowSource.CollectionChanged -= OnRowSourceReset;
                 window.Content = null; window.Close();
             }
+        });
+
+        yield return Case("music cover shelves retain native size bounds for home and overview", async () =>
+        {
+            var resources = new MusicCatalogView();
+            var cards = Enumerable.Range(1, 17).Select(index =>
+                new MusicCatalogCard(index.ToString(), "封面" + index, "", "", "playlist", "wy",
+                    ActionId: index.ToString())).ToArray();
+            foreach (var (type, minimum) in new[] { ("playlists", 124d), ("entries", 150d), ("rankings", 120d) })
+            {
+                var section = new MusicCatalogSection("", cards, Type: type);
+                var shelf = (Shelf)((DataTemplate)resources.FindResource("Catalog.Section.Shelf")).LoadContent();
+                shelf.DataContext = section;
+                var window = SearchPlaylistWindow(shelf, 560, 380);
+                try
+                {
+                    window.Show(); window.UpdateLayout(); await Drain();
+                    foreach (double width in new[] { 560d, 826d, 1490d, 275d, 100d })
+                    {
+                        window.Width = width; window.UpdateLayout(); await Drain();
+                        var items = (ListBox)shelf.FindName("ItemsHost");
+                        var container = (ListBoxItem)items.ItemContainerGenerator.ContainerFromIndex(0);
+                        var cover = Visuals(container).OfType<ArtworkImage>().First();
+                        True(cover.ActualWidth >= Math.Min(minimum, width) - .5 && cover.ActualWidth <= 168.5,
+                            $"{type} artwork stays in its readable range, including a narrow viewport");
+                        True(Math.Abs(cover.ActualWidth - cover.ActualHeight) < 1, "music covers stay square");
+                        True(cover.TranslatePoint(new(), shelf).X >= -1 &&
+                            cover.TranslatePoint(new(cover.ActualWidth, 0), shelf).X <= shelf.ActualWidth + 1,
+                            "the first cover fits completely inside the native shelf");
+                        foreach (var text in Visuals(container).OfType<TextBlock>())
+                            AssertUnscaledMusicText(text, shelf);
+                        True(ReferenceEquals(cards, section.Items), "layout preserves the section business projection");
+                    }
+                    window.Width = 826;
+                    shelf.DataContext = section with { Items = cards.Take(1).ToArray() };
+                    window.UpdateLayout(); await Drain();
+                    var host = (ListBox)shelf.FindName("ItemsHost");
+                    Equal(1, host.Items.Count);
+                    True(Visuals(host).OfType<ArtworkImage>().All(image => image.ActualWidth <= 168.5),
+                        "short data never enlarges its remaining cover beyond the content limit");
+                    shelf.DataContext = section with { Items = [] };
+                    window.UpdateLayout(); await Drain();
+                    Equal(0, host.Items.Count);
+                    Equal(0d, shelf.MaximumOffset);
+                }
+                finally { window.Content = null; window.Close(); }
+            }
+        });
+
+        yield return Case("search playlist native geometry preserves append and return without input or paging", async () =>
+        {
+            await using var f = await CreateSearchPlaylistPresentationScene(120);
+            var catalog = new MusicCatalogView { DataContext = f.Module };
+            var window = SearchPlaylistWindow(catalog, 823, 400);
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var list = SearchPlaylistList(catalog);
+                var source = list.ItemsSource;
+                var cards = f.Module.CatalogSections.Single().Items;
+                // Six 124-DIP covers with five 16-DIP gaps require a real 824-DIP viewport.
+                foreach (var (width, columns) in new[] { (821d, 5), (823d, 5), (824d, 6), (960d, 6),
+                    (963d, 6), (964d, 7), (976d, 7), (1490d, 10), (240d, 1), (100d, 1) })
+                {
+                    await SetSearchPlaylistViewportWidth(window, list, width);
+                    Equal(columns, ((MusicCatalogPlaylistRow)list.Items[0]).Items.Count);
+                    AssertSearchPlaylistRows(list, f.Module, 30);
+                    True(ReferenceEquals(source, list.ItemsSource), "native resizing retains the row source");
+                    True(ReferenceEquals(cards, f.Module.CatalogSections.Single().Items),
+                        "native resizing retains the business cards");
+                    Equal(1, f.Http.SearchRequests);
+                }
+                await SetSearchPlaylistViewportWidth(window, list, 824);
+                var scroll = SearchPlaylistScrollViewer(list);
+                double listWidth = list.ActualWidth;
+                var margin = scroll.Margin;
+                scroll.Margin = new(margin.Left, margin.Top, margin.Right + 1, margin.Bottom);
+                window.UpdateLayout(); await Drain();
+                True(Math.Abs(list.ActualWidth - listWidth) < 1, "viewport-only reflow retains the list's outer width");
+                True(Math.Abs(scroll.ViewportWidth - 823) < 1, "template space reduces the real viewport below six columns");
+                Equal(5, ((MusicCatalogPlaylistRow)list.Items[0]).Items.Count);
+                AssertSearchPlaylistRows(list, f.Module, 30);
+                scroll.Margin = margin;
+                window.UpdateLayout(); await Drain();
+                Equal(6, ((MusicCatalogPlaylistRow)list.Items[0]).Items.Count);
+                AssertSearchPlaylistRows(list, f.Module, 30);
+                True(ReferenceEquals(source, list.ItemsSource), "viewport-only reflow retains the row source");
+                True(ReferenceEquals(cards, f.Module.CatalogSections.Single().Items),
+                    "viewport-only reflow retains the business cards");
+                Equal(1, f.Http.SearchRequests);
+                scroll.ScrollToVerticalOffset(Math.Min(scroll.ViewportHeight, scroll.ScrollableHeight));
+                await Drain(); window.UpdateLayout();
+                double offset = scroll.VerticalOffset;
+                True(offset > 0, "the native list has a real non-top anchor before append");
+                var container = VisibleSearchPlaylistContainer(SearchPlaylistContainers(list), scroll) ??
+                    throw new InvalidOperationException("native playlist anchor container is unavailable");
+                int anchorIndex = list.ItemContainerGenerator.IndexFromContainer(container);
+                var row = list.Items[anchorIndex];
+                await f.Module.MoreSearchAsync();
+                await SearchUntil(() => f.Module.CatalogSections.Single().Items.Count == 60 &&
+                    f.Module.CanLoadMoreSearchPlaylists);
+                window.UpdateLayout(); await Drain();
+                AssertSearchPlaylistRows(list, f.Module, 60);
+                True(ReferenceEquals(source, list.ItemsSource) && ReferenceEquals(row, list.Items[anchorIndex]),
+                    "append retains the stable source and anchored row");
+                True(ReferenceEquals(container, list.ItemContainerGenerator.ContainerFromIndex(anchorIndex)),
+                    "append retains the visible native container");
+                True(Math.Abs(offset - scroll.VerticalOffset) < 1, "append retains the actual offset");
+                True(SearchPlaylistContainers(list).Length < list.Items.Count, "native rows remain virtualized");
+                await f.Module.OpenSearchTabAsync("overview"); window.UpdateLayout(); await Drain();
+                await f.Module.OpenSearchTabAsync("playlists"); window.UpdateLayout(); await Drain();
+                True(ReferenceEquals(source, list.ItemsSource), "tab return retains the source");
+                True(Math.Abs(offset - scroll.VerticalOffset) < 1, "tab return retains the actual offset");
+                string location = f.Module.CaptureNavigationLocation();
+                await f.Module.NavigateAsync("catalog-home", default); window.UpdateLayout(); await Drain();
+                await f.Module.RestoreNavigationAsync(location, default); window.UpdateLayout(); await Drain();
+                True(f.Module.IsSearchPlaylists, "history restores the selected native search tab");
+                True(ReferenceEquals(source, list.ItemsSource), "history retains the native row source");
+                True(Math.Abs(offset - scroll.VerticalOffset) < 1, "history restores the native actual offset");
+                Equal(2, f.Http.SearchRequests);
+            }
+            finally { window.Content = null; window.Close(); }
+        });
+
+        yield return Case("search playlist short and empty results retain bounded native cards", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy([], ["wy"]);
+            var catalog = new MusicCatalogView { DataContext = f.Module };
+            var window = SearchPlaylistWindow(catalog, 960, 400);
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                int reads = f.Http.SearchRequests;
+                foreach (int count in new[] { 2, 0 })
+                {
+                    f.Http.SearchResult = _ => new { code = 200, result = new { playlistCount = count,
+                        playlists = SearchPlaylistPresentationPage(1, count).ToArray() } };
+                    await f.Search("短歌单" + count); await f.Module.OpenSearchTabAsync("playlists");
+                    await SearchUntil(() => !f.Module.SearchPlaylistsLoading &&
+                        f.Module.CatalogSections.Single().Items.Count == count);
+                    window.UpdateLayout(); await Drain();
+                    var list = SearchPlaylistList(catalog);
+                    AssertSearchPlaylistRows(list, f.Module, count);
+                    if (count == 0) True(!Visuals(list).OfType<Button>().Any(button => button.IsVisible && button.Name == "PlaylistHost"),
+                        "empty results release every visible old playlist card");
+                    True(!f.Module.CanLoadMoreSearchPlaylists, "short and empty results have no continuation");
+                    Equal(++reads, f.Http.SearchRequests);
+                }
+            }
+            finally { window.Content = null; window.Close(); }
         });
 
         yield return Case("search playlist paging requires a downward user gesture at the bottom", async () =>
@@ -312,8 +463,16 @@ public static partial class MusicUiTests
     private static Window SearchPlaylistWindow(UIElement content, double width, double height) => new()
     {
         Content = content, Width = width, Height = height, Left = -10000, Top = -10000,
-        ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
+        ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize
     };
+
+    private static async Task SetSearchPlaylistViewportWidth(Window window, ListBox list, double width)
+    {
+        var scroll = Visuals(list).OfType<ScrollViewer>().First();
+        window.Width += width - scroll.ViewportWidth;
+        window.UpdateLayout(); await Drain();
+        True(Math.Abs(scroll.ViewportWidth - width) < 1, "the fixture exposes the requested native viewport");
+    }
 
     private static ListBox SearchPlaylistList(UIElement view) =>
         Visuals(view).OfType<MusicCatalogView>().Single().FindName("SearchPlaylistList") as ListBox ??
@@ -337,11 +496,13 @@ public static partial class MusicUiTests
 
     private static void AssertSearchPlaylistRows(ListBox list, MusicCapability module, int cardCount)
     {
-        int columns = Math.Max(1, (int)Math.Floor(list.ActualWidth / 168d));
-        int rowCount = (cardCount + columns - 1) / columns;
-        Equal(rowCount, list.Items.Count);
         var sectionCards = module.CatalogSections.Single().Items;
         Equal(cardCount, sectionCards.Count);
+        if (cardCount == 0) { Equal(0, list.Items.Count); return; }
+        True(list.Items.Count > 0, "non-empty search results have projected rows");
+        int columns = ((MusicCatalogPlaylistRow)list.Items[0]).Items.Count;
+        True(columns > 0, "the first projected row has real cards");
+        Equal((cardCount + columns - 1) / columns, list.Items.Count);
         for (int row = 0; row < list.Items.Count; row++)
         {
             var playlistRow = (MusicCatalogPlaylistRow)list.Items[row]!;
@@ -352,6 +513,41 @@ public static partial class MusicUiTests
                 True(ReferenceEquals(sectionCards[start + item], playlistRow.Items[item]),
                     $"row {row} item {item} references the current section card");
         }
+        AssertSearchPlaylistCardGeometry(list);
+    }
+
+    private static void AssertSearchPlaylistCardGeometry(ListBox list)
+    {
+        var scroll = Visuals(list).OfType<ScrollViewer>().First();
+        double width = scroll.ViewportWidth;
+        True(width > 0, "native playlist geometry has a real viewport");
+        var cards = Visuals(list).OfType<Button>()
+            .Where(button => button.IsVisible && button.Name == "PlaylistHost").ToArray();
+        True(cards.Length > 0, "native geometry is checked on generated playlist cards");
+        foreach (var card in cards)
+        {
+            var cover = Visuals(card).OfType<ArtworkImage>().Single();
+            True(cover.ActualWidth >= Math.Min(124, width) - .5 && cover.ActualWidth <= 168.5,
+                "playlist artwork retains its 124–168 DIP content range");
+            True(Math.Abs(cover.ActualWidth - cover.ActualHeight) < 1, "playlist artwork stays square");
+            var bounds = cover.TransformToAncestor(scroll).TransformBounds(new Rect(cover.RenderSize));
+            True(bounds.Left >= -1 && bounds.Right <= width + 1,
+                $"whole cards fit the horizontal viewport: bounds={bounds}, viewport={width}, list={list.ActualWidth}, card={card.RenderSize}");
+            var title = Visuals(card).OfType<TextBlock>().Single(text => text.Text == ((MusicCatalogCard)card.DataContext).Title);
+            Equal((double)list.FindResource("MeowFilm.Font.Size.Compact"), title.FontSize);
+            AssertUnscaledMusicText(title, list);
+        }
+    }
+
+    private static void AssertUnscaledMusicText(TextBlock text, FrameworkElement ancestor)
+    {
+        var transform = text.TransformToAncestor(ancestor);
+        var origin = transform.Transform(new Point());
+        var x = transform.Transform(new Point(1, 0));
+        var y = transform.Transform(new Point(0, 1));
+        True(Math.Abs(x.X - origin.X - 1) < .001 && Math.Abs(x.Y - origin.Y) < .001 &&
+            Math.Abs(y.Y - origin.Y - 1) < .001 && Math.Abs(y.X - origin.X) < .001,
+            "music text retains a unit native transform through card resizing");
     }
 
     private static void AssertVisiblePlaylistCardsBelongToCurrentSection(ListBox list, MusicCapability module)

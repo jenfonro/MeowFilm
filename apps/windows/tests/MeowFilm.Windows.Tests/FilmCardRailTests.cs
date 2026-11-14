@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -17,6 +18,40 @@ public static class FilmCardRailTests
             () => MusicQualityConsumerTests.Sta(Home));
         yield return new("film-card-rails: episodes scale complete cards and page beside the rail without business commands",
             () => MusicQualityConsumerTests.Sta(Playback));
+        yield return new("film-card-rails: native grids bound posters at width transitions and keep short rows small",
+            () => MusicQualityConsumerTests.Sta(Grid));
+    }
+
+    private static Task Grid()
+    {
+        var grid = new AdaptiveCardPanel();
+        foreach (int index in Enumerable.Range(1, 12))
+            grid.Children.Add(new FilmCard { DataContext = FilmPlaybackFixture.Card(number: index) });
+        foreach (var sample in new[] { (120d, 1), (176d, 1), (300d, 1), (304d, 2), (1000d, 6), (1440d, 9) })
+        {
+            grid.Measure(new(sample.Item1, double.PositiveInfinity));
+            grid.Arrange(new Rect(0, 0, sample.Item1, grid.DesiredSize.Height));
+            grid.UpdateLayout();
+            var row = grid.Children.Cast<FilmCard>().Where(card => card.TranslatePoint(new Point(), grid).Y < 1).ToArray();
+            Check(row.Length == sample.Item2, "a grid adds another column only within the readable poster range");
+            foreach (var card in grid.Children.Cast<FilmCard>())
+            {
+                var bounds = Bounds(card, grid);
+                var poster = (Grid)card.FindName("PosterFrame");
+                Check(bounds.Left >= -.5 && bounds.Right <= sample.Item1 + .5 &&
+                    card.ActualWidth <= 176.5 && card.ActualWidth >= Math.Min(144, sample.Item1) - .5 &&
+                    Math.Abs(poster.ActualHeight - poster.ActualWidth * 1.5) <= 1,
+                    "grid artwork preserves its ratio without clipping or exceeding its maximum, including a narrow single column");
+            }
+        }
+        grid.Children.RemoveRange(1, 11);
+        grid.Measure(new(1440, double.PositiveInfinity));
+        grid.Arrange(new Rect(0, 0, 1440, grid.DesiredSize.Height));
+        Check(((FilmCard)grid.Children[0]).ActualWidth <= 176.5, "short data does not enlarge its last row");
+        grid.Children.Clear();
+        grid.Measure(new(1440, double.PositiveInfinity));
+        Check(grid.DesiredSize.Height == 0, "an empty grid has no phantom card rows");
+        return Task.CompletedTask;
     }
 
     private static async Task Home()
@@ -30,12 +65,12 @@ public static class FilmCardRailTests
             var shelf = (Shelf)view.FindName("Cards");
             await Until(() => shelf.ScrollHost is { ViewportWidth: > 0 });
             var counts = new HashSet<int>();
-            foreach (double width in new[] { 780d, 1150d, 1440d })
+            foreach (double width in new[] { 420d, 780d, 1150d, 1440d })
             {
                 window.Width = width;
                 window.UpdateLayout();
                 await Drain();
-                counts.Add(CheckCards<FilmCard>(shelf, card => (FrameworkElement)card.FindName("PosterFrame"), 176d / 264));
+                counts.Add(CheckCards<FilmCard>(shelf, card => (FrameworkElement)card.FindName("PosterFrame"), 176d / 264, 144, 176));
                 Check(Visuals(shelf).OfType<FilmCard>().Count() < 40,
                     "home realizes nearby cards rather than the complete source");
                 ((Button)shelf.FindName("Next")).Focus();
@@ -55,16 +90,18 @@ public static class FilmCardRailTests
             await Drain();
             Check(Math.Abs(shelf.PresentedOffset / shelf.CardWidth - anchor) < .01,
                 "returning after hidden resize retains the same complete first card");
-            CheckCards<FilmCard>(shelf, card => (FrameworkElement)card.FindName("PosterFrame"), 176d / 264);
+            CheckCards<FilmCard>(shelf, card => (FrameworkElement)card.FindName("PosterFrame"), 176d / 264, 144, 176);
             shelf.ScrollToIndex(999);
             await Drain();
-            CheckCards<FilmCard>(shelf, card => (FrameworkElement)card.FindName("PosterFrame"), 176d / 264);
+            CheckCards<FilmCard>(shelf, card => (FrameworkElement)card.FindName("PosterFrame"), 176d / 264, 144, 176);
             Check(((Button)shelf.FindName("Next")).Visibility == Visibility.Collapsed,
                 "home hides the unavailable forward direction on the final page");
             section.Complete(section.Items.Take(1).ToArray());
             await Drain();
             Check(shelf.PresentedOffset < .5 && BothArrowsHidden(shelf),
                 "a shortened source clears the distant offset and both navigation arrows");
+            var single = Visuals(shelf).OfType<FilmCard>().Single();
+            Check(single.ActualWidth <= 176.5, "one remaining poster never expands beyond the search-card maximum");
         }
         finally { window.Content = null; window.Close(); }
     }
@@ -89,7 +126,7 @@ public static class FilmCardRailTests
                 window.UpdateLayout();
                 shelf.ScrollToIndex(0);
                 await Drain();
-                counts.Add(CheckCards<Button>(shelf, EpisodeFrame, 260d / 144,
+                counts.Add(CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, 208, 260,
                     button => button.Tag is FilmEpisodeItem));
                 var next = (Button)shelf.FindName("Next");
                 Check(next.ActualWidth == 48 && next.ActualHeight == 48 &&
@@ -102,7 +139,7 @@ public static class FilmCardRailTests
                 Snapshot(view, $"playback-{width:0}");
                 Click(shelf, "Next");
                 await Until(() => shelf.IsSettled && shelf.PresentedOffset > .5);
-                CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, button => button.Tag is FilmEpisodeItem);
+                CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, 208, 260, button => button.Tag is FilmEpisodeItem);
                 Click(shelf, "Previous");
                 await Until(() => shelf.IsSettled && shelf.PresentedOffset < .5);
             }
@@ -111,7 +148,7 @@ public static class FilmCardRailTests
                 "resizing and paging change complete visible card count without selecting or requesting data");
             shelf.ScrollToIndex(rig.Page.Episodes.Count - 1);
             await Drain();
-            CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, button => button.Tag is FilmEpisodeItem);
+            CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, 208, 260, button => button.Tag is FilmEpisodeItem);
             Check(((Button)shelf.FindName("Next")).Visibility == Visibility.Collapsed,
                 "the short last page finishes with complete cards");
             ClickView(view, "ListLayout");
@@ -119,7 +156,7 @@ public static class FilmCardRailTests
             ClickView(view, "HorizontalLayout");
             await Until(() => rig.Page.IsHorizontalLayout && shelf.IsVisible);
             await Drain();
-            CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, button => button.Tag is FilmEpisodeItem);
+            CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, 208, 260, button => button.Tag is FilmEpisodeItem);
             Check(shelf.PresentedOffset < .5 && ReferenceEquals(selected, rig.Page.SelectedEpisode),
                 "returning from the list locates the selected first episode without changing it");
             rig.Runtime.Change(root => root["episodes"] = new System.Text.Json.Nodes.JsonArray());
@@ -133,7 +170,7 @@ public static class FilmCardRailTests
     private static FrameworkElement EpisodeFrame(Button tile) =>
         (FrameworkElement)VisualTreeHelper.GetParent(Visuals(tile).OfType<FilmPlayMark>().Single());
 
-    private static int CheckCards<T>(Shelf shelf, Func<T, FrameworkElement> image, double ratio,
+    private static int CheckCards<T>(Shelf shelf, Func<T, FrameworkElement> image, double ratio, double minimum, double maximum,
         Func<T, bool>? include = null) where T : FrameworkElement
     {
         var rail = shelf.ScrollHost!;
@@ -142,16 +179,27 @@ public static class FilmCardRailTests
             .Where(row => row.Bounds.Right > 1 && row.Bounds.Left < rail.ViewportWidth - 1).ToArray();
         Check(cards.Length > 0 && cards.All(row => row.Bounds.Left >= -1 &&
             row.Bounds.Right <= rail.ViewportWidth + 1), "every visible card fits completely inside its viewport");
-        Check(Math.Abs(cards[0].Bounds.Left) <= 1 &&
-            Math.Abs(cards[^1].Bounds.Right - rail.ViewportWidth) <= 1,
-            "complete cards fill the row from the first edge to the last edge");
+        Check(Math.Abs(cards[0].Bounds.Left) <= 1, "the row starts on a complete card");
+        Check(Math.Abs(cards[^1].Bounds.Right - rail.ViewportWidth) <= 1 ||
+            (rail.ViewportWidth + 16) / (cards.Length + 1) - 16 < minimum,
+            "the row fills its width unless another complete card would be smaller than the readable minimum");
         foreach (var row in cards)
         {
             var poster = Bounds(image(row.Card), rail);
             Check(Math.Abs(poster.Width / poster.Height - ratio) < .015,
                 "artwork scales with the complete card and keeps its original frame ratio");
-            double sx = row.Bounds.Width / row.Card.ActualWidth, sy = row.Bounds.Height / row.Card.ActualHeight;
-            Check(Math.Abs(sx - sy) < .01, "the whole card uses one proportional scale");
+            Check(poster.Width >= minimum - 1 && poster.Width <= maximum + 1,
+                "artwork stays between the readable minimum and the reference-image maximum");
+            foreach (var text in Visuals(row.Card).OfType<TextBlock>())
+            {
+                var transform = text.TransformToAncestor(rail);
+                Point origin = transform.Transform(new Point()), unit = transform.Transform(new Point(1, 1));
+                Check(Math.Abs(unit.X - origin.X - 1) < .001 && Math.Abs(unit.Y - origin.Y - 1) < .001 &&
+                    text.FontFamily.Equals(SystemFonts.MessageFontFamily) && text.FontWeight == FontWeights.Normal &&
+                    TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&
+                    TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto,
+                    "native card text keeps system typography without any viewport-dependent glyph scale");
+            }
         }
         Check(Math.Abs(shelf.PresentedOffset / shelf.CardWidth -
             Math.Round(shelf.PresentedOffset / shelf.CardWidth)) < .01,
@@ -168,7 +216,7 @@ public static class FilmCardRailTests
         element.TransformToAncestor(ancestor).TransformBounds(new Rect(element.RenderSize));
     private static Window Mount(FrameworkElement view)
     {
-        var window = new Window { Content = view, Width = 1150, Height = 850, Left = 24, Top = 24,
+        var window = new DesktopWindow { Content = view, Width = 1150, Height = 850, Left = 24, Top = 24,
             ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None,
             Background = Brushes.White, SizeToContent = SizeToContent.Manual };
         window.Show();

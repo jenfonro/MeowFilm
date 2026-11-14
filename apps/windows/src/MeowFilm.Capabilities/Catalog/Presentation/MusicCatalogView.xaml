@@ -148,10 +148,10 @@
    </Style.Triggers>
   </Style>
   <DataTemplate x:Key="Catalog.Entry">
-   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click"/>
+   <local:EntryCard MaxWidth="168" Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click"/>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.PlaylistCard">
-   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" ContextMenuOpening="CardMenu_Opening" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
+   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" ContextMenuOpening="CardMenu_Opening" Style="{StaticResource Catalog.Flat}" MaxWidth="168" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <Button.ContextMenu><ContextMenu Style="{DynamicResource MeowFilm.ContextMenu}"/></Button.ContextMenu>
     <StackPanel>
      <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="8">
@@ -171,7 +171,7 @@
    </Button>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.RankCoverCard">
-   <Button x:Name="RankCoverHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0"
+   <Button x:Name="RankCoverHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" MaxWidth="168" Margin="0,0,16,0"
            IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" local:CardClip.Radius="4">
      <Grid.Style><Style TargetType="Grid"><Setter Property="Background" Value="#E7EAF0"/><Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger></Style.Triggers></Style></Grid.Style>
@@ -307,11 +307,14 @@
    </Style></Setter.Value></Setter>
    <Setter Property="ItemTemplate"><Setter.Value>
     <DataTemplate>
-     <ItemsControl ItemsSource="{Binding Items}" HorizontalAlignment="Left">
-      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl ItemsSource="{Binding Items}" HorizontalAlignment="Left"
+                   Width="{Binding SearchPlaylistRowWidth,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate>
+       <UniformGrid Rows="1" Columns="{Binding SearchPlaylistColumns,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}"/>
+      </ItemsPanelTemplate></ItemsControl.ItemsPanel>
       <ItemsControl.ItemTemplate><DataTemplate>
-       <ContentControl Content="{Binding}" ContentTemplate="{StaticResource Catalog.PlaylistCard}" Width="168"
-                       Margin="0,0,0,24" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+       <ContentControl Content="{Binding}" ContentTemplate="{StaticResource Catalog.PlaylistCard}"
+                       Margin="0,0,0,24" HorizontalContentAlignment="Stretch" VerticalAlignment="Top"/>
       </DataTemplate></ItemsControl.ItemTemplate>
      </ItemsControl>
     </DataTemplate>
@@ -321,16 +324,15 @@
     <local:Shelf>
      <local:Shelf.Style><Style TargetType="local:Shelf">
       <Setter Property="CardTemplate" Value="{StaticResource Catalog.PlaylistCard}"/>
+      <Setter Property="MinimumCardWidth" Value="124"/>
       <Style.Triggers>
-       <DataTrigger Binding="{Binding (local:MusicCatalogSurface.IsHome),RelativeSource={RelativeSource Self}}" Value="True">
-        <Setter Property="MinimumCardWidth" Value="124"/>
-       </DataTrigger>
        <DataTrigger Binding="{Binding IsRankingCoverSection}" Value="True">
         <Setter Property="CardTemplate" Value="{StaticResource Catalog.RankCoverCard}"/>
         <Setter Property="MinimumCardWidth" Value="120"/>
        </DataTrigger>
        <DataTrigger Binding="{Binding IsEntrySection}" Value="True">
         <Setter Property="CardTemplate" Value="{StaticResource Catalog.Entry}"/>
+        <Setter Property="MinimumCardWidth" Value="150"/>
        </DataTrigger>
        <DataTrigger Binding="{Binding IsBannerSection}" Value="True">
         <Setter Property="CardTemplate" Value="{StaticResource Catalog.Banner}"/>
@@ -421,18 +423,18 @@
         <Button Content="&#xE76C;" Tag="{Binding Action}" Click="Card_Click" Width="24" Height="24" Style="{StaticResource MeowFilm.IconButton}" Visibility="{Binding Action.CanOpen,Converter={StaticResource Visible},FallbackValue=Collapsed}" IsEnabled="{Binding Action.CanOpen}" AutomationProperties.Name="更多内容"/>
        </StackPanel>
       </DockPanel>
-       <WrapPanel ClipToBounds="True">
-        <WrapPanel.Style><Style TargetType="WrapPanel"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers>
+       <local:AdaptiveCardPanel MinimumCardWidth="124" MaximumCardWidth="168" RowGap="16" ClipToBounds="True">
+        <local:AdaptiveCardPanel.Style><Style TargetType="local:AdaptiveCardPanel"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers>
          <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding Items.Count}" Value="0"/><Condition Binding="{Binding Title}" Value="单曲"/><Condition Binding="{Binding (local:MusicCatalogSurface.IsOverview),RelativeSource={RelativeSource Self}}" Value="True"/><Condition Binding="{Binding DataContext.SearchSongsLoading,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>
          <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding Items.Count}" Value="0"/><Condition Binding="{Binding Title}" Value="歌单"/><Condition Binding="{Binding (local:MusicCatalogSurface.IsOverview),RelativeSource={RelativeSource Self}}" Value="True"/><Condition Binding="{Binding DataContext.SearchPlaylistsLoading,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>
-        </Style.Triggers></Style></WrapPanel.Style>
-        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
-        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
-        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
-        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
-        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
-        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
-       </WrapPanel>
+        </Style.Triggers></Style></local:AdaptiveCardPanel.Style>
+        <desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/>
+       </local:AdaptiveCardPanel>
        <ContentControl Content="{Binding}" Style="{StaticResource Catalog.SectionPresenter}"/>
      </StackPanel>
     </DataTemplate>
@@ -543,20 +545,24 @@
    </local:MusicCatalogSkeleton>
    <Grid Panel.ZIndex="2" IsHitTestVisible="False" ClipToBounds="True">
     <Grid.Style><Style TargetType="Grid"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding ShowCatalogSkeleton}" Value="True"/><Condition Binding="{Binding IsCatalogLanding}" Value="False"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding ShowSearchSkeleton}" Value="True"/><Condition Binding="{Binding IsSearchPlaylists}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger></Style.Triggers></Style></Grid.Style>
-    <WrapPanel Margin="40,0,40,0" VerticalAlignment="Top">
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
-    </WrapPanel>
+    <local:AdaptiveCardPanel MinimumCardWidth="124" MaximumCardWidth="168" RowGap="28" VerticalAlignment="Top">
+     <local:AdaptiveCardPanel.Style><Style TargetType="local:AdaptiveCardPanel">
+      <Setter Property="Margin" Value="40,0,40,0"/>
+      <Style.Triggers><DataTrigger Binding="{Binding IsSearchPlaylists}" Value="True"><Setter Property="Margin" Value="0"/></DataTrigger></Style.Triggers>
+     </Style></local:AdaptiveCardPanel.Style>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel><desktop:LoadingSkeleton Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+    </local:AdaptiveCardPanel>
    </Grid>
    <ListBox x:Name="SearchPlaylistList" Visibility="Collapsed" Style="{StaticResource Catalog.SearchPlaylistList}"
             ScrollViewer.ScrollChanged="SearchPlaylistList_ScrollChanged"

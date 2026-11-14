@@ -14,6 +14,16 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicCatalogView : UserControl
 {
+    private static readonly DependencyPropertyKey SearchPlaylistRowWidthPropertyKey =
+        DependencyProperty.RegisterReadOnly(nameof(SearchPlaylistRowWidth), typeof(double), typeof(MusicCatalogView),
+            new PropertyMetadata(184d));
+    public static readonly DependencyProperty SearchPlaylistRowWidthProperty = SearchPlaylistRowWidthPropertyKey.DependencyProperty;
+    public double SearchPlaylistRowWidth => (double)GetValue(SearchPlaylistRowWidthProperty);
+    private static readonly DependencyPropertyKey SearchPlaylistColumnsPropertyKey =
+        DependencyProperty.RegisterReadOnly(nameof(SearchPlaylistColumns), typeof(int), typeof(MusicCatalogView),
+            new PropertyMetadata(1));
+    public static readonly DependencyProperty SearchPlaylistColumnsProperty = SearchPlaylistColumnsPropertyKey.DependencyProperty;
+    public int SearchPlaylistColumns => (int)GetValue(SearchPlaylistColumnsProperty);
     private readonly UserScrollIntent scrollIntent;
     private MusicCapability? observed;
     private bool loadingMore;
@@ -69,7 +79,6 @@ public partial class MusicCatalogView : UserControl
             }
             else { RefreshSearchPlaylistHost(); RefreshSearchPlaylistRows(); }
         };
-        SearchPlaylistList.SizeChanged += (_, _) => RefreshSearchPlaylistRows();
         HomeContent.SizeChanged += (_, _) => ClearHomeTransition();
         HomeContent.IsVisibleChanged += (_, _) => { if (!HomeContent.IsVisible) ClearHomeTransition(); };
         Unloaded += (_, _) =>
@@ -172,9 +181,14 @@ public partial class MusicCatalogView : UserControl
     private void RefreshSearchPlaylistRows()
     {
         if (Owner is not { IsSearchPlaylists: true } || !IsLoaded || !IsVisible) return;
-        double viewportWidth = SearchPlaylistList.ActualWidth;
+        double viewportWidth = SearchPlaylistScroll?.ViewportWidth ?? 0;
         if (viewportWidth <= 0) return;
-        int columns = Math.Max(1, (int)Math.Floor(viewportWidth / 168));
+        var (columns, pitch) = Shelf.MeasureCards(viewportWidth, 124, 16);
+        double rowWidth = columns * pitch;
+        if (SearchPlaylistRowWidth != rowWidth || SearchPlaylistColumns != columns) scrollIntent.Clear();
+        // Include the trailing gap in one row width, rather than accumulating rounded card pitches.
+        SetValue(SearchPlaylistRowWidthPropertyKey, rowWidth);
+        SetValue(SearchPlaylistColumnsPropertyKey, columns);
         UpdateSearchPlaylistRows(columns);
     }
     private void UpdateSearchPlaylistRows(int columns)
@@ -255,6 +269,7 @@ public partial class MusicCatalogView : UserControl
     {
         if (!IsVisible || !SearchPlaylistList.IsVisible) return;
         if (e.OriginalSource is not ScrollViewer scroll || !ReferenceEquals(scroll, SearchPlaylistScroll)) return;
+        if (e.ViewportWidthChange != 0) RefreshSearchPlaylistRows();
         if (!restoringSearchPlaylistOffset) searchPlaylistOffset = scroll.VerticalOffset;
         if (e.VerticalChange > 0 && scrollIntent.Accepts(SearchPlaylistList))
             LoadMoreSearchPlaylistsNearEnd();
