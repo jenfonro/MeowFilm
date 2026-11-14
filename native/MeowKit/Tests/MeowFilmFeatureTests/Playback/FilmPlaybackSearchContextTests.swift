@@ -6,6 +6,71 @@ import MeowRuntime
 @MainActor
 final class FilmPlaybackSearchContextTests: XCTestCase {
     private typealias F = FilmSearchWireFixture
+    func testSingleCardResultsDoNotNarrowAuthorizedScopeForLateMetadataOrReentry() async throws {
+        let other = FilmSearchSite(
+            cat: .init(installationId: "other-installation", name: "fixture", sourceType: "local", generation: 1),
+            source: .init(key: .init(installationId: "other-installation", siteKey: "site"),
+                name: "来源", api: "fixture", actions: ["search"], methods: [:]))
+        let scope = [F.site.playbackSource, other.playbackSource]
+        let selected = F.row(), unrelated = F.row(.string("unrelated"), key: "site:unrelated", title: "另一详情")
+        let results: [RuntimeValue] = [.object([
+            "sourceKey": .string(F.site.key), "items": .array([selected.catField("raw")!]),
+        ])]
+        let handoff = F.handoff(sources: scope, results: results)
+        let rpc = FilmSearchRPCFixture(
+            F.snapshot(loading: true, cards: [F.group([selected])], raw: [selected, unrelated]), handoff: handoff)
+        let service = filmSearchService(rpc, sites: [F.site, other])
+        let session = try service.session(for: "原查询")
+        await rpc.awaitObservation()
+        let context = session.context(for: try XCTUnwrap(session.snapshot.cards.first))
+        let target = try FilmSearchHandoff(handoff).request.target
+        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(target: .object(target.value)))
+        let media = FilmPlaybackTestMedia(), transport = server.transport
+        let model = FilmPlaybackModel(transport: transport, media: media, searchContext: context,
+            request: { try await context.playbackRequest(sources: scope, owner: transport.producer()) })
+        addTeardownBlock { await model.close(); await service.close() }
+        await model.open()?.value
+        let initialCalls = await server.calls()
+        let opened = try XCTUnwrap(initialCalls.first { $0.0 == "session.open" }?.1.filmObject)
+        let authorized = RuntimeValue.array(scope.map { .object($0.value) })
+        XCTAssertEqual(opened["sources"], authorized)
+        XCTAssertEqual(opened["results"], .array(results), "The other search card is not a playback source member")
+        XCTAssertNil(opened["resumeTarget"])
+        XCTAssertTrue(session.snapshot.loading)
+
+        let carrier = FilmPlaybackTarget(id: context.selectionID, kind: .tv, title: "可靠关联",
+            metadataProvider: .tmdb, metadataID: "7",
+            members: [.object(["sourceKey": .string(F.site.key), "detailId": .number(0)])])
+        let updated = expectation(description: "late metadata reference retains the full admitted scope")
+        await server.beforeAction { action in if action == "search.update" { updated.fulfill() } }
+        await rpc.setHandoff(F.handoff(target: carrier, revision: 4, sources: scope, results: results,
+            metadata: .object(["name": .string("可靠关联")])))
+        try await rpc.emit(F.snapshot(4, cards: [F.group([selected])], raw: [selected, unrelated]))
+        await session.drain()
+        await fulfillment(of: [updated], timeout: 3)
+        await model.waitForPendingWork()
+        let calls = await server.calls()
+        let update = try XCTUnwrap(calls.last { $0.1.filmObject?["action"] == .string("search.update") }?.1.filmObject)
+        XCTAssertEqual(update["sources"], authorized)
+        XCTAssertEqual(update["searchReference"], opened["searchReference"])
+        XCTAssertNil(update["results"], "The reference, not the displayed search page, supplies late members")
+        XCTAssertEqual(context.metadataDetail?.catField("name"), .string("可靠关联"))
+        XCTAssertTrue(media.prepared.isEmpty)
+
+        await model.close()
+        await model.open()?.value
+        await model.waitForPendingWork()
+        let handoffs = await rpc.calls.filter { $0.0 == "search.handoff" }
+        XCTAssertEqual(handoffs.count, 3)
+        XCTAssertTrue(handoffs.allSatisfy { $0.1.filmObject?["sources"] == authorized })
+        let opens = await server.calls().filter { $0.0 == "session.open" }
+        XCTAssertEqual(opens.count, 2)
+        XCTAssertEqual(opens.last?.1.filmObject?["sources"], authorized)
+        XCTAssertEqual(opens.last?.1.filmObject?["results"], .array(results))
+        XCTAssertEqual(opens.last?.1.filmObject?["searchReference"], opened["searchReference"])
+        XCTAssertTrue(media.prepared.isEmpty)
+    }
+
     func testOpenDoesNotWaitForSearchCompletionAndLateUpdateUsesReferenceOnSamePlaybackSession() async throws {
         let rpc = FilmSearchRPCFixture(F.snapshot(loading: true, cards: [F.group([F.row()])], raw: [F.row()]))
         let service = filmSearchService(rpc), session = try service.session(for: "原查询")

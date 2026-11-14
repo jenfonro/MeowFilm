@@ -348,7 +348,7 @@ public static class FilmPlaybackRecoveryTests
             });
 
         foreach (bool numeric in new[] { true, false })
-            yield return Test("raw typed " + (numeric ? "numeric" : "text") + " zero selectors survive sanitized snapshots and remain single-source", async () =>
+            yield return Test("raw typed " + (numeric ? "numeric" : "text") + " zero selectors keep exact execution and full search authorization across recovery", async () =>
             {
                 await using var rig = new Rig(); await rig.StartAsync();
                 var request = await rig.ProduceAsync(Source("a"), Source("b"));
@@ -357,19 +357,26 @@ public static class FilmPlaybackRecoveryTests
                     key = Key("a"), detailId = numeric ? (object)0 : "0", lineId = numeric ? (object)0 : "0",
                     episodeId = numeric ? (object)"0" : 0, playId = numeric ? (object)0 : "0"
                 });
-                request = request with { Target = new("source:exact", "source", "原始单源", Source: raw) };
-                await rig.OpenAsync(request); OnlySources(Opened(rig.Epochs[0]), "a");
+                request = request with
+                {
+                    Target = new("source:exact", "source", "原始单源", Source: raw),
+                    Results = FilmJson.Encode(FilmJson.Array(request.Results!.Value).Where(row => FilmJson.Text(row, "sourceKey") == Key("a")).ToArray()),
+                    Metadata = null,
+                    CacheEntries = FilmJson.Encode(FilmJson.Array(request.CacheEntries!.Value)
+                        .Where(entry => FilmJson.Text(entry, "kind") != "metadata").ToArray())
+                };
+                await rig.OpenAsync(request); OnlySources(Opened(rig.Epochs[0]), "a", "b");
                 var sanitized = FilmJson.Encode(new { key = Key("a"), detailId = raw.GetProperty("detailId"), lineId = raw.GetProperty("lineId") });
                 rig.Epochs[0].Film.Change(root => root["target"]!["source"] = Node(sanitized));
                 await Until(() => rig.Page.ActiveTarget.Source is { } source && !source.TryGetProperty("playId", out _));
                 rig.Epochs[0].Crash(); await Until(() => rig.Page.ConnectionFailed);
                 await rig.Page.ReconnectAsync();
-                var sent = Opened(rig.Epochs[1]); OnlySources(sent, "a");
+                var sent = Opened(rig.Epochs[1]); OnlySources(sent, "a", "b");
                 Equal(raw, sent.GetProperty("target").GetProperty("source"),
                     "without an opaque selected candidate, omitted private play/episode IDs retain their original exact types");
                 Check(Rows(sent, "resultHints").All(row => FilmJson.Text(row, "sourceKey") == Key("a")) &&
                     Rows(sent, "results").Length == 0,
-                    "raw recovery cannot borrow B's result rows or become a title-wide aggregate");
+                    "raw recovery preserves search authorization but cannot borrow B's result rows or become a title-wide aggregate");
             });
 
         yield return Test("a missing exact raw source fails SOURCE_NOT_FOUND before any new session open", async () =>

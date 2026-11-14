@@ -37,7 +37,7 @@ public partial class FilmPlaybackView
             pictureClickTimer.Stop();
             var page = clickPage; var identity = clickIdentity; clickPage = null; clickIdentity = null;
             if (page is not null && ReferenceEquals(page, boundPage) && identity == page.MediaIdentity)
-                await ExecuteAsync(page, page.PlayAsync);
+                await ExecuteAsync(page, page.PauseOrResumeAsync);
         };
     }
 
@@ -176,7 +176,7 @@ public partial class FilmPlaybackView
         {
             case Key.Space:
                 if (e.IsRepeat) return;
-                e.Handled = true; await ExecuteAsync(page, page.PlayAsync); break;
+                e.Handled = true; await ExecuteAsync(page, page.PauseOrResumeAsync); break;
             case Key.Left when page.CanSeek:
             case Key.Right when page.CanSeek:
                 e.Handled = true;

@@ -58,7 +58,7 @@ final class FilmCatPanBridgeConsumerTests: XCTestCase {
         XCTAssertEqual(browsing.files.first?.codec, "hevc")
         XCTAssertEqual(try XCTUnwrap(browsing.files.first?.fps), 60_000.0 / 1_001, accuracy: 0.0001)
         try await waitFor {
-            (try? self.button("film.detail.source", page).title(for: .normal)) == "Bridge site" &&
+            (try? self.button("film.detail.source", page).title(for: .normal)) == "Bridge site · Bridge Series" &&
                 (try? self.button("film.detail.line", page).title(for: .normal)) == "夸克"
         }
         XCTAssertEqual(try button("film.detail.line", page).accessibilityLabel, "网盘源")

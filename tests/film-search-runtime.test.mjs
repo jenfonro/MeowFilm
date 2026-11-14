@@ -95,7 +95,7 @@ test('HTTP search returns both views, preserves original provider fields and nav
   assert.deepEqual(f.calls.map(row => row.operation), ['search']);
   const handoff = await f.rpc('search.handoff', { sessionId: opened.sessionId,
     selectionId: value.cards[0].displayKey, sources: [source] });
-  assert.equal(handoff.target.kind, 'group');
+  assert.deepEqual(handoff.selectionMembers, [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'a', detailId: '0' }]);
   const playback = await f.rpc('session.open', {
     platform: 'test', target: { id: 'client-display', kind: 'source', title: '不能替换原查询',
       source: { key: 'a', detailId: 'wrong' } },
@@ -103,22 +103,68 @@ test('HTTP search returns both views, preserves original provider fields and nav
     results: [{ sourceKey: 'a', items: [{ id: 'wrong', title: 'wrong' }] }],
     searchReference: handoff.searchReference,
   });
-  assert.equal(playback.target.kind, 'group');
   assert.equal(playback.target.id, handoff.target.id);
   assert.deepEqual(playback.target.members.map(member => member.detailId), [0, '0']);
+  assert.deepEqual(playback.sources.map(row => row.source.detailId), [0, '0']);
   assert.equal(playback.rulesRevision, value.rulesRevision);
   await until(async () => (await f.rpc('session.snapshot', { sessionId: playback.sessionId })).stage !== 'loading');
   assert.equal(f.calls.filter(row => row.operation === 'search').length, 1);
   const raw = await f.rpc('search.handoff', { sessionId: opened.sessionId,
     selectionId: value.rawCards.find(row => row.detailId === '0').displayKey, sources: [source] });
   const single = await f.rpc('session.open', { platform: 'test', ...raw });
-  assert.equal(single.target.kind, 'source');
   assert.equal(single.target.source.detailId, '0');
+  assert.deepEqual(single.sources.map(row => row.source.detailId), ['0']);
   assert.equal(single.metadata, null);
   assert.equal(f.calls.filter(row => row.operation === 'search').length, 1);
   assert.equal(f.calls.some(row => row.operation === 'play'), false);
   await f.rpc('session.release', { sessionId: playback.sessionId });
   await f.rpc('session.release', { sessionId: single.sessionId });
+});
+
+test('HTTP default and raw single-card handoffs open and update only the selected typed detail, not the search page', async t => {
+  const selected = { id: 0, name: '星河' }, other = { id: '0', name: '别片' };
+  const f = await setup(t, { invoke: input => input.operation === 'search'
+    ? { list: [selected, other], pagecount: 1 } : undefined });
+  const opened = await f.rpc('search.open', { query: '星河', sources: [source] });
+  const value = await f.complete(opened.sessionId);
+  assert.equal(value.siteItems.length, 2);
+  for (const cards of [value.cards, value.rawCards]) {
+    const card = cards.find(row => row.detailId === 0);
+    const handoff = await f.rpc('search.handoff', { sessionId: opened.sessionId,
+      selectionId: card.displayKey, sources: [source] });
+    assert.equal(handoff.target.id, card.displayKey);
+    assert.equal(handoff.target.metadataProvider, undefined);
+    assert.deepEqual(handoff.selectionMembers, [{ sourceKey: 'a', detailId: 0 }]);
+    assert.deepEqual(handoff.results, [{ sourceKey: 'a', items: [selected] }]);
+    assert.deepEqual(handoff.search, [{ sourceKey: 'a', page: 1, completed: true }]);
+    const playback = await f.rpc('session.open', { platform: 'test', ...handoff,
+      results: [{ sourceKey: 'a', items: [other] }] });
+    const ready = await until(async () => {
+      const state = await f.rpc('session.snapshot', { sessionId: playback.sessionId });
+      return state.stage === 'idle' && state;
+    });
+    assert.equal(ready.target.id, card.displayKey);
+    assert.deepEqual(ready.sources.map(row => row.source.detailId), [0]);
+    await f.rpc('session.command', { sessionId: playback.sessionId, action: 'browse', sourceId: ready.sources[0].id });
+    const browsing = await until(async () => {
+      const state = await f.rpc('session.snapshot', { sessionId: playback.sessionId });
+      return !state.browsing.loading && state.browsing.episodes.length === 2 && state;
+    });
+    assert.equal(browsing.browsing.sourceId, ready.sources[0].id);
+    assert.equal(browsing.current, null);
+    assert.equal(browsing.attempt, null);
+    const calls = structuredClone(f.calls);
+    const updated = await f.rpc('session.command', { sessionId: playback.sessionId,
+      action: 'search.update', sources: handoff.sources, searchReference: handoff.searchReference,
+      results: [{ sourceKey: 'a', items: [other] }] });
+    assert.deepEqual(updated.sources.map(row => row.source.detailId), [0]);
+    assert.equal(updated.browsing.sourceId, ready.sources[0].id);
+    assert.deepEqual(f.calls, calls);
+    await f.rpc('session.release', { sessionId: playback.sessionId });
+  }
+  assert.deepEqual(f.calls.filter(row => row.operation === 'search').map(row => row.payload.page), [1]);
+  assert.deepEqual(f.calls.filter(row => row.operation === 'detail').map(row => row.payload.id), [0]);
+  assert.equal(f.calls.some(row => row.operation === 'play'), false);
 });
 
 test('HTTP transports derived lone UTF16 losslessly while raw titles and typed IDs remain unchanged', async t => {
@@ -140,9 +186,9 @@ test('HTTP transports derived lone UTF16 losslessly while raw titles and typed I
   assert.deepEqual(value.rawCards.map(card => card.detailId), [0, '0']);
   const handoff = await f.rpc('search.handoff', { sessionId: opened.sessionId,
     selectionId: value.cards[0].displayKey, sources: [source] });
-  assert.equal(handoff.target.kind, 'group');
   assert.equal(handoff.target.title, title);
   assert.deepEqual(handoff.target.members.map(member => member.detailId), [0, '0']);
+  assert.deepEqual(handoff.results[0].items.map(row => row.id), [0, '0']);
 });
 
 test('saved rules affect only a new HTTP search; old search handoff keeps its fixed recognition snapshot', async t => {
@@ -313,7 +359,7 @@ for (const output of ['pending', 'current']) {
       target: { ...handoff.target, members: forgedMembers },
       searchHandoff: { ...handoff, selectionMembers: forgedMembers },
     });
-    assert.equal(playback.target.kind, 'group');
+    assert.equal(playback.target.metadataProvider, undefined);
     assert.deepEqual(playback.target.members, [{ sourceKey: 'a', detailId: 0 }]);
     await until(async () => (await f.rpc('session.snapshot', { sessionId: playback.sessionId })).stage === 'idle');
     await f.rpc('session.command', { sessionId: playback.sessionId, action: 'play' });
@@ -337,7 +383,7 @@ for (const output of ['pending', 'current']) {
     const members = [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'a', detailId: '0' }];
     assert.equal(latest.target.kind, 'tv');
     assert.deepEqual(latest.selectionMembers, members);
-    assert.deepEqual(latest.results, [{ sourceKey: 'a', items: [first, later, other] }]);
+    assert.deepEqual(latest.results, [{ sourceKey: 'a', items: [first, later] }]);
     const calls = structuredClone(f.calls), metadataCalls = structuredClone(f.metadataCalls);
     await f.rpc('session.command', {
       sessionId: playback.sessionId, action: 'search.update', sources: [source],
@@ -354,7 +400,7 @@ for (const output of ['pending', 'current']) {
     assert.deepEqual(updated.attempt, before.attempt);
     assert.deepEqual(updated.current, before.current);
     assert.equal(updated.stage, before.stage);
-    assert.deepEqual(updated.sources.map(row => row.source.detailId), [0, '0', 'not-selected']);
+    assert.deepEqual(updated.sources.map(row => row.source.detailId), [0, '0']);
     assert.deepEqual(updated.search.map(row => [row.page, row.completed]), [[2, true]]);
     assert.deepEqual(await f.rpc('session.attempt', { sessionId: playback.sessionId, attemptId: pending.id }), receipt);
     assert.deepEqual(f.calls, calls, 'the update reuses search, detail and media instead of rescheduling them');

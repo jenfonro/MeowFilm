@@ -324,6 +324,9 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             model.setVideoScale(scaleMode)
         }
         let state = model.mediaState, snapshot = model.snapshot
+        let kind = snapshot.map { value in
+            value.metadataSources.first { $0.id == value.metadataSourceID }?.kind ?? value.target.kind
+        }
         titleLabel.text = snapshot?.target.title
         let candidate = snapshot?.current?.candidate ?? snapshot?.attempt?.candidate
         sourceLabel.text = candidate.map { [$0.source.name, $0.lineLabel, $0.name].filter { !$0.isEmpty }.joined(separator: " · ") }
@@ -348,11 +351,11 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         pip.isEnabled = state.pictureInPictureAvailable
         pip.isSelected = state.pictureInPicture
         pip.accessibilityLabel = state.pictureInPicture ? "退出画中画" : "画中画"
-        previous.isEnabled = snapshot?.target.kind != .movie && playing
-        nextButton.isEnabled = snapshot?.target.kind != .movie && playing
+        previous.isEnabled = kind != .movie && playing
+        nextButton.isEnabled = kind != .movie && playing
         shortVideo.isSelected = snapshot?.shortVideo == true
         shortVideo.configuration?.title = shortVideo.isSelected ? "短视频：开" : "短视频"
-        shortVideo.isEnabled = snapshot != nil && snapshot?.target.kind != .movie
+        shortVideo.isEnabled = snapshot != nil && kind != .movie
         swipeUp.isEnabled = shortVideo.isSelected; swipeDown.isEnabled = shortVideo.isSelected
         pan.configuration?.title = candidate?.provider.flatMap(FilmPanProvider.init(rawValue:))?.title ?? candidate?.lineLabel ?? "网盘"
         quality.configuration?.title = candidate?.quality.flatMap(FilmResourceQuality.init(rawValue:))?.title ?? candidate?.quality ?? "画质"

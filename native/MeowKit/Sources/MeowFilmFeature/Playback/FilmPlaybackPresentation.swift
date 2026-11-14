@@ -6,18 +6,18 @@ import MeowRuntime
 enum FilmPlaybackPresentation {
     static func detail(_ snapshot: FilmPlaybackSnapshot, original: FilmDetail) -> FilmDetail {
         let displayMetadata = snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }
-        let provider = snapshot.target.metadataProvider ?? displayMetadata?.provider
-        let metadataID = snapshot.target.value["metadataId"]?.filmScalar ?? displayMetadata?.metadataID.display
-        let displayKind = snapshot.target.metadataProvider == nil ? displayMetadata?.kind : snapshot.target.kind
-        let kind = FilmItemKind(rawValue: (displayKind ?? snapshot.target.kind).rawValue)
+        let provider = displayMetadata?.provider ?? snapshot.target.metadataProvider
+        let metadataID = displayMetadata?.metadataID.display ?? snapshot.target.value["metadataId"]?.filmScalar
+        let displayKind = displayMetadata?.kind ?? snapshot.target.kind
+        let kind = FilmItemKind(rawValue: displayKind.rawValue)
         let baseline: FilmDetail
-        if let targetProvider = snapshot.target.metadataProvider,
-           targetProvider.rawValue != original.item.sourceID ||
+        if let provider,
+           provider.rawValue != original.item.sourceID ||
             metadataID != original.item.id ||
-            (targetProvider == .tmdb && original.item.kind != nil && original.item.kind != kind) {
-            baseline = .init(item: .init(sourceID: targetProvider.rawValue,
+            (provider == .tmdb && original.item.kind != nil && original.item.kind != kind) {
+            baseline = .init(item: .init(sourceID: provider.rawValue,
                 id: metadataID ?? snapshot.target.id,
-                title: snapshot.target.title, kind: kind))
+                title: displayMetadata?.title ?? snapshot.target.title, kind: kind))
         } else { baseline = original }
         let fields = snapshot.metadata.filmObject ?? [:]
         let hasDetail = succeeded(snapshot.metadataCache, component: "detail")

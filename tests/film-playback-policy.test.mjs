@@ -222,6 +222,21 @@ test('E49 group membership is an accurate typed source/detail identity rather th
   assert.equal(isCandidateAllowed({ ...item, kind: 'movie' }, { target: group }), false);
 });
 
+test('an exact group file uses its typed selector rather than requiring semantic membership again', () => {
+  const selected = candidate({ targetId: 'group:directory', kind: 'group', detailId: 0 });
+  const target = { id: selected.targetId, kind: 'group', title: '原组',
+    members: [{ sourceKey: 'another-site', detailId: 'original' }],
+    season: 1, episode: 2, globalEpisode: 2,
+    source: { key: source.key, detailId: 0, lineId: selected.lineId, candidateId: selected.id } };
+  assert.equal(isCandidateAllowed(selected, { target }), true);
+  for (const patch of [{ id: 'forged' }, { detailId: '0' }, { lineId: 'other-line' },
+    { episode: 3 }, { source: { ...source, key: 'other-source' } }])
+    assert.equal(isCandidateAllowed({ ...selected, ...patch }, { target }), false);
+  assert.equal(isCandidateAllowed(selected, { target, blocks: [{
+    targetId: target.id, sourceKey: source.key, detailId: 0, lineId: selected.lineId,
+  }] }), false);
+});
+
 test('E15–20 raw replacement policy bypasses only file/line locks for an explicitly proved same-episode operation', () => {
   const selected = candidate({ targetId: 'raw-reselect', kind: 'source', playId: 'a', episodeId: 'a' });
   const raw = { id: selected.targetId, kind: 'source', title: 'Raw', season: 1, episode: 2,

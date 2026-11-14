@@ -245,6 +245,11 @@ internal sealed class FilmPlaybackSnapshot
         Target.Validate();
         EntryTarget = FilmJson.Target(FilmJson.Member(Raw, "entryTarget"));
         EntryTarget.Validate();
+        string metadataSourceId = FilmJson.Text(Raw, "metadataSourceId");
+        SelectedMetadataSource = metadataSourceId.Length > 0
+            ? FilmJson.Array(Raw, "metadataSources").FirstOrDefault(row => FilmJson.Text(row, "id") == metadataSourceId) : default;
+        string contentKind = FilmJson.Text(SelectedMetadataSource, "kind");
+        ContentKind = contentKind is "movie" or "tv" ? contentKind : Target.Kind;
         MetadataCache = FilmMetadataCache.Read(FilmJson.Member(Raw, "metadataCache"));
         MetadataSupplement = FilmMetadataSupplement.Read(FilmJson.Member(Raw, "metadataSupplement"));
     }
@@ -253,6 +258,8 @@ internal sealed class FilmPlaybackSnapshot
     internal long Sequence { get; }
     internal FilmPlaybackTarget Target { get; }
     internal FilmPlaybackTarget EntryTarget { get; }
+    internal JsonElement SelectedMetadataSource { get; }
+    internal string ContentKind { get; }
     internal string EntrySurface => FilmJson.Text(Raw, "entrySurface");
     internal FilmMetadataCache? MetadataCache { get; }
     internal FilmMetadataSupplement? MetadataSupplement { get; }

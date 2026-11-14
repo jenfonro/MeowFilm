@@ -37,6 +37,66 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertEqual(request.value.filmObject?["metadata"], metadata)
         XCTAssertEqual(request.value.filmObject?["cacheEntries"], .array([]))
     }
+    func testMetadataEntryRetargetKeepsProvenanceAndExactSourceWithoutSearchReference() throws {
+        let source = try FilmPlaybackSource(FilmPlaybackFixture.source)
+        let sourceKey = try XCTUnwrap(source.key)
+        for provider in [FilmMetadataProvider.tmdb, .douban] {
+            for kind in [FilmPlaybackKind.movie, .tv] {
+                let entry = FilmPlaybackTarget(id: "\(provider.rawValue):\(kind.rawValue):19",
+                    kind: kind, title: "元数据入口", metadataProvider: provider, metadataID: "19")
+                let metadata: RuntimeValue = .object(["id": .number(19), "title": .string("入口资料")])
+                let exact = FilmPlaybackTarget(id: entry.id, kind: .source, title: entry.title,
+                    position: kind == .tv ? .init(season: 0, episode: 0) : .init(),
+                    source: ["key": .string(sourceKey), "detailId": .number(0),
+                             "lineId": .string("0"), "candidateId": .string("opaque-selected")])
+                let original = FilmPlaybackRequest(target: entry, sources: [source],
+                    metadata: metadata, entrySurface: "home")
+                XCTAssertNil(original.resumeTarget)
+                let request = original.retargeted(exact)
+                XCTAssertEqual(request.target, entry)
+                XCTAssertEqual(request.metadata, metadata)
+                XCTAssertEqual(request.sources, [source])
+                XCTAssertNil(request.searchReference)
+                XCTAssertEqual(request.resumeTarget, exact)
+                XCTAssertEqual(request.value.filmObject?["target"], .object(entry.value))
+                XCTAssertEqual(request.value.filmObject?["metadata"], metadata)
+                XCTAssertEqual(request.value.filmObject?["resumeTarget"], .object(exact.value))
+                XCTAssertEqual(request.value.filmObject?["entrySurface"], .string("home"))
+                XCTAssertEqual(request.value.filmObject?["platform"], .string("ios"))
+                XCTAssertNil(request.resumeTarget?.metadataProvider, "Provenance does not turn the exact execution into metadata playback")
+
+                let reference: RuntimeValue = .object(["sessionId": .string(UUID().uuidString.lowercased()),
+                                                       "selectionId": .string(entry.id)])
+                let fromSearch = FilmPlaybackRequest(target: entry, sources: [source], metadata: metadata,
+                    searchReference: reference, entrySurface: "search").retargeted(exact)
+                XCTAssertEqual(fromSearch.target, exact)
+                XCTAssertEqual(fromSearch.resumeTarget, exact)
+                XCTAssertEqual(fromSearch.searchReference, reference)
+                XCTAssertNil(fromSearch.metadata, "Search reentry reloads the entry through its owner reference")
+            }
+        }
+    }
+    func testSourceAndGroupRetargetDoNotInventMetadataProvenance() {
+        let source: RuntimeObject = ["key": .string("source-key"), "detailId": .number(0),
+            "lineId": .string("0"), "candidateId": .string("opaque-selected")]
+        for kind in [FilmPlaybackKind.source, .group] {
+            let members: [RuntimeValue]? = kind == .group
+                ? [.object(["sourceKey": .string("source-key"), "detailId": .number(0)])] : nil
+            let entry = FilmPlaybackTarget(id: "site-card", kind: kind, title: "站点条目",
+                source: kind == .source ? ["key": .string("source-key"), "detailId": .number(0)] : nil,
+                members: members)
+            let selected = FilmPlaybackTarget(id: entry.id, kind: kind, title: entry.title,
+                source: source, members: members)
+            let request = FilmPlaybackRequest(target: entry, sources: []).retargeted(selected)
+            XCTAssertEqual(request.target, selected)
+            XCTAssertNil(request.target.metadataProvider)
+            XCTAssertNil(request.metadata); XCTAssertNil(request.searchReference)
+            XCTAssertNil(request.resumeTarget)
+            XCTAssertNil(request.value.filmObject?["metadata"])
+            XCTAssertNil(request.value.filmObject?["resumeTarget"])
+            XCTAssertEqual(request.target.value["members"], members.map(RuntimeValue.array))
+        }
+    }
     func testCacheOwnerIdentityTimesCompletenessAndRevisionAreTransferredUnchanged() {
         let entries: [RuntimeValue] = [
             .object(["kind": .string("detail"), "source": FilmPlaybackFixture.source,
@@ -332,6 +392,53 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertEqual(detail.item.kind, .tv)
         XCTAssertEqual(detail.item.identity, original.item.identity)
         XCTAssertNil(original.item.kind)
+    }
+
+    func testExactSourceTargetRetainsConfirmedMetadataKindSeasonAndIdentity() throws {
+        for kind in [FilmPlaybackKind.movie, .tv] {
+            let target = FilmPlaybackTarget(id: "tmdb:\(kind.rawValue):19", kind: .source, title: "准确来源",
+                position: kind == .tv ? .init(season: 0, episode: 0) : .init(),
+                source: ["key": .string("source-key"), "detailId": .number(0),
+                         "lineId": .string("0"), "candidateId": .string("opaque-selected")])
+            let confirmed: RuntimeValue = .object([
+                "id": .string("confirmed-tmdb"), "provider": .string("tmdb"), "metadataId": .number(19),
+                "kind": .string(kind.rawValue), "title": .string("可靠作品"),
+                "seasons": .array(kind == .tv ? [.object(["season_number": .number(0), "name": .string("特别季")])] : []),
+            ])
+            let episode: RuntimeValue = .object(["season": .number(0), "episode": .number(0), "name": .string("真实特别集")])
+            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+                metadata: .object(["name": .string("可靠作品")]), episodes: kind == .tv ? [episode] : [],
+                target: .object(target.value), metadataSources: [confirmed], metadataSourceID: "confirmed-tmdb"))
+            let original = FilmDetail(item: .init(sourceID: "tmdb", id: "19", title: "原作品",
+                kind: kind == .movie ? .movie : .tv), summary: "已有简介")
+            let detail = FilmPlaybackPresentation.detail(snapshot, original: original)
+            XCTAssertEqual(snapshot.target, target)
+            XCTAssertEqual(snapshot.target.kind, .source)
+            XCTAssertEqual(snapshot.target.value["source"]?.filmObject?["lineId"], .string("0"))
+            XCTAssertEqual(detail.item.identity, original.item.identity)
+            XCTAssertEqual(detail.item.kind, kind == .movie ? .movie : .tv)
+            XCTAssertEqual(detail.title, "可靠作品"); XCTAssertEqual(detail.summary, "已有简介")
+            XCTAssertEqual(detail.seasons.map(\.number), kind == .tv ? [0] : [])
+            XCTAssertEqual(detail.seasons.first?.episodes.map(\.title) ?? [], kind == .tv ? ["真实特别集"] : [])
+        }
+    }
+
+    func testMetadataBrowseProjectionUsesConfirmedProviderWithoutChangingPlaybackTarget() throws {
+        let target = FilmPlaybackTarget(id: "tmdb:movie:19", kind: .source, title: "原作品",
+            source: ["key": .string("source-key"), "detailId": .number(0), "candidateId": .string("opaque-current")])
+        let confirmed: RuntimeValue = .object(["id": .string("douban:movie:0"),
+            "provider": .string("douban"), "metadataId": .number(0), "kind": .string("movie"), "title": .string("当前资料")])
+        let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            metadata: .object(["title": .string("当前资料")]), target: .object(target.value),
+            metadataSources: [confirmed], metadataSourceID: "douban:movie:0"))
+        let original = FilmDetail(item: .init(sourceID: "tmdb", id: "19", title: "旧资料", kind: .movie,
+            posterURL: URL(string: "https://artwork.example.invalid/old.jpg")), summary: "旧简介")
+        let detail = FilmPlaybackPresentation.detail(snapshot, original: original)
+        XCTAssertEqual(detail.item.sourceID, "douban"); XCTAssertEqual(detail.item.id, "0")
+        XCTAssertEqual(detail.item.kind, .movie); XCTAssertEqual(detail.title, "当前资料")
+        XCTAssertTrue(detail.summary.isEmpty); XCTAssertNil(detail.item.posterURL)
+        XCTAssertEqual(snapshot.target, target)
+        XCTAssertEqual(snapshot.target.value["source"]?.filmObject?["candidateId"], .string("opaque-current"))
     }
 
     func testOriginalSourceProjectionDoesNotInventAMetadataKindOrChangeIdentity() throws {

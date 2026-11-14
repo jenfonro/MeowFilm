@@ -36,12 +36,13 @@
 
 `FilmSearchPlayback` 只解码 Node 返回的 target/query/sources/results/resultHints/search/metadata/cacheEntries/searchReference，并绑定实际 producer：
 
-- `source` 保原单源 typed ID，数字 `0` 与字符串 `"0"` 不互换；不接受聚合成员或 TMDB 简介扩展。
+- 原始行交接的 `source` 保原单源 typed ID，数字 `0` 与字符串 `"0"` 不互换；不接受聚合成员或 TMDB 简介扩展。元数据页后续选择准确站点文件产生的 `source` 仍独立保留运行器给出的展示资料。
 - 未可靠关联的 `group` 保全部准确成员，不退化为代表项；可靠关联使用 Node 的 movie/tv 与元数据身份。
 - 原始行、原查询、已成功页及真实缓存 receipt 原样保留，不从显示标题重建查询、不生成新鲜度证明。换 owner 仍沿既有播放接缝降为 hints，不给旧事实盖新代次。
 - 播放 open 与 `search.update` 携带 `searchReference:{sessionId,selectionId}`。Node 重新读取该选择的事实与规则；客户端不上传 rules 或推导 metadataTarget。
+- `FilmPlaybackOpen` 的 `sources` 保留与当前安装相交的完整原搜索授权，不因当前执行目标为单源而收窄；`results/resultHints` 只转交 Node handoff 给出的真实卡片详情／成员。完整授权与分页事实不变成额外菜单条目，重入与迟到 reference 也不能借新全局来源扩大原授权。
 - 搜索列表停止后仍可向保留的播放选择通知较新 reference revision，但不发布其 cards/rawCards。播放端只转发 reference，不重搜、不预取全部详情，Node 负责迟到成员／可靠关联及已准备文件保护。会话退役或页面不可达后解除订阅。
-- 初次 open 不发送 `resumeTarget`，允许 Node 跟随迟到 handoff。已有确认播放 snapshot 的同 owner 重进才发送当前准确 `resumeTarget`，保留已选元数据、季集、globalEpisode 和 source/candidate；换 owner 不携带失效 searchReference 或 resume marker。目标不由标题猜测。
+- 初次搜索 open 不生成 `resumeTarget`，允许 Node 跟随迟到 handoff。已有确认播放 snapshot 的同 owner 重进发送当前准确 `resumeTarget`，保留已选元数据、季集、globalEpisode 和 source/candidate；换 owner 不携带失效 searchReference 或仅用于跟随搜索的 resume marker。已确认元数据入口手选准确 source 则独立保存入口 `target` 与精确 `resumeTarget`，不依赖 searchReference 或 owner 仍有效；普通 source/group 入口不补造元数据 provenance。目标不由标题猜测。
 
 搜索派生文本可按 `FilmRuleText` 使用 UInt16 数组。展示 helper 接受数组并为 WPF 渲染文本，原 JSON 和 opaque 身份不变，不从显示字符串反推选择。原始来源 `raw` 保持 Cat 契约。
 

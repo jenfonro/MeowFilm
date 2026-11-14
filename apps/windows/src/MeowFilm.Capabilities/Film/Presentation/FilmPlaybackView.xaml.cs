@@ -235,6 +235,11 @@ public partial class FilmPlaybackView : UserControl
         e.Handled = true;
         if (DataContext is FilmPlaybackPage page) await ExecuteAsync(page, page.PlayAsync, "播放操作失败");
     }
+    private async void PauseOrResume_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is FilmPlaybackPage page) await ExecuteAsync(page, page.PauseOrResumeAsync, "播放操作失败");
+    }
     private async void Previous_Click(object sender, RoutedEventArgs e) { e.Handled = true; await ActAsync("previous"); }
     private async void Next_Click(object sender, RoutedEventArgs e) { e.Handled = true; await ActAsync("next"); }
     private async void Switch_Click(object sender, RoutedEventArgs e)

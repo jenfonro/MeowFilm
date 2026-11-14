@@ -79,18 +79,86 @@ test('one source page is complete; raw and aggregate views keep typed identities
   assert.deepEqual(group.aggregateItems.map(item => item.detailId), [0, '0']);
   for (const raw of value.rawCards.filter(card => card.title === '星河')) {
     const handoff = service.handoff({ sessionId: opened.sessionId, selectionId: raw.displayKey, sources: [source] });
-    assert.equal(handoff.target.kind, 'source');
+    assert.equal(handoff.target.id, raw.displayKey);
     assert.equal(handoff.target.source.detailId, raw.detailId);
     assert.deepEqual(handoff.selectionMembers, [{ sourceKey: 'a', detailId: raw.detailId }]);
-    assert.equal(handoff.results[0].items.length, 1);
+    assert.deepEqual(handoff.results, [{ sourceKey: 'a', items: [rows.find(row => row.id === raw.detailId)] }]);
     assert.equal(handoff.metadata, null);
   }
   const handoff = service.handoff({ sessionId: opened.sessionId, selectionId: group.displayKey, sources: [source] });
-  assert.equal(handoff.target.kind, 'group');
+  assert.equal(handoff.target.id, group.displayKey);
   assert.deepEqual(handoff.target.members.map(member => member.detailId), [0, '0']);
   assert.deepEqual(handoff.selectionMembers, handoff.target.members);
+  assert.deepEqual(handoff.results, [{ sourceKey: 'a', items: rows.slice(0, 2) }]);
   assert.deepEqual(handoff.search, [{ sourceKey: 'a', page: 1, completed: true }]);
   assert.equal(calls.filter(call => call[0] === 'search').length, 1);
+});
+
+test('handoff separates full search authorization from card members while raw selection stays fixed across late same-name sources', async t => {
+  const gate = deferred();
+  const first = { id: 0, name: '星河' }, later = { id: '0', name: '星河' };
+  const sameNameSource = { ...sourceB, name: source.name };
+  const outsideSource = { ...source, key: 'outside', installationId: 'outside' };
+  t.after(() => gate.resolve(page([later, { id: 'unrelated-b', name: '别片乙' }], 1, 1)));
+  const entries = [];
+  const { service, calls, complete, snapshot } = setup(t, {
+    search: async item => item.key === 'a'
+      ? page([first, { id: 'unrelated-a', name: '别片甲' }], 1, 1) : gate.promise,
+    cachedEntry: async request => {
+      const entry = { request, producer: 'accepted', storedAt: 42 };
+      entries.push(entry); return entry;
+    },
+  });
+  const { sessionId } = await service.open({ query: '星河', sources: [source, sameNameSource] });
+  const early = await until(() => snapshot(sessionId).cards.length && snapshot(sessionId));
+  const selectionId = early.cards.find(card => card.detailId === 0).displayKey;
+  const rawId = early.rawCards.find(card => card.detailId === 0).displayKey;
+  const sources = [source, sameNameSource, outsideSource];
+  const before = service.handoff({ sessionId, selectionId, sources });
+  assert.equal(before.target.metadataProvider, undefined);
+  assert.deepEqual(before.sources, [source, sameNameSource]);
+  assert.deepEqual(before.selectionMembers, [{ sourceKey: 'a', detailId: 0 }]);
+  assert.deepEqual(before.results, [{ sourceKey: 'a', items: [first] }]);
+  assert.deepEqual(before.resultHints, []);
+  assert.deepEqual(before.search, [
+    { sourceKey: 'a', page: 1, completed: true }, { sourceKey: 'b', page: 0, completed: false },
+  ]);
+  const rawBefore = service.handoff({ sessionId, selectionId: rawId, sources });
+  assert.deepEqual(rawBefore.sources, before.sources);
+  assert.deepEqual(rawBefore.selectionMembers, before.selectionMembers);
+  assert.deepEqual(rawBefore.results, before.results);
+  assert.throws(() => service.handoff({ sessionId, selectionId: rawId,
+    sources: [{ ...source, enabled: false }, sameNameSource] }), error => error.code === 'SOURCE_NOT_FOUND');
+  assert.throws(() => service.handoff({ sessionId, selectionId: rawId,
+    sources: [{ ...source, installationId: 'forged' }, sameNameSource] }), error => error.code === 'SOURCE_NOT_FOUND');
+  assert.throws(() => service.handoff({ sessionId, selectionId: 'client-only', sources }),
+    error => error.code === 'NOT_FOUND');
+
+  gate.resolve(page([later, { id: 'unrelated-b', name: '别片乙' }], 1, 1));
+  const final = await complete(sessionId);
+  assert.equal(final.cards.find(card => card.title === '星河').displayKey, selectionId);
+  const after = service.handoff({ sessionId, selectionId, sources });
+  assert.equal(after.target.id, before.target.id);
+  assert.deepEqual(after.searchReference, before.searchReference);
+  assert.deepEqual(after.sources, before.sources);
+  assert.deepEqual(after.selectionMembers, [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'b', detailId: '0' }]);
+  assert.deepEqual(after.results, [{ sourceKey: 'a', items: [first] }, { sourceKey: 'b', items: [later] }]);
+  assert.deepEqual(after.search, [
+    { sourceKey: 'a', page: 1, completed: true }, { sourceKey: 'b', page: 1, completed: true },
+  ]);
+  assert.deepEqual(after.cacheEntries, entries);
+  const rawAfter = service.handoff({ sessionId, selectionId: rawId, sources });
+  assert.deepEqual(rawAfter.target, rawBefore.target);
+  assert.deepEqual(rawAfter.selectionMembers, rawBefore.selectionMembers);
+  assert.deepEqual(rawAfter.results, rawBefore.results);
+  assert.deepEqual(rawAfter.sources, after.sources);
+  assert.deepEqual(rawAfter.search, after.search);
+  assert.deepEqual(rawAfter.cacheEntries, entries);
+  assert.equal(rawAfter.metadata, null);
+  assert.equal(rawAfter.metadataTarget, undefined);
+  assert.deepEqual(calls.filter(call => call[0] === 'search').map(call => [call[1], call[3]]),
+    [['a', 1], ['b', 1]]);
+  assert.equal(calls.filter(call => call[0] === 'receipt').length, 2);
 });
 
 test('explicit more retries only failed cursor and appends new groups without reordering existing cards', async t => {
@@ -137,6 +205,7 @@ test('an implicit duplicate page ends its source, but explicit page counts take 
 
 test('late metadata changes the selected group carrier but never changes a raw selection or repeats search', async t => {
   const metadataGate = deferred();
+  t.after(() => metadataGate.resolve({ results: [] }));
   const { service, calls, complete, snapshot } = setup(t, {
     search: async () => page([{ id: 'a', name: '星河' }], 1, 1),
     metadata: async (_provider, path) => path.includes('/search/')
@@ -146,7 +215,10 @@ test('late metadata changes the selected group carrier but never changes a raw s
   const early = await until(() => snapshot(sessionId).cards.length && snapshot(sessionId));
   const group = early.cards[0], raw = early.rawCards[0];
   const before = service.handoff({ sessionId, selectionId: group.displayKey, sources: [source] });
-  assert.equal(before.target.kind, 'group');
+  const rawBefore = service.handoff({ sessionId, selectionId: raw.displayKey, sources: [source] });
+  assert.equal(before.target.metadataProvider, undefined);
+  assert.deepEqual(before.selectionMembers, [{ sourceKey: 'a', detailId: 'a' }]);
+  assert.deepEqual(before.results, [{ sourceKey: 'a', items: [{ id: 'a', name: '星河' }] }]);
   metadataGate.resolve({ results: [{ id: 12, media_type: 'tv', name: '星河' }] });
   await complete(sessionId);
   const after = service.handoff({ sessionId, selectionId: group.displayKey, sources: [source] });
@@ -154,7 +226,12 @@ test('late metadata changes the selected group carrier but never changes a raw s
   assert.equal(after.target.id, group.displayKey);
   assert.equal(after.target.metadataId, '12');
   assert.equal(after.metadata.id, 12);
-  assert.equal(service.handoff({ sessionId, selectionId: raw.displayKey, sources: [source] }).target.kind, 'source');
+  assert.deepEqual(after.selectionMembers, before.selectionMembers);
+  assert.deepEqual(after.results, before.results);
+  const rawAfter = service.handoff({ sessionId, selectionId: raw.displayKey, sources: [source] });
+  assert.deepEqual(rawAfter.target, rawBefore.target);
+  assert.deepEqual(rawAfter.results, rawBefore.results);
+  assert.equal(rawAfter.metadataTarget, undefined);
   assert.equal(calls.filter(call => call[0] === 'search').length, 1);
   assert.deepEqual(calls.filter(call => call[0] === 'metadata').map(call => call[2]), ['/3/search/multi', '/3/tv/12']);
   assert.equal(calls.some(call => call[0] === 'metadata' && call[1] === 'douban'), false);
@@ -176,7 +253,7 @@ for (const kind of ['movie', 'tv']) {
     const early = await until(() => snapshot(sessionId).cards.length && snapshot(sessionId));
     const selectionId = early.cards[0].displayKey;
     const before = service.handoff({ sessionId, selectionId, sources: [source] });
-    assert.equal(before.target.kind, 'group');
+    assert.equal(before.target.metadataProvider, undefined);
     assert.deepEqual(before.selectionMembers, [{ sourceKey: 'a', detailId: 0 }]);
     metadataGate.resolve({ results: [{ id: 12, media_type: kind, title: '星河', name: '星河' }] });
     await complete(sessionId);
@@ -191,11 +268,10 @@ for (const kind of ['movie', 'tv']) {
     assert.equal(handoff.target.metadataId, '12');
     assert.deepEqual(handoff.selectionMembers,
       [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'a', detailId: '0' }]);
-    assert.deepEqual(handoff.results, [{ sourceKey: 'a', items: [first, later, other] }]);
+    assert.deepEqual(handoff.results, [{ sourceKey: 'a', items: [first, later] }]);
     assert.deepEqual(handoff.search, [{ sourceKey: 'a', page: 2, completed: true }]);
     const raw = service.handoff({ sessionId,
       selectionId: next.rawCards.find(card => card.detailId === '0').displayKey, sources: [source] });
-    assert.equal(raw.target.kind, 'source');
     assert.equal(raw.target.source.detailId, '0');
     assert.deepEqual(raw.selectionMembers, [{ sourceKey: 'a', detailId: '0' }]);
     assert.deepEqual(raw.results, [{ sourceKey: 'a', items: [later] }]);
@@ -274,16 +350,19 @@ test('closing a snapshot stream detaches only that observer, and reconnect gets 
   assert.throws(() => service.snapshot({ sessionId }), error => error.code === 'NOT_FOUND');
 });
 
-test('source invalidation keeps only explicit hints and cannot bless an old cursor with a new generation', async t => {
-  const { service, complete } = setup(t, { search: async () => page([{ id: 1, name: '星河' }], 1, 1) });
+test('source invalidation keeps only selected hints and cannot bless an old cursor with a new generation', async t => {
+  const selected = { id: 1, name: '星河' };
+  const { service, complete } = setup(t, {
+    search: async () => page([selected, { id: 'other', name: '别片' }], 1, 1),
+  });
   const { sessionId } = await service.open({ query: '星河', sources: [source] });
   const value = await complete(sessionId);
   await service.invalidate({ kind: 'source', engine: 'cat', installationId: 'a' });
-  const handoff = service.handoff({ sessionId, selectionId: value.cards[0].displayKey,
+  const handoff = service.handoff({ sessionId, selectionId: value.cards.find(card => card.detailId === 1).displayKey,
     sources: [{ ...source, generation: 2 }] });
   assert.deepEqual(handoff.results, []);
   assert.deepEqual(handoff.search, []);
-  assert.equal(handoff.resultHints[0].items[0].id, 1);
+  assert.deepEqual(handoff.resultHints, [{ sourceKey: 'a', items: [selected] }]);
   assert.deepEqual(handoff.cacheEntries, []);
   await assert.rejects(service.command({ sessionId, action: 'resume' }), error => error.code === 'STALE_SESSION');
 });

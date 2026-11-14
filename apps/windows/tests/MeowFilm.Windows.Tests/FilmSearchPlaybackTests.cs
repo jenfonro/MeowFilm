@@ -11,6 +11,7 @@ public static class FilmSearchPlaybackTests
     {
         yield return Case("Node handoff keeps typed members original query raw rows confirmed cursors and cache provenance", TypedHandoff);
         yield return Case("raw selection remains its exact single source and cannot inherit TMDB metadata", RawHandoff);
+        yield return Case("source execution and reentry retain full search authorization without adding unrelated card results", SourceSelectionScope);
         yield return Case("late navigation updates carry only the original search reference and preserve active target on reopen", LiveUpdate);
         yield return Case("first open follows handoff while same-owner page reentry sends the exact resume target even after search retirement", Reentry);
         yield return Case("stale and failed update receipts cannot overwrite a replacement page", UpdateFailure);
@@ -97,6 +98,78 @@ public static class FilmSearchPlaybackTests
             FilmJson.Array(request.Results!.Value).Single().GetProperty("items").GetArrayLength() == 1,
             "raw Node receipt keeps only the exact zero-valued source and no TMDB/group association");
     }
+    private static async Task SourceSelectionScope()
+    {
+        foreach (bool metadataEntry in new[] { false, true })
+        {
+            var a = SearchFixture.Source("a"); var b = SearchFixture.Source("b", order: 1);
+            await using var fixture = new SearchFixture(new(a, b));
+            var runtime = fixture.Runtime;
+            var member = SearchFixture.Member(a, 0, "内容身份");
+            runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"),
+                [SearchFixture.Card("selected-card", metadataEntry ? "tmdb" : "site", "内容身份", [member])], [member]);
+            var search = fixture.Service.Start("原词"); await SearchFixture.Settle(search);
+            var context = new FilmSearchContext(search, metadataEntry ? search.Items.Single() : search.RawItems.Single());
+            var exact = Encode(new { key = a.Key, detailId = 0, lineId = "0", candidateId = "selected-file" });
+            var entry = metadataEntry ? new FilmPlaybackTarget(context.DisplayKey, "tv", "内容身份", "tmdb", "7") :
+                new FilmPlaybackTarget(context.DisplayKey, "source", "内容身份", Source: Encode(new { key = a.Key, detailId = 0 }));
+            var selected = new FilmPlaybackTarget(entry.Id, "source", entry.Title, Source: exact);
+            var results = Encode(new[] { new { sourceKey = a.Key, items = new[] { SearchFixture.Member(a, 0, entry.Title).GetProperty("raw") } } });
+            var cursors = Encode(new[] { new { sourceKey = a.Key, page = 1, completed = false },
+                new { sourceKey = b.Key, page = 2, completed = false } });
+            var metadata = metadataEntry ? Encode(new { name = "内容身份", overview = "已得元数据" }) : (JsonElement?)null;
+            runtime.SearchHandoff = input => SearchFixture.Handoff(Guid.Parse(search.Id), FilmJson.Text(input, "selectionId"),
+                search.Query, entry, [a.Wire, b.Wire], results, cursors, metadata: metadata);
+            runtime.PlaybackOpen = (id, input) =>
+            {
+                var root = JsonNode.Parse(FilmPlaybackFixture.Snapshot(id, 0, FilmJson.Target(input.GetProperty("target")),
+                    FilmJson.Member(input, "metadata")).GetRawText())!.AsObject();
+                root["sources"] = JsonSerializer.SerializeToNode(new[]
+                { new { id = "selected-result", source = new { key = a.Key, name = "站点 A", detailId = 0 } } });
+                if (!metadataEntry) root["browsing"]!["sourceId"] = "selected-result";
+                return JsonSerializer.SerializeToElement(root);
+            };
+            var request = await context.HandoffAsync(default);
+            await using var native = new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeProbe());
+            var page = FilmPlaybackPage.FromSearch(new("card", entry.Title, "", "") { SearchContext = context }, request, native, null);
+            bool FullScope(JsonElement input) => FilmJson.Array(input, "sources").Select(row => FilmJson.Text(row, "key"))
+                .SequenceEqual(new[] { a.Key, b.Key });
+            JsonElement Execution(JsonElement input) => FilmJson.Member(input, metadataEntry ? "resumeTarget" : "target");
+            try
+            {
+                await native.OpenAsync(page, Open(request), default);
+                await SearchFixture.Until(() => Updates(runtime).Length > 0);
+                var opened = runtime.Calls.Single(call => call.Method == "film.session.open").Input;
+                Check(FullScope(opened) && JsonElement.DeepEquals(opened.GetProperty("results"), results) &&
+                    JsonElement.DeepEquals(opened.GetProperty("search"), cursors) &&
+                    page.Sources.Count(row => row.MetadataSourceId is null) == 1 && FullScope(Updates(runtime).Last()),
+                    "authorization and cursors cover A and B, while only the selected card's A detail is selectable");
+                runtime.Publish(runtime.LastSessionId, selected, metadata ?? Encode((object)null!), entryTarget: entry);
+                await SearchFixture.Until(() => page.ActiveTarget.Kind == "source" &&
+                    FilmJson.Text(page.ActiveTarget.Source!.Value, "candidateId") == "selected-file");
+                var reopened = FilmPlaybackOpen.ParametersFor(page, Encode(Open(request)), runtime.Connection, [a.Wire, b.Wire]);
+                Check(FullScope(reopened) && FilmJson.Text(Execution(reopened), "kind") == "source" &&
+                    JsonElement.DeepEquals(Execution(reopened).GetProperty("source"), exact) &&
+                    (!metadataEntry || JsonElement.DeepEquals(reopened.GetProperty("target"), Encode(entry.Wire()))) &&
+                    JsonElement.DeepEquals(reopened.GetProperty("results"), results),
+                    "source-target reentry keeps its exact file without replacing the original search authorization or importing B results");
+                runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(search.Id), search.Query, [], [], revision: 5));
+                await SearchFixture.Until(() => Updates(runtime).Any(update => FilmJson.Integer(update, "revision") == 5));
+                Check(Updates(runtime).All(FullScope), "late search references still carry the complete original authorized source scope");
+                using var replacement = new FilmSearchConsumerRuntime();
+                var otherOwner = FilmPlaybackOpen.ParametersFor(page, Encode(Open(request)), replacement.Connection, [a.Wire, b.Wire]);
+                Check(FullScope(otherOwner) && FilmJson.Array(otherOwner, "results").Length == 0 &&
+                    JsonElement.DeepEquals(otherOwner.GetProperty("resultHints"), results) &&
+                    !otherOwner.TryGetProperty("searchReference", out _) &&
+                    JsonElement.DeepEquals(Execution(otherOwner).GetProperty("source"), exact) &&
+                    (metadataEntry ? JsonElement.DeepEquals(otherOwner.GetProperty("target"), Encode(entry.Wire())) :
+                        !otherOwner.TryGetProperty("resumeTarget", out _)),
+                    "a replacement owner keeps the exact selection and only genuine card hints without stale producer authority");
+            }
+            finally { page.ReleaseSearch(); }
+        }
+    }
+
     private static async Task LiveUpdate()
     {
         await using var fixture = new SearchFixture();

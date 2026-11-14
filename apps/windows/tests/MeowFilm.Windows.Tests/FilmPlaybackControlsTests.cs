@@ -24,6 +24,8 @@ public static class FilmPlaybackControlsTests
         yield return Test("source menu continuation keeps exact browsing selection and admits one request while enabled", SourceSearchMore);
         yield return Test("source menu continuation reports failure permits retry and ignores a retired page error", SourceSearchMoreFailure);
         yield return Test("source pan and layout controls share one row while rail paging stays with the cards", BrowseToolbar);
+        yield return Test("source picker starts disabled without fake rows and selects exact same-name sources after loading", SourcePickerStates);
+        yield return Test("page play submits the current browsing intent while player transport controls only accepted media", PagePlayAndTransport);
         yield return Test("play pause seek rate aspect and volume drive the actual accepted occurrence", async () =>
         {
             await using var scene = await Scene.Create();
@@ -699,6 +701,139 @@ public static class FilmPlaybackControlsTests
             finally { pending.TrySetResult(FilmRuntimeProbe.Failure("CANCELLED")); }
         });
     }
+    private static async Task SourcePickerStates()
+    {
+        await using var scene = new Scene();
+        scene.Window.Show();
+        await Until(() => scene.View.IsLoaded);
+        var source = scene.Element<ComboBox>("SourcePicker");
+        void Waiting()
+        {
+            source.ApplyTemplate(); scene.Window.UpdateLayout();
+            Check(!source.IsEnabled && source.SelectedItem is null && source.Items.Count == 0 &&
+                source.Template.FindName("SourceLoading", source) is TextBlock { Text: "加载中...", Visibility: Visibility.Visible } &&
+                source.Template.FindName("SourceSelection", source) is ContentPresenter { Visibility: Visibility.Collapsed } &&
+                !scene.Element<Button>("PlayButton").IsEnabled,
+                "the real control shows a disabled loading label, never a fabricated selectable source or a blank selection");
+        }
+        Waiting();
+        var ordinary = new FilmPlaybackTarget("ordinary", "source", "站点影片",
+            Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0 }));
+        var group = new FilmPlaybackTarget("aggregate", "group", "聚合影片",
+            Members: FilmJson.Encode(new[] { new { sourceKey = "cat:fixture:site:1", detailId = 0 } }));
+        FilmPlaybackPage? page = null;
+        foreach (var target in new[] { ordinary, group, Card().PlaybackContext!.Target,
+            new FilmPlaybackTarget("douban:tv:10", "tv", "豆瓣影片", "douban", "10") })
+        {
+            page = new(new(target.Id, target.Title, "", ""), new(target), null, null);
+            scene.View.DataContext = page;
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Waiting();
+            var waiting = JsonNode.Parse(Snapshot(Guid.NewGuid(), 1, target, FilmJson.Encode((object)null!)).GetRawText())!.AsObject();
+            waiting["metadataSources"] = new JsonArray(); waiting["metadataSourceId"] = null;
+            waiting["browsing"]!["loading"] = true;
+            waiting["stage"] = "error"; waiting["error"] = "UPSTREAM_ERROR";
+            page.Apply(new(JsonSerializer.SerializeToElement(waiting)));
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Waiting();
+            Check(page.StatusText == "上游服务请求失败" && !scene.Element<Button>("PlayButton").IsEnabled,
+                "source loading does not replace the real playback failure or enable empty player transport");
+        }
+        var loaded = JsonNode.Parse(Snapshot(Guid.NewGuid(), 2, page!.Request.Target, FilmJson.Encode((object)null!)).GetRawText())!.AsObject();
+        loaded["metadataSources"] = new JsonArray(); loaded["metadataSourceId"] = null;
+        loaded["sources"] = JsonNode.Parse(FilmJson.Encode(new[]
+        {
+            new { id = "same-name-number", title = "所选短剧", source = new { key = "source-a", name = "红果短剧", detailId = (object)0 } },
+            new { id = "same-name-text", title = "另一短剧", source = new { key = "source-b", name = "红果短剧", detailId = (object)"0" } },
+            new { id = "title-only", title = "真实条目标题", source = new { key = "source-c", name = "", detailId = (object)1 } }
+        }).GetRawText());
+        loaded["browsing"]!["sourceId"] = "same-name-text";
+        page.Apply(new(JsonSerializer.SerializeToElement(loaded)));
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Check(source.IsEnabled && source.Items.Count == 3 &&
+            source.SelectedItem is FilmSelection { Id: "same-name-text", Label: "红果短剧 · 另一短剧" } &&
+            source.Template.FindName("SourceLoading", source) is TextBlock { Visibility: Visibility.Collapsed } &&
+            scene.Rig.Runtime.Calls.Count == 0,
+            "real same-name identities survive loading and the owner's exact selected row is shown without UI requests");
+        loaded["sequence"] = 3; loaded["browsing"]!["sourceId"] = "same-name-number";
+        page.Apply(new(JsonSerializer.SerializeToElement(loaded)));
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Check(source.Items.Count == 3 && source.SelectedItem is FilmSelection { Id: "same-name-number", Label: "红果短剧 · 所选短剧" } &&
+            scene.Rig.Runtime.Calls.Count == 0, "later owner selection changes the real row without name-based coalescing or echo commands");
+        loaded["sequence"] = 4; loaded["browsing"]!["sourceId"] = "title-only";
+        page.Apply(new(JsonSerializer.SerializeToElement(loaded)));
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Check(source.IsEnabled && source.SelectedItem is FilmSelection { Id: "title-only", Label: "真实条目标题" } &&
+            scene.Rig.Runtime.Calls.Count == 0, "an absent station label uses the real result title rather than blank text or a fabricated source");
+    }
+
+    private static async Task PagePlayAndTransport()
+    {
+        await using var scene = await Scene.Create();
+        int initialCalls = scene.Rig.Runtime.Calls.Count;
+        Click(scene.Element<Button>("PlayButton"));
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Check(!scene.Element<Button>("PlayButton").IsEnabled && scene.Rig.Runtime.Calls.Count == initialCalls,
+            "empty player transport cannot start a page selection");
+        await scene.Play();
+        var scope = scene.Rig.Native.Scope;
+        int playCalls = 0;
+        scene.Rig.Runtime.Intercept = (method, input, token) =>
+        {
+            if (method == "film.session.command")
+            {
+                string action = FilmJson.Text(input, "action");
+                if (action == "browse")
+                    scene.Rig.Runtime.Change(root =>
+                    {
+                        root["browsing"] = JsonNode.Parse(FilmJson.Encode(new
+                        {
+                            sourceId = "selected-site", lineId = 0, loading = false, error = (string?)null,
+                            lines = new[] { new { id = 0, provider = "quark" } },
+                            episodes = new[] { new { candidateId = "page-file", name = "所选文件", season = 1, episode = 2 } },
+                            originalEpisodes = Array.Empty<object>()
+                        }).GetRawText());
+                    });
+                if (action == "play" && ++playCalls == 1)
+                {
+                    Check(scene.Rig.Page.SourceId == "selected-site" && !input.TryGetProperty("isSmart", out _) &&
+                        !input.TryGetProperty("candidateId", out _), "Node receives the existing play action after the exact browse receipt");
+                    var target = new FilmPlaybackTarget(scene.Rig.Runtime.Target.Id, "source", scene.Rig.Runtime.Target.Title,
+                        Season: 1, Episode: 2, GlobalEpisode: 2,
+                        Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "page-file" }));
+                    scene.Rig.Runtime.Attempt("page-selection", Candidate("page-file", episode: 2), target: target);
+                }
+            }
+            return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+        };
+        scene.Rig.Runtime.Change(root => root["sources"] = JsonNode.Parse(FilmJson.Encode(new[]
+        { new { id = "selected-site", source = new { name = "准确站点" } } }).GetRawText()));
+        await Until(() => scene.Rig.Page.Sources.Any(row => row.Id == "selected-site"));
+        scene.Element<ComboBox>("SourcePicker").SelectedItem = scene.Rig.Page.Sources.Single(row => row.Id == "selected-site");
+        await Until(() => scene.Rig.Page.SourceId == "selected-site" && scene.Called("browse"));
+        Check(scene.Rig.Native.Scope == scope && scene.Rig.Native.Commits == 1 && !scene.Rig.Native.Paused && playCalls == 0,
+            "source selection browses only and keeps the actual playing occurrence unchanged");
+        Click(scene.Element<Button>("PlayButton")); await Until(() => scene.Rig.Native.Paused);
+        Click(scene.Element<Button>("PlayButton")); await Until(() => !scene.Rig.Native.Paused);
+        Check(scene.Rig.Native.Scope == scope && scene.Rig.Native.Commits == 1 && playCalls == 0,
+            "player pause and resume control the accepted media even after browsing another source");
+        var hero = scene.Element<Button>("HeroPlayButton");
+        Check(AutomationProperties.GetName(hero) == "播放当前选择" &&
+            Visuals(hero).OfType<TextBlock>().Any(text => text.Text == "播放"),
+            "the page action is labelled independently of the old output's pause state");
+        Click(hero);
+        await Until(() => scene.Rig.Native.SettledIdentity == "page-selection" && scene.Rig.Session.HasOutput);
+        Check(playCalls == 1 && scene.Rig.Native.Commits == 2 && scene.Rig.Native.Scope != scope &&
+            !scene.Rig.Native.Paused && scene.Rig.Page.ActiveTarget.Kind == "source" &&
+            scene.Rig.Page.Recommendations.Count > 0 && scene.Rig.Page.SelectedSeason?.Season == 1,
+            "page play submits the new source intent despite old output and retains its content metadata");
+        Click(hero); await Until(() => playCalls == 2);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Check(scene.Rig.Native.Commits == 2 && !scene.Rig.Native.Paused &&
+            scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt") == 2,
+            "same-target page activation still reaches Node without reopening or pausing the accepted media");
+    }
+
     private static async Task SourceSearchMore()
     {
         await using var scene = await Scene.Create();
@@ -901,7 +1036,7 @@ public static class FilmPlaybackControlsTests
         internal readonly FilmPlaybackView View = new();
         internal readonly Window Window;
         internal readonly List<string> Notices = [];
-        private Scene()
+        internal Scene()
         {
             Window = new() { Content = View, Width = 1150, Height = 850, Left = -10000, Top = -10000,
                 ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };

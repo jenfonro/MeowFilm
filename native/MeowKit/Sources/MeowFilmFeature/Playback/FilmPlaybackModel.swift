@@ -32,6 +32,8 @@ public final class FilmPlaybackModel: ObservableObject {
     private var searchObservation: AnyCancellable?
     private var searchAdmissionTask: Task<FilmPlaybackRequest, Error>?
     private var searchUpdateTask: Task<Void, Never>?
+    /// The handoff's full authorized search scope, independent of card results
+    /// and the currently browsed or playing source.
     private var searchScope: [FilmPlaybackSource] = []
     private var searchRevision = -1
     private var reentryTarget: FilmPlaybackTarget?
@@ -76,6 +78,7 @@ public final class FilmPlaybackModel: ObservableObject {
     private final class Preparation {
         let attempt: FilmPlaybackAttempt
         let target: FilmPlaybackTarget
+        let contentKind: FilmPlaybackKind
         let sessionID: UUID
         let admission: UUID
         let generation: UUID
@@ -90,8 +93,9 @@ public final class FilmPlaybackModel: ObservableObject {
         var state: FilmMediaState?
         private var resourceReleased = false
         private var releaseTask: Task<Void, Error>?
-        init(attempt: FilmPlaybackAttempt, target: FilmPlaybackTarget, sessionID: UUID, admission: UUID, generation: UUID) {
-            self.attempt = attempt; self.target = target; self.sessionID = sessionID
+        init(attempt: FilmPlaybackAttempt, target: FilmPlaybackTarget, contentKind: FilmPlaybackKind,
+             sessionID: UUID, admission: UUID, generation: UUID) {
+            self.attempt = attempt; self.target = target; self.contentKind = contentKind; self.sessionID = sessionID
             self.admission = admission; self.generation = generation
         }
         func releaseResource(transport: FilmPlaybackTransport) async throws {
@@ -572,8 +576,9 @@ public final class FilmPlaybackModel: ObservableObject {
     private func prepare(_ attempt: FilmPlaybackAttempt, sessionID: UUID) {
         guard preparingID != attempt.id, requestedPreparation?.attempt.id != attempt.id else { return }
         cancelPreparation()
-        guard let target = snapshot?.target else { return }
-        requestedPreparation = .init(attempt: attempt, target: target, sessionID: sessionID,
+        guard let snapshot else { return }
+        let contentKind = snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.kind ?? snapshot.target.kind
+        requestedPreparation = .init(attempt: attempt, target: snapshot.target, contentKind: contentKind, sessionID: sessionID,
                                      admission: mediaAdmission, generation: generation)
         if preparationWorker == nil {
             preparationWorker = Task { [weak self] in
@@ -703,7 +708,7 @@ public final class FilmPlaybackModel: ObservableObject {
     private func preservesPosition(_ request: Preparation) -> Bool {
         guard let current = committed, current.started, !current.retired,
               current.target.id.utf8.elementsEqual(request.target.id.utf8) else { return false }
-        if request.target.kind == .movie { return true }
+        if request.contentKind == .movie && current.contentKind == .movie { return true }
         let a = current.attempt.candidate.position, b = request.attempt.candidate.position
         if let first = a.globalEpisode, let second = b.globalEpisode { return first == second }
         if let firstSeason = a.season, let secondSeason = b.season,

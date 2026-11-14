@@ -24,6 +24,90 @@ public static class FilmPlaybackContractTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("metadata display and season controls survive an exact source target without changing playback identity", async () =>
+        {
+            foreach (string provider in new[] { "tmdb", "douban" })
+            {
+                await using var rig = new FilmPlaybackRig();
+                var target = new FilmPlaybackTarget(provider + ":tv:100", "tv", "元数据内容", provider, "100");
+                var card = Card() with { PlaybackContext = new(target, Metadata: Metadata(target, "content-poster")) };
+                var request = card.PlaybackContext! with
+                {
+                    Sources = [FilmJson.Encode(new { key = "cat:fixture:site:1", engine = "cat",
+                        installationId = "fixture", siteId = "site", generation = 1, name = "准确站点" })],
+                    CacheEntries = FilmJson.Encode(new[] { new { kind = "metadata", provider, path = "/tv/100",
+                        value = new { title = "缓存内容" }, fetchedAt = 100L, expiresAt = 200L, completeness = "complete" } }),
+                    DataOwner = await rig.Runtime.CaptureConnectionAsync()
+                };
+                await rig.OpenAsync(card, request);
+                var exact = new FilmPlaybackTarget(target.Id, "source", target.Title, Season: 1, Episode: 1, GlobalEpisode: 1,
+                    Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "chosen-file" }));
+                rig.Runtime.Change(root =>
+                {
+                    root["entryTarget"] = Node(FilmJson.Encode(target.Wire()));
+                    root["target"] = Node(FilmJson.Encode(exact.Wire()));
+                    root["sources"] = Node(FilmJson.Encode(new[]
+                    { new { id = "exact-site", source = new { key = "cat:fixture:site:1", name = "准确站点", detailId = 0 } } }));
+                    root["browsing"] = Node(SourceBrowsing());
+                    root["browsing"]!["sourceId"] = "exact-site";
+                    if (provider == "douban")
+                    {
+                        root["entryResolution"] = "matched";
+                        root["metadata"] = Node(FilmJson.Encode(new { title = "豆瓣内容", doubanSeasons = new[]
+                        { new { season = 1, name = "可信第一季", episodes = Array.Empty<object>() } } }));
+                        root["metadataSupplement"] = Node(FilmJson.Encode(new { provider = "tmdb", metadataId = "100",
+                            kind = "tv", metadata = Metadata(target, "supplement-poster") }));
+                    }
+                });
+                await Until(() => rig.Page.ActiveTarget.Kind == "source");
+                Check(rig.Page.ActiveTarget.Id == target.Id && rig.Page.ActiveTarget.MetadataProvider is null &&
+                    rig.Page.SelectedSource is { Id: "exact-site" } && rig.Page.HasImageEpisodes &&
+                    rig.Page.SelectedSeason?.Season == 1 && rig.Page.Metadata.Contains(rig.Page.SeasonLabel, StringComparison.Ordinal) &&
+                    rig.Page.Recommendations.Count > 0 && rig.Page.Poster.Length > 0,
+                    "metadata source identity owns presentation while the exact source target owns playback");
+                await rig.Page.BrowseSeasonAsync(rig.Page.Seasons[0]);
+                var browse = rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "browse.season").Parameters;
+                Check(FilmJson.Integer(browse, "season") == 1 && rig.Page.ActiveTarget.Kind == "source",
+                    "the existing season command remains available without converting a file selection into metadata play");
+                var captured = rig.Page.CaptureRequest;
+                Check(JsonElement.DeepEquals(FilmJson.Encode(captured.Target.Wire()), FilmJson.Encode(target.Wire())) &&
+                    captured.ResumeTarget is { } resume && JsonElement.DeepEquals(FilmJson.Encode(resume.Wire()), FilmJson.Encode(exact.Wire())) &&
+                    captured.Metadata?.ValueKind == JsonValueKind.Object &&
+                    captured.SearchReference is null, "a metadata home entry retains its proven provenance and exact resume without a search reference");
+                await using var replacement = new FilmRuntimeProbe();
+                foreach (var connection in new[] { request.DataOwner!, await replacement.CaptureConnectionAsync() })
+                {
+                    var reentry = new FilmPlaybackPage(card, captured, null, null);
+                    var opened = FilmPlaybackOpen.ParametersFor(reentry, FilmJson.Encode(captured), connection, request.Sources!);
+                    Check(JsonElement.DeepEquals(opened.GetProperty("target"), FilmJson.Encode(target.Wire())) &&
+                        JsonElement.DeepEquals(opened.GetProperty("resumeTarget"), FilmJson.Encode(exact.Wire())) &&
+                        FilmJson.Array(opened, "cacheEntries").Any(entry => FilmJson.Text(entry, "kind") == "metadata") &&
+                        !opened.TryGetProperty("searchReference", out _),
+                        "same-owner and replacement-owner reentry restore confirmed metadata separately from strict exact-file execution");
+                }
+                await Error("SOURCE_NOT_FOUND", () =>
+                {
+                    FilmPlaybackOpen.ParametersFor(rig.Page, FilmJson.Encode(captured), request.DataOwner!, []);
+                    return Task.CompletedTask;
+                });
+                if (provider == "tmdb")
+                {
+                    rig.Runtime.Change(root =>
+                    {
+                        root["metadataSourceId"] = "other-douban";
+                        root["metadataSources"] = Node(FilmJson.Encode(new[]
+                        { new { id = "other-douban", provider = "douban", metadataId = "200", kind = "tv", title = "豆瓣展示" } }));
+                        root["metadata"] = Node(FilmJson.Encode(new { id = "200", title = "豆瓣展示" }));
+                    });
+                    await Until(() => rig.Page.MetadataSourceId == "other-douban");
+                    var mixed = rig.Page.CaptureRequest;
+                    Check(JsonElement.DeepEquals(FilmJson.Encode(mixed.Target.Wire()), FilmJson.Encode(target.Wire())) &&
+                        mixed.ResumeTarget is { } mixedResume && JsonElement.DeepEquals(FilmJson.Encode(mixedResume.Wire()), FilmJson.Encode(exact.Wire())) &&
+                        mixed.Metadata is { } seed && JsonElement.DeepEquals(seed, request.Metadata!.Value),
+                        "a source resume keeps the original entry seed instead of labelling another provider's current display as TMDB");
+                }
+            }
+        });
         yield return Test("raw episode with only Node global number displays centrally and selects by candidate identity alone", async () =>
         {
             await using var rig = new FilmPlaybackRig();
