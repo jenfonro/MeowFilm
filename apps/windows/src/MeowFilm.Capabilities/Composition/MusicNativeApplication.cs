@@ -208,6 +208,9 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         }
         try
         {
+            // Cached owners can complete every await synchronously. Keep document
+            // cloning, validation and serialization off the caller's UI dispatcher.
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
             var token = request.Token;
             token.ThrowIfCancellationRequested();

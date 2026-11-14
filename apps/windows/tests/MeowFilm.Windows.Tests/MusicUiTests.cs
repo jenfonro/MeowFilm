@@ -72,6 +72,7 @@ public static partial class MusicUiTests
         foreach (var test in PlayerChromeCases()) yield return test;
         foreach (var test in SeekHitAreaCases()) yield return test;
         foreach (var test in LyricInteractionCases()) yield return test;
+        foreach (var test in PlaybackResponsivenessCases()) yield return test;
         yield return Case("test document stores authorize exact native namespaces and complete script sources", async () =>
         {
             const string hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
