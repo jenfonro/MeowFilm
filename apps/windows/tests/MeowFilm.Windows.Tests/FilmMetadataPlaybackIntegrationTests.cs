@@ -89,7 +89,7 @@ public static class FilmMetadataPlaybackIntegrationTests
         Toggle(preview, true);
         await Until(upstream, () => page.PreviewEpisodes && page.Episodes.Select(item => item.Number).SequenceEqual(new int?[] { 1, 4 }));
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-        var future = Visuals((ItemsControl)view.FindName("EpisodeCards")).OfType<Button>()
+        var future = Visuals((Shelf)view.FindName("EpisodeShelf")).OfType<Button>()
             .Single(button => button.Tag is FilmEpisodeItem { Season: 2, Number: 4 });
         Check(future.IsEnabled && page.Episodes.All(item => item.CanSelect) &&
             page.Episodes.All(item => item.Number is not (2 or 3)),

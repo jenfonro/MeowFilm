@@ -1,0 +1,52 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Capabilities"
+ xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop">
+ <local:FilmScaleConverter x:Key="Film.ShelfScale"/>
+   <Style x:Key="Film.ShelfArrow" TargetType="Button">
+    <Setter Property="local:CardMotion.Enabled" Value="True"/>
+    <Setter Property="Width" Value="48"/>
+    <Setter Property="Height" Value="48"/>
+    <Setter Property="MinHeight" Value="0"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Margin" Value="8,0"/>
+    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}"/>
+    <Setter Property="Foreground" Value="#4B5563"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Opacity" Value="0"/>
+    <Setter Property="IsHitTestVisible" Value="False"/>
+    <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
+    <Setter Property="Effect"><Setter.Value><DropShadowEffect BlurRadius="20" ShadowDepth="0" Opacity=".12" Color="Black"/></Setter.Value></Setter>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+     <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+             BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="24"
+             RenderTransformOrigin=".5,.5">
+      <Border.RenderTransform><ScaleTransform
+       ScaleX="{Binding Path=(local:CardMotion.Progress),RelativeSource={RelativeSource TemplatedParent},Converter={StaticResource Film.ShelfScale},ConverterParameter=0.05}"
+       ScaleY="{Binding Path=(local:CardMotion.Progress),RelativeSource={RelativeSource TemplatedParent},Converter={StaticResource Film.ShelfScale},ConverterParameter=0.05}"/>
+      </Border.RenderTransform>
+      <Path Data="{TemplateBinding Tag}" Width="11" Height="20" Stretch="Fill"
+            Stroke="{TemplateBinding Foreground}" StrokeThickness="2"
+            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+     </Border>
+    </ControlTemplate></Setter.Value></Setter>
+    <Style.Triggers>
+     <DataTrigger Binding="{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=local:Shelf}}" Value="True">
+      <Setter Property="Opacity" Value="1"/>
+      <Setter Property="IsHitTestVisible" Value="True"/>
+     </DataTrigger>
+     <DataTrigger Binding="{Binding IsKeyboardFocusWithin,RelativeSource={RelativeSource AncestorType=local:Shelf}}" Value="True">
+      <Setter Property="Opacity" Value="1"/>
+      <Setter Property="IsHitTestVisible" Value="True"/>
+     </DataTrigger>
+     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+      <Setter Property="Effect" Value="{x:Null}"/>
+     </Trigger>
+    </Style.Triggers>
+   </Style>
+</ResourceDictionary>

@@ -23,7 +23,7 @@ public static class FilmPlaybackControlsTests
     {
         yield return Test("source menu continuation keeps exact browsing selection and admits one request while enabled", SourceSearchMore);
         yield return Test("source menu continuation reports failure permits retry and ignores a retired page error", SourceSearchMoreFailure);
-        yield return Test("source pan layout and rail controls share one row while seasons stay separate", BrowseToolbar);
+        yield return Test("source pan and layout controls share one row while rail paging stays with the cards", BrowseToolbar);
         yield return Test("play pause seek rate aspect and volume drive the actual accepted occurrence", async () =>
         {
             await using var scene = await Scene.Create();
@@ -848,8 +848,7 @@ public static class FilmPlaybackControlsTests
         var pan = scene.Element<ComboBox>("LinePicker");
         var preview = Visuals(toolbar).OfType<CheckBox>().Single();
         var controls = new FrameworkElement[] { source, pan, preview, scene.Element<Button>("RawDirectory"),
-            scene.Element<Button>("HorizontalLayout"), scene.Element<Button>("ListLayout"),
-            scene.Element<Button>("EpisodePrevious"), scene.Element<Button>("EpisodeNext") };
+            scene.Element<Button>("HorizontalLayout"), scene.Element<Button>("ListLayout") };
         foreach (double width in new[] { 1150d, 780d })
         {
             scene.Window.Width = width;
@@ -871,13 +870,11 @@ public static class FilmPlaybackControlsTests
                 "real seasons remain below the toolbar while both exact browsing selections stay visible");
             int commands = scene.Rig.Runtime.Calls.Count;
             Click(scene.Element<Button>("ListLayout"));
-            await Until(() => page.IsListLayout && !scene.Element<Button>("EpisodePrevious").IsVisible &&
-                !scene.Element<Button>("EpisodeNext").IsVisible);
+            await Until(() => page.IsListLayout && !scene.Element<Shelf>("EpisodeShelf").IsVisible);
             Check(source.IsVisible && pan.IsVisible && preview.IsVisible && scene.Element<Button>("RawDirectory").IsVisible,
                 "list mode keeps source, pan, preview and the real directory entry in place");
             Click(scene.Element<Button>("HorizontalLayout"));
-            await Until(() => page.IsHorizontalLayout && scene.Element<Button>("EpisodePrevious").IsVisible &&
-                scene.Element<Button>("EpisodeNext").IsVisible);
+            await Until(() => page.IsHorizontalLayout && scene.Element<Shelf>("EpisodeShelf").IsVisible);
             Check(scene.Rig.Runtime.Calls.Count == commands,
                 "changing episode presentation never refreshes a directory or searches a source");
         }

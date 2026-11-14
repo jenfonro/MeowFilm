@@ -53,7 +53,7 @@ public partial class FilmPlaybackView : UserControl
             UpdateControlSelections();
             PageScroll.ScrollToTop();
             MetadataScroll.ScrollToTop();
-            HorizontalEpisodes.ScrollToLeftEnd();
+            EpisodeShelf.ScrollToIndex(0);
             RelatedScroll.ScrollToLeftEnd();
             UpdateMedia();
             ShowPlayerControls();
@@ -152,7 +152,7 @@ public partial class FilmPlaybackView : UserControl
         {
             if (!IsVisible || !ReferenceEquals(DataContext, page)) return;
             int index = page.SelectedEpisode is { } selected ? page.Episodes.ToList().IndexOf(selected) : 0;
-            HorizontalEpisodes.ScrollToHorizontalOffset(index * 276);
+            EpisodeShelf.ScrollToIndex(index);
         }));
     }
 
@@ -596,8 +596,6 @@ public partial class FilmPlaybackView : UserControl
             RecommendationRequested?.Invoke(this, new(item));
     }
 
-    private void EpisodePrevious_Click(object sender, RoutedEventArgs e) => PageRail(HorizontalEpisodes, -1, e);
-    private void EpisodeNext_Click(object sender, RoutedEventArgs e) => PageRail(HorizontalEpisodes, 1, e);
     private void RelatedPrevious_Click(object sender, RoutedEventArgs e) => PageRail(RelatedScroll, -1, e);
     private void RelatedNext_Click(object sender, RoutedEventArgs e) => PageRail(RelatedScroll, 1, e);
 
@@ -611,9 +609,7 @@ public partial class FilmPlaybackView : UserControl
 
     private void UpdateRailButtons()
     {
-        if (EpisodePrevious is null || RelatedNext is null) return;
-        EpisodePrevious.IsEnabled = HorizontalEpisodes.HorizontalOffset > .5;
-        EpisodeNext.IsEnabled = HorizontalEpisodes.ScrollableWidth - HorizontalEpisodes.HorizontalOffset > .5;
+        if (RelatedNext is null) return;
         RelatedPrevious.IsEnabled = RelatedScroll.HorizontalOffset > .5;
         RelatedNext.IsEnabled = RelatedScroll.ScrollableWidth - RelatedScroll.HorizontalOffset > .5;
     }
