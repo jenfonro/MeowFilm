@@ -64,8 +64,9 @@
       </ToggleButton>
       <Grid IsHitTestVisible="False" Margin="{TemplateBinding Padding}">
        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/></Grid.ColumnDefinitions>
-       <ContentPresenter Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+       <ContentPresenter x:Name="SourceSelection" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
         ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" VerticalAlignment="Center"/>
+       <TextBlock x:Name="SourceLoading" Text="加载中..." Visibility="Collapsed" VerticalAlignment="Center"/>
        <Path x:Name="Arrow" Grid.Column="1" Data="M 0,0 L 4.5,4.5 L 9,0" Width="9" Height="5" Stretch="None" StrokeThickness="1.4"
         StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{TemplateBinding Foreground}"
         HorizontalAlignment="Right" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
@@ -87,6 +88,10 @@
       </Popup>
      </Grid>
      <ControlTemplate.Triggers>
+      <Trigger Property="SelectedItem" Value="{x:Null}">
+       <Setter TargetName="SourceSelection" Property="Visibility" Value="Collapsed"/>
+       <Setter TargetName="SourceLoading" Property="Visibility" Value="Visible"/>
+      </Trigger>
       <Trigger Property="IsDropDownOpen" Value="True"><Setter TargetName="Arrow" Property="RenderTransform"><Setter.Value><RotateTransform Angle="180"/></Setter.Value></Setter></Trigger>
       <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="DropDown" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
      </ControlTemplate.Triggers>
@@ -417,7 +422,7 @@
           <Grid x:Name="ControlsRow" Margin="12,0,12,12">
            <Border x:Name="LeftPill" Style="{StaticResource Film.PlayerPill}" HorizontalAlignment="Left">
             <StackPanel Orientation="Horizontal">
-             <Button x:Name="PlayButton" Click="Play_Click" Style="{StaticResource Film.PlayerButton}" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="播放或暂停" ToolTip="{Binding PlayLabel}">
+             <Button x:Name="PlayButton" Click="PauseOrResume_Click" Style="{StaticResource Film.PlayerButton}" IsEnabled="{Binding HasOutput,FallbackValue=False,TargetNullValue=False}" AutomationProperties.Name="播放或暂停" ToolTip="{Binding PlayLabel}">
               <Path><Path.Style><Style TargetType="Path" BasedOn="{StaticResource Film.PlayerIcon}"><Setter Property="Data" Value="M8,5 V19 L19,12 Z"/><Style.Triggers><DataTrigger Binding="{Binding IsPlaying}" Value="True"><Setter Property="Data" Value="M6,5 H10 V19 H6 Z M14,5 H18 V19 H14 Z"/></DataTrigger></Style.Triggers></Style></Path.Style></Path>
              </Button>
              <Button Click="Previous_Click" Style="{StaticResource Film.PlayerButton}" Margin="8,0,0,0" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="上一集" ToolTip="上一集"><Path Style="{StaticResource Film.PlayerIcon}" Data="M6,6 H8 V18 H6 Z M9.5,12 L18,6 V18 Z"/></Button>
@@ -487,11 +492,11 @@
        </WrapPanel>
        <StackPanel x:Name="HeroActions" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,14,0,16">
         <Button x:Name="HeroPlayButton" IsEnabled="{Binding CanPlay}" Click="Play_Click" Style="{StaticResource Film.HeroPlay}"
-                AutomationProperties.Name="播放或暂停" Margin="0,0,12,0">
+                AutomationProperties.Name="播放当前选择" Margin="0,0,12,0">
          <StackPanel Orientation="Horizontal">
           <Path Data="M 0,0 L 11,7 L 0,14 Z" Width="11" Height="14" Margin="0,0,8,0" VerticalAlignment="Center"
                 Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-          <TextBlock Text="{Binding PlayLabel}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" VerticalAlignment="Center"
+          <TextBlock Text="播放" FontSize="{StaticResource MeowFilm.Font.Size.Body}" VerticalAlignment="Center"
                      Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
          </StackPanel>
         </Button>
@@ -593,7 +598,7 @@
         <ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
        </Grid.ColumnDefinitions>
        <ComboBox x:Name="SourcePicker" ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource,Mode=OneWay}" DisplayMemberPath="Label"
-        SelectionChanged="Source_Changed" Style="{StaticResource Film.SourcePicker}" MinHeight="36" VerticalAlignment="Center" AutomationProperties.Name="站点来源"/>
+        IsEnabled="{Binding CanBrowseSources,FallbackValue=False,TargetNullValue=False}" SelectionChanged="Source_Changed" Style="{StaticResource Film.SourcePicker}" MinHeight="36" VerticalAlignment="Center" AutomationProperties.Name="站点来源"/>
        <ComboBox x:Name="LinePicker" Grid.Column="1" ItemsSource="{Binding Lines}" SelectedItem="{Binding SelectedLine,Mode=OneWay}" DisplayMemberPath="Label"
         SelectionChanged="Line_Changed" MinHeight="36" Margin="10,0,0,0" VerticalAlignment="Center"
         Visibility="{Binding HasLines,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="网盘来源"/>

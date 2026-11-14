@@ -199,7 +199,8 @@ export async function matchesResult(raw, options) {
   return (await matchesResults([raw], options))[0];
 }
 
-export async function recognizeCandidates(detail, { target, source = detail?.source, metadata, rules, signal } = {}) {
+export async function recognizeCandidates(detail, { target, source = detail?.source, metadata, rules, signal,
+  completeDirectory = false } = {}) {
   if (!target || !['movie', 'tv', 'source', 'group'].includes(target.kind) || !source?.key) invalidDetail();
   // normalizeDetail also accepts the expanded lines produced by data.expand.
   // Their opaque row ID must never become the script's playId.
@@ -208,7 +209,9 @@ export async function recognizeCandidates(detail, { target, source = detail?.sou
   if (detailId === undefined) invalidDetail();
   const sourceIdentity = [source.key, source.engine, source.installationId, source.siteId];
   const candidateSource = { ...source, detailId };
-  if (target.kind === 'source' && target.source) {
+  // The session owns one complete directory; target-specific eligibility is
+  // applied when selecting, not by deleting ordinary files from that owner.
+  if (!completeDirectory && target.kind === 'source' && target.source) {
     for (const field of ['key', 'engine', 'installationId', 'siteId', 'revision', 'generation']) {
       if (target.source[field] !== undefined && target.source[field] !== source[field]) return [];
     }
@@ -232,7 +235,7 @@ export async function recognizeCandidates(detail, { target, source = detail?.sou
   for (const line of normalized.lines) {
     for (const item of line.episodes) {
       const parsed = texts[textIndex++];
-      if (!parsed.eligible) continue;
+      if (!parsed.eligible && !completeDirectory) continue;
       const { fileName, path, season, episode, movie, quality } = parsed;
       const explicitGlobal = coordinate(item.globalEpisode);
       let mapped = explicitGlobal === undefined ? undefined : global.get(explicitGlobal);
@@ -251,6 +254,7 @@ export async function recognizeCandidates(detail, { target, source = detail?.sou
         fileIdentity: resourceIdentity, targetId: target.id, source: candidateSource, detailId, lineId: line.id,
         lineLabel: line.label, flag: line.flag ?? line.id, name: item.name, fileName,
         episodeId: item.id, index: item.index, kind: target.kind,
+        ...(completeDirectory ? { eligible: parsed.eligible } : {}),
         ...(path === undefined ? {} : { path }), ...(provider === undefined ? {} : { provider }),
         ...Object.fromEntries(['resolution', 'fps', 'codec'].flatMap(field => {
           const value = item[field] ?? item.file?.[field];

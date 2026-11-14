@@ -45,9 +45,9 @@ enum FilmUIKitPlaybackFixture {
         fields["season"] = season.map { .number(Double($0)) }
         return .object(fields)
     }
-    static func metadataSources(_ providers: [FilmMetadataProvider]) -> [RuntimeValue] {
+    static func metadataSources(_ providers: [FilmMetadataProvider], kind: FilmPlaybackKind = .tv) -> [RuntimeValue] {
         providers.map { .object(["id": .string("confirmed-\($0.rawValue)"), "provider": .string($0.rawValue),
-                                  "metadataId": .number($0 == .tmdb ? 19 : 0), "kind": .string("tv"),
+                                  "metadataId": .number($0 == .tmdb ? 19 : 0), "kind": .string(kind.rawValue),
                                   "title": .string("星海航线")]) }
     }
     static func snapshot(_ sequence: Int = 1, kind: FilmPlaybackKind = .tv,
@@ -55,6 +55,8 @@ enum FilmUIKitPlaybackFixture {
                          episodes: [RuntimeValue]? = nil, candidates: [RuntimeValue] = [],
                          metadataSources: [RuntimeValue]? = nil, metadataError: String? = nil,
                          attemptID: String? = nil, shortVideo: Bool = false) -> RuntimeValue {
+        var otherDetail = source.filmObject!
+        otherDetail["detailId"] = .string("0")
         var fields: RuntimeObject = [
             "sessionId": .string(sessionID.uuidString.lowercased()), "sequence": .number(Double(sequence)),
             "target": target(kind: kind, provider: provider), "stage": .string(attemptID == nil ? "idle" : "pending"),
@@ -62,13 +64,13 @@ enum FilmUIKitPlaybackFixture {
             "error": .null, "metadata": .object(["name": .string("星海航线"),
                 "seasons": .array([.object(["id": .number(1), "season_number": .number(1), "name": .string("第一季")]),
                                    .object(["id": .number(2), "season_number": .number(2), "name": .string("第二季")])])]),
-            "metadataSources": .array(metadataSources ?? self.metadataSources([provider])),
+            "metadataSources": .array(metadataSources ?? self.metadataSources([provider], kind: kind)),
             "metadataSourceId": .string("confirmed-\(provider.rawValue)"),
             "metadataError": metadataError.map(RuntimeValue.string) ?? .null,
             "sources": .array([
                 .object(["id": .string("result-a"), "title": .string("星海航线"), "source": source,
                          "state": .string("ready"), "error": .null]),
-                .object(["id": .string("result-b"), "title": .string("失败站点"), "source": source,
+                .object(["id": .string("result-b"), "title": .string("失败站点"), "source": .object(otherDetail),
                          "state": .string("error"), "error": .string("UPSTREAM_HTTP")]),
             ]),
             "browsing": browsing ?? self.browsing(),

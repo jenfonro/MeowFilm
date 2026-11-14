@@ -18,7 +18,15 @@
 
 详情以显式传入的 `FilmDetail` 为初始展示；带 `FilmPlaybackModel` 的播放实现随后投影 Node 会话的真实元数据、季集与来源快照，加载和错误不冒充成功空数据。豆瓣首页摘要本身仍只有海报、标题、评分与摘要副标题，不授予播放地址或虚构剧集。缺失内容保持空状态；浏览、选源与播放通过会话命令处理，不在 UIKit 重写智能选路或填入示例。
 
+来源按钮按 `browsing.sourceId` 或 `metadataSourceId` 显示真实选中项的来源与条目标题；初始、无 snapshot 或尚无真实选中项时禁用并显示“加载中...”，不以入口 provider 充当选中来源。菜单保留同名不同详情项，不按名称去重。普通来源的详情播放按钮只在当前显示文件中保留准确候选或取首个可播放候选，不从其他季度的完整原始目录找回旧文件；原始目录的显式文件选择仍发送原候选 ID。
+
+元数据视图的季集、资料投影及电影／剧集控件读取 `metadataSourceId` 对应的确认项，不因准确播放目标变成 `source` 就丢失已有资料。元数据集数发送 `select.episode` 坐标，详情总播放发送 `play` 交由 Node 使用当前浏览目标；播放器有有效输出时 `pauseOrResume()` 只控制当前原生媒体，不因浏览新来源切流，无有效输出才通过既有 `play` 正式发起播放。媒体准备捕获该 attempt 的内容类型，保留同一电影换源时的播放位置，未知剧集仍要求准确集号或同一候选身份。
+
+无 `searchReference` 的元数据入口重入保留原始 `target`、metadata seed 和入口信息，以既有 `resumeTarget` 携带当前准确 `source`／坐标；不限豆瓣入口。Node 根据原入口恢复确认资料，当前 source 仍只用于准确执行，不因此重新授予自动准备。搜索重入继续由 reference 的 owner 重读入口；原本没有元数据的 source／group 不补造元数据 provenance。
+
 `FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。锁定的 MeowVideoKernel 处理媒体，Node 仍拥有业务会话及媒体资源授权。影片收藏继续由稳定 `FilmLibrary` 持有，用 `meowfilm.film.library.v1` 保存来源与影片复合身份；不复制进 Node 新增的历史／人工匹配／屏蔽／偏好库，也不写音乐曲库。
+
+iOS 请求继续携带 `platform: ios`，“进入播放页自动准备”由运行器的 `iosAutoPrepare` 设置与既有入口范围控制。Swift 不为普通站点／聚合新增自动目录或准备命令，保留既有页面恢复刷新；收到 `prepareOnly` 也不启动原生媒体或写入观看事实，进入详情不自动实播或呈现全屏播放器。
 
 iOS 影视只使用共享原生媒体 owner，不提供外部播放器入口、URL 模板或应用启动注入。进入后台或离开播放器时，仅真实 PiP／系统 owner 可通过 `keepMedia` 保留当前媒体；普通关闭等待原生输出和准确资源回执排空。页面重开沿用既有会话恢复与显式播放流程，媒体回执由实际原生资源的释放完成确认。
 

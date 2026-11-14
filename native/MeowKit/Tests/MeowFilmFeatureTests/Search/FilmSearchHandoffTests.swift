@@ -64,8 +64,8 @@ final class FilmSearchHandoffTests: XCTestCase {
         let service = filmSearchService(rpc), session = try service.session(for: "原查询")
         await session.drain()
         let context = session.context(for: try XCTUnwrap(session.snapshot.cards.first))
-        let selected = try FilmPlaybackTarget(.object(["id": .string(context.selectionID), "kind": .string("tv"),
-            "title": .string("用户当前选择"), "metadataProvider": .string("douban"), "metadataId": .string("8"),
+        let selected = try FilmPlaybackTarget(.object(["id": .string(context.selectionID), "kind": .string("source"),
+            "title": .string("用户当前选择"),
             "season": .number(0), "episode": .number(0), "source": .object(["key": .string(F.site.key),
             "detailId": .number(0), "lineId": .number(0), "candidateId": .string("opaque-candidate")])]))
         let request = try await context.playbackRequest(sources: [F.site.playbackSource], owner: nil, target: selected)

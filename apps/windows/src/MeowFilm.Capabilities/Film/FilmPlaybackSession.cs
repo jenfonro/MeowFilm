@@ -14,12 +14,13 @@ namespace MeowFilm.Capabilities;
 /// </summary>
 internal sealed class FilmPlaybackSession : IAsyncDisposable
 {
-    private sealed class Input(FilmMediaReceipt receipt, FilmCandidateItem candidate, FilmPlaybackTarget target, JsonElement source,
+    private sealed class Input(FilmMediaReceipt receipt, FilmCandidateItem candidate, FilmPlaybackTarget target, string contentKind, JsonElement source,
         CancellationTokenSource lifetime, CancellationTokenSource publication, CancellationToken runtimeRevoked)
     {
         internal readonly FilmMediaReceipt Receipt = receipt;
         internal readonly FilmCandidateItem Candidate = candidate;
         internal readonly FilmPlaybackTarget Target = target;
+        internal readonly string ContentKind = contentKind;
         internal readonly JsonElement Source = source;
         internal readonly CancellationTokenSource Lifetime = lifetime;
         internal readonly CancellationTokenSource Publication = publication;
@@ -292,23 +293,21 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     {
         if (rpc is null || snapshot is null || closed || closing is not null)
             return Task.FromException(new FilmPlaybackException("STALE_SESSION"));
-        // play is idempotent for the same admitted pending receipt. Cancelling
-        // its native prepare would release the very address Node is reusing.
-        if (action == "play" && pendingPublication is { IsCancellationRequested: false } &&
-            pending is not { Retiring: true } && snapshot.AttemptId == processingId &&
-            !FilmJson.Bool(snapshot.Attempt, "prepareOnly"))
-            return Task.CompletedTask;
         long ticket = intentGeneration;
         if (ChangesPlayback(action))
         {
             if (playbackCommands++ == 0)
                 playbackAdmission = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            // Blocking or retry can be rejected without any business mutation. Keep the
-            // admitted candidate alive; control serializes its commit behind
-            // the durable RPC, and only an accepted snapshot may retire it.
             if (action is not ("block" or "media.retry"))
             {
                 continuingFrom = action is "pan" or "quality" or "switch" ? current?.Receipt.AttemptId ?? "" : "";
+            }
+            // Node resolves each intent, including repeated exact selections.
+            // Fence native commit while it decides; only its accepted snapshot
+            // may replace a pending receipt. Stop/address-only preparation revoke
+            // native publication immediately rather than starting output.
+            if (action is "stop" or "prepare")
+            {
                 ticket = ++intentGeneration;
                 if (pendingPublication is not null) revokedPublicationId = processingId;
                 pendingPublication?.Cancel();
@@ -505,7 +504,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             if (receipt.AttemptId != id) throw new FilmPlaybackException("INVALID_RESPONSE");
             var candidate = FilmCandidateItem.Read(FilmJson.Member(candidateSnapshot.Attempt, "candidate"));
             var lifetime = CancellationTokenSource.CreateLinkedTokenSource(connection!.Revoked, publication.Token);
-            input = new(receipt, candidate, candidateSnapshot.Target,
+            input = new(receipt, candidate, candidateSnapshot.Target, candidateSnapshot.ContentKind,
                 FilmJson.Member(FilmJson.Member(candidateSnapshot.Attempt, "candidate"), "source").Clone(),
                 lifetime, publication, connection.Revoked);
             pending = input;
@@ -517,7 +516,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                     resourceId => ReleaseResourceAsync(input, client, candidateSnapshot.SessionId, resourceId));
                 input.Lease = input.Authority.CreateLease(receipt.ResourceId, receipt.Address, lifetime.Token);
             }
-            bool sameEpisode = HasOutput && current is { } acceptedDonor && SameEpisode(acceptedDonor, candidateSnapshot.Target, candidate);
+            bool sameEpisode = HasOutput && current is { } acceptedDonor && SameEpisode(acceptedDonor, input);
             intent = new RuntimeMediaPlaybackIntent("film", id, receipt.Title,
                 receipt.Position, receipt.Paused, sameEpisode ? current!.NativeScope : null);
             await media.PrepareAsync(intent, receipt, input.Lease, lifetime.Token);
@@ -627,19 +626,20 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         if (generation == ownerGeneration) Apply(new(response));
     }
 
-    private bool SameEpisode(Input input, FilmPlaybackTarget next, FilmCandidateItem candidate)
+    private bool SameEpisode(Input input, Input replacement)
     {
         var previous = input.Target;
-        if (previous.Id != next.Id || previous.Kind != next.Kind) return false;
-        if (next.Kind == "movie") return true;
+        var next = replacement.Target;
+        if (previous.Id != next.Id) return false;
+        if (input.ContentKind == "movie" && replacement.ContentKind == "movie") return true;
         if (previous.GlobalEpisode is { } beforeGlobal && next.GlobalEpisode is { } afterGlobal)
             return beforeGlobal == afterGlobal;
-        if (next.Kind == "tv") return previous.Season is not null && previous.Episode is not null &&
-            previous.Season == next.Season && previous.Episode == next.Episode;
+        if (previous.Season is not null && previous.Episode is not null && next.Season is not null && next.Episode is not null)
+            return previous.Season == next.Season && previous.Episode == next.Episode;
         // Raw play references are intentionally absent from public snapshots.
         // Exact candidate equality or an explicit same-target replacement action
         // supplies continuation; missing coordinates never compare equal by accident.
-        return input.Candidate.Id == candidate.Id || continuingFrom == input.Receipt.AttemptId;
+        return input.Candidate.Id == replacement.Candidate.Id || continuingFrom == input.Receipt.AttemptId;
     }
 
     private static async ValueTask ReleaseResourceAsync(Input input, FilmPlaybackClient client, Guid sessionId, string resourceId)

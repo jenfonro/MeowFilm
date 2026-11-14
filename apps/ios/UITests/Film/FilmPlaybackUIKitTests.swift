@@ -26,6 +26,95 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         }
     }
 
+    func testSourceControlStaysDisabledBeforeSnapshotAndUntilConfirmedMetadataArrives() async throws {
+        for provider in [FilmMetadataProvider.tmdb, .douban] {
+            var waiting = try FilmUIKitPlaybackFixture.snapshot(provider: provider, episodes: [],
+                metadataSources: []).filmRequiredObject()
+            waiting["sources"] = .array([]); waiting["metadata"] = .null
+            waiting["metadataSourceId"] = .null; waiting["entryResolution"] = .string("loading")
+            let server = FilmUIKitPlaybackServer(.object(waiting)), media = FilmUIKitPlaybackMedia()
+            let model = makeModel(server, media), page = try detailPage(model)
+            page.loadViewIfNeeded()
+            let source = try button("film.detail.source", page.view)
+            XCTAssertNil(model.snapshot)
+            XCTAssertEqual(source.title(for: .normal), "加载中...")
+            XCTAssertEqual(source.accessibilityValue, "加载中...")
+            XCTAssertFalse(source.isEnabled)
+            XCTAssertNil(source.menu, "Loading is a control state, not a synthetic source")
+
+            await model.open()?.value
+            let initialSequence = try XCTUnwrap(model.snapshot).sequence
+            let window = try mount(page)
+            try await visible(page)
+            try await waitFor("Appearance completes the ordinary browse refresh") {
+                model.snapshot.map { $0.sequence > initialSequence } == true
+            }
+            await model.waitForPendingWork()
+            await server.awaitObservation()
+            await settle()
+            XCTAssertEqual(model.snapshot?.target.metadataProvider, provider)
+            XCTAssertTrue(try XCTUnwrap(model.snapshot).metadataSources.isEmpty)
+            XCTAssertTrue(try XCTUnwrap(model.snapshot).sources.isEmpty)
+            XCTAssertFalse(source.isEnabled, "An entry provider and menu commands are not a confirmed selection")
+            XCTAssertEqual(source.title(for: .normal), "加载中...")
+            XCTAssertTrue(try button("film.detail.line", page.view).isHidden)
+
+            let sequence = Int(try XCTUnwrap(model.snapshot).sequence) + 1
+            var ready = try FilmUIKitPlaybackFixture.snapshot(sequence, provider: provider).filmRequiredObject()
+            ready["sources"] = .array([])
+            try await server.publish(.object(ready))
+            try await waitFor("Confirmed metadata enables the exact selection") { source.isEnabled }
+            XCTAssertEqual(source.title(for: .normal), "\(provider.title) · 星海航线")
+            XCTAssertEqual(source.accessibilityValue, source.title(for: .normal))
+            let selected = try menuAction("\(provider.title) · 星海航线", source.menu)
+            XCTAssertEqual(selected.state, .on)
+            XCTAssertTrue(media.inputs.isEmpty)
+            let calls = await server.calls()
+            XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command"])
+            XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh"])
+            unmount(page, window)
+            await model.close()
+        }
+    }
+
+    func testSameNamedSourcesKeepDistinctRowsAndAccurateCurrentSelection() async throws {
+        let ready = FilmUIKitPlaybackFixture.snapshot(browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-a"))
+        let server = FilmUIKitPlaybackServer(ready), media = FilmUIKitPlaybackMedia()
+        let model = makeModel(server, media)
+        await model.open()?.value
+        let initialSequence = try XCTUnwrap(model.snapshot).sequence
+        let page = try detailPage(model), window = try mount(page)
+        defer { unmount(page, window) }
+        try await visible(page)
+        try await waitFor("Appearance completes the ordinary browse refresh") {
+            model.snapshot.map { $0.sequence > initialSequence } == true
+        }
+        await model.waitForPendingWork()
+        let source = try button("film.detail.source", page.view)
+        XCTAssertTrue(source.isEnabled)
+        XCTAssertEqual(source.title(for: .normal), "测试站 · 星海航线")
+        XCTAssertEqual(try menuAction("测试站 · 星海航线", source.menu).state, .on)
+        XCTAssertEqual(try menuAction("测试站 · 失败站点", source.menu).state, .off)
+        XCTAssertEqual(try menuAction("TMDB · 星海航线", source.menu).state, .off)
+        await server.reply(to: "browse", with: FilmUIKitPlaybackFixture.snapshot(
+            browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-b")))
+        invoke(try menuAction("测试站 · 失败站点", source.menu))
+        await model.waitForPendingWork()
+        try await waitFor("The selected same-named source detail is shown") {
+            source.title(for: .normal) == "测试站 · 失败站点"
+        }
+        XCTAssertEqual(model.snapshot?.browsing.sourceID, "result-b")
+        XCTAssertEqual(try XCTUnwrap(model.snapshot).sources.count, 2)
+        XCTAssertEqual(try menuAction("测试站 · 星海航线", source.menu).state, .off)
+        XCTAssertEqual(try menuAction("测试站 · 失败站点", source.menu).state, .on)
+        XCTAssertEqual(try menuAction("TMDB · 星海航线", source.menu).state, .off)
+        XCTAssertEqual(source.accessibilityValue, "测试站 · 失败站点")
+        let calls = await server.calls()
+        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "browse"])
+        XCTAssertEqual(calls.last?.input.filmObject?["sourceId"], .string("result-b"))
+        XCTAssertTrue(media.inputs.isEmpty, "Selecting a source is browsing, not media transport")
+    }
+
     func testMetadataMenusOnlyExposeConfirmedProvidersAndChangingProviderUpdatesDirectoryVisibility() async throws {
         let server = FilmUIKitPlaybackServer(), media = FilmUIKitPlaybackMedia()
         let model = makeModel(server, media)
@@ -461,7 +550,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.entryTarget, request.target)
         XCTAssertEqual(model.snapshot?.target.kind, .group)
         XCTAssertNil(model.snapshot?.target.metadataProvider)
-        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "站点源")
+        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "加载中...")
+        XCTAssertFalse(try button("film.detail.source", page.view).isEnabled)
         XCTAssertTrue(try button("film.detail.line", page.view).isHidden)
         XCTAssertFalse(try button("film.detail.play", page.view).isEnabled)
         let manualSearch = try button("film.detail.search", page.view)
@@ -491,6 +581,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(media.inputs.isEmpty)
         fields["sources"] = .array([.object(["id": .string("found-site"), "title": .string("星海航线"),
             "source": FilmUIKitPlaybackFixture.source, "state": .string("found"), "error": .null])])
+        fields["browsing"] = FilmUIKitPlaybackFixture.browsing(sourceID: "found-site")
         await server.reply(to: "search.more", with: .object(fields))
         manualSearch.sendActions(for: .touchUpInside)
         await model.waitForPendingWork()
@@ -500,13 +591,15 @@ final class FilmPlaybackUIKitTests: XCTestCase {
                        .string(FilmUIKitPlaybackFixture.sessionID.uuidString.lowercased()))
         XCTAssertNil(searched.last?.input.filmObject?["candidateId"])
         XCTAssertTrue(manualSearch.isHidden, "Once sites exist, source selection owns the next action")
+        XCTAssertTrue(try button("film.detail.source", page.view).isEnabled)
+        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "测试站 · 星海航线")
         XCTAssertNil((view("film.detail.episodes-state", page.view) as? UILabel)?.text)
         let file = FilmUIKitPlaybackFixture.file("first", name: "原始文件")
         fields["browsing"] = FilmUIKitPlaybackFixture.browsing(sourceID: "found-site", files: [file], original: [file])
         await server.reply(to: "browse", with: .object(fields))
         invoke(try menuAction("测试站 · 星海航线", button("film.detail.source", page.view).menu))
         await model.waitForPendingWork()
-        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "测试站")
+        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "测试站 · 星海航线")
         XCTAssertEqual(try button("film.detail.line", page.view).title(for: .normal), "未知原标签")
         XCTAssertEqual(try button("film.detail.line", page.view).accessibilityLabel, "网盘源")
         XCTAssertFalse(try button("film.detail.line", page.view).isHidden)
@@ -1007,6 +1100,36 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(page.preferredInterfaceOrientationForPresentation, .landscapeRight)
         XCTAssertTrue(page.prefersStatusBarHidden)
         XCTAssertEqual(media.inputs.count, 1)
+    }
+
+    func testExactSourceOutputKeepsConfirmedMovieOrSeriesControlsAndCurrentTransport() async throws {
+        for kind in [FilmPlaybackKind.movie, .tv] {
+            var fields = try FilmUIKitPlaybackFixture.snapshot(kind: kind, attemptID: "exact-current").filmRequiredObject()
+            let exact = FilmPlaybackTarget(id: "fixture-target", kind: .source, title: "星海航线",
+                source: ["key": .string("source-key"), "detailId": .number(0), "lineId": .number(0),
+                         "candidateId": .string("candidate-first")])
+            fields["target"] = .object(exact.value)
+            let server = FilmUIKitPlaybackServer(.object(fields)), media = FilmUIKitPlaybackMedia()
+            let model = makeModel(server, media)
+            await model.open()?.value
+            await model.waitForPendingWork()
+            let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
+            let window = try mount(page)
+            try await visible(page)
+            await model.waitForPendingWork()
+            XCTAssertEqual(model.snapshot?.target.kind, .source)
+            XCTAssertEqual(try button("film.player.previous", page.view).isEnabled, kind == .tv)
+            XCTAssertEqual(try button("film.player.next", page.view).isEnabled, kind == .tv)
+            XCTAssertEqual(try button("film.player.short-video", page.view).isEnabled, kind == .tv)
+            try button("film.player.play-pause", page.view).sendActions(for: .touchUpInside)
+            try button("film.player.play-pause", page.view).sendActions(for: .touchUpInside)
+            XCTAssertEqual(media.paused, 1); XCTAssertEqual(media.resumed, 1)
+            XCTAssertEqual(media.inputs.map(\.attemptID), ["exact-current"])
+            let calls = await server.calls()
+            XCTAssertFalse(calls.contains { $0.action == "play" })
+            unmount(page, window)
+            await model.close()
+        }
     }
 
     func testTheSamePlayerModalReturnsFromOrdinaryBackgroundWithoutAutoplayAndOneTapFormallyPlays() async throws {

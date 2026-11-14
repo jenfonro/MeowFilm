@@ -170,9 +170,10 @@ public static class FilmPlaybackTests
         var hero = Named<Grid>(view, "HeroGrid");
         var scroll = Named<ScrollViewer>(view, "PageScroll");
         var play = Named<Button>(view, "PlayButton");
-        Check(play.IsEnabled && Named<TextBlock>(view, "PlayerStatus").Text == "暂无可用片源" &&
+        Check(!play.IsEnabled && Named<Button>(view, "HeroPlayButton").IsEnabled &&
+            Named<TextBlock>(view, "PlayerStatus").Text == "暂无可用片源" &&
             AutomationProperties.GetName(play) == "播放或暂停" && scene.Native.Commits == 0,
-            "an unavailable snapshot remains honestly empty while allowing an explicit playback retry");
+            "an unavailable snapshot disables empty transport while the page still offers explicit playback");
 
         foreach (double width in new[] { 1160d, 840d, 839d, 700d })
         {
@@ -226,7 +227,8 @@ public static class FilmPlaybackTests
         await Drain();
         CheckInsideViewport(scroll, Named<ItemsControl>(view, "EpisodeList"));
         CheckInsideViewport(scroll, Named<Grid>(view, "MetadataPanel"));
-        Check(play.IsEnabled && !scene.Page.HasOutput && scene.Native.Commits == 0 && scene.Source.Calls == 0,
+        Check(!play.IsEnabled && Named<Button>(view, "HeroPlayButton").IsEnabled &&
+            !scene.Page.HasOutput && scene.Native.Commits == 0 && scene.Source.Calls == 0,
             "resizing and scrolling do not manufacture an output or resolve a source");
     }
 
@@ -526,7 +528,7 @@ public static class FilmPlaybackTests
                 "the short title playback favorite and overview action fit the desktop metadata viewport");
             CheckSharedCanvas(view);
         }
-        Check(play.IsEnabled && AutomationProperties.GetName(play) == "播放或暂停" &&
+        Check(play.IsEnabled && AutomationProperties.GetName(play) == "播放当前选择" &&
             Visuals(play).OfType<TextBlock>().Any(text => text.Text == "播放") && !page.HasOutput,
             "the hero offers explicit retry without claiming a native media output");
         Check(favorite.IsEnabled && favorite.IsTabStop && favorite.Focusable && !page.IsFavorite &&

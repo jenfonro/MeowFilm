@@ -386,7 +386,6 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
     const { selected, card } = currentSelection(session, input.selectionId);
     const isRaw = rawSelection(selected), currentSources = input.sources.map(checkSource);
     const sources = session.cursors.flatMap(cursor => {
-      if (isRaw && cursor.source.key !== selected.siteKey) return [];
       const current = currentSources.find(source => sourceIdentity(source) === sourceIdentity(cursor.source) &&
         source.enabled !== false && source.searchable !== false);
       return current ? [{ ...current, key: cursor.source.key }] : [];
@@ -398,7 +397,7 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
       target = { id: input.selectionId, kind: card.tmdbType, title: card.title,
         metadataProvider: 'tmdb', metadataId: String(card.tmdbId) };
     } else if (isRaw) {
-      requireValue(sources.length > 0, 'SOURCE_NOT_FOUND');
+      requireValue(selectedMembers.length > 0, 'SOURCE_NOT_FOUND');
       target = { id: input.selectionId, kind: 'source', title: selected.title,
         source: { key: selected.siteKey, detailId: selected.detailId } };
     } else {
@@ -409,15 +408,16 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
     const results = [], resultHints = [], search = [], cacheEntries = [];
     for (const source of sources) {
       const cursor = session.cursors.find(row => row.source.key === source.key);
-      const items = session.siteItems.filter(item => item.siteKey === source.key &&
-        (!isRaw || item.detailId === selected.detailId)).map(item => clone(item.raw));
+      // Authorization and cursor receipts cover the search, but only this
+      // card's real members become selectable playback results.
+      const items = selectedMembers.filter(item => item.siteKey === source.key).map(item => clone(item.raw));
       const sameProducer = !session.invalidated && sourceRevision(cursor.source) === sourceRevision(source);
       const result = { sourceKey: source.key, items };
       if (sameProducer) {
-        results.push(result);
+        if (items.length) results.push(result);
         search.push({ sourceKey: source.key, page: cursor.confirmedPage, completed: cursor.ended });
         cacheEntries.push(...[...cursor.pages.values()].flatMap(page => page.entry ? [page.entry] : []));
-      } else resultHints.push(result);
+      } else if (items.length) resultHints.push(result);
     }
     let metadata = null;
     if (!isRaw && card.sourceKind === 'tmdb') {

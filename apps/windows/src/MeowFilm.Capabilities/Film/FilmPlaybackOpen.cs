@@ -104,6 +104,8 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
         var target = request.Target;
         var selected = request.ResumeTarget ?? target;
         bool doubanSeed = page.EntryTarget.MetadataProvider == "douban";
+        bool metadataSourceResume = selected.Kind == "source" && target.Kind is ("movie" or "tv") &&
+            target.MetadataProvider is ("tmdb" or "douban");
         var requestedResume = page.Request.ResumeTarget;
         var wireResume = FilmJson.Member(original, "resumeTarget");
         if (!doubanSeed && ((requestedResume is { } requestedTarget && IsEmptyGroup(requestedTarget)) ||
@@ -111,15 +113,17 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
             throw new FilmPlaybackException("SOURCE_NOT_FOUND");
         var parameters = JsonNode.Parse(original.GetRawText())!.AsObject();
         var originalSources = OriginalSources(original, available);
+        // Search authorization survives a precise source selection. Results
+        // carry only the selected card's members; they do not define this scope.
         var admitted = originalSources
-            .Where(old => selected.Kind != "source" || selected.Source is { } raw &&
-                FilmJson.Text(old, "key") == FilmJson.Text(raw, "key"))
             .Select(old => (Old: old, Current: available.FirstOrDefault(value =>
             FilmJson.Text(value, "engine") == FilmJson.Text(old, "engine") &&
             FilmJson.Text(value, "installationId") == FilmJson.Text(old, "installationId") &&
             FilmJson.Text(value, "siteId") == FilmJson.Text(old, "siteId"))))
             .Where(pair => pair.Current.ValueKind == JsonValueKind.Object).ToArray();
-        if (selected.Kind == "source" && admitted.Length == 0) throw new FilmPlaybackException("SOURCE_NOT_FOUND");
+        if (selected.Kind == "source" && !admitted.Any(pair =>
+            FilmJson.Text(pair.Old, "key") == FilmJson.Text(selected.Source!.Value, "key")))
+            throw new FilmPlaybackException("SOURCE_NOT_FOUND");
         // A Douban resume must reach Node intact: an empty revoked group is not
         // another seed lookup, and session.open rejects it before that lookup.
         if (selected.Kind == "group" && !(doubanSeed && IsEmptyGroup(selected)))
@@ -139,7 +143,7 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
                 selected = selected with { Source = null };
             }
         }
-        if (!doubanSeed) target = selected;
+        if (!doubanSeed && !metadataSourceResume) target = selected;
         var sources = new JsonArray();
         var trusted = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (old, current) in admitted)
@@ -158,7 +162,7 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
         parameters["target"] = JsonSerializer.SerializeToNode(target.Wire(), FilmJson.Options);
         if (request.EntrySurface is { } entrySurface) parameters["entrySurface"] = entrySurface;
         else parameters.Remove("entrySurface");
-        if (doubanSeed ? request.ResumeTarget is not null :
+        if (doubanSeed ? request.ResumeTarget is not null : metadataSourceResume ||
             SameOwner(page.Request.DataOwner, connection) &&
             parameters["searchReference"] is JsonObject && page.HasPlaybackSnapshot)
             parameters["resumeTarget"] = JsonSerializer.SerializeToNode(selected.Wire(), FilmJson.Options);

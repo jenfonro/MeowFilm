@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -27,6 +28,7 @@ public static class FilmTrayPlaybackTests
         yield return Test("failed exit preparation remains visible and cancellation keeps the typed Film owner", FailedExit);
         yield return Test("real system media settings fence disabled Film startup and queued requests across restart", SystemMediaSettings);
         yield return Test("system media re-enable publishes the current typed native Film clock", NativeSystemMediaClock);
+        yield return Test("system pause and resume never start a page selection without accepted media", SystemTransport);
     }
 
     private static TestCase Test(string name, Func<Task> body) =>
@@ -34,6 +36,33 @@ public static class FilmTrayPlaybackTests
     private static TaskCompletionSource Gate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Pump() => await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
     private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+
+    private static async Task SystemTransport()
+    {
+        await using var scene = await Scene.Create();
+        int calls = scene.Rig.Runtime.Calls.Count;
+        await scene.Film.ResumePlaybackAsync();
+        await scene.Film.PausePlaybackAsync();
+        Check(scene.Rig.Runtime.Calls.Count == calls && scene.Rig.Native.Commits == 0 && !scene.Rig.Session.HasOutput,
+            "system transport has no page-play fallback when no native media has been accepted");
+        await scene.Play();
+        var scope = scene.Rig.Native.Scope;
+        scene.Rig.Runtime.Change(root =>
+        {
+            root["sources"] = JsonNode.Parse(FilmJson.Encode(new[]
+            { new { id = "another-browsed-source", source = new { name = "另一个真实目录", key = "cat:fixture:site:1", detailId = 1 } } }).GetRawText());
+            root["browsing"]!["sourceId"] = "another-browsed-source";
+        });
+        await Until(() => scene.Film.Playback?.SourceId == "another-browsed-source");
+        scene.Backend.Request(SystemPlaybackCommand.Pause);
+        await Until(() => scene.Rig.Native.Paused);
+        scene.Backend.Request(SystemPlaybackCommand.Play);
+        await Until(() => !scene.Rig.Native.Paused);
+        Check(scene.Rig.Native.Scope == scope && scene.Rig.Native.Commits == 1 && scene.Started == 1 &&
+            !scene.Rig.Runtime.Calls.Any(call => call.Method == "film.session.command" &&
+                FilmJson.Text(call.Parameters, "action") == "play"),
+            "typed system commands resume only the current media after an unrelated browse selection");
+    }
 
     private static async Task CancelClose()
     {

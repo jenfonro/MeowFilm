@@ -477,7 +477,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
 
     public Task StepAsync(bool next) => filmPlayback?.CommandAsync(next ? "next" : "previous") ?? Task.CompletedTask;
     public Task ResumePlaybackAsync() => filmPlayback is { HasOutput: true } owner
-        ? owner.SetPausedAsync(false) : filmPlayback?.CommandAsync("play") ?? Task.CompletedTask;
+        ? owner.SetPausedAsync(false) : Task.CompletedTask;
     public Task PausePlaybackAsync() => filmPlayback is { HasOutput: true } owner ? owner.SetPausedAsync(true) : Task.CompletedTask;
     public Task StopPlaybackAsync() => filmPlayback?.CommandAsync("stop") ?? Task.CompletedTask;
     public Task SeekPlaybackAsync(double seconds) => filmPlayback?.SeekAsync(seconds) ?? Task.CompletedTask;

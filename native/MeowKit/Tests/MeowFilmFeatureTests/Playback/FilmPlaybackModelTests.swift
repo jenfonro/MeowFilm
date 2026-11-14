@@ -508,6 +508,35 @@ final class FilmPlaybackModelTests: XCTestCase {
         XCTAssertFalse(model.navigateFromSystem(forward: false))
     }
 
+    func testBrowsingAnotherSourceDoesNotRetargetCurrentMediaTransport() async throws {
+        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+            attempt: FilmPlaybackFixture.attempt("transport-current")))
+        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+        await model.open()?.value
+        await model.waitForPendingWork()
+        let before = try XCTUnwrap(model.snapshot?.current)
+        let browsing: RuntimeValue = .object([
+            "sourceId": .string("result-other"), "lineId": .number(0), "season": .number(2),
+            "loading": .bool(false), "error": .null, "lines": .array([]), "episodes": .array([]),
+        ])
+        await server.reply(to: "browse", with: FilmPlaybackFixture.snapshot(10, stage: "playing",
+            current: FilmPlaybackFixture.current("transport-current"), browsing: browsing))
+        model.browse(sourceID: "result-other", lineID: .number(0))
+        await model.waitForPendingWork()
+        XCTAssertEqual(model.snapshot?.browsing.sourceID, "result-other")
+        XCTAssertEqual(model.snapshot?.current, before)
+        model.pauseOrResume()
+        model.pauseOrResume()
+        await model.waitForPendingWork()
+        XCTAssertEqual(media.pauses, 1); XCTAssertEqual(media.resumes, 1)
+        XCTAssertEqual(media.prepared.map(\.attemptID), ["transport-current"])
+        XCTAssertEqual(model.mediaState.attemptID, "transport-current")
+        let calls = await server.calls()
+        XCTAssertEqual(actions(calls).filter { ["browse", "play", "select.candidate", "select.episode"].contains($0) }, ["browse"])
+        XCTAssertTrue(media.stopped.isEmpty)
+        await model.close()
+    }
+
     func testChangingEpisodeDoesNotPreservePositionAndRetiredCallbacksCannotStopNewOutput() async throws {
         let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
             attempt: FilmPlaybackFixture.attempt("first")))
@@ -551,6 +580,46 @@ final class FilmPlaybackModelTests: XCTestCase {
         await model.waitForPendingWork()
         XCTAssertEqual(media.preservedPosition, [false, true])
         await model.close()
+    }
+
+    func testExactSourceReplacementPreservesOnlyTheSameConfirmedMoviePosition() async throws {
+        for kind in [FilmPlaybackKind.movie, .tv] {
+            let metadataSource: RuntimeValue = .object(["id": .string("confirmed"), "provider": .string("tmdb"),
+                "metadataId": .number(19), "kind": .string(kind.rawValue), "title": .string("可靠作品")])
+            func candidate(_ id: String) -> RuntimeValue {
+                .object(["id": .string(id), "source": FilmPlaybackFixture.source, "lineId": .number(0),
+                    "lineLabel": .string("原线路"), "name": .string("真实文件")])
+            }
+            func target(_ id: String) -> FilmPlaybackTarget {
+                .init(id: "stable-content", kind: .source, title: "可靠作品",
+                    source: ["key": .string("source-key"), "detailId": .number(0),
+                             "lineId": .number(0), "candidateId": .string(id)])
+            }
+            let first = candidate("first-file"), replacement = candidate("replacement-file")
+            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+                attempt: FilmPlaybackFixture.attempt("first", candidate: first), target: .object(target("first-file").value),
+                metadataSources: [metadataSource], metadataSourceID: "confirmed"))
+            let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+            await model.open()?.value
+            await server.awaitObservation()
+            await model.waitForPendingWork()
+            var state = model.mediaState
+            state.position = 137; state.paused = true
+            media.emit(.state(state), attemptID: "first")
+            await model.waitForPendingWork()
+            let current: RuntimeValue = .object(["attemptId": .string("first"), "candidate": first,
+                "position": .number(137), "duration": .number(600), "paused": .bool(true)])
+            try await server.publish(FilmPlaybackFixture.snapshot(Int(try XCTUnwrap(model.snapshot).sequence) + 1,
+                stage: "pending", attempt: FilmPlaybackFixture.attempt("replacement", candidate: replacement),
+                current: current, target: .object(target("replacement-file").value),
+                metadataSources: [metadataSource], metadataSourceID: "confirmed"))
+            await model.waitForPendingWork()
+            XCTAssertEqual(model.snapshot?.target.kind, .source)
+            XCTAssertEqual(media.preservedPosition, [false, kind == .movie])
+            XCTAssertEqual(model.mediaState.position, kind == .movie ? 137 : 0)
+            XCTAssertEqual(model.mediaState.paused, kind == .movie)
+            await model.close()
+        }
     }
 
     func testRetryOfMalformedOpenDrainsThePreviousAllocatedSessionFirst() async throws {
@@ -770,6 +839,59 @@ final class FilmPlaybackModelTests: XCTestCase {
                            [.string("before-background"), .string("after-background")])
             XCTAssertEqual(calls.filter { $0.0 == "session.media.release" }.map { $0.1.filmObject?["attemptId"] },
                            [.string("before-background")])
+            await model.close()
+        }
+    }
+
+    func testMetadataEntryReopensExactSourceWithOriginalProvenanceAndWithoutNativePreparation() async throws {
+        for kind in [FilmPlaybackKind.movie, .tv] {
+            let entry = FilmPlaybackTarget(id: "tmdb:\(kind.rawValue):19", kind: kind, title: "原入口",
+                metadataProvider: .tmdb, metadataID: "19")
+            let metadata: RuntimeValue = .object(["id": .number(19), "title": .string("原入口资料")])
+            let confirmed: RuntimeValue = .object(["id": .string("confirmed-tmdb"), "provider": .string("tmdb"),
+                "metadataId": .number(19), "kind": .string(kind.rawValue), "title": .string("原入口")])
+            let exact = FilmPlaybackTarget(id: entry.id, kind: .source, title: entry.title,
+                position: kind == .tv ? .init(season: 0, episode: 0) : .init(),
+                source: ["key": .string("source-key"), "detailId": .number(0),
+                         "lineId": .string("0"), "candidateId": .string("opaque-selected")])
+            var initial = try FilmPlaybackFixture.snapshot(metadata: metadata, target: .object(entry.value),
+                metadataSources: [confirmed], metadataSourceID: "confirmed-tmdb").filmRequiredObject()
+            initial["entryTarget"] = .object(entry.value)
+            let server = FilmPlaybackWireServer(.object(initial)), media = FilmPlaybackTestMedia()
+            let request = FilmPlaybackRequest(target: entry, sources: [try FilmPlaybackSource(FilmPlaybackFixture.source)],
+                metadata: metadata, entrySurface: "home")
+            let model = FilmPlaybackModel(transport: server.transport, media: media, request: { request })
+            addTeardownBlock { await model.close() }
+            await model.open()?.value
+            XCTAssertEqual(model.snapshot?.target, entry)
+            var selected = initial
+            selected["sequence"] = .number(10); selected["target"] = .object(exact.value)
+            await server.reply(to: "select.candidate", with: .object(selected))
+            model.selectCandidate("opaque-selected")
+            await model.waitForPendingWork()
+            XCTAssertEqual(model.snapshot?.target, exact)
+            await model.close()
+            XCTAssertTrue(model.isReleased)
+            await model.open()?.value
+            await model.waitForPendingWork()
+            let calls = await server.calls()
+            let opens = calls.filter { $0.0 == "session.open" }
+            XCTAssertEqual(opens.count, 2)
+            XCTAssertNil(opens.first?.1.filmObject?["resumeTarget"])
+            XCTAssertEqual(opens.last?.1.filmObject?["target"], .object(entry.value))
+            XCTAssertEqual(opens.last?.1.filmObject?["metadata"], metadata)
+            XCTAssertEqual(opens.last?.1.filmObject?["resumeTarget"], .object(exact.value))
+            XCTAssertEqual(opens.last?.1.filmObject?["sources"], .array(request.sources.map { .object($0.value) }))
+            XCTAssertEqual(opens.last?.1.filmObject?["entrySurface"], .string("home"))
+            XCTAssertEqual(opens.last?.1.filmObject?["platform"], .string("ios"))
+            XCTAssertNil(opens.last?.1.filmObject?["searchReference"])
+            XCTAssertEqual(model.snapshot?.entryTarget, entry)
+            XCTAssertEqual(model.snapshot?.target, exact)
+            XCTAssertEqual(model.snapshot?.metadataSourceID, "confirmed-tmdb")
+            XCTAssertEqual(model.snapshot?.metadataSources.first?.kind, kind)
+            XCTAssertEqual(actions(calls), ["select.candidate"])
+            XCTAssertTrue(media.prepared.isEmpty)
+            XCTAssertNil(model.mediaState.attemptID); XCTAssertNil(model.actionError)
             await model.close()
         }
     }

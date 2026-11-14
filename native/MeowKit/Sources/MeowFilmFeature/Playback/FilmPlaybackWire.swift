@@ -173,12 +173,13 @@ public struct FilmPlaybackRequest: Sendable {
     }
 
     func retargeted(_ target: FilmPlaybackTarget, errorCode: String? = nil) -> Self {
-        if self.target.metadataProvider == .douban, searchReference == nil {
-            // Keep the home seed/provenance separate from the exact current
-            // TMDB coordinate or group file selected by the user.
+        if self.target.metadataProvider != nil, searchReference == nil {
+            // Keep the metadata entry and its seed separate from the current
+            // coordinate or exact source selected by the user.
             var request = self
-            let waitingGroup = errorCode != "SOURCE_NOT_FOUND" && resumeTarget == nil && target.kind == .group &&
-                target.value["source"] == nil && target.value["members"] == .array([])
+            let waitingGroup = self.target.metadataProvider == .douban && errorCode != "SOURCE_NOT_FOUND" &&
+                resumeTarget == nil && target.kind == .group && target.value["source"] == nil &&
+                target.value["members"] == .array([])
             // Only Node may create the empty waiting group from the seed.
             request.resumeTarget = target == self.target || waitingGroup ? nil : target
             return request

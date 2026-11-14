@@ -182,6 +182,8 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
                            "a complete detail line is not fetched/listed again")
         }
 
+        let selectedPlayID = autoPrepare ? "one" : "other"
+        let selectedLine = autoPrepare ? "原始线路" : "备用原始线路"
         try await fixture.mountSurface(model)
         await model.send("play")?.value
         try await waitForHost {
@@ -200,7 +202,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         let playing: RuntimeObject
         do {
             playing = try await fixture.sourceState(waitFor: [
-                "report": .object(["event": .string("started"), "id": .string("one"), "flag": .string("原始线路")]),
+                "report": .object(["event": .string("started"), "id": .string(selectedPlayID), "flag": .string(selectedLine)]),
             ])
         } catch {
             XCTFail("The source did not confirm started; reportError=\(model.snapshot?.reportError ?? "none")")
@@ -210,8 +212,16 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         XCTAssertEqual(playing["missingCookie"], .number(0), "the first binary request must already carry the source header")
         XCTAssertTrue(playing["reports"]?.filmArray?.contains {
             $0.filmObject?["event"] == .string("started") &&
-                $0.filmObject?["id"] == .string("one") && $0.filmObject?["flag"] == .string("原始线路")
+                $0.filmObject?["id"] == .string(selectedPlayID) && $0.filmObject?["flag"] == .string(selectedLine)
         } == true)
+        if !autoPrepare {
+            XCTAssertEqual(model.snapshot?.target.kind, .source)
+            XCTAssertEqual(model.snapshot?.current?.candidate.lineLabel, selectedLine)
+            XCTAssertEqual(operations(playing), ["search", "detail", "play"])
+            XCTAssertEqual(playing["plays"], .array([.object([
+                "id": .string(selectedPlayID), "flag": .string(selectedLine),
+            ])]), "Page play must resolve the browsed file, not search or switch back to the metadata match")
+        }
         XCTAssertNil(model.snapshot?.reportError)
         let watchedHistory = try await fixture.history()
         XCTAssertEqual(watchedHistory.count, 1)
@@ -243,9 +253,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
                 brokenAttempt = attempt
                 admitted.fulfill()
             }
-            let failure = model.$actionError.compactMap { $0 }.first {
-                brokenAttempt != nil && $0.code == "MEDIA_READ_FAILED"
-            }.sink { error in
+            let failure = model.$actionError.compactMap { $0 }.first { _ in brokenAttempt != nil }.sink { error in
                 nativeFailure = error
                 failed.fulfill()
             }
@@ -259,7 +267,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
             let rejected = try XCTUnwrap(brokenAttempt)
             XCTAssertNotEqual(rejected.id, healthy)
             XCTAssertEqual(rejected.candidate.id, broken.id)
-            XCTAssertEqual(nativeFailure?.code, "MEDIA_READ_FAILED")
+            XCTAssertEqual(nativeFailure?.code, "MEDIA_FORMAT_UNSUPPORTED")
             try await waitForHost {
                 model.snapshot?.stage == "unavailable" && model.snapshot?.error == "NO_MATCH" &&
                     model.snapshot?.attempt == nil && model.snapshot?.current?.attemptID == healthy
@@ -453,13 +461,25 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
 
     private func waitForPreparation(_ model: FilmPlaybackModel, autoPrepare: Bool,
                                     previousSessionID: UUID? = nil) async throws {
-        try await waitForHost {
-            guard let snapshot = model.snapshot, snapshot.sessionID != previousSessionID,
-                  snapshot.error == nil, snapshot.current == nil, !snapshot.browsing.loading,
-                  snapshot.browsing.error == nil, model.actionError == nil, model.observationError == nil else { return false }
-            return autoPrepare
-                ? snapshot.stage == "prepared" && snapshot.attempt?.prepareOnly == true
-                : snapshot.stage == "idle" && snapshot.attempt == nil
+        do {
+            try await waitForHost {
+                guard let snapshot = model.snapshot, snapshot.sessionID != previousSessionID,
+                      snapshot.error == nil, snapshot.current == nil, !snapshot.browsing.loading,
+                      snapshot.browsing.error == nil, model.actionError == nil, model.observationError == nil else { return false }
+                return autoPrepare
+                    ? snapshot.stage == "prepared" && snapshot.attempt?.prepareOnly == true
+                    : snapshot.stage == "idle" && snapshot.attempt == nil
+            }
+        } catch {
+            let snapshot = model.snapshot
+            XCTFail("Preparation state: sequence=\(snapshot?.sequence.description ?? "nil"), stage=\(snapshot?.stage ?? "nil"), " +
+                "error=\(snapshot?.error ?? "none"), browseLoading=\(snapshot?.browsing.loading == true), " +
+                "browseError=\(snapshot?.browsing.error ?? "none"), " +
+                "actionError=\(model.actionError?.code ?? "none"), " +
+                "observationError=\(model.observationError?.code ?? "none"), " +
+                "attempt=\(snapshot?.attempt != nil), current=\(snapshot?.current != nil), " +
+                "autoPrepare=\(snapshot?.preferences.iosAutoPrepare == true)")
+            throw error
         }
         XCTAssertNil(model.actionError)
         XCTAssertNil(model.observationError)
@@ -578,6 +598,10 @@ final class FilmPlaybackHostFixture {
         let metadata: RuntimeValue = .object([
             "id": .number(Double(metadataID)), "name": .string(id), "genres": .array([]),
             "first_air_date": .string("2020-01-01"), "number_of_seasons": .number(1), "number_of_episodes": .number(2),
+            "credits": .object(["cast": .array([]), "crew": .array([])]),
+            "similar": .object(["page": .number(1), "results": .array([]),
+                                "total_pages": .number(0), "total_results": .number(0)]),
+            "images": .object(["backdrops": .array([]), "posters": .array([]), "logos": .array([])]),
             "seasons": .array([.object(["season_number": .number(1), "episode_count": .number(2),
                                         "air_date": .string("2020-01-01")])]),
         ])

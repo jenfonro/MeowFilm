@@ -204,30 +204,97 @@ public static class FilmPlaybackSessionTests
             await Until(() => rig.Page.StatusText == "已准备");
             Check(rig.Native.Intents.Count == 0 && !rig.Session.HasOutput &&
                 !rig.Runtime.Calls.Any(call => call.Method == "film.session.attempt"), "address preparation never opens native output");
-            rig.Runtime.Change(root => { root["attempt"]!["prepareOnly"] = false; root["stage"] = "pending"; });
+            rig.Runtime.Intercept = (method, input, _) =>
+            {
+                if (method == "film.session.command" && FilmJson.Text(input, "action") == "play")
+                    rig.Runtime.Change(root => { root["attempt"]!["prepareOnly"] = false; root["stage"] = "pending"; });
+                return Task.FromResult(rig.Runtime.Handle(method, input));
+            };
+            await rig.Page.PlayAsync();
             await Until(() => Called(rig, "media.started", "prepared") && rig.Native.Commits == 1);
             await rig.Session.ReconnectAsync();
-            Check(rig.Native.Commits == 1 && rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt") == 1,
+            Check(rig.Native.Commits == 1 && rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt") == 1 &&
+                rig.Runtime.Calls.Count(call => call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == "play") == 1,
                 "the state transition, not seeing an id, gates its single native consumption");
         });
-        yield return Test("repeated play while a receipt is already preparing does not revoke or release that same input", async () =>
+        foreach (string action in new[] { "play", "select.episode", "select.candidate" })
+            yield return Test($"repeated {action} reaches Node and keeps an unchanged preparing receipt", async () =>
+            {
+                await using var rig = new FilmPlaybackRig();
+                await rig.OpenAsync();
+                var entered = Gate(); var finish = Gate(); CancellationToken prepareToken = default;
+                rig.Native.Preparing = async token => { prepareToken = token; entered.TrySetResult(); await finish.Task; };
+                try
+                {
+                    var target = action == "select.candidate" ? new FilmPlaybackTarget(rig.Runtime.Target.Id, "source",
+                        rig.Runtime.Target.Title, Season: 1, Episode: 1, GlobalEpisode: 1,
+                        Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "pending-play" })) :
+                        rig.Runtime.Target;
+                    rig.Runtime.Attempt("pending-play", Candidate("pending-play"), target: target); await entered.Task;
+                    for (int index = 0; index < 2; index++)
+                        if (action == "play") await rig.Page.PlayAsync();
+                        else await rig.Page.CommandAsync(action, action == "select.candidate"
+                            ? (object)new { candidateId = "pending-play" } : new { episode = new { season = 1, episode = 1, globalEpisode = 1 } });
+                    Check(rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
+                        FilmJson.Text(call.Parameters, "action") == action) == 2 &&
+                        !prepareToken.IsCancellationRequested && !rig.Runtime.Released.Contains("pending-play") &&
+                        rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt") == 1,
+                        "every activation reaches the intent owner; an unchanged receipt retains one native consumer");
+                    finish.TrySetResult();
+                    await Until(() => Called(rig, "media.started", "pending-play") && rig.Session.HasOutput);
+                    Check(rig.Native.Commits == 1 && !Called(rig, "media.failed"), "repeated activation yields one real output");
+                }
+                finally { finish.TrySetResult(); }
+            });
+        foreach (bool accepted in new[] { true, false })
+            yield return Test($"a later page play {(accepted ? "accepted" : "rejected")} waits for Node before replacing a preparing receipt", async () =>
         {
             await using var rig = new FilmPlaybackRig();
             await rig.OpenAsync();
-            var entered = Gate(); var finish = Gate(); CancellationToken prepareToken = default;
-            rig.Native.Preparing = async token => { prepareToken = token; entered.TrySetResult(); await finish.Task; };
+            var entered = Gate(); var finish = Gate(); var prepared = Gate();
+            var requested = Gate(); var response = Gate(); CancellationToken prepareToken = default;
+            rig.Native.Preparing = async token =>
+            {
+                prepareToken = token; entered.TrySetResult(); await finish.Task; prepared.TrySetResult();
+            };
+            rig.Runtime.Intercept = async (method, input, _) =>
+            {
+                if (method == "film.session.command" && FilmJson.Text(input, "action") == "play")
+                {
+                    Check(input.EnumerateObject().Select(field => field.Name).Order().SequenceEqual(new[] { "action", "sessionId" }),
+                        "page play asks Node to resolve its current selection without a second intent protocol");
+                    requested.TrySetResult(); await response.Task;
+                    if (!accepted) return FilmRuntimeProbe.Failure("STORAGE_ERROR");
+                    rig.Runtime.Attempt("new-selection", Candidate("new-selection", episode: 2),
+                        target: rig.Runtime.Target with { Episode = 2, GlobalEpisode = 2 });
+                }
+                return rig.Runtime.Handle(method, input);
+            };
             try
             {
-                rig.Runtime.Attempt("pending-play", Candidate("pending-play")); await entered.Task;
-                await rig.Page.PlayAsync(); await rig.Page.PlayAsync();
-                Check(!prepareToken.IsCancellationRequested && !rig.Runtime.Released.Contains("pending-play") &&
-                    rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt") == 1,
-                    "idempotent play intent cannot destroy the in-progress native consumer of its unchanged receipt");
-                finish.TrySetResult();
-                await Until(() => Called(rig, "media.started", "pending-play") && rig.Session.HasOutput);
-                Check(rig.Native.Commits == 1 && !Called(rig, "media.failed"), "repeated activation yields one real output");
+                rig.Runtime.Attempt("old-selection", Candidate("old-selection")); await entered.Task;
+                var playing = rig.Page.PlayAsync(); await requested.Task;
+                Check(!prepareToken.IsCancellationRequested && !rig.Runtime.Released.Contains("old-selection"),
+                    "a pending command cannot release an address before its owner decides whether to reuse it");
+                finish.TrySetResult(); await prepared.Task;
+                await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                Check(rig.Native.Commits == 0 && !Called(rig, "media.started", "old-selection"),
+                    "a ready old input cannot publish while the newer page intent awaits admission");
+                rig.Native.Preparing = null; response.TrySetResult();
+                if (accepted) await playing;
+                else await Error("STORAGE_ERROR", () => playing);
+                string winner = accepted ? "new-selection" : "old-selection";
+                await Until(() => rig.Native.SettledIdentity == winner && rig.Session.HasOutput &&
+                    Called(rig, "media.started", winner));
+                Check(prepareToken.IsCancellationRequested == accepted && rig.Native.Commits == 1 &&
+                    rig.Runtime.Released.Contains("old-selection") == accepted && !Called(rig, "media.failed") &&
+                    Called(rig, "media.started", "old-selection") == !accepted &&
+                    rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
+                        FilmJson.Text(call.Parameters, "action") == "play") == 1 &&
+                    rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt") == (accepted ? 2 : 1),
+                    "only an accepted replacement retires the old input; a rejected intent reuses it with no duplicate read or false failure");
             }
-            finally { finish.TrySetResult(); }
+            finally { finish.TrySetResult(); response.TrySetResult(); }
         });
         yield return Test("same episode keeps live position pause rate and aspect while next episode starts at zero", async () =>
         {
@@ -256,6 +323,98 @@ public static class FilmPlaybackSessionTests
                     "a real new episode does not inherit the preceding episode's clock or paused state");
             }
             finally { finish.TrySetResult(); }
+        });
+        yield return Test("same episode continuity survives metadata to source while a new source episode resets its clock", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync(); await Play(rig);
+            await rig.Session.SeekAsync(120); await rig.Session.SetPausedAsync(true);
+            var donor = rig.Native.Scope;
+            var exact = new FilmPlaybackTarget(rig.Runtime.Target.Id, "source", rig.Runtime.Target.Title,
+                Season: 1, Episode: 1, GlobalEpisode: 1,
+                Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "same-source-episode" }));
+            rig.Runtime.Attempt("same-source-episode", Candidate("same-source-episode"), target: exact);
+            await Until(() => rig.Native.SettledIdentity == "same-source-episode" && Called(rig, "media.started", "same-source-episode"));
+            Check(rig.Native.Intents[^1].PreserveFrom == donor && rig.Native.Position == 120 && rig.Native.Paused,
+                "execution changing to source does not erase the confirmed same content episode");
+            rig.Runtime.Attempt("new-source-episode", Candidate("new-source-episode", episode: 2), target: exact with
+            {
+                Episode = 2, GlobalEpisode = 2,
+                Source = FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "new-source-episode" })
+            });
+            await Until(() => rig.Native.SettledIdentity == "new-source-episode" && Called(rig, "media.started", "new-source-episode"));
+            Check(!rig.Native.Intents[^1].PreserveCurrent && rig.Native.Position == 0 && !rig.Native.Paused,
+                "new exact episode coordinates cannot inherit the old episode's clock or paused state");
+        });
+        foreach (string provider in new[] { "tmdb", "douban" })
+            yield return Test($"{provider} confirmed movie keeps live playback state across source file changes and retry", async () =>
+            {
+                await using var rig = new FilmPlaybackRig();
+                var card = Card("movie");
+                var movie = card.PlaybackContext!.Target with { Id = provider + ":movie:100", MetadataProvider = provider };
+                await rig.OpenAsync(card, new(movie, Metadata: Metadata(movie, card.Poster)));
+                rig.Runtime.Attempt("movie-original", Candidate("movie-original", episode: null));
+                await Until(() => Called(rig, "media.started", "movie-original") && rig.Session.HasOutput);
+                await rig.Session.SeekAsync(120); await rig.Session.SetPausedAsync(true);
+                await rig.Session.RateAsync(1.5); await rig.Session.AspectAsync("4:3");
+                foreach (string id in new[] { "movie-file", "movie-other-file", "movie-retry" })
+                {
+                    string candidateId = id == "movie-retry" ? "movie-other-file" : id;
+                    string action = id == "movie-retry" ? "media.retry" : "select.candidate";
+                    var sourceTarget = new FilmPlaybackTarget(movie.Id, "source", movie.Title,
+                        Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId }));
+                    var entered = Gate(); var finish = Gate();
+                    var donor = rig.Native.Scope;
+                    rig.Native.Preparing = async _ => { entered.TrySetResult(); await finish.Task; };
+                    rig.Runtime.Intercept = (method, input, _) =>
+                    {
+                        if (method == "film.session.command" && FilmJson.Text(input, "action") == action)
+                            rig.Runtime.Attempt(id, Candidate(candidateId, episode: null), target: sourceTarget);
+                        return Task.FromResult(rig.Runtime.Handle(method, input));
+                    };
+                    try
+                    {
+                        if (action == "media.retry") await rig.Page.RetryMediaAsync();
+                        else await rig.Page.CommandAsync(action, new { candidateId });
+                        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                        Check(rig.Native.Intents[^1].PreserveFrom == donor && rig.Page.ActiveTarget.Kind == "source" &&
+                            rig.Page.ShowMovieCandidates && rig.Page.ActiveTarget.MetadataProvider is null,
+                            "the selected real movie metadata source survives the exact execution kind without guessing from its ID");
+                        await rig.Session.SeekAsync(rig.Native.Position + 7);
+                        double position = rig.Native.Position;
+                        finish.TrySetResult();
+                        await Until(() => rig.Native.SettledIdentity == id && Called(rig, "media.started", id));
+                        Check(rig.Session.HasOutput && rig.Native.Position == position && rig.Native.Paused &&
+                            rig.Native.Rate == 1.5 && rig.Native.Aspect == "4:3",
+                            "movie file replacement and exact retry preserve the donor's live clock and controls");
+                    }
+                    finally { finish.TrySetResult(); }
+                }
+                Check(rig.Native.Commits == 4 && !Called(rig, "media.failed"),
+                    "each accepted occurrence commits once without a false media failure");
+            });
+        yield return Test("source files without selected movie metadata do not infer continuation from title or content ID", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            var source = new FilmPlaybackTarget("tmdb:movie:100", "source", "电影同名",
+                Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0 }));
+            var candidate = Candidate("unknown-file", episode: null);
+            await rig.OpenAsync(new(source.Id, source.Title, "", ""), new(source, Sources: [candidate.GetProperty("source")]));
+            rig.Runtime.Change(root =>
+            {
+                root["metadataSources"] = JsonNode.Parse(FilmJson.Encode(new[]
+                { new { id = "tmdb:100", provider = "tmdb", metadataId = "100", kind = "movie" } }).GetRawText());
+                root["metadataSourceId"] = null;
+            });
+            rig.Runtime.Attempt("unknown-file", candidate);
+            await Until(() => Called(rig, "media.started", "unknown-file") && rig.Session.HasOutput);
+            await rig.Session.SeekAsync(90); await rig.Session.SetPausedAsync(true);
+            rig.Runtime.Attempt("unknown-other", Candidate("unknown-other", episode: null), target: source with
+            { Source = FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "unknown-other" }) });
+            await Until(() => rig.Native.SettledIdentity == "unknown-other" && Called(rig, "media.started", "unknown-other"));
+            Check(!rig.Native.Intents[^1].PreserveCurrent && rig.Native.Position == 0 && !rig.Native.Paused &&
+                !rig.Page.ShowMovieCandidates && rig.Native.Commits == 2 && !Called(rig, "media.failed"),
+                "an unselected movie row, movie-like ID and title are not evidence that two coordinate-free files share a movie clock");
         });
         yield return Test("prepare failure after native lease disposal reports the exact pending attempt without destroying the donor", async () =>
         {

@@ -130,7 +130,8 @@ export function isCandidateAllowed(candidate, { target, constraint = { action: '
   if (target) {
     if (candidate.targetId !== undefined && candidate.targetId !== target.id) return false;
     if (candidate.kind !== undefined && target.kind !== 'source' && candidate.kind !== target.kind) return false;
-    if (target.kind === 'group' && !target.members?.some(member => member.sourceKey === candidate.source?.key &&
+    if (target.kind === 'group' && (!target.source || actualEpisode) &&
+        !target.members?.some(member => member.sourceKey === candidate.source?.key &&
       member.detailId === (candidate.detailId ?? candidate.source?.detailId))) return false;
     if (actualEpisode && ['source', 'group'].includes(target.kind)) {
       if (target.kind === 'source' && (candidate.source?.key !== actualEpisode.source?.key ||

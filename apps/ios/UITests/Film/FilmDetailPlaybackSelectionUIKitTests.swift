@@ -191,7 +191,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         await model.close()
     }
 
-    func testBrowsingSeasonTwoKeepsSeasonOneSecondEvenWhenDisplayedSeasonHasNoFiles() async throws {
+    func testBrowsingSeasonTwoPlaysOnlyItsFilesAndKeepsSeasonOneOutputUntilSelection() async throws {
         for hasSeasonTwoFile in [true, false] {
             let fields = try seasonSnapshot(hasSeasonTwoFile: hasSeasonTwoFile)
             let server = FilmUIKitPlaybackServer(.object(fields)), media = FilmUIKitPlaybackMedia()
@@ -244,38 +244,135 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             XCTAssertEqual(browseCalls.last?.input.filmObject?["season"], .number(2))
 
             let play = try button("film.detail.play", page.view)
-            XCTAssertTrue(play.isEnabled, "An empty displayed season must not hide the exact current in this line")
+            XCTAssertEqual(play.isEnabled, hasSeasonTwoFile, "Page play follows the displayed season, not a hidden current file")
             play.sendActions(for: .touchUpInside)
             await model.waitForPendingWork()
 
             let commands = await server.calls().filter { $0.operation == "session.command" }
-            XCTAssertEqual(commands.compactMap(\.action), ["browse.refresh", "browse.season", "select.candidate"])
-            XCTAssertEqual(commands.last?.input.filmObject?["candidateId"], .string(secondID))
+            XCTAssertEqual(commands.compactMap(\.action), hasSeasonTwoFile
+                ? ["browse.refresh", "browse.season", "select.candidate"] : ["browse.refresh", "browse.season"])
+            XCTAssertEqual(commands.last?.input.filmObject?["candidateId"],
+                           hasSeasonTwoFile ? .string(seasonTwoID) : nil)
             XCTAssertEqual(model.snapshot?.current, before.current)
             XCTAssertEqual(model.snapshot?.target, before.target)
             XCTAssertEqual(model.snapshot?.current?.position, 137)
             XCTAssertEqual(model.snapshot?.current?.paused, true)
             XCTAssertTrue(media.inputs.isEmpty)
-            XCTAssertEqual(presentations, 1)
+            XCTAssertEqual(presentations, hasSeasonTwoFile ? 1 : 0)
             await model.close()
         }
     }
 
-    func testOriginalLineDoesNotAuthorizeUnselectedOrUnavailableCandidates() async throws {
-        for unavailable in OriginalLineDenial.allCases {
+    func testMetadataSeasonAndPlayAfterExactSourceUseConfirmedMetadataRatherThanTargetKind() async throws {
+        var fields = try seasonSnapshot(hasSeasonTwoFile: true)
+        let entry = try FilmPlaybackTarget(fields.filmValue("target"))
+        let exact = FilmPlaybackTarget(id: entry.id, kind: .source, title: entry.title,
+            position: entry.position, source: ["key": .string("source-key"), "detailId": .number(0),
+                "lineId": .number(0), "candidateId": .string(secondID)])
+        fields["target"] = .object(exact.value)
+        fields["browsing"] = FilmUIKitPlaybackFixture.browsing(season: 1)
+        let server = FilmUIKitPlaybackServer(.object(fields)), media = FilmUIKitPlaybackMedia()
+        let model = try makeModel(server, media, fields: fields)
+        await model.open()?.value
+        let before = try XCTUnwrap(model.snapshot)
+        let page = try detailPage(model), window = try mount(page)
+        defer { unmount(page, window) }
+        var presentations = 0
+        page.onPresentPlayback = { presentations += 1 }
+        try await visible(page)
+        await model.waitForPendingWork()
+        XCTAssertEqual(before.target.kind, .source)
+        XCTAssertEqual(page.detail.item.kind, .tv)
+        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "TMDB · 星海航线")
+        XCTAssertNotNil(find("film.episode.season-1-episode-2", page.view))
+
+        var changed = fields
+        changed["browsing"] = FilmUIKitPlaybackFixture.browsing(season: 2)
+        changed["episodes"] = .array((1...3).map {
+            seasonEpisode(season: 2, episode: $0, globalEpisode: 2 + $0)
+        })
+        await server.reply(to: "browse.season", with: .object(changed))
+        invoke(try menuAction("第二季", button("film.detail.season", page.view).menu))
+        await model.waitForPendingWork()
+        try await waitFor("Confirmed metadata episodes survive the exact source target") {
+            self.find("film.episode.season-2-episode-2", page.view) != nil
+        }
+        XCTAssertEqual(model.snapshot?.target, exact, "Browsing does not rewrite the selected file")
+        XCTAssertEqual(model.snapshot?.current, before.current)
+        XCTAssertNil(model.snapshot?.browsing.sourceID)
+        XCTAssertEqual(try button("film.detail.season", page.view).title(for: .normal), "第二季")
+        XCTAssertEqual(presentations, 0)
+        let play = try button("film.detail.play", page.view)
+        XCTAssertTrue(play.isEnabled)
+        play.sendActions(for: .touchUpInside)
+        await model.waitForPendingWork()
+        try button("film.episode.season-2-episode-2", page.view).sendActions(for: .touchUpInside)
+        await model.waitForPendingWork()
+        let commands = await server.calls().filter { $0.operation == "session.command" }
+        XCTAssertEqual(commands.compactMap(\.action), ["browse.refresh", "browse.season", "play", "select.episode"])
+        XCTAssertEqual(commands[1].input.filmObject?["season"], .number(2))
+        XCTAssertNil(commands[2].input.filmObject?["candidateId"])
+        XCTAssertNil(commands[2].input.filmObject?["episode"], "Node resolves the current browse for page play")
+        XCTAssertEqual(commands[3].input.filmObject?["episode"],
+            .object(["season": .number(2), "episode": .number(2), "globalEpisode": .number(4)]))
+        XCTAssertEqual(model.snapshot?.target, exact)
+        XCTAssertEqual(model.snapshot?.current, before.current)
+        XCTAssertEqual(presentations, 2)
+        XCTAssertTrue(media.inputs.isEmpty)
+        await model.close()
+    }
+
+    func testConcreteMovieCandidateRemainsExactWhenMetadataIsStaleAndTargetBecomesSource() async throws {
+        var fields = try snapshot(kind: .movie)
+        fields["browsing"] = FilmUIKitPlaybackFixture.browsing(season: nil)
+        fields["metadataCache"] = .object(["status": .string("stale"),
+            "components": .object(["detail": .object(["status": .string("failed")])])])
+        let beforeTarget = try FilmPlaybackTarget(fields.filmValue("target"))
+        let exact = FilmPlaybackTarget(id: beforeTarget.id, kind: .source, title: beforeTarget.title,
+            source: ["key": .string("source-key"), "detailId": .number(0),
+                     "lineId": .number(0), "candidateId": .string(secondID)])
+        var selected = fields
+        selected["target"] = .object(exact.value)
+        let server = FilmUIKitPlaybackServer(.object(fields)), media = FilmUIKitPlaybackMedia()
+        await server.reply(to: "select.candidate", with: .object(selected))
+        let model = try makeModel(server, media, fields: fields)
+        await model.open()?.value
+        let page = try detailPage(model), window = try mount(page)
+        defer { unmount(page, window) }
+        var presentations = 0
+        page.onPresentPlayback = { presentations += 1 }
+        try await visible(page)
+        await model.waitForPendingWork()
+        XCTAssertFalse(try button("film.detail.play", page.view).isEnabled, "Metadata play still observes freshness")
+        let candidate = try button("film.candidate.\(secondID)", page.view)
+        XCTAssertTrue(candidate.isEnabled, "A concrete candidate does not run metadata matching")
+        candidate.sendActions(for: .touchUpInside)
+        await model.waitForPendingWork()
+        let calls = await server.calls()
+        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "select.candidate"])
+        XCTAssertEqual(calls.last?.input.filmObject?["candidateId"], .string(secondID))
+        XCTAssertNil(calls.last?.input.filmObject?["episode"])
+        XCTAssertEqual(model.snapshot?.target, exact)
+        XCTAssertEqual(model.snapshot?.metadataSources.first?.kind, .movie)
+        XCTAssertEqual(page.detail.item.kind, .movie)
+        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "TMDB · 星海航线")
+        XCTAssertEqual(presentations, 1)
+        XCTAssertTrue(media.inputs.isEmpty)
+        await model.close()
+    }
+
+    func testCurrentBrowseDoesNotAuthorizeHiddenOrUnavailableCandidates() async throws {
+        for unavailable in BrowseDenial.allCases {
             var fields = try seasonSnapshot(hasSeasonTwoFile: false)
             var browsing = try fields.filmValue("browsing").filmRequiredObject()
             browsing["season"] = .number(2); browsing["episodes"] = .array([])
             switch unavailable {
-            case .unselected:
-                fields["current"] = .null; fields["stage"] = .string("idle")
+            case .emptySeason:
+                break
             case .unselectable:
-                fields["candidates"] = .array([candidate(firstID, position: .init(season: 1, episode: 1, globalEpisode: 1))])
-                browsing["originalEpisodes"] = .array([
-                    file("first", candidateID: firstID, position: .init(season: 1, episode: 1, globalEpisode: 1)),
-                    file("second", candidateID: nil, position: .init(season: 1, episode: 2, globalEpisode: 2)),
-                ])
+                browsing["episodes"] = .array([file("unavailable", candidateID: nil)])
             case .sourceError:
+                browsing["episodes"] = .array([file("second", candidateID: secondID)])
                 browsing["error"] = .string("STALE_SOURCE")
             }
             fields["browsing"] = .object(browsing)
@@ -306,7 +403,11 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             await model.waitForPendingWork()
 
             XCTAssertFalse(before.previewEpisodes)
-            XCTAssertTrue(before.browsing.files.isEmpty)
+            XCTAssertTrue(before.browsing.files.compactMap(\.candidateID).isEmpty)
+            XCTAssertEqual(before.current?.candidate.id, secondID, "An old output does not authorize page play outside the current browse")
+            if unavailable == .unselectable {
+                XCTAssertFalse(try button("film.file.unavailable", page.view).isEnabled)
+            }
             let play = try button("film.detail.play", page.view)
             XCTAssertFalse(play.isEnabled, "\(unavailable)")
             play.sendActions(for: .touchUpInside)
@@ -322,11 +423,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         }
     }
 
-    func testBusinessRejectionOfPreservedSelectionDoesNotFallbackOrStartNativeMedia() async throws {
-        var fields = try seasonSnapshot(hasSeasonTwoFile: false)
-        var browsing = try fields.filmValue("browsing").filmRequiredObject()
-        browsing["season"] = .number(2); browsing["episodes"] = .array([])
-        fields["browsing"] = .object(browsing); fields["episodes"] = .array([])
+    func testExactSelectionFailureDoesNotFallbackOrStartNativeMedia() async throws {
+        let fields = try seasonSnapshot(hasSeasonTwoFile: false)
         let server = FilmUIKitPlaybackServer(.object(fields)), media = FilmUIKitPlaybackMedia()
         let model = try makeModel(server, media, fields: fields)
         await model.open()?.value
@@ -336,7 +434,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         try await visible(page)
         await model.waitForPendingWork()
         var rejected = fields
-        rejected["stage"] = .string("unavailable"); rejected["error"] = .string("NO_MATCH")
+        rejected["stage"] = .string("unavailable"); rejected["error"] = .string("MEDIA_UNAVAILABLE")
         await server.reply(to: "select.candidate", with: .object(rejected))
 
         let play = try button("film.detail.play", page.view)
@@ -349,7 +447,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "select.candidate"])
         XCTAssertEqual(calls.last?.input.filmObject?["candidateId"], .string(secondID))
         XCTAssertEqual(model.snapshot?.stage, "unavailable")
-        XCTAssertEqual(model.snapshot?.error, "NO_MATCH")
+        XCTAssertEqual(model.snapshot?.error, "MEDIA_UNAVAILABLE")
         XCTAssertNil(model.snapshot?.attempt)
         XCTAssertEqual(model.snapshot?.current, before.current)
         XCTAssertEqual(model.snapshot?.target, before.target)
@@ -360,7 +458,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
 
     private enum SelectionProof: CaseIterable { case current, attempt, rawTarget }
     private enum BrowseDestination: CaseIterable { case line, source }
-    private enum OriginalLineDenial: CaseIterable { case unselected, unselectable, sourceError }
+    private enum BrowseDenial: CaseIterable { case emptySeason, unselectable, sourceError }
 
     private func seasonSnapshot(hasSeasonTwoFile: Bool) throws -> RuntimeObject {
         var fields = try FilmUIKitPlaybackFixture.snapshot(kind: .tv).filmRequiredObject()
