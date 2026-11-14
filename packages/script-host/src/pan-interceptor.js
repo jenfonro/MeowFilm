@@ -95,12 +95,21 @@ export class PanInterceptor {
         } catch (error) { done(error); return; }
         const data = fields(url, body);
         body = '';
-        const id = String(data.pwd_id ?? data.surl ?? data.shorturl ?? data.shareCode ?? data.linkID ?? data.linkId ?? '');
+        const identity = ['pwd_id', 'surl', 'shorturl', 'shareCode', 'linkID', 'linkId']
+          .find(key => Object.hasOwn(data, key));
+        const id = identity === undefined ? undefined : data[identity];
+        const password = data.passcode ?? data.pwd ?? data.accessCode ?? data.passwd;
         let share = valid(id) ? parseShare(bases[provider] + id,
-          String(data.passcode ?? data.pwd ?? data.accessCode ?? data.passwd ?? '')) : null;
-        if (!share && stage === 'list') {
+          String(password ?? '')) : null;
+        if (share && stage === 'list') {
+          const known = scope.panShares.get(provider + ':' + share.shareId);
+          if (!known) share = null;
+          else if (password === undefined) share.password = known.password;
+        }
+        if (!share && stage === 'list' && identity === undefined) {
           const known = [...scope.panShares.values()].filter(value => value.provider === provider);
-          if (known.length === 1) share = known[0];
+          if (known.length === 1) share = { ...known[0],
+            ...(password === undefined ? {} : { password: String(password) }) };
         }
         // A recognized API with an opaque/unknown share cannot be fabricated.
         // Replay is safe here: no network request has been sent yet.
@@ -149,9 +158,10 @@ export class PanInterceptor {
           fileName: '网盘内容.mp4', name: '网盘内容.mp4', file_type: 1, category: 1,
           file: true, dir: false, pdir_fid: '0', share_fid_token: token, size: 1 };
         const answer = ['quark', 'uc'].includes(provider)
-          ? { status: 200, code: 0, data: stage === 'token'
-            ? { stoken: token, share: { title: '网盘内容' } }
-            : { list: [file], metadata: { _total: 1 }, share: { title: '网盘内容' } } }
+          ? stage === 'token'
+            ? { status: 200, code: 0, data: { stoken: token, share: { title: '网盘内容' } } }
+            : { status: 200, code: 0, metadata: { _total: 1 },
+              data: { list: [file], metadata: { _total: 1 }, share: { title: '网盘内容' } } }
           : provider === 'baidu' ? stage === 'token'
             ? { errno: 0, randsk: token } : { errno: 0, list: [{ ...file, fs_id: token,
               server_filename: file.file_name, isdir: 0 }], has_more: 0 }

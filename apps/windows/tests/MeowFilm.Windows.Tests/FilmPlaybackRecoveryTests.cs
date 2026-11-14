@@ -231,11 +231,15 @@ public static class FilmPlaybackRecoveryTests
             await using var rig = new Rig("a");
             rig.ConfigureEpoch = (number, epoch) => { if (number == 2) epoch.Generations["new"] = 1; };
             await rig.StartAsync();
-            await rig.OpenAsync(Card().PlaybackContext!);
-            OnlySources(Opened(rig.Epochs[0]), "a");
+            var request = Card().PlaybackContext!;
+            await rig.OpenAsync(request);
+            var opened = Opened(rig.Epochs[0]);
+            OnlySources(opened, "a");
+            Check(request.Sources is null && rig.Page.Request.Sources is { } frozen &&
+                frozen.Count == 1 && JsonElement.DeepEquals(frozen[0], Rows(opened, "sources").Single()),
+                "the page freezes its first admitted source range without mutating the caller's null request");
             rig.Epochs[0].Crash(); await Until(() => rig.Page.ConnectionFailed);
             await rig.Page.ReconnectAsync(); OnlySources(Opened(rig.Epochs[1]), "a");
-            Check(rig.Page.Request.Sources is null, "remembering first admission does not mutate the caller's null request");
         });
 
         foreach (bool proof in new[] { true, false })
@@ -382,6 +386,60 @@ public static class FilmPlaybackRecoveryTests
                 rig.Sources.Cats.Single().InstallationId == "b",
                 "a healthy different source is not a fallback for the missing raw owner or an empty successful session");
         });
+
+        foreach (string? selector in new string?[] { "candidateId", "episodeId", "playId", null })
+            yield return Test("a removed group source " + (selector is null ? "without a selected file keeps its remaining member" :
+                "with exact " + selector + " fails before another file can open"), async () =>
+            {
+                await using var rig = new Rig();
+                rig.ConfigureEpoch = (number, epoch) =>
+                {
+                    if (number == 2) epoch.Generations.TryRemove("a", out _);
+                };
+                await rig.StartAsync();
+                var request = await rig.ProduceAsync(Source("a"), Source("b"));
+                var source = JsonSerializer.SerializeToNode(new { key = Key("a"), detailId = 0, lineId = "0" })!.AsObject();
+                if (selector is not null) source[selector] = selector == "candidateId" ? JsonValue.Create("opaque-selected-file") : JsonValue.Create(0);
+                request = request with
+                {
+                    Target = new("group:exact", "group", "准确聚合", Season: 2, Episode: 4, GlobalEpisode: 16,
+                        Members: FilmJson.Encode(new[]
+                        {
+                            new { sourceKey = Key("a"), detailId = 0 },
+                            new { sourceKey = Key("b"), detailId = 0 }
+                        }),
+                        Source: JsonSerializer.SerializeToElement(source))
+                };
+                var before = FilmJson.Encode(request);
+                await rig.OpenAsync(request);
+                rig.Epochs[0].Crash(); await Until(() => rig.Page.ConnectionFailed);
+                if (selector is not null)
+                {
+                    await Error("SOURCE_NOT_FOUND", () => rig.Page.ReconnectAsync());
+                    Check(rig.Epochs[1].OpenCount == 0 && !rig.Session.HasSession && rig.Page.ConnectionFailed &&
+                        rig.Sources.Cats.Single().InstallationId == "b",
+                        "remaining group members cannot replace the exact file whose source was removed");
+                    Equal(request.Target.Source!.Value, rig.Page.CaptureRequest.Target.Source!.Value,
+                        "a failed restoration does not clear the selected file identity");
+                    Check(rig.Epochs[1].Calls.All(call => call.Method is "cat.script.status" or "cat.script.start"),
+                        "missing selected source fails before any replacement search, detail or media operation");
+                }
+                else
+                {
+                    await rig.Page.ReconnectAsync();
+                    var sent = Opened(rig.Epochs[1]); OnlySources(sent, "b");
+                    var target = sent.GetProperty("target");
+                    Check(FilmJson.Member(target, "source").ValueKind is JsonValueKind.Undefined or JsonValueKind.Null &&
+                        Rows(target, "members").Length == 1 && FilmJson.Text(Rows(target, "members")[0], "sourceKey") == Key("b") &&
+                        FilmJson.Text(target, "id") == request.Target.Id &&
+                        FilmJson.Integer(target, "season") == 2 && FilmJson.Integer(target, "episode") == 4 &&
+                        FilmJson.Integer(target, "globalEpisode") == 16,
+                        "a group without an exact file keeps only its available member and its original coordinates");
+                    Check(Rows(sent, "resultHints").Length == 1 && FilmJson.Text(Rows(sent, "resultHints")[0], "sourceKey") == Key("b"),
+                        "unselected group recovery does not retain removed-source hints");
+                }
+                Equal(before, FilmJson.Encode(request), "restoration does not mutate the caller's group, selectors or cache evidence");
+            });
 
         yield return Test("snapshot discoveries append deduplicated typed hints without overwriting original raw remarks", async () =>
         {
@@ -636,8 +694,10 @@ public static class FilmPlaybackRecoveryTests
             Page = new(Card() with { PlaybackContext = request }, request, Session, null);
             await Session.OpenAsync(Page, new
             {
-                platform = "windows", target = request.Target.Wire(), sources = request.Sources, query = request.Query,
-                results = request.Results, search = request.Search, metadata = request.Metadata, cacheEntries = request.CacheEntries
+                platform = "windows", entrySurface = request.EntrySurface, target = request.Target.Wire(),
+                resumeTarget = request.ResumeTarget?.Wire(), sources = request.Sources, query = request.Query,
+                results = request.Results, search = request.Search, metadata = request.Metadata, cacheEntries = request.CacheEntries,
+                resultHints = request.ResultHints, searchReference = request.SearchReference
             }, default);
         }
         public async ValueTask DisposeAsync()

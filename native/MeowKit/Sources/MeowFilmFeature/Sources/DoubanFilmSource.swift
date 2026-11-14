@@ -21,7 +21,8 @@ public struct DoubanFilmSource: FilmCategorySource {
                         "category": .string(section.category), "type": .string(section.type)
                     ], refresh: refresh)
                     try Task.checkCancellation()
-                    let items = try Self.parse(bytes, sourceID: descriptor.id)
+                    let items = try Self.parse(bytes, sourceID: descriptor.id,
+                                               kind: FilmItemKind(rawValue: section.kind))
                     return (index, FilmHomeSection(id: section.id, title: section.title,
                                                   items: Array(items.prefix(12)), cache: cache))
                 }
@@ -42,7 +43,7 @@ public struct DoubanFilmSource: FilmCategorySource {
                                           refresh: refresh)
         try Task.checkCancellation()
         let rows = try Self.rows(bytes)
-        let items = Self.parseRows(rows, sourceID: descriptor.id)
+        let items = try Self.parseRows(rows, sourceID: descriptor.id, kind: FilmItemKind(rawValue: kind))
         let count = rows.count
         return FilmCategoryPage(items: items, nextOffset: count < 24 ? nil : offset + count, cache: cache)
     }
@@ -85,8 +86,8 @@ public struct DoubanFilmSource: FilmCategorySource {
                 "category": .string(requestCategory), "type": .string(type)]
     }
 
-    static func parse(_ bytes: Data, sourceID: String = "douban") throws -> [FilmItem] {
-        parseRows(try rows(bytes), sourceID: sourceID)
+    static func parse(_ bytes: Data, sourceID: String = "douban", kind: FilmItemKind? = nil) throws -> [FilmItem] {
+        try parseRows(rows(bytes), sourceID: sourceID, kind: kind)
     }
 
     private static func rows(_ bytes: Data) throws -> [Any] {
@@ -102,7 +103,7 @@ public struct DoubanFilmSource: FilmCategorySource {
         return rows
     }
 
-    private static func parseRows(_ rows: [Any], sourceID: String) -> [FilmItem] {
+    private static func parseRows(_ rows: [Any], sourceID: String, kind: FilmItemKind?) throws -> [FilmItem] {
         var items: [FilmItem] = []
         var identities = Set<String>()
         for row in rows {
@@ -117,9 +118,10 @@ public struct DoubanFilmSource: FilmCategorySource {
                 .map(text).first { !$0.isEmpty } ?? ""
             let posterURL = FilmPosterAddress.normalize(address)
             let largeURL = FilmPosterAddress.normalize(text(pic?["large"]))
-            items.append(FilmItem(sourceID: sourceID, id: id, title: title, posterURL: posterURL,
+            items.append(FilmItem(sourceID: sourceID, id: id, title: title, kind: kind, posterURL: posterURL,
                                   largePosterURL: largeURL == posterURL ? nil : largeURL,
-                                  score: score(row["rating"]), subtitle: text(row["card_subtitle"])))
+                                  score: score(row["rating"]), subtitle: text(row["card_subtitle"]),
+                                  metadataSeed: try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])))
         }
         return items
     }

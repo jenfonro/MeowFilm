@@ -102,7 +102,7 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
             {
                 PlaybackContext = metadataId.Length == 0 ? null : new(new(
                     $"douban:{section.Kind}:{metadataId}", section.Kind == "movie" ? "movie" : "tv",
-                    title, "douban", metadataId))
+                    title, "douban", metadataId), Metadata: item.Clone(), EntrySurface: "home")
             });
         }
         return result;

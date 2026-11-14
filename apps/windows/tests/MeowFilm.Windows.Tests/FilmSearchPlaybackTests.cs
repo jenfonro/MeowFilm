@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 
@@ -18,13 +19,22 @@ public static class FilmSearchPlaybackTests
         yield return Case("revocation fences late content and late cache receipt", RevokedReceipt);
         yield return Case("ordinary waiter cancellation never revokes the runtime owner", CancelledWaiter);
         yield return Case("group open and reconnect retain only admitted original members with their typed identity", GroupScope);
+        yield return Case("an accepted group file cannot fall back to another member after its source is removed", SelectedGroupSourceRevocation);
+        yield return Case("Douban seed loading unmatched and error entries retain their seed across reentry with or without entry provenance", HomeEntryRecovery);
+        yield return Case("Douban seed resume keeps the exact accepted season episode or group file across navigation and owner replacement", HomeSelectionRecovery);
+        yield return Case("ordinary empty groups and externally supplied empty resume targets are SOURCE_NOT_FOUND", EmptyGroupBoundary);
+        foreach (string stage in new[] { "unavailable", "stopped" })
+            yield return Case($"unselected revoked Douban group in {stage} retains its empty resume and cannot restart seed search",
+                () => RevokedUnselectedHomeGroup(stage));
+        yield return Case("unmatched home entry accepts retained search publications without reviving a revoked ordinary group", WaitingEntryUpdate);
     }
     private static TestCase Case(string name, Func<Task> action) => new("film-search-playback: " + name, () => MusicQualityConsumerTests.Sta(action));
     private static void Check(bool condition, string reason) => SearchFixture.Check(condition, reason);
     private static JsonElement Encode(object value) => FilmJson.Encode(value);
     private static object Open(FilmPlaybackRequest request) => new
     {
-        platform = "windows", target = request.Target.Wire(), sources = request.Sources, query = request.Query,
+        platform = "windows", entrySurface = request.EntrySurface, target = request.Target.Wire(), sources = request.Sources, query = request.Query,
+        resumeTarget = request.ResumeTarget?.Wire(),
         results = request.Results, resultHints = request.ResultHints, search = request.Search, metadata = request.Metadata,
         cacheEntries = request.CacheEntries, searchReference = request.SearchReference
     };
@@ -185,9 +195,12 @@ public static class FilmSearchPlaybackTests
                     _ => new FilmPlaybackTarget("douban:tv:18", "tv", "同一显示", "douban", "18", Season: 2, Episode: 9, GlobalEpisode: 21,
                         Source: selectedSource)
                 };
-                f.Runtime.Publish(f.Runtime.LastSessionId, target, Encode(new { title = "已选择资料" }));
+                f.Runtime.Publish(f.Runtime.LastSessionId, target, Encode(new { title = "已选择资料" }),
+                    entryTarget: request.Target, entrySurface: request.EntrySurface);
                 await SearchFixture.Until(() => page.ActiveTarget.Source is { } selected &&
                     FilmJson.Text(selected, "candidateId") == "opaque-selected-file");
+                Check(JsonElement.DeepEquals(Encode(page.EntryTarget.Wire()), Encode(request.Target.Wire())),
+                    "changing the selected target does not replace the original search entry identity");
                 var captured = page.CaptureRequest.Target;
                 f.Service.InvalidateQuery("新查询");
                 var reopened = FilmPlaybackOpen.ParametersFor(page, Encode(Open(request)), f.Runtime.Connection, request.Sources!);
@@ -222,7 +235,8 @@ public static class FilmSearchPlaybackTests
                 Check(FilmJson.Text(input, "provider") == "tmdb", "metadata provider remains explicit");
                 string path = FilmJson.Text(input, "path");
                 var query = input.GetProperty("query");
-                Check(FilmJson.Text(query, "language") == "zh-CN", "required language is part of the key");
+                Check(!query.TryGetProperty("language", out var language),
+                    "the client metadata key leaves language to Node's configured request identity");
                 if (path == "/3/search/multi")
                     Check(FilmJson.Text(input, "imageSize") == "w500" && query.GetProperty("page").GetInt32() == 1 &&
                         FilmJson.Text(query, "query") == " 原查询 ", "list request preserves exact query and w500 identity");
@@ -417,6 +431,486 @@ public static class FilmSearchPlaybackTests
                 }
             }
         }
+    }
+
+    private static async Task SelectedGroupSourceRevocation()
+    {
+        foreach (bool homeSeed in new[] { false, true })
+            foreach (bool reconnect in new[] { false, true })
+            {
+                using var original = new FilmSearchConsumerRuntime();
+                using var replacement = new FilmSearchConsumerRuntime();
+                var a = SearchFixture.Source("a").Wire;
+                var b = SearchFixture.Source("b").Wire;
+                string aKey = FilmJson.Text(a, "key"), bKey = FilmJson.Text(b, "key");
+                var selected = new FilmPlaybackTarget("selected-group", "group", "目标",
+                    Season: 1, Episode: 2,
+                    Source: Encode(new { key = aKey, detailId = "a-detail", lineId = "原线路", candidateId = "exact-a-file" }),
+                    Members: Encode(new object[]
+                    {
+                        new { sourceKey = aKey, detailId = (object)"a-detail" },
+                        new { sourceKey = bKey, detailId = (object)0 }
+                    }));
+                var entry = homeSeed ? new FilmPlaybackTarget("douban:tv:77", "tv", "目标", "douban", "77") : selected;
+                original.PlaybackOpen = (id, _) => FilmPlaybackFixture.Snapshot(id, 0, selected,
+                    Encode((object)null!), entryTarget: entry, entrySurface: homeSeed ? "home" : "search",
+                    entryResolution: homeSeed ? "unmatched" : null);
+                IReadOnlyList<JsonElement> available = [a, b];
+                FilmSearchConsumerRuntime current = original;
+                var request = new FilmPlaybackRequest(entry, [a, b], EntrySurface: homeSeed ? "home" : "search");
+                await using var session = new FilmPlaybackSession(
+                    token => current.CaptureConnectionAsync(token), new FilmNativeProbe(),
+                    prepareOpen: (page, input, _, token) =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        return Task.FromResult(new FilmPlaybackOpen(current.Connection,
+                            FilmPlaybackOpen.ParametersFor(page, input, current.Connection, available)));
+                    });
+                var page = new FilmPlaybackPage(new(entry.Id, entry.Title, "", "")
+                    { PlaybackContext = request }, request, session, null);
+                await session.OpenAsync(page, Open(request), default);
+                var captured = page.CaptureRequest.Own();
+                Check(JsonElement.DeepEquals(Encode((captured.ResumeTarget ?? captured.Target).Wire()), Encode(selected.Wire())),
+                    "the accepted exact file is preserved before source revocation");
+                available = [b];
+                current = replacement;
+                if (reconnect)
+                {
+                    original.Revoked.Cancel();
+                    await FilmPlaybackFixture.Error("SOURCE_NOT_FOUND", () => session.ReconnectAsync());
+                }
+                else
+                {
+                    await session.CloseSessionAsync();
+                    page = new(new(entry.Id, entry.Title, "", "") { PlaybackContext = captured }, captured, session, null);
+                    await FilmPlaybackFixture.Error("SOURCE_NOT_FOUND", () => session.OpenAsync(page, Open(captured), default));
+                }
+                Check(!replacement.Calls.Any(call => call.Method == "film.session.open"),
+                    "remaining member B cannot replace the explicitly accepted file from A");
+                Check(FilmJson.Text((page.CaptureRequest.ResumeTarget ?? page.CaptureRequest.Target).Source!.Value,
+                        "candidateId") == "exact-a-file",
+                    "failure keeps the exact file selector instead of clearing it for another match");
+            }
+    }
+
+    private static async Task HomeEntryRecovery()
+    {
+        foreach (string kind in new[] { "movie", "tv" })
+            foreach (string resolution in new[] { "loading", "unmatched", "error" })
+                foreach (bool reconnect in new[] { false, true })
+                    foreach (bool hasEntrySurface in new[] { false, true })
+                {
+                    using var original = new FilmSearchConsumerRuntime();
+                    using var replacement = new FilmSearchConsumerRuntime();
+                    var seed = new FilmPlaybackTarget($"douban:{kind}:77", kind, "首页原标题", "douban", "77", Year: 2023);
+                    var metadata = Encode(new { title = seed.Title, year = "2023", pic = new { normal = "/douban/poster.jpg" },
+                        raw = new { original = " 保留原始摘要 " } });
+                    var waiting = new FilmPlaybackTarget("group:" + seed.Id, "group", seed.Title,
+                        Year: seed.Year, Members: Encode(Array.Empty<object>()));
+                    JsonElement Reply(Guid id, JsonElement input)
+                    {
+                        var root = JsonNode.Parse(FilmPlaybackFixture.Snapshot(id, 0, waiting, Encode((object)null!),
+                            entryTarget: seed, entrySurface: hasEntrySurface ? "home" : null,
+                            entryResolution: resolution).GetRawText())!.AsObject();
+                        root["stage"] = resolution == "loading" ? "loading" : resolution == "error" ? "error" : "idle";
+                        root["error"] = resolution == "error" ? "UPSTREAM_HTTP" : null;
+                        return JsonSerializer.SerializeToElement(root);
+                    }
+                    original.PlaybackOpen = Reply; replacement.PlaybackOpen = Reply;
+                    FilmSearchConsumerRuntime current = original;
+                    var source = SearchFixture.Source("original").Wire;
+                    IReadOnlyList<JsonElement> available = [source];
+                    var restoredRequest = new FilmPlaybackRequest(seed, [source], Metadata: metadata,
+                        EntrySurface: hasEntrySurface ? "home" : null)
+                    { DataOwner = original.Connection };
+                    var restoredPage = new FilmPlaybackPage(new("restored", seed.Title, "/douban/poster.jpg", "")
+                        { PlaybackContext = restoredRequest }, restoredRequest, null, null);
+                    restoredPage.Apply(new FilmPlaybackSnapshot(Reply(Guid.NewGuid(), Encode(new { }))));
+                    var recovered = FilmPlaybackOpen.ParametersFor(restoredPage, Encode(Open(restoredRequest)),
+                        original.Connection, []);
+                    Check(JsonElement.DeepEquals(recovered.GetProperty("target"), Encode(seed.Wire())) &&
+                        JsonElement.DeepEquals(recovered.GetProperty("metadata"), metadata) &&
+                        FilmJson.Text(recovered, "entrySurface") == (hasEntrySurface ? "home" : "") &&
+                        !recovered.TryGetProperty("resumeTarget", out _) &&
+                        FilmJson.Array(recovered, "sources").Length == 0,
+                        "an empty unmatched snapshot reopens from the Douban seed with or without entrySurface and omits external resumeTarget");
+                    Check(restoredPage.CaptureRequest.ResumeTarget is null,
+                        "a public empty unmatched wait group is never captured as an external resume target");
+                    var request = new FilmPlaybackRequest(seed, [source], Metadata: metadata,
+                        EntrySurface: hasEntrySurface ? "home" : null)
+                    { DataOwner = original.Connection };
+                    await using var session = new FilmPlaybackSession(token => current.CaptureConnectionAsync(token), new FilmNativeProbe(),
+                        prepareOpen: (page, input, _, token) =>
+                        {
+                            token.ThrowIfCancellationRequested();
+                            return Task.FromResult(new FilmPlaybackOpen(current.Connection,
+                                FilmPlaybackOpen.ParametersFor(page, input, current.Connection, available)));
+                        });
+                    var page = new FilmPlaybackPage(new("home", seed.Title, "/douban/poster.jpg", "") { PlaybackContext = request },
+                        request, session, null);
+                    await session.OpenAsync(page, Open(request), default);
+                    Check(page.ActiveTarget.Kind == "group" && page.CaptureRequest.Target == seed &&
+                        JsonElement.DeepEquals(page.CaptureRequest.Metadata!.Value, metadata) &&
+                        page.CaptureRequest.ResumeTarget is null &&
+                        page.Title == seed.Title && page.Poster == "/douban/poster.jpg",
+                        "an unresolved Node target never discards the original home seed or summary");
+                    Check(page.RequiresSourceSearch == (resolution == "unmatched") &&
+                        page.CanStartSourceSearch == (resolution == "unmatched"),
+                        "only explicit no-match enables manual source search; loading and request failure cannot masquerade as no-match");
+                    if (resolution != "unmatched") await page.SearchSourcesAsync();
+                    Check(!original.Calls.Any(call => call.Method == "film.session.command" &&
+                        FilmJson.Text(call.Input, "action") == "search.more"),
+                        "unmatched waits for an explicit click while loading and failed entries cannot search sites");
+                    available = [];
+                    if (reconnect)
+                    {
+                        original.Revoked.Cancel(); current = replacement;
+                        await session.ReconnectAsync();
+                    }
+                    else
+                    {
+                        var captured = page.CaptureRequest.Own();
+                        await session.CloseSessionAsync();
+                        var restored = JsonSerializer.Deserialize<FilmPlaybackRequest>(Encode(captured).GetRawText(), FilmJson.Options)!;
+                        Check(restored.ResumeTarget is null && restored.DataOwner is null,
+                            "navigation stores the seed and summary, never an empty resume group or runtime authority");
+                        page = new(new("home", seed.Title, "/douban/poster.jpg", "") { PlaybackContext = restored },
+                            restored, session, null);
+                        await session.OpenAsync(page, Open(restored), default);
+                    }
+                    var opened = current.Calls.Last(call => call.Method == "film.session.open").Input;
+                    Check(JsonElement.DeepEquals(opened.GetProperty("target"), Encode(seed.Wire())) &&
+                        JsonElement.DeepEquals(opened.GetProperty("metadata"), metadata) &&
+                        FilmJson.Text(opened, "entrySurface") == (hasEntrySurface ? "home" : "") &&
+                        FilmJson.Array(opened, "sources").Length == 0 && !opened.TryGetProperty("resumeTarget", out _) &&
+                        !opened.TryGetProperty("searchReference", out _) &&
+                        page.CaptureRequest.Target == seed && page.CaptureRequest.ResumeTarget is null &&
+                        page.RequiresSourceSearch == (resolution == "unmatched"),
+                        "reentry and owner replacement send the exact Douban seed without an illegal empty resume target");
+                    Check(original.Calls.Count(call => call.Method == "film.session.command" &&
+                        FilmJson.Text(call.Input, "action") == "search.more") +
+                        replacement.Calls.Count(call => call.Method == "film.session.command" &&
+                            FilmJson.Text(call.Input, "action") == "search.more") == 0,
+                        "unmatched reentry and owner replacement do not trigger a site search");
+                    await page.SearchSourcesAsync();
+                    Check(current.Calls.Count(call => call.Method == "film.session.command" &&
+                        FilmJson.Text(call.Input, "action") == "search.more") == (resolution == "unmatched" ? 1 : 0),
+                        "only an explicit unmatched click after reentry triggers exactly one site search");
+                    Console.WriteLine($"OBSERVED film-search-wire home-entry kind={kind} resolution={resolution} reconnect={reconnect} entrySurface={hasEntrySurface} seed=douban sources=0 resumeTarget=omitted");
+                }
+    }
+
+    private static async Task RevokedUnselectedHomeGroup(string stage)
+    {
+        foreach (bool reconnect in new[] { false, true })
+        {
+            await using var rig = new FilmPlaybackRig();
+            await using var replacement = new FilmRuntimeProbe();
+            var seed = new FilmPlaybackTarget("douban:tv:77", "tv", "首页豆瓣标题", "douban", "77");
+            var metadata = Encode(new { title = seed.Title, overview = "原豆瓣简介", pic = new { normal = "/douban/77.jpg" } });
+            var source = SearchFixture.Source("discovered").Wire;
+            var empty = new FilmPlaybackTarget("group:" + seed.Id, "group", seed.Title, Members: Encode(Array.Empty<object>()));
+            var discovered = empty with { Members = Encode(new[] { new { sourceKey = FilmJson.Text(source, "key"), detailId = 0 } }) };
+            rig.Runtime.PlaybackOpen = (id, _) =>
+            {
+                var state = JsonNode.Parse(FilmPlaybackFixture.Snapshot(id, 0, empty, Encode((object)null!),
+                    entryTarget: seed, entrySurface: "home", entryResolution: "unmatched").GetRawText())!.AsObject();
+                state["stage"] = "idle";
+                return Encode(state);
+            };
+            var request = new FilmPlaybackRequest(seed, [source], Metadata: metadata, EntrySurface: "home");
+            await rig.OpenAsync(new(seed.Id, seed.Title, "/douban/77.jpg", "") { PlaybackContext = request }, request);
+            Check(rig.Page.HasUnresolvedEntry && rig.Page.RequiresSourceSearch && rig.Page.CaptureRequest.ResumeTarget is null,
+                "the initial idle no-match still waits for the explicit source search without an external empty resume");
+            await rig.Page.SearchSourcesAsync();
+            rig.Runtime.Change(root =>
+            {
+                root["target"] = JsonSerializer.SerializeToNode(discovered.Wire(), FilmJson.Options);
+                root["sources"] = JsonSerializer.SerializeToNode(new[] { new { id = "discovered-result", title = seed.Title,
+                    source = new { key = FilmJson.Text(source, "key"), engine = "cat", installationId = "discovered",
+                        siteId = "site", generation = 1, name = "已发现站点", detailId = 0 } } });
+            });
+            await FilmPlaybackFixture.Until(() => FilmJson.Array(rig.Page.ActiveTarget.Members ?? default).Length == 1);
+            Check(rig.Page.ActiveTarget.Source is null && rig.Page.CanSearchMore && !rig.Page.RequiresSourceSearch &&
+                rig.Native.Inputs.Count == 0, "discovery alone does not select a file or create a media occurrence");
+            rig.Runtime.Change(root =>
+            {
+                root["target"] = JsonSerializer.SerializeToNode(empty.Wire(), FilmJson.Options);
+                root["sources"] = new JsonArray();
+                root["stage"] = "unavailable";
+                root["error"] = "SOURCE_NOT_FOUND";
+            });
+            await FilmPlaybackFixture.Until(() => rig.Page.StatusText == "暂无可用片源" && rig.Page.Sources.Count == 0);
+            if (stage == "stopped") await rig.Page.CommandAsync("stop");
+            Check(!rig.Page.HasUnresolvedEntry && !rig.Page.IsUnmatchedDoubanEntry &&
+                !rig.Page.RequiresSourceSearch && !rig.Page.CanStartSourceSearch && !rig.Page.CanSearchMore &&
+                FilmJson.Text(rig.Runtime.Value, "stage") == stage && FilmJson.Text(rig.Runtime.Value, "error") == "SOURCE_NOT_FOUND",
+                "the public source error, including after stop, cannot masquerade as the initial manual-search wait");
+            await rig.Page.SearchSourcesAsync();
+            var captured = rig.Page.CaptureRequest.Own();
+            Check(captured.Target == seed && captured.ResumeTarget is { Kind: "group", Source: null } resume &&
+                JsonElement.DeepEquals(Encode(resume.Wire()), Encode(empty.Wire())) &&
+                JsonElement.DeepEquals(captured.Metadata!.Value, metadata) &&
+                JsonElement.DeepEquals(Encode(Open(captured)).GetProperty("resumeTarget"), Encode(empty.Wire())) &&
+                rig.Page.Title == seed.Title && rig.Page.Poster == "/douban/77.jpg" && rig.Page.Overview == "原豆瓣简介",
+                "the exact empty group resume survives alongside original provenance and Douban display metadata");
+            rig.Runtime.Intercept = (method, input, _) => Task.FromResult(method == "film.session.open"
+                ? FilmRuntimeProbe.Failure("SOURCE_NOT_FOUND") : rig.Runtime.Handle(method, input));
+            replacement.Intercept = (method, input, _) => Task.FromResult(method == "film.session.open"
+                ? FilmRuntimeProbe.Failure("SOURCE_NOT_FOUND") : replacement.Handle(method, input));
+            if (reconnect)
+            {
+                rig.Runtime.Owner.Cancel();
+                rig.Capture = replacement.CaptureConnectionAsync;
+                await FilmPlaybackFixture.Error("SOURCE_NOT_FOUND", rig.Session.ReconnectAsync);
+            }
+            else
+            {
+                await rig.Session.CloseSessionAsync();
+                var restored = JsonSerializer.Deserialize<FilmPlaybackRequest>(Encode(captured).GetRawText(), FilmJson.Options)!;
+                var page = new FilmPlaybackPage(new(seed.Id, seed.Title, "/douban/77.jpg", "") { PlaybackContext = restored },
+                    restored, rig.Session, rig.Library);
+                await FilmPlaybackFixture.Error("SOURCE_NOT_FOUND", () => rig.Session.OpenAsync(page, Open(restored), default));
+            }
+            var reopened = (reconnect ? replacement.Calls : rig.Runtime.Calls)
+                .Last(call => call.Method == "film.session.open").Parameters;
+            Check(JsonElement.DeepEquals(reopened.GetProperty("target"), Encode(seed.Wire())) &&
+                JsonElement.DeepEquals(reopened.GetProperty("resumeTarget"), Encode(empty.Wire())) &&
+                JsonElement.DeepEquals(reopened.GetProperty("metadata"), metadata) &&
+                FilmJson.Text(reopened, "entrySurface") == "home" &&
+                !reopened.TryGetProperty("searchReference", out _) &&
+                rig.Runtime.Calls.Count(call => call.Method == "film.session.open") == (reconnect ? 1 : 2) &&
+                replacement.Calls.Count(call => call.Method == "film.session.open") == (reconnect ? 1 : 0) &&
+                rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
+                    FilmJson.Text(call.Parameters, "action") == "search.more") == 1 &&
+                !rig.Runtime.Calls.Concat(replacement.Calls).Any(call =>
+                    call.Method.StartsWith("film.data.", StringComparison.Ordinal) || call.Method == "film.search.open") &&
+                rig.Native.Inputs.Count == 0,
+                "navigation and owner replacement send the exact empty resume for Node rejection without a new seed or site search");
+            Console.WriteLine($"OBSERVED film-search-wire revoked-unselected stage={stage} reconnect={reconnect} members=0 source=null resume=exact reopened=1 error=SOURCE_NOT_FOUND search.more=1");
+        }
+    }
+
+    private static async Task WaitingEntryUpdate()
+    {
+        await using var fixture = new SearchFixture();
+        var seed = new FilmPlaybackTarget("douban:tv:77", "tv", "首页原标题", "douban", "77");
+        var source = fixture.Sources.Sources[0];
+        var raw = SearchFixture.Member(source, "source-detail", seed.Title);
+        fixture.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"),
+            [SearchFixture.Card(seed.Id, "site", seed.Title, [raw])], [raw]);
+        fixture.Runtime.SearchHandoff = input => SearchFixture.Handoff(Guid.Parse(FilmJson.Text(input, "sessionId")),
+            FilmJson.Text(input, "selectionId"), "首页原标题", seed, [source.Wire],
+            results: Encode(new[] { new { sourceKey = source.Key, items = new[] { raw.GetProperty("raw") } } }));
+        var search = fixture.Service.Start("首页原标题"); await SearchFixture.Settle(search);
+        var waiting = new FilmPlaybackTarget("group:" + seed.Id, "group", seed.Title, Members: Encode(Array.Empty<object>()));
+        var context = new FilmSearchContext(search, search.Items[0]);
+        var request = (await context.HandoffAsync(default)) with
+        { Metadata = Encode(new { title = seed.Title }), EntrySurface = "home" };
+        fixture.Runtime.PlaybackOpen = (id, _) => FilmPlaybackFixture.Snapshot(id, 0, waiting, Encode((object)null!),
+            entryTarget: seed, entrySurface: "home", entryResolution: "unmatched");
+        await using var session = new FilmPlaybackSession(fixture.Runtime.CaptureConnectionAsync, new FilmNativeProbe());
+        var page = new FilmPlaybackPage(new("home", seed.Title, "", "") { SearchContext = context }, request, session, null);
+        try
+        {
+            await session.OpenAsync(page, Open(request), default);
+            await SearchFixture.Until(() => Updates(fixture.Runtime).Length > 0);
+            var update = Updates(fixture.Runtime)[0];
+            Check(FilmJson.Text(update, "selectionId") == seed.Id &&
+                JsonElement.DeepEquals(update.GetProperty("searchReference"), Encode(context.Reference)) &&
+                page.RequiresSourceSearch, "the waiting state uses entry identity for search publication, not its temporary empty group id");
+            var revoked = waiting with { Id = "ordinary-group", Source = Encode(new { key = fixture.Sources.Sources[0].Key,
+                detailId = 0, candidateId = "withdrawn-file" }) };
+            fixture.Runtime.Publish(fixture.Runtime.LastSessionId, revoked, Encode((object)null!));
+            await SearchFixture.Until(() => page.ActiveTarget.Id == revoked.Id);
+            int before = Updates(fixture.Runtime).Length;
+            session.UpdateSearch(page, 8);
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            Check(Updates(fixture.Runtime).Length == before && !page.RequiresSourceSearch,
+                "an ordinary empty revocation remains terminal and is never inferred to be an unmatched home entry");
+        }
+        finally { page.ReleaseSearch(); }
+    }
+
+    private static async Task HomeSelectionRecovery()
+    {
+        foreach (string mode in new[] { "matched", "unmatched" })
+            foreach (bool reconnect in new[] { false, true })
+                foreach (bool hasEntrySurface in new[] { false, true })
+            {
+                using var original = new FilmSearchConsumerRuntime();
+                using var replacement = new FilmSearchConsumerRuntime();
+                var seed = new FilmPlaybackTarget("douban:tv:77", "tv", "首页豆瓣标题", "douban", "77", Year: 2023);
+                var metadata = Encode(new { title = seed.Title, overview = "原豆瓣简介", pic = new { normal = "/douban/77.jpg" },
+                    raw = new { original = " 原豆瓣资料 " } });
+                var source = SearchFixture.Source("home").Wire;
+                string key = FilmJson.Text(source, "key");
+                var target = mode == "matched"
+                    ? new FilmPlaybackTarget("tmdb:tv:321", "tv", "TMDB当前标题", "tmdb", "321",
+                        Year: 2023, Season: 3, Episode: 4, GlobalEpisode: 28)
+                    : new FilmPlaybackTarget("group:" + seed.Id, "group", seed.Title, Year: 2023,
+                        Season: 2, Episode: 9, Members: Encode(new[] { new { sourceKey = key, detailId = 0 } }),
+                        Source: Encode(new { key, detailId = 0, lineId = "0", candidateId = "opaque-file-9" }));
+                var currentMetadata = mode == "matched"
+                    ? Encode(new { name = "TMDB当前标题", overview = "当前简介" })
+                    : Encode((object)null!);
+                JsonElement Reply(Guid id, JsonElement _)
+                {
+                    var root = JsonNode.Parse(FilmPlaybackFixture.Snapshot(id, 0, target,
+                        currentMetadata, entryTarget: seed, entrySurface: hasEntrySurface ? "home" : null,
+                        entryResolution: mode).GetRawText())!.AsObject();
+                    if (mode == "unmatched")
+                        root["sources"] = JsonSerializer.SerializeToNode(new[]
+                        { new { id = "selected-result", title = "原始站点标题", source = new
+                            { key, engine = "cat", installationId = "home", siteId = "site", generation = 1,
+                                name = "首页来源", detailId = 0 }, state = "ready" } });
+                    return JsonSerializer.SerializeToElement(root);
+                }
+                original.PlaybackOpen = Reply; replacement.PlaybackOpen = Reply;
+                FilmSearchConsumerRuntime current = original;
+                var request = new FilmPlaybackRequest(seed, [source], Metadata: metadata,
+                    EntrySurface: hasEntrySurface ? "home" : null)
+                { DataOwner = original.Connection };
+                await using var session = new FilmPlaybackSession(token => current.CaptureConnectionAsync(token), new FilmNativeProbe(),
+                    prepareOpen: (page, input, _, token) =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        return Task.FromResult(new FilmPlaybackOpen(current.Connection,
+                            FilmPlaybackOpen.ParametersFor(page, input, current.Connection, [source])));
+                    });
+                var page = new FilmPlaybackPage(new(seed.Id, seed.Title, "/douban/77.jpg", "")
+                    { PlaybackContext = request }, request, session, null);
+                await session.OpenAsync(page, Open(request), default);
+                var captured = page.CaptureRequest.Own();
+                Check(captured.Target == seed && captured.ResumeTarget is not null &&
+                    JsonElement.DeepEquals(Encode(captured.ResumeTarget.Wire()), Encode(target.Wire())) &&
+                    JsonElement.DeepEquals(captured.Metadata!.Value, metadata) &&
+                    captured.EntrySurface == (hasEntrySurface ? "home" : null),
+                    "the original home card and its raw summary remain distinct from the exact selected target");
+                if (mode == "unmatched")
+                {
+                    var hints = FilmJson.Array(captured.ResultHints ?? default);
+                    Check(hints.Length == 1 && FilmJson.Text(hints[0], "sourceKey") == key &&
+                        FilmJson.Array(hints[0], "items").Single().GetProperty("id").GetInt32() == 0,
+                        "the selected group retains discovery identity as a hint without fabricating fresh results");
+                }
+                if (reconnect)
+                {
+                    original.Revoked.Cancel(); current = replacement;
+                    await session.ReconnectAsync();
+                }
+                else
+                {
+                    await session.CloseSessionAsync();
+                    var restored = JsonSerializer.Deserialize<FilmPlaybackRequest>(Encode(captured).GetRawText(), FilmJson.Options)!;
+                    Check(restored.DataOwner is null && restored.ResumeTarget is not null,
+                        "navigation keeps the selected target but never serializes runtime authority");
+                    page = new(new(seed.Id, seed.Title, "/douban/77.jpg", "") { PlaybackContext = restored }, restored, session, null);
+                    await session.OpenAsync(page, Open(restored), default);
+                }
+                var opened = current.Calls.Last(call => call.Method == "film.session.open").Input;
+                Check(JsonElement.DeepEquals(opened.GetProperty("target"), Encode(seed.Wire())) &&
+                    JsonElement.DeepEquals(opened.GetProperty("resumeTarget"), Encode(target.Wire())) &&
+                    JsonElement.DeepEquals(opened.GetProperty("metadata"), metadata) &&
+                    FilmJson.Text(opened, "entrySurface") == (hasEntrySurface ? "home" : "") &&
+                    !opened.TryGetProperty("searchReference", out _) && page.EntryTarget.Id == seed.Id &&
+                    JsonElement.DeepEquals(Encode(page.ActiveTarget.Wire()), Encode(target.Wire())),
+                    "reopen sends seed plus exact current coordinates without a retired search reference or title reconstruction");
+                if (mode == "unmatched")
+                    Check(page.Title == seed.Title && page.Poster == "/douban/77.jpg" && page.Overview == "原豆瓣简介" &&
+                        JsonElement.DeepEquals(page.CaptureRequest.Metadata!.Value, metadata) &&
+                        JsonElement.DeepEquals(Encode(page.CaptureRequest.ResumeTarget!.Wire()), Encode(target.Wire())),
+                        "when the Node group snapshot has null metadata, reentry keeps the original Douban title, poster and overview together with the exact selected target");
+                Check(!current.Calls.Any(call => call.Method.StartsWith("film.data.", StringComparison.Ordinal) ||
+                    call.Method == "film.search.open" || call.Method == "film.session.command" &&
+                    FilmJson.Text(call.Input, "action") == "search.more"),
+                    "consumer navigation does not start a second title or site search");
+                if (mode == "unmatched")
+                {
+                    Check(FilmJson.Text(opened.GetProperty("resumeTarget").GetProperty("source"), "candidateId") == "opaque-file-9" &&
+                        opened.GetProperty("resumeTarget").GetProperty("source").GetProperty("lineId").ValueKind == JsonValueKind.String &&
+                        FilmJson.Array(opened, "resultHints").Length == 1 && !page.RequiresSourceSearch,
+                        "a selected group file keeps its typed line, candidate and hint instead of reverting to manual-search empty state");
+                    try
+                    {
+                        FilmPlaybackOpen.ParametersFor(page, opened, current.Connection, []);
+                        throw new InvalidOperationException("A home seed cannot authorize a selected group whose sources were all revoked");
+                    }
+                    catch (FilmPlaybackException error) when (error.Code == "SOURCE_NOT_FOUND") { }
+                }
+                Console.WriteLine($"OBSERVED film-search-wire home-resume resolution={mode} reconnect={reconnect} entrySurface={hasEntrySurface} season={target.Season} episode={target.Episode}");
+            }
+    }
+
+    private static async Task EmptyGroupBoundary()
+    {
+        using var runtime = new FilmSearchConsumerRuntime();
+        runtime.Respond = (method, input, _) => Task.FromResult(method == "film.session.open"
+            ? FilmSearchConsumerRuntime.Failure("SOURCE_NOT_FOUND") : runtime.Handle(method, input));
+        var seed = new FilmPlaybackTarget("douban:tv:77", "tv", "首页豆瓣标题", "douban", "77");
+        var empty = new FilmPlaybackTarget("ordinary-empty", "group", "空聚合", Members: Encode(Array.Empty<object>()));
+        foreach (bool hasEntrySurface in new[] { false, true })
+            foreach (bool isDoubanSeed in new[] { false, true })
+            {
+                var source = SearchFixture.Source("ordinary").Wire;
+                string key = FilmJson.Text(source, "key");
+                var ordinary = new FilmPlaybackTarget("site-entry", "source", "站点标题",
+                    Source: Encode(new { key, detailId = 0 }));
+                var target = isDoubanSeed ? seed : ordinary;
+                var request = new FilmPlaybackRequest(target, [source],
+                    EntrySurface: hasEntrySurface ? "home" : null, ResumeTarget: empty);
+                await using var session = new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeProbe());
+                var page = new FilmPlaybackPage(new(target.Id, target.Title, "", "") { PlaybackContext = request }, request, session, null);
+                int opens = runtime.Calls.Count(call => call.Method == "film.session.open");
+                await FilmPlaybackFixture.Error("SOURCE_NOT_FOUND", () => session.OpenAsync(page, Open(request), default));
+                Check(runtime.Calls.Count(call => call.Method == "film.session.open") == opens + (isDoubanSeed ? 1 : 0),
+                    "ordinary empty resumes fail locally while Douban resumes reach Node's pre-lookup rejection");
+                if (isDoubanSeed)
+                {
+                    var rejected = runtime.Calls.Last(call => call.Method == "film.session.open").Input;
+                    Check(JsonElement.DeepEquals(rejected.GetProperty("target"), Encode(seed.Wire())) &&
+                        JsonElement.DeepEquals(rejected.GetProperty("resumeTarget"), Encode(empty.Wire())),
+                        "a seed never replaces the exact externally supplied empty resume");
+                }
+
+                if (!isDoubanSeed)
+                {
+                    var ordinaryRequest = request with { Target = empty, ResumeTarget = null };
+                    var ordinaryPage = new FilmPlaybackPage(new(empty.Id, empty.Title, "", ""),
+                        ordinaryRequest, session, null);
+                    await FilmPlaybackFixture.Error("SOURCE_NOT_FOUND",
+                        () => session.OpenAsync(ordinaryPage, Open(ordinaryRequest), default));
+                }
+                else
+                {
+                    var selected = new FilmPlaybackTarget("selected-group", "group", "已选择站点组",
+                        Members: Encode(new[] { new { sourceKey = key, detailId = (object)0 } }));
+                    var selectedRequest = new FilmPlaybackRequest(seed, [source], EntrySurface: request.EntrySurface,
+                        ResumeTarget: selected);
+                    var selectedPage = new FilmPlaybackPage(new(seed.Id, seed.Title, "", ""),
+                        selectedRequest, session, null);
+                    selectedPage.Apply(new FilmPlaybackSnapshot(FilmPlaybackFixture.Snapshot(Guid.NewGuid(), 0,
+                        empty, Encode((object)null!), entryTarget: seed,
+                        entrySurface: request.EntrySurface, entryResolution: "unmatched")));
+                    var captured = selectedPage.CaptureRequest;
+                    Check(captured.ResumeTarget is { Kind: "group" } capturedGroup &&
+                        capturedGroup.Members is { } members && members.GetArrayLength() == 0,
+                        "a previously selected Douban group does not become an internally generated seed wait after its last member disappears");
+                    await FilmPlaybackFixture.Error("SOURCE_NOT_FOUND",
+                        () => session.OpenAsync(selectedPage, Open(captured), default));
+                    var rejected = runtime.Calls.Last(call => call.Method == "film.session.open").Input;
+                    Check(JsonElement.DeepEquals(rejected.GetProperty("target"), Encode(seed.Wire())) &&
+                        JsonElement.DeepEquals(rejected.GetProperty("resumeTarget"), Encode(empty.Wire())),
+                        "a selected group withdrawn to empty keeps its exact resume through Node rejection");
+                }
+            }
+        Check(runtime.Calls.Where(call => call.Method == "film.session.open").All(call =>
+                FilmJson.Text(call.Input.GetProperty("target"), "metadataProvider") == "douban" &&
+                JsonElement.DeepEquals(call.Input.GetProperty("resumeTarget"), Encode(empty.Wire()))) &&
+            !runtime.Calls.Any(call => call.Method == "film.search.open" ||
+                call.Method.StartsWith("film.data.", StringComparison.Ordinal) ||
+                call.Method == "film.session.command" && FilmJson.Text(call.Input, "action") == "search.more"),
+            "every external empty group still fails SOURCE_NOT_FOUND without a replacement lookup or search");
     }
 
     private sealed class CapturingFacade(FilmSearchConsumerRuntime producer) : IRuntimeClient, IRuntimeConnectionSource

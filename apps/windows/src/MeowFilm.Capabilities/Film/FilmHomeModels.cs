@@ -240,7 +240,7 @@ public sealed record FilmCardItem(string Id, string Title, string Poster, string
 
         static bool SameRequest(FilmPlaybackRequest? left, FilmPlaybackRequest? right) =>
             left == right || left is not null && right is not null &&
-            left.Target == right.Target && left.Sources == right.Sources && left.Query == right.Query &&
+            left.Target == right.Target && left.Sources == right.Sources && left.Query == right.Query && left.EntrySurface == right.EntrySurface &&
             left.DataOwner == right.DataOwner && SameJson(left.Results, right.Results) &&
             SameJson(left.Search, right.Search) && SameJson(left.Metadata, right.Metadata) &&
             SameJson(left.CacheEntries, right.CacheEntries);

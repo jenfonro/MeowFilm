@@ -10,6 +10,7 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
     private let sourceID: String
     private let lineID: FilmPlaybackIdentifier?
     private let path: [String]
+    private var displayedError: String?
     var onPresentPlayback: (() -> Void)?
 
     init(model: FilmPlaybackModel, sourceID: String, lineID: FilmPlaybackIdentifier?, path: [String] = [],
@@ -30,10 +31,18 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
             render(); return
         }
         if let error = browsing.error {
-            sections = [.init(title: "", rows: [.init(title: FilmPlaybackError(code: error).localizedDescription,
-                                                      id: "film.directory.error")])]
+            sections = []
+            if error != displayedError {
+                displayedError = error
+                failure(FilmPlaybackError(code: error), retry: { [weak self] in
+                    guard let self, let browsing = model.snapshot?.browsing,
+                          browsing.sourceID == sourceID, browsing.lineID == lineID else { return }
+                    model.refreshBrowsing()
+                })
+            }
             render(); return
         }
+        displayedError = nil
         let entries = FilmPlaybackDirectory(files: browsing.originalFiles).children(at: path)
         let rows = entries.enumerated().map { index, entry -> FilmSettingsRow in
             switch entry {

@@ -198,15 +198,18 @@ public static class FilmMetadataPlaybackIntegrationTests
         using var failedPresentation = await hero.PrepareForPresentationAsync();
         await Until(upstream, () => hero.Source is null && AutomationProperties.GetHelpText(hero) == "图片加载失败" &&
             upstream.DoubanImageRequests > 1 && upstream.SuccessfulDoubanImages == 1 &&
-            upstream.Count("/tmdb/3/search/tv") == 1);
+            upstream.Count("/tmdb/3/search/multi") == 1);
         Check(page.Title == MetadataUpstream.DoubanTitle && page.Overview == "来自真实公开资料接口的简介" &&
             page.Cast == "豆瓣演员" && page.Directors == "豆瓣导演" &&
             ((TextBlock)view.FindName("CastNames")).Text == "豆瓣演员" && page.Poster == reference &&
             !hero.ShowRetry && hero.ToolTip as string == "图片加载失败",
             "the actual Douban playback view displays provider facts and safe image failure without inventing an image retry button");
-        Check(page.ActiveTarget.Season is null && page.ActiveTarget.Episode is null && page.Episodes.Count == 0 &&
-            page.Seasons.All(item => item.Season is null),
-            "missing season/count/date data remains missing, never an invented first episode");
+        Check(page.ActiveTarget.Kind == "group" && page.EntryTarget.MetadataProvider == "douban" &&
+            page.EntryResolution == "unmatched" && page.RequiresSourceSearch &&
+            page.ActiveTarget.Members!.Value.GetArrayLength() == 0 && page.Sources.Count == 0 &&
+            page.ActiveTarget.Season is null && page.ActiveTarget.Episode is null && page.Episodes.Count == 0 &&
+            page.Seasons.Count == 0 && upstream.Count("/tmdb/3/search/multi") == 1,
+            "the Douban seed becomes Node's empty unmatched group and retains its display metadata without invented episodes or source searches");
         var preview = Visuals(view).OfType<CheckBox>().Single(box => AutomationProperties.GetName(box) == "显示点映剧集");
         int beforePreview = upstream.MetadataRequests;
         Toggle(preview, true);
@@ -369,7 +372,7 @@ public static class FilmMetadataPlaybackIntegrationTests
         internal async Task ConfigureAsync(FilmMetadataRuntimeTests.RuntimeHost host)
         {
             await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
-            { ["apiBase"] = server.BaseUrl + "/tmdb", ["imageBase"] = server.BaseUrl + "/tmdb-images" });
+            { ["apiBase"] = server.BaseUrl + "/tmdb/3", ["imageBase"] = server.BaseUrl + "/tmdb-images/t/p" });
             var reply = await host.Client.CallAsync("douban.data.settings.update", new
             {
                 apiBase = server.BaseUrl + "/douban", searchBase = server.BaseUrl + "/douban",
@@ -415,7 +418,7 @@ public static class FilmMetadataPlaybackIntegrationTests
                     episodes = new[] { Episode(2, 1, "第二季已播", "2000-01-01"), Episode(2, 4, "第二季未来", "2999-01-01") } },
                 "/tmdb/3/tv/7/season/0" => new { season_number = 0, episode_count = 1,
                     episodes = new[] { Episode(0, 0, "未知日期特别篇", null) } },
-                "/tmdb/3/search/tv" => new { results = Array.Empty<object>(), total_pages = 0 },
+                "/tmdb/3/search/multi" => new { results = Array.Empty<object>(), page = 1, total_pages = 0 },
                 "/douban/rexxar/api/v2/tv/77" => new
                 {
                     id = 77, title = DoubanTitle, intro = "来自真实公开资料接口的简介",
@@ -439,8 +442,8 @@ public static class FilmMetadataPlaybackIntegrationTests
                 await exchange.ReplyAsync(Encoding.UTF8.GetBytes(body), contentType: "text/html; charset=utf-8").ConfigureAwait(false);
                 return;
             }
-            if (path is "/tmdb-images/original/poster.png" or "/tmdb-images/original/similar.png" or
-                "/tmdb-images/original/episode.png" or "/douban-images/poster.png")
+            if (path is "/tmdb-images/t/p/original/poster.png" or "/tmdb-images/t/p/original/similar.png" or
+                "/tmdb-images/t/p/original/episode.png" or "/douban-images/poster.png")
             {
                 if (exchange.Headers.ContainsKey("Cookie") || new Uri(server.BaseUrl + exchange.Path).Query.Length != 0)
                     failures.Enqueue("Metadata credentials or unexpected query reached image upstream: " + path);

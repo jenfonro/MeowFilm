@@ -306,6 +306,12 @@ public partial class FilmPlaybackView : UserControl
         ShowPlayerControls();
     }
     private async void SearchMore_Click(object sender, RoutedEventArgs e) { e.Handled = true; await ActAsync("search.more"); }
+    private async void SearchSources_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is FilmPlaybackPage page)
+            await ExecuteAsync(page, page.SearchSourcesAsync, "搜索失败，请重试");
+    }
     private async void Reconnect_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;

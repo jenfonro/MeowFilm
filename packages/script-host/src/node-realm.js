@@ -332,7 +332,12 @@ export function createNodeRealm(session, node) {
         }
         let result;
         const directActionSet=new Set(directActions);
-        if(typeof start==='function')result=start({sites:{list:[]},pans:{list:[]},color:[],...(options.config||{})});
+        if(typeof start==='function')result=start({
+          sites:{list:[]},pans:{list:[]},color:[],
+          baidu:{cookie:''},quark:{},uc:{},y115:{},pan123ziyuan:{},bili:{},wuming:{},
+          ali:{},tgsou:{},tgchannel:{},muou:{},leijing:{},wogg:{},livetovod:{},
+          server:{url:'',authorization:''},...(options.config||{})
+        });
         else if(directActions.length){
           const spider=value.exports,server=sandbox.catServerFactory(async(req,res)=>{
             try {

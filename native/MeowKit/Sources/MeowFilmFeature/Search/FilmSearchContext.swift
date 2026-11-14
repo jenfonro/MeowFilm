@@ -86,7 +86,7 @@ struct FilmSearchHandoff {
             query: try fields.filmString("query"), results: try fields.filmArray("results"),
             resultHints: try fields.filmArray("resultHints"), search: try fields.filmArray("search"),
             metadata: fields["metadata"].flatMap { $0 == .null ? nil : $0 },
-            cacheEntries: try fields.filmArray("cacheEntries"), searchReference: reference)
+            cacheEntries: try fields.filmArray("cacheEntries"), searchReference: reference, entrySurface: "search")
     }
 }
 #endif

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
 import { createPlaybackData } from '../packages/film-playback/src/data.js';
-import { recognizeCandidates } from '../packages/film-playback/src/recognition.js';
+import { mediaVariants, recognizeCandidates, recognizeVariantCandidates } from '../packages/film-playback/src/recognition.js';
 import { buildEpisodeMap, resolveEpisode } from '../packages/film-playback/src/episodes.js';
 import { sourceRevision } from '../packages/film-playback/src/identity.js';
 import { encodePanResource } from '@meowfilm/script-host/cat-output';
@@ -21,6 +21,7 @@ const movieTarget = { id: 'tmdb:movie:42', metadataProvider: 'tmdb', metadataId:
   kind: 'movie', title: '真实电影', year: 2024 };
 const tvTarget = { id: 'tmdb:tv:43', metadataProvider: 'tmdb', metadataId: 43,
   kind: 'tv', title: '真实剧集', year: 2024 };
+const recognitionRules = { episodeCleanRegexRules: [], episodeRules: [], movieRules: [], aggregateRegexRules: [] };
 const movieValue = (id = 42, patch = {}) => ({ id, title: '真实电影', release_date: '2024-01-01',
   overview: '实际简介', runtime: 120, genres: [], credits: { cast: [] }, similar: { results: [] },
   images: { posters: [] }, ...patch });
@@ -144,6 +145,119 @@ test('E08 portable Spider uses keyword/action/revision rather than Cat wd/operat
   assert.equal(descriptor.scope.sourceEngine, 'source');
   assert.deepEqual(f.calls('source', 'invoke').at(-1).params.payload,
     { flag: '未知原始flag', id: 'original$opaque$id', vipFlags: [] });
+});
+
+test('M3 selected HLS discovery shares a parent receipt but isolates variant addresses, refresh and missing choices', async t => {
+  const f = fixture(t);
+  let issued = 0, omitHigh = false;
+  f.handlers.cat.invoke = () => success({ url: `https://hls.invalid/master.m3u8?issued=${++issued}`,
+    headers: { 'X-Playback': `synthetic-${issued}` }, format: 'hls', drm: { scheme: 'clearkey' },
+    _meow: { version: 1, media: [{ variants: [
+      ...(!omitHigh ? [{ url: 'https://hls.invalid/high/index.m3u8?part=1',
+        quality: '4K', resolution: '3840x2160', fps: 59.94 }] : []),
+      { url: 'https://hls.invalid/low.m3u8', quality: '1080P', resolution: '1920x1080', fps: 25 },
+    ] }] } });
+  const parent = rawCandidate(source, { id: 'a'.repeat(64) });
+  await f.data.resolve(parent);
+  assert.equal(f.calls('cat', 'invoke').at(-1).mediaPurpose, 'receipt');
+  const descriptor = await f.data.resolve(parent, { discoverVariants: true });
+  assert.equal(f.calls('cat', 'invoke').at(-1).mediaPurpose, undefined);
+  assert.deepEqual(await f.data.resolve(parent), descriptor);
+  assert.equal(issued, 2, 'ordinary readers reuse the discovered parent without another play invocation');
+  const [high, low] = await recognizeVariantCandidates(parent, mediaVariants(descriptor));
+  const [first, second] = await Promise.all([f.data.resolve(high), f.data.resolve(low)]);
+  assert.equal(issued, 2);
+  assert.equal(first.url, 'https://hls.invalid/high/index.m3u8?part=1');
+  assert.equal(second.url, 'https://hls.invalid/low.m3u8');
+  for (const value of [first, second]) {
+    assert.deepEqual(value.headers, { 'X-Playback': 'synthetic-2' });
+    assert.deepEqual(value.drm, { scheme: 'clearkey' });
+    assert.equal(value.format, 'hls');
+    assert.equal(value.scope.sourceRevision, sourceRevision(source));
+    assert.equal(value.expiresAt, descriptor.expiresAt);
+  }
+  assert.notEqual(first.resolution, second.resolution);
+  await f.data.invalidateAddress(high);
+  assert.deepEqual(await f.data.resolve(low), second);
+  assert.deepEqual(await f.data.resolve(high), first);
+  assert.equal(issued, 2, 'revoking one child must not resolve its parent or another child');
+  f.advance(1);
+  const refreshed = await f.data.refresh(low);
+  assert.equal(issued, 3);
+  assert.equal(refreshed.url, second.url);
+  assert.deepEqual(refreshed.headers, { 'X-Playback': 'synthetic-3' });
+  assert.deepEqual((await f.data.resolve(high)).headers, refreshed.headers);
+  omitHigh = true;
+  await assert.rejects(f.data.refresh(high), { code: 'MEDIA_UNAVAILABLE' });
+  assert.equal((await f.data.resolve(low)).url, second.url);
+  assert.equal(issued, 4, 'a disappeared exact variant is not replaced by the master');
+  assert.equal(f.calls('pan', 'prepare').length, 0);
+  assert.equal(f.calls('pan', 'play').length, 0);
+  await f.data.refresh(parent);
+  assert.equal(f.calls('cat', 'invoke').at(-1).mediaPurpose, undefined,
+    'retrying the chosen Cat parent may discover newly available variants');
+});
+
+test('M3 ordinary readers join accepted Cat discovery and retain its exact upstream expiration', async t => {
+  const f = fixture(t), parent = rawCandidate(), consumer = new AbortController();
+  const entered = deferred(), gate = deferred();
+  t.after(() => gate.resolve());
+  let issued = 0;
+  f.handlers.cat.invoke = async (_params, signal) => {
+    const current = ++issued;
+    entered.resolve(signal);
+    await gate.promise;
+    return success({ url: `https://media.invalid/discovered-${current}.mp4`,
+      headers: { Referer: 'https://example.invalid/' }, expiresAt: f.now() + 25_000 });
+  };
+  const discovery = f.data.resolve(parent, { discoverVariants: true });
+  const producerSignal = await entered.promise;
+  const rejected = assert.rejects(f.data.resolve(parent, { signal: consumer.signal }), { code: 'CANCELLED' });
+  await tick();
+  assert.equal(issued, 1);
+  assert.equal(f.calls('cat', 'invoke')[0].mediaPurpose, undefined);
+  consumer.abort();
+  await rejected;
+  assert.equal(producerSignal.aborted, false);
+  const joined = f.data.resolve(parent);
+  await tick();
+  assert.equal(issued, 1);
+  gate.resolve();
+  const descriptor = await discovery;
+  assert.deepEqual(await joined, descriptor);
+  assert.equal(descriptor.expiresAt, f.now() + 25_000);
+  f.advance(24_999);
+  assert.deepEqual(await f.data.resolve(parent), descriptor);
+  assert.deepEqual(await f.data.resolve(parent, { discoverVariants: true }), descriptor);
+  assert.equal(issued, 1);
+  f.advance(1);
+  const renewed = await f.data.resolve(parent, { discoverVariants: true });
+  assert.notEqual(renewed.url, descriptor.url);
+  assert.equal(renewed.resolvedAt, f.now());
+  assert.equal(renewed.expiresAt, f.now() + 25_000);
+  assert.deepEqual(await f.data.resolve(parent), renewed);
+  assert.equal(issued, 2);
+});
+
+test('M3 real variant metadata never changes the ordinary pan play protocol or file-level prepare reuse', async t => {
+  const f = fixture(t);
+  f.handlers.pan.play = ({ file, mode }) => success({ file, mode, url: 'https://hls.invalid/master.m3u8',
+    headers: { Referer: 'https://synthetic.invalid/' }, format: 'hls', _meow: { version: 1, media: [{ variants: [
+      { url: 'https://hls.invalid/high.m3u8', quality: '4K', resolution: '3840x2160' },
+      { url: 'https://hls.invalid/low.m3u8', quality: '1080P', resolution: '1920x1080' },
+    ] }] } });
+  const parent = candidate(ref(), { id: 'b'.repeat(64) });
+  const descriptor = await f.data.resolve(parent);
+  const [high, low] = await recognizeVariantCandidates(parent, mediaVariants(descriptor));
+  await f.data.resolve(high);
+  await f.data.resolve(low);
+  await f.data.refresh(high);
+  assert.equal(f.calls('pan', 'prepare').length, 1);
+  assert.equal(f.calls('pan', 'play').length, 2);
+  for (const call of f.calls('pan', 'play')) {
+    assert.deepEqual(Object.keys(call.params).sort(), ['file', 'mode', 'provider']);
+    assert.equal(call.params.file.fileId, 'stored-file-1');
+  }
 });
 
 test('E49 K2 data retains full nonempty pages without a pagecount and exposes valid explicit totals independently of overlap', async t => {
@@ -983,6 +1097,142 @@ test('E03 cross-provider search consumes later TMDB pages and accepts ordinary o
   f.handlers.tmdb.request = () => success({ page: 1, total_pages: 100,
     results: [movieValue(11, { title: '其他', release_date: '2020-01-01' })] });
   await assert.rejects(f.data.metadataSources(target), { code: 'UPSTREAM_FORMAT' });
+});
+
+test('Douban seed resolves through one cached TMDB multi-search page with kind and year precedence', async t => {
+  const f = fixture(t);
+  const requests = [];
+  const target = { id: 'douban:movie:51', kind: 'movie', title: '真实电影', year: 2024 };
+  f.handlers.tmdb.request = ({ path, query }) => {
+    requests.push({ path, query });
+    if (path === '/3/search/multi') return success({ page: 1, total_pages: 100, results: [
+      { id: 81, media_type: 'tv', name: '真实电影', first_air_date: '2024-01-01' },
+      { id: 80, media_type: 'movie', title: '真实电影', release_date: '2023-01-01' },
+      { id: 42, media_type: 'movie', title: '真实电影', release_date: '2024-06-01' },
+    ] });
+    assert.equal(path, '/3/movie/42');
+    return success(movieValue(42));
+  };
+
+  const resolved = await f.data.tmdbTargetEntry(target, {
+    metadata: doubanValue('51', { title: '真实电影', year: '2024' }), rules: recognitionRules,
+  });
+  assert.deepEqual(resolved.target, { id: 'tmdb:movie:42', kind: 'movie', title: '真实电影',
+    metadataProvider: 'tmdb', metadataId: 42, year: 2024 });
+  assert.equal(resolved.entry.value.id, 42);
+  assert.deepEqual(requests.map(row => row.path), ['/3/search/multi', '/3/movie/42']);
+  assert.deepEqual(requests[0].query, { query: '真实电影', page: 1, language: 'zh-CN',
+    region: 'CN', include_adult: false });
+
+  const cached = await f.data.tmdbTargetEntry(target, {
+    metadata: doubanValue('51', { title: '真实电影', year: '2024' }), rules: recognitionRules,
+  });
+  assert.equal(cached.entry.value.id, 42);
+  assert.equal(f.calls('tmdb', 'request').filter(row => row.params.path === '/3/search/multi').length, 1);
+  assert.equal(f.calls('tmdb', 'request').filter(row => row.params.path === '/3/movie/42').length, 1);
+});
+
+test('Douban seed falls back to the first same-kind result and reports successful no-match distinctly', async t => {
+  const f = fixture(t);
+  const target = { id: 'douban:tv:51', kind: 'tv', title: '真实剧集', year: 2024 };
+  f.handlers.tmdb.request = ({ path, query }) => path === '/3/search/multi' ? success({
+    results: [
+      { id: 91, media_type: 'movie', title: '真实剧集', release_date: '2024-01-01' },
+      { id: 92, media_type: 'tv', name: '同名其他年份', first_air_date: '2018-01-01' },
+    ],
+  }) : success(tvValue(92));
+  const resolved = await f.data.tmdbTargetEntry(target, {
+    metadata: doubanValue('51', { title: '真实剧集', year: '2024' }), rules: recognitionRules,
+  });
+  assert.equal(resolved.target.metadataId, 92);
+  assert.equal(resolved.target.year, 2018);
+  assert.deepEqual(f.calls('tmdb', 'request').map(row => row.params.path), ['/3/search/multi', '/3/tv/92']);
+
+  await f.data.invalidate('tmdb');
+  f.handlers.tmdb.request = ({ path }) => {
+    assert.equal(path, '/3/search/multi');
+    return success({ results: [{ id: 93, media_type: 'movie', title: '其他', release_date: '2024-01-01' }] });
+  };
+  assert.equal(await f.data.tmdbTargetEntry(target, {
+    metadata: doubanValue('51', { title: '真实剧集', year: '2024' }), rules: recognitionRules,
+  }), null);
+  assert.equal(f.calls('tmdb', 'request').filter(row => row.params.path === '/3/search/multi').length, 2);
+  assert.equal(f.calls('tmdb', 'request').filter(row => row.params.path === '/3/tv/92').length, 1);
+});
+
+test('Douban seed first-pass selection accepts unknown year before a later exact-year candidate', async t => {
+  const f = fixture(t);
+  const target = { id: 'douban:movie:51', kind: 'movie', title: '真实电影', year: 2024 };
+  f.handlers.tmdb.request = ({ path, query }) => {
+    if (path === '/3/search/multi') {
+      assert.equal(query.page, 1);
+      return success({ results: [
+        { id: 1, media_type: 'tv', name: '真实电影' },
+        { id: 41, media_type: 'movie', title: '真实电影', release_date: '2023-01-01' },
+        { id: 42, media_type: 'movie', title: '真实电影', release_date: '' },
+        { id: 43, media_type: 'movie', title: '真实电影', release_date: '2024-01-01' },
+      ] });
+    }
+    assert.equal(path, '/3/movie/42');
+    return success(movieValue(42));
+  };
+  const resolved = await f.data.tmdbTargetEntry(target, { rules: recognitionRules });
+  assert.equal(resolved.target.metadataId, 42);
+  assert.deepEqual(f.calls('tmdb', 'request').map(row => row.params.path), ['/3/search/multi', '/3/movie/42']);
+});
+
+test('Douban seed explicit refresh replaces a cached no-match with one new multi-search page', async t => {
+  const f = fixture(t);
+  const target = { id: 'douban:movie:51', kind: 'movie', title: '真实电影', year: 2024 };
+  let matched = false;
+  f.handlers.tmdb.request = ({ path }) => {
+    if (path === '/3/search/multi') return success({ results: matched
+      ? [{ id: 42, media_type: 'movie', title: '真实电影', release_date: '2024-01-01' }] : [] });
+    assert.equal(path, '/3/movie/42');
+    return success(movieValue(42));
+  };
+  assert.equal(await f.data.tmdbTargetEntry(target, { rules: recognitionRules }), null);
+  matched = true;
+  assert.equal(await f.data.tmdbTargetEntry(target, { rules: recognitionRules }), null);
+  assert.equal(f.calls('tmdb', 'request').length, 1);
+  const resolved = await f.data.tmdbTargetEntry(target, { rules: recognitionRules, refresh: true });
+  assert.equal(resolved.target.metadataId, 42);
+  assert.deepEqual(f.calls('tmdb', 'request').map(row => row.params.path),
+    ['/3/search/multi', '/3/search/multi', '/3/movie/42']);
+});
+
+test('Douban seed ignores unused multi-search rows and validates only the selected same-kind identity', async t => {
+  const f = fixture(t);
+  const target = { id: 'douban:movie:51', kind: 'movie', title: '真实电影' };
+  f.handlers.tmdb.request = ({ path }) => success(path === '/3/search/multi' ? { results: [
+    { media_type: 'person', name: '未消费的人物' },
+    { title: '缺少类型的未消费行' },
+    { media_type: 'tv' },
+    { id: 42, media_type: 'movie', title: '真实电影' },
+    { media_type: 'movie' },
+  ] } : movieValue(42));
+  const resolved = await f.data.tmdbTargetEntry(target, { rules: recognitionRules });
+  assert.equal(resolved.target.metadataId, 42);
+  assert.deepEqual(f.calls('tmdb', 'request').map(row => row.params.path), ['/3/search/multi', '/3/movie/42']);
+  await f.data.invalidate('tmdb');
+  f.handlers.tmdb.request = () => success({ results: [{ id: 42, title: '真实电影' }] });
+  assert.equal(await f.data.tmdbTargetEntry(target, { rules: recognitionRules }), null);
+  await f.data.invalidate('tmdb');
+  f.handlers.tmdb.request = () => success({ results: [{ media_type: 'movie', title: '真实电影' }] });
+  await assert.rejects(f.data.tmdbTargetEntry(target, { rules: recognitionRules }), { code: 'UPSTREAM_FORMAT' });
+  await f.data.invalidate('tmdb');
+  f.handlers.tmdb.request = () => success({ results: [{ id: 42, media_type: 'movie' }] });
+  await assert.rejects(f.data.tmdbTargetEntry(target, { rules: recognitionRules }), { code: 'UPSTREAM_FORMAT' });
+});
+
+test('Douban seed preserves TMDB request failures instead of converting them into no-match', async t => {
+  const f = fixture(t);
+  const target = { id: 'douban:movie:51', kind: 'movie', title: '真实电影' };
+  f.handlers.tmdb.request = () => failure('UPSTREAM_HTTP');
+  await assert.rejects(f.data.tmdbTargetEntry(target, {
+    metadata: doubanValue('51'), rules: recognitionRules,
+  }), { code: 'UPSTREAM_HTTP' });
+  assert.deepEqual(f.calls('tmdb', 'request').map(row => row.params.path), ['/3/search/multi']);
 });
 
 test('E47 Cat string/source JSON report action keeps exact flag/id/session and requires inner ok true', async t => {

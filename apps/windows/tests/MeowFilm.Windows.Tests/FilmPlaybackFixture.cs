@@ -50,14 +50,16 @@ internal static class FilmPlaybackFixture
         });
     }
     internal static JsonElement Snapshot(Guid id, long sequence, FilmPlaybackTarget target, JsonElement metadata,
-        JsonElement? attempt = null, JsonElement? current = null, JsonElement? browsing = null, JsonElement? candidates = null)
+        JsonElement? attempt = null, JsonElement? current = null, JsonElement? browsing = null, JsonElement? candidates = null,
+        FilmPlaybackTarget? entryTarget = null, string? entrySurface = null, string? entryResolution = null)
     {
         JsonElement[] episodes = target.Kind == "movie" ? [] : FilmJson.Array(metadata, "seasons").SelectMany(row => FilmJson.Array(row, "episodes")).ToArray();
         object[] metadataSources = target.MetadataProvider is null ? [] : [new
         { id = target.MetadataProvider + ":" + target.MetadataId, provider = target.MetadataProvider, metadataId = target.MetadataId, kind = target.Kind, title = target.Title }];
         return FilmJson.Encode(new
         {
-            sessionId = id.ToString(), sequence, target = target.Wire(), stage = "unavailable", error = (string?)null, metadata,
+            sessionId = id.ToString(), sequence, target = target.Wire(), entryTarget = (entryTarget ?? target).Wire(),
+            entrySurface, entryResolution, stage = "unavailable", error = (string?)null, metadata,
             metadataSources,
             metadataSourceId = target.MetadataProvider is null ? null : target.MetadataProvider + ":" + target.MetadataId,
             sources = Array.Empty<object>(), search = Array.Empty<object>(),
@@ -126,6 +128,7 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
     private readonly HashSet<string> released = new(StringComparer.Ordinal);
     internal IReadOnlySet<string> Released { get { lock (gate) return new HashSet<string>(released, StringComparer.Ordinal); } }
     internal Func<string, JsonElement, CancellationToken, Task<JsonElement>>? Intercept;
+    internal Func<Guid, JsonElement, JsonElement>? PlaybackOpen;
     private JsonElement value;
     internal JsonElement Value { get { lock (gate) return value; } set { lock (gate) this.value = value; } }
     internal bool Connected = true, Controlled = true;
@@ -180,7 +183,9 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
                 pendingId = ""; currentId = "";
                 var visibleCandidates = Target.Kind == "movie" && FilmJson.Array(Candidates).Length == 0
                     ? FilmJson.Encode(new[] { FilmPlaybackFixture.Candidate("movie-file", episode: null) }) : Candidates;
-                Value = FilmPlaybackFixture.Snapshot(SessionId, ++sequence, Target, Metadata, candidates: visibleCandidates);
+                Value = PlaybackOpen?.Invoke(SessionId, input) ??
+                    FilmPlaybackFixture.Snapshot(SessionId, ++sequence, Target, Metadata, candidates: visibleCandidates);
+                sequence = FilmJson.Member(Value, "sequence").GetInt64();
                 return Ok(Value);
             case "film.session.snapshot": return Ok(Value);
             case "film.session.release":
@@ -330,9 +335,10 @@ internal sealed class FilmPlaybackRig : IAsyncDisposable
         Page = new(item, request, Session, Library);
         await Session.OpenAsync(Page, new
         {
-            platform = "windows", target = request.Target.Wire(), sources = request.Sources ?? [],
+            platform = "windows", entrySurface = request.EntrySurface, target = request.Target.Wire(),
+            resumeTarget = request.ResumeTarget?.Wire(), sources = request.Sources ?? [],
             query = request.Query, results = request.Results, search = request.Search, metadata = request.Metadata,
-            cacheEntries = request.CacheEntries
+            cacheEntries = request.CacheEntries, resultHints = request.ResultHints, searchReference = request.SearchReference
         }, token);
         await Page.LoadFavoriteAsync();
     }
@@ -358,6 +364,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
     public event EventHandler? Failed;
     public event EventHandler? Ended;
     internal readonly List<RuntimeMediaPlaybackIntent> Intents = [];
+    internal readonly List<(RuntimeMediaPlaybackIntent Intent, FilmMediaReceipt Receipt, INativeMediaResourceLease? Lease)> Inputs = [];
     internal readonly List<(NativePlaybackScope Scope, string Command, object? Value)> Controls = [];
     internal Func<CancellationToken, Task>? Preparing;
     internal Func<CancellationToken, Task>? Committing;
@@ -373,6 +380,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
     internal string? Aspect;
     public async Task PrepareAsync(RuntimeMediaPlaybackIntent value, FilmMediaReceipt receipt, INativeMediaResourceLease? lease, CancellationToken token)
     {
+        Inputs.Add((value, receipt, lease));
         Intents.Add(value); intent = value; preparedFrom = Scope; PendingLease = lease; inputFailure = null;
         try
         {

@@ -59,13 +59,14 @@ public struct FilmItem: Equatable, Codable, Sendable {
     public let largePosterURL: URL?
     public let score: String
     public let subtitle: String
+    public let metadataSeed: Data?
 
     public var identity: FilmItemIdentity {
         FilmItemIdentity(sourceID: sourceID, itemID: id, kind: kind)
     }
 
     public init(sourceID: String, id: String, title: String, kind: FilmItemKind? = nil, posterURL: URL? = nil,
-                largePosterURL: URL? = nil, score: String = "", subtitle: String = "") {
+                largePosterURL: URL? = nil, score: String = "", subtitle: String = "", metadataSeed: Data? = nil) {
         self.sourceID = sourceID
         self.id = id
         self.title = title
@@ -74,6 +75,7 @@ public struct FilmItem: Equatable, Codable, Sendable {
         self.largePosterURL = largePosterURL
         self.score = score
         self.subtitle = subtitle
+        self.metadataSeed = metadataSeed
     }
 }
 

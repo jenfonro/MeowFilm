@@ -7,10 +7,10 @@ using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>Bundled preview posters stay local; catalog URLs retain the shared artwork lifecycle.</summary>
+/// <summary>Explicit bundled artwork stays local; catalog URLs retain the shared artwork lifecycle.</summary>
 public sealed class FilmPlaybackPoster : Grid
 {
-    private const string PreviewPrefix =
+    private const string BundledPrefix =
         "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/";
 
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(
@@ -33,7 +33,7 @@ public sealed class FilmPlaybackPoster : Grid
         "ArtworkPalette", typeof(Brush), typeof(FilmPlaybackPoster),
         new PropertyMetadata(null, (value, _) => ((FilmPlaybackPoster)value).LatchArtworkPalette()));
 
-    private readonly Image preview = new() { Stretch = Stretch.UniformToFill };
+    private readonly Image bundledImage = new() { Stretch = Stretch.UniformToFill };
     private readonly ArtworkImage artwork = new() { ShowRetry = false };
 
     public string Address
@@ -53,7 +53,7 @@ public sealed class FilmPlaybackPoster : Grid
     public FilmPlaybackPoster()
     {
         ClipToBounds = true;
-        Children.Add(preview);
+        Children.Add(bundledImage);
         Children.Add(artwork);
         SetBinding(ArtworkPaletteProperty, new Binding(nameof(ArtworkImage.RawPaletteBrush))
             { Source = artwork, Mode = BindingMode.OneWay });
@@ -61,11 +61,11 @@ public sealed class FilmPlaybackPoster : Grid
 
     private void UpdateAddress()
     {
-        bool bundled = Address?.StartsWith(PreviewPrefix, StringComparison.Ordinal) == true;
+        bool bundled = Address?.StartsWith(BundledPrefix, StringComparison.Ordinal) == true;
         // Clear first: a cached catalog image may publish its palette while the address is assigned.
         ClearValue(PaletteBrushPropertyKey);
-        preview.Source = bundled ? new BitmapImage(new Uri(Address!, UriKind.Absolute)) : null;
-        preview.Visibility = bundled ? Visibility.Visible : Visibility.Collapsed;
+        bundledImage.Source = bundled ? new BitmapImage(new Uri(Address!, UriKind.Absolute)) : null;
+        bundledImage.Visibility = bundled ? Visibility.Visible : Visibility.Collapsed;
         artwork.Address = bundled ? "" : Address ?? "";
         artwork.Visibility = bundled ? Visibility.Collapsed : Visibility.Visible;
         UpdateBackdrop();
@@ -78,7 +78,7 @@ public sealed class FilmPlaybackPoster : Grid
             ClearValue(PaletteBrushPropertyKey);
             return;
         }
-        if (preview.Source is BitmapSource local)
+        if (bundledImage.Source is BitmapSource local)
         {
             // Fully transparent images sample to the shared DimGray placeholder: no poster color.
             if (ArtworkImage.SamplePalette(local).Raw is SolidColorBrush sampled && !ReferenceEquals(sampled, Brushes.DimGray))
@@ -93,7 +93,7 @@ public sealed class FilmPlaybackPoster : Grid
     private void LatchArtworkPalette()
     {
         // Retiring offscreen artwork resets to the shared DimGray placeholder; keep the last real color.
-        if (IsBackdrop && preview.Source is null && artwork.RawPaletteBrush is SolidColorBrush brush &&
+        if (IsBackdrop && bundledImage.Source is null && artwork.RawPaletteBrush is SolidColorBrush brush &&
             !ReferenceEquals(brush, Brushes.DimGray))
             SetValue(PaletteBrushPropertyKey, brush);
     }
@@ -109,13 +109,13 @@ public sealed class FilmPlaybackPoster : Grid
     {
         if (!IsBackdrop) return base.ArrangeOverride(arrangeSize);
         var slot = new Rect(arrangeSize);
-        if (preview.Source is BitmapSource { PixelWidth: > 0, PixelHeight: > 0 } local)
+        if (bundledImage.Source is BitmapSource { PixelWidth: > 0, PixelHeight: > 0 } local)
         {
             double scale = Math.Max(arrangeSize.Width / local.PixelWidth, arrangeSize.Height / local.PixelHeight);
             double width = local.PixelWidth * scale, height = local.PixelHeight * scale;
             slot = new Rect((arrangeSize.Width - width) / 2, (arrangeSize.Height - height) / 2, width, height);
         }
-        preview.Arrange(slot);
+        bundledImage.Arrange(slot);
         // ArtworkImage owns the decoded catalog size and its UniformToFill crop; no guessed poster ratio.
         artwork.Arrange(new Rect(arrangeSize));
         return arrangeSize;
