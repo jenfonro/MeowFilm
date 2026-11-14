@@ -13,7 +13,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     private readonly FilmPlaybackSession? session;
     private readonly FilmLibrary? library;
     private FilmPlaybackSnapshot? snapshot;
-    private bool isListLayout, overviewExpanded, favorite, favoriteBusy;
+    private bool isListLayout, overviewExpanded, favorite, favoriteBusy, searchMoreBusy;
     private string connectionError = "";
 
     internal FilmPlaybackPage(FilmCardItem item, FilmPlaybackRequest request,
@@ -255,7 +255,9 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public bool RequiresSourceSearch => IsUnmatchedDoubanEntry &&
         FilmJson.Array(snapshot?.Raw ?? default, "sources").Length == 0;
     public bool CanStartSourceSearch => session?.IsCurrentPage(this) == true && RequiresSourceSearch && !PlayerBusy;
-    public bool CanSearchMore => snapshot is not null && !RequiresSourceSearch &&
+    public bool CanSearchMore => snapshot is not null && session?.IsCurrentPage(this) == true && !searchMoreBusy &&
+        PlayerStage is not ("loading" or "searching") && !RequiresSourceSearch &&
+        !FilmJson.Array(snapshot.Raw, "search").Any(row => FilmJson.Bool(row, "loading")) &&
         EntryResolution is not ("loading" or "error") &&
         FilmJson.Text(snapshot.Raw, "error") != "SOURCE_NOT_FOUND" && !FilmJson.Bool(snapshot.Raw, "searchComplete");
     public bool ListLoading => FilmJson.Bool(snapshot?.Browsing ?? default, "loading");
@@ -266,7 +268,6 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public string ListMessage => ListLoading || snapshot is null ? "加载中…" : "暂无内容";
     public bool ShowListMessage => ShowListStatus && ListError.Length == 0;
     public bool CanPlay => session?.IsCurrentPage(this) == true && snapshot is not null && !RequiresSourceSearch;
-    public bool CanRefreshBrowsing => CanPlay && !ListLoading;
     public bool CanRetryMedia => CanPlay && (snapshot!.AttemptId.Length > 0 || HasCurrent ||
         FilmJson.Text(snapshot.Raw, "stage") is "error" or "unavailable");
     internal FilmMetadataCache? MetadataCache => snapshot?.MetadataCache;
@@ -342,8 +343,9 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
                     FilmJson.Text(line, "label") is { Length: > 0 } label ? label : provider,
                     WireId: id, Provider: provider.Length > 0 ? provider : null);
             }).ToArray();
-            var seasons = FilmJson.Array(value.Metadata, "seasons");
-            if (seasons.Length == 0) seasons = FilmJson.Array(value.Metadata, "doubanSeasons");
+            var trustedSeasons = FilmJson.Member(value.Metadata, "doubanSeasons");
+            var seasons = trustedSeasons.ValueKind == JsonValueKind.Array
+                ? FilmJson.Array(trustedSeasons) : FilmJson.Array(value.Metadata, "seasons");
             Seasons = ActiveTarget.Kind == "movie" || seasons.Length == 0 ? [] :
                 seasons.Select(row => new { Row = row, Number = FilmJson.Integer(row, "season_number") ?? FilmJson.Integer(row, "season") })
                 .Where(row => row.Number is not null)
@@ -381,15 +383,13 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     }
 
     internal string ContentPoster => Poster.Length > 0 ? Poster : Item.Poster;
-    private JsonElement EpisodeMetadata => MetadataSources.FirstOrDefault(row =>
-        row.MetadataSourceId == MetadataSourceId)?.Provider switch
-        {
-            "tmdb" => DisplayMetadata,
-            "douban" => SupplementMetadata,
-            _ => ActiveTarget.MetadataProvider == "douban" ? SupplementMetadata : DisplayMetadata
-        };
-    internal JsonElement EpisodeSeason(int? season) => FilmJson.Array(EpisodeMetadata, "seasons")
-        .FirstOrDefault(row => (FilmJson.Integer(row, "season_number") ?? FilmJson.Integer(row, "season")) == season);
+    internal JsonElement EpisodeSeason(int? season)
+    {
+        var trusted = FilmJson.Member(DisplayMetadata, "doubanSeasons");
+        var seasons = trusted.ValueKind == JsonValueKind.Array
+            ? FilmJson.Array(trusted) : FilmJson.Array(DisplayMetadata, "seasons");
+        return seasons.FirstOrDefault(row => (FilmJson.Integer(row, "season_number") ?? FilmJson.Integer(row, "season")) == season);
+    }
     internal JsonElement EpisodeDetail(int? season, int? episode) => season is null || episode is null ? default :
         FilmJson.Array(EpisodeSeason(season), "episodes").FirstOrDefault(row =>
             (FilmJson.Integer(row, "episode_number") ?? FilmJson.Integer(row, "episode")) == episode);
@@ -433,7 +433,13 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     }
     internal Task CommandAsync(string action, object? parameters = null) => RequireSession().CommandAsync(action, parameters);
     internal Task PlayAsync() => HasOutput ? RequireSession().PauseAsync() : CommandAsync("play");
-    internal Task RefreshBrowsingAsync() => CommandAsync("browse.refresh");
+    internal async Task SearchMoreSourcesAsync()
+    {
+        if (!CanSearchMore) return;
+        searchMoreBusy = true; Changed(nameof(CanSearchMore));
+        try { await CommandAsync("search.more"); }
+        finally { searchMoreBusy = false; Changed(nameof(CanSearchMore)); }
+    }
     internal Task SearchSourcesAsync() => CanStartSourceSearch ? CommandAsync("search.more") : Task.CompletedTask;
     internal Task RetryMediaAsync()
     {

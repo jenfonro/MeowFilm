@@ -590,7 +590,15 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       if (row.provider === 'tmdb' && Array.isArray(row.metadata.seasons)) row.seasons = row.metadata.seasons;
       else if (row.provider === 'douban' && seasons.length) row.seasons = seasons;
     }
-    return result;
+    const douban = result.find(row => row.provider === 'douban' &&
+      target.metadataProvider === 'douban' && String(row.metadataId) === String(target.metadataId)) ??
+      result.find(row => row.provider === 'douban' && String(row.metadataId) === String(seasons[0]?.metadataId)) ??
+      result.find(row => row.provider === 'douban');
+    const tmdb = result.find(row => row.provider === 'tmdb');
+    const redundant = target.metadataProvider !== 'douban' && seasons.length > 0 &&
+      tmdb?.seasons?.length === seasons.length && seasons.every(row => tmdb.seasons.some(other =>
+        other.season_number === row.season && other.episode_count === row.episodeCount));
+    return result.filter(row => row.provider !== 'douban' || row === douban && !redundant);
   }
   async function metadataSources(target, { metadata: supplied, rules, signal, canSchedule } = {}) {
     return execute([{ domain: 'tmdb' }, { domain: 'douban' }], { signal, canSchedule },

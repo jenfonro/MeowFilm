@@ -11,8 +11,8 @@ const integer = (value, minimum = 0) => {
 export function buildEpisodeMap(metadata) {
   if (!metadata || typeof metadata !== 'object') return [];
   const rows = Array.isArray(metadata) ? metadata
-    : Array.isArray(metadata.seasons) ? metadata.seasons
-      : Array.isArray(metadata.doubanSeasons) ? metadata.doubanSeasons
+    : Array.isArray(metadata.doubanSeasons) ? metadata.doubanSeasons
+      : Array.isArray(metadata.seasons) ? metadata.seasons
         : metadata.season_number !== undefined || metadata.season !== undefined ? [metadata] : [];
   const seasons = new Map();
   for (const row of rows) {
@@ -68,6 +68,26 @@ export function buildEpisodeMap(metadata) {
     }
   }
   return result;
+}
+
+export function sameSeasonPartition(metadata, reference) {
+  const rows = value => value?.doubanSeasons ?? value?.seasons ?? [];
+  const numbers = value => [...new Set(rows(value).map(row => integer(row.season_number ?? row.season))
+    .filter(number => number > 0))].sort((a, b) => a - b);
+  const ownSeasons = numbers(metadata), referenceSeasons = numbers(reference);
+  return ownSeasons.length > 0 && ownSeasons.length === referenceSeasons.length &&
+    ownSeasons.every((season, index) => season === referenceSeasons[index]);
+}
+
+export function matchEpisodeMaps(metadata, reference) {
+  const sameSeasons = sameSeasonPartition(metadata, reference);
+  const index = new Map();
+  for (const episode of buildEpisodeMap(reference)) {
+    const key = sameSeasons ? `${episode.season}:${episode.episode}` : episode.globalEpisode;
+    if (key !== undefined) index.set(key, index.has(key) ? null : episode);
+  }
+  return buildEpisodeMap(metadata).map(episode => ({ episode,
+    match: index.get(sameSeasons ? `${episode.season}:${episode.episode}` : episode.globalEpisode) ?? null }));
 }
 
 export function resolveEpisode(map, { season, episode, globalEpisode } = {}) {

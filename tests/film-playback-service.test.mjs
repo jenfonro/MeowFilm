@@ -1076,7 +1076,7 @@ test('G02-C01 real data preserves a selected season-zero episode-zero and an exp
     ['/3/tv/19', '/3/tv/19/season/0', '/3/tv/19/season/2']);
 });
 
-test('G02-C01 real data does not merge TMDB season fields into a different Douban identity', async t => {
+test('G02-C01 real data supplements verified Douban episodes without replacing their identity or counts', async t => {
   const calls = [], reply = value => ({ ok: true, value });
   const primary = { id: '20', title: 'Series 第1季', year: '2020', season: 1,
     episodes_count: 1, genres: [], intro: 'Real Douban data' };
@@ -1121,9 +1121,11 @@ test('G02-C01 real data does not merge TMDB season fields into a different Douba
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSourceId === first.id);
   assert.equal(f.snapshot(sessionId).metadata.id, '20');
   assert.equal(f.snapshot(sessionId).target.metadataId, '20');
-  assert.deepEqual(f.snapshot(sessionId).episodes, [{ season: 1, episode: 1, globalEpisode: 1 }]);
+  const mapped = { name: 'TMDB episode 1', still_path: '/tmdb-1.jpg', air_date: '2020-01-01',
+    season: 1, episode: 1, globalEpisode: 1 };
+  assert.deepEqual(f.snapshot(sessionId).episodes, [mapped]);
   await f.command(sessionId, 'preview', { enabled: true });
-  assert.deepEqual(f.snapshot(sessionId).episodes, [{ season: 1, episode: 1, globalEpisode: 1 }]);
+  assert.deepEqual(f.snapshot(sessionId).episodes, [mapped]);
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: second.id });
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSourceId === second.id);
   assert.equal(f.snapshot(sessionId).metadata.id, 19);
@@ -1176,6 +1178,205 @@ for (const pausedAt of ['metadata', 'season']) {
     assert.equal(runtime.metadataCalls.filter(row => row.path === '/3/tv/19/season/1').length, pausedAt === 'metadata' ? 1 : 2);
   });
 }
+
+async function mappedMetadataFixture(t, beforeSeason = async () => {}, { secondSeasonCount = 1 } = {}) {
+  const calls = [], reply = value => ({ ok: true, value });
+  const counts = [2, 1, 2, 2], totals = [3, 2, 2, 2];
+  const series = { ...tmdbAppended, id: 19, name: 'Series', first_air_date: '2020-01-01',
+    poster_path: '/series.jpg', genres: [], status: 'Ended',
+    seasons: counts.map((count, index) => ({ season_number: index + 1,
+      episode_count: index === 1 ? secondSeasonCount : count })) };
+  const seasons = counts.map((count, index) => ({ season_number: index + 1,
+    episodes: Array.from({ length: count }, (_, episode) => ({
+      season_number: index + 1, episode_number: episode + 1, name: `TMDB S${index + 1}E${episode + 1}`,
+      overview: `Overview ${index + 1}/${episode + 1}`, runtime: 40 + episode,
+      air_date: '2020-01-01', still_path: `/season-${index + 1}-episode-${episode + 1}.jpg`,
+    })) }));
+  const subjects = totals.map((episodes_count, index) => ({ id: String(20 + index),
+    title: `Series 第${index + 1}季`, year: String(2020 + index), season_number: index + 1,
+    episodes_count, genres: [], intro: `Douban season ${index + 1}`,
+    pic: { normal: '/douban-cover.jpg' } }));
+  const modules = new Map([
+    ['douban', { methods: {
+      'douban.data.settings.get': async () => reply({ revision: 'douban-current' }),
+      'douban.data.search': async () => {
+        calls.push(['douban', 'search']);
+        return reply({ subjects: { items: [...subjects].reverse().map(target =>
+          ({ target_id: target.id, target_type: 'tv', target })) } });
+      },
+      'douban.data.request': async ({ path }) => {
+        calls.push(['douban', path]);
+        const row = subjects.find(value => path.endsWith(`/${value.id}`));
+        assert.ok(row);
+        return reply({ ...row, seasons: subjects.map(value => ({ id: value.id, title: value.title })) });
+      },
+    } }],
+    ['tmdb', { methods: {
+      'tmdb.data.settings.get': async () => reply({ revision: 'tmdb-current' }),
+      'tmdb.data.request': async ({ path }) => {
+        calls.push(['tmdb', path]);
+        if (path === '/3/tv/19') return reply(series);
+        if (path === '/3/search/tv') return reply({ page: 1, total_pages: 1, results: [series] });
+        const number = Number(/^\/3\/tv\/19\/season\/(\d+)$/.exec(path)?.[1]);
+        assert.ok(seasons[number - 1]);
+        await beforeSeason(number);
+        return reply(seasons[number - 1]);
+      },
+    } }],
+  ]);
+  const cache = createPlaybackCache(), data = createPlaybackData({ modules, cache });
+  const f = fixture({ data });
+  t.after(async () => { await f.service.close(); await data.close(); await cache.close(); });
+  await f.service.setSettings({ ...defaultPreferences(), iosAutoPrepare: false });
+  const { sessionId } = await f.open({ platform: 'ios',
+    target: { ...tv, season: 2, episode: 1, ...(secondSeasonCount === 0 ? {} : { globalEpisode: 3 }) },
+    sources: [] });
+  await until(() => f.snapshot(sessionId).stage === 'idle' && f.snapshot(sessionId).metadataSources.length === 2);
+  return { ...f, sessionId, calls, series, seasons };
+}
+
+test('four-season TMDB and Douban lists keep different totals, map available details and restore full TMDB data', async t => {
+  const f = await mappedMetadataFixture(t), id = f.sessionId;
+  const before = f.snapshot(id);
+  const tmdb = before.metadataSources.find(row => row.provider === 'tmdb');
+  const douban = before.metadataSources.find(row => row.provider === 'douban');
+  assert.equal(before.metadataSources.filter(row => row.provider === 'douban').length, 1);
+  assert.deepEqual(douban.seasons.map(row => [row.season, row.episodeCount, row.metadataId]),
+    [[1, 3, '20'], [2, 2, '21'], [3, 2, '22'], [4, 2, '23']]);
+  assert.equal(before.episodes[0].name, 'TMDB S2E1');
+  await f.command(id, 'browse.metadata', { metadataSourceId: douban.id });
+  await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === douban.id);
+  const mapped = f.snapshot(id);
+  assert.deepEqual([mapped.target.metadataProvider, mapped.target.metadataId, mapped.target.season,
+    mapped.target.episode, mapped.target.globalEpisode], ['douban', '20', 2, 1, 4]);
+  assert.equal(mapped.episodes.length, 2);
+  assert.deepEqual(mapped.episodes[0], { name: 'TMDB S2E1', overview: 'Overview 2/1',
+    still_path: '/season-2-episode-1.jpg', runtime: 40, air_date: '2020-01-01',
+    season: 2, episode: 1, globalEpisode: 4 });
+  assert.deepEqual(mapped.episodes[1], { season: 2, episode: 2, globalEpisode: 5 });
+  assert.equal(mapped.metadata.id, '20');
+  await f.command(id, 'browse.metadata', { metadataSourceId: tmdb.id });
+  await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === tmdb.id);
+  assert.deepEqual(f.snapshot(id).episodes, before.episodes);
+  assert.deepEqual(f.snapshot(id).target, before.target);
+  assert.equal(f.snapshot(id).metadata.seasons[1].episodes[0].runtime, 40);
+  assert.deepEqual(f.calls.filter(([provider]) => provider === 'tmdb'),
+    [['tmdb', '/3/tv/19'], ['tmdb', '/3/tv/19/season/2']]);
+  assert.equal(f.snapshot(id).attempt, null);
+  assert.equal(f.snapshot(id).current, null);
+  assert.deepEqual(f.library.read().history, []);
+});
+
+for (const secondSeasonCount of [0, null]) {
+  test(`Douban maps an already cached TMDB season despite its zero or unknown summary count (${secondSeasonCount})`, async t => {
+    const f = await mappedMetadataFixture(t, undefined, { secondSeasonCount }), id = f.sessionId;
+    const before = f.snapshot(id);
+    assert.equal(before.metadata.seasons[1].episode_count, secondSeasonCount);
+    assert.equal(before.episodes[0].name, 'TMDB S2E1', 'the season owner already supplied real cached episodes');
+    const douban = before.metadataSources.find(row => row.provider === 'douban');
+    await f.command(id, 'browse.metadata', { metadataSourceId: douban.id });
+    await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === douban.id);
+    const mapped = f.snapshot(id);
+    assert.deepEqual([mapped.target.metadataProvider, mapped.target.metadataId, mapped.target.season,
+      mapped.target.episode, mapped.target.globalEpisode], ['douban', '20', 2, 1, 4]);
+    assert.equal(mapped.metadata.id, '20');
+    assert.deepEqual(mapped.metadata.doubanSeasons.map(row => [row.season, row.episodeCount, row.metadataId]),
+      [[1, 3, '20'], [2, 2, '21'], [3, 2, '22'], [4, 2, '23']]);
+    assert.deepEqual(mapped.episodes, [
+      { name: 'TMDB S2E1', overview: 'Overview 2/1', still_path: '/season-2-episode-1.jpg',
+        runtime: 40, air_date: '2020-01-01', season: 2, episode: 1, globalEpisode: 4 },
+      { season: 2, episode: 2, globalEpisode: 5 },
+    ]);
+    assert.equal(mapped.metadataError, null);
+    assert.equal(mapped.browsing.error, null);
+    const tmdb = before.metadataSources.find(row => row.provider === 'tmdb');
+    await f.command(id, 'browse.metadata', { metadataSourceId: tmdb.id });
+    await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === tmdb.id);
+    const restored = f.snapshot(id);
+    assert.deepEqual(restored.target, before.target, 'returning to TMDB preserves the original S2 coordinates');
+    assert.equal(restored.browsing.season, 2);
+    assert.deepEqual(restored.episodes, before.episodes, 'returning to TMDB preserves the complete cached S2 fields');
+    assert.deepEqual(restored.metadata.seasons[1].episodes, before.metadata.seasons[1].episodes);
+    assert.equal(restored.metadata.seasons[1].episodes[0].name, 'TMDB S2E1');
+    assert.equal(restored.metadata.seasons[1].episodes[0].runtime, 40);
+    assert.equal(restored.metadataError, null);
+    assert.equal(restored.browsing.error, null);
+    assert.equal(f.calls.filter(([provider, path]) =>
+      provider === 'tmdb' && path === '/3/tv/19/season/2').length, 1, 'the real season cache is reused');
+  });
+}
+
+for (const cached of [true, false]) {
+  test(`a failed optional TMDB supplement preserves Douban episodes and reports metadataError (cached=${cached})`, async t => {
+    let failSupplement = false, failures = 0;
+    const requestedSeason = cached ? 2 : 1;
+    const f = await mappedMetadataFixture(t, async season => {
+      if (failSupplement && season === requestedSeason) {
+        failures++;
+        throw error('NETWORK_ERROR');
+      }
+    }), id = f.sessionId;
+    const douban = f.snapshot(id).metadataSources.find(row => row.provider === 'douban');
+    await f.command(id, 'browse.metadata', { metadataSourceId: douban.id });
+    await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === douban.id);
+    const before = f.snapshot(id);
+    assert.equal(before.episodes[0].name, 'TMDB S2E1');
+    assert.equal(before.metadataCache.status, 'fresh');
+    if (!cached) assert.equal(f.calls.some(([provider, path]) =>
+      provider === 'tmdb' && path === '/3/tv/19/season/1'), false, 'the failing reference season has no old value');
+    failSupplement = true;
+    if (cached) await f.command(id, 'browse.refresh');
+    else await f.command(id, 'browse.season', { season: requestedSeason });
+    await until(() => failures > 0 && !f.snapshot(id).browsing.loading);
+    const failed = f.snapshot(id);
+    assert.equal(failed.metadataError, 'NETWORK_ERROR');
+    assert.equal(failed.metadataCache.status, 'fresh', 'an optional failure must not invalidate the independent primary');
+    assert.equal(failed.metadataCache.error, undefined);
+    assert.equal(failed.browsing.error, null);
+    assert.equal(failed.metadataSourceId, douban.id);
+    assert.equal(failed.metadata.id, '20');
+    assert.deepEqual(failed.target, before.target);
+    assert.deepEqual(failed.metadata.doubanSeasons.map(row => [row.season, row.episodeCount, row.metadataId]),
+      [[1, 3, '20'], [2, 2, '21'], [3, 2, '22'], [4, 2, '23']]);
+    assert.equal(failed.browsing.season, requestedSeason);
+    if (cached) assert.deepEqual(failed.episodes, before.episodes, 'stale reference details remain displayable');
+    else assert.deepEqual(failed.episodes, [
+      { season: 1, episode: 1, globalEpisode: 1 },
+      { season: 1, episode: 2, globalEpisode: 2 },
+      { season: 1, episode: 3, globalEpisode: 3 },
+    ], 'missing optional details leave the real primary season available');
+    assert.equal(failed.attempt, null);
+    assert.equal(failed.current, null);
+    assert.deepEqual(f.library.read().history, []);
+  });
+}
+
+test('a late TMDB supplement for a Douban season cannot overwrite a newer TMDB selection', async t => {
+  const gate = deferred();
+  let waiting = false;
+  const f = await mappedMetadataFixture(t, async season => {
+    if (season === 1) { waiting = true; await gate.promise; }
+  });
+  t.after(() => gate.resolve());
+  const id = f.sessionId, sources = f.snapshot(id).metadataSources;
+  const tmdb = sources.find(row => row.provider === 'tmdb'), douban = sources.find(row => row.provider === 'douban');
+  await f.command(id, 'browse.metadata', { metadataSourceId: douban.id });
+  await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === douban.id);
+  await f.command(id, 'browse.season', { season: 1 });
+  await until(() => waiting);
+  await f.command(id, 'browse.metadata', { metadataSourceId: tmdb.id });
+  await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === tmdb.id);
+  const current = f.snapshot(id);
+  gate.resolve();
+  await f.data.seasonMetadataEntry(tv, 1);
+  await tick();
+  const final = f.snapshot(id);
+  assert.equal(final.metadataSourceId, tmdb.id);
+  assert.deepEqual(final.metadata, current.metadata);
+  assert.deepEqual(final.episodes, current.episodes);
+  assert.deepEqual(final.target, current.target);
+  assert.equal(final.browsing.error, null);
+});
 
 test('Windows auto playback waits for output; first media failure continues cached candidate without new search', async t => {
   const f = fixture(); t.after(() => f.service.close());

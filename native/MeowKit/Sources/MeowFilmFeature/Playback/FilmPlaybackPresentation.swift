@@ -34,7 +34,7 @@ enum FilmPlaybackPresentation {
                             largePosterURL: large ?? supplementalPoster ?? (poster == nil && !hasDetail ? baseline.item.largePosterURL : nil),
                             score: rating == nil && !hasDetail ? baseline.item.score : score.map { String(format: "%.1f", $0) } ?? "",
                             subtitle: baseline.item.subtitle, metadataSeed: baseline.item.metadataSeed)
-        let seasonField = field(fields, "seasons", "doubanSeasons")
+        let seasonField = field(fields, "doubanSeasons", "seasons")
         let seasonRows = seasonField == nil && !succeeded(snapshot.metadataCache, component: "seasons")
             ? displayMetadata?.seasons : seasonField?.filmArray ?? []
         let seasons = seasonRows?.compactMap { raw -> FilmSeason? in

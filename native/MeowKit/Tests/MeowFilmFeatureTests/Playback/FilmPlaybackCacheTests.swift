@@ -354,6 +354,26 @@ final class FilmPlaybackCacheTests: XCTestCase {
         XCTAssertEqual(detail.seasons.first?.episodes.map(\.number), [7])
         XCTAssertEqual(snapshot.target.position, target.position)
 
+        var associated = try main.filmRequiredObject()
+        associated["doubanSeasons"] = associated["seasons"]
+        associated["seasons"] = .array([.object([
+            "id": .string("101"), "title": .string("关联豆瓣条目")
+        ])])
+        let associatedSnapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: .object(associated),
+            episodes: [.object(["season": .number(2), "episode": .number(7), "name": .string("主集")])],
+            target: .object(target.value), metadataSupplement: supplement))
+        let associatedDetail = FilmPlaybackPresentation.detail(associatedSnapshot, original: original)
+        XCTAssertEqual(associatedDetail.seasons.map(\.number), [2])
+        XCTAssertEqual(associatedDetail.seasons.map(\.title), ["主季度"])
+        XCTAssertEqual(associatedDetail.seasons.first?.episodes.map(\.number), [7])
+        XCTAssertEqual(associatedDetail.seasons.first?.episodes.map(\.title), ["主集"])
+
+        var emptySeasons = try main.filmRequiredObject()
+        emptySeasons["doubanSeasons"] = .array([])
+        let emptySnapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: .object(emptySeasons),
+            target: .object(target.value), metadataSupplement: supplement))
+        XCTAssertTrue(FilmPlaybackPresentation.detail(emptySnapshot, original: original).seasons.isEmpty)
+
         let cleared = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: main,
             target: .object(target.value)))
         let withoutSupplement = FilmPlaybackPresentation.detail(cleared, original: original)

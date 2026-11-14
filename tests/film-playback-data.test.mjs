@@ -1020,6 +1020,7 @@ test('E03 independent Douban seasons use explicit real season markers/counts wit
     { target_id: '999', target_type: 'tv', target: { id: '999', title: '另一个剧 第2季', year: '2025' } },
   ] } });
   const sources = await f.data.metadataSources(target);
+  assert.equal(sources.length, 1, 'one Douban selector owns all verified subjects/seasons');
   const rows = sources.find(row => row.provider === 'douban').seasons;
   assert.equal(rows.length, 12); assert.equal(rows.at(-1).season, 12); assert.equal(rows.at(-1).episodeCount, 13);
   assert.equal(sources.every(row => row.provider === 'douban'), true);
@@ -1027,6 +1028,32 @@ test('E03 independent Douban seasons use explicit real season markers/counts wit
   assert.equal(season.id, '112'); assert.equal(season.season, 12); assert.equal(season.episodeCount, 13);
   assert.equal(f.calls('douban', 'request').some(row => row.params.path.endsWith('/999')), false);
 });
+
+for (const counts of [[2, 2, 2, 2], [3, 2, 2, 2]]) {
+  test(`Douban selector compares every season count with TMDB: ${counts.join('/')}`, async t => {
+    const f = fixture(t);
+    f.handlers.tmdb.request = () => success(tvValue(43, {
+      seasons: [1, 2, 3, 4].map(season_number => ({ season_number, episode_count: 2 })),
+    }));
+    const subjects = counts.map((episodes_count, index) => doubanValue(String(101 + index), {
+      title: `真实剧集 第${index + 1}季`, year: String(2024 + index), episodes_count,
+    }));
+    f.handlers.douban.search = () => success({ subjects: { items: [...subjects].reverse().map(target =>
+      ({ target_id: target.id, target_type: 'tv', target })) } });
+    f.handlers.douban.request = ({ path }) => success(subjects.find(row => path.endsWith(`/${row.id}`)));
+    const rows = await f.data.metadataSources(tvTarget);
+    if (counts[0] === 2) {
+      assert.deepEqual(rows.map(row => row.provider), ['tmdb'], 'identical season/count structure is redundant');
+    } else {
+      assert.deepEqual(rows.map(row => row.provider), ['tmdb', 'douban']);
+      assert.equal(rows[1].metadataId, '101', 'the season-one subject anchors the single selector');
+      assert.deepEqual(rows[1].seasons.map(row => [row.season, row.episodeCount, row.metadataId]),
+        counts.map((count, index) => [index + 1, count, String(101 + index)]));
+    }
+    assert.equal(f.calls('douban', 'request').length, 4);
+    assert.equal(f.calls('tmdb', 'request').some(row => row.params.path.includes('/season/')), false);
+  });
+}
 
 test('E03 primary season evidence survives missing opposite owner, but absent season/count never fabricates season one or zero count', async t => {
   const f = fixture(t);
