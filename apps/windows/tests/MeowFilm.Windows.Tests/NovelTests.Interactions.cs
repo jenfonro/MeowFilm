@@ -495,7 +495,7 @@ public static partial class NovelTests
             Check(((FrameworkElement)shell.FindName("PageHeaderHost")).Visibility == Visibility.Collapsed && ((FrameworkElement)shell.FindName("PlayerFrame")).Visibility == Visibility.Collapsed);
             Preview((FrameworkElement)shell.Content, "novel-shell-reader", 1050, 760);
             module.Request(NovelCapability.BookRoute);
-            await Until(() => module.Route == NovelCapability.BookRoute && ((Grid)shell.FindName("RootLayout")).ColumnDefinitions[0].Width.Value == 203);
+            await Until(() => module.Route == NovelCapability.BookRoute && ((Grid)shell.FindName("RootLayout")).ColumnDefinitions[0].Width.Value == 216);
             Check(module.CaptureNavigationLocation() == retained && ((FrameworkElement)shell.FindName("PageHeaderHost")).Visibility == Visibility.Visible);
         }
         finally { shell.Close(); await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(10)); }

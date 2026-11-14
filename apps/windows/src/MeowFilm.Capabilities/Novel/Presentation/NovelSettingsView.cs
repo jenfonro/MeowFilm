@@ -164,8 +164,15 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     }
     internal async Task ImportFromAsync(FrameworkElement owner, CancellationToken token)
     {
-        var panel = new ManagementForm(); var input = panel.Field("书源内容", "", 12); JsonElement preview = default;
-        bool accepted = await NovelUi.DialogAsync(owner, "导入书源", panel, "预览", async ct => { preview = await module.Sources.PreviewImportAsync(text: input.Text, token: ct); return true; }, token, applicationOverlay: true);
+        var panel = new ManagementForm(); var input = panel.Field("书源地址或内容", "", 12); JsonElement preview = default;
+        bool accepted = await NovelUi.DialogAsync(owner, "导入书源", panel, "预览", async ct =>
+        {
+            string value = input.Text.Trim();
+            preview = Uri.TryCreate(value, UriKind.Absolute, out var url) && url.Scheme is "http" or "https"
+                ? await module.Sources.PreviewImportAsync(url: value, token: ct)
+                : await module.Sources.PreviewImportAsync(text: value, token: ct);
+            return true;
+        }, token, applicationOverlay: true);
         if (accepted) await PreviewSourcesAsync(owner, preview, token);
     }
     private async Task PreviewSourcesAsync(FrameworkElement owner, JsonElement preview, CancellationToken token)

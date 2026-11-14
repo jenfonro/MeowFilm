@@ -77,7 +77,7 @@ public static partial class NovelTests
             var sources = new NovelSourceService(runtime);
             await using var ruleRuntime = new NovelRuleRuntimeFixture();
             await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
-            await module.InitializeAsync(default); await module.NavigateAsync(NovelCapability.ShelfRoute, default);
+            await module.InitializeAsync(default);
             Check(module.Library.Entries.Single().BookId == "cold-shelf" && runtime.Calls.Count == 0);
             await module.ReceiveBookAsync(module.Library.Entries.Single().Book, default);
             try

@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { isUtf8 } from 'node:buffer';
-import { PrivateDocuments, SCRIPT_LIMITS } from '@meowfilm/script-host';
+import { PrivateDocuments, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
 import { normalizeSourceDefinition } from '@meowfilm/source-runtime';
 import { InstallationOperations } from './source-candidates.mjs';
 
@@ -331,12 +331,29 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
   async function importEntries(params, signal) {
     let input = params.text;
     if (params.url !== undefined) {
-      let target;
-      try { target = new URL(params.url); } catch { throw fail('INVALID_REQUEST'); }
-      require(['http:', 'https:'].includes(target.protocol) && !target.username && !target.password);
-      const response = await network({ url: target.href,
-        options: { method: 'GET', encoding: null, timeout: 60_000 }, signal });
-      guard(signal);
+      const validateURL = value => {
+        let target;
+        try { target = new URL(value); } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
+        if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password)
+          throw new ScriptHostError('INVALID_ARGUMENT');
+        return target.href;
+      };
+      const url = validateURL(params.url);
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(), 60_000);
+      timer.unref?.();
+      let response;
+      try {
+        response = await network({ url, validateURL,
+          options: { method: 'GET', encoding: null },
+          signal: AbortSignal.any([signal, deadline.signal]) });
+        guard(signal);
+        require(!deadline.signal.aborted, 'TIMEOUT');
+      } catch (error) {
+        guard(signal);
+        if (deadline.signal.aborted) throw fail('TIMEOUT');
+        throw error;
+      } finally { clearTimeout(timer); }
       require(response.statusCode >= 200 && response.statusCode < 300, 'HTTP_ERROR');
       const body = Buffer.from(response.body);
       require(isUtf8(body), 'SOURCE_ENCODING');

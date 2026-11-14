@@ -16,7 +16,8 @@ public static partial class DesktopTests
         yield return Case("shared header composes different slot structures without a shell", async () =>
         {
             var navigation = new TextBox { Width = 160, Height = 36, Text = "retained navigation" };
-            var host = new DesktopPageHeader { Navigation = navigation };
+            var center = new TextBox { MaxWidth = 430, Height = 34, MinHeight = 34, Text = "center search" };
+            var host = new DesktopPageHeader { Navigation = navigation, Center = center };
             var root = HeaderRoot(host);
             var input = new TextBox { Text = "slot draft", Height = 24, MinHeight = 24, Padding = new Thickness(4, 2, 4, 2) };
             var slot = new Grid { Width = 120, Height = 48 };
@@ -36,6 +37,9 @@ public static partial class DesktopTests
             Same(slot, ((ContentControl)host.FindName("LeadingSlot")).Content, "automatic slot follows the visible title");
             True(Bounds(slot).Left > Bounds(heading).Right && Bounds(heading).Left > Bounds(navigation).Right,
                 "the host measures navigation, heading and contributed structure in order");
+            Same(center, ((ContentControl)host.FindName("CenterSlot")).Content, "center has its own retained slot");
+            True(Bounds(center).Width > 0 && Bounds(center).Left >= Bounds(slot).Right,
+                "center uses the space remaining after the leading contribution");
             Equal(new Size(120, 48), slot.RenderSize, "a multi-row slot retains its own structure");
             Equal(24d, input.ActualHeight, "compact contributed input keeps its intended height");
             True(Bounds(input).Top >= Bounds((FrameworkElement)slot.Children[0]).Bottom,
@@ -61,6 +65,8 @@ public static partial class DesktopTests
             True(LogicalTreeHelper.GetParent(slot) is null, "replaced custom structure is released");
             Same(toggle, ((ContentControl)host.FindName("TrailingSlot")).Content, "page selects the trailing slot");
             True(Bounds(toggle).Left > Bounds(heading).Right, "trailing content follows the measured leading group");
+            True(Bounds(center).Left >= Bounds(heading).Right && Bounds(center).Right <= Bounds(toggle).Left,
+                "moving the contribution to trailing preserves an independent center without overlap");
             DesktopTheme.SetIsHighContrast(root, true); LayoutHeader(root, 620);
             action = ChromeVisuals(host).OfType<Button>().Single();
             Equal(SystemColors.HighlightTextColor, ((SolidColorBrush)action.Foreground).Color, "system action foreground");
@@ -75,10 +81,13 @@ public static partial class DesktopTests
             True(LogicalTreeHelper.GetParent(toggle) is null, "explicit retirement releases the slot");
             source.RootVisual = null;
         });
-        yield return Case("shell header preserves positions caption hit tests and settings search identity", async () =>
+        yield return Case("shell header centers search in remaining content space and preserves contributions caption and search identity", async () =>
         {
+            var executions = 0;
+            var slot = new Button { Content = "筛选", Width = 72, Height = 28 };
+            slot.Click += (_, _) => executions++;
             var page = new HeaderContributionProbe("layout", new("layout",
-                Actions: [new("action", "执行", _ => Task.CompletedTask)]));
+                Slot: slot, Actions: [new("action", "执行", _ => { executions++; return Task.CompletedTask; })]));
             await using var f = new Fixture([new ProbeModule("layout-domain")], pages: [page]);
             await f.LoadAsync();
             f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
@@ -95,23 +104,42 @@ public static partial class DesktopTests
                 void Near(double expected, double actual, string label) =>
                     True(Math.Abs(expected - actual) <= 1, label + " (within layout rounding)");
                 var caption = f.Element<StackPanel>("CaptionBar");
-                var button = ChromeVisuals(f.Element<DesktopPageHeader>("PageHeaderHost")).OfType<Button>()
+                var header = f.Element<DesktopPageHeader>("PageHeaderHost");
+                var center = f.HeaderElement<ContentControl>("CenterSlot");
+                var input = f.Element<Grid>("SearchInput");
+                var navigation = f.Element<Grid>("SearchChrome");
+                var button = ChromeVisuals(header).OfType<Button>()
                     .Single(item => AutomationProperties.GetName(item) == "执行");
-                Near(243, Bounds(f.Back).Left, "back keeps sidebar plus existing content inset");
-                Near(279, Bounds(search).Left, "retained search keeps its original left position");
-                Near(14, Bounds(search).Top, "retained search keeps its original top position");
-                Near(300, Bounds(search).Width, "retained search keeps its original width");
-                Near(36, Bounds(search).Height, "retained search keeps its original height");
-                Near(width - 180, Bounds(caption).Left, "four existing caption controls keep their position");
+                Same(navigation, header.Navigation, "back and forward share the navigation contribution");
+                Same(input, header.Center, "the retained search belongs to the center contribution");
+                Equal(2, navigation.Children.Count, "navigation contains only back and forward");
+                True(navigation.Children.Contains(f.Back) && navigation.Children.Contains(f.Forward),
+                    "both real history controls remain mounted");
+                Near(430, input.MaxWidth, "search keeps the design width cap");
+                Near(34, Bounds(search).Height, "search keeps the compact design height");
+                Near(32, Bounds(search).Top + Bounds(search).Height / 2, "search is vertically centered in the caption");
+                Near(Math.Min(430, center.ActualWidth), Bounds(input).Width, "search adapts to the available center width");
+                Near(Bounds(center).Left + Bounds(center).Width / 2,
+                    Bounds(input).Left + Bounds(input).Width / 2, "search is centered within the remaining content slot");
+                True(Bounds(input).Width > 0 && Bounds(navigation).Left >= Bounds(f.Element<Grid>("ContentRegion")).Left &&
+                    Bounds(navigation).Right <= Bounds(input).Left && Bounds(input).Right <= Bounds(slot).Left &&
+                    Bounds(slot).Right <= Bounds(button).Left && Bounds(button).Right <= Bounds(caption).Left,
+                    "navigation search contribution action and caption never overlap at any supported width");
+                if (width == 1440) Near(430, Bounds(input).Width, "wide content reaches the design search width");
+                if (width == 860) True(Bounds(input).Width < 430, "narrow content shrinks the search before the caption");
+                Equal(5, caption.Children.OfType<Button>().Count(), "notification joins the four caption controls");
+                foreach (var control in caption.Children.OfType<Button>()) Near(42, Bounds(control).Width, "caption button width");
+                Near(width - 222, Bounds(caption).Left, "five caption buttons occupy their measured width");
                 Near(width - 12, Bounds(caption).Right, "caption keeps its existing right inset");
-                True(Math.Abs(Bounds(button).Right - (Bounds(caption).Left - 20)) <= 1,
-                    "page action retains the existing right inset before the caption");
                 Equal(64d, Bounds(f.Element<Grid>("ContentRegion")).Top, "content retains the compact top boundary");
-                foreach (var interactive in new FrameworkElement[] { search, f.Back, button, f.Element<Button>("MaximizeButton") })
+                foreach (var interactive in new FrameworkElement[] { search, f.Back, f.Forward, slot, button,
+                    f.Element<Button>("NotificationButton"), f.Element<Button>("MaximizeButton") })
                     True(WindowChrome.GetIsHitTestVisibleInChrome(interactive), "controls retain client hit tests");
-                var hit = root.InputHitTest(new Point((Bounds(search).Right + Bounds(button).Left) / 2, 32));
+                var hit = root.InputHitTest(new Point(Bounds(caption).Left - 2, 2));
                 True(hit is not null && !WindowChrome.GetIsHitTestVisibleInChrome(hit), "blank header space remains draggable");
+                Click(slot); Click(button); await DrainAsync();
             }
+            Equal(6, executions, "contribution controls and generated actions remain executable across resize");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync(); root.UpdateLayout();
             Same(search, f.Search, "settings do not replace the search instance");
             Equal(Visibility.Collapsed, f.Element<Grid>("SearchInput").Visibility, "settings hide the retained search");

@@ -5,6 +5,7 @@ using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -32,14 +33,14 @@ public static class FilmPlaybackTests
             () => MusicQualityConsumerTests.Sta(FlatTiles));
         yield return new("film-playback: hover or focus lifts episode cards rows and recommendations around a centered play mark",
             () => MusicQualityConsumerTests.Sta(HoverLift));
-        yield return new("film-playback: poster covers the whole information region behind its foreground",
-            () => MusicQualityConsumerTests.Sta(BackdropPoster));
+        yield return new("film-playback: normal poster cards retain their crop while metadata uses the shared canvas",
+            () => MusicQualityConsumerTests.Sta(PosterCards));
         yield return new("film-playback: centered hero actions allow retry and persist each film favorite",
             () => MusicQualityConsumerTests.Sta(HeroActions));
-        yield return new("film-playback: overlay text stays readable on bright dark and missing posters",
-            () => MusicQualityConsumerTests.Sta(OverlayReadability));
-        yield return new("film-playback: ambient tint follows the poster stays fixed in the viewport and keeps text readable",
-            () => MusicQualityConsumerTests.Sta(AmbientTint));
+        yield return new("film-playback: text stays readable on the default and custom application canvas",
+            () => MusicQualityConsumerTests.Sta(SharedCanvasReadability));
+        yield return new("film-playback: the shared canvas follows global color rather than scrolling or film posters",
+            () => MusicQualityConsumerTests.Sta(SharedCanvasNavigation));
     }
 
     private static async Task ExplicitData()
@@ -204,7 +205,7 @@ public static class FilmPlaybackTests
                 await Drain();
                 Check(details.VerticalOffset > 0 && Math.Abs(scroll.VerticalOffset - pageOffset) < .5,
                     "scrolling metadata leaves the page viewport in place");
-                CheckBackgroundCoverage(view);
+                CheckSharedCanvas(view);
                 Click(Named<Button>(view, "OverviewToggle"));
                 await Drain();
             }
@@ -320,9 +321,8 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         var page = scene.Page;
         var metadata = Named<Grid>(view, "MetadataPanel");
-        var backdropLayer = Named<Grid>(view, "MetadataBackdrop");
         Check(!Visuals(metadata).OfType<Border>().Any(border => border.IsVisible &&
-                !border.IsDescendantOf(backdropLayer) && border.TemplatedParent is not ButtonBase &&
+                border.TemplatedParent is not ButtonBase &&
                 ((border.BorderThickness != default && border.BorderBrush is SolidColorBrush { Color.A: > 0 }) ||
                 (border.ActualWidth > metadata.ActualWidth / 2 && border.Background is SolidColorBrush { Color.A: > 0 }))),
             "metadata sits directly on the page without a surface or outlined card");
@@ -340,8 +340,9 @@ public static class FilmPlaybackTests
 
         DesktopTheme.SetIsHighContrast(scene.Window, true);
         await Drain();
-        Check(!Named<Border>(view, "AmbientLayer").IsVisible && !Named<FilmPlaybackPoster>(view, "Backdrop").IsVisible,
-            "high contrast removes the ambient tint and poster backdrop");
+        Check(view.Background is SolidColorBrush background && background.Color == SystemColors.WindowColor &&
+            Named<TextBlock>(view, "FilmTitle").Foreground is SolidColorBrush ink && ink.Color == SystemColors.WindowTextColor,
+            "high contrast pairs the shared page with the system background and text");
         CheckFlat(view, page, outline: true);
         CheckSelection(scene, chosen);
         Click(Named<Button>(view, "HorizontalLayout"));
@@ -440,73 +441,52 @@ public static class FilmPlaybackTests
             "the tile settles back without residue");
     }
 
-    private static async Task BackdropPoster()
+    private static async Task PosterCards()
     {
         const string poster = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/poster-long-season.jpg";
         const string still = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/episode-01.jpg";
-        var (backdrop, image) = Backdrop(poster, 400, 300);
-        Check(backdrop.DesiredSize == default, "the backdrop never asks its panel for size");
-        CheckSlot(backdrop, image, new Rect(0, -150, 400, 600), "a portrait fills the entire frame with a centered crop");
-        var pixels = Pixels((FrameworkElement)backdrop.Parent);
-        Check(new[] { (1, 1), (399, 1), (1, 140), (399, 140), (200, 140), (200, 225), (1, 299), (399, 299) }
-            .All(point => Alpha(pixels, 400, point.Item1, point.Item2) > 240),
-            "the image remains present across the full region including behind the lower content");
-
-        (backdrop, image) = Backdrop(poster, 150, 300);
-        CheckSlot(backdrop, image, new Rect(-25, 0, 200, 300), "a narrow frame crops the portrait equally on each side");
-        (backdrop, image) = Backdrop(still, 400, 300);
-        CheckSlot(backdrop, image, new Rect((400 - 300 * 16d / 9) / 2, 0, 300 * 16d / 9, 300),
-            "a landscape image covers the frame with a centered crop and no stretching");
+        CheckPosterCard(poster, 400, 300, 2d / 3);
+        CheckPosterCard(poster, 150, 300, 2d / 3);
+        CheckPosterCard(still, 400, 300, 16d / 9);
 
         await using var scene = new Scene();
         await scene.OpenAsync();
         await Drain();
         var view = scene.Playback;
         var panel = Named<Grid>(view, "MetadataPanel");
-        var real = Named<FilmPlaybackPoster>(view, "Backdrop");
-        var preview = real.Children.OfType<Image>().Single();
-        var slot = Bounds(preview, real);
-        Check(real.IsVisible && real.Opacity == 1 &&
-            Math.Abs(preview.ActualWidth / preview.ActualHeight - 2d / 3) < .01 &&
-            slot.Left <= 0 && slot.Top <= 0 && slot.Right >= real.ActualWidth && slot.Bottom >= real.ActualHeight &&
-            Math.Abs(slot.Left + slot.Width / 2 - real.ActualWidth / 2) < 1,
-            "the wide information background keeps the poster ratio");
-        CheckBackgroundCoverage(view);
+        CheckSharedCanvas(view);
         scene.View.Width = 700;
         scene.Window.Width = 700;
         scene.Window.UpdateLayout();
         await Drain();
         var details = Named<ScrollViewer>(view, "MetadataScroll");
-        Check(double.IsNaN(panel.Height) && Math.Abs(panel.ActualHeight - details.DesiredSize.Height) < 1 &&
-            Math.Abs(preview.ActualWidth / preview.ActualHeight - 2d / 3) < .01,
-            "stacked metadata sizes to its content without stretching the poster");
-        CheckBackgroundCoverage(view);
+        Check(double.IsNaN(panel.Height) && Math.Abs(panel.ActualHeight - details.DesiredSize.Height) < 1,
+            "stacked metadata sizes to its content on the shared canvas");
+        CheckSharedCanvas(view);
         double collapsedHeight = panel.ActualHeight;
         Click(Named<Button>(view, "OverviewToggle"));
         await Drain();
         Check(panel.ActualHeight > collapsedHeight && Named<TextBlock>(view, "OverviewText").IsVisible,
             "the expanded overview grows the narrow information region");
-        CheckBackgroundCoverage(view);
+        CheckSharedCanvas(view);
     }
 
-    private static void CheckBackgroundCoverage(FilmPlaybackView view)
+    private static void CheckSharedCanvas(FilmPlaybackView view)
     {
         var panel = Named<Grid>(view, "MetadataPanel");
-        var backdrop = Named<FilmPlaybackPoster>(view, "Backdrop");
-        var bounds = Bounds(backdrop, panel);
-        Check(bounds.TopLeft == default && Math.Abs(bounds.Width - panel.ActualWidth) < 1 &&
-            Math.Abs(bounds.Height - panel.ActualHeight) < 1,
-            "the poster covers the whole information region, not a separate image above it");
-        foreach (var element in new FrameworkElement[] { Named<TextBlock>(view, "FilmTitle"),
-            Named<TextBlock>(view, "FilmMetadata"), Named<StackPanel>(view, "HeroActions"),
-            Named<Button>(view, "OverviewToggle"), Named<TextBlock>(view, "OverviewText") })
+        var scroll = Named<ScrollViewer>(view, "MetadataScroll");
+        Check(view.Background is SolidColorBrush { Color.A: 0 },
+            "the playback page exposes its application's background");
+        var visibility = scroll.Visibility;
+        scroll.Visibility = Visibility.Hidden;
+        try
         {
-            if (!element.IsVisible) continue;
-            var visible = Bounds(element, panel);
-            visible.Intersect(new Rect(panel.RenderSize));
-            if (!visible.IsEmpty)
-                Check(bounds.Contains(visible), "every visible foreground element is superimposed on the poster");
+            panel.UpdateLayout();
+            var pixels = Pixels(panel);
+            Check(Enumerable.Range(0, pixels.Length / 4).All(index => pixels[index * 4 + 3] == 0),
+                "the entire metadata region exposes the shared canvas behind its scrolling foreground");
         }
+        finally { scroll.Visibility = visibility; panel.UpdateLayout(); }
     }
 
     private static async Task HeroActions()
@@ -525,8 +505,8 @@ public static class FilmPlaybackTests
         var favorite = Named<ToggleButton>(view, "FavoriteButton");
         var play = Named<Button>(view, "HeroPlayButton");
         Check(title.TextAlignment == TextAlignment.Center && metadata.TextAlignment == TextAlignment.Center &&
-            content.IsDescendantOf(details) && !Named<FilmPlaybackPoster>(view, "Backdrop").IsDescendantOf(details),
-            "identity and actions scroll in front of a background covering their whole viewport");
+            content.IsDescendantOf(details) && details.IsDescendantOf(Named<Grid>(view, "MetadataPanel")),
+            "identity and actions scroll inside the metadata region on the shared canvas");
         foreach (double width in new[] { 1237d, 907d, 840d })
         {
             scene.Window.Width = scene.View.Width = width;
@@ -537,12 +517,12 @@ public static class FilmPlaybackTests
             {
                 var bounds = Bounds(element, content);
                 Check(Math.Abs(bounds.Left + bounds.Width / 2 - content.ActualWidth / 2) <= 1,
-                    "identity facts and the action group share the image center");
+                    "identity facts and the action group share the metadata center");
             }
             Check(Bounds(title, details).Top >= 0 && Bounds(actions, details).Bottom <= details.ViewportHeight + 1 &&
                 Bounds(Named<Button>(view, "OverviewToggle"), details).Bottom <= details.ViewportHeight + 1,
                 "the short title playback favorite and overview action fit the desktop metadata viewport");
-            CheckBackgroundCoverage(view);
+            CheckSharedCanvas(view);
         }
         Check(play.IsEnabled && AutomationProperties.GetName(play) == "播放或暂停" &&
             Visuals(play).OfType<TextBlock>().Any(text => text.Text == "播放") && !page.HasOutput,
@@ -616,15 +596,15 @@ public static class FilmPlaybackTests
         DesktopTheme.SetIsHighContrast(scene.Window, true);
         details.ScrollToTop();
         await Drain();
-        Check(!Named<FilmPlaybackPoster>(view, "Backdrop").IsVisible && !Named<Border>(view, "MetadataWash").IsVisible &&
+        Check(view.Background is SolidColorBrush background && background.Color == SystemColors.WindowColor &&
             Bounds(title, content).Top < 1 &&
             favorite.Foreground is SolidColorBrush ink && ink.Color == SystemColors.WindowTextColor &&
             play.Foreground is SolidColorBrush actionInk && actionInk.Color == SystemColors.HighlightTextColor,
-            "high contrast reclaims the image space and uses system colors for both actions");
+            "high contrast keeps the metadata layout and uses system colors for the canvas and both actions");
         Check(scene.Source.Calls == 0, "hero and favorite interactions issue no source requests");
     }
 
-    private static async Task OverlayReadability()
+    private static async Task SharedCanvasReadability()
     {
         await using var scene = new Scene(907);
         await scene.OpenAsync();
@@ -632,61 +612,61 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         var panel = Named<Grid>(view, "MetadataPanel");
         var scroll = Named<ScrollViewer>(view, "MetadataScroll");
-        var poster = Named<FilmPlaybackPoster>(view, "Backdrop");
-        var image = poster.Children.OfType<Image>().Single();
-        foreach (bool dark in new[] { false, true })
+        var labels = new[] { Named<TextBlock>(view, "FilmMetadata"),
+            Visuals(Named<ItemsControl>(view, "EpisodeCards")).OfType<TextBlock>()
+                .First(text => text.Text == scene.Page.Episodes[0].Overview) };
+        foreach (string selected in new[] { AppearanceColors.DefaultColor, "#FF0000", "#000000" })
         {
-            var window = dark ? Color.FromRgb(0x19, 0x1B, 0x20) : Color.FromRgb(0xF7, 0xF8, 0xFA);
-            var text = dark ? Color.FromRgb(0xF1, 0xF2, 0xF4) : Color.FromRgb(0x30, 0x34, 0x43);
-            view.Resources["MeowFilm.Brush.Window"] = new SolidColorBrush(window);
-            view.Resources["MeowFilm.Brush.Text"] = new SolidColorBrush(text);
-            panel.Background = new SolidColorBrush(window);
-            foreach (byte? value in new byte?[] { 0, 255, null })
+            scene.Window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background(selected);
+            await Drain();
+            var region = Bounds(panel, scene.Canvas);
+            region.Intersect(new Rect(scene.Canvas.RenderSize));
+            Check(region.Width > 40 && region.Height > 44, "contrast samples cover the visible metadata region");
+            scroll.Visibility = Visibility.Hidden;
+            try
             {
-                image.Source = value is byte channel
-                    ? BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null, new byte[] { channel, channel, channel, 255 }, 4)
-                    : null;
-                poster.InvalidateArrange();
                 await Drain();
-                var ink = ((SolidColorBrush)Named<TextBlock>(view, "FilmMetadata").Foreground).Color;
-                Check(ink == text, "the contrast experiment uses the requested theme's actual text color");
-                scroll.Visibility = Visibility.Hidden;
-                await Drain();
-                var pixels = Pixels(panel);
-                int width = (int)panel.ActualWidth, height = (int)panel.ActualHeight;
-                double worst = 99;
-                for (int y = 22; y < height - 22; y += 4)
-                    for (int x = 20; x < width - 20; x += 4)
-                    {
-                        int offset = (y * width + x) * 4;
-                        Check(pixels[offset + 3] == 255, "contrast samples must contain the painted information background");
-                        var color = Color.FromRgb(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
-                        worst = Math.Min(worst, Contrast(ink, color));
-                    }
-                scroll.Visibility = Visibility.Visible;
-                await Drain();
-                Check(worst >= 4.5, $"overlay text stays readable for {(dark ? "dark" : "light")} theme and poster {value}: {worst}");
+                var pixels = Pixels(scene.Canvas);
+                int width = (int)scene.Canvas.ActualWidth;
+                foreach (var label in labels)
+                {
+                    var ink = ((SolidColorBrush)label.Foreground).Color;
+                    double worst = 99;
+                    for (int y = (int)region.Top + 22; y < region.Bottom - 22; y += 4)
+                        for (int x = (int)region.Left + 20; x < region.Right - 20; x += 4)
+                        {
+                            int offset = (y * width + x) * 4;
+                            Check(pixels[offset + 3] == 255,
+                                "contrast samples contain the actual application's opaque canvas");
+                            var color = Color.FromRgb(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
+                            worst = Math.Min(worst, Contrast(ink, color));
+                        }
+                    Check(worst >= 4.5, $"actual text stays readable on the shared application color {selected}: {worst}");
+                }
             }
+            finally { scroll.Visibility = Visibility.Visible; await Drain(); }
         }
     }
 
-    private static (FilmPlaybackPoster Poster, Image Image) Backdrop(string address, double width, double height)
+    private static void CheckPosterCard(string address, int width, int height, double ratio)
     {
-        // A host keeps the poster's crop in the rendered visual tree.
-        var poster = new FilmPlaybackPoster { IsBackdrop = true, Address = address };
+        var poster = new FilmPlaybackPoster { Address = address, Width = width, Height = height };
         var host = new Grid { Width = width, Height = height, Children = { poster } };
         host.Measure(new Size(width, height));
         host.Arrange(new Rect(0, 0, width, height));
         host.UpdateLayout();
-        return (poster, poster.Children.OfType<Image>().Single());
-    }
-
-    private static void CheckSlot(FilmPlaybackPoster poster, Image image, Rect slot, string message)
-    {
-        var origin = image.TranslatePoint(new Point(), poster);
-        Check(image.Visibility == Visibility.Visible && Math.Abs(origin.X - slot.X) < .5 && Math.Abs(origin.Y - slot.Y) < .5 &&
-            Math.Abs(image.ActualWidth - slot.Width) < .5 && Math.Abs(image.ActualHeight - slot.Height) < .5 &&
-            poster.ClipToBounds, message);
+        var image = poster.Children.OfType<Image>().Single();
+        var slot = Bounds(image, poster);
+        Check(image.Visibility == Visibility.Visible && image.Source is BitmapSource source &&
+            Math.Abs((double)source.PixelWidth / source.PixelHeight - ratio) < .01 &&
+            image.Stretch == Stretch.UniformToFill && poster.ClipToBounds &&
+            slot.Left <= 0 && slot.Top <= 0 && slot.Right >= width - 1 && slot.Bottom >= height - 1,
+            "normal portrait and landscape cards retain their source ratio and clipped fill");
+        var pixels = Pixels(host);
+        Check(new[] { (1, 1), (width - 2, 1), (1, height / 2), (width - 2, height / 2),
+                (width / 2, height / 2), (1, height - 2), (width - 2, height - 2) }
+            .All(point => Alpha(pixels, width, point.Item1, point.Item2) > 240),
+            "ordinary poster cards fill their whole frame without letterboxing");
     }
 
     private static byte[] Pixels(FrameworkElement element)
@@ -705,7 +685,7 @@ public static class FilmPlaybackTests
 
     private static byte Alpha(byte[] pixels, int width, int x, int y) => pixels[(y * width + x) * 4 + 3];
 
-    private static async Task AmbientTint()
+    private static async Task SharedCanvasNavigation()
     {
         await using var scene = new Scene();
         var module = scene.Module;
@@ -714,17 +694,16 @@ public static class FilmPlaybackTests
         await module.OpenPlaybackAsync(section.Items[0]);
         await Drain();
         var view = scene.Playback;
-        var tint = Named<Border>(view, "AmbientTint");
-        var window = (SolidColorBrush)view.FindResource("MeowFilm.Brush.Window");
-        var first = CheckTint(view, tint, window);
+        string originalPoster = scene.Page.Poster;
+        Point[] samples = [new(8, 4), new(8, 200), new(8, scene.Canvas.ActualHeight - 4)];
+        var first = CanvasColors(scene.Canvas, samples);
+        CheckSharedCanvas(view);
 
         var scroll = Named<ScrollViewer>(view, "PageScroll");
-        var origin = tint.TranslatePoint(new Point(), view);
-        Check(Math.Abs(tint.ActualHeight - view.ActualHeight) < .5, "the ambient tint fills the playback viewport");
         scroll.ScrollToEnd();
         await Drain();
-        Check(scroll.VerticalOffset > 0 && tint.TranslatePoint(new Point(), view) == origin,
-            "the ambient tint stays fixed while the page scrolls");
+        Check(scroll.VerticalOffset > 0 && CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+            "the application canvas stays fixed while the page scrolls");
 
         var recommendation = scene.Page.Recommendations.First(item => item.Poster != scene.Page.Poster);
         // This layout fixture returns a successful detail with its explicit poster.
@@ -744,60 +723,41 @@ public static class FilmPlaybackTests
         Click(Visuals(Named<ItemsControl>(view, "RelatedItems")).OfType<Button>()
             .Single(button => ReferenceEquals(button.Tag, recommendation)));
         await Drain();
-        Check(scene.Page.Item.Id == recommendation.Id, "the recommendation opens its own film identity");
-        Check(CheckTint(view, tint, window) != first, "the ambient tint follows the newly opened poster");
+        Check(scene.Page.Item.Id == recommendation.Id && scene.Page.Poster == recommendation.Poster &&
+            scene.Page.Poster != originalPoster, "the recommendation opens its own film identity and real poster");
+        CheckSharedCanvas(view);
+        Check(CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+            "opening a different poster does not change the application canvas");
 
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
         var blank = FilmPlaybackFixture.RefreshMetadata(section.Items[1] with { Poster = "" });
         section.Items[1] = blank;
         await module.OpenPlaybackAsync(blank);
         await Drain();
-        Check(scene.Page.Item.Id == blank.Id && Named<FilmPlaybackPoster>(view, "Backdrop").PaletteBrush is null &&
-            tint.Background is SolidColorBrush { Color.A: 0 }, "a film without a poster has no ambient tint");
-
-        var converter = new FilmAmbientTintConverter();
-        Check(converter.Convert([null!, window], typeof(Brush), null!, null!) is SolidColorBrush { Color.A: 0 } &&
-            converter.Convert([DependencyProperty.UnsetValue, window], typeof(Brush), null!, null!) is SolidColorBrush { Color.A: 0 },
-            "a missing palette converts to transparent");
-        var themes = new[]
-        {
-            (Window: window.Color, Text: ((SolidColorBrush)view.FindResource("MeowFilm.Brush.Text")).Color,
-                Muted: ((SolidColorBrush)view.FindResource("MeowFilm.Brush.Muted")).Color),
-            (Window: Color.FromRgb(0x19, 0x1B, 0x20), Text: Color.FromRgb(0xF1, 0xF2, 0xF4), Muted: Color.FromRgb(0xB3, 0xB8, 0xC5))
-        };
-        foreach (var theme in themes)
-            for (int hue = 0; hue < 360; hue += 3)
-                foreach (var saturation in new[] { 0, .08, .25, 1 })
-                {
-                    var color = ((SolidColorBrush)converter.Convert([new SolidColorBrush(Hsl(hue, saturation, .4)),
-                        new SolidColorBrush(theme.Window)], typeof(Brush), null!, null!)).Color;
-                    Check(color.A == 255 && color != theme.Window &&
-                        Contrast(theme.Text, color) >= 4.5 && Contrast(theme.Muted, color) >= 4.5,
-                        "every poster hue keeps text and muted text readable on the ambient tint");
-                }
+        Check(scene.Page.Item.Id == blank.Id && scene.Page.Poster.Length == 0 &&
+            CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+            "a film without a poster keeps the same application canvas");
+        CheckSharedCanvas(view);
+        scene.Window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background("#FF0000");
+        await Drain();
+        Check(!CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+            "the selected global application color changes the playback canvas");
+        scene.Window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.DefaultBackground;
+        await Drain();
+        Check(CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+            "restoring the global default restores the same playback canvas");
     }
 
-    private static Color CheckTint(FilmPlaybackView view, Border tint, SolidColorBrush window)
+    private static Color[] CanvasColors(FrameworkElement canvas, IEnumerable<Point> samples)
     {
-        var color = tint.Background is SolidColorBrush brush ? brush.Color : default;
-        var text = ((SolidColorBrush)view.FindResource("MeowFilm.Brush.Text")).Color;
-        var muted = ((SolidColorBrush)view.FindResource("MeowFilm.Brush.Muted")).Color;
-        Check(Named<FilmPlaybackPoster>(view, "Backdrop").PaletteBrush is not null && color.A == 255 &&
-            color != window.Color && Contrast(text, color) >= 4.5 && Contrast(muted, color) >= 4.5,
-            "the poster tints the page while text and muted text stay readable");
-        return color;
-    }
-
-    private static Color Hsl(double hue, double saturation, double lightness)
-    {
-        double chroma = (1 - Math.Abs(2 * lightness - 1)) * saturation, h = hue / 60;
-        double x = chroma * (1 - Math.Abs(h % 2 - 1)), m = lightness - chroma / 2;
-        var (r, g, b) = h switch
+        var pixels = Pixels(canvas);
+        int width = (int)canvas.ActualWidth;
+        return samples.Select(point =>
         {
-            < 1 => (chroma, x, 0d), < 2 => (x, chroma, 0d), < 3 => (0d, chroma, x),
-            < 4 => (0d, x, chroma), < 5 => (x, 0d, chroma), _ => (chroma, 0d, x)
-        };
-        return Color.FromRgb((byte)Math.Round((r + m) * 255), (byte)Math.Round((g + m) * 255), (byte)Math.Round((b + m) * 255));
+            int offset = ((int)point.Y * width + (int)point.X) * 4;
+            Check(pixels[offset + 3] == 255, "canvas samples contain the opaque application background");
+            return Color.FromRgb(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
+        }).ToArray();
     }
 
     private static double Contrast(Color a, Color b)
@@ -919,6 +879,7 @@ public static class FilmPlaybackTests
         internal readonly FilmMemoryStore Store = new();
         internal readonly FilmCapability Module;
         internal readonly FilmView View;
+        internal readonly Border Canvas;
         internal readonly Window Window;
         internal FilmPlaybackPage Page => Module.Playback ?? throw new InvalidOperationException("Missing playback model");
         internal FilmPlaybackView Playback => Named<FilmPlaybackView>(View, "PlaybackView");
@@ -929,12 +890,16 @@ public static class FilmPlaybackTests
             View = (FilmView)Module.View;
             // Explicit content width avoids native offscreen window constraints.
             View.Width = width;
+            Canvas = new() { Child = View };
+            Canvas.SetBinding(FrameworkElement.WidthProperty, new Binding(nameof(View.Width)) { Source = View });
+            Canvas.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.AppBackground");
             Window = new()
             {
-                Content = View, Width = width, Height = 800, WindowStyle = WindowStyle.None,
+                Content = Canvas, Width = width, Height = 800, WindowStyle = WindowStyle.None,
                 ResizeMode = ResizeMode.NoResize, Left = -10000, Top = -10000,
                 ShowActivated = false, ShowInTaskbar = false
             };
+            Window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.DefaultBackground;
             Window.Show();
             Window.UpdateLayout();
         }

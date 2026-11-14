@@ -22,6 +22,8 @@ public partial class DesktopPageHeader : UserControl
 
     public static readonly DependencyProperty NavigationProperty = DependencyProperty.Register(
         nameof(Navigation), typeof(FrameworkElement), typeof(DesktopPageHeader));
+    public static readonly DependencyProperty CenterProperty = DependencyProperty.Register(
+        nameof(Center), typeof(FrameworkElement), typeof(DesktopPageHeader));
 
     private readonly ObservableCollection<DesktopHeaderActionItem> actions = [];
     private Presentation? presentation;
@@ -46,6 +48,11 @@ public partial class DesktopPageHeader : UserControl
     {
         get => (FrameworkElement?)GetValue(NavigationProperty);
         set => SetValue(NavigationProperty, value);
+    }
+    public FrameworkElement? Center
+    {
+        get => (FrameworkElement?)GetValue(CenterProperty);
+        set => SetValue(CenterProperty, value);
     }
 
     public DesktopHeaderContribution? Contribution { get; private set; }

@@ -9,6 +9,7 @@
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
         <Grid VerticalAlignment="Center" HorizontalAlignment="Left" Margin="0,0,16,0"
               shell:WindowChrome.IsHitTestVisibleInChrome="True">
@@ -25,7 +26,12 @@
             <ContentControl x:Name="LeadingSlot" Grid.Column="2" Visibility="Collapsed"
                             VerticalContentAlignment="Center" Focusable="False" IsTabStop="False" />
         </Grid>
-        <StackPanel x:Name="TrailingHeader" Grid.Column="1" Orientation="Horizontal" Visibility="Collapsed"
+        <ContentControl x:Name="CenterSlot" Grid.Column="1"
+                        Content="{Binding Center, RelativeSource={RelativeSource AncestorType=local:DesktopPageHeader}}"
+                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center"
+                        Focusable="False" IsTabStop="False" Margin="12,0"
+                        shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
+        <StackPanel x:Name="TrailingHeader" Grid.Column="2" Orientation="Horizontal" Visibility="Collapsed"
                     HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True">
             <ContentControl x:Name="TrailingSlot" VerticalContentAlignment="Center" Margin="0,0,8,0"

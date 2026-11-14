@@ -190,7 +190,7 @@ public static partial class NovelTests
             {
                 fresh = new(new NovelSourceService(sources), new NovelLibrary(store), new NovelRuleProgram(remote));
                 await fresh.InitializeAsync(default);
-                await fresh.NavigateAsync(NovelCapability.ShelfRoute, default);
+                await fresh.NavigateAsync(NovelCapability.HomeRoute, default);
             });
         try
         {
@@ -205,7 +205,7 @@ public static partial class NovelTests
             heldWrite.TrySetResult(); await acceptedWrite; await resetting;
             Check(fresh is not null && fresh.Library.Entries.Count == 0 && fresh.Library.Rules.Count == 0 &&
                 fresh.Library.Appearance.FontSize == 22 && fresh.Session is null &&
-                fresh.CaptureNavigationLocation() == NovelCapability.ShelfRoute && old.Session is null &&
+                fresh.CaptureNavigationLocation() == NovelCapability.HomeRoute && old.Session is null &&
                 remote.Disposals == 0, "fresh native owner and navigation must not retain a retired book or its data");
             try { await old.Rules.IdentityAsync(Book()); throw new InvalidOperationException("Old owner remained usable"); }
             catch (ObjectDisposedException) { }
