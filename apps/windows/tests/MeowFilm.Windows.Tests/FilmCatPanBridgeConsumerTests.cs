@@ -29,7 +29,7 @@ public static class FilmCatPanBridgeConsumerTests
         yield return Test("real HTTP metadata entry auto plays first episode and source menu preserves its identity", MetadataEntry);
         yield return Test("real HTTP descriptor preserves DASH CENC receipt without reading media", () => Descriptor(direct: false));
         yield return Test("real HTTP headerless descriptor selects direct native input without a lease", () => Descriptor(direct: true));
-        yield return Test("real HTTP list failure notifies and explicit refresh rebuilds the same directory", ListFailure);
+        yield return Test("real HTTP list failure notifies and presentation resume rebuilds the same directory", ListFailure);
         yield return Test("close drains an admitted HTTP attempt and releases it without native publication", LateReceipt);
     }
 
@@ -81,10 +81,10 @@ public static class FilmCatPanBridgeConsumerTests
             scene.Window.UpdateLayout();
             var station = scene.Element<ComboBox>("SourcePicker");
             var pan = scene.Element<ComboBox>("LinePicker");
-            var row = station.Parent as StackPanel;
+            var row = station.Parent as Grid;
             var stationPoint = row is null ? new Point(double.NaN, double.NaN) : station.TranslatePoint(new(), row);
             var panPoint = row is null ? new Point(double.NaN, double.NaN) : pan.TranslatePoint(new(), row);
-            Check(row is { Orientation: Orientation.Horizontal } && ReferenceEquals(station.Parent, pan.Parent),
+            Check(row is not null && ReferenceEquals(station.Parent, pan.Parent),
                 $"source and pan share one horizontal row at width {width}");
             Check(Math.Abs(stationPoint.Y - panPoint.Y) < .5 &&
                 Math.Abs(panPoint.X - stationPoint.X - station.ActualWidth - 10) < .5,
@@ -265,20 +265,20 @@ public static class FilmCatPanBridgeConsumerTests
             "the classified provider error uses the floating notice and exposes no stale playable file");
         await scene.Control("scenario", new { scenario = "success" });
         int refreshes = scene.Traffic.Commands("browse.refresh").Count();
-        Click(scene.Element<Button>("RefreshBrowsingButton"));
+        await scene.Session.ResumePresentationAsync();
         await scene.Ready(() => !scene.Page.ListLoading && scene.Page.ListError.Length == 0 && scene.Page.Episodes.Count == 3);
         Check(scene.Page.SourceId == source.Id && scene.Page.SelectedSource?.Label == "Bridge site" &&
             scene.Page.SelectedLine is { Label: "夸克", Provider: "quark" } && scene.Native.Inputs.Count == 0 &&
             scene.Traffic.Commands("browse.refresh").Count() == refreshes + 1 &&
-            !scene.Traffic.Commands("browse.refresh").Last().Input.TryGetProperty("refresh", out _) &&
+            FilmJson.Member(scene.Traffic.Commands("browse.refresh").Last().Input, "refresh").ValueKind == JsonValueKind.False &&
             scene.Traffic.Commands("media.started").Count() == 0,
-            "only explicit refresh rebuilds the real directory without silently restarting media");
+            "presentation resume revalidates the failed directory without forcing refresh or silently restarting media");
         var evidence = await scene.Evidence();
         Check(scene.Records(evidence).Any(row => FilmJson.Text(row, "layer") == "provider" && FilmJson.Text(row, "phase") == "list") &&
             !scene.Records(evidence).Any(row => FilmJson.Text(row, "layer") == "pan-service" &&
                 FilmJson.Text(row, "phase") is "prepare" or "play"), "failure and recovery cannot bypass provider list");
         await scene.Close(); scene.CheckNoMedia(await scene.Evidence());
-        Console.WriteLine("OBSERVED film-cat-pan windows list-http; notice=UPSTREAM_HTTP; explicit-refresh; nativeReceipts=0; mediaHead=0; mediaBody=0");
+        Console.WriteLine("OBSERVED film-cat-pan windows list-http; notice=UPSTREAM_HTTP; presentation-resume; nativeReceipts=0; mediaHead=0; mediaBody=0");
     }
 
     private static async Task LateReceipt()

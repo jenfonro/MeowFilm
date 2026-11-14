@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { compareCandidates, defaultPreferences, isCandidateAllowed, isSmartSiteAllowed, normalizePreferences } from './policy.js';
 import { matchesResult, matchesResults, mediaVariants, recognizeCandidates, recognizeVariantCandidates } from './recognition.js';
-import { buildEpisodeMap, resolveEpisode } from './episodes.js';
+import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode, sameSeasonPartition } from './episodes.js';
 import { providerFamily, qualityKey } from './rules.js';
 import { checkSource, checkTarget, clone, codeOf, fail, identity, isIdentifier, object, requireValue,
   resultDetailId, sourceRevision, text, variantParentId } from './identity.js';
@@ -718,6 +718,7 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
     const index = rows.findIndex(row => (row.season_number ?? row.season) === season);
     const row = { ...(index < 0 ? {} : rows[index]), ...value,
       [key === 'seasons' ? 'season_number' : 'season']: season };
+    if (key === 'doubanSeasons' && !Object.hasOwn(value, 'episodes')) delete row.episodes;
     if (index < 0) rows.push(row);
     else rows[index] = row;
     rows.sort((a, b) => (a.season_number ?? a.season) - (b.season_number ?? b.season));
@@ -736,13 +737,13 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
         [`season:${season.season}`]: { status: season.cache.error ? 'failed' : 'ready',
           fetchedAt: season.fetchedAt, ...(season.cache.error ? { error: clone(season.cache.error) } : {}) } } };
   }
-  function acceptMetadataCache(session, entry, season) {
+  function acceptMetadataCache(session, entry, season, supplementError) {
     if (season === undefined) {
       session.metadataCache = entry?.cache ?? null;
       session.metadataExpiresAt = entry?.expiresAt;
       session.metadataSeasonCache = null;
     } else session.metadataSeasonCache = { season, cache: entry.cache, fetchedAt: entry.fetchedAt, expiresAt: entry.expiresAt };
-    session.metadataError = metadataCacheState(session)?.error?.code ?? null;
+    session.metadataError = metadataCacheState(session)?.error?.code ?? supplementError ?? null;
   }
   function requireFreshMetadata(session) {
     const cache = metadataCacheState(session);
@@ -751,16 +752,54 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
   const metadataIdentity = row => identity(row.provider, row.kind, String(row.metadataId));
   const metadataDisplay = row => row.provider === 'douban' && row.seasons?.length
     ? { ...row.metadata, doubanSeasons: row.seasons } : row.metadata;
-  function metadataSupplement(session) {
-    const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
+  function associatedTMDB(session, selected) {
     if (selected?.provider !== 'douban') return null;
     const associated = session.metadataSources.filter(row => row.provider === 'tmdb' && row.kind === selected.kind &&
       (row.association?.targetProvider === 'douban' &&
         String(row.association.targetMetadataId) === String(selected.metadataId) ||
        selected.association?.targetProvider === 'tmdb' &&
         String(selected.association.targetMetadataId) === String(row.metadataId)));
-    return associated.length === 1
-      ? fields(associated[0], ['provider', 'metadataId', 'kind', 'metadata']) : null;
+    return associated.length === 1 ? associated[0] : null;
+  }
+  function metadataSupplement(session) {
+    const selected = associatedTMDB(session, session.metadataSources.find(row => row.id === session.metadataSourceId));
+    return selected ? fields(selected, ['provider', 'metadataId', 'kind', 'metadata']) : null;
+  }
+  async function seasonDisplay(session, target, metadata, season, options) {
+    const subject = target.metadataProvider === 'douban'
+      ? metadata.doubanSeasons?.find(row => row.season === season)?.metadataId : undefined;
+    const entry = await data.seasonMetadataEntry(subject === undefined ? target : { ...target, metadataId: subject },
+      season, { rules: session.rules, ...options });
+    if (!options.canSchedule()) return { entry, display: metadata };
+    let display = mergeSeason(target, metadata, season, entry.value);
+    const selected = session.metadataSources.find(row => row.provider === target.metadataProvider &&
+      String(row.metadataId) === String(target.metadataId));
+    const reference = associatedTMDB(session, selected);
+    if (!reference) return { entry, display };
+    let supplement = reference.metadata;
+    const declared = (supplement.seasons ?? []).some(row => (row.season_number ?? row.season) === season);
+    const needed = new Set(sameSeasonPartition(display, supplement) && declared ? [season]
+      : matchEpisodeMaps(display, supplement).filter(row => row.episode.season === season && row.match)
+        .map(row => row.match.season));
+    const referenceTarget = { ...target, metadataProvider: 'tmdb', metadataId: reference.metadataId };
+    let error;
+    for (const number of needed) {
+      try {
+        const value = await data.seasonMetadataEntry(referenceTarget, number, { rules: session.rules,
+          canSchedule: options.canSchedule, refresh: options.refresh });
+        if (!options.canSchedule()) return { entry, display };
+        supplement = mergeSeason(referenceTarget, supplement, number, value.value);
+        error ??= value.cache.error?.code ?? (value.cache.status === 'stale' ? 'STALE_METADATA' : undefined);
+      } catch (caught) {
+        if (!options.canSchedule()) return { entry, display };
+        error ??= codeOf(caught);
+      }
+    }
+    const episodes = matchEpisodeMaps(display, supplement).filter(row => row.episode.season === season)
+      .map(({ episode, match }) => ({ ...(match ? fields(match,
+        ['name', 'overview', 'still_path', 'runtime', 'air_date']) : {}), ...episode }));
+    display = mergeSeason(target, display, season, { ...entry.value, episodes });
+    return { entry, display, error };
   }
   function initializeEpisode(session, previous) {
     if (session.target.episode === undefined) {
@@ -786,11 +825,20 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       // A successful discovery is the current proof set. Retaining an omitted
       // association would keep showing a supplement after it became ambiguous.
       session.metadataSources = sources;
+      session.metadataError = metadataCacheState(session)?.error?.code ?? null;
       const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
       if (selected?.provider === 'douban' && selected.seasons) {
-        session.metadata = { ...session.metadata, doubanSeasons: selected.seasons };
+        const display = metadataDisplay(selected);
+        const season = session.browsing.season ?? session.target.season ??
+          buildEpisodeMap(display).find(row => row.season > 0)?.season;
+        if (season !== undefined) {
+          const value = await seasonDisplay(session, { ...session.target,
+            metadataProvider: selected.provider, metadataId: selected.metadataId }, display, season, { canSchedule: admitted });
+          if (!admitted()) return;
+          session.metadata = value.display;
+          acceptMetadataCache(session, value.entry, season, value.error);
+        } else session.metadata = display;
       }
-      session.metadataError = metadataCacheState(session)?.error?.code ?? null;
       if (session.target.kind === 'tv' && session.target.episode === undefined && session.generation === 0) {
         const previous = session.platform === 'windows'
           ? library.read().history.find(row => row.targetId === session.target.id) : null;
@@ -836,16 +884,26 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       const coordinates = session.target.kind === 'group' ? {}
         : session.target.globalEpisode !== undefined ? { globalEpisode: session.target.globalEpisode }
         : id === session.metadataSourceId ? fields(session.target, ['season', 'episode']) : {};
-      let mapped = resolveEpisode(buildEpisodeMap(display), coordinates);
+      const mappedEpisode = value => id === session.metadataSourceId
+        ? resolveEpisode(buildEpisodeMap(value), coordinates)
+        : matchEpisodeMaps(value, session.metadata).find(({ match }) => match &&
+          (session.target.season !== undefined && session.target.episode !== undefined
+            ? match.season === session.target.season && match.episode === session.target.episode
+            : match.globalEpisode !== undefined && match.globalEpisode === session.target.globalEpisode))?.episode;
+      let mapped = mappedEpisode(display);
+      const seasons = display.doubanSeasons ?? display.seasons ?? [];
+      const firstSeason = seasons.find(row => (row.season_number ?? row.season) > 0) ?? seasons[0];
       const season = selectedSeason ?? mapped?.season ?? (id === session.metadataSourceId
-        ? coordinates.season ?? session.browsing.season : undefined);
+        ? coordinates.season ?? session.browsing.season
+        : sameSeasonPartition(display, session.metadata) ? session.target.season : undefined) ??
+        (firstSeason?.season_number ?? firstSeason?.season);
       if (target.kind === 'tv' && season !== undefined) {
-        const value = await data.seasonMetadataEntry(target, season, { rules: session.rules, canSchedule: admitted });
+        const value = await seasonDisplay(session, target, display, season, { canSchedule: admitted });
         if (!admitted()) return;
-        display = mergeSeason(target, display, season, value.value);
+        display = value.display;
         acceptMetadataCache(session, entry);
-        acceptMetadataCache(session, value, season);
-        mapped = resolveEpisode(buildEpisodeMap(display), coordinates);
+        acceptMetadataCache(session, value.entry, season, value.error);
+        mapped = mappedEpisode(display);
       } else acceptMetadataCache(session, entry);
       selected.metadata = metadata;
       session.metadata = display; session.metadataSourceId = id;
@@ -1274,23 +1332,25 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
     try {
       const entry = await data.targetMetadataEntry(target, { rules: session.rules, canSchedule: admitted, refresh });
       if (!admitted()) return;
-      let display = entry.value;
+      let display = selected ? metadataDisplay({ ...selected, metadata: entry.value }) : entry.value;
       const requestedSeason = season ?? previous.season ?? session.target.season;
-      let seasonEntry;
-      const declaredSeason = (display.seasons ?? display.doubanSeasons ?? [])
+      let seasonEntry, supplementError;
+      const declaredSeason = (display.doubanSeasons ?? display.seasons ?? [])
         .some(row => (row.season_number ?? row.season) === requestedSeason);
       if (target.kind === 'tv' && requestedSeason !== undefined && declaredSeason) {
-        seasonEntry = await data.seasonMetadataEntry(target, requestedSeason,
-          { rules: session.rules, canSchedule: admitted, refresh, requestedEpisode });
+        const value = await seasonDisplay(session, target, display, requestedSeason,
+          { canSchedule: admitted, refresh, requestedEpisode });
         if (!admitted()) return;
-        display = mergeSeason(target, display, requestedSeason, seasonEntry.value);
+        display = value.display;
+        seasonEntry = value.entry;
+        supplementError = value.error;
       }
       session.metadata = display;
       acceptMetadataCache(session, entry);
-      if (seasonEntry) acceptMetadataCache(session, seasonEntry, requestedSeason);
+      if (seasonEntry) acceptMetadataCache(session, seasonEntry, requestedSeason, supplementError);
       if (selected) {
         selected.metadata = entry.value;
-        selected.seasons = display.seasons ?? display.doubanSeasons;
+        if (selected.provider === 'tmdb') selected.seasons = display.seasons;
       }
       session.browsing = { ...previous, loading: false, refreshing: false, error: null };
       session.initializationError = null;
@@ -1444,7 +1504,7 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       await refreshMetadataDisplay(session, { season: session.target.season,
         requestedEpisode: session.target.episode === undefined ? undefined : session.target.episode + 1 });
       if (!valid(session, generation) || session.target !== target || adjacent(session, 1)) return;
-      const nextSeason = (session.metadata?.seasons ?? session.metadata?.doubanSeasons ?? [])
+      const nextSeason = (session.metadata?.doubanSeasons ?? session.metadata?.seasons ?? [])
         .map(row => row.season_number ?? row.season)
         .filter(season => Number.isSafeInteger(season) && season > session.target.season).sort((a, b) => a - b)[0];
       if (nextSeason !== undefined) await refreshMetadataDisplay(session, { season: nextSeason, requestedEpisode: 1 });
@@ -1700,7 +1760,7 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       case 'browse.season': {
         requireValue(Number.isSafeInteger(input.season) && input.season >= 0);
         requireValue(session.target.kind === 'tv' && session.target.metadataProvider, 'NOT_FOUND');
-        const hasSeason = () => (session.metadata?.seasons ?? session.metadata?.doubanSeasons ?? [])
+        const hasSeason = () => (session.metadata?.doubanSeasons ?? session.metadata?.seasons ?? [])
           .some(row => (row.season_number ?? row.season) === input.season);
         if (!hasSeason()) {
           const epoch = session.metadataEpoch, browsing = session.browseGeneration;
@@ -1720,10 +1780,10 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
         detached(session, (async () => {
           try {
             const target = session.target;
-            const season = await data.seasonMetadataEntry(target, input.season, { rules: session.rules, canSchedule: admitted });
+            const season = await seasonDisplay(session, target, session.metadata, input.season, { canSchedule: admitted });
             if (!admitted()) return;
-            session.metadata = mergeSeason(target, session.metadata, input.season, season.value);
-            acceptMetadataCache(session, season, input.season);
+            session.metadata = season.display;
+            acceptMetadataCache(session, season.entry, input.season, season.error);
             await refreshBrowsing(session);
             if (!admitted()) return;
             session.browsing = { ...session.browsing, loading: false, error: null };

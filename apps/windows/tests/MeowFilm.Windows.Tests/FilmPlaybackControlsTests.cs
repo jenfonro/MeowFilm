@@ -21,6 +21,9 @@ public static class FilmPlaybackControlsTests
         new("film-playback-controls: " + name, () => MusicQualityConsumerTests.Sta(run));
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("source menu continuation keeps exact browsing selection and admits one request while enabled", SourceSearchMore);
+        yield return Test("source menu continuation reports failure permits retry and ignores a retired page error", SourceSearchMoreFailure);
+        yield return Test("source pan layout and rail controls share one row while seasons stay separate", BrowseToolbar);
         yield return Test("play pause seek rate aspect and volume drive the actual accepted occurrence", async () =>
         {
             await using var scene = await Scene.Create();
@@ -696,6 +699,205 @@ public static class FilmPlaybackControlsTests
             finally { pending.TrySetResult(FilmRuntimeProbe.Failure("CANCELLED")); }
         });
     }
+    private static async Task SourceSearchMore()
+    {
+        await using var scene = await Scene.Create();
+        BrowseSource(scene);
+        await Until(() => scene.Rig.Page.SourceId == "site-result" && scene.Rig.Page.HasLines);
+        var page = scene.Rig.Page;
+        var source = scene.Element<ComboBox>("SourcePicker");
+        var pan = scene.Element<ComboBox>("LinePicker");
+        string? sourceId = page.SourceId;
+        var lineId = page.SelectedLine!.WireId!.Value;
+        int? season = page.Season;
+        var target = page.ActiveTarget;
+        int before = scene.Rig.Runtime.Calls.Count;
+        source.IsDropDownOpen = true;
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        var popup = (Popup)source.Template.FindName("PART_Popup", source);
+        var more = (Button)source.Template.FindName("SearchMoreSourcesButton", source);
+        Check(popup.IsOpen && more.IsVisible && more.IsEnabled && more.IsDescendantOf(popup.Child) &&
+            more.Content as string == "加载更多" && AutomationProperties.GetName(more) == "继续搜索未完成来源" &&
+            source.Items.Cast<FilmSelection>().SequenceEqual(page.Sources) &&
+            source.SelectedItem is FilmSelection selected && selected == page.SelectedSource &&
+            scene.Rig.Runtime.Calls.Count == before,
+            "opening the real source popup exposes continuation outside selectable source rows without requesting data");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        scene.Rig.Runtime.Intercept = async (method, input, token) =>
+        {
+            if (method != "film.session.command" || FilmJson.Text(input, "action") != "search.more")
+                return scene.Rig.Runtime.Handle(method, input);
+            entered.TrySetResult();
+            await finish.Task.WaitAsync(token);
+            return scene.Rig.Runtime.Handle(method, input);
+        };
+        try
+        {
+            Click(more);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!source.IsDropDownOpen && !more.IsEnabled && !page.CanSearchMore &&
+                source.SelectedItem is FilmSelection sourceChoice && sourceChoice == page.SelectedSource &&
+                pan.SelectedItem is FilmSelection panChoice && panChoice == page.SelectedLine,
+                "the footer action closes its popup and disables continuation without becoming a source or pan selection");
+            source.IsDropDownOpen = true;
+            Click(more);
+            finish.TrySetResult();
+            await Until(() => page.CanSearchMore && more.IsEnabled);
+            var commands = scene.Rig.Runtime.Calls.Skip(before)
+                .Where(call => call.Method == "film.session.command").ToArray();
+            Check(commands.Length == 1 && FilmJson.Text(commands[0].Parameters, "action") == "search.more" &&
+                page.SourceId == sourceId && page.Season == season && page.ActiveTarget == target &&
+                JsonElement.DeepEquals(page.SelectedLine!.WireId!.Value, lineId) &&
+                source.SelectedItem is FilmSelection afterSource && afterSource == page.SelectedSource &&
+                pan.SelectedItem is FilmSelection afterPan && afterPan == page.SelectedLine,
+                "one continuation request preserves the exact source, typed line, season and playback target");
+            foreach (string stage in new[] { "loading", "searching" })
+            {
+                scene.Rig.Runtime.Change(root => root["stage"] = stage);
+                string status = stage == "loading" ? "加载中..." : "正在搜索片源...";
+                await Until(() => page.PlayerStatusText == status && !more.IsEnabled && !page.CanSearchMore);
+                Click(more);
+            }
+            scene.Rig.Runtime.Change(root =>
+            {
+                root["stage"] = "idle";
+                root["search"] = JsonNode.Parse("""[{"sourceKey":"a","page":1,"completed":false,"loading":true}]""");
+            });
+            await Until(() => page.PlayerStatusText == "待播放" && !page.CanSearchMore && !more.IsEnabled);
+            Click(more);
+            scene.Rig.Runtime.Change(root => root["search"]![0]!["loading"] = false);
+            await Until(() => page.CanSearchMore && more.IsEnabled);
+            scene.Rig.Runtime.Change(root => { root["stage"] = "idle"; root["searchComplete"] = true; });
+            await Until(() => page.PlayerStatusText == "待播放" && !page.CanSearchMore && !more.IsEnabled);
+            Click(more);
+            Check(scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
+                FilmJson.Text(call.Parameters, "action") == "search.more") == 1 &&
+                page.SourceId == sourceId && page.Season == season &&
+                JsonElement.DeepEquals(page.SelectedLine!.WireId!.Value, lineId),
+                "loading, searching and completed owners cannot admit continuation or alter browsing selection");
+        }
+        finally { finish.TrySetResult(); source.IsDropDownOpen = false; }
+    }
+
+    private static async Task SourceSearchMoreFailure()
+    {
+        await using var scene = await Scene.Create();
+        var page = scene.Rig.Page;
+        var source = scene.Element<ComboBox>("SourcePicker");
+        source.ApplyTemplate();
+        var more = (Button)source.Template.FindName("SearchMoreSourcesButton", source);
+        scene.Rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
+            method == "film.session.command" && FilmJson.Text(input, "action") == "search.more"
+                ? FilmRuntimeProbe.Failure("UPSTREAM_ERROR") : scene.Rig.Runtime.Handle(method, input));
+        source.IsDropDownOpen = true;
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Click(more);
+        await Until(() => scene.Notices.Count == 1 && more.IsEnabled && page.CanSearchMore);
+        Check(scene.Notices.Single() == "上游服务请求失败",
+            "a rejected source continuation uses the existing floating notice and releases its pending state");
+        scene.Rig.Runtime.Intercept = null;
+        source.IsDropDownOpen = true;
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Click(more);
+        await Until(() => scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
+            FilmJson.Text(call.Parameters, "action") == "search.more") == 2 && page.CanSearchMore);
+        Check(scene.Notices.Count == 1, "an explicit successful retry adds no failure notice");
+        scene.Rig.Runtime.Intercept = (method, input, _) =>
+            method == "film.session.command" && FilmJson.Text(input, "action") == "search.more"
+                ? Task.FromException<JsonElement>(new OperationCanceledException())
+                : Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+        source.IsDropDownOpen = true;
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Click(more);
+        await Until(() => scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
+            FilmJson.Text(call.Parameters, "action") == "search.more") == 3 && page.CanSearchMore);
+        Check(scene.Notices.Count == 1 && more.IsEnabled,
+            "a cancelled continuation releases its pending state without showing a failure notice");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        scene.Rig.Runtime.Intercept = (method, input, _) =>
+        {
+            if (method != "film.session.command" || FilmJson.Text(input, "action") != "search.more")
+                return Task.FromResult(scene.Rig.Runtime.Handle(method, input));
+            entered.TrySetResult();
+            return finish.Task;
+        };
+        try
+        {
+            source.IsDropDownOpen = true;
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Click(more);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            scene.View.DataContext = new FilmPlaybackPage(page.Item, page.Request, null, null);
+            finish.TrySetResult(FilmRuntimeProbe.Failure("AUTH_FAILED"));
+            await Until(() => page.CanSearchMore);
+            Check(scene.Notices.Count == 1, "a late continuation error cannot notify the replacement page");
+        }
+        finally { finish.TrySetResult(FilmRuntimeProbe.Failure("CANCELLED")); }
+    }
+
+    private static async Task BrowseToolbar()
+    {
+        await using var scene = await Scene.Create();
+        BrowseSource(scene);
+        await Until(() => scene.Rig.Page.HasSeasons && scene.Rig.Page.CanBrowseRaw);
+        var page = scene.Rig.Page;
+        var toolbar = scene.Element<DockPanel>("EpisodeToolbar");
+        var source = scene.Element<ComboBox>("SourcePicker");
+        var pan = scene.Element<ComboBox>("LinePicker");
+        var preview = Visuals(toolbar).OfType<CheckBox>().Single();
+        var controls = new FrameworkElement[] { source, pan, preview, scene.Element<Button>("RawDirectory"),
+            scene.Element<Button>("HorizontalLayout"), scene.Element<Button>("ListLayout"),
+            scene.Element<Button>("EpisodePrevious"), scene.Element<Button>("EpisodeNext") };
+        foreach (double width in new[] { 1150d, 780d })
+        {
+            scene.Window.Width = width;
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            scene.Window.UpdateLayout();
+            double center = source.TranslatePoint(new(0, source.ActualHeight / 2), toolbar).Y;
+            foreach (var control in controls)
+            {
+                var point = control.TranslatePoint(new(0, control.ActualHeight / 2), toolbar);
+                Check(control.IsVisible && control.ActualWidth > 0 && Math.Abs(point.Y - center) < 1 &&
+                    point.X >= -.5 && point.X + control.ActualWidth <= toolbar.ActualWidth + .5,
+                    $"{control.Name} stays visible on the source toolbar at width {width}");
+            }
+            var seasons = scene.Element<ItemsControl>("SeasonPicker");
+            Check(seasons.IsVisible && seasons.TranslatePoint(new(), scene.View).Y >=
+                toolbar.TranslatePoint(new(0, toolbar.ActualHeight), scene.View).Y &&
+                source.SelectedItem is FilmSelection selected && selected == page.SelectedSource &&
+                pan.SelectedItem is FilmSelection line && line == page.SelectedLine,
+                "real seasons remain below the toolbar while both exact browsing selections stay visible");
+            int commands = scene.Rig.Runtime.Calls.Count;
+            Click(scene.Element<Button>("ListLayout"));
+            await Until(() => page.IsListLayout && !scene.Element<Button>("EpisodePrevious").IsVisible &&
+                !scene.Element<Button>("EpisodeNext").IsVisible);
+            Check(source.IsVisible && pan.IsVisible && preview.IsVisible && scene.Element<Button>("RawDirectory").IsVisible,
+                "list mode keeps source, pan, preview and the real directory entry in place");
+            Click(scene.Element<Button>("HorizontalLayout"));
+            await Until(() => page.IsHorizontalLayout && scene.Element<Button>("EpisodePrevious").IsVisible &&
+                scene.Element<Button>("EpisodeNext").IsVisible);
+            Check(scene.Rig.Runtime.Calls.Count == commands,
+                "changing episode presentation never refreshes a directory or searches a source");
+        }
+    }
+
+    private static void BrowseSource(Scene scene) => scene.Rig.Runtime.Change(root =>
+    {
+        root["sources"] = JsonNode.Parse(FilmJson.Encode(new[]
+        { new { id = "site-result", source = new { name = "准确站点" } } }).GetRawText());
+        root["browsing"] = JsonNode.Parse(FilmJson.Encode(new
+        {
+            sourceId = "site-result", lineId = 0, season = 1, loading = false, error = (string?)null,
+            lines = new[] { new { id = 0, provider = "quark", label = "夸克" } },
+            episodes = new[] { new { id = "browse-file", candidateId = "browse-file", season = 1, episode = 1, globalEpisode = 1, name = "准确文件" } },
+            originalEpisodes = new[] { new { id = "browse-file", candidateId = "browse-file", name = "准确文件", path = "/season/第1集.mp4" } }
+        }).GetRawText());
+        root["candidates"] = JsonNode.Parse(FilmJson.Encode(new[] { Candidate("browse-file") }).GetRawText());
+        root["metadata"]!["seasons"]!.AsArray().Add(JsonNode.Parse("""{"season_number":2,"name":"第二季","episode_count":8}"""));
+    });
+
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly FilmPlaybackRig Rig = new();

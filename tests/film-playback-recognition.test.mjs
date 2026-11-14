@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildEpisodeMap, resolveEpisode } from '../packages/film-playback/src/episodes.js';
+import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode } from '../packages/film-playback/src/episodes.js';
 import { matchesResult, mediaVariants, normalizeDetail, recognizeCandidates,
   recognizeVariantCandidates } from '../packages/film-playback/src/recognition.js';
 import { compareCandidates, isCandidateAllowed } from '../packages/film-playback/src/policy.js';
@@ -573,4 +573,39 @@ test('E11 malformed/ambiguous details fail without leaking raw IDs or accepting 
   assert.equal(selected.lines[0].episodes[0].playId, 'two');
   (await assert.rejects(async () => (await recognize({ lines: [{ id: 'flag', label: 'flag',
     episodes: [{ id: 'secret', name: 'S01E01.mkv' }] }] })), { code: 'INVALID_DETAIL' }));
+});
+
+test('verified Douban season evidence takes precedence over raw related-subject seasons', () => {
+  const value = { seasons: [{ id: 'subject-one' }, { id: 'subject-two' }],
+    doubanSeasons: [{ season: 1, episodeCount: 2 }, { season: 2, episodeCount: 1 }] };
+  assert.deepEqual(buildEpisodeMap(value).map(row => [row.season, row.episode, row.globalEpisode]),
+    [[1, 1, 1], [1, 2, 2], [2, 1, 3]]);
+  assert.deepEqual(buildEpisodeMap({ ...value, doubanSeasons: [] }), []);
+});
+
+test('equal season partitions map aired TMDB episodes locally despite different full-season counts', () => {
+  const own = { doubanSeasons: [1, 2, 3, 4].map(season => ({ season, episodeCount: 3 })) };
+  const reference = { seasons: [1, 2, 3, 4].map(season_number => ({
+    season_number, episode_count: 2, episodes: [1, 2].map(episode_number =>
+      ({ season_number, episode_number, name: `S${season_number}E${episode_number}` })),
+  })) };
+  reference.seasons.unshift({ season_number: 0, episode_count: 1 });
+  const rows = matchEpisodeMaps(own, reference);
+  assert.equal(rows.length, 12);
+  assert.deepEqual(rows.filter(row => row.episode.season === 2).map(({ episode, match }) =>
+    [episode.episode, episode.globalEpisode, match?.name]), [[1, 4, 'S2E1'], [2, 5, 'S2E2'], [3, 6, undefined]]);
+  assert.equal(rows[0].episode.name, undefined);
+});
+
+test('different season partitions require unambiguous global evidence to map episode metadata', () => {
+  const own = { doubanSeasons: [{ season: 1, episodeCount: 2 }, { season: 2, episodeCount: 2 }] };
+  const reference = { seasons: [{ season_number: 1, episode_count: 3,
+    episodes: [1, 2, 3].map(episode_number => ({ episode_number, name: `Episode ${episode_number}` })) }] };
+  assert.deepEqual(matchEpisodeMaps(own, reference).map(row => row.match?.name),
+    ['Episode 1', 'Episode 2', 'Episode 3', undefined]);
+  assert.deepEqual(matchEpisodeMaps({ doubanSeasons: [{ season: 2, episodeCount: 2 }] }, reference)
+    .map(row => row.match), [null, null]);
+  const ambiguous = { seasons: [{ season_number: 1, episode_count: 2,
+    episodes: [{ episode_number: 1 }, { episode_number: 1 }] }] };
+  assert.equal(matchEpisodeMaps(own, ambiguous)[0].match, null);
 });

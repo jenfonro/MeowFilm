@@ -53,6 +53,45 @@
     <Setter Property="Padding" Value="0"/>
     <Setter Property="FontFamily" Value="{DynamicResource MeowFilm.Font.Icons}"/>
    </Style>
+   <Style x:Key="Film.SourcePicker" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}">
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
+     <Grid>
+      <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen,RelativeSource={RelativeSource TemplatedParent},Mode=TwoWay}"
+       Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+       <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
+        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8"/>
+       </ControlTemplate></ToggleButton.Template>
+      </ToggleButton>
+      <Grid IsHitTestVisible="False" Margin="{TemplateBinding Padding}">
+       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/></Grid.ColumnDefinitions>
+       <ContentPresenter Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+        ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" VerticalAlignment="Center"/>
+       <Path x:Name="Arrow" Grid.Column="1" Data="M 0,0 L 4.5,4.5 L 9,0" Width="9" Height="5" Stretch="None" StrokeThickness="1.4"
+        StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{TemplateBinding Foreground}"
+        HorizontalAlignment="Right" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
+      </Grid>
+      <Popup x:Name="PART_Popup" Style="{StaticResource MeowFilm.Popup}" Placement="Bottom" VerticalOffset="4" IsOpen="{TemplateBinding IsDropDownOpen}"
+       AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+       <Border x:Name="DropDown" Margin="0,0,10,10" MinWidth="{Binding ActualWidth,RelativeSource={RelativeSource TemplatedParent}}"
+        Background="{TemplateBinding Background}" BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1" CornerRadius="8" Padding="4">
+        <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity=".12"/></Border.Effect>
+        <DockPanel KeyboardNavigation.TabNavigation="Cycle">
+         <Button x:Name="SearchMoreSourcesButton" DockPanel.Dock="Bottom" Content="加载更多" Click="SearchMoreSources_Click"
+          Style="{StaticResource Film.PlaybackAction}" HorizontalContentAlignment="Left" Margin="0,4,0,0"
+          IsEnabled="{Binding CanSearchMore}" AutomationProperties.Name="继续搜索未完成来源"/>
+         <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto">
+          <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+         </ScrollViewer>
+        </DockPanel>
+       </Border>
+      </Popup>
+     </Grid>
+     <ControlTemplate.Triggers>
+      <Trigger Property="IsDropDownOpen" Value="True"><Setter TargetName="Arrow" Property="RenderTransform"><Setter.Value><RotateTransform Angle="180"/></Setter.Value></Setter></Trigger>
+      <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="DropDown" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+     </ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+   </Style>
    <!-- Flat tiles: no resting surface or border; CardMotion supplies the hover and focus lift. -->
    <Style x:Key="Film.Tile" TargetType="Button">
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
@@ -511,19 +550,7 @@
      </Grid>
     </Grid>
     <StackPanel Margin="0,28,0,14">
-     <WrapPanel Margin="0,0,0,10">
-      <StackPanel Orientation="Horizontal">
-       <ComboBox x:Name="SourcePicker" ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource,Mode=OneWay}" DisplayMemberPath="Label" SelectionChanged="Source_Changed" MinHeight="36" Width="210" AutomationProperties.Name="站点来源"/>
-       <ComboBox x:Name="LinePicker" ItemsSource="{Binding Lines}" SelectedItem="{Binding SelectedLine,Mode=OneWay}" DisplayMemberPath="Label" SelectionChanged="Line_Changed" MinHeight="36" Width="180" Margin="10,0,0,0" Visibility="{Binding HasLines,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="网盘来源"/>
-      </StackPanel>
-      <WrapPanel Margin="10,0,0,0">
-       <CheckBox Content="点映" IsChecked="{Binding PreviewEpisodes,Mode=OneWay}" Click="Preview_Click" Margin="0,0,16,0" VerticalAlignment="Center" AutomationProperties.Name="显示点映剧集"/>
-       <Button x:Name="RefreshBrowsingButton" Content="刷新" Click="RefreshBrowsing_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" IsEnabled="{Binding CanRefreshBrowsing}" AutomationProperties.Name="刷新当前资料或目录"/>
-       <Button x:Name="RawDirectory" Content="查看原始列表" Click="Directory_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" Visibility="{Binding CanBrowseRaw,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
-       <Button Content="加载更多" Click="SearchMore_Click" Style="{StaticResource Film.PlaybackAction}" Margin="8,0,0,0" IsEnabled="{Binding CanSearchMore}" AutomationProperties.Name="继续搜索未完成来源"/>
-      </WrapPanel>
-     </WrapPanel>
-     <DockPanel>
+     <DockPanel x:Name="EpisodeToolbar" Margin="0,0,0,10">
      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Visibility="{Binding HasImageEpisodes,Converter={StaticResource MeowFilm.BoolToVisibility}}">
       <Border Background="{DynamicResource MeowFilm.Brush.Hover}" CornerRadius="8" Padding="3" Margin="0,0,10,0">
        <StackPanel Orientation="Horizontal">
@@ -564,6 +591,29 @@
       </StackPanel>
      </StackPanel>
 
+      <Grid>
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" MaxWidth="210"/>
+        <ColumnDefinition MaxWidth="190">
+         <ColumnDefinition.Style><Style TargetType="ColumnDefinition">
+          <Setter Property="Width" Value="*"/>
+          <Style.Triggers><DataTrigger Binding="{Binding HasLines}" Value="False"><Setter Property="Width" Value="0"/></DataTrigger></Style.Triggers>
+         </Style></ColumnDefinition.Style>
+        </ColumnDefinition>
+        <ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
+       </Grid.ColumnDefinitions>
+       <ComboBox x:Name="SourcePicker" ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource,Mode=OneWay}" DisplayMemberPath="Label"
+        SelectionChanged="Source_Changed" Style="{StaticResource Film.SourcePicker}" MinHeight="36" VerticalAlignment="Center" AutomationProperties.Name="站点来源"/>
+       <ComboBox x:Name="LinePicker" Grid.Column="1" ItemsSource="{Binding Lines}" SelectedItem="{Binding SelectedLine,Mode=OneWay}" DisplayMemberPath="Label"
+        SelectionChanged="Line_Changed" MinHeight="36" Margin="10,0,0,0" VerticalAlignment="Center"
+        Visibility="{Binding HasLines,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="网盘来源"/>
+       <CheckBox Grid.Column="2" Content="点映" IsChecked="{Binding PreviewEpisodes,Mode=OneWay}" Click="Preview_Click"
+        Margin="10,0,16,0" VerticalAlignment="Center" AutomationProperties.Name="显示点映剧集"/>
+       <Button x:Name="RawDirectory" Grid.Column="3" Content="查看原始列表" Click="Directory_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,8,0"
+        Visibility="{Binding CanBrowseRaw,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+      </Grid>
+     </DockPanel>
+     <DockPanel>
       <ItemsControl DockPanel.Dock="Right" ItemsSource="{Binding MetadataSources}" Margin="12,0,0,0"
                     Visibility="{Binding HasMetadataMappings,Converter={StaticResource MeowFilm.BoolToVisibility}}"
                     AutomationProperties.Name="当前站点分季映射">
