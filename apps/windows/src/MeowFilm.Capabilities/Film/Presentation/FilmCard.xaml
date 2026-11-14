@@ -4,20 +4,15 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- Width="176" Background="Transparent"
+ MaxWidth="176" HorizontalAlignment="Left" VerticalAlignment="Top" Background="Transparent"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
- <UserControl.Style><Style TargetType="UserControl">
-  <Setter Property="Height" Value="294"/>
-  <Style.Triggers><DataTrigger Binding="{Binding HasSubtitle}" Value="True">
-   <Setter Property="Height" Value="318"/>
-  </DataTrigger></Style.Triggers>
- </Style></UserControl.Style>
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
    <local:FilmScaleConverter x:Key="Film.Scale"/>
+   <local:FilmBadgeWidthConverter x:Key="Film.BadgeWidth"/>
    <Style x:Key="Film.CardButton" TargetType="Button">
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="BorderThickness" Value="0"/>
@@ -38,8 +33,9 @@
  <Button x:Name="HitButton" Style="{StaticResource Film.CardButton}"
          local:CardMotion.Enabled="True" Click="Activate_Click"
          AutomationProperties.Name="{Binding Title}">
-  <StackPanel Width="176">
-   <Grid x:Name="PosterFrame" Width="176" Height="264" local:CardClip.Radius="14"
+  <StackPanel>
+   <local:AspectRatioDecorator AspectRatio="176,264">
+   <Grid x:Name="PosterFrame" local:CardClip.Radius="14"
          RenderTransformOrigin=".5,0">
     <Grid.RenderTransform><ScaleTransform
      ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"
@@ -58,7 +54,8 @@
                           Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}"/>
     <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}"/>
     <Border x:Name="TextBadge" HorizontalAlignment="Right" VerticalAlignment="Top"
-            MaxWidth="123.2" Margin="8" Padding="8,2" CornerRadius="8">
+            MaxWidth="{Binding ActualWidth,ElementName=PosterFrame,Converter={StaticResource Film.BadgeWidth}}"
+            Margin="8" Padding="8,2" CornerRadius="8">
      <Border.Style><Style TargetType="Border">
       <Setter Property="Visibility" Value="{Binding HasTextBadge,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
       <Setter Property="Background" Value="#F97316"/>
@@ -97,6 +94,7 @@
                 HorizontalAlignment="Center" VerticalAlignment="Center"/>
     </Border>
    </Grid>
+   </local:AspectRatioDecorator>
    <TextBlock Text="{Binding Title}" Margin="0,9,0,0" Height="21"
               Foreground="{DynamicResource MeowFilm.Brush.Text}"
               FontSize="15" TextAlignment="Center"

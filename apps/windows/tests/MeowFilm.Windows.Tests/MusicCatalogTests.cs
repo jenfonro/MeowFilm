@@ -1410,8 +1410,8 @@ public static partial class MusicCatalogTests
                 True(ReferenceEquals(view.FindResource("Catalog.RankCoverCard"), shelf.CardTemplate),
                     "ranking covers own a dedicated card template");
                 Equal(120d, shelf.MinimumCardWidth);
-                True(shelf.CardWidth - 16 is >= 123 and <= 124,
-                    "seven official square cards retain the measured 16 pixel gap at a 960 pixel content width");
+                True(shelf.CardWidth - 16 is >= 120 and <= 168,
+                    "ranking covers use the readable native range without exceeding the reference maximum");
                 var card = Descendants<Button>(shelf).First(button => button.Tag is MusicCatalogCard);
                 True(Math.Abs(card.ActualWidth - card.ActualHeight) < .5,
                     $"ranking artwork card is square ({card.ActualWidth} × {card.ActualHeight})");

@@ -9,14 +9,12 @@
  <Grid>
   <local:FilmLoadingCards Margin="24,0"
       Visibility="{Binding ShowSkeleton,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
-  <local:Shelf x:Name="Cards" Margin="24,0" MinimumCardWidth="176"
+  <local:Shelf x:Name="Cards" Margin="24,0" MinimumCardWidth="144"
                ItemsSource="{Binding Items}" HorizontalOffset="{Binding HorizontalOffset,Mode=TwoWay}"
                NavigationButtonStyle="{StaticResource Film.ShelfArrow}"
                Visibility="{Binding HasItems,Converter={StaticResource MeowFilm.BoolToVisibility}}">
    <local:Shelf.CardTemplate><DataTemplate>
-    <Viewbox Stretch="Uniform" Margin="0,0,16,0">
-     <local:FilmCard Activated="Card_Activated"/>
-    </Viewbox>
+    <local:FilmCard Margin="0,0,16,0" Activated="Card_Activated"/>
    </DataTemplate></local:Shelf.CardTemplate>
   </local:Shelf>
   <StackPanel MinHeight="294" HorizontalAlignment="Center" VerticalAlignment="Center"

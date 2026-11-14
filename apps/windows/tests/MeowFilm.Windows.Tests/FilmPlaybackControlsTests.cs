@@ -410,7 +410,9 @@ public static class FilmPlaybackControlsTests
         });
         yield return Test("movie buttons mark exact same-label current through pending failed replacement and started while retaining width and quality order", async () =>
         {
-            await using var scene = await Scene.Create();
+            await using var scene = new Scene();
+            await scene.Rig.OpenAsync(Card("movie")); scene.View.DataContext = scene.Rig.Page; scene.Window.Show();
+            await Until(() => scene.View.IsLoaded && scene.View.ActualWidth > 0);
             JsonElement Movie(string id, string quality = "1080p")
             {
                 var row = JsonNode.Parse(Candidate(id, episode: null, quality: quality).GetRawText())!;
@@ -421,8 +423,6 @@ public static class FilmPlaybackControlsTests
             // Product Node snapshots supply the already ordered movie candidates.
             var rows = FilmJson.Encode(new[] { Movie("movie-hdr", "4k_hdr"), a, b, Movie("movie-unknown", "") });
             void Choices() => scene.Rig.Runtime.Change(root => root["candidates"] = JsonNode.Parse(rows.GetRawText()));
-            scene.Rig.Runtime.Target = scene.Rig.Runtime.Target with
-            { Id = "tmdb:movie:100", Kind = "movie", Season = null, Episode = null, GlobalEpisode = null };
             scene.Rig.Runtime.Attempt("movie-output-a", a);
             Choices();
             await Until(() => scene.Rig.Page.CurrentCandidateId == "movie-a" && scene.Rig.Page.Candidates.Count == 4 &&
@@ -435,8 +435,8 @@ public static class FilmPlaybackControlsTests
                 var buttons = Visuals(choices).OfType<Button>().Where(button => button.Tag is FilmCandidateItem).ToArray();
                 Check(buttons.Select(button => ((FilmCandidateItem)button.Tag).Id)
                     .SequenceEqual(new[] { "movie-hdr", "movie-a", "movie-b", "movie-unknown" }) &&
-                    buttons.All(button => Math.Abs(button.ActualWidth - 190) < .5),
-                    "all accepted-state updates retain Node quality order and the poster candidate width");
+                    buttons.All(button => button.ActualWidth >= 143.5 && button.ActualWidth <= 176.5),
+                    "all accepted-state updates retain Node quality order and bounded readable poster candidates");
                 Check(scene.Rig.Page.Candidates.Single(value => value.Id == "movie-a").DisplayLabel == "1080P · 契约来源" &&
                     scene.Rig.Page.Candidates.Single(value => value.Id == "movie-b").DisplayLabel == "1080P · 契约来源 (2)" &&
                     scene.Rig.Page.Candidates.Single(value => value.IsSelected).Id == expected,
@@ -500,21 +500,15 @@ public static class FilmPlaybackControlsTests
             }
             finally { prepare.TrySetResult(); }
         });
-        yield return Test("long movie choices keep fixed widths and raw-directory visibility follows the selected real list", async () =>
+        yield return Test("long movie choices keep bounded widths and raw-directory visibility follows the selected real list", async () =>
         {
-            await using var scene = await Scene.Create();
+            await using var scene = new Scene();
             string longName = string.Concat(Enumerable.Repeat("这是一个很长但不能撑开选集块的站点名称", 12));
             var candidate = JsonNode.Parse(Candidate("movie-long", episode: null).GetRawText())!.AsObject();
             candidate["source"]!["name"] = longName;
-            scene.Rig.Runtime.Change(root =>
-            {
-                root["target"]!["kind"] = "movie";
-                root["target"]!.AsObject().Remove("season");
-                root["target"]!.AsObject().Remove("episode");
-                root["target"]!.AsObject().Remove("globalEpisode");
-                root["candidates"] = new JsonArray(candidate);
-                root["episodes"] = new JsonArray();
-            });
+            scene.Rig.Runtime.Candidates = FilmJson.Encode(new[] { candidate });
+            await scene.Rig.OpenAsync(Card("movie")); scene.View.DataContext = scene.Rig.Page; scene.Window.Show();
+            await Until(() => scene.View.IsLoaded && scene.View.ActualWidth > 0);
             await Until(() => scene.Rig.Page.ShowMovieCandidates && scene.Rig.Page.Candidates.Count == 1);
             foreach (double width in new[] { 1150d, 780d })
             {
@@ -527,7 +521,7 @@ public static class FilmPlaybackControlsTests
                 var title = Visuals(button).OfType<TextBlock>().Single(value => value.Text == scene.Rig.Page.Candidates.Single().Name);
                 Check(title.FontSize == 14 && title.FontWeight == FontWeights.Normal,
                     "actual movie candidate titles retain body size and use regular text");
-                Check(Math.Abs(button.ActualWidth - 190) < .5 && choices.ActualWidth <= scene.View.ActualWidth &&
+                Check(button.ActualWidth >= 143.5 && button.ActualWidth <= 176.5 && choices.ActualWidth <= scene.View.ActualWidth &&
                     label.TextWrapping == TextWrapping.NoWrap && label.TextTrimming == TextTrimming.CharacterEllipsis,
                     "wide and narrow movie rows constrain the real long label instead of expanding the content region");
             }

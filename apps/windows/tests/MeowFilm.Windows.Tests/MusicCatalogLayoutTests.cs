@@ -78,6 +78,9 @@ public static class MusicCatalogLayoutTests
             await Drain(); scene.Layout(width);
             Check(!Descendants<ArtworkImage>(skeleton).Any(), "placeholder cannot request artwork");
             var shapes = skeleton.Children.Cast<LoadingSkeleton>().ToArray();
+            var squareCovers = shapes.Where(shape => Math.Abs(shape.ActualWidth - shape.ActualHeight) < .5).ToArray();
+            Check(squareCovers.Length > 0 && squareCovers.All(shape => shape.ActualWidth is >= 123.5 and <= 168.5),
+                "ordinary cover placeholders use the same bounded square geometry as their native shelves");
             var first = shapes[0].TransformToAncestor(skeleton).TransformBounds(new Rect(shapes[0].RenderSize));
             if (!home)
             {

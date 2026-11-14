@@ -307,8 +307,8 @@
     </Style.Triggers>
    </Style>
    <DataTemplate x:Key="Film.EpisodeCard">
-    <Viewbox Stretch="Uniform" Margin="0,0,16,0">
-     <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" Width="260"
+     <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" MaxWidth="260"
+             Margin="0,0,16,0" HorizontalAlignment="Left"
              local:CardMotion.Enabled="True" Tag="{Binding}" Click="Episode_Click" IsEnabled="{Binding CanSelect}"
              AutomationProperties.Name="{Binding Label}">
       <Button.RenderTransform><ScaleTransform
@@ -316,7 +316,8 @@
        ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"/>
       </Button.RenderTransform>
       <StackPanel>
-       <Grid Height="144" local:CardClip.Radius="10">
+       <local:AspectRatioDecorator AspectRatio="260,144">
+       <Grid local:CardClip.Radius="10">
         <local:FilmPlaybackPoster Address="{Binding Image}" AutomationProperties.Name="{Binding Label}"
                RenderTransformOrigin=".5,.5">
          <local:FilmPlaybackPoster.RenderTransform><ScaleTransform
@@ -337,6 +338,7 @@
          <TextBlock Text="{Binding Duration}" Foreground="White" FontSize="{StaticResource MeowFilm.Font.Size.Caption}"/>
         </Border>
        </Grid>
+       </local:AspectRatioDecorator>
        <StackPanel Margin="2,10,2,0">
         <TextBlock Text="{Binding Label}" FontSize="{StaticResource MeowFilm.Font.Size.Body}"
                    Style="{StaticResource Film.EpisodeLabel}"
@@ -347,7 +349,6 @@
        </StackPanel>
       </StackPanel>
      </Button>
-    </Viewbox>
    </DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
@@ -631,16 +632,17 @@
              AutomationProperties.Name="搜索剧集"/>
     </Grid>
     <ItemsControl x:Name="MovieCandidates" ItemsSource="{Binding Candidates}" Visibility="{Binding ShowMovieCandidates,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-     <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><local:AdaptiveCardPanel RowGap="16"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
      <ItemsControl.ItemTemplate><DataTemplate>
       <Button x:Name="MovieTile" Tag="{Binding}" Click="Candidate_Click" Style="{StaticResource Film.EpisodeTile}"
-              local:CardMotion.Enabled="True" Width="190" Margin="0,0,16,16" AutomationProperties.Name="{Binding DisplayLabel}">
+              local:CardMotion.Enabled="True" MaxWidth="176" AutomationProperties.Name="{Binding DisplayLabel}">
        <Button.RenderTransform><ScaleTransform
         ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"
         ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"/>
        </Button.RenderTransform>
        <StackPanel>
-        <Grid Height="276" local:CardClip.Radius="10">
+        <local:AspectRatioDecorator AspectRatio="176,264">
+        <Grid local:CardClip.Radius="10">
          <local:FilmPlaybackPoster Address="{Binding Image}" AutomationProperties.Name="{Binding Name}"/>
          <local:FilmHoverShade Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile}"/>
          <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile}"/>
@@ -651,7 +653,8 @@
           </StackPanel>
          </Border>
         </Grid>
-        <TextBlock Text="{Binding Name}" FontSize="14" Margin="2,9,2,0"
+        </local:AspectRatioDecorator>
+        <TextBlock Text="{Binding Name}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="2,9,2,0"
                    TextTrimming="CharacterEllipsis"/>
         <TextBlock Text="{Binding DisplayLabel}" FontSize="13" Margin="2,4,2,0"
                    TextTrimming="CharacterEllipsis" Style="{StaticResource Capability.Muted}"/>
@@ -662,7 +665,7 @@
       </Button>
      </DataTemplate></ItemsControl.ItemTemplate>
     </ItemsControl>
-    <local:Shelf x:Name="EpisodeShelf" ItemsSource="{Binding Episodes}" MinimumCardWidth="260"
+    <local:Shelf x:Name="EpisodeShelf" ItemsSource="{Binding Episodes}" MinimumCardWidth="208"
                  NavigationButtonStyle="{StaticResource Film.ShelfArrow}"
                  Visibility="{Binding ShowEpisodeCards,Converter={StaticResource MeowFilm.BoolToVisibility}}"
                  CardTemplate="{StaticResource Film.EpisodeCard}"

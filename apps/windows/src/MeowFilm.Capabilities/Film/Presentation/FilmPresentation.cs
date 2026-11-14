@@ -19,21 +19,19 @@ public sealed class FilmScaleConverter : IValueConverter
         throw new NotSupportedException();
 }
 
-public sealed class FilmGridColumnsConverter : IValueConverter
+public sealed class FilmPlayerHeightConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
-        value is double width && double.IsFinite(width)
-            ? Math.Clamp((int)((width + 36) / 212), 1, 8)
-            : 1;
+        value is double width && double.IsFinite(width) ? Math.Max(0, width) * 9 / 16 : 0d;
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
         throw new NotSupportedException();
 }
 
-public sealed class FilmPlayerHeightConverter : IValueConverter
+public sealed class FilmBadgeWidthConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
-        value is double width && double.IsFinite(width) ? Math.Max(0, width) * 9 / 16 : 0d;
+        value is double width ? width * .7 : 0d;
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
         throw new NotSupportedException();

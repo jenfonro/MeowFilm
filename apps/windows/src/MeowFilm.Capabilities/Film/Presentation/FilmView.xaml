@@ -10,7 +10,6 @@
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
-   <local:FilmGridColumnsConverter x:Key="Film.GridColumns"/>
    <Style x:Key="Film.MoreButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
     <Setter Property="Padding" Value="13,5,11,5"/>
@@ -200,14 +199,12 @@
       </Style></ItemsControl.Style>
       <ItemsControl.ItemsPanel>
        <ItemsPanelTemplate>
-        <UniformGrid Columns="{Binding ActualWidth,RelativeSource={RelativeSource AncestorType=ItemsControl},Converter={StaticResource Film.GridColumns}}"/>
+        <local:AdaptiveCardPanel/>
        </ItemsPanelTemplate>
       </ItemsControl.ItemsPanel>
       <ItemsControl.ItemTemplate>
        <DataTemplate>
-        <Border Margin="18,0,18,36" HorizontalAlignment="Center">
-          <local:FilmCard Activated="DataCard_Activated"/>
-        </Border>
+        <local:FilmCard Activated="DataCard_Activated"/>
        </DataTemplate>
       </ItemsControl.ItemTemplate>
      </ItemsControl>

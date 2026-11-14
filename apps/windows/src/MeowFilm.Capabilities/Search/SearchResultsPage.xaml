@@ -77,8 +77,8 @@
                  Style="{StaticResource MeowFilm.OverlayScrollViewer}">
     <StackPanel>
      <ItemsControl ItemsSource="{Binding Cards}" AutomationProperties.Name="影视搜索结果">
-      <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-      <ItemsControl.ItemTemplate><DataTemplate><local:FilmCard Margin="0,0,24,24" Activated="Card_Activated"/></DataTemplate></ItemsControl.ItemTemplate>
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><local:AdaptiveCardPanel CardGap="24"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate><DataTemplate><local:FilmCard Activated="Card_Activated"/></DataTemplate></ItemsControl.ItemTemplate>
      </ItemsControl>
      <TextBlock Text="{Binding Status}" Margin="0,16" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}"/>
      <Button Content="加载更多" Click="More_Click" IsEnabled="{Binding CanLoadMore}" HorizontalAlignment="Center"
