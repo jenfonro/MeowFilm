@@ -27,8 +27,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         Sources = sources; Library = library; Rules = rules; Search = new(sources, rules);
         Navigation = [new(HomeRoute, "小说", "\uE8F1", ShowInSidebar: false)
             { IconData = "M12,5 C9,3 6,3 3,4 L3,19 C6,18 9,18 12,20 C15,18 18,18 21,19 L21,4 C18,3 15,3 12,5 L12,20" },
-            new(CategoriesRoute, "分类", "\uE80A")
-            { IconData = "M3,3 L10,3 10,10 3,10 Z M14,3 L21,3 21,10 14,10 Z M3,14 L10,14 10,21 3,21 Z M14,14 L21,14 21,21 14,21 Z" },
+            new(CategoriesRoute, "分类", "\uE8A9"),
             new(BookRoute, "书籍详情", "\uE8F1", ShowInSidebar: false), new(ReaderRoute, "阅读", "\uE8F1", ShowInSidebar: false)];
         view = new(this); settings = new(this);
         Library.Changed += LibraryChanged; Sources.Changed += SourcesChanged;

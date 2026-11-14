@@ -4,12 +4,6 @@
  <ResourceDictionary.MergedDictionaries>
   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
  </ResourceDictionary.MergedDictionaries>
- <Style x:Key="Novel.Discovery.Text" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
-  <Setter Property="Foreground" Value="#202923"/>
- </Style>
- <Style x:Key="Novel.Discovery.Muted" TargetType="TextBlock" BasedOn="{StaticResource Novel.Discovery.Text}">
-  <Setter Property="Foreground" Value="#58635B"/>
- </Style>
  <Style x:Key="Novel.Discovery.Icon" TargetType="Path">
   <Setter Property="Stroke" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
   <Style.Triggers>
@@ -19,16 +13,10 @@
   </Style.Triggers>
  </Style>
  <Style x:Key="Novel.Discovery.Action" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
-  <Setter Property="FontSize" Value="12"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
   <Setter Property="MinHeight" Value="30"/><Setter Property="Height" Value="30"/>
   <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0"/>
   <Setter Property="BorderThickness" Value="0"/>
-  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-   <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" Padding="{TemplateBinding Padding}">
-    <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
-   </Border>
-  </ControlTemplate></Setter.Value></Setter>
   <Style.Triggers>
    <MultiTrigger><MultiTrigger.Conditions>
     <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsMouseOver" Value="True"/>
@@ -56,7 +44,7 @@
  </Style>
  <Style x:Key="Novel.Discovery.Tab" TargetType="RadioButton">
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-  <Setter Property="FontSize" Value="13"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
   <Setter Property="Height" Value="55"/><Setter Property="Margin" Value="0,0,30,0"/>
   <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
@@ -67,7 +55,7 @@
    <ControlTemplate.Triggers>
     <Trigger Property="IsChecked" Value="True">
      <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-     <Setter Property="FontWeight" Value="SemiBold"/>
+     <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
      <Setter TargetName="Underline" Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
     </Trigger>
     <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/></Trigger>
@@ -84,7 +72,7 @@
  </Style>
  <Style x:Key="Novel.Discovery.Choice" TargetType="RadioButton">
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-  <Setter Property="FontSize" Value="12"/><Setter Property="MinHeight" Value="24"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/><Setter Property="MinHeight" Value="24"/>
   <Setter Property="Padding" Value="10,3"/><Setter Property="Margin" Value="0,3,12,3"/>
   <Setter Property="Background" Value="Transparent"/>
   <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
@@ -98,7 +86,7 @@
    <Trigger Property="IsChecked" Value="True">
     <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/>
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
    </Trigger>
    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
@@ -114,7 +102,7 @@
  </Style>
  <Style x:Key="Novel.Discovery.Source" TargetType="ComboBox" BasedOn="{StaticResource Novel.ComboBox}">
   <Setter Property="MinHeight" Value="32"/><Setter Property="Height" Value="32"/>
-  <Setter Property="FontSize" Value="12"/><Setter Property="Padding" Value="10,4"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/><Setter Property="Padding" Value="10,4"/>
   <Setter Property="ItemTemplate"><Setter.Value><DataTemplate>
    <Grid>
     <Grid.ColumnDefinitions><ColumnDefinition Width="14"/><ColumnDefinition Width="8"/><ColumnDefinition/></Grid.ColumnDefinitions>

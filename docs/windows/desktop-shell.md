@@ -49,9 +49,10 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 - AppHost 注入 `IDesktopAppearance`，壳在模块设置类别之前提供“通用”。通用页不伪装成业务模块；业务通过 `IDesktopGeneralSettingsSource` 分别贡献外观、首页数据源、缓存控制内容，壳仅负责区域切换，设置返回仍恢复最初页面且不重放导航。
 - `AppAppearance` 独占原生文档 `app.appearance.v1`，严格字段为 `{schema:1, themeColor:"#RRGGBB"}`。缺失只采用默认、不写盘；损坏或未知版本不覆盖，通知并允许重新读取。保存使用读取指纹 CAS，失败后权威重读、不重放写入；已接受写入在 App 关闭前实际排空，取消关闭可恢复准入。该 namespace 不开放给脚本桥。
 - `MeowFilm.Brush.AppBackground` 只属于壳的普通页面背景。默认纵向渐变为 `#E4F2FC/#EBF5FC/#F5F8FB/#F7F9FC`，位置 `0/.24/.58/1`，从浅蓝过渡到近白，底部不再变深；自定义色按各层固定权重着色，保留浅底与中性过渡，不铺纯色。存储的 `themeColor` 与默认选择标识 `#E6F3FB` 不变，不重置用户已保存的主题。普通页主操作为绿色，错误、删除、收藏心形及平台标识可保留语义红。
-- 侧栏 `SidebarBackdrop` 用 `VisualBrush` 引用独立的整窗 `ApplicationBackground` 背景兄弟层，该层绑定同一窗口背景来源。绘制使用背景层在侧栏中的真实坐标及完整尺寸，再施加 12 DIP 的背景模糊并裁剪到侧栏；不把渐变缩放进侧栏，不模糊文字与图标。按已确认外壳图稿在材质上覆盖 40% 白色轻层，并保留右侧及导航分组分隔线；该轻层不是独立壁纸或渐变 owner。背景换色由同一 Brush 来源更新，尺寸变化使投影失效重绘；不逐帧截图、不取样包含自身的祖先、不使用系统桌面 Acrylic。高对比时关闭模糊及白色轻层，使用不透明系统背景和系统色边界。
+- 侧栏 `SidebarBackdrop` 用 `VisualBrush` 引用独立的整窗 `ApplicationBackground` 背景兄弟层，该层绑定同一窗口背景来源。绘制使用背景层在侧栏中的真实坐标及完整尺寸，再施加 12 DIP 的背景模糊并裁剪到侧栏；不把渐变缩放进侧栏，不模糊文字与图标。按已确认外壳图稿在材质上覆盖 40% 白色轻层，保留右侧及导航分组分隔线，并在主内容侧用 30 DIP 的横向透明渐隐柔化交界；装饰不接收输入，随侧栏退出沉浸画布。该轻层和交界不是独立壁纸或渐变 owner。背景换色由同一 Brush 来源更新，尺寸变化使投影失效重绘；不逐帧截图、不取样包含自身的祖先、不使用系统桌面 Acrylic。高对比时关闭模糊、白色轻层及交界渐隐，使用不透明系统背景和系统色边界。
 - 影片播放页与其他普通页面透明透出同一 AppBackground，不再由海报生成环境色或铺满信息区。全屏音乐播放器与小说阅读器保留独立专用画布及各自的用户配色、夜间和背景设置；音乐底栏背景/进度仍跟随歌曲或固定播放器配色，主播放按钮使用绿色。视频像素区及视频浮窗保留黑底，高对比仍优先系统资源。
 - `FloatingSurface`、`ItemHover`、`ItemSelected`、`InputSurface` 从同一 `ThemeColor` 派生浅色菜单／弹层、悬停、当前及搜索底色。AppHost 当前仅装配一个 Shell 和一个 appearance owner；同一 UI dispatcher 的重复 Theme 字典与脱离视觉树的 Popup 引用同一组颜色 Brush。Brush 的 Color 绑定到派生值，防止 WPF 模板／资源封存冻结后不能更新；未复制主题设置或遍历控件树。这不是同一 dispatcher 多个独立主题 owner 的契约。高对比由控件样式切到系统色。
+- 公共 `MeowFilm.ComboBox` 与设置派生样式共用既有 `MeowFilm.SettingsComboItem`；弹层直接使用 `MeowFilm.FloatingSurface`，不继承闭合控件的透明背景。搜索模式和书源选择器保留各自紧凑尺寸，共享选项的字体、悬停、选中、禁用及高对比状态；弹层最大高度沿用 `MaxDropDownHeight`。
 - `SettingsScrollChrome.xaml` 仅用于设置页和其中列表，常显且不创建空闲计时器；普通页保留 `OverlayScrollChrome` 的原自动隐藏机制。
 
 ## 媒体快捷键设置

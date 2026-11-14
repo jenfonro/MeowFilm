@@ -11,7 +11,7 @@
     <x:Static x:Key="MeowFilm.Brush.ItemHover" Member="local:AppearanceColors.ItemHover"/>
     <x:Static x:Key="MeowFilm.Brush.ItemSelected" Member="local:AppearanceColors.ItemSelected"/>
     <x:Static x:Key="MeowFilm.Brush.InputSurface" Member="local:AppearanceColors.InputSurface"/>
-    <SolidColorBrush x:Key="MeowFilm.Brush.SidebarBorder" Color="#80E5E7EB"/>
+    <SolidColorBrush x:Key="MeowFilm.Brush.SidebarBorder" Color="#B8B9CDD7"/>
     <SolidColorBrush x:Key="MeowFilm.Brush.Surface" Color="#FFFFFF" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#374151" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#6B7280" />
@@ -563,6 +563,7 @@
   <Setter Property="MinHeight" Value="38"/>
   <Setter Property="Padding" Value="12,8"/>
   <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
+  <Setter Property="ItemContainerStyle" Value="{DynamicResource MeowFilm.SettingsComboItem}"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
    <Grid>
     <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen,RelativeSource={RelativeSource TemplatedParent},Mode=TwoWay}"
@@ -579,19 +580,20 @@
       StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{TemplateBinding Foreground}"
       HorizontalAlignment="Right" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
     </Grid>
-    <Popup x:Name="PART_Popup" Style="{StaticResource MeowFilm.Popup}" Placement="Bottom" VerticalOffset="4" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True"
+    <Popup x:Name="PART_Popup" Style="{StaticResource MeowFilm.Popup}" Placement="Bottom" HorizontalOffset="-8" VerticalOffset="-4" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True"
      Focusable="False" PopupAnimation="Fade">
-     <Border x:Name="DropDown" Margin="0,0,10,10" MinWidth="{Binding ActualWidth,RelativeSource={RelativeSource TemplatedParent}}"
-      Background="{TemplateBinding Background}" BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1"
-      CornerRadius="8" Padding="4">
-      <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity=".12"/></Border.Effect>
-      <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer>
+     <Border Padding="8" Background="Transparent">
+      <Border x:Name="DropDown" Style="{StaticResource MeowFilm.FloatingSurface}" Padding="4"
+       MinWidth="{Binding ActualWidth,RelativeSource={RelativeSource TemplatedParent}}">
+       <ScrollViewer MaxHeight="{TemplateBinding MaxDropDownHeight}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+       </ScrollViewer>
+      </Border>
      </Border>
     </Popup>
    </Grid>
    <ControlTemplate.Triggers>
     <Trigger Property="IsDropDownOpen" Value="True"><Setter TargetName="Arrow" Property="RenderTransform"><Setter.Value><RotateTransform Angle="180"/></Setter.Value></Setter></Trigger>
-    <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="DropDown" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
    </ControlTemplate.Triggers>
   </ControlTemplate></Setter.Value></Setter>
   <Style.Triggers>
@@ -623,8 +625,10 @@
    <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" CornerRadius="6"><ContentPresenter/></Border>
   </ControlTemplate></Setter.Value></Setter>
   <Style.Triggers>
-   <Trigger Property="IsHighlighted" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/></Trigger>
-   <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/></Trigger>
+   <Trigger Property="IsHighlighted" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
+   <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
+   <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/></Trigger>
+   <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Disabled}"/></Trigger>
    <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
@@ -637,6 +641,14 @@
     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
    </MultiTrigger>
+   <MultiTrigger><MultiTrigger.Conditions><Condition Property="local:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsSelected" Value="True"/></MultiTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+   </MultiTrigger>
+   <MultiTrigger><MultiTrigger.Conditions><Condition Property="local:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsEnabled" Value="False"/></MultiTrigger.Conditions>
+    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+   </MultiTrigger>
   </Style.Triggers>
  </Style>
  <Style x:Key="MeowFilm.SettingsComboBox" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}">
@@ -644,7 +656,6 @@
   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Normal}"/>
   <Setter Property="TextOptions.TextFormattingMode" Value="Display"/><Setter Property="TextOptions.TextRenderingMode" Value="Auto"/>
   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
-  <Setter Property="ItemContainerStyle" Value="{StaticResource MeowFilm.SettingsComboItem}"/>
  </Style>
  <Style x:Key="MeowFilm.SettingsSectionTitle" TargetType="TextBlock">
   <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
