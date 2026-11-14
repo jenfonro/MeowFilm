@@ -2,6 +2,7 @@ using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using MeowFilm.Desktop;
 using Microsoft.Win32;
 
@@ -23,7 +24,13 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     private CancellationTokenSource pending = new();
     internal NovelSettingsView(NovelCapability module)
     {
-        this.module = module; NovelUi.Theme(this); Content = root; root.Children.Add(body); root.Children.Add(notice);
+        this.module = module; NovelUi.Theme(this);
+        SetBinding(Control.BackgroundProperty, new Binding(nameof(Window.Background))
+        { RelativeSource = new(RelativeSourceMode.FindAncestor, typeof(Window), 1) });
+        Content = root;
+        root.SetBinding(Panel.BackgroundProperty, new Binding(nameof(Window.Background))
+        { RelativeSource = new(RelativeSourceMode.FindAncestor, typeof(Window), 1) });
+        root.Children.Add(body); root.Children.Add(notice);
         sourceSort = MenuButton("\uE8CB", "排序"); sourceGroups = MenuButton("\uE71C", "分组与协议"); sourceMore = MenuButton("\uE712", "更多");
         ruleGroups = MenuButton("\uE71C", "分组"); ruleMore = MenuButton("\uE712", "更多");
         foreach (var button in new[] { sourceSort, sourceGroups, sourceMore }) sourceList.Tools.Children.Add(button);
@@ -114,7 +121,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     { foreach (var source in module.Sources.Sources.Where(s => sourceList.Selected.Contains(s.InstallationId)).ToArray()) await module.Sources.UpdateAsync(source, new { enabled }, token); }
     private async Task RemoveSourcesAsync(NovelSource[] sources, CancellationToken token)
     {
-        if (sources.Length == 0 || !await NovelUi.ConfirmAsync(this, "删除书源", $"删除所选 {sources.Length} 个书源及其私有数据？", "删除", token)) return;
+        if (sources.Length == 0 || !await NovelUi.ConfirmAsync(this, "删除书源", $"删除所选 {sources.Length} 个书源及其私有数据？", "删除", token, applicationOverlay: true)) return;
         foreach (var source in sources) await module.Sources.RemoveAsync(source, token);
     }
     private async Task EditSourceAsync(NovelSource? source, string protocol, CancellationToken token)
@@ -142,7 +149,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
             }
             else source = NovelJson.Decode<NovelSource>((await module.Sources.SaveAsync(source, text, ct)).GetProperty("source"));
             module.Notify("书源已保存"); return false;
-        }, token);
+        }, token, applicationOverlay: true);
     }
     private async Task ImportSourceFileAsync(CancellationToken token)
     {
@@ -152,13 +159,13 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     private async Task ImportSourceUrlAsync(CancellationToken token)
     {
         var panel = new ManagementForm(true); var input = panel.Field("书源地址", "", id: "management.import.url", placeholder: "请输入网络书源地址"); JsonElement preview = default;
-        bool accepted = await NovelUi.DialogAsync(this, "网络导入", panel, "确定", async ct => { preview = await module.Sources.PreviewImportAsync(url: input.Text.Trim(), token: ct); return true; }, token);
+        bool accepted = await NovelUi.DialogAsync(this, "网络导入", panel, "确定", async ct => { preview = await module.Sources.PreviewImportAsync(url: input.Text.Trim(), token: ct); return true; }, token, applicationOverlay: true);
         if (accepted) await PreviewSourcesAsync(this, preview, token);
     }
     internal async Task ImportFromAsync(FrameworkElement owner, CancellationToken token)
     {
         var panel = new ManagementForm(); var input = panel.Field("书源内容", "", 12); JsonElement preview = default;
-        bool accepted = await NovelUi.DialogAsync(owner, "导入书源", panel, "预览", async ct => { preview = await module.Sources.PreviewImportAsync(text: input.Text, token: ct); return true; }, token);
+        bool accepted = await NovelUi.DialogAsync(owner, "导入书源", panel, "预览", async ct => { preview = await module.Sources.PreviewImportAsync(text: input.Text, token: ct); return true; }, token, applicationOverlay: true);
         if (accepted) await PreviewSourcesAsync(owner, preview, token);
     }
     private async Task PreviewSourcesAsync(FrameworkElement owner, JsonElement preview, CancellationToken token)
@@ -172,7 +179,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
             string text = "[" + string.Join(',', items.Where((_, index) => selection.Selected.Contains(index)).Select(item => NovelJson.Text(item, "definition"))) + "]";
             var result = await module.Sources.ImportAsync(text: text, token: ct); var failures = ImportErrors(result).ToArray();
             module.Notify($"已导入 {result.GetProperty("sources").GetArrayLength()} 个书源" + (failures.Length == 0 ? "" : "\n" + string.Join("\n", failures))); return true;
-        }, token);
+        }, token, applicationOverlay: true);
     }
     private static IEnumerable<string> ImportErrors(JsonElement value) => value.GetProperty("failures").EnumerateArray().Select(item => $"条目 {item.GetProperty("index").GetInt32() + 1} · {NovelJson.Text(item, "name")} · {NovelJson.Text(item, "code")}");
     private async Task ExportSourcesAsync(string[] ids, CancellationToken token)
@@ -186,12 +193,12 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     private async Task EditAppearanceAsync(CancellationToken token)
     {
         var editor = new NovelAppearanceEditor(module.Library.Appearance);
-        await NovelUi.DialogAsync(this, "阅读排版", NovelUi.Scroll(editor), "保存", async ct =>
+        await NovelUi.DialogAsync(this, "阅读排版", editor, "保存", async ct =>
         {
             var prior = module.Library.Appearance; var next = editor.Read(); await module.Library.SaveAppearanceAsync(next, ct);
             if (prior.Conversion != next.Conversion) await module.ReprocessCurrentAsync(ct);
             return true;
-        }, token);
+        }, token, applicationOverlay: true);
     }
     private void Run(Func<CancellationToken, Task> action)
     {

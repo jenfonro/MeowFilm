@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using MeowFilm.Desktop;
 
@@ -79,6 +80,20 @@ internal sealed class FilmDirectoryDialog : DesktopWindow
     {
         this.page = page; browsing = page.RawBrowsing.Clone();
         directory = new(browsing, page.CurrentCandidateId);
+        Resources.MergedDictionaries.Add(new ResourceDictionary
+        {
+            Source = new("/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml", UriKind.Relative)
+        });
+        SetResourceReference(BackgroundProperty, "MeowFilm.Brush.Window");
+        SetResourceReference(ForegroundProperty, "MeowFilm.Brush.Text");
+        back.SetResourceReference(StyleProperty, "MeowFilm.QuietButton");
+        play.SetResourceReference(StyleProperty, "MeowFilm.PrimaryButton");
+        play.Margin = new(0, 12, 0, 0);
+        list.SetResourceReference(StyleProperty, "MeowFilm.NavigationList");
+        list.ItemContainerStyle = new(typeof(ListBoxItem), (Style)FindResource("MeowFilm.NavigationItem"))
+        {
+            Setters = { new Setter(AutomationProperties.NameProperty, new Binding(nameof(FilmDirectoryRow.Label))) }
+        };
         Title = "原始目录"; Width = 580; Height = 520; MinWidth = 360; MinHeight = 320;
         WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
         AutomationProperties.SetName(list, "原始目录与文件");
@@ -87,7 +102,10 @@ internal sealed class FilmDirectoryDialog : DesktopWindow
         DockPanel.SetDock(header, Dock.Top); body.Children.Add(header);
         DockPanel.SetDock(play, Dock.Bottom); body.Children.Add(play);
         DockPanel.SetDock(notices, Dock.Bottom); body.Children.Add(notices);
-        body.Children.Add(list); Content = body;
+        var boundary = new Border { Child = list, BorderThickness = new(1), CornerRadius = new(8) };
+        boundary.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.Border");
+        boundary.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface");
+        body.Children.Add(boundary); Content = body;
         back.Click += (_, _) => { directory.Back(); Populate(); };
         list.SelectionChanged += (_, _) => play.IsEnabled = list.SelectedItem is FilmDirectoryRow { IsDirectory: false, CandidateId: not null };
         list.MouseDoubleClick += (_, _) => Enter();
@@ -97,7 +115,7 @@ internal sealed class FilmDirectoryDialog : DesktopWindow
             if (list.SelectedItem is not FilmDirectoryRow { IsDirectory: false, CandidateId: { } id } || !IsCurrent(page)) return;
             try { await page.SelectOriginalCandidateAsync(id); }
             catch (OperationCanceledException) { }
-            catch (Exception) { notices.Message = "文件播放失败"; }
+            catch (Exception error) { notices.Message = FilmPlaybackError.Message(error, "文件播放失败"); }
         };
         Populate();
     }

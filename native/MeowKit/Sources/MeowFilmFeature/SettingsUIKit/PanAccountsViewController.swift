@@ -6,7 +6,7 @@ import MeowUI
 @MainActor
 public final class PanAccountsViewController: PageViewController, UITableViewDataSource {
     let model: PanAccountsModel
-    let table = UITableView(frame: .zero, style: .insetGrouped)
+    let table = SettingsTableView()
     private let loading = UIActivityIndicatorView(style: .medium)
     private weak var loginCard: PanLoginViewController?
     private var displayedNotice: UUID?
@@ -18,7 +18,7 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
         super.viewDidLoad()
         view.accessibilityIdentifier = "pan.accounts"
         table.accessibilityIdentifier = "pan.accounts.table"
-        table.backgroundColor = .clear; table.dataSource = self
+        table.dataSource = self
         table.rowHeight = UITableView.automaticDimension; table.estimatedRowHeight = 110
         table.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(table)
         loading.hidesWhenStopped = true; table.backgroundView = loading
@@ -50,7 +50,10 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
     public func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { model.rows.count + 1 }
     public func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-        cell.selectionStyle = .none; cell.backgroundColor = UIColor(theme.surface)
+        let last = indexPath.row == model.rows.count
+        cell.selectionStyle = .none; cell.backgroundColor = .clear
+        cell.backgroundView = SettingsRowBackgroundView(theme: theme, first: indexPath.row == 0,
+            last: last, showsSeparator: !last)
         let columns = PanAccountColumns()
         columns.translatesAutoresizingMaskIntoConstraints = false; cell.contentView.addSubview(columns)
         NSLayoutConstraint.activate([
@@ -63,7 +66,8 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             cell.accessibilityIdentifier = "pan.accounts.header"
             for (column, text) in zip(columns.columns, ["平台", "状态", "操作"]) {
                 let label = UILabel(); label.text = text; label.font = .preferredFont(forTextStyle: .subheadline)
-                label.textColor = UIColor(theme.muted); column.addArrangedSubview(label)
+                label.adjustsFontForContentSizeCategory = true
+                label.textColor = UIColor(theme.settings.muted); column.addArrangedSubview(label)
             }
             return cell
         }
@@ -72,7 +76,7 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
         let platform = UIHostingConfiguration {
             AccountPlatformLabel(title: row.id.title, symbol: "externaldrive", size: 24, theme: theme)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundStyle(Color(uiColor: UIColor(theme.ink)))
+                .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
         }.margins(.all, 0).makeContentView()
         platform.accessibilityIdentifier = "pan.accounts.platform"
         columns.columns[0].addArrangedSubview(platform)
@@ -84,7 +88,8 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             let label = UILabel(); label.text = row.account?.status.title
             label.accessibilityIdentifier = "pan.accounts.status"
             label.font = .preferredFont(forTextStyle: .subheadline); label.numberOfLines = 0
-            label.textColor = row.account?.status == .expired ? UIColor(theme.settingsDanger) : UIColor(theme.muted)
+            label.adjustsFontForContentSizeCategory = true
+            label.textColor = row.account?.status == .expired ? UIColor(theme.settingsDanger) : UIColor(theme.settings.muted)
             columns.columns[1].addArrangedSubview(label)
         }
         for action in row.actions {
@@ -94,8 +99,14 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             case .refresh: title = "刷新"; suffix = "refresh"
             case .logout: title = "退出登录"; suffix = "logout"
             }
+            let foreground = UIColor(row.busy ? theme.settings.muted : theme.settings.accent)
             var configuration = UIButton.Configuration.plain()
-            configuration.title = title; configuration.baseForegroundColor = UIColor(theme.accent)
+            configuration.title = title; configuration.baseForegroundColor = foreground
+            configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
+                var attributes = $0
+                attributes.foregroundColor = foreground
+                return attributes
+            }
             configuration.titleLineBreakMode = .byWordWrapping
             configuration.contentInsets = .init(top: 6, leading: 0, bottom: 6, trailing: 0)
             let button = UIButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in

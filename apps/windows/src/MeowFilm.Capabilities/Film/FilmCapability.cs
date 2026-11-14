@@ -285,11 +285,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     {
         ArgumentNullException.ThrowIfNull(item);
         if (stopping || disposed || (!IsHome && !IsData)) return;
-        bool visible = IsHome
-            ? Sections.Any(section => section.Items.Contains(item))
-            : ActiveData.Items.Contains(item);
-        if (!visible) throw new ArgumentException("Unknown film item.", nameof(item));
-        if (!await SelectPlaybackAsync(item, lifetime.Token)) return;
+        if (!await SelectPlaybackAsync(item, lifetime.Token, IsHome ? "home" : "search")) return;
         if (NavigationRequested is not { } requested)
         {
             await NavigateAsync(PlaybackRoute, lifetime.Token);
@@ -345,9 +341,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     {
         ArgumentNullException.ThrowIfNull(item);
         if (stopping || disposed || !IsPlayback || Playback is null) return;
-        if (!Playback.Recommendations.Contains(item))
-            throw new ArgumentException("Unknown film recommendation.", nameof(item));
-        if (!await SelectPlaybackAsync(item, lifetime.Token)) return;
+        if (!await SelectPlaybackAsync(item, lifetime.Token, Playback.EntrySurface)) return;
         if (NavigationRequested is not { } requested)
         {
             await NavigateAsync(PlaybackRoute, lifetime.Token);
@@ -360,17 +354,18 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     {
         token.ThrowIfCancellationRequested();
         if (stopping || disposed) return;
+        request = request with { EntrySurface = IsHome ? "home" : "search" };
         if (!await SelectPlaybackAsync(item with { PlaybackContext = request }, token)) return;
         if (NavigationRequested is { } requested) requested(this, new(PlaybackRoute));
         else await NavigateAsync(PlaybackRoute, token);
     }
 
-    private async Task<bool> SelectPlaybackAsync(FilmCardItem item, CancellationToken token)
+    private async Task<bool> SelectPlaybackAsync(FilmCardItem item, CancellationToken token, string? entrySurface = null)
     {
         if (filmPlayback is null || item.PlaybackContext is not { } request)
             throw new FilmPlaybackException("CAPABILITY_UNAVAILABLE");
         long ticket = ++navigationGeneration;
-        request = request.Own();
+        request = (request with { EntrySurface = entrySurface ?? request.EntrySurface ?? "search" }).Own();
         var selected = new FilmPlaybackPage(item with { PlaybackContext = request }, request, filmPlayback, library);
         Playback = selected;
         ReleaseUnreachableSearchPages();
@@ -387,7 +382,8 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         var request = page.CaptureRequest;
         await filmPlayback.OpenAsync(page, new
         {
-            platform = "windows", target = request.Target.Wire(), sources = request.Sources,
+            platform = "windows", entrySurface = request.EntrySurface,
+            target = request.Target.Wire(), resumeTarget = request.ResumeTarget?.Wire(), sources = request.Sources,
             query = request.Query, results = request.Results, search = request.Search, metadata = request.Metadata,
             cacheEntries = request.CacheEntries, resultHints = request.ResultHints, searchReference = request.SearchReference
         }, token);

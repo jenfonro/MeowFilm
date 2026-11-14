@@ -19,6 +19,8 @@ function canonical(value) {
   return value;
 }
 export const identity = (...parts) => createHash('sha256').update(JSON.stringify(canonical(parts))).digest('hex');
+export const variantParentId = id => typeof id === 'string' && /^[a-f0-9]{64}:[a-f0-9]{64}$/.test(id)
+  ? id.slice(0, 64) : null;
 export const sourceIdentity = source => identity(source.engine ?? 'cat', source.installationId, source.siteId);
 export const sourceRevision = source => identity(sourceIdentity(source), source.revision, source.generation);
 export const codeOf = error => typeof error?.code === 'string' && /^[A-Z][A-Z_]+$/.test(error.code)
@@ -44,7 +46,7 @@ export function checkTarget(target) {
   if (target.kind === 'source') requireValue(object(target.source) && text(target.source.key) &&
     isIdentifier(target.source.detailId));
   if (target.kind === 'group') {
-    requireValue(Array.isArray(target.members) && target.members.length > 0 &&
+    requireValue(Array.isArray(target.members) &&
       target.members.every(member => object(member) && text(member.sourceKey) && isIdentifier(member.detailId)) &&
       target.metadataProvider === undefined);
     if (target.source !== undefined) requireValue(object(target.source) && text(target.source.key) &&

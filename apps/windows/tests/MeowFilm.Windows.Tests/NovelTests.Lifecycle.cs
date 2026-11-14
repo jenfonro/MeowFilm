@@ -5,6 +5,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
@@ -220,12 +221,18 @@ public static partial class NovelTests
             await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
             await module.InitializeAsync(default);
             FrameworkElement view = owner == "view" ? module.View : module.SettingsView;
-            var host = GeneralAppearanceTests.Window(view); host.Show();
+            var root = new Grid();
+            root.Children.Add(view);
+            var dialogHost = new PlayerDialogHost();
+            root.Children.Add(dialogHost);
+            var host = GeneralAppearanceTests.Window(root);
+            dialogHost.Attach(host);
+            host.Show();
             var physical = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             try
             {
                 if (owner == "settings")
-                    await Until(() => Find<Button>(view).Any(b => b.Content as string == "取消操作" && !b.IsEnabled));
+                    await Until(() => Find<TextBlock>(view).Any(text => text.Text == runtime.Records.Single().Name));
                 store.Hold = physical; store.Accepted = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 if (owner == "settings")
                     Find<Button>(view).Single(b => b.Content as string == "阅读排版").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
@@ -234,11 +241,25 @@ public static partial class NovelTests
                     await NovelUi.DialogAsync(view, "本地写入", new TextBlock(), "保存", async token =>
                     { await module.Library.SaveAppearanceAsync(new() { FontSize = 28 }, token); return true; }, ct);
                 });
-                await Until(() => PopupItems<Button>().Any(b => b.Content as string == "保存" && b.IsVisible));
-                var popup = DialogPopup(PopupItems<Button>().Single(b => b.Content as string == "保存" && b.IsVisible));
-                var closed = DialogClosed(popup); ClickDialog(popup, "保存");
-                await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5)); ClickDialog(popup, "取消");
-                await closed.WaitAsync(TimeSpan.FromSeconds(5));
+                Popup? popup = null;
+                if (owner == "settings")
+                {
+                    await Until(() => dialogHost.IsOpen);
+                    Find<Button>(dialogHost).Single(b => b.Content as string == "保存")
+                        .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                    await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    Find<Button>(dialogHost).Single(b => b.Content as string == "取消")
+                        .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                    await Until(() => !dialogHost.IsOpen);
+                }
+                else
+                {
+                    await Until(() => PopupItems<Button>().Any(b => b.Content as string == "保存" && b.IsVisible));
+                    popup = DialogPopup(PopupItems<Button>().Single(b => b.Content as string == "保存" && b.IsVisible));
+                    var closed = DialogClosed(popup); ClickDialog(popup, "保存");
+                    await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5)); ClickDialog(popup, "取消");
+                    await closed.WaitAsync(TimeSpan.FromSeconds(5));
+                }
                 Check(module.Notice.Length == 0 && store.Bytes is null);
                 store.WriteFailure = cancel ? new OperationCanceledException() : new DocumentStoreException(DocumentStoreError.Storage);
                 physical.TrySetResult();
@@ -251,7 +272,8 @@ public static partial class NovelTests
                     await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                     Check(module.Notice.Length == 0, owner + ": cancellation became a visible write failure.");
                 }
-                Check(module.Library.Appearance.FontSize == 22 && store.Bytes is null && popup.Child is null);
+                Check(module.Library.Appearance.FontSize == 22 && store.Bytes is null &&
+                    (owner == "settings" ? !dialogHost.IsOpen : popup?.Child is null));
             }
             finally { physical.TrySetResult(); host.Close(); await module.PrepareShutdownAsync(); }
         }

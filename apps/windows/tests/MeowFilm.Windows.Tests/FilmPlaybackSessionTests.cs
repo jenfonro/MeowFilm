@@ -32,6 +32,48 @@ public static class FilmPlaybackSessionTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("headerless direct receipt consumes exact format scope native controls and release without a local lease", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            rig.Runtime.Controlled = false;
+            await rig.OpenAsync();
+            var scope = FilmJson.Encode(new { sourceKey = "cat:fixture:site:1", sourceEngine = "cat", sourceRevision = 1 });
+            rig.Runtime.Intercept = (method, input, _) =>
+            {
+                var reply = rig.Runtime.Handle(method, input);
+                if (method == "film.session.attempt")
+                {
+                    var receipt = JsonNode.Parse(reply.GetProperty("value").GetRawText())!.AsObject();
+                    receipt["format"] = "mp4"; receipt["scope"] = JsonNode.Parse(scope.GetRawText());
+                    reply = FilmRuntimeProbe.Ok(FilmJson.Encode(receipt));
+                }
+                return Task.FromResult(reply);
+            };
+            await Play(rig, "direct-file", 2);
+            var input = rig.Native.Inputs.Single();
+            Check(input.Receipt.AttemptId == "direct-file" && input.Intent.Identity == input.Receipt.AttemptId &&
+                input.Receipt.ResourceId == FilmJson.Text(rig.Runtime.Receipts["direct-file"], "id") &&
+                input.Receipt.Address.AbsoluteUri == FilmJson.Text(rig.Runtime.Receipts["direct-file"], "url") &&
+                input.Receipt.MediaOrigin is null && input.Lease is null && rig.Native.AcceptedLease is null &&
+                JsonElement.DeepEquals(input.Receipt.Scope, scope) && input.Receipt.Format.GetString() == "mp4" &&
+                rig.Page.CurrentCandidateId == "direct-file" && rig.Page.ActiveTarget.Episode == 2,
+                "absence of mediaOrigin chooses the real direct native input without inventing a Node lease");
+            using (var video = FilmVideoInput.Read(input.Receipt.Format, input.Receipt.Drm))
+                Check(video.Format == NativeVideoFormat.Progressive, "the direct receipt still uses the production typed input adapter");
+            await rig.Session.SeekAsync(81); await rig.Session.SetPausedAsync(true);
+            Check(rig.Session.Position == 81 && !rig.Session.IsPlaying && rig.Native.Commits == 1 &&
+                Called(rig, "media.started", "direct-file") && rig.Runtime.Calls.Any(call =>
+                    FilmJson.Text(call.Parameters, "action") == "media.progress" &&
+                    FilmJson.Text(call.Parameters, "attemptId") == "direct-file" &&
+                    FilmJson.Number(call.Parameters, "position") == 81 && FilmJson.Bool(call.Parameters, "paused")),
+                "the direct occurrence owns real native controls and exact progress rather than only a URL");
+            await rig.Session.CloseSessionAsync();
+            Check(rig.Native.Stops == 1 && !rig.Session.HasOutput &&
+                rig.Runtime.Calls.Count(call => call.Method == "film.session.media.release" &&
+                    FilmJson.Text(call.Parameters, "attemptId") == input.Receipt.AttemptId &&
+                    FilmJson.Text(call.Parameters, "resourceId") == input.Receipt.ResourceId) == 1 &&
+                !Called(rig, "media.failed"), "direct media retains one precise resource release without a local lease");
+        });
         foreach (bool releaseFails in new[] { false, true })
             yield return Test("open HTTP address preserves the exact native release receipt failure=" + releaseFails, async () =>
             {

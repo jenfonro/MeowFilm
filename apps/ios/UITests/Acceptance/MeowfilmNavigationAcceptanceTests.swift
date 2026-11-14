@@ -593,10 +593,12 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(app.otherElements["page.header"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["page.header.back"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["设置"].exists)
+        assertSettingsDock()
         attach("21-settings")
         XCTAssertTrue(app.cells["settings.category.film"].exists)
         app.cells["settings.category.music"].tap()
         XCTAssertTrue(app.buttons["settings.search"].waitForExistence(timeout: 5))
+        assertSettingsDock()
 
         for (identifier, title) in [
             ("settings.search", "搜索设置"),
@@ -609,6 +611,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             destination.tap()
             XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 5))
             assertInsideHeader(app.buttons["page.header.back"])
+            assertSettingsDock()
             attach("23-" + identifier)
             app.buttons["page.header.back"].tap()
             XCTAssertTrue(destination.waitForExistence(timeout: 5))
@@ -618,6 +621,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         app.cells["settings.preferences"].tap()
         XCTAssertTrue(app.staticTexts["偏好设置"].waitForExistence(timeout: 5))
         assertInsideHeader(app.buttons["page.header.back"])
+        assertSettingsDock()
         app.buttons["settings.colors"].tap()
         XCTAssertTrue(app.staticTexts["配色设置"].waitForExistence(timeout: 5))
         assertInsideHeader(app.buttons["page.header.back"])
@@ -882,6 +886,12 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             XCTAssertEqual(button.isSelected, button.identifier == "app.primary." + selected,
                            file: file, line: line)
         }
+    }
+
+    private func assertSettingsDock(file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(app.buttons["music.miniPlayer.open"].isHittable,
+                       "The capsule player must be hidden throughout settings",
+                       file: file, line: line)
     }
 
     private func acknowledgeMusicContentFailureIfPresent(file: StaticString = #filePath, line: UInt = #line) {

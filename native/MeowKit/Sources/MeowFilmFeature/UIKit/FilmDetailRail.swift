@@ -80,23 +80,34 @@ final class FilmEpisodeButton: FilmPressButton {
     private let artwork: ArtworkView
     private let heading = UILabel(), summary = UILabel()
 
-    init(episode: FilmEpisode, images: ArtworkImages) {
+    init(episode: FilmEpisode, images: ArtworkImages, list: Bool = false) {
         artwork = ArtworkView(size: 0, images: images)
         super.init(frame: .zero)
         artwork.layer.cornerRadius = 9
         artwork.load(episode.artworkURL)
-        heading.text = episode.number.map { "\($0). \(episode.title)" } ?? episode.title
+        heading.text = episode.number.map {
+            episode.title.isEmpty ? "第 \($0) 集" : "\($0). \(episode.title)"
+        } ?? episode.title
         heading.font = .systemFont(ofSize: 14, weight: .medium)
         heading.numberOfLines = 2
+        heading.textAlignment = episode.title.isEmpty ? .center : .natural
         summary.text = episode.summary
         summary.font = .systemFont(ofSize: 12)
         summary.numberOfLines = 3
-        let stack = UIStackView(arrangedSubviews: [artwork, heading, summary])
-        stack.axis = .vertical
-        stack.spacing = 6
+        summary.isHidden = episode.summary.isEmpty
+        let text = UIStackView(arrangedSubviews: [heading, summary])
+        text.axis = .vertical; text.spacing = 6
+        let stack = UIStackView(arrangedSubviews: [artwork, text])
+        stack.axis = list ? .horizontal : .vertical
+        stack.alignment = list ? .center : .fill
+        stack.spacing = list ? 12 : 6
         stack.isUserInteractionEnabled = false
         addSubview(stack)
         stack.pinEdges(to: self)
+        if list {
+            artwork.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.36).isActive = true
+            heightAnchor.constraint(greaterThanOrEqualTo: artwork.heightAnchor).isActive = true
+        }
         artwork.heightAnchor.constraint(equalTo: artwork.widthAnchor, multiplier: 9.0 / 16.0).isActive = true
         accessibilityLabel = [heading.text, episode.summary].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，")
         accessibilityIdentifier = "film.episode.\(episode.id)"

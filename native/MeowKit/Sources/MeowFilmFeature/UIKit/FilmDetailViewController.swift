@@ -47,15 +47,17 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private let titleLabel = UILabel(), metadata = UILabel(), dateLabel = UILabel(), summary = UILabel()
     private var dateContainer: UIView?
     private let play = UIButton(type: .system), favorite = UIButton(type: .custom)
-    private let seasonButton = UIButton(type: .system)
+    private let seasonButton = UIButton(type: .system), summaryButton = UIButton(type: .system)
     private let sourceButton = UIButton(type: .system), lineButton = UIButton(type: .system)
-    private let directoryButton = UIButton(type: .system), previewButton = UIButton(type: .system)
-    private let episodeState = UILabel(), playbackState = UILabel(), metadataState = UILabel()
+    private let searchButton = UIButton(type: .system)
+    private let episodeState = UILabel(), playbackState = UILabel()
     private let loadingIndicator = UIActivityIndicatorView(style: .medium)
-    private let sourceRow = UIStackView(), playbackActions = UIStackView()
+    private let sourceRow = UIStackView(), episodeList = UIStackView()
     private var displayedSnapshot: FilmPlaybackSnapshot?
     private var playbackActivationRequested = false
-    private var movieButtons: [UIButton] = []
+    private var summaryExpanded = false
+    private var episodeListVisible = false
+    private var episodeListContainer = UIView()
     private var episodeStateContainer = UIView()
     private let episodeRail = FilmDetailRail(), castRail = FilmDetailRail(), similarRail = FilmDetailRail()
     private var selectedSeasonID: String?
@@ -71,6 +73,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         accessibilityLabel: "返回") { [weak self] in
             (self?.navigationController as? PageNavigationController)?.requestBack()
         }
+    private lazy var more = PageHeaderButton(image: UIImage(systemName: "ellipsis")!,
+        accessibilityLabel: "更多", menu: UIMenu(children: []))
+    private lazy var episodeMore = PageHeaderButton(image: UIImage(systemName: "ellipsis")!,
+        accessibilityLabel: "选集视图", menu: UIMenu(children: []))
 
     public init(detail: FilmDetail, library: FilmLibrary, images: ArtworkImages,
                 themeProvider: any PageThemeProviding, model: FilmPlaybackModel? = nil) {
@@ -114,11 +120,15 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         view.accessibilityIdentifier = "film.detail"
         back.accessibilityIdentifier = "page.header.back"
         pageHeader.setLeading(back)
+        more.accessibilityIdentifier = "film.detail.more"
+        more.isHidden = model == nil
+        pageHeader.setTrailing([more])
         heroMask.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
         heroMask.locations = [0, 0.5, 1]
         heroClip.clipsToBounds = true
         heroClip.layer.mask = heroMask
         poster.layer.cornerRadius = 0
+        poster.accessibilityIdentifier = "film.detail.hero"
         poster.backgroundColor = .clear
         poster.onImage = { [weak self] _, _ in self?.updateHero() }
         poster.onFailure = { [weak self] _ in self?.loadNextHeroCandidate() }
@@ -204,6 +214,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         content.addArrangedSubview(titleContainer)
         content.setCustomSpacing(16, after: content.arrangedSubviews.last!)
         logo.contentMode = .scaleAspectFit
+        logo.accessibilityIdentifier = "film.detail.logo"
         logo.backgroundColor = .clear
         logo.layer.cornerRadius = 0
         logo.isHidden = detail.logoURL == nil
@@ -265,7 +276,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         statusContainer.isHidden = model == nil
         content.addArrangedSubview(statusContainer)
         content.setCustomSpacing(12, after: statusContainer)
-        configurePlaybackActions()
         favorite.titleLabel?.font = .systemFont(ofSize: 12)
         favorite.accessibilityIdentifier = "film.detail.favorite"
         favorite.heightAnchor.constraint(equalToConstant: 48).isActive = true
@@ -288,8 +298,24 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         content.setCustomSpacing(22, after: favoriteContainer)
         summary.text = detail.summary.isEmpty ? "暂无简介" : detail.summary
         summary.font = .systemFont(ofSize: 15)
-        summary.numberOfLines = 0
-        let summaryContainer = inset(summary)
+        summary.numberOfLines = 2
+        summary.accessibilityIdentifier = "film.detail.summary"
+        summaryButton.setTitle("展开", for: .normal)
+        summaryButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
+        summaryButton.accessibilityIdentifier = "film.detail.summary-toggle"
+        summaryButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        summaryButton.isHidden = detail.summary.isEmpty
+        summaryButton.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            summaryExpanded.toggle()
+            summary.numberOfLines = summaryExpanded ? 0 : 2
+            summaryButton.setTitle(summaryExpanded ? "收起" : "展开", for: .normal)
+            summaryButton.accessibilityValue = summaryExpanded ? "已展开" : "已收起"
+        }, for: .touchUpInside)
+        summaryButton.contentHorizontalAlignment = .leading
+        let summaryContent = UIStackView(arrangedSubviews: [summary, summaryButton])
+        summaryContent.axis = .vertical
+        let summaryContainer = inset(summaryContent)
         content.addArrangedSubview(summaryContainer)
         content.setCustomSpacing(26, after: summaryContainer)
     }
@@ -301,19 +327,39 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         seasonButton.accessibilityIdentifier = "film.detail.season"
         seasonButton.heightAnchor.constraint(equalToConstant: 44).isActive = true
         seasonButton.showsMenuAsPrimaryAction = true
-        let seasonTitle = inset(seasonButton)
+        episodeMore.accessibilityIdentifier = "film.detail.episodes-more"
+        let seasonRow = UIStackView(arrangedSubviews: [seasonButton, episodeMore])
+        seasonRow.alignment = .center; seasonRow.spacing = 8
+        let seasonTitle = inset(seasonRow)
         content.addArrangedSubview(seasonTitle)
         content.setCustomSpacing(6, after: seasonTitle)
         content.addArrangedSubview(episodeRail)
+        episodeRail.accessibilityIdentifier = "film.detail.episode-cards"
+        episodeList.axis = .vertical; episodeList.spacing = 16
+        episodeList.accessibilityIdentifier = "film.detail.episode-list"
+        episodeListContainer = inset(episodeList)
+        episodeListContainer.isHidden = true
+        content.addArrangedSubview(episodeListContainer)
         episodeState.font = .systemFont(ofSize: 14)
         episodeState.textAlignment = .center; episodeState.numberOfLines = 0
         episodeState.accessibilityIdentifier = "film.detail.episodes-state"
         episodeState.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        episodeStateContainer = inset(episodeState)
+        var searchConfiguration = UIButton.Configuration.tinted()
+        searchConfiguration.title = "搜索剧集"
+        searchConfiguration.cornerStyle = .capsule
+        searchButton.configuration = searchConfiguration
+        searchButton.accessibilityIdentifier = "film.detail.search"
+        searchButton.isHidden = true
+        searchButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        searchButton.addAction(UIAction { [weak model] _ in model?.send("search.more") }, for: .touchUpInside)
+        let episodeStatus = UIStackView(arrangedSubviews: [episodeState, searchButton])
+        episodeStatus.axis = .vertical; episodeStatus.alignment = .center; episodeStatus.spacing = 8
+        episodeStateContainer = inset(episodeStatus)
         episodeStateContainer.isHidden = model == nil
         content.addArrangedSubview(episodeStateContainer)
         content.setCustomSpacing(26, after: episodeStateContainer)
         content.setCustomSpacing(26, after: episodeRail)
+        content.setCustomSpacing(26, after: episodeListContainer)
         renderSeason()
         addHeading("演职人员")
         content.addArrangedSubview(castRail)
@@ -345,7 +391,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func renderSeason() {
-        if model != nil { renderRuntimeEpisodes(); return }
+        if model != nil { renderRuntimeEpisodes(); renderEpisodeMenu(); return }
         let season = detail.seasons.first { $0.id == selectedSeasonID } ?? detail.seasons.first
         selectedSeasonID = season?.id
         let selectable = detail.seasons.count > 1
@@ -361,20 +407,17 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         })
         seasonButton.isUserInteractionEnabled = selectable
         seasonButton.accessibilityTraits = selectable ? [.header, .button] : .header
-        episodeRail.removeAll()
-        emptyLabels.removeAll { $0.superview == nil }
-        episodeViews.removeAll()
+        resetEpisodeViews()
         if let season, !season.episodes.isEmpty {
             for episode in season.episodes {
-                let button = FilmEpisodeButton(episode: episode, images: images)
+                let button = FilmEpisodeButton(episode: episode, images: images, list: episodeListVisible)
                 button.isEnabled = false
-                episodeRail.append(button, width: 176)
-                episodeViews.append(button)
+                appendEpisode(button)
             }
         } else {
-            addEmpty("暂无集数", to: episodeRail)
+            showEpisodeState("暂无集数")
         }
-        episodeRail.resetOffset()
+        renderEpisodeMenu()
         applyTheme()
     }
 
@@ -407,64 +450,19 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         if snapshot.browsing.sourceID != nil {
             return playbackCandidateID(snapshot) != nil
         }
+        if snapshot.metadataCache?.status == .stale { return false }
+        if snapshot.target.kind == .group, snapshot.target.value["members"]?.filmArray?.isEmpty != false { return false }
         if let season = snapshot.browsing.season, season != snapshot.target.position.season,
            snapshot.target.kind != .movie { return !snapshot.episodes.isEmpty }
         return true
     }
 
-    private func configurePlaybackActions() {
-        playbackActions.axis = .horizontal
-        playbackActions.spacing = 6
-        playbackActions.distribution = .fillEqually
-        playbackActions.isHidden = model == nil
-        for (title, id) in [("网盘", "pan"), ("画质", "quality"), ("换源", "switch"), ("片源错误", "block")] {
-            let button = UIButton(type: .system)
-            var configuration = UIButton.Configuration.plain()
-            configuration.title = title
-            configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
-                var attributes = $0; attributes.font = .systemFont(ofSize: 13, weight: .medium); return attributes
-            }
-            button.configuration = configuration
-            button.accessibilityIdentifier = "film.detail.\(id)"
-            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-            if id == "pan" {
-                button.showsMenuAsPrimaryAction = true
-                button.menu = UIMenu(title: "网盘", children: FilmPanProvider.allCases.map { provider in
-                    UIAction(title: provider.title) { [weak self] _ in self?.model?.selectPan(provider) }
-                })
-            } else if id == "quality" {
-                button.showsMenuAsPrimaryAction = true
-                button.menu = UIMenu(title: "画质", children: FilmResourceQuality.allCases.map { quality in
-                    UIAction(title: quality.title) { [weak self] _ in self?.model?.selectQuality(quality) }
-                })
-            } else {
-                button.addAction(UIAction { [weak self] _ in
-                    guard let self else { return }
-                    if id == "block" {
-                        guard let model, let snapshot = model.snapshot,
-                              let attemptID = snapshot.current?.attemptID ?? snapshot.attempt?.id else { return }
-                        let alert = UIAlertController(title: "片源错误", message: detail.title, preferredStyle: .alert)
-                        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-                        alert.addAction(UIAlertAction(title: "屏蔽并换源", style: .destructive) { [weak model] _ in
-                            model?.send("block", parameters: ["attemptId": .string(attemptID)])
-                        })
-                        present(alert, animated: true)
-                    } else { model?.send(id) }
-                }, for: .touchUpInside)
-            }
-            playbackActions.addArrangedSubview(button)
-        }
-        let actionsContainer = inset(playbackActions)
-        actionsContainer.isHidden = model == nil
-        content.addArrangedSubview(actionsContainer)
-    }
-
     private func configureSources() {
         sourceRow.axis = .horizontal; sourceRow.spacing = 8; sourceRow.distribution = .fillEqually
         sourceRow.isHidden = model == nil
-        for (button, title, id) in [(sourceButton, "来源", "source"), (lineButton, "线路", "line"),
-                                    (directoryButton, "原始目录", "directory")] {
+        for (button, title, id) in [(sourceButton, "站点源", "source"), (lineButton, "网盘源", "line")] {
             button.setTitle(title, for: .normal)
+            button.accessibilityLabel = title
             button.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
             button.titleLabel?.lineBreakMode = .byTruncatingTail
             button.accessibilityIdentifier = "film.detail.\(id)"
@@ -472,35 +470,19 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             sourceRow.addArrangedSubview(button)
         }
         sourceButton.showsMenuAsPrimaryAction = true; lineButton.showsMenuAsPrimaryAction = true
-        directoryButton.addAction(UIAction { [weak self] _ in
-            guard let self, let model, let browsing = model.snapshot?.browsing,
-                  let sourceID = browsing.sourceID else { return }
-            let page = FilmDirectoryViewController(model: model, sourceID: sourceID, lineID: browsing.lineID,
-                                                   themeProvider: themeProvider)
-            page.onPresentPlayback = onPresentPlayback
-            navigationController?.pushViewController(page, animated: true)
-        }, for: .touchUpInside)
         let sourceContainer = inset(sourceRow)
         sourceContainer.isHidden = model == nil
         content.addArrangedSubview(sourceContainer)
-        metadataState.font = .systemFont(ofSize: 13)
-        metadataState.numberOfLines = 0; metadataState.textAlignment = .center
-        metadataState.accessibilityIdentifier = "film.detail.metadata-state"
-        let metadataStatus = inset(metadataState)
-        metadataStatus.isHidden = true
-        content.addArrangedSubview(metadataStatus)
-        previewButton.titleLabel?.font = .systemFont(ofSize: 14)
-        previewButton.setTitle("点映", for: .normal)
-        previewButton.accessibilityIdentifier = "film.detail.preview"
-        previewButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        previewButton.isHidden = model == nil
-        previewButton.addAction(UIAction { [weak self] _ in
-            guard let self, let snapshot = model?.snapshot else { return }
-            model?.setPreview(!snapshot.previewEpisodes)
-        }, for: .touchUpInside)
-        let previewContainer = inset(previewButton)
-        previewContainer.isHidden = model == nil
-        content.addArrangedSubview(previewContainer)
+        content.setCustomSpacing(8, after: sourceContainer)
+    }
+
+    private func showDirectory() {
+        guard let model, let browsing = model.snapshot?.browsing, browsing.error == nil,
+              let sourceID = browsing.sourceID, !browsing.originalFiles.isEmpty else { return }
+        let page = FilmDirectoryViewController(model: model, sourceID: sourceID, lineID: browsing.lineID,
+                                               themeProvider: themeProvider)
+        page.onPresentPlayback = onPresentPlayback
+        navigationController?.pushViewController(page, animated: true)
     }
 
     private func renderPlayback() {
@@ -523,7 +505,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         case "playing": playbackState.text = "播放中"
         case "searching": playbackState.text = "匹配片源"
         case "resolving", "pending": playbackState.text = "准备中"
-        case "unavailable", "error": playbackState.text = snapshot.error.map { FilmPlaybackError(code: $0).localizedDescription }
         case "ended": playbackState.text = "播放结束"
         default: playbackState.text = nil
         }
@@ -542,17 +523,23 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         }
         if displayedSnapshot?.sources != snapshot.sources || displayedSnapshot?.browsing != snapshot.browsing ||
             displayedSnapshot?.searchComplete != snapshot.searchComplete ||
+            displayedSnapshot?.entryResolution != snapshot.entryResolution ||
             displayedSnapshot?.metadataSources != snapshot.metadataSources || metadataChanged {
             renderSourceMenus(snapshot)
         }
         if displayedSnapshot?.episodes != snapshot.episodes || displayedSnapshot?.browsing != snapshot.browsing ||
+            displayedSnapshot?.sources != snapshot.sources || displayedSnapshot?.entryResolution != snapshot.entryResolution ||
             displayedSnapshot?.candidates != snapshot.candidates || metadataChanged {
             renderRuntimeEpisodes()
         }
-        previewButton.setTitle(snapshot.previewEpisodes ? "点映：开" : "点映：关", for: .normal)
-        previewButton.isSelected = snapshot.previewEpisodes
-        metadataState.text = snapshot.metadataError.map { FilmPlaybackError(code: $0).localizedDescription }
-        metadataState.superview?.isHidden = snapshot.metadataError == nil
+        more.menu = UIMenu(children: [
+            UIAction(title: "点映", identifier: .init("film.detail.preview"),
+                     state: snapshot.previewEpisodes ? .on : .off) { [weak model] _ in
+                guard let model, let current = model.snapshot else { return }
+                model.setPreview(!current.previewEpisodes)
+            }
+        ])
+        renderEpisodeMenu()
         displayedSnapshot = snapshot
         presentPlaybackError()
         applyTheme()
@@ -570,6 +557,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         dateLabel.text = detail.releaseDate; dateLabel.isHidden = detail.releaseDate?.isEmpty != false
         dateLabel.superview?.isHidden = dateLabel.isHidden
         summary.text = detail.summary.isEmpty ? "暂无简介" : detail.summary
+        summaryButton.isHidden = detail.summary.isEmpty
         var candidates: [URL] = []
         for url in [detail.backdropURL, detail.item.largePosterURL, detail.item.posterURL]
             .compactMap({ $0 }) where !candidates.contains(url) { candidates.append(url) }
@@ -621,7 +609,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
                 model?.browse(sourceID: row.id)
             }
         }
-        if !snapshot.searchComplete {
+        let waitingForExplicitSiteSearch = snapshot.entryResolution == "unmatched" &&
+            snapshot.error != "SOURCE_NOT_FOUND" && snapshot.sources.isEmpty
+        if !waitingForExplicitSiteSearch && snapshot.error != "SOURCE_NOT_FOUND" && !snapshot.searchComplete &&
+            snapshot.entryResolution != "loading" && snapshot.entryResolution != "error" {
             actions.append(UIAction(title: "加载更多来源") { [weak model] _ in model?.send("search.more") })
         }
         actions.append(UIMenu(options: .displayInline, children: [
@@ -632,37 +623,31 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         sourceButton.menu = UIMenu(title: "来源", children: actions)
         sourceButton.setTitle(snapshot.sources.first { $0.id == snapshot.browsing.sourceID }?.source.name ??
                               snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.provider.title ??
-                              snapshot.target.metadataProvider?.title ?? "来源",
+                              snapshot.target.metadataProvider?.title ?? "站点源",
                               for: .normal)
         lineButton.isHidden = snapshot.browsing.sourceID == nil
-        lineButton.setTitle(snapshot.browsing.lines.first { $0.id == snapshot.browsing.lineID }?.label ?? "线路", for: .normal)
-        lineButton.menu = UIMenu(title: "线路", children: snapshot.browsing.lines.map { line in
+        lineButton.setTitle(snapshot.browsing.lines.first { $0.id == snapshot.browsing.lineID }?.label ?? "网盘源", for: .normal)
+        lineButton.menu = UIMenu(title: "网盘源", children: snapshot.browsing.lines.map { line in
             UIAction(title: line.label, state: line.id == snapshot.browsing.lineID ? .on : .off) { [weak model] _ in
                 model?.browse(sourceID: snapshot.browsing.sourceID, lineID: line.id)
             }
         })
-        directoryButton.isHidden = snapshot.target.metadataProvider == .tmdb ||
-            snapshot.browsing.sourceID == nil || snapshot.browsing.originalFiles.isEmpty || snapshot.browsing.error != nil
     }
 
     private func renderRuntimeEpisodes() {
         guard let snapshot = model?.snapshot else { return }
-        episodeRail.removeAll(); episodeViews.removeAll(); movieButtons.removeAll()
-        emptyLabels.removeAll { $0.superview == nil }
+        resetEpisodeViews()
         let browsing = snapshot.browsing
         let seasons = detail.seasons
         let number = browsing.season ?? snapshot.target.position.season ?? snapshot.episodes.first?.position.season
         let season = seasons.first { $0.number == number }
-        var seasonTitle = season?.title ??
-            (snapshot.target.kind == .tv ? "集数" : snapshot.target.kind == .movie ? "正片" : "文件")
+        let seasonTitle = season?.title ??
+            (snapshot.target.kind == .tv ? "第一季" : snapshot.target.kind == .movie ? "正片" : "文件")
         let metadataActions: [UIMenuElement] = snapshot.metadataSources.map { row in
             UIAction(title: "\(row.provider.title) · \(row.title)",
                      state: row.id == snapshot.metadataSourceID ? .on : .off) { [weak model] _ in
                 model?.browseMetadata(row.id, keepSource: true)
             }
-        }
-        if browsing.sourceID != nil, let provider = snapshot.target.metadataProvider {
-            seasonTitle = provider.title + " · " + seasonTitle
         }
         seasonButton.setTitle(seasonTitle, for: .normal)
         seasonButton.isUserInteractionEnabled = seasons.count > 1 ||
@@ -679,56 +664,119 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             choices.insert(UIMenu(title: "分季资料", children: metadataActions), at: 0)
         }
         seasonButton.menu = UIMenu(title: "季度", children: choices)
+        if snapshot.entryResolution == "loading" { showEpisodeState("加载中"); return }
+        if snapshot.entryResolution == "error" { showEpisodeState(nil); return }
         if browsing.loading && !browsing.refreshing { showEpisodeState("加载中"); return }
-        if let error = browsing.error { showEpisodeState(FilmPlaybackError(code: error).localizedDescription); return }
-        episodeRail.isHidden = false; episodeStateContainer.isHidden = true
+        if browsing.error != nil { showEpisodeState(nil); return }
         if browsing.sourceID != nil {
             for file in browsing.files {
-                let button = makeResourceButton(file.name, id: "film.file.\(file.id)")
+                let button = FilmEpisodeButton(episode: displayedEpisode(position: file.position,
+                    id: file.id, name: file.name), images: images, list: episodeListVisible)
+                button.accessibilityIdentifier = "film.file.\(file.id)"
                 button.isEnabled = file.candidateID != nil
                 button.addAction(UIAction { [weak self] _ in
                     guard let self, let id = file.candidateID else { return }
                     model?.selectCandidate(id); onPresentPlayback?()
                 }, for: .touchUpInside)
-                episodeRail.append(button, width: 176); movieButtons.append(button)
+                appendEpisode(button)
             }
-        } else if snapshot.target.kind != .tv {
+        } else if snapshot.target.kind == .movie {
             for candidate in snapshot.candidates {
-                let button = makeResourceButton(candidate.name, id: "film.candidate.\(candidate.id)")
-                button.configuration?.subtitle = [candidate.quality, candidate.source.name, candidate.lineLabel]
-                    .compactMap { $0 }.joined(separator: " · ")
+                let episode = FilmEpisode(id: candidate.id, title: candidate.name,
+                    summary: [candidate.quality, candidate.source.name, candidate.lineLabel]
+                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
+                    artworkURL: detail.item.posterURL ?? detail.item.largePosterURL)
+                let button = FilmEpisodeButton(episode: episode, images: images, list: episodeListVisible)
+                button.accessibilityIdentifier = "film.candidate.\(candidate.id)"
+                button.isEnabled = snapshot.metadataCache?.status != .stale
                 button.addAction(UIAction { [weak self] _ in
                     self?.model?.selectCandidate(candidate.id); self?.onPresentPlayback?()
                 }, for: .touchUpInside)
-                episodeRail.append(button, width: 176); movieButtons.append(button)
+                appendEpisode(button)
             }
-        } else {
+        } else if snapshot.target.kind == .tv {
             for episode in snapshot.episodes {
-                let button = FilmEpisodeButton(episode: FilmPlaybackPresentation.episode(episode), images: images)
+                let button = FilmEpisodeButton(episode: FilmPlaybackPresentation.episode(episode,
+                    fallbackArtworkURL: episodeArtwork(season: episode.position.season)),
+                    images: images, list: episodeListVisible)
+                button.isEnabled = snapshot.metadataCache?.status != .stale
                 button.addAction(UIAction { [weak self] _ in
                     self?.model?.selectEpisode(episode.position); self?.onPresentPlayback?()
                 }, for: .touchUpInside)
-                episodeRail.append(button, width: 176); episodeViews.append(button)
+                appendEpisode(button)
             }
         }
-        if episodeViews.isEmpty && movieButtons.isEmpty { showEpisodeState(snapshot.target.kind == .tv ? "暂无集数" : "暂无片源") }
+        if episodeViews.isEmpty {
+            let manualSearch = snapshot.entryResolution == "unmatched" && snapshot.error != "SOURCE_NOT_FOUND" &&
+                browsing.sourceID == nil && snapshot.sources.isEmpty
+            showEpisodeState(manualSearch || !snapshot.sources.isEmpty ? nil :
+                snapshot.target.kind == .tv ? "暂无集数" : "暂无片源")
+            searchButton.isHidden = !manualSearch
+            if manualSearch { episodeStateContainer.isHidden = false }
+        }
         episodeRail.resetOffset()
     }
 
-    private func makeResourceButton(_ title: String, id: String) -> UIButton {
-        let button = FilmPressButton(type: .system)
-        var configuration = UIButton.Configuration.tinted()
-        configuration.title = title; configuration.titleLineBreakMode = .byTruncatingTail
-        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
-            var attributes = $0; attributes.font = .systemFont(ofSize: 14, weight: .medium); return attributes
-        }
-        button.configuration = configuration; button.accessibilityIdentifier = id
-        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
-        return button
+    private func episodeArtwork(season: Int?) -> URL? {
+        detail.seasons.first { $0.number == season }?.posterURL ?? detail.item.posterURL ?? detail.item.largePosterURL
     }
 
-    private func showEpisodeState(_ text: String) {
-        episodeRail.isHidden = true; episodeStateContainer.isHidden = false; episodeState.text = text
+    private func displayedEpisode(position: FilmEpisodePosition, id: String, name: String) -> FilmEpisode {
+        if let episode = model?.snapshot?.episodes.first(where: {
+            $0.position.season == position.season && $0.position.episode == position.episode
+        }) {
+            return FilmPlaybackPresentation.episode(episode, fallbackArtworkURL: episodeArtwork(season: position.season))
+        }
+        let number = position.episode ?? position.globalEpisode
+        return FilmEpisode(id: id, title: number == nil ? name : "", number: number,
+                           artworkURL: episodeArtwork(season: position.season))
+    }
+
+    private func resetEpisodeViews() {
+        episodeRail.removeAll()
+        for view in episodeList.arrangedSubviews { episodeList.removeArrangedSubview(view); view.removeFromSuperview() }
+        episodeViews.removeAll()
+        emptyLabels.removeAll { $0.superview == nil }
+        episodeRail.isHidden = episodeListVisible
+        episodeListContainer.isHidden = !episodeListVisible
+        episodeStateContainer.isHidden = true
+        episodeState.isHidden = true
+        searchButton.isHidden = true
+    }
+
+    private func appendEpisode(_ button: FilmEpisodeButton) {
+        if episodeListVisible { episodeList.addArrangedSubview(button) }
+        else { episodeRail.append(button, width: 176) }
+        episodeViews.append(button)
+    }
+
+    private func renderEpisodeMenu() {
+        let viewActions: [UIMenuElement] = [
+            UIAction(title: "卡片视图", identifier: .init("film.detail.cards"),
+                     state: episodeListVisible ? .off : .on) { [weak self] _ in
+                self?.episodeListVisible = false; self?.renderSeason()
+            },
+            UIAction(title: "列表视图", identifier: .init("film.detail.list"),
+                     state: episodeListVisible ? .on : .off) { [weak self] _ in
+                self?.episodeListVisible = true; self?.renderSeason()
+            },
+        ]
+        var actions = viewActions
+        if let browsing = model?.snapshot?.browsing, browsing.sourceID != nil,
+           browsing.error == nil, !browsing.originalFiles.isEmpty {
+            actions.append(UIAction(title: "查看原始列表", identifier: .init("film.detail.directory")) { [weak self] _ in
+                self?.showDirectory()
+            })
+        }
+        episodeMore.menu = UIMenu(children: actions)
+    }
+
+    private func showEpisodeState(_ text: String?) {
+        episodeRail.isHidden = true; episodeListContainer.isHidden = true
+        episodeStateContainer.isHidden = text == nil
+        episodeState.text = text
+        episodeState.isHidden = text == nil
+        searchButton.isHidden = true
     }
 
     private var displayedLibraryError: FilmLibraryError?
@@ -744,18 +792,21 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private func presentPlaybackError() {
         let reported = model?.snapshot?.reportError.map { FilmPlaybackError(code: $0) }
         let metadata = model?.snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
+        let browsing = model?.snapshot?.browsing.error.map { FilmPlaybackError(code: $0) }
         let session = model?.snapshot?.error.map { FilmPlaybackError(code: $0) }
-        if model?.actionError == nil, model?.observationError == nil, reported == nil, metadata == nil, session == nil {
+        if model?.actionError == nil, model?.observationError == nil, reported == nil,
+           metadata == nil, browsing == nil, session == nil {
             displayedPlaybackError = nil
         }
-        guard let model, let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session,
+        guard let model, let error = model.actionError ?? model.observationError ?? reported ?? browsing ?? metadata ?? session,
               error != displayedPlaybackError, canPresentPageAlert else { return }
         let presented: Bool
         if model.actionError == nil, model.observationError != nil {
             presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.reconnect() })
         } else if model.snapshot == nil {
             presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.open() })
-        } else if model.actionError == nil, model.observationError == nil, reported == nil, metadata != nil {
+        } else if model.actionError == nil, model.observationError == nil, reported == nil,
+                  browsing != nil || metadata != nil || model.snapshot?.entryResolution == "error" {
             presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.refreshBrowsing() })
         } else {
             presented = showError(error.localizedDescription, acknowledged: { [weak model] in model?.acknowledgeError() })
@@ -799,14 +850,11 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         seasonButton.setTitleColor(UIColor(detail.seasons.count > 1 ? theme.accent : theme.ink), for: .normal)
         playbackState.textColor = UIColor(theme.muted)
         episodeState.textColor = UIColor(theme.muted)
-        metadataState.textColor = UIColor(theme.muted)
+        summaryButton.setTitleColor(UIColor(theme.accent), for: .normal)
+        searchButton.configuration?.baseForegroundColor = UIColor(theme.accent)
         loadingIndicator.color = UIColor(theme.muted)
-        for button in [sourceButton, lineButton, directoryButton, previewButton] {
+        for button in [sourceButton, lineButton] {
             button.setTitleColor(UIColor(theme.ink), for: .normal)
-        }
-        for button in movieButtons { button.configuration?.baseForegroundColor = UIColor(theme.ink) }
-        for button in playbackActions.arrangedSubviews.compactMap({ $0 as? UIButton }) {
-            button.configuration?.baseForegroundColor = UIColor(theme.ink)
         }
         for label in sectionTitles { label.textColor = UIColor(theme.ink) }
         for label in emptyLabels { label.textColor = UIColor(theme.muted) }
@@ -857,6 +905,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             pageHeader.background.alpha = headerAlpha
             pageHeader.title = headerAlpha > 0.75 ? detail.title : nil
             back.tintColor = lightChrome ? .white : UIColor(theme.ink)
+            more.tintColor = lightChrome ? .white : UIColor(theme.ink)
         }
         if usesLightChrome != lightChrome {
             usesLightChrome = lightChrome

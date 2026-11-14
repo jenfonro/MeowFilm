@@ -72,7 +72,7 @@ private enum FilmSettingsDestination: String, CaseIterable {
         case .matching: return "智能匹配设置"
         case .cats: return "猫源"
         case .videos: return "视频源"
-        case .dataSources: return "数据源"
+        case .dataSources: return "刮削设置"
         case .pan: return "网盘账号"
         case .preferences: return "智能播放设置"
         }

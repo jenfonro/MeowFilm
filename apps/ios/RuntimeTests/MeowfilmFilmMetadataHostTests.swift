@@ -47,6 +47,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
                 page.detail.cast.count == 2 && self.episodeIDs(page).count == 2
         }
         XCTAssertTrue(page.searchContext?.session === session)
+        XCTAssertEqual(model.snapshot?.entrySurface, "search")
         XCTAssertEqual(page.detail.summary, "完整资料简介")
         XCTAssertEqual(page.detail.cast.map(\.name), ["合成导演", "合成演员"])
         XCTAssertEqual(page.detail.similarItems.map(\.id), [String(fixture.values.similarID)])
@@ -68,7 +69,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
                 page.detail.logoURL.flatMap { fixture.assembly.filmImages.cached($0) } != nil
         }
         for suffix in ["backdrop", "logo", "director", "actor"] {
-            XCTAssertEqual(fixture.reads("/tmdb-images/original/\(fixture.values.prefix)-\(suffix).png"), 1)
+            XCTAssertEqual(fixture.reads("/tmdb-images/t/p/original/\(fixture.values.prefix)-\(suffix).png"), 1)
         }
         // This is the actual source menu's action, not a hand-written model browse.
         let source = try button("film.detail.source", page)
@@ -85,17 +86,18 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
             model.snapshot?.browsing.sourceID == nil && model.snapshot?.browsing.loading == false &&
                 self.episodeIDs(page).count == 2
         }
-        let preview = try button("film.detail.preview", page)
-        XCTAssertFalse(preview.isSelected)
-        preview.sendActions(for: .touchUpInside)
-        try await waitFor { preview.isSelected && self.episodeIDs(page).count == 3 }
+        let more = try button("film.detail.more", page)
+        XCTAssertEqual(try menuAction("点映", in: more).state, .off)
+        invoke(try menuAction("点映", in: more))
+        try await waitFor { model.snapshot?.previewEpisodes == true && self.episodeIDs(page).count == 3 }
+        XCTAssertEqual(try menuAction("点映", in: more).state, .on)
         XCTAssertEqual(episodeIDs(page), [
             "film.episode.season-1-episode-1", "film.episode.season-1-episode-2", "film.episode.season-1-episode-3",
         ], "Preview reveals only the real future episode, never the directory's maximum file number")
         XCTAssertEqual(model.snapshot?.episodes.last?.raw["air_date"], .string("2999-01-01"),
                        "Returning to the same metadata source must retain its already-read real future episode fields")
-        preview.sendActions(for: .touchUpInside)
-        try await waitFor { !preview.isSelected && self.episodeIDs(page).count == 2 }
+        invoke(try menuAction("点映", in: more))
+        try await waitFor { model.snapshot?.previewEpisodes == false && self.episodeIDs(page).count == 2 }
 
         let season = try button("film.detail.season", page)
         XCTAssertEqual(season.menu?.children.compactMap { ($0 as? UIAction)?.title }, ["特别篇", "第一季", "第二季"])
@@ -114,12 +116,12 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         XCTAssertNil(model.snapshot?.browsing.error)
         XCTAssertTrue(model.snapshot?.episodes.isEmpty == true)
         XCTAssertEqual(fixture.seasonReads, [1, 0, 2])
-        preview.sendActions(for: .touchUpInside)
-        try await waitFor { preview.isSelected }
+        invoke(try menuAction("点映", in: more))
+        try await waitFor { model.snapshot?.previewEpisodes == true }
         XCTAssertTrue(episodeIDs(page).isEmpty,
                       "An explicitly empty season detail cannot fabricate episodes from a summary count or file 99")
-        preview.sendActions(for: .touchUpInside)
-        try await waitFor { !preview.isSelected }
+        invoke(try menuAction("点映", in: more))
+        try await waitFor { model.snapshot?.previewEpisodes == false }
         invoke(try menuAction("第一季", in: season))
         try await waitFor {
             model.snapshot?.browsing.season == 1 && model.snapshot?.browsing.loading == false &&
@@ -157,7 +159,178 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         assertUpstreamBoundary(fixture)
     }
 
-    func testActualDoubanDataFeedsPageArtworkAndAuthenticatedFailureRetry() async throws {
+    func testHomeTVSeedPreservesRawMetadataThroughCoordinatorAndReentry() async throws {
+        let fixture = try await makeFixture()
+        let installed = try await fixture.installDirectory(title: fixture.values.doubanTitle)
+        let source = DoubanFilmSource { fixture.client }
+        let sections = try await source.loadHome()
+        let item = try XCTUnwrap(sections.first { $0.id == "tv" }?.items.first)
+        XCTAssertEqual(item.kind, .tv)
+        let decoded = try JSONDecoder().decode(FilmItem.self, from: JSONEncoder().encode(item))
+        XCTAssertEqual(decoded, item)
+        let seed = try RuntimeJSON.decode(XCTUnwrap(decoded.metadataSeed))
+        XCTAssertEqual(seed.catField("year"), .string("2020"))
+        XCTAssertEqual(seed.catField("card_subtitle"), .string("2031 / 不作为年份来源"))
+        XCTAssertEqual(seed.catField("fixture")?.catField("origin"), .string("home-row"))
+        let (page, _) = try await openHomeItem(fixture, section: 1)
+        let model = try XCTUnwrap(page.filmPlaybackModel)
+        try await waitFor { model.snapshot?.entryResolution == "matched" && model.snapshot?.stage == "idle" && !model.opening }
+        XCTAssertEqual(model.snapshot?.entrySurface, "home")
+        XCTAssertEqual(model.snapshot?.entryTarget?.metadataProvider, .douban)
+        XCTAssertEqual(model.snapshot?.entryTarget?.kind, .tv)
+        XCTAssertEqual(model.snapshot?.entryTarget?.title, item.title)
+        XCTAssertEqual(model.snapshot?.entryTarget?.value["metadataId"], .string(item.id))
+        XCTAssertEqual(model.snapshot?.target.metadataProvider, .tmdb)
+        XCTAssertEqual(model.snapshot?.target.value["metadataId"], .number(Double(fixture.values.tvID)),
+                       "The raw seed year selects 2020, not the first same-title 2019 TMDB result")
+        XCTAssertEqual(model.snapshot?.target.value["year"], .number(2020))
+        XCTAssertEqual(page.detail.item.sourceID, "tmdb")
+        XCTAssertEqual(page.detail.summary, "完整资料简介")
+        XCTAssertTrue(try button("film.detail.search", page).isHidden)
+        XCTAssertFalse(model.snapshot?.metadataSources.contains { $0.provider == .douban } == true)
+        let before = try await fixture.directoryCalls(installed)
+        XCTAssertEqual(before, [])
+        let oldSession = try XCTUnwrap(model.sessionID)
+        await model.close()
+        await model.open()?.value
+        try await waitFor {
+            model.sessionID != oldSession && model.snapshot?.entryResolution == "matched" && model.snapshot?.stage == "idle"
+        }
+        XCTAssertEqual(model.snapshot?.entrySurface, "home")
+        XCTAssertEqual(model.snapshot?.entryTarget?.metadataProvider, .douban)
+        XCTAssertEqual(model.snapshot?.entryTarget?.value["metadataId"], .string(item.id))
+        XCTAssertEqual(model.snapshot?.target.value["metadataId"], .number(Double(fixture.values.tvID)))
+        XCTAssertEqual(fixture.reads("/tmdb-api/3/search/multi"), 1, "Reentry reuses Node's seed-search cache")
+        XCTAssertEqual(fixture.reads("/tmdb-api/3/tv/\(fixture.values.similarID)"), 0)
+        XCTAssertEqual(fixture.reads("/douban-api/rexxar/api/v2/tv/\(fixture.values.doubanID)"), 0,
+                       "A home seed must not initialize an independent Douban playback source")
+        let after = try await fixture.directoryCalls(installed)
+        XCTAssertEqual(after, before)
+        XCTAssertNil(model.snapshot?.attempt); XCTAssertNil(model.snapshot?.current)
+        let artwork = try hero(page)
+        try await waitFor { artwork.image != nil }
+        assertUpstreamBoundary(fixture)
+    }
+
+    func testHomeDoubanSeedSearchesTMDBThenRequiresExplicitSiteSearchOnMiss() async throws {
+        let fixture = try await makeFixture()
+        fixture.responses.forceNoTMDBMatch = true
+        let installed = try await fixture.installDirectory(title: fixture.values.doubanTitle)
+        let (page, _) = try await openHomeItem(fixture, section: 0)
+        let model = try XCTUnwrap(page.filmPlaybackModel)
+        try await waitFor { model.snapshot?.entryResolution == "unmatched" && model.snapshot?.stage == "idle" && !model.opening }
+        let searchButton = try button("film.detail.search", page)
+        try await waitFor { !searchButton.isHidden }
+        XCTAssertEqual(page.detail.item.sourceID, "douban")
+        XCTAssertEqual(page.detail.item.id, String(fixture.values.doubanID))
+        XCTAssertEqual(model.snapshot?.entrySurface, "home")
+        XCTAssertEqual(model.snapshot?.entryTarget?.metadataProvider, .douban)
+        XCTAssertEqual(model.snapshot?.entryTarget?.kind, .movie)
+        XCTAssertEqual(model.snapshot?.entryTarget?.title, fixture.values.doubanTitle)
+        XCTAssertEqual(model.snapshot?.target.kind, .group)
+        XCTAssertEqual(model.snapshot?.target.value["members"], .array([]))
+        XCTAssertNil(model.snapshot?.target.metadataProvider)
+        XCTAssertTrue(model.snapshot?.metadataSources.isEmpty == true)
+        XCTAssertTrue(model.snapshot?.sources.isEmpty == true,
+                      "A TMDB miss does not automatically search every site")
+        let poster = try XCTUnwrap(page.detail.item.posterURL)
+        XCTAssertEqual(poster.absoluteString, "/v1/douban/images/posters/\(fixture.values.prefix).png")
+        XCTAssertNil(poster.scheme); XCTAssertNil(poster.baseURL)
+        let artwork = try hero(page)
+        try await waitFor { artwork.image != nil }
+        let entryTarget = try XCTUnwrap(model.snapshot?.entryTarget)
+        XCTAssertEqual(fixture.reads("/tmdb-api/3/search/multi"), 1)
+        let initialCalls = try await fixture.directoryCalls(installed)
+        XCTAssertEqual(initialCalls, [], "No site search is admitted before the explicit action")
+        let oldSession = try XCTUnwrap(model.sessionID)
+        await model.close()
+        XCTAssertTrue(model.isReleased)
+        await model.open()?.value
+        try await waitFor {
+            model.sessionID != oldSession && model.snapshot?.entryResolution == "unmatched" &&
+                model.snapshot?.stage == "idle" && !model.opening
+        }
+        XCTAssertNil(model.actionError, "A seed-generated wait group must not be sent back as an invalid empty resume")
+        XCTAssertNil(model.snapshot?.error); XCTAssertNil(model.snapshot?.browsing.error)
+        XCTAssertEqual(model.snapshot?.entryTarget, entryTarget)
+        XCTAssertEqual(model.snapshot?.entrySurface, "home")
+        XCTAssertEqual(model.snapshot?.target.value["members"], .array([]),
+                       "A legal no-match group must not become a revoked or withdrawn selection on reentry")
+        XCTAssertTrue(model.snapshot?.sources.isEmpty == true)
+        XCTAssertFalse(searchButton.isHidden)
+        XCTAssertEqual(fixture.reads("/tmdb-api/3/search/multi"), 1,
+                       "Reentry resolves the original seed through Node's cached no-match search")
+        let before = try await fixture.directoryCalls(installed)
+        XCTAssertEqual(before, [])
+        searchButton.sendActions(for: .touchUpInside)
+        try await waitFor { model.snapshot?.sources.contains { $0.source.name == "Metadata directory" } == true }
+        let calls = try await fixture.directoryCalls(installed)
+        XCTAssertEqual(calls, ["search"], "Only the explicit search button starts site aggregation")
+        XCTAssertEqual(model.snapshot?.target.kind, .group)
+        XCTAssertNil(model.snapshot?.target.metadataProvider)
+        XCTAssertNil(model.snapshot?.attempt); XCTAssertNil(model.snapshot?.current)
+        XCTAssertEqual(fixture.reads("/tmdb-api/3/search/multi"), 1)
+        let warm = try await fixture.assembly.filmImages.read(poster)
+        XCTAssertTrue(warm.0 === artwork.image); XCTAssertNil(warm.1)
+        XCTAssertEqual(fixture.reads("/douban-images/posters/\(fixture.values.prefix).png"), 1)
+        assertUpstreamBoundary(fixture)
+    }
+
+    func testHomeTMDBFailureShowsRetryWithoutMasqueradingAsUnmatched() async throws {
+        let fixture = try await makeFixture()
+        fixture.responses.forceTMDBFailure = true
+        let installed = try await fixture.installDirectory(title: fixture.values.doubanTitle)
+        let source = DoubanFilmSource { fixture.client }
+        let sections = try await source.loadHome()
+        let item = try XCTUnwrap(sections.first { $0.id == "movie" }?.items.first)
+        XCTAssertNotNil(item.metadataSeed)
+        let model = try fixture.assembly.makeFilmPlayback(item: item, kind: .movie, entrySurface: "home")
+        fixture.models.append(model)
+        try await fixture.assembly.activateFilm(model)
+        await model.open()?.value
+        try await waitFor { model.snapshot?.entryResolution == "error" && !model.opening }
+        let page = FilmDetailViewController(detail: .init(item: item), library: fixture.assembly.filmLibrary,
+            images: fixture.assembly.filmImages, themeProvider: fixture.assembly.appearance, model: model)
+        try await fixture.mount(page)
+        try await waitFor { page.presentedViewController is UIAlertController }
+        XCTAssertEqual(model.snapshot?.entrySurface, "home")
+        XCTAssertEqual(model.snapshot?.entryTarget?.metadataProvider, .douban)
+        XCTAssertEqual(model.snapshot?.stage, "error")
+        XCTAssertNotNil(model.snapshot?.error)
+        XCTAssertTrue(try button("film.detail.search", page).isHidden)
+        let sourceActions = try button("film.detail.source", page).menu?.children.compactMap { $0 as? UIAction } ?? []
+        XCTAssertFalse(sourceActions.contains { $0.title == "加载更多来源" })
+        XCTAssertFalse(descendants(page.view).compactMap { $0 as? UILabel }.contains {
+            $0.text?.contains(model.snapshot?.error ?? "UPSTREAM_HTTP") == true
+        })
+        XCTAssertEqual(model.snapshot?.entryResolution, "error")
+        XCTAssertEqual(model.snapshot?.target.kind, .group)
+        XCTAssertEqual(model.snapshot?.target.value["members"], .array([]))
+        XCTAssertTrue(model.snapshot?.sources.isEmpty == true)
+        let before = try await fixture.directoryCalls(installed)
+        XCTAssertEqual(before, [])
+        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(alert.actions.map(\.title), ["确定", "重试"])
+        fixture.responses.forceTMDBFailure = false
+        fixture.responses.forceNoTMDBMatch = true
+        // UIKit owns the retry action handler; invoking its actual UIButton
+        // action is covered by component tests. Here exercise the same owner RPC.
+        let dismissed = expectation(description: "Entry failure alert dismissed before owner retry")
+        alert.dismiss(animated: false) { dismissed.fulfill() }
+        await fulfillment(of: [dismissed], timeout: 10)
+        await model.refreshBrowsing()?.value
+        try await waitFor { model.snapshot?.entryResolution == "unmatched" && model.snapshot?.stage == "idle" }
+        XCTAssertNil(model.snapshot?.error)
+        XCTAssertFalse(try button("film.detail.search", page).isHidden)
+        let after = try await fixture.directoryCalls(installed)
+        XCTAssertEqual(after, [])
+        XCTAssertNil(model.snapshot?.attempt); XCTAssertNil(model.snapshot?.current)
+        let artwork = try hero(page)
+        try await waitFor { artwork.image != nil }
+        assertUpstreamBoundary(fixture)
+    }
+
+    func testActualDoubanDataArtworkOwnerRetainsAuthenticatedFailureRetryAndCache() async throws {
         let fixture = try await makeFixture()
         let path = "/rexxar/api/v2/movie/\(fixture.values.doubanID)"
         let parameters: RuntimeValue = .object([
@@ -168,36 +341,16 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         let avatarPath = "/v1/douban/images/avatars/\(fixture.values.prefix).png"
         XCTAssertEqual(data.catField("pic")?.catField("normal"), .string(posterPath))
         XCTAssertEqual(data.catField("actors")?.catArray?.first?.catField("avatar")?.catField("normal"), .string(avatarPath))
-        XCTAssertEqual(fixture.reads("/douban-api" + path), 1)
-        let item = FilmItem(sourceID: "douban", id: String(fixture.values.doubanID), title: fixture.values.doubanTitle,
-                            kind: .movie)
-        let model = try fixture.assembly.makeFilmPlayback(item: item, kind: .movie)
-        fixture.models.append(model)
-        try await fixture.assembly.activateFilm(model)
-        await model.open()?.value
-        try await waitFor { model.snapshot?.stage == "idle" && !model.opening }
-        let page = FilmDetailViewController(detail: .init(item: item), library: fixture.assembly.filmLibrary,
-            images: fixture.assembly.filmImages, themeProvider: fixture.assembly.appearance, model: model)
-        try await fixture.mount(page)
-        try await waitFor { page.detail.cast.count == 1 }
-        XCTAssertEqual(page.detail.summary, "豆瓣合成完整资料")
-        XCTAssertEqual(page.detail.item.sourceID, "douban")
-        XCTAssertEqual(page.detail.item.id, String(fixture.values.doubanID))
-        XCTAssertEqual(page.detail.cast.first?.name, "豆瓣合成演员")
-        XCTAssertTrue(page.detail.seasons.isEmpty, "A movie without episode metadata must not acquire a synthetic season")
-        let poster = try XCTUnwrap(page.detail.item.posterURL)
-        XCTAssertEqual(poster.absoluteString, posterPath); XCTAssertNil(poster.scheme); XCTAssertNil(poster.baseURL)
-        let hero = try hero(page)
-        try await waitFor { hero.image != nil }
-        XCTAssertNotNil(fixture.assembly.filmImages.cached(poster),
-                        "Real decoded artwork through the App owner, not just a syntactically valid relative URL")
-
-        await fulfillment(of: [fixture.responses.avatarEntered], timeout: 10)
-        let cast = try XCTUnwrap(descendants(page.view).compactMap { $0 as? FilmCastView }.first)
-        let avatar = try XCTUnwrap(descendants(cast).compactMap { $0 as? ArtworkView }.first)
+        let poster = try XCTUnwrap(RuntimeHTTPClient.metadataImageURL(posterPath))
+        let posterImage = try await fixture.assembly.filmImages.read(poster)
+        XCTAssertNotNil(fixture.assembly.filmImages.cached(poster))
+        XCTAssertNotNil(posterImage.0.cgImage)
+        let avatar = ArtworkView(size: 0, images: fixture.assembly.filmImages)
         let reference = try XCTUnwrap(RuntimeHTTPClient.metadataImageURL(avatarPath))
         let failed = expectation(description: "Actual Douban Artwork reports the upstream failure")
         avatar.onFailure = { XCTAssertEqual($0, reference); failed.fulfill() }
+        avatar.load(reference)
+        await fulfillment(of: [fixture.responses.avatarEntered], timeout: 10)
         XCTAssertEqual(fixture.upstream.replyToHeldJSON(.object(["error": .string("Synthetic image failure")]), status: 503), 1)
         await fulfillment(of: [failed], timeout: 10)
         XCTAssertNil(avatar.image); XCTAssertNil(fixture.assembly.filmImages.cached(reference))
@@ -215,7 +368,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         let cached = try await fixture.client.call(module: .film, operation: "data.metadata", parameters: parameters)
         XCTAssertEqual(cached, data)
         XCTAssertEqual(fixture.reads("/douban-api" + path), 1,
-                       "The real model/page and later metadata borrower use the same film.data entry")
+                       "Metadata borrowers share one film.data entry without a Douban playback session")
         XCTAssertEqual(fixture.reads("/douban-images/posters/\(fixture.values.prefix).png"), 1)
         let beforeInvalid = fixture.imageReads
         for invalid in ["/v1/douban/images/", "/v1/douban/images/a/../b.png",
@@ -228,8 +381,34 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
             } catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest) }
         }
         XCTAssertEqual(fixture.imageReads, beforeInvalid)
-        XCTAssertNil(model.snapshot?.attempt); XCTAssertNil(model.snapshot?.current)
         assertUpstreamBoundary(fixture)
+    }
+
+    private func openHomeItem(_ fixture: FilmMetadataHostFixture, section: Int) async throws
+        -> (FilmDetailViewController, MeowfilmRootContainerViewController) {
+        let (_, root) = try await fixture.coordinator()
+        try await waitFor { root.navigation.topViewController is MeowfilmPrimaryShellViewController }
+        let main = try XCTUnwrap(root.navigation.topViewController as? MeowfilmPrimaryShellViewController)
+        try await waitFor { main.isPageVisible && root.transitionCoordinator == nil }
+        try await dismissKnownMusicNotice(root)
+        main.select(.film)
+        try await waitFor {
+            self.controllers(main).compactMap { $0 as? FilmHomeViewController }.first?.isPageVisible == true
+        }
+        let home = try XCTUnwrap(controllers(main).compactMap { $0 as? FilmHomeViewController }.first)
+        let grid = try XCTUnwrap(descendants(home.view).compactMap { $0 as? UICollectionView }
+            .first { $0.accessibilityIdentifier == "film.home.sections" })
+        try await waitFor { grid.numberOfSections == 4 && grid.numberOfItems(inSection: section) == 1 }
+        try await navigate(root.navigation, to: { $0 is FilmDetailViewController }) {
+            home.collectionView(grid, didSelectItemAt: IndexPath(item: 0, section: section))
+        }
+        let page = try XCTUnwrap(root.navigation.topViewController as? FilmDetailViewController)
+        fixture.models.append(try XCTUnwrap(page.filmPlaybackModel))
+        return (page, root)
+    }
+
+    private func controllers(_ controller: UIViewController) -> [UIViewController] {
+        controller.children.flatMap { [$0] + controllers($0) }
     }
 
     private func makeFixture() async throws -> FilmMetadataHostFixture {
@@ -267,7 +446,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         XCTAssertFalse(images.isEmpty)
         XCTAssertTrue(images.allSatisfy { $0.headers["authorization"] == nil && $0.headers["cookie"] == nil && $0.query.isEmpty })
         XCTAssertTrue(images.filter { $0.path.hasPrefix("/tmdb-images/") }.allSatisfy {
-            $0.path.hasPrefix("/tmdb-images/original/")
+            $0.path.hasPrefix("/tmdb-images/t/p/original/")
         })
         XCTAssertTrue(images.filter { $0.path.hasPrefix("/douban-images/") }.allSatisfy {
             $0.headers["referer"] == "https://movie.douban.com/"
@@ -294,8 +473,17 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
     }
     private func dismissKnownMusicNotice(_ root: MeowfilmRootContainerViewController) async throws {
         guard let alert = root.presentedViewController as? UIAlertController else { return }
+        // A dedicated simulator can retain an unrelated music Keychain-policy
+        // or document error. Accept only the exact music read notice; a film or
+        // unexpected application failure must still throw below.
         let known = alert.title == "错误" && alert.actions.map(\.title) == ["取消", "重试"] &&
-            alert.message?.contains(MusicServiceError.storagePolicyMismatch.localizedDescription) == true
+            alert.actions.map(\.style) == [.cancel, .default] &&
+            [MusicServiceError.storagePolicyMismatch, .corruptDocument].contains {
+                let prefix = $0.message(operation: "音乐内容读取")
+                let pattern = "^" + NSRegularExpression.escapedPattern(for: prefix) +
+                    "(?:（诊断 [A-Fa-f0-9]{8}）)?$"
+                return alert.message?.range(of: pattern, options: .regularExpression) != nil
+            }
         XCTAssertTrue(known, "Do not dismiss a metadata or unexpected application failure")
         guard known else { throw FilmMetadataHostFailure.unexpectedNotice }
         try await waitFor { !alert.isBeingPresented && alert.transitionCoordinator == nil }
@@ -383,7 +571,8 @@ private final class FilmMetadataHostFixture {
         _ = try await client.call(module: .film, operation: "settings.set", parameters: .object(settings))
         try await upstream.start()
         _ = try await client.call(module: .tmdb, operation: "settings.update", parameters: .object([
-            "apiBase": .string(upstream.base + "/tmdb-api"), "imageBase": .string(upstream.base + "/tmdb-images"),
+            "apiBase": .string(upstream.base + "/tmdb-api/3"),
+            "imageBase": .string(upstream.base + "/tmdb-images"),
             "apiKey": .string(""), "accessToken": .string("synthetic-metadata-token"),
         ]))
         _ = try await client.call(module: .douban, operation: "settings.update", parameters: .object([
@@ -394,10 +583,10 @@ private final class FilmMetadataHostFixture {
         assembly.filmSearch?.metadataSettingsChanged()
     }
 
-    func installDirectory() async throws -> FilmCatSource {
+    func installDirectory(title: String? = nil) async throws -> FilmCatSource {
         installedID = values.prefix
         return try await resources.filmSourceSettings.importLocal(name: "Metadata directory",
-            source: filmMetadataHostCat.replacingOccurrences(of: "__TITLE__", with: values.title),
+            source: filmMetadataHostCat.replacingOccurrences(of: "__TITLE__", with: title ?? values.title),
             installationId: values.prefix)
     }
     func directoryCalls(_ installed: FilmCatSource) async throws -> [String] {
@@ -488,6 +677,22 @@ private struct FilmMetadataHostValues: Sendable {
     var title: String { prefix }
     var doubanTitle: String { "Douban-" + prefix }
     func image(_ suffix: String) -> RuntimeValue { .string("/\(prefix)-\(suffix).png") }
+    var home: RuntimeValue {
+        .object(["items": .array([.object([
+            "id": .string(String(doubanID)), "title": .string(doubanTitle), "year": .string("2020"),
+            "card_subtitle": .string("2031 / 不作为年份来源"),
+            "pic": .object(["normal": .string("/v1/douban/images/posters/\(prefix).png")]),
+            "fixture": .object(["origin": .string("home-row")]),
+        ])])])
+    }
+    var seedSearch: RuntimeValue {
+        .object(["page": .number(1), "total_pages": .number(1), "results": .array([
+            .object(["id": .number(Double(similarID)), "media_type": .string("tv"), "name": .string(title),
+                     "first_air_date": .string("2019-01-01")]),
+            .object(["id": .number(Double(tvID)), "media_type": .string("tv"), "name": .string(title),
+                     "first_air_date": .string("2020-01-01")]),
+        ])])
+    }
     var search: RuntimeValue {
         .object(["page": .number(1), "total_pages": .number(1), "results": .array([
             .object(["id": .number(Double(tvID)), "media_type": .string("tv"), "name": .string(title),
@@ -545,11 +750,26 @@ private struct FilmMetadataHostValues: Sendable {
 private final class FilmMetadataHostResponses: @unchecked Sendable {
     let avatarEntered = XCTestExpectation(description: "Douban avatar reached the real HTTP upstream")
     private let lock = NSLock()
+    private var noTMDBMatch = false
+    private var tmdbFailure = false
     private var avatarReads = 0
     private let values: FilmMetadataHostValues, image: Data
     init(values: FilmMetadataHostValues, image: Data) { self.values = values; self.image = image }
+    var forceNoTMDBMatch: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return noTMDBMatch }
+        set { lock.lock(); defer { lock.unlock() }; noTMDBMatch = newValue }
+    }
+    var forceTMDBFailure: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return tmdbFailure }
+        set { lock.lock(); defer { lock.unlock() }; tmdbFailure = newValue }
+    }
     func reply(_ request: TMDBTestUpstream.Request) -> TMDBTestUpstream.Response {
-        if request.path == "/tmdb-api/3/search/multi" { return .json(values.search) }
+        if request.path == "/tmdb-api/3/search/multi" {
+            if forceTMDBFailure { return .json(.object(["error": .string("Synthetic TMDB failure")]), status: 503) }
+            return .json(forceNoTMDBMatch ? .object(["page": .number(1), "total_pages": .number(1),
+                                                      "results": .array([])]) :
+                request.query["query"] == values.doubanTitle ? values.seedSearch : values.search)
+        }
         if request.path == "/tmdb-api/3/search/movie" || request.path == "/tmdb-api/3/search/tv" {
             return .json(.object(["page": .number(1), "total_pages": .number(1), "results": .array([])]))
         }
@@ -562,11 +782,13 @@ private final class FilmMetadataHostResponses: @unchecked Sendable {
             return .bytes(Data(#"<html><script>window.__DATA__ = {"items":[],"total":0};</script></html>"#.utf8), type: "text/html")
         }
         if request.path == "/douban-api/rexxar/api/v2/movie/\(values.doubanID)" { return .json(values.douban) }
+        if request.path == "/douban-api/rexxar/api/v2/subject/recent_hot/movie" ||
+            request.path == "/douban-api/rexxar/api/v2/subject/recent_hot/tv" { return .json(values.home) }
         if request.path == "/douban-images/avatars/\(values.prefix).png" {
             lock.lock(); avatarReads += 1; let first = avatarReads == 1; lock.unlock()
             if first { avatarEntered.fulfill(); return .hold(onDisconnect: {}) }
         }
-        if request.path.hasPrefix("/tmdb-images/original/") || request.path == "/douban-images/posters/\(values.prefix).png" ||
+        if request.path.hasPrefix("/tmdb-images/t/p/original/") || request.path == "/douban-images/posters/\(values.prefix).png" ||
             request.path == "/douban-images/avatars/\(values.prefix).png" { return .bytes(image, type: "image/png") }
         return .json(.object(["error": .string("Unexpected metadata fixture route")]), status: 404)
     }

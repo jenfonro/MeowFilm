@@ -82,7 +82,7 @@ struct PanLoginContent: View {
                 ProgressView().frame(width: 200, height: 200).accessibilityLabel("读取二维码")
             }
             if let progress = model.progress {
-                Text(progress.title).font(.subheadline).foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                Text(progress.title).font(.subheadline).foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
             }
             if model.canRetry {
                 Button("重试") { model.retry() }.buttonStyle(AccountPrimaryButtonStyle(theme: theme))

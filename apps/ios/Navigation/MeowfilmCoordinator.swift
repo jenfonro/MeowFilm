@@ -44,11 +44,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             guard let self else { return }
             let primary = page === self.main
             self.root.setRootVisible(primary, animated: animated)
+            self.root.setPlayerSurfaceVisible(!self.isSettingsBranchVisible)
             self.root.setReadingVisible(page is NovelReaderViewController || self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
         }
         navigation.didShowPage = { [weak self] page in
             guard let self else { return }
             self.root.setRootVisible(page === self.main, animated: false)
+            self.root.setPlayerSurfaceVisible(!self.isSettingsBranchVisible)
             if !(page is FilmDetailViewController), self.filmPlayer == nil {
                 self.activateFilmPage(page)
             }
@@ -97,6 +99,10 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 if !accepted { continuation.resume(returning: false) }
             }
         }
+    }
+
+    private var isSettingsBranchVisible: Bool {
+        navigation.viewControllers.contains { $0 is MeowfilmSettingsViewController }
     }
 
     func becameActive() {
@@ -256,13 +262,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         main?.selectChannel(channel)
     }
 
-    private func showFilm(_ item: FilmItem, kind: FilmPlaybackKind) {
+    private func showFilm(_ item: FilmItem, kind: FilmPlaybackKind, entrySurface: String? = nil) {
         let item = FilmItem(sourceID: item.sourceID, id: item.id, title: item.title,
                             kind: FilmItemKind(rawValue: kind.rawValue) ?? item.kind,
                             posterURL: item.posterURL, largePosterURL: item.largePosterURL,
-                            score: item.score, subtitle: item.subtitle)
+                            score: item.score, subtitle: item.subtitle, metadataSeed: item.metadataSeed)
         let model: FilmPlaybackModel
-        do { model = try assembly.makeFilmPlayback(item: item, kind: kind) }
+        do { model = try assembly.makeFilmPlayback(item: item, kind: kind, entrySurface: entrySurface) }
         catch {
             (navigation.topViewController as? PageViewController)?.showError(error.localizedDescription)
             return
@@ -365,14 +371,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                         page?.showError("缺少影片类型")
                         return
                     }
-                    self?.showFilm(item, kind: category == .movie ? .movie : .tv)
+                    self?.showFilm(item, kind: category == .movie ? .movie : .tv, entrySurface: "home")
                 }
                 page.onSelectCategory = { [weak self] model in
                     guard let self else { return }
                     let category = FilmCategoryViewController(model: model, images: self.assembly.filmImages,
                                                                themeProvider: appearance)
                     category.onSelectItem = { [weak self] in
-                        self?.showFilm($0, kind: model.category == .movie ? .movie : .tv)
+                        self?.showFilm($0, kind: model.category == .movie ? .movie : .tv, entrySurface: "home")
                     }
                     self.navigation.pushViewController(category, animated: true)
                 }

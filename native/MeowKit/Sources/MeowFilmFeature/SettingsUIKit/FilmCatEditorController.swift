@@ -20,6 +20,8 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
     private var reading: Task<Void, Never>?
     private var saveVisibilityGeneration = UUID()
     var onSaved: (() -> Void)?
+    var onCancel: (() -> Void)?
+    var isFloating = false
 
     init(service: FilmSourceService, mode: Mode, themeProvider: any PageThemeProviding) {
         self.service = service; self.mode = mode
@@ -31,7 +33,13 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
         }
     }
     override func viewDidLoad() {
-        super.viewDidLoad(); sourceURL.keyboardType = .URL; render()
+        super.viewDidLoad()
+        sourceURL.keyboardType = .URL
+        if isFloating {
+            pageHeader.setLeading(PageHeaderButton(image: PageIcon.image(.close),
+                accessibilityLabel: "关闭") { [weak self] in self?.onCancel?() })
+        }
+        render()
     }
     override func pageDidBecomeActive() {
         runPageTask { [weak self, service] in

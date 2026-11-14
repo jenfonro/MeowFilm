@@ -143,14 +143,17 @@ public struct FilmPlaybackRequest: Sendable {
     public let metadata: RuntimeValue?
     public let cacheEntries: [RuntimeValue]
     public let searchReference: RuntimeValue?
+    public let entrySurface: String?
     public private(set) var resumeTarget: FilmPlaybackTarget?
 
     public init(target: FilmPlaybackTarget, sources: [FilmPlaybackSource], query: String? = nil,
                 results: [RuntimeValue] = [], resultHints: [RuntimeValue] = [], search: [RuntimeValue] = [],
-                metadata: RuntimeValue? = nil, cacheEntries: [RuntimeValue] = [], searchReference: RuntimeValue? = nil) {
+                metadata: RuntimeValue? = nil, cacheEntries: [RuntimeValue] = [], searchReference: RuntimeValue? = nil,
+                entrySurface: String? = nil) {
         self.target = target; self.sources = sources; self.query = query
         self.results = results; self.resultHints = resultHints; self.search = search; self.metadata = metadata
         self.cacheEntries = cacheEntries; self.searchReference = searchReference
+        self.entrySurface = entrySurface
         resumeTarget = nil
     }
 
@@ -165,14 +168,26 @@ public struct FilmPlaybackRequest: Sendable {
         fields["metadata"] = metadata
         fields["searchReference"] = searchReference
         fields["resumeTarget"] = resumeTarget.map { .object($0.value) }
+        fields["entrySurface"] = entrySurface.map(RuntimeValue.string)
         return .object(fields)
     }
 
-    func retargeted(_ target: FilmPlaybackTarget) -> Self {
+    func retargeted(_ target: FilmPlaybackTarget, errorCode: String? = nil) -> Self {
+        if self.target.metadataProvider == .douban, searchReference == nil {
+            // Keep the home seed/provenance separate from the exact current
+            // TMDB coordinate or group file selected by the user.
+            var request = self
+            let waitingGroup = errorCode != "SOURCE_NOT_FOUND" && resumeTarget == nil && target.kind == .group &&
+                target.value["source"] == nil && target.value["members"] == .array([])
+            // Only Node may create the empty waiting group from the seed.
+            request.resumeTarget = target == self.target || waitingGroup ? nil : target
+            return request
+        }
         let sameMetadata = target.kind == self.target.kind && target.metadataProvider == self.target.metadataProvider &&
             target.value["metadataId"] == self.target.value["metadataId"]
         var request = Self(target: target, sources: sources, query: query, results: results, resultHints: resultHints,
-                     search: search, metadata: sameMetadata ? metadata : nil, cacheEntries: cacheEntries, searchReference: searchReference)
+                     search: search, metadata: sameMetadata ? metadata : nil, cacheEntries: cacheEntries,
+                     searchReference: searchReference, entrySurface: entrySurface)
         if searchReference != nil { request.resumeTarget = target }
         return request
     }
@@ -273,6 +288,9 @@ public struct FilmPlaybackCandidate: Equatable, Sendable {
     public let path: String?
     public let position: FilmEpisodePosition
     public let quality: String?
+    public let resolution: String?
+    public let fps: Double?
+    public let codec: String?
 
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
@@ -283,6 +301,9 @@ public struct FilmPlaybackCandidate: Equatable, Sendable {
         provider = fields["provider"]?.filmText
         name = try fields.filmString("name"); path = fields["path"]?.filmText
         quality = fields["quality"]?.filmText
+        resolution = fields["resolution"]?.filmText
+        fps = fields["fps"]?.filmNumber
+        codec = fields["codec"]?.filmText
         position = .init(season: fields["season"]?.filmInteger, episode: fields["episode"]?.filmInteger,
                          globalEpisode: fields["globalEpisode"]?.filmInteger)
     }
@@ -344,10 +365,16 @@ public struct FilmPlaybackFile: Equatable, Sendable {
     public let name: String
     public let path: String?
     public let position: FilmEpisodePosition
+    public let quality: String?
+    public let resolution: String?
+    public let fps: Double?
+    public let codec: String?
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
         id = try fields.filmString("id"); name = try fields.filmString("name")
         candidateID = fields["candidateId"]?.filmText; path = fields["path"]?.filmText
+        quality = fields["quality"]?.filmText; resolution = fields["resolution"]?.filmText
+        fps = fields["fps"]?.filmNumber; codec = fields["codec"]?.filmText
         position = .init(season: fields["season"]?.filmInteger, episode: fields["episode"]?.filmInteger,
                          globalEpisode: fields["globalEpisode"]?.filmInteger)
     }
@@ -451,6 +478,9 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public let sessionID: UUID
     public let sequence: Int64
     public let target: FilmPlaybackTarget
+    public let entryTarget: FilmPlaybackTarget?
+    public let entrySurface: String?
+    public let entryResolution: String?
     public let stage: String
     public let error: String?
     public let metadata: RuntimeValue
@@ -478,6 +508,9 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
               let sequence = fields["sequence"]?.filmInteger else { throw FilmPlaybackError.invalidResponse }
         sessionID = id; self.sequence = Int64(sequence)
         target = try FilmPlaybackTarget(fields.filmValue("target"))
+        entryTarget = try fields["entryTarget"].flatMap { $0 == .null ? nil : $0 }.map(FilmPlaybackTarget.init)
+        entrySurface = fields["entrySurface"]?.filmText
+        entryResolution = fields["entryResolution"]?.filmText
         stage = try fields.filmString("stage"); error = fields["error"]?.filmText
         metadata = try fields.filmValue("metadata")
         if let cache = fields["metadataCache"], cache != .null {
@@ -516,12 +549,13 @@ public struct FilmPlaybackMediaInput: Sendable, CustomStringConvertible, CustomD
     public let attemptID: String
     public let resourceID: String
     public let url: URL
+    public let mediaOrigin: URL?
     public let format: String?
     public let drm: RuntimeValue?
     public let title: String
     public let position: Double
     public let paused: Bool
-    public let scope: RuntimeValue
+    public let scope: RuntimeValue?
 
     init(value: RuntimeValue, sessionID: UUID, attemptID: String) throws {
         let fields = try value.filmRequiredObject()
@@ -531,10 +565,11 @@ public struct FilmPlaybackMediaInput: Sendable, CustomStringConvertible, CustomD
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               url.host?.isEmpty == false else { throw FilmPlaybackError.invalidResponse }
         self.sessionID = sessionID; self.attemptID = attemptID; self.url = url
+        mediaOrigin = fields["mediaOrigin"]?.filmText.flatMap(URL.init(string:))
         format = fields["format"]?.filmText
         drm = fields["drm"]; title = try fields.filmString("title")
         position = try fields.filmNumber("position"); paused = try fields.filmBool("paused")
-        scope = try fields.filmValue("scope")
+        scope = fields["scope"]
     }
 
     public var description: String { "FilmPlaybackMediaInput(redacted)" }

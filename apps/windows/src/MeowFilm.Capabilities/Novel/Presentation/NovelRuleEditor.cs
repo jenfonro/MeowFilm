@@ -17,7 +17,7 @@ internal sealed class NovelRuleEditor : DockPanel
         var actions = new WrapPanel();
         actions.Children.Add(NovelUi.Button("复制规则", () => { try { Clipboard.SetText(System.Text.Json.JsonSerializer.Serialize(Read(), NovelJson.Options)); notice("规则已复制"); } catch (Exception error) { notice(error.Message); } }));
         actions.Children.Add(NovelUi.Button("粘贴规则", () => { try { var pasted = NovelRuleImport.Parse(Clipboard.GetText()).FirstOrDefault() ?? throw new InvalidDataException(); Render(pasted); } catch { notice("剪贴板内容格式不对"); } }));
-        SetDock(actions, Dock.Top); Children.Add(actions); Children.Add(NovelUi.Scroll(form.Card())); Render(rule);
+        SetDock(actions, Dock.Top); Children.Add(actions); Children.Add(form.Card()); Render(rule);
     }
     private void Render(NovelRule rule)
     {

@@ -14,14 +14,16 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
     {
         if (FilmJson.Member(original, "sources").ValueKind == JsonValueKind.Array)
             return FilmJson.Array(original, "sources");
-        var raw = FilmJson.Member(FilmJson.Member(original, "target"), "source");
+        var selected = FilmJson.Member(original, "resumeTarget");
+        if (selected.ValueKind != JsonValueKind.Object) selected = FilmJson.Member(original, "target");
+        var raw = FilmJson.Member(selected, "source");
         var recorded = FilmJson.Array(original, "cacheEntries")
             .Where(entry => FilmJson.Text(entry, "kind") is "search" or "detail")
             .Select(entry => FilmJson.Member(entry, "source")).ToList();
         if (FilmJson.Text(raw, "installationId").Length > 0) recorded.Add(raw);
         var facts = FilmJson.Array(original, "results").Concat(FilmJson.Array(original, "resultHints"))
             .Concat(FilmJson.Array(original, "search"))
-            .Concat(FilmJson.Array(FilmJson.Member(original, "target"), "members")).ToArray();
+            .Concat(FilmJson.Array(selected, "members")).ToArray();
         if (new[] { "results", "resultHints", "search" }.Any(name =>
                 FilmJson.Member(original, name).ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null or JsonValueKind.Array)) ||
             raw.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null or JsonValueKind.Object) ||
@@ -98,29 +100,46 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
     internal static JsonElement ParametersFor(FilmPlaybackPage page, JsonElement original,
         RuntimeConnection connection, IReadOnlyList<JsonElement> available)
     {
+        var request = page.CaptureRequest;
+        var target = request.Target;
+        var selected = request.ResumeTarget ?? target;
+        bool doubanSeed = page.EntryTarget.MetadataProvider == "douban";
+        var requestedResume = page.Request.ResumeTarget;
+        var wireResume = FilmJson.Member(original, "resumeTarget");
+        if (!doubanSeed && ((requestedResume is { } requestedTarget && IsEmptyGroup(requestedTarget)) ||
+            (wireResume.ValueKind == JsonValueKind.Object && IsEmptyGroup(FilmJson.Target(wireResume)))))
+            throw new FilmPlaybackException("SOURCE_NOT_FOUND");
         var parameters = JsonNode.Parse(original.GetRawText())!.AsObject();
         var originalSources = OriginalSources(original, available);
-        var target = page.CaptureRequest.Target;
         var admitted = originalSources
-            .Where(old => target.Kind != "source" || target.Source is { } raw &&
+            .Where(old => selected.Kind != "source" || selected.Source is { } raw &&
                 FilmJson.Text(old, "key") == FilmJson.Text(raw, "key"))
             .Select(old => (Old: old, Current: available.FirstOrDefault(value =>
             FilmJson.Text(value, "engine") == FilmJson.Text(old, "engine") &&
             FilmJson.Text(value, "installationId") == FilmJson.Text(old, "installationId") &&
             FilmJson.Text(value, "siteId") == FilmJson.Text(old, "siteId"))))
             .Where(pair => pair.Current.ValueKind == JsonValueKind.Object).ToArray();
-        if (target.Kind == "source" && admitted.Length == 0) throw new FilmPlaybackException("SOURCE_NOT_FOUND");
-        if (target.Kind == "group")
+        if (selected.Kind == "source" && admitted.Length == 0) throw new FilmPlaybackException("SOURCE_NOT_FOUND");
+        // A Douban resume must reach Node intact: an empty revoked group is not
+        // another seed lookup, and session.open rejects it before that lookup.
+        if (selected.Kind == "group" && !(doubanSeed && IsEmptyGroup(selected)))
         {
-            var members = FilmJson.Array(target.Members ?? default).Where(member => admitted.Any(pair =>
+            var originalMembers = FilmJson.Array(selected.Members ?? default);
+            var members = originalMembers.Where(member => admitted.Any(pair =>
                 FilmJson.Text(pair.Old, "key") == FilmJson.Text(member, "sourceKey"))).ToArray();
             if (members.Length == 0) throw new FilmPlaybackException("SOURCE_NOT_FOUND");
-            target = target with { Members = FilmJson.Encode(members) };
-            if (target.Source is { } selected && !members.Any(member =>
-                FilmJson.Text(member, "sourceKey") == FilmJson.Text(selected, "key") &&
-                JsonElement.DeepEquals(FilmJson.Member(member, "detailId"), FilmJson.Member(selected, "detailId"))))
-                target = target with { Source = null };
+            selected = selected with { Members = FilmJson.Encode(members) };
+            if (selected.Source is { } source && !members.Any(member =>
+                FilmJson.Text(member, "sourceKey") == FilmJson.Text(source, "key") &&
+                JsonElement.DeepEquals(FilmJson.Member(member, "detailId"), FilmJson.Member(source, "detailId"))))
+            {
+                if (new[] { "candidateId", "episodeId", "playId" }.Any(name =>
+                    FilmJson.Member(source, name).ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null)))
+                    throw new FilmPlaybackException("SOURCE_NOT_FOUND");
+                selected = selected with { Source = null };
+            }
         }
+        if (!doubanSeed) target = selected;
         var sources = new JsonArray();
         var trusted = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (old, current) in admitted)
@@ -137,10 +156,14 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
         if (!SameOwner(page.Request.DataOwner, connection))
             parameters.Remove("searchReference");
         parameters["target"] = JsonSerializer.SerializeToNode(target.Wire(), FilmJson.Options);
-        if (parameters["searchReference"] is JsonObject && page.HasPlaybackSnapshot)
-            parameters["resumeTarget"] = JsonSerializer.SerializeToNode(target.Wire(), FilmJson.Options);
+        if (request.EntrySurface is { } entrySurface) parameters["entrySurface"] = entrySurface;
+        else parameters.Remove("entrySurface");
+        if (doubanSeed ? request.ResumeTarget is not null :
+            SameOwner(page.Request.DataOwner, connection) &&
+            parameters["searchReference"] is JsonObject && page.HasPlaybackSnapshot)
+            parameters["resumeTarget"] = JsonSerializer.SerializeToNode(selected.Wire(), FilmJson.Options);
         else parameters.Remove("resumeTarget");
-        parameters["metadata"] = page.CaptureRequest.Metadata is { } metadata
+        parameters["metadata"] = request.Metadata is { } metadata
             ? JsonNode.Parse(metadata.GetRawText()) : null;
         parameters["sources"] = sources;
         var results = new JsonArray();
@@ -153,6 +176,10 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
         }
         foreach (var hint in FilmJson.Array(original, "resultHints"))
             if (admitted.Any(pair => FilmJson.Text(pair.Old, "key") == FilmJson.Text(hint, "sourceKey")))
+                hints.Add(JsonNode.Parse(hint.GetRawText()));
+        foreach (var hint in FilmJson.Array(request.ResultHints ?? default))
+            if (admitted.Any(pair => FilmJson.Text(pair.Old, "key") == FilmJson.Text(hint, "sourceKey")) &&
+                !hints.Any(existing => JsonNode.DeepEquals(existing, JsonNode.Parse(hint.GetRawText()))))
                 hints.Add(JsonNode.Parse(hint.GetRawText()));
         parameters["results"] = results;
         parameters["resultHints"] = hints;
@@ -170,6 +197,9 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
     internal static bool SourceEquals(JsonElement left, JsonElement right) =>
         new[] { "engine", "installationId", "siteId", "generation", "revision" }
             .All(name => FilmJson.Text(left, name) == FilmJson.Text(right, name));
+
+    private static bool IsEmptyGroup(FilmPlaybackTarget target) =>
+        target.Kind == "group" && FilmJson.Array(target.Members ?? default).Length == 0;
 
     private static JsonElement DetailIdentity(JsonElement value)
     {

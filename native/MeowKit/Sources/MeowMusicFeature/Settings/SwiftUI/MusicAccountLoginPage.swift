@@ -161,7 +161,7 @@ private struct MusicLoginMethodTabs: View {
             tab(.qr, title: "扫码登录")
         }
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color(uiColor: UIColor(theme.settings.border))).frame(height: 1)
+            MusicSettingsDivider(theme: theme)
         }
         .disabled(!state.available)
     }

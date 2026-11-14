@@ -4,82 +4,131 @@ import MeowUI
 
 @MainActor
 final class FilmVideoSourcesViewController: FilmSourcePageController {
-    private var selecting = false
-    private var selected = Set<FilmSourceKey>()
+    override var usesSettingsTable: Bool { false }
+    let manager = ManagementListView()
+    private var query = ""
+    private lazy var sortButton = ManagementListView.icon("management.sort", label: "排序视频源") { [weak self] in
+        self?.openOrder()
+    }
     private var detection: Task<Void, Never>?
     private(set) var detecting = false
     private var detectingKeys = Set<FilmSourceKey>()
     private var detectionGeneration = UUID()
 
-    override func viewDidLoad() { pageTitle = "视频源"; super.viewDidLoad(); view.accessibilityIdentifier = "film.videos" }
+    override func viewDidLoad() {
+        pageTitle = "视频源"
+        super.viewDidLoad()
+        view.accessibilityIdentifier = "film.videos"
+        manager.accessibilityIdentifier = "film.videos.managementList"
+        manager.search.placeholder = "搜索视频源"
+        manager.onSearch = { [weak self] in self?.query = $0; self?.render() }
+        manager.onSelection = { [weak self] in self?.updateFooterMenu() }
+        manager.onDelete = { [weak self] in self?.removeSelected() }
+        manager.footerMoreNeedsSelection = false
+        sortButton.accessibilityIdentifier = "film.videos.sort"
+        manager.tools.addArrangedSubview(sortButton)
+        view.addSubview(manager); manager.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            manager.topAnchor.constraint(equalTo: contentTopAnchor),
+            manager.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            manager.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            manager.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        manager.applyTheme(theme)
+        render()
+    }
+
     override func render() {
-        let videos = snapshot?.videos ?? []
+        let allVideos = snapshot?.videos ?? []
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let videos = normalizedQuery.isEmpty ? allVideos : allVideos.filter {
+            [$0.name, $0.key.installationId, $0.key.siteKey]
+                .contains { $0.localizedCaseInsensitiveContains(normalizedQuery) }
+        }
         let detectable = Set((snapshot?.cats ?? []).filter(\.canDetect).map(\.installationId))
-        selected.formIntersection(videos.map(\.key))
-        var rows = videos.map { video in
+        sortButton.isEnabled = !busy && !detecting && allVideos.count > 1
+        let rows = videos.map { video in
+            let identifier = rowID(video.key)
             let checking = detectingKeys.contains(video.key)
             let canDetect = detectable.contains(video.key.installationId)
-            return sourceRow(title: video.name,
-                status: checking ? "检测中" : (video.detection.map { filmSourceState($0.result) } ?? "未检测"),
-                id: "film.video.\(video.key.installationId).\(video.key.siteKey)", isOn: video.options.enabled, enabled: !busy,
-                selecting: selecting, selected: selected.contains(video.key), open: { [weak self] in
-                    guard let self else { return }
-                    if selecting {
-                        if !selected.insert(video.key).inserted { selected.remove(video.key) }; render()
-                    } else {
-                        navigationController?.pushViewController(FilmVideoDetailController(service: service, key: video.key,
-                            themeProvider: themeProvider), animated: true)
-                    }
-                }, change: { [weak self] enabled in
-                    guard let self else { return }
+            let status = checking ? "检测中" : (video.detection.map { filmSourceState($0.result) } ?? "未检测")
+            let open = { [weak self] in
+                guard let self, isPageActive, isPageVisible else { return }
+                navigationController?.pushViewController(FilmVideoDetailController(service: service, key: video.key,
+                    themeProvider: themeProvider), animated: true)
+            }
+            return ManagementListView.Row(id: identifier, title: video.name,
+                detail: status, enabled: video.options.enabled, failed: video.detection?.result == "failed",
+                controlsEnabled: !busy,
+                edit: open, open: open, toggle: { [weak self] enabled in
+                    guard let self, !busy else { return }
                     var options = video.options; options.enabled = enabled
                     perform({ [service] in try await service.saveVideoOptions(video.key, options: options) })
-                }, actions: [
+                }, menu: UIMenu(children: [
                     UIAction(title: checking ? "取消检测" : "检测",
                              attributes: (checking || (!detecting && canDetect)) ? [] : .disabled) { [weak self] _ in
                         guard let self else { return }
                         if detecting { cancelDetection(); render() } else { detect([video.key]) }
                     },
-                    UIAction(title: "详情") { [weak self] _ in
-                        guard let self, isPageActive, isPageVisible else { return }
-                        navigationController?.pushViewController(FilmVideoDetailController(service: service, key: video.key,
-                            themeProvider: themeProvider), animated: true)
-                    },
-                    UIAction(title: "删除", attributes: .destructive) { [weak self] _ in self?.remove([video.key]) },
-                ])
+                ]))
         }
-        rows += sourceStateRows(empty: videos.isEmpty)
-        sections = [.init(title: "", rows: [
-            .init(title: selecting ? "完成选择" : "选择", id: "film.videos.select", enabled: !busy && !detecting && (selecting || !videos.isEmpty),
-                  action: { [weak self] in self?.selecting.toggle(); self?.render() }),
-        ]), .init(title: "", rows: rows)]
-        if selecting {
-            sections.append(.init(title: "已选 \(selected.count)", rows: [
-                .init(title: "全选", id: "film.videos.selectAll", enabled: !busy && !detecting, action: { [weak self] in self?.selected = Set(videos.map(\.key)); self?.render() }),
-                .init(title: "取消选择", id: "film.videos.deselectAll", enabled: !busy && !detecting, action: { [weak self] in self?.selected.removeAll(); self?.render() }),
-                .init(title: detecting ? "取消检测" : "检测", id: "film.videos.detect", enabled: !busy && (detecting || !selected.isEmpty),
-                      action: { [weak self] in self?.detectSelected() }),
-                .init(title: "删除", id: "film.videos.delete", enabled: !busy && !detecting && !selected.isEmpty, destructive: true, action: { [weak self] in
-                    guard let self else { return }
-                    let keys = videos.filter { self.selected.contains($0.key) }.map(\.key)
-                    remove(keys)
-                }),
-            ]))
-        }
-        super.render()
+        manager.setRows(rows, total: allVideos.count,
+                        validIDs: Set(allVideos.map { rowID($0.key) }),
+                        emptyMessage: snapshot == nil ? "加载中" :
+                            (allVideos.isEmpty ? "暂无视频源" : "没有匹配的视频源"))
+        updateFooterMenu()
     }
+
+    override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        manager.applyTheme(theme)
+        render()
+    }
+
+    private func rowID(_ key: FilmSourceKey) -> String {
+        "film.video.\(key.installationId).\(key.siteKey)"
+    }
+
+    private func updateFooterMenu() {
+        let videos = snapshot?.videos ?? []
+        let selected = videos.filter { manager.selected.contains(rowID($0.key)) }
+        let canDetect = Set((snapshot?.cats ?? []).filter(\.canDetect).map(\.installationId))
+        let hasDetectableSelection = selected.contains { canDetect.contains($0.key.installationId) }
+        manager.deleteButton.isEnabled = !busy && !detecting && !selected.isEmpty
+        manager.footerMore.isEnabled = detecting || (!busy && hasDetectableSelection)
+        manager.footerMore.menu = UIMenu(children: [
+            UIAction(title: detecting ? "取消检测" : "检测所选",
+                     attributes: (detecting || hasDetectableSelection) ? [] : .disabled) { [weak self] _ in
+                guard let self else { return }
+                if detecting { cancelDetection(); render() } else { detect(selected.map(\.key)) }
+            },
+        ])
+    }
+
+    private func removeSelected() {
+        guard !busy, !detecting else { return }
+        let keys = (snapshot?.videos ?? []).filter { manager.selected.contains(rowID($0.key)) }.map(\.key)
+        remove(keys)
+    }
+
+    private func openOrder() {
+        guard let videos = snapshot?.videos, videos.count > 1,
+              let navigationController, navigationController.topViewController === self else { return }
+        navigationController.pushViewController(
+            FilmVideoSourceOrderController(service: service, videos: videos, themeProvider: themeProvider),
+            animated: true
+        )
+    }
+
     private func remove(_ keys: [FilmSourceKey]) {
+        guard !keys.isEmpty else { return }
         confirm("删除选中的 \(keys.count) 个视频源？") { [weak self] in
             guard let self else { return }
             deleteBatch(keys, isPresent: { key, snapshot in
                 snapshot.videos.contains { $0.key == key }
             }) { [service] in try await service.deleteVideo($0) }
         }
-    }
-    private func detectSelected() {
-        if detecting { cancelDetection(); render(); return }
-        let keys = (snapshot?.videos ?? []).filter { selected.contains($0.key) }.map(\.key)
-        detect(keys)
     }
     private func detect(_ keys: [FilmSourceKey]) {
         guard isPageActive, isPageVisible, !detecting else { return }
@@ -148,15 +197,6 @@ final class FilmVideoDetailController: FilmSourcePageController {
             .init(title: "操作", rows: [
                 .init(title: detecting ? "取消检测" : "检测", id: "film.video.detect", enabled: !busy && (canDetect || detecting),
                       action: { [weak self] in self?.detect() }),
-                .init(title: "删除", id: "film.video.delete", enabled: !busy, destructive: true, action: { [weak self] in
-                    self?.confirm("删除视频源？") { [weak self] in
-                        guard let self else { return }; cancelDetection()
-                        deleteBatch([key], isPresent: { key, snapshot in snapshot.videos.contains { $0.key == key } },
-                            completed: { [weak self] in
-                            self?.navigationController?.popViewController(animated: true)
-                        }) { [service] in try await service.deleteVideo($0) }
-                    }
-                }),
             ]),
         ]
         if let result = video.detection {
@@ -174,20 +214,21 @@ final class FilmVideoDetailController: FilmSourcePageController {
     }
     private func editOrder(_ video: FilmVideoSource) {
         guard canPresentPageAlert else { return }
-        let alert = UIAlertController(title: "排序", message: nil, preferredStyle: .alert)
-        alert.addTextField { field in
-            field.text = String(video.order); field.keyboardType = .numbersAndPunctuation
-            field.accessibilityLabel = "排序"; field.accessibilityIdentifier = "film.video.order.input"
-        }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "保存", style: .default) { [weak self, weak alert] _ in
-            guard let self else { return }
-            guard let order = Int(alert?.textFields?.first?.text ?? "") else {
-                failure(FilmSourceError(code: "排序必须是整数"), retry: { [weak self] in self?.editOrder(video) }); return
+        let dialog = ManagementDialog(title: "排序", action: "保存", themeProvider: themeProvider)
+        let input = ManagementDialog.input(placeholder: "排序")
+        input.text = String(video.order)
+        input.keyboardType = .numbersAndPunctuation
+        input.accessibilityIdentifier = "film.video.order.input"
+        dialog.body.addArrangedSubview(input)
+        dialog.submit = { [weak self] in
+            guard let self else { return false }
+            guard let order = Int(input.text ?? "") else {
+                throw FilmSourceError(code: "排序必须是整数")
             }
-            saveOptions(video.options, order: order)
-        })
-        present(alert, animated: true)
+            try await self.service.saveVideoOptions(video.key, options: video.options, order: order)
+            return true
+        }
+        present(dialog, animated: true)
     }
     func detect() {
         if detecting { cancelDetection(); render(); return }
@@ -209,5 +250,107 @@ final class FilmVideoDetailController: FilmSourcePageController {
     override func pageDidBecomeHidden() { super.pageDidBecomeHidden(); cancelDetection() }
     override func pageDidBecomeInactive() { super.pageDidBecomeInactive(); cancelDetection() }
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); render() }
+}
+
+@MainActor
+final class FilmVideoSourceOrderController: FilmSourcePageController {
+    private var ordered: [FilmVideoSource]
+    private var saving = false
+
+    init(service: FilmSourceService, videos: [FilmVideoSource],
+         themeProvider: any PageThemeProviding) {
+        ordered = videos
+        super.init(service: service, themeProvider: themeProvider)
+        pageTitle = "视频源排序"
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.accessibilityIdentifier = "film.videos.order"
+        render()
+    }
+
+    override func pageDidBecomeVisible() {
+        if !saving, let snapshot { ordered = snapshot.videos }
+        render()
+    }
+
+    override func render() {
+        sections = [.init(title: "", rows: ordered.enumerated().map { index, video in
+            let title = UILabel()
+            title.text = video.name
+            title.textColor = UIColor(theme.settings.ink)
+            title.font = .preferredFont(forTextStyle: .body)
+            title.adjustsFontForContentSizeCategory = true
+            title.numberOfLines = 0
+
+            let up = PageHeaderButton(image: UIImage(systemName: "chevron.up")!,
+                accessibilityLabel: "\(video.name) 上移") { [weak self] in
+                    self?.move(from: index, to: index - 1)
+                }
+            up.accessibilityIdentifier = "film.video.order.\(index).up"
+            up.isEnabled = !saving && index > 0
+            up.tintColor = UIColor(theme.settings.ink)
+
+            let down = PageHeaderButton(image: UIImage(systemName: "chevron.down")!,
+                accessibilityLabel: "\(video.name) 下移") { [weak self] in
+                    self?.move(from: index, to: index + 1)
+                }
+            down.accessibilityIdentifier = "film.video.order.\(index).down"
+            down.isEnabled = !saving && index + 1 < ordered.count
+            down.tintColor = UIColor(theme.settings.ink)
+
+            let controls = UIStackView(arrangedSubviews: [up, down])
+            controls.axis = .horizontal
+            controls.spacing = 0
+            controls.setContentHuggingPriority(.required, for: .horizontal)
+            let row = UIStackView(arrangedSubviews: [title, controls])
+            row.axis = .horizontal
+            row.alignment = .center
+            row.spacing = 12
+            return FilmSettingsRow(title: video.name, detail: "第 \(index + 1) 位",
+                id: "film.video.order.\(index)", enabled: !saving, content: row)
+        })]
+        super.render()
+    }
+
+    private func move(from: Int, to: Int) {
+        guard isPageActive, isPageVisible, !saving,
+              ordered.indices.contains(from), ordered.indices.contains(to) else { return }
+        ordered.swapAt(from, to)
+        save()
+    }
+
+    private func save() {
+        guard !saving else { return }
+        let values = ordered
+        let generation = sourcePageGeneration
+        saving = true
+        render()
+        Task { [weak self, service] in
+            do {
+                for (index, video) in values.enumerated() {
+                    guard self?.canContinueSourceBatch(generation) == true else { break }
+                    let current = await service.snapshot
+                    guard self?.canContinueSourceBatch(generation) == true else { break }
+                    guard let source = current.videos.first(where: { $0.key == video.key }) else {
+                        throw FilmSourceError(code: "NOT_FOUND")
+                    }
+                    if source.order != index {
+                        try await service.saveVideoOptions(source.key, options: source.options, order: index)
+                    }
+                }
+                guard let self else { return }
+                ordered = (await service.snapshot).videos
+                saving = false
+                render()
+            } catch {
+                guard let self else { return }
+                saving = false
+                render()
+                failure(error, retry: { [weak self] in self?.save() })
+            }
+        }
+    }
 }
 #endif

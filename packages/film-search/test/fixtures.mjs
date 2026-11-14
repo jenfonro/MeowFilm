@@ -72,7 +72,7 @@ export const tmdbCases = [
       { id: '16', media_type: 'movie', title: 'numeric string is invalid' },
       { id: -1, media_type: 'tv', name: 'invalid' },
       { id: 17, media_type: 'tv', name: '' },
-      { id: 18.9, media_type: 'movie', original_title: 'Origin', poster_path: '/origin' },
+      { id: 18, media_type: 'movie', original_title: 'Origin', poster_path: '/origin' },
       null,
     ] },
   },

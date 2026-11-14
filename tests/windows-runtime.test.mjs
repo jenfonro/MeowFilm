@@ -164,8 +164,8 @@ async function assertRealBusiness(client) {
     value: { name: '测试书', author: '甲', key: JSON.stringify(['book', '测试书', '甲']) } });
   for (const method of ['music.library.list', 'reader.content.chapter', 'eval'])
     await assert.rejects(client.call(method), { code: 'METHOD_NOT_FOUND' });
-  assert.deepEqual(await client.call('film.playback.recognize'), {
-    ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND',
+  assert.deepEqual(await client.call('film.session.open'), {
+    ok: false, contract: 'film.playback.v1', code: 'INVALID_REQUEST',
   });
   return description;
 }

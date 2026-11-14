@@ -6,9 +6,11 @@ public sealed record FilmPlayerOption(string Value, string Label, bool IsSelecte
 
 public sealed partial class FilmPlaybackPage
 {
+    private static readonly string[] PlayerProviders = ["yidong", "tianyi", "quark", "uc", "baidu"];
+    private static readonly string[] PlayerQualities = ["4k_hdr", "4k_fps", "4k", "1080p", "720p"];
+    private bool IsMetadataPlayback => ActiveTarget.Kind is "movie" or "tv" &&
+        ActiveTarget.MetadataProvider is "tmdb" or "douban";
     private string PlayerStage => FilmJson.Text(snapshot?.Raw ?? default, "stage");
-    private bool PlayerMetadataMode => (ActiveTarget.Kind is "movie" or "tv") &&
-        (ActiveTarget.MetadataProvider is "tmdb" or "douban");
     private JsonElement PlayerCandidate => FilmJson.Member(snapshot?.Current ?? default, "candidate") is
         { ValueKind: JsonValueKind.Object } current ? current : FilmJson.Member(snapshot?.Attempt ?? default, "candidate");
     private string PlayerPanValue => PlayerProviderFamily(FilmJson.Text(PlayerCandidate, "provider"));
@@ -21,26 +23,27 @@ public sealed partial class FilmPlaybackPage
     {
         get
         {
-            IEnumerable<string> providers = PlayerMetadataMode ? ["yidong", "tianyi", "quark", "uc", "baidu"] :
+            IEnumerable<string> providers = IsMetadataPlayback ? PlayerProviders :
                 FilmJson.Array(snapshot?.Browsing ?? default, "lines")
                     .Select(line => PlayerProviderFamily(FilmJson.Text(line, "provider")))
                     .Where(provider => provider.Length > 0).Distinct(StringComparer.Ordinal);
-            string selected = PlayerPanValue;
-            return providers.Select(provider => new FilmPlayerOption(provider, PlayerPanName(provider), provider == selected)).ToArray();
+            return providers
+                .Select(provider => new FilmPlayerOption(provider, PlayerPanName(provider), provider == PlayerPanValue)).ToArray();
         }
     }
     public IReadOnlyList<FilmPlayerOption> PlayerQualityOptions
     {
         get
         {
-            string selected = PlayerQualityValue;
-            bool metadata = PlayerMetadataMode;
-            string[] qualities = ["4k_hdr", "4k_fps", "4k", "1080p", "720p"];
-            return qualities.Where(quality => metadata || quality == selected)
-                .Select(quality => new FilmPlayerOption(quality, PlayerQualityName(quality), quality == selected)).ToArray();
+            IEnumerable<string> qualities = IsMetadataPlayback ? PlayerQualities :
+                PlayerQualities.Where(quality => quality == PlayerQualityValue);
+            return qualities
+                .Select(quality => new FilmPlayerOption(quality, PlayerQualityName(quality), quality == PlayerQualityValue))
+                .ToArray();
         }
     }
-    public bool ShowPlayerSwitchActions => PlayerMetadataMode && HasCurrent;
+    public bool ShowPlayerSwitchActions => IsMetadataPlayback && HasCurrent;
+    public FilmPlayerOption? SelectedPanOption => PlayerPanOptions.FirstOrDefault(option => option.IsSelected);
     public bool PlayerBusy => !ConnectionFailed && (snapshot is null ||
         PlayerStage is "loading" or "searching" or "history" or "manual" or "cached" or "resolving" or "pending");
     public bool PlayerBuffering => HasOutput && IsPlaying && session?.IsBuffering == true;
@@ -73,7 +76,9 @@ public sealed partial class FilmPlaybackPage
     {
         var constraint = FilmJson.Member(snapshot?.Raw ?? default, "constraint");
         return PlayerBusy && FilmJson.Text(constraint, "action") == action &&
-            (action == "switch" || FilmJson.Text(constraint, action == "pan" ? "provider" : "quality") == value);
+            (action == "switch" || action == "pan" &&
+                PlayerProviderFamily(FilmJson.Text(constraint, "provider")) == PlayerProviderFamily(value) ||
+             action == "quality" && FilmJson.Text(constraint, "quality") == value);
     }
 
     private static string PlayerProviderFamily(string provider) => provider switch
@@ -83,7 +88,8 @@ public sealed partial class FilmPlaybackPage
     };
     private static string PlayerPanName(string provider) => provider switch
     {
-        "yidong" => "移动云盘", "tianyi" => "天翼云盘", "quark" => "夸克", "uc" => "UC", "baidu" => "百度网盘", _ => "未知"
+        "yidong" => "移动云盘", "tianyi" => "天翼云盘", "quark" or "quark_tv" => "夸克",
+        "uc" or "uc_tv" => "UC", "baidu" => "百度网盘", "" => "未知", _ => provider
     };
     private static string PlayerQualityName(string quality) => quality switch
     {

@@ -147,6 +147,89 @@ for (const config of ordinary) {
     }
   });
 
+  test(`${config.id}: list extracts video_meta dimensions, rational fps and codec without changing file identity`, async (t) => {
+    const items = [
+      { ...video('high', 'episode.mkv'), size: 123,
+        video_meta: { width: 3840, height: 2160, fps: '60000/1001', codec: 'hevc', duration: 80 } },
+      { ...video('low', 'episode.mp4'),
+        video_meta: { video_width: '1920', video_height: '1080', frame_rate: '25', video_codec: 'avc1' } },
+      { ...video('portrait'), video_meta: { width: 2160, height: 3840, fps: 24 } },
+      { ...video('explicit'), video_meta: { width: 1280, height: 720, quality: '原画' } },
+      { ...video('provider-explicit'), resolution: '854x480', quality: '480P',
+        video_meta: { width: 'bad', height: 2160, fps: 'bad' } },
+    ];
+    const { list } = await fixture(t, request => request.url.pathname.endsWith('/token')
+      ? ok({ stoken: 'synthetic-stoken' }) : page(items), { accounts: { [config.id]: { cookie } } });
+    const { files } = await list(config, 'explicit-password');
+    assert.equal(files.length, 5);
+    assert.deepEqual(files.map(item => item.quality), ['4K', '1080P', '4K', '原画', '480P']);
+    assert.deepEqual(files.map(item => item.resolution),
+      ['3840x2160', '1920x1080', '2160x3840', '1280x720', '854x480']);
+    assert.equal(files[0].fps, 60000 / 1001);
+    assert.equal(files[1].fps, 25);
+    assert.equal(files[0].codec, 'hevc');
+    assert.equal(files[1].codec, 'avc1');
+    assert.deepEqual(files[0].video_meta, items[0].video_meta);
+    assert.equal(files[0].size, 123);
+    assert.deepEqual(files[0].file, { provider: config.id, accountRevision: 1,
+      kind: 'share', shareId: 'share-A', shareUrl: `https://${config.host}/s/share-A`,
+      password: 'explicit-password', stoken: 'synthetic-stoken', fileId: 'high',
+      fileToken: 'synthetic-file-token', name: 'episode.mkv', path: '/episode.mkv' });
+  });
+
+  test(`${config.id}: missing or invalid optional video metadata never invents quality, dimensions or fps`, async (t) => {
+    const metadata = [
+      {}, { width: 3840 }, { width: -3840, height: 2160, fps: '60/0' },
+      { width: true, height: 2160, fps: true }, { width: 3840.5, height: 2160, fps: -1 },
+      { width: null, height: '', fps: '' }, { width: 'not-a-number', height: 2160, fps: 'bad' },
+      { width: 640, height: 360, fps: null, codec: '  hevc  ' },
+    ];
+    const { list } = await fixture(t, request => request.url.pathname.endsWith('/token')
+      ? ok({ stoken: 'synthetic-stoken' })
+      : page(metadata.map((video_meta, index) => ({ ...video(String(index)), video_meta }))),
+    { accounts: { [config.id]: { cookie } } });
+    const { files } = await list(config);
+    for (const [index, item] of files.entries()) {
+      assert.deepEqual(item.video_meta, metadata[index]);
+      assert.equal(item.quality, undefined);
+      assert.equal(item.fps, undefined);
+      assert.equal(item.resolution, index === metadata.length - 1 ? '640x360' : undefined);
+      assert.equal(item.file.fileId, String(index));
+    }
+    assert.equal(files.at(-1).codec, 'hevc');
+  });
+
+  test(`${config.id}: out-of-range numeric and rational fps stays raw without promoting 4K candidates`, async (t) => {
+    const { recognizeCandidates } = await import('../../film-playback/src/recognition.js');
+    const metadata = [1000, 1001, '1000', '1000.5', '1000/1', '2001/2']
+      .map(fps => ({ width: 3840, height: 2160, fps }));
+    const { list } = await fixture(t, request => request.url.pathname.endsWith('/token')
+      ? ok({ stoken: 'synthetic-stoken' })
+      : page(metadata.map((video_meta, index) => ({ ...video(String(index)), video_meta }))),
+    { accounts: { [config.id]: { cookie } } });
+    const { files } = await list(config);
+    assert.equal(files.length, metadata.length);
+    const source = { key: 'cat:install:site', engine: 'cat', installationId: 'install', siteId: 'site',
+      detailId: 'fps-boundary' };
+    const candidates = await recognizeCandidates({ id: source.detailId, provider: config.id, files },
+      { source, target: { id: 'tmdb:movie:1', kind: 'movie', title: 'movie' } });
+    assert.equal(candidates.length, metadata.length);
+    for (const [index, item] of files.entries()) {
+      assert.deepEqual(item.video_meta, metadata[index]);
+      assert.equal(Object.hasOwn(item, 'fps'), false);
+      assert.equal(item.quality, '4K');
+      assert.equal(item.resolution, '3840x2160');
+      assert.equal(item.file.provider, config.id);
+      assert.equal(item.file.shareId, 'share-A');
+      assert.equal(item.file.fileId, String(index));
+      assert.equal(item.file.accountRevision, 1);
+      assert.equal(Object.hasOwn(candidates[index], 'fps'), false);
+      assert.equal(candidates[index].quality, '4k');
+      assert.equal(candidates[index].resolution, item.resolution);
+      assert.deepEqual(candidates[index].file, item.file);
+    }
+  });
+
   test(`${config.id}: nested token arrays and wide objects do not impose an argument-stack size limit`, async (t) => {
     const entries = Array(200_000).fill(null);
     entries.push({ stoken: 'synthetic-large-token' });
@@ -1067,23 +1150,115 @@ for (const config of ordinary) {
     assert.equal(settings.accounts.find((item) => item.provider === config.id).configured, false);
   });
 
-  test(`${config.id}: login refuses cross-provider or HTTP redirect before sending cookies`, async (t) => {
+  test(`${config.id}: QR follows HTTP(S) redirects across hosts and ports with scoped cookies`, async (t) => {
+    const domain = config.id === 'quark' ? '.quark.cn' : '.uc.cn';
+    let location;
+    let expectedCookie;
+    const route = qrRoute(config, [], {
+      '/cas/ajax/getTokenForQrcodeLogin': () => ({
+        status: 302, headers: { location, 'set-cookie': [
+          'sso-only=synthetic-sso; Path=/; Secure',
+          `plain=synthetic-http; Domain=${domain}; Path=/`,
+        ] }, body: '',
+      }),
+    });
+    const { service, requests } = await fixture(t, request => {
+      if (request.url.pathname !== '/token-result') return route(request);
+      assert.equal(request.headers.cookie, expectedCookie);
+      assert.equal(request.method, 'GET');
+      assert.equal(request.redirect, 'manual');
+      return { value: { data: { token: 'synthetic-cross-host-token' } } };
+    });
+    for (const [target, scopedCookie] of [
+      ['https://login.example:8443/token-result', undefined],
+      ['http://login.example:8080/token-result', undefined],
+      [`http://${config.host}:8080/token-result`, 'plain=synthetic-http'],
+      [`https://${config.id === 'uc' ? 'uop.quark.cn' : 'api.open.uc.cn'}/token-result`, undefined],
+    ]) {
+      location = target;
+      expectedCookie = scopedCookie;
+      const start = await service.invoke('login.start', { provider: config.id });
+      assert.equal(new URL(start.challenge.url).searchParams.get('token'), 'synthetic-cross-host-token');
+      assert.equal(requests.at(-1).url.href, target);
+      assert.equal(start.status, 'pending');
+    }
+    assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === config.id).configured, false);
+  });
+
+  test(`${config.id}: QR rejects invalid redirect protocols and URL credentials before transport`, async (t) => {
     let location;
     const { service, requests } = await fixture(t, qrRoute(config, [], {
       '/cas/ajax/getTokenForQrcodeLogin': () => ({ status: 302, headers: { location }, body: '' }),
     }));
     for (const target of [
-      'http://untrusted.example/login', `http://${config.host}/login`,
-      `https://${config.id === 'uc' ? 'uop.quark.cn' : 'api.open.uc.cn'}/login`,
+      'file:///synthetic-login', 'ftp://login.example/token', 'javascript:void(0)',
+      'data:application/json,{}', 'https://synthetic-user:synthetic-password@login.example/token',
     ]) {
       location = target;
+      const before = requests.length;
       await assert.rejects(service.invoke('login.start', { provider: config.id }), { code: 'UPSTREAM_FORMAT' });
+      assert.equal(requests.length, before + 3);
+      assert.equal(requests.at(-1).url.pathname, '/cas/ajax/getTokenForQrcodeLogin');
     }
-    assert.equal(requests.some((item) => item.url.hostname === 'untrusted.example'), false);
-    assert.equal(requests.some((item) => item.url.href === location), false);
+    assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === config.id).configured, false);
   });
 
-  test(`${config.id}: QR follows a trusted relative redirect with its scoped cookies`, async (t) => {
+  test(`${config.id}: QR redirects preserve real HTTP, network and consumed-format failures`, async (t) => {
+    let response, failure;
+    const target = 'https://login.example:8443/token-result';
+    const route = qrRoute(config, [], {
+      '/cas/ajax/getTokenForQrcodeLogin': () => ({ status: 302, headers: { location: target }, body: '' }),
+    });
+    const { service, requests } = await fixture(t, request => {
+      if (request.url.href !== target) return route(request);
+      assert.equal(request.headers.cookie, undefined);
+      if (failure) throw failure;
+      return response;
+    });
+    for (const [upstream, code] of [
+      [{ status: 401, body: '{}' }, 'AUTH_REQUIRED'],
+      [{ status: 503, body: '{}' }, 'UPSTREAM_HTTP'],
+      [{ body: '<html>synthetic error</html>' }, 'UPSTREAM_FORMAT'],
+      [{ value: [] }, 'UPSTREAM_FORMAT'],
+      [{ value: { data: {} } }, 'UPSTREAM_FORMAT'],
+      [new PanError('NETWORK_ERROR'), 'NETWORK_ERROR'],
+      [new PanError('TIMEOUT'), 'TIMEOUT'],
+    ]) {
+      failure = upstream instanceof PanError ? upstream : undefined;
+      response = failure ? undefined : upstream;
+      await assert.rejects(service.invoke('login.start', { provider: config.id }), { code });
+      assert.equal(requests.at(-1).url.href, target);
+      assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === config.id).configured, false);
+    }
+  });
+
+  test(`${config.id}: QR cancellation drains a redirected request without publishing a challenge`, { timeout: 30000 }, async (t) => {
+    const entered = deferred(), release = deferred();
+    const controller = new AbortController();
+    const target = 'https://login.example/held-token';
+    const route = qrRoute(config, [], {
+      '/cas/ajax/getTokenForQrcodeLogin': () => ({ status: 302, headers: { location: target }, body: '' }),
+    });
+    const { service, requests } = await fixture(t, async request => {
+      if (request.url.href !== target) return route(request);
+      assert.equal(request.headers.cookie, undefined);
+      entered.resolve(request);
+      await release.promise;
+      return { value: { data: { token: 'synthetic-cancelled-token' } } };
+    });
+    const pending = service.invoke('login.start', { provider: config.id }, { signal: controller.signal });
+    const rejected = assert.rejects(pending, { code: 'CANCELLED' });
+    try {
+      const request = await entered.promise;
+      controller.abort();
+      assert.equal(request.signal.aborted, true);
+    } finally { release.resolve(); }
+    await rejected;
+    assert.equal(requests.length, 4);
+    assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === config.id).configured, false);
+  });
+
+  test(`${config.id}: QR follows a relative redirect with its scoped cookies`, async (t) => {
     const { service, requests } = await fixture(t, qrRoute(config, [], {
       '/cas/ajax/getTokenForQrcodeLogin': () => ({
         status: 302, headers: { location: './token-result', 'set-cookie': ['scoped=synthetic-sso; Path=/cas/ajax; Secure'] }, body: '',
@@ -1125,3 +1300,51 @@ for (const config of ordinary) {
     assert.equal(requests.length, 5);
   });
 }
+
+for (const config of ordinary) {
+  test(`${config.id}: QR keeps host-only login cookies scoped through confirmation and persistence`, async (t) => {
+    const domain = config.id === 'quark' ? '.quark.cn' : '.uc.cn';
+    const route = qrRoute(config, [{ status: 2000000, data: { service_ticket: 'synthetic-service-ticket' } }], {
+      '/': request => ({
+        body: 'synthetic login HTML', headers: { 'set-cookie': [
+          `__pus=synthetic-login; Domain=${domain}; Path=/; Secure`,
+          ...(request.url.hostname === config.host ? ['page-only=synthetic-page; Path=/; Secure'] : []),
+        ] },
+      }),
+      '/cas/custom/login': () => ({
+        body: 'synthetic SSO HTML', headers: { 'set-cookie': ['sso-only=synthetic-sso; Path=/; Secure'] },
+      }),
+      '/account/info': request => {
+        assert.doesNotMatch(request.headers.cookie ?? '', /sso-only/);
+        return { ...ok({}), headers: { 'set-cookie': [`__puus=synthetic-confirmed; Domain=${domain}; Path=/; Secure`] } };
+      },
+    });
+    const { service, requests, document } = await fixture(t, request => {
+      if (request.url.hostname === config.apiHost) {
+        assert.doesNotMatch(request.headers.cookie ?? '', /sso-only|page-only/);
+      }
+      return route(request);
+    });
+    const { sessionId } = await service.invoke('login.start', { provider: config.id });
+    assert.equal((await service.invoke('login.poll', { sessionId })).status, 'confirmed');
+    assert.match(requests.find(item => item.url.pathname.endsWith('/getServiceTicketByQrcodeToken')).headers.cookie,
+      /sso-only=synthetic-sso/);
+    assert.doesNotMatch((await document()).accounts[config.id].credentials.cookie, /sso-only|page-only/);
+  });
+}
+
+test('quark: QR challenge URLs accept HTTP(S) hosts and ports while rejecting invalid protocols', async (t) => {
+  let challenge;
+  const config = ordinary.find(item => item.id === 'quark');
+  const { service } = await fixture(t, qrRoute(config, [], {
+    '/cas/ajax/getTokenForQrcodeLogin': () => ({
+      value: { data: { token: 'synthetic-challenge-token', qrcode_url: challenge } },
+    }),
+  }));
+  for (const target of ['http://login.example:8080/challenge', 'https://login.example:8443/challenge']) {
+    challenge = target;
+    assert.equal((await service.invoke('login.start', { provider: 'quark' })).challenge.url, target);
+  }
+  challenge = 'file:///synthetic-challenge';
+  await assert.rejects(service.invoke('login.start', { provider: 'quark' }), { code: 'UPSTREAM_FORMAT' });
+});

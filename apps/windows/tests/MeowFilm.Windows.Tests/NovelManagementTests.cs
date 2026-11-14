@@ -18,6 +18,7 @@ public static class NovelManagementTests
     {
         yield return new("novel management form: three protocols nested mapping and unedited JSON types", Drafts);
         yield return new("novel management import: external rule identity nullable fields and tag-only group changes", Imports);
+        yield return new("novel management theme: inputs and titles follow resources and window high contrast", () => NovelTests.Sta(ThemeResources));
         yield return new("novel management components: visible selection inverse native tabs fields and previews", () => NovelTests.Sta(Components));
         yield return new("novel management QR: local image decodes original rule text and rejects invalid images", () => NovelTests.Sta(Qr));
         yield return new("novel management save: accepted revisions remain editable without another list request", () => NovelTests.Sta(SavedRevision));
@@ -71,12 +72,98 @@ public static class NovelManagementTests
         Check(NovelGroups.Split(NovelGroups.Replacing("甲,乙", "甲", "丙")).ToHashSet().SetEquals(["乙", "丙"])); Check(NovelGroups.Replacing("甲,乙", "甲", null) == "乙");
         return Task.CompletedTask;
     }
+    private static async Task ThemeResources()
+    {
+        var root = new StackPanel(); NovelUi.Theme(root);
+        var form = new ManagementForm(); var plain = form.Field("普通字段", "保留输入");
+        var boxed = new ManagementForm(true); var input = boxed.Field("浮窗字段", "保留输入");
+        root.Children.Add(form.Card()); root.Children.Add(boxed.Card());
+        var preview = new ManagementImportSelection([new("导入标题", "导入说明", "新增"), new("已存在标题", "已存在说明", "已存在")]);
+        root.Children.Add(preview);
+        var list = new ManagementList { Height = 300 }; root.Children.Add(list);
+        var host = GeneralAppearanceTests.Window(root); DesktopTheme.SetIsHighContrast(host, false);
+        try
+        {
+            host.Show();
+            list.SetRows([new("1", "书源标题", "列表说明", true, () => { }, _ => { }, new ContextMenu()),
+                new("2", "失效书源", "失败说明", true, () => { }, _ => { }, new ContextMenu(), Failed: true)],
+                2, ["1", "2"], "无书源");
+            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            var titles = new[] { NovelTests.Find<TextBlock>(list).Single(text => text.Text == "书源标题"),
+                NovelTests.Find<TextBlock>(list).Single(text => text.Text == "失效书源"),
+                NovelTests.Find<TextBlock>(preview).Single(text => text.Text == "导入标题") };
+            var labels = new[] { NovelTests.Find<TextBlock>(form).Single(text => text.Text == "普通字段"),
+                NovelTests.Find<TextBlock>(boxed).Single(text => text.Text == "浮窗字段"),
+                NovelTests.Find<TextBlock>(list).Single(text => text.Text == "列表说明"),
+                NovelTests.Find<TextBlock>(preview).Single(text => text.Text == "导入说明") };
+            var failure = NovelTests.Find<TextBlock>(list).Single(text => text.Text == "失败说明");
+            var newStatus = NovelTests.Find<TextBlock>(preview).Single(text => text.Text == "新增");
+            var existingStatus = NovelTests.Find<TextBlock>(preview).Single(text => text.Text == "已存在");
+            var newBadge = newStatus.Parent as Border ?? throw new InvalidOperationException("New import status badge is missing.");
+            var existingBadge = existingStatus.Parent as Border ?? throw new InvalidOperationException("Existing import status badge is missing.");
+            Foreground(false);
+            root.Resources["MeowFilm.Brush.Text"] = new SolidColorBrush(Color.FromRgb(30, 40, 50));
+            root.Resources["MeowFilm.Brush.Muted"] = new SolidColorBrush(Color.FromRgb(80, 90, 100));
+            root.Resources["MeowFilm.Brush.AccentText"] = new SolidColorBrush(Color.FromRgb(100, 110, 120));
+            root.Resources["MeowFilm.Brush.AccentSoft"] = new SolidColorBrush(Color.FromArgb(40, 100, 110, 120));
+            root.Resources["MeowFilm.Brush.InputSurface"] = new SolidColorBrush(Color.FromRgb(130, 140, 150));
+            root.Resources["MeowFilm.Brush.Accent"] = new SolidColorBrush(Color.FromRgb(70, 100, 150));
+            root.Resources["MeowFilm.Brush.Focus"] = new SolidColorBrush(Color.FromRgb(80, 110, 160));
+            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            Foreground(false);
+            DesktopTheme.SetIsHighContrast(host, true); host.UpdateLayout();
+            await Dispatcher.Yield(DispatcherPriority.Render);
+            Foreground(true);
+            DesktopTheme.SetIsHighContrast(host, false); host.UpdateLayout();
+            await Dispatcher.Yield(DispatcherPriority.Render);
+            Foreground(false);
+            Check(plain.Text == "保留输入" && input.Text == "保留输入", "Theme changes must preserve field values.");
+            Check(input.Focus(), "The management input could not receive focus.");
+            await Dispatcher.Yield(DispatcherPriority.Render);
+            Check(input.BorderBrush == (Brush)root.FindResource("MeowFilm.Brush.Focus"),
+                "Management input focus must follow the application focus resource.");
+            DesktopTheme.SetIsHighContrast(host, true); host.UpdateLayout();
+            await Dispatcher.Yield(DispatcherPriority.Render);
+            Check(input.BorderBrush == SystemColors.HighlightBrush,
+                "Focused management input must use the system highlight in high contrast.");
+
+            void Foreground(bool contrast)
+            {
+                var text = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.Text");
+                var muted = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.Muted");
+                var error = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.Error");
+                Check(plain.Foreground == text && input.Foreground == text && titles.All(title => title.Foreground == text),
+                    "Management inputs and titles must follow theme resources or the window's high-contrast foreground.");
+                Check(labels.All(label => label.Foreground == muted) && failure.Foreground == error,
+                    "Management labels and details must preserve theme semantics and the system high-contrast foreground.");
+                var accent = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.AccentText");
+                var existing = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.Muted");
+                var badgeBackground = contrast ? SystemColors.WindowBrush : (Brush)root.FindResource("MeowFilm.Brush.AccentSoft");
+                var existingBackground = contrast ? SystemColors.WindowBrush : (Brush)root.FindResource("MeowFilm.Brush.InputSurface");
+                var inputBackground = contrast ? SystemColors.WindowBrush : (Brush)root.FindResource("MeowFilm.Brush.InputSurface");
+                var inputBorder = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.Border");
+                Check(newStatus.Foreground == accent && existingStatus.Foreground == existing,
+                    "Import status labels must preserve semantic foreground resources and use the system foreground in high contrast.");
+                Check(newBadge.Background == badgeBackground && existingBadge.Background == existingBackground,
+                    "Import status badges must follow semantic backgrounds and the system window background in high contrast.");
+                Check(input.Background == inputBackground && input.BorderBrush == inputBorder,
+                    "Boxed management inputs must use theme surfaces or system high-contrast colors.");
+                var selection = contrast ? SystemColors.HighlightBrush : (Brush)root.FindResource("MeowFilm.Brush.Accent");
+                Check(input.SelectionBrush == selection,
+                    "Management text selection must use the application accent or system highlight.");
+            }
+        }
+        finally { host.Close(); }
+    }
     private static async Task Components()
     {
         var list = new ManagementList();
         var surface = new Border { Background = AppearanceColors.DefaultBackground, Padding = new Thickness(24), Child = list, Width = 880, Height = 700 };
         NovelUi.Theme(surface);
-        var host = GeneralAppearanceTests.Window(surface); host.SizeToContent = SizeToContent.WidthAndHeight; host.Show();
+        var root = new Grid(); root.Children.Add(surface);
+        var dialogHost = new PlayerDialogHost(); root.Children.Add(dialogHost);
+        var host = GeneralAppearanceTests.Window(root); host.SizeToContent = SizeToContent.WidthAndHeight;
+        DesktopTheme.SetIsHighContrast(host, false); dialogHost.Attach(host); host.Show();
         string? previous = Environment.GetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT");
         Environment.SetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT", TestWorkspace.DataPath("novel-management-previews"));
         try
@@ -111,14 +198,13 @@ public static class NovelManagementTests
                 ((ScrollViewer)((TabItem)tabs.Items[1]).Content).ScrollToEnd(); dialog.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
                 await CaptureDialog(dialog, "source-search-bottom");
             });
-            var ruleEditor = new NovelRuleEditor(new() { Name = "净化广告", Pattern = "广告", Replacement = "" }, _ => { })
-            { Height = Math.Max(300, host.ActualHeight - 220) };
+            var ruleEditor = new NovelRuleEditor(new() { Name = "净化广告", Pattern = "广告", Replacement = "" }, _ => { });
             await DialogPreview(surface, ruleEditor, "替换规则编辑", "保存", "rule-editor", async dialog =>
             {
                 Check(NovelTests.Find<TextBox>(ruleEditor).Select(b => AutomationProperties.GetAutomationId(b)).Count(id => id.StartsWith("novel.rule.field.")) == 7);
                 Check(ruleEditor.Read().Pattern == "广告");
                 await CaptureDialog(dialog, "rule-editor");
-                ruleEditor.Children.OfType<ScrollViewer>().Single().ScrollToEnd(); dialog.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+                await ReachRuleEditorBottom(dialog, ruleEditor);
                 await CaptureDialog(dialog, "rule-editor-bottom");
             });
             var preview = new ManagementImportSelection([new("书源一", "阅读源 · 精品", "新增"), new("书源二", "异次元", "已存在")]);
@@ -135,8 +221,16 @@ public static class NovelManagementTests
             await using var module = new NovelCapability(sources, library, new NovelRuleProgram(ruleRuntime));
             await module.InitializeAsync(default); await sources.RefreshAsync();
             surface.Child = module.SettingsView; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            ((NovelSettingsView)module.SettingsView).Refresh();
+            var settings = (NovelSettingsView)module.SettingsView;
+            settings.Refresh();
             host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var priorBackground = host.Background;
+            var themedBackground = new SolidColorBrush(Color.FromRgb(30, 40, 50));
+            host.Background = themedBackground; host.UpdateLayout();
+            Check(ReferenceEquals(settings.Background, themedBackground) &&
+                  ReferenceEquals(((Grid)settings.Content).Background, themedBackground),
+                "Novel settings canvas did not follow its application background.");
+            host.Background = priorBackground; host.UpdateLayout();
             Check(NovelTests.Find<TextBlock>(module.SettingsView).Any(text => text.Text == "书源a"));
             await Preview("source-manager-product", 880, 900);
             NovelTests.Find<Button>(module.SettingsView).Single(button => button.Content as string == "替换净化")
@@ -144,6 +238,24 @@ public static class NovelManagementTests
             await Dispatcher.Yield(DispatcherPriority.Render);
             Check(NovelTests.Find<TextBlock>(module.SettingsView).Any(text => text.Text == "净化广告"));
             await Preview("rule-manager-product", 880, 900);
+            NovelTests.Find<Button>(module.SettingsView).Single(button =>
+                AutomationProperties.GetName(button) == "编辑 净化广告")
+                .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var ruleDialog = NovelTests.Find<Border>(dialogHost).Single(item =>
+                AutomationProperties.GetName(item) == "替换规则编辑");
+            try
+            {
+                await ReachRuleEditorBottom(ruleDialog, NovelTests.Find<NovelRuleEditor>(ruleDialog).Single());
+                await CaptureDialog(ruleDialog, "rule-editor-product-bottom");
+            }
+            finally
+            {
+                NovelTests.Find<Button>(ruleDialog).Single(button => Equals(button.Content, "取消"))
+                    .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(!dialogHost.IsOpen, "Cancelling the rule editor must restore the settings page.");
+            }
         }
         finally { Environment.SetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT", previous); host.Close(); }
         async Task Preview(string name, int width, int height)
@@ -157,6 +269,7 @@ public static class NovelManagementTests
             Check(Math.Abs(surface.ActualWidth - width) < 1 && Math.Abs(surface.ActualHeight - height) < 1);
             var hostedContent = host.Content;
             host.Content = null;
+            root.Children.Remove(surface);
             var composition = new Border { Background = host.Background, Child = surface };
             try
             {
@@ -168,27 +281,56 @@ public static class NovelManagementTests
             finally
             {
                 composition.Child = null;
+                root.Children.Insert(0, surface);
                 host.Content = hostedContent;
                 host.UpdateLayout();
             }
         }
     }
+    private static async Task ReachRuleEditorBottom(FrameworkElement dialog, NovelRuleEditor editor)
+    {
+        var scroll = NovelTests.Find<ScrollViewer>(dialog).Single(item => ReferenceEquals(item.Content, editor));
+        Check(scroll.ScrollableHeight > 0, "All rule fields must contribute to the dialog's scroll extent.");
+        scroll.ScrollToEnd(); dialog.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+        var viewport = scroll.Template.FindName("PART_ScrollContentPresenter", scroll) as ScrollContentPresenter
+            ?? throw new InvalidOperationException("The rule dialog viewport is missing.");
+        var timeout = NovelTests.Find<TextBox>(editor).Single(input =>
+            AutomationProperties.GetAutomationId(input) == "novel.rule.field.timeoutMillisecond");
+        var bounds = timeout.TransformToAncestor(viewport).TransformBounds(new Rect(timeout.RenderSize));
+        Check(bounds.Top >= -1 && bounds.Bottom <= viewport.ActualHeight + 1 &&
+              bounds.Left >= -1 && bounds.Right <= viewport.ActualWidth + 1,
+            "The last rule field must be fully reachable inside the dialog viewport.");
+        timeout.Text = "2345";
+        Check(editor.Read().TimeoutMillisecond == 2345, "Editing the last visible field must preserve its value.");
+    }
     private static async Task DialogPreview(FrameworkElement owner, FrameworkElement body, string title, string action, string name,
         Func<FrameworkElement, Task>? capture = null)
     {
         using var cancellation = new CancellationTokenSource();
-        var pending = NovelUi.DialogAsync(owner, title, body, action, _ => Task.FromResult(true), cancellation.Token);
+        var dialogHost = PlayerDialogHost.Find(owner)
+            ?? throw new InvalidOperationException("The component preview requires the application dialog host.");
+        var pending = NovelUi.DialogAsync(owner, title, body, action, _ => Task.FromResult(true), cancellation.Token,
+            applicationOverlay: true);
+        Button? cancel = null;
         try
         {
             await Dispatcher.Yield(DispatcherPriority.Render);
-            DependencyObject? node = body;
-            while (node is not null && node is not Popup) node = LogicalTreeHelper.GetParent(node);
-            var popup = node as Popup ?? throw new InvalidOperationException("The actual native dialog is missing");
-            var panel = (FrameworkElement)popup.Child;
-            Check(popup.IsOpen && panel.IsVisible && panel.ActualWidth > 0 && panel.ActualHeight > 0);
+            var panel = NovelTests.Find<Border>(dialogHost).Single(item =>
+                AutomationProperties.GetName(item) == title);
+            cancel = NovelTests.Find<Button>(dialogHost).Single(button => Equals(button.Content, "取消"));
+            Check(dialogHost.IsOpen && panel.IsVisible && panel.ActualWidth > 0 && panel.ActualHeight > 0 && cancel.IsVisible);
             if (capture is null) await CaptureDialog(panel, name); else await capture(panel);
         }
-        finally { cancellation.Cancel(); Check(!await pending, "Screenshot cancellation must not accept the import"); }
+        finally
+        {
+            if (dialogHost.IsOpen && cancel is not null)
+            {
+                // Dispatch the WPF control event directly; this does not simulate physical input.
+                cancel.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            }
+            else cancellation.Cancel();
+            Check(!await pending, "Cancelling the preview dialog must not accept the import.");
+        }
     }
     private static async Task CaptureDialog(FrameworkElement panel, string name)
     {
@@ -196,6 +338,7 @@ public static class NovelManagementTests
         int width = (int)Math.Ceiling(panel.ActualWidth), height = (int)Math.Ceiling(panel.ActualHeight);
         Check(width > 0 && height > 0 && Math.Abs(panel.RenderSize.Width - width) < 1 && Math.Abs(panel.RenderSize.Height - height) < 1,
             "The captured native dialog must be fully arranged at its visible size");
+        // This is a WPF RenderTargetBitmap visual snapshot, not a desktop pixel capture.
         GeneralAppearanceTests.SavePreview(panel, name, width, height);
     }
     private static async Task Qr()
