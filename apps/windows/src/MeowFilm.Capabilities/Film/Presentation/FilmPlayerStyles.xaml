@@ -1,6 +1,9 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:sys="clr-namespace:System;assembly=System.Runtime">
+ <ResourceDictionary.MergedDictionaries>
+  <ResourceDictionary Source="/MeowFilm.Desktop;component/Typography.xaml"/>
+ </ResourceDictionary.MergedDictionaries>
  <Style x:Key="Film.PlayerFocus" TargetType="Control">
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Control">
    <Rectangle x:Name="Outline" Margin="-3" RadiusX="5" RadiusY="5"
@@ -22,7 +25,7 @@
   <Setter Property="BorderBrush" Value="#14FFFFFF"/>
   <Setter Property="BorderThickness" Value="1"/>
   <Setter Property="Foreground" Value="#EBFFFFFF"/>
-  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="FontSize" Value="{DynamicResource MeowFilm.Font.Size.Caption}"/><Setter Property="FontWeight" Value="{DynamicResource MeowFilm.Font.Weight.Strong}"/>
   <Setter Property="HorizontalContentAlignment" Value="Center"/>
   <Setter Property="VerticalContentAlignment" Value="Center"/>
   <Setter Property="Cursor" Value="Hand"/>
@@ -116,7 +119,7 @@
  </Style>
 
  <Style x:Key="Film.PlayerTime" TargetType="TextBlock">
-  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="FontSize" Value="{DynamicResource MeowFilm.Font.Size.Caption}"/><Setter Property="FontWeight" Value="{DynamicResource MeowFilm.Font.Weight.Strong}"/>
   <Setter Property="Foreground" Value="#D1FFFFFF"/>
   <Setter Property="VerticalAlignment" Value="Center"/>
   <Setter Property="Typography.NumeralAlignment" Value="Tabular"/>
@@ -212,7 +215,7 @@
  <Style x:Key="Film.PlayerOption" TargetType="ListBoxItem">
   <Setter Property="Height" Value="32"/><Setter Property="Margin" Value="4"/>
   <Setter Property="Padding" Value="8,0"/>
-  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="FontSize" Value="{DynamicResource MeowFilm.Font.Size.Caption}"/><Setter Property="FontWeight" Value="{DynamicResource MeowFilm.Font.Weight.Strong}"/>
   <Setter Property="Background" Value="#0AFFFFFF"/><Setter Property="Foreground" Value="#E0FFFFFF"/>
   <Setter Property="BorderBrush" Value="#1AFFFFFF"/><Setter Property="BorderThickness" Value="1"/>
   <Setter Property="HorizontalContentAlignment" Value="Center"/>
@@ -289,7 +292,7 @@
  <Style x:Key="Film.PlayerMenuItem" TargetType="MenuItem">
   <Setter Property="Height" Value="34"/><Setter Property="MinWidth" Value="100"/>
   <Setter Property="Padding" Value="10,0"/><Setter Property="Margin" Value="0,4"/>
-  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="FontSize" Value="{DynamicResource MeowFilm.Font.Size.Caption}"/><Setter Property="FontWeight" Value="{DynamicResource MeowFilm.Font.Weight.Strong}"/>
   <Setter Property="Background" Value="#0AFFFFFF"/><Setter Property="Foreground" Value="#E0FFFFFF"/>
   <Setter Property="BorderBrush" Value="#1AFFFFFF"/><Setter Property="BorderThickness" Value="1"/>
   <Setter Property="HorizontalContentAlignment" Value="Center"/>
@@ -344,30 +347,6 @@
   </Style.Triggers>
  </Style>
 
- <Style x:Key="Film.PlayerMenu" TargetType="ContextMenu">
-  <Setter Property="Background" Value="#EB121212"/><Setter Property="BorderBrush" Value="#1FFFFFFF"/>
-  <Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="8"/>
-  <Setter Property="Foreground" Value="#E0FFFFFF"/>
-  <Setter Property="ItemContainerStyle" Value="{StaticResource Film.PlayerMenuItem}"/>
-  <Setter Property="SnapsToDevicePixels" Value="True"/>
-  <Setter Property="KeyboardNavigation.DirectionalNavigation" Value="Cycle"/>
-  <Setter Property="KeyboardNavigation.TabNavigation" Value="Cycle"/>
-  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ContextMenu">
-   <Border CornerRadius="14" Background="{TemplateBinding Background}"
-           BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-           Padding="{TemplateBinding Padding}">
-    <ItemsPresenter/>
-   </Border>
-  </ControlTemplate></Setter.Value></Setter>
-  <Style.Triggers>
-   <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
-    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-   </DataTrigger>
-  </Style.Triggers>
- </Style>
-
  <Style x:Key="Film.PlayerSettingsPanel" TargetType="Border">
   <Setter Property="Width" Value="240"/><Setter Property="Padding" Value="10"/>
   <Setter Property="CornerRadius" Value="14"/><Setter Property="Background" Value="#EB121212"/>
@@ -383,7 +362,7 @@
  </Style>
 
  <Style x:Key="Film.PlayerSettingsTitle" TargetType="TextBlock">
-  <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Bold"/>
+  <Setter Property="FontSize" Value="{DynamicResource MeowFilm.Font.Size.Caption}"/><Setter Property="FontWeight" Value="{DynamicResource MeowFilm.Font.Weight.Strong}"/>
   <Setter Property="Foreground" Value="#C7FFFFFF"/><Setter Property="Margin" Value="0,0,0,8"/>
   <Style.Triggers>
    <DataTrigger Binding="{Binding Path=(SystemParameters.HighContrast)}" Value="True">
@@ -393,7 +372,7 @@
  </Style>
 
  <Style x:Key="Film.PlayerStatus" TargetType="TextBlock">
-  <Setter Property="FontSize" Value="26"/><Setter Property="FontWeight" Value="ExtraBold"/>
+  <Setter Property="FontSize" Value="{DynamicResource MeowFilm.Font.Size.Heading}"/><Setter Property="FontWeight" Value="{DynamicResource MeowFilm.Font.Weight.Strong}"/>
   <Setter Property="Foreground" Value="White"/>
   <Setter Property="TextWrapping" Value="Wrap"/><Setter Property="TextAlignment" Value="Center"/>
   <Style.Triggers>

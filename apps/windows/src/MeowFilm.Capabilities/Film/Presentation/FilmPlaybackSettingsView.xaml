@@ -20,7 +20,7 @@
    <DockPanel>
     <Border DockPanel.Dock="Right" BorderBrush="{Binding Foreground,RelativeSource={RelativeSource AncestorType=ListBoxItem}}"
             BorderThickness=".5" CornerRadius="10" Padding="6,2" Margin="8,0,0,0">
-     <TextBlock Text="{Binding Rows.Count}" FontSize="12" Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"
+     <TextBlock Text="{Binding Rows.Count}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"
                 Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
     </Border>
     <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}" VerticalAlignment="Center"

@@ -1,18 +1,15 @@
-<Window x:Class="MeowFilm.Desktop.ShellWindow"
+<local:DesktopWindow x:Class="MeowFilm.Desktop.ShellWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:MeowFilm.Desktop"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="meowfilm" Width="1110" Height="869"
         WindowStartupLocation="CenterScreen" WindowStyle="SingleBorderWindow" ResizeMode="CanResize"
-        FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
-        UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"
-        TextOptions.TextRenderingMode="Auto"
         Loaded="OnLoaded" PreviewKeyDown="OnPreviewKeyDown" PreviewKeyUp="OnPreviewKeyUp"
         PreviewMouseDown="OnChannelHeaderPointer" PreviewMouseUp="OnChannelHeaderPointer"
         local:PlayerSurfaceInput.DismissRequested="OnQueueDismissClick"
         AutomationProperties.Name="meowfilm">
-    <Window.Resources>
+    <local:DesktopWindow.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml" />
@@ -41,9 +38,9 @@
                 </DataTemplate.Triggers>
             </DataTemplate>
         </ResourceDictionary>
-    </Window.Resources>
-    <Window.Style>
-        <Style TargetType="Window">
+    </local:DesktopWindow.Resources>
+    <local:DesktopWindow.Style>
+        <Style TargetType="{x:Type local:DesktopWindow}">
             <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AppBackground}" />
             <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
             <Style.Triggers>
@@ -53,7 +50,7 @@
                 </Trigger>
             </Style.Triggers>
         </Style>
-    </Window.Style>
+    </local:DesktopWindow.Style>
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="64" ResizeBorderThickness="6" GlassFrameThickness="0"
                             CornerRadius="0" UseAeroCaptionButtons="False" />
@@ -155,7 +152,7 @@
                         </TextBlock.Style>
                     </TextBlock>
                 </Border>
-                <TextBlock Text="meowfilm" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <TextBlock Text="meowfilm" Style="{DynamicResource MeowFilm.Title}" VerticalAlignment="Center" />
             </StackPanel>
 
             <ScrollViewer x:Name="SidebarScroll" PreviewMouseWheel="OnSidebarWheel" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Grid.Row="1" Margin="16,22,8,16" Focusable="False" IsEnabled="{Binding IsInteractive}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel Margin="0,0,8,0">
@@ -448,4 +445,4 @@
         </StackPanel>
         </Grid>
     </Border>
-</Window>
+</local:DesktopWindow>

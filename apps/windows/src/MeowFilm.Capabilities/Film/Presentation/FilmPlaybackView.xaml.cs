@@ -8,6 +8,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -241,12 +242,6 @@ public partial class FilmPlaybackView : UserControl
         e.Handled = true;
         if (boundPage is { } page && !page.PlayerActionPending("switch")) await ActAsync("switch");
     }
-    private async void RefreshBrowsing_Click(object sender, RoutedEventArgs e)
-    {
-        e.Handled = true;
-        if (DataContext is FilmPlaybackPage page)
-            await ExecuteAsync(page, page.RefreshBrowsingAsync, "资料刷新失败");
-    }
     private async void RetryMedia_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
@@ -305,7 +300,19 @@ public partial class FilmPlaybackView : UserControl
         menu.IsOpen = true;
         ShowPlayerControls();
     }
-    private async void SearchMore_Click(object sender, RoutedEventArgs e) { e.Handled = true; await ActAsync("search.more"); }
+    private async void SearchMoreSources_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not FilmPlaybackPage { CanSearchMore: true } page) return;
+        SourcePicker.IsDropDownOpen = false;
+        await ExecuteAsync(page, page.SearchMoreSourcesAsync, "搜索失败，请重试");
+    }
+    private async void SearchSources_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is FilmPlaybackPage page)
+            await ExecuteAsync(page, page.SearchSourcesAsync, "搜索失败，请重试");
+    }
     private async void Reconnect_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
@@ -493,7 +500,7 @@ public partial class FilmPlaybackView : UserControl
         VideoPicture.ClearValue(HeightProperty);
         PlayerFrame.VerticalAlignment = VerticalAlignment.Stretch;
         var host = new Grid { Background = Brushes.Black }; host.Children.Add(PlayerFrame);
-        var dialog = new Window
+        var dialog = new DesktopWindow
         {
             Title = page.Title, Owner = Window.GetWindow(this), Content = host, DataContext = page, Resources = Resources,
             Width = 640, Height = 360, MinWidth = 380, MinHeight = 214, Background = Brushes.Black,

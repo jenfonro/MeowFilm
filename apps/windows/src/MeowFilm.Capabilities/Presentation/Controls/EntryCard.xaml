@@ -4,11 +4,10 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
- TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary Source="/MeowFilm.Desktop;component/Typography.xaml"/>
    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/Controls/CardBrushes.xaml"/>
   </ResourceDictionary.MergedDictionaries>
   <local:MusicCatalogPaletteConverter x:Key="EntryPalette"/>
@@ -85,7 +84,7 @@
      <Path Data="M 0,7 L 17,7 M 4,0 L 4,5 M 13,0 L 13,5" Stroke="{Binding Foreground,ElementName=Entry}" StrokeThickness="1"/>
      <TextBlock Text="{Binding DayOfMonth}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="9" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,1"/>
     </Grid>
-    <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="17" FontWeight="SemiBold" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
+    <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="17" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
    </Grid>
   <Canvas x:Name="CaptionHost" Grid.Row="1" Margin="10,6" IsHitTestVisible="False">
    <StackPanel x:Name="ContentBlock" Width="{Binding ActualWidth,ElementName=CaptionHost}">
@@ -94,7 +93,7 @@
      <Binding Path="(local:CardMotion.Progress)" ElementName="Surface"/>
     </MultiBinding></TranslateTransform.Y></TranslateTransform></StackPanel.RenderTransform>
     <Grid x:Name="CaptionSlot" Height="36">
-     <TextBlock x:Name="Caption" Text="{Binding Subtitle}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight"
+     <TextBlock x:Name="Caption" Text="{Binding Subtitle}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" LineHeight="18" LineStackingStrategy="BlockLineHeight"
       VerticalAlignment="Bottom" MaxHeight="36" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
     </Grid>
     <Border x:Name="PreviewBlock" Padding="0,8,40,0" MinHeight="44" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}">
@@ -104,7 +103,7 @@
       </MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>
      </Style.Triggers></Style></Border.Style>
      <ItemsControl ItemsSource="{Binding PreviewTitles}" VerticalAlignment="Bottom"><ItemsControl.ItemTemplate><DataTemplate>
-      <TextBlock Text="{Binding}" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType={x:Type local:EntryCard}}}" FontSize="13" Height="25" TextTrimming="CharacterEllipsis"/>
+      <TextBlock Text="{Binding}" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType={x:Type local:EntryCard}}}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Height="25" TextTrimming="CharacterEllipsis"/>
      </DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
     </Border>
    </StackPanel>

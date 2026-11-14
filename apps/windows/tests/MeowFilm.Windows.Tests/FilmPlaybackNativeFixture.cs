@@ -150,7 +150,11 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         var request = new FilmPlaybackRequest(target, sources);
         var page = new FilmPlaybackPage(new(targetId, Title, "", "") { PlaybackContext = request }, request, session, null);
         View.DataContext = page;
-        await session.OpenAsync(page, new { platform, target = target.Wire(), sources }, default);
+        await session.OpenAsync(page, new
+        {
+            platform, entrySurface = request.EntrySurface, target = request.Target.Wire(),
+            resumeTarget = request.ResumeTarget?.Wire(), sources = request.Sources
+        }, default);
         Guid id = Traffic.Opened(targetId);
         await Until(async () => FilmJson.Text(await SnapshotAsync(id), "stage") != "loading", "real session initialization");
         return new(session, page, id, targetId);

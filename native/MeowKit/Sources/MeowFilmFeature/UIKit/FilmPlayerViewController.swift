@@ -361,8 +361,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         selectMenu(pan, value: candidate?.provider); selectMenu(quality, value: candidate?.quality)
         let busy = state.buffering || ["loading", "searching", "resolving", "pending"].contains(snapshot?.stage ?? "")
         if busy { activity.startAnimating() } else { activity.stopAnimating() }
-        stateLabel.text = snapshot?.error.map { FilmPlaybackError(code: $0).localizedDescription } ??
-            (busy ? "准备中" : snapshot?.stage == "ended" ? "播放结束" : nil)
+        stateLabel.text = busy ? "准备中" : snapshot?.stage == "ended" ? "播放结束" : nil
         let reported = snapshot?.reportError.map { FilmPlaybackError(code: $0) }
         let metadata = snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
         let session = snapshot?.error.map { FilmPlaybackError(code: $0) }

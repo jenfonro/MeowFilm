@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { decodePanResource } from '@meowfilm/script-host/cat-output';
 import { buildEpisodeMap } from './episodes.js';
-import { isIdentifier, resultDetailId } from './identity.js';
+import { fail, isIdentifier, resultDetailId, requireValue } from './identity.js';
 import { invokeRecognition, providerFamily } from './rules.js';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -129,6 +129,46 @@ export function stableFileIdentity(file) {
   return identity(['file', exact]);
 }
 
+export function mediaVariants(value) {
+  if (value?._meow?.version !== 1 || !Array.isArray(value._meow.media)) return [];
+  const variants = new Map();
+  for (const media of value._meow.media) {
+    if (!Array.isArray(media?.variants)) continue;
+    for (const row of media.variants) {
+      requireValue(object(row) && typeof row.url === 'string' && /^https?:\/\//i.test(row.url) &&
+        !/[\u0000-\u0020\u007f]/.test(row.url), 'UPSTREAM_FORMAT');
+      let url;
+      try { url = new URL(row.url).href; } catch { throw fail('UPSTREAM_FORMAT'); }
+      const id = identity(['hls-variant', url]);
+      const variant = { id, url };
+      for (const field of ['quality', 'resolution', 'codec']) {
+        if (typeof row[field] === 'string' && row[field].trim()) variant[field] = row[field];
+      }
+      if (Number.isFinite(row.fps) && row.fps > 0 && row.fps < 1000) variant.fps = row.fps;
+      const previous = variants.get(id);
+      requireValue(!previous || identity(previous) === identity(variant), 'UPSTREAM_FORMAT');
+      variants.set(id, variant);
+    }
+  }
+  return [...variants.values()];
+}
+
+export async function recognizeVariantCandidates(candidate, variants, { rules, signal } = {}) {
+  const texts = await invokeRecognition(rules, { operation: 'recognition.candidates', target: { kind: 'source' },
+    source: {}, detail: { lines: [{ episodes: variants.map(variant =>
+      ({ name: '', quality: variant.quality, fps: variant.fps })) }] } }, { signal });
+  return variants.map((variant, index) => {
+    const result = { ...candidate, id: `${candidate.id}:${variant.id}`, parentId: candidate.id, variant };
+    // A master/file label is not evidence about each of its variants.
+    for (const field of ['quality', 'resolution', 'fps', 'codec']) delete result[field];
+    if (texts[index].quality) result.quality = texts[index].quality;
+    for (const field of ['resolution', 'fps', 'codec']) {
+      if (variant[field] !== undefined) result[field] = variant[field];
+    }
+    return result;
+  });
+}
+
 function fileIdentity(file, share, sourceIdentity, detailId, lineId, playId) {
   if (file) return stableFileIdentity(file);
   if (share) {
@@ -179,7 +219,7 @@ export async function recognizeCandidates(detail, { target, source = detail?.sou
     detail: { season: normalized.season, lines: normalized.lines.map(line =>
       ({ season: line.season, episodes: line.episodes.map(item => ({
         name: item.name, fileName: item.fileName, path: item.path, season: item.season, episode: item.episode,
-        quality: item.quality, hdr: item.hdr, fps: item.fps,
+        quality: item.quality, hdr: item.hdr, fps: item.fps ?? item.file?.fps,
         ...(item.file ? { file: { name: item.file.name, path: item.file.path } } : {}),
       })) })) } }, { signal });
   let textIndex = 0;
@@ -212,6 +252,10 @@ export async function recognizeCandidates(detail, { target, source = detail?.sou
         lineLabel: line.label, flag: line.flag ?? line.id, name: item.name, fileName,
         episodeId: item.id, index: item.index, kind: target.kind,
         ...(path === undefined ? {} : { path }), ...(provider === undefined ? {} : { provider }),
+        ...Object.fromEntries(['resolution', 'fps', 'codec'].flatMap(field => {
+          const value = item[field] ?? item.file?.[field];
+          return value === undefined ? [] : [[field, value]];
+        })),
         ...(quality ? { quality } : {}), ...(item.file === undefined ? {} : { file: item.file }),
         ...(item.share === undefined ? {} : { share: item.share }),
         ...(item.playId === undefined ? {} : { playId: item.playId }) };

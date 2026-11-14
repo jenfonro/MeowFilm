@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { decodePanResource } from '@meowfilm/script-host/cat-output';
-import { normalizeDetail, stableFileIdentity } from './recognition.js';
+import { mediaVariants, normalizeDetail, stableFileIdentity } from './recognition.js';
 import { createRecognitionRules, providerFamily } from './rules.js';
 import { createMetadataCache } from './metadata-cache.js';
 import { metadataTTL } from './metadata-policy.js';
@@ -71,6 +71,8 @@ function metadataValue(provider, path, value, completeness) {
   if (provider === 'douban' && path === 'search') {
     requireValue(Array.isArray(value.subjects?.items) && value.subjects.items.every(row =>
       object(row) && object(row.target) && isIdentifier(row.target_id ?? row.target.id)), 'UPSTREAM_FORMAT');
+  } else if (provider === 'tmdb' && path === '/3/search/multi') {
+    requireValue(Array.isArray(value.results), 'UPSTREAM_FORMAT');
   } else if (provider === 'tmdb' && /^\/3\/(?:search|discover|trending)\//.test(path)) {
     requireValue(Array.isArray(value.results) && value.results.every(row => object(row) && isIdentifier(row.id)),
       'UPSTREAM_FORMAT');
@@ -236,7 +238,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       requireValue(instance.protocol === 'cat' && source.siteId === 'source', 'UNSUPPORTED_OPERATION');
     }
   }
-  async function invoke(source, action, payload, signal, checkSchedule) {
+  async function invoke(source, action, payload, signal, checkSchedule, { discoverVariants = false } = {}) {
     const value = await call(source.engine, 'invoke', source.engine === 'cat' ? {
       installationId: source.installationId, generation: source.generation,
       siteId: source.siteId, operation: action, payload,
@@ -244,7 +246,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       installationId: source.installationId, revision: source.revision,
       generation: source.generation, action, payload,
     }, signal, sourceDependencies(source), checkSchedule,
-    source.engine === 'cat' && action === 'play' ? { mediaPurpose: 'receipt' } : undefined);
+    source.engine === 'cat' && action === 'play' && !discoverVariants ? { mediaPurpose: 'receipt' } : undefined);
     return parseSourceValue(value);
   }
   async function catalog(source, action, payload = {}, { signal, canSchedule, refresh = false } = {}) {
@@ -441,6 +443,29 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   async function targetMetadata(target, options = {}) {
     return rawMetadata(await targetMetadataEntry(target, options));
   }
+  async function tmdbTargetEntry(target, { metadata, rules, signal, canSchedule, refresh = false } = {}) {
+    return execute([{ domain: 'tmdb' }], { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
+      const recognition = createRecognitionRules(rules);
+      const seed = { ...metadata, ...target };
+      const hint = await recognition.metadata(seed, target.kind, { signal: ownedSignal });
+      const response = rawMetadata(await getMetadata(metadataRequest('tmdb', '/3/search/multi',
+        { query: hint.query, page: 1 }, 'w500'), { signal: ownedSignal, checkSchedule, refresh }));
+      const candidates = response.results.filter(record => record?.media_type === target.kind);
+      const dateField = target.kind === 'movie' ? 'release_date' : 'first_air_date';
+      const candidateYear = record => typeof record[dateField] === 'string' && /^\d{4}/.test(record[dateField])
+        ? Number(record[dateField].slice(0, 4)) : null;
+      const selected = candidates.find(record => hint.year === null || candidateYear(record) === null ||
+        candidateYear(record) === hint.year) ?? candidates[0];
+      if (!selected) return null;
+      requireValue(Number.isSafeInteger(selected.id) && selected.id > 0 && text(selected.title ?? selected.name),
+        'UPSTREAM_FORMAT');
+      const resolved = { id: `tmdb:${target.kind}:${selected.id}`, kind: target.kind,
+        title: selected.title ?? selected.name, metadataProvider: 'tmdb', metadataId: selected.id,
+        ...(candidateYear(selected) === null && hint.year === null ? {} : { year: candidateYear(selected) ?? hint.year }) };
+      const entry = await getMetadata(targetRequest(resolved), { signal: ownedSignal, checkSchedule, refresh });
+      return { target: resolved, entry };
+    });
+  }
   async function metadataSourcesValue(target, supplied, rules, signal, checkSchedule) {
     if (!target.metadataProvider) return [];
     const primaryRequest = targetRequest(target);
@@ -565,7 +590,15 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       if (row.provider === 'tmdb' && Array.isArray(row.metadata.seasons)) row.seasons = row.metadata.seasons;
       else if (row.provider === 'douban' && seasons.length) row.seasons = seasons;
     }
-    return result;
+    const douban = result.find(row => row.provider === 'douban' &&
+      target.metadataProvider === 'douban' && String(row.metadataId) === String(target.metadataId)) ??
+      result.find(row => row.provider === 'douban' && String(row.metadataId) === String(seasons[0]?.metadataId)) ??
+      result.find(row => row.provider === 'douban');
+    const tmdb = result.find(row => row.provider === 'tmdb');
+    const redundant = target.metadataProvider !== 'douban' && seasons.length > 0 &&
+      tmdb?.seasons?.length === seasons.length && seasons.every(row => tmdb.seasons.some(other =>
+        other.season_number === row.season && other.episode_count === row.episodeCount));
+    return result.filter(row => row.provider !== 'douban' || row === douban && !redundant);
   }
   async function metadataSources(target, { metadata: supplied, rules, signal, canSchedule } = {}) {
     return execute([{ domain: 'tmdb' }, { domain: 'douban' }], { signal, canSchedule },
@@ -597,10 +630,27 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   async function seasonMetadata(target, season, options = {}) {
     return rawMetadata(await seasonMetadataEntry(target, season, options));
   }
-  const addressIdentity = (candidate, source) => identity(scopeOf(source), candidate.file
-    ? { fileIdentity: stableFileIdentity(candidate.file), accountRevision: candidate.file.accountRevision }
-    : candidate.playId, candidate.flag);
-  async function resolveValue(candidate, source, mode, signal, checkSchedule) {
+  const addressIdentity = (candidate, source) => {
+    const parent = identity(scopeOf(source), candidate.file
+      ? { fileIdentity: stableFileIdentity(candidate.file), accountRevision: candidate.file.accountRevision }
+      : candidate.playId, candidate.flag);
+    return candidate.variant ? identity(parent, candidate.variant.id) : parent;
+  };
+  async function variantEntry(candidate, request, parent, dependencies, signal, checkSchedule) {
+    if (!candidate.variant) return parent;
+    const variant = mediaVariants(parent.value).find(value => value.id === candidate.variant.id);
+    requireValue(variant, 'MEDIA_UNAVAILABLE');
+    return load({ kind: 'variant-play', parent: request, variantId: variant.id,
+      parentIdentity: identity(parent.value), parentFetchedAt: parent.fetchedAt },
+      async () => {
+        const value = clone(parent.value);
+        for (const field of ['quality', 'resolution', 'fps', 'codec']) delete value[field];
+        const { id, ...media } = variant;
+        return { ...value, ...media, format: value.format ?? 'hls' };
+      }, { ttl: (_value, at) => Math.max(0, parent.expiresAt - at), dependencies, signal, checkSchedule });
+  }
+  async function resolveValue(candidate, source, mode, signal, checkSchedule,
+    { discoverVariants = false, refresh = false } = {}) {
     if (source.engine !== 'pan') await liveSource(source, signal, checkSchedule);
     if (candidate.file) {
       const original = candidate.file;
@@ -649,16 +699,19 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       for (const provider of choices) {
         open(signal);
         const row = rows.find(item => item.provider === provider);
-        const dependency = [...fileDeps, accountDependency(provider, row.revision),
-          { kind: 'address', identity: addressIdentity(candidate, source) }];
+        const common = [...fileDeps, accountDependency(provider, row.revision)];
+        const dependency = [...common, { kind: 'address', identity: addressIdentity({ ...candidate, variant: undefined }, source) }];
         try {
-          const entry = await load({ kind: 'pan-play', source: scopeOf(source), provider,
-            revision: row.revision, file, mode: selectedMode }, async producerSignal => {
+          const request = { kind: 'pan-play', source: scopeOf(source), provider,
+            revision: row.revision, file, mode: selectedMode };
+          const parent = await load(request, async producerSignal => {
             const value = mediaValue(await call('pan', 'play', { provider, file, mode: selectedMode }, producerSignal, dependency));
             if (value.file !== undefined) fileValue(value.file, file.provider, file.accountRevision);
             requireValue(value.mode === selectedMode, 'UPSTREAM_FORMAT');
             return value;
-          }, { ttl: addressTTL, dependencies: dependency, signal, checkSchedule });
+          }, { ttl: addressTTL, dependencies: dependency, signal, checkSchedule, refresh });
+          const entry = await variantEntry(candidate, request, parent,
+            [...common, { kind: 'address', identity: addressIdentity(candidate, source) }], signal, checkSchedule);
           return { ...clone(entry.value), resolvedFile: clone(file), resolvedAt: entry.fetchedAt,
             expiresAt: entry.expiresAt, scope: { ...scopeOf(source), accountProvider: provider, accountRevision: row.revision,
               fileProvider: file.provider, fileAccountRevision: file.accountRevision } };
@@ -671,24 +724,32 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     }
     requireValue(source.engine !== 'pan' && !candidate.share, 'INVALID_REQUEST');
     requireValue(isIdentifier(candidate.playId) && isIdentifier(candidate.flag));
+    const discover = source.engine === 'cat' && (discoverVariants || !!candidate.variant);
     const dependencies = [...sourceDependencies(source),
-      { kind: 'address', identity: addressIdentity(candidate, source) }];
-    const entry = await load(sourceRequest('play', source, { flag: candidate.flag, playId: candidate.playId }),
+      { kind: 'address', identity: addressIdentity({ ...candidate, variant: undefined }, source) }];
+    const request = sourceRequest('play', source, { flag: candidate.flag, playId: candidate.playId });
+    // Discovery enriches the same parent receipt; ordinary readers can reuse it.
+    const completeness = source.engine === 'cat' && !discover ? 'partial' : 'complete';
+    const parent = await load(request,
       async producerSignal => mediaValue(await invoke(source, 'play', { flag: candidate.flag, id: candidate.playId,
-        ...(source.engine === 'cat' ? { flags: [] } : { vipFlags: [] }) }, producerSignal)),
-      { ttl: addressTTL, dependencies, signal, checkSchedule });
+        ...(source.engine === 'cat' ? { flags: [] } : { vipFlags: [] }) }, producerSignal, undefined,
+      { discoverVariants: discover })),
+      { ttl: addressTTL, completeness, dependencies, signal, checkSchedule, refresh });
+    const entry = await variantEntry(candidate, request, parent,
+      [...sourceDependencies(source), { kind: 'address', identity: addressIdentity(candidate, source) }], signal, checkSchedule);
     return { ...clone(entry.value), resolvedAt: entry.fetchedAt, expiresAt: entry.expiresAt, scope: scopeOf(source) };
   }
   function candidateDependencies(candidate, source) {
     return [...sourceDependencies(source), ...providers.filter(provider =>
       providerFamily(provider) === providerFamily(candidate.file?.provider)).map(provider => accountDependency(provider))];
   }
-  async function resolve(candidate, { signal, canSchedule, mode } = {}) {
+  async function resolve(candidate, { signal, canSchedule, mode, discoverVariants = false } = {}) {
     requireValue(object(candidate));
+    requireValue(typeof discoverVariants === 'boolean');
     requireValue(mode === undefined || ['streaming', 'download'].includes(mode));
     const source = playbackSource(candidate.source);
     return execute(candidateDependencies(candidate, source), { signal, canSchedule },
-      (ownedSignal, checkSchedule) => resolveValue(candidate, source, mode, ownedSignal, checkSchedule));
+      (ownedSignal, checkSchedule) => resolveValue(candidate, source, mode, ownedSignal, checkSchedule, { discoverVariants }));
   }
   async function refresh(candidate, { signal, canSchedule, mode } = {}) {
     requireValue(object(candidate));
@@ -696,9 +757,12 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     const source = playbackSource(candidate.source);
     return execute(candidateDependencies(candidate, source), { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
       const selected = addressIdentity(candidate, source);
-      await cache.invalidate(entry => entry.dependencies?.some(dep => dep.kind === 'address' && dep.identity === selected));
+      const parent = candidate.variant ? addressIdentity({ ...candidate, variant: undefined }, source) : selected;
+      await cache.invalidate(entry => entry.dependencies?.some(dep => dep.kind === 'address' &&
+        (dep.identity === selected || dep.identity === parent)));
       checkSchedule();
-      return resolveValue(candidate, source, mode, ownedSignal, checkSchedule);
+      return resolveValue(candidate, source, mode, ownedSignal, checkSchedule,
+        { discoverVariants: source.engine === 'cat' && !candidate.file, refresh: !!candidate.variant });
     });
   }
   async function invalidateAddress(candidate, { signal, canSchedule } = {}) {
@@ -832,7 +896,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       .then(() => metadataCache.close());
     return closing;
   }
-  return { catalog, search, detail, expand, metadata, metadataEntry, targetMetadata, targetMetadataEntry,
+  return { catalog, search, detail, expand, metadata, metadataEntry, targetMetadata, targetMetadataEntry, tmdbTargetEntry,
     seasonMetadata, seasonMetadataEntry, metadataSources, resolve, refresh, invalidateAddress,
     report, accounts, seed, handoff, cachedEntry, invalidate, close };
 }

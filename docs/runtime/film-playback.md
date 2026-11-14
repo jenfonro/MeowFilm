@@ -38,7 +38,7 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 
 | operation | 输入与结果 |
 | --- | --- |
-| `session.open` | `{platform,target,sources,query?,results?,resultHints?,search?,metadata?,cacheEntries?,searchReference?,resumeTarget?}` → 当前 snapshot；规则由 Node 捕获 |
+| `session.open` | `{platform,entrySurface?,target,sources,query?,results?,resultHints?,search?,metadata?,cacheEntries?,searchReference?,resumeTarget?}` → 当前 snapshot；规则由 Node 捕获 |
 | `session.command` | `{sessionId,action,...}` → 受理后的 snapshot，后续由事件推进 |
 | `session.snapshot` | `{sessionId}` → 当前 snapshot |
 | `session.attempt` | `{sessionId,attemptId}` → 私有媒体 receipt |
@@ -118,6 +118,20 @@ metadataId,season,episode,globalEpisode`。原始单源携带
 使同一内容重新搜索后仍能读取原历史、人工匹配和屏蔽。
 不伪造 movie／tv，也不降成代表单源。未关联时使用真实源目录与上下集，
 iOS 不自动准备，Windows 仍沿正式自动播放入口。
+
+`entrySurface:'home'|'search'` 标识进入位置，snapshot 的 `entryTarget` 保留原始卡片目标，
+`target` 是运行器当前使用的目标；客户端不据显示标题重新构造来源。
+首页豆瓣 subject 只是 TMDB 查找种子，不建立独立豆瓣播放会话。Node 按标题执行一次
+TMDB SearchMulti 首页查询，按真实媒体类型及年份选择匹配，命中后读取该 TMDB 详情；没有匹配时保留
+`kind:'group',members:[]` 的等待态和原卡片信息，不自动调用站点搜索。
+`entryResolution` 区分 `loading`、`matched`、`unmatched`、`error`；
+其他入口为 `null`。只有 `unmatched` 展示手动搜索动作，请求失败不能当成未匹配。
+用户点击“搜索剧集”后才发送 `search.more`；选择已有站点只读取准确详情，
+选择网盘／线路再按需读取其目录，均不重新按标题智能匹配。
+空等待组仅由 seed 转换创建；调用方传入的空 group（`target` 或 `resumeTarget`）
+均以 `SOURCE_NOT_FOUND` 拒绝，携带其他有效恢复目标也不例外。
+等待组获得真实成员后，全部成员撤销表示来源失效，不再作为首次 seed 等待态；
+刷新不重新查 TMDB，搜索／交接及晚到搜索结果不能补回该组。
 
 source 包含 `key,engine:'cat'|'source',installationId,siteId,generation,name`；
 portable source 另带 `revision`。原始详情、线路、集数标识保留 string／安全整数
@@ -207,11 +221,22 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   不套用别集进度。电影不造集号。iOS 准备不建 decoder、不抢音频 owner、不记观看。
 - 默认阶段：可用候选 → 历史 → 人工匹配 → 已得结果与增量搜索。地址进入 pending
   就停止新调度；真正媒体失败才续选。候选／原始文件身份防止重复选同一失败资源。
+  已过期元数据可以继续展示，但不能据此准备／播放新候选；先刷新当前准确资料，
+  刷新失败保留展示及真实错误，不把旧资料标为 fresh，不影响已提交的当前输出。
 - `search.more` 只加载尚未完成来源的下一页；菜单打开不产生请求。
   `browse {sourceId,lineId?}` 只读所选 detail／必要分享列表，`sourceId:null` 返回
   纯 metadata。完整线路不重复请求盘列表。
 - `browse.metadata {metadataSourceId,keepSource?}` 只能选择已证明关联；
   `keepSource:true` 保留当前站点／线路，只切分季资料。关联查询不阻塞主资料匹配。
+  同一作品的豆瓣 subject 按已确认分季归入一个豆瓣选项，各季保留原 subject 身份。
+  只有季度坐标及每季集数都与 TMDB 相同时才隐藏冗余豆瓣选项；相同季度数但
+  豆瓣为整季总集数、TMDB 仍随播出增长时保留两套。可信 `doubanSeasons` 优先于
+  豆瓣原始 `seasons` 关联条目。季度划分相同时按季／集映射，否则只按可靠全局
+  集号映射；已对应集复用真实 TMDB 集名、剧照、简介、时长及播出日期，未对应集
+  保留豆瓣坐标与原生封面回退。映射不替换豆瓣身份／总集数，也不重排原始文件。
+  切回 TMDB 按当前真实季度读取 owner 已缓存的完整季资料，不能以集数占位覆盖它。
+  TMDB 补充季资料的真实失败通过 `metadataError` 报告，已有旧资料仍可展示；
+  不把可用的豆瓣主资料变为空列表，也不以主资料成功掩盖辅助资料刷新失败。
   `browse.season {season}` 按需真实分季；映射无证据时不造季或集。
 - `browse.refresh {refresh?}` 默认显式刷新当前元数据及所看季、或准确站点详情／线路目录。
   `refresh:false` 用于普通页面恢复，仅让owner判定是否过期／缺资料，不强刷。
@@ -219,7 +244,8 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   snapshot 的 `metadataCache` 报告资料/当前季刷新状态；`metadataSupplement` 仅在豆瓣
   与唯一TMDB可靠关联时提供原TMDB资料供图文／演职员／相似作品填缺，不改主身份或季集。
 - `select.episode {episode}` 选择真实 metadata 坐标；
-  `select.candidate {candidateId}` 选择准确源文件。`next/previous` 使用真实列表。
+  `select.candidate {candidateId}` 选择准确源文件或该文件的真实 HLS variant，不增加选择参数。
+  `next/previous` 使用真实列表。
   同集换源保进度和暂停意图，新集从正确起点，替代失败保留可用旧流。
   旧流结束只负责其历史与释放，不能覆盖后发的选集／换源意图。
   当前尾部无下一集或所选季缺失时先让owner检查相关资料／目录，仍无真实记录则结束／报错，
@@ -231,8 +257,9 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   确认期间已换成其他 attempt 则返回 `STALE_SESSION`，不屏蔽未经确认的新片源。
   写失败不得提前改变匹配结果。
   source／group 已选文件在这些显式操作或真实媒体失败后，只有已证明实际同集坐标时
-  才临时解开文件／线路锁。raw 仍限原 source／detail，group 仍限原范围；
-  无可靠映射则 `NO_MATCH`，不能拿另一集补位。普通重开始终要求保存的准确
+  才临时解开文件／线路锁；无季集坐标的 HLS variants 仅可在同父 source/detail/line/playId
+  且同 fileIdentity 内重排，不将下一原始文件当作替代。raw 仍限原 source／detail，group 仍限原范围；
+  无上述证据则 `NO_MATCH`，不能拿另一集补位。普通重开始终要求保存的准确
   candidateId；替代失败保旧输出与恢复目标，成功后才保存新文件身份。
 - `media.retry {attemptId?}` 定向撤掉准确 pending/current（或最近失败候选）的短效地址，
   重新取同一文件，不变成换源搜索，保同集进度／暂停意图。传入旧 attemptId 则拒绝。
@@ -258,18 +285,33 @@ data: JSON
 ```
 
 只保留当前状态并随背压合并，不积累无限事件历史。重新连接先交当前快照；
-断开观察不关闭业务会话，也不停止实际媒体。snapshot 含 target、stage、metadata、
+断开观察不关闭业务会话，也不停止实际媒体。snapshot 含 entryTarget、entrySurface、target、stage、metadata、
 metadataSources、sources、search、browsing、episodes、candidates、attempt、current、
 preferences、error、reportError 和 prefetch；不含 URL、头、分享密码、playId 或 DRM key。
 
-`browsing.episodes` 是第三行：具体站源按可靠季映射过滤，失败时为空并在第三行显示
-错误，来源菜单仍可切换。`browsing.originalEpisodes` 保留完整所选线路供原始目录，
+`browsing.episodes` 是具体站源按可靠季映射过滤的选集；失败时为空，错误由客户端
+统一浮层显示，来源菜单仍可切换。`browsing.originalEpisodes` 保留完整所选线路供原始目录，
 目录浏览不转存、不自动播放。纯 metadata 的 `episodes` 仅包含真实资料。
 电影候选按质量排序；原生提供固定宽度、截断长文案。
 
 `attempt` 只是媒体意图；私有 `session.attempt` receipt 含
-`attemptId,id,url,mediaOrigin?,format?,drm?,title,position,paused,scope`。
+`attemptId,id,url,mediaOrigin?,format?,drm?,title,position,paused,scope?`。
 只有可信 native owner 消费，不记录日志或放系统 NowPlaying。
+有上游请求头时一次性生成本地流式资源，由 `mediaOrigin` 标识其本地资源来源；
+不把 Cookie 等凭据放进公开候选或快照，不要求播放器先直连失败再换路。
+候选和公开投影保留实际存在的 `quality/resolution/fps/codec`；这些字段来自网盘／媒体
+规整，不由客户端从站点名、线路名或标题猜造。
+
+实际选中 Cat 父候选后，film 按需使用现成 HLS metadata 增强，消费
+`_meow.media[].variants` 的真实 URL／分辨率／帧率。首次指定画质也先发现再过滤，
+不因父候选尚无质量而提前拒绝。各 variant 使用不同 opaque candidateId，保留父文件、
+来源和季集身份；质量由现有规则规整，缺字段不继承父文件的高画质标签。
+父播放描述可共享，variant 地址缓存和失败排除分别按准确子候选隔离；
+强刷重取父描述后必须仍找到同一 variant，消失时失败，不回 master 或另一个 variant。
+新父描述带来的质量变化同步更新候选，并在准备前重新核对画质约束；
+同一 variant URL 的冲突媒体字段返回 `UPSTREAM_FORMAT`，不靠行序选择画质。
+同文件 variant 切换承接进度与暂停，失败后允许同父其它真实质量续选。
+网盘 prepare 仍按原稳定文件身份复用，普通 provider play 不增加 transcode／quality 参数。
 
 原生在真实输出后发送 `media.started {attemptId}`；`media.failed` 统一续选；
 `media.progress {attemptId,position,duration,paused}` 为秒；`media.ended` 触发真实
@@ -293,8 +335,10 @@ iOS 外播请求开始前持有该份额，内置解码／音频排空不提前�
 原生仍须负责自己的直连 HTTP、解码器、surface、音频和系统生命周期。
 
 无必需头且未显式短视频缓存时直接把 URL 交原生；有头第一次读取即走 Node
-二进制流。Cat 自有媒体通过同一入口衔接实例生命周期；准备不读取媒体，
-也不会因选择本地路由自动启用预取。同一媒体描述明确提供的头沿用于重定向、
+二进制流。Cat 自有媒体通过同一入口衔接实例生命周期；准备时仅选中的 `.m3u8`
+父描述允许 SDK 读取一次清单以发现 metadata，未选文件、variant 子清单、key、init 与媒体段
+不提前读取；DASH 和 extensionless 描述沿原冷取址路径。选择本地路由不会自动启用预取。
+同一媒体描述明确提供的头沿用于重定向、
 HLS／DASH 子清单、key 与分片，不按 origin 注册或剥离必需头。
 业务与媒体 HTTP 不限定回环监听，不按域名、Host、Origin 或调用方地址限制访问，
 既有数据与媒体接口允许外部客户端、浏览器及预检请求；不要求调用方持有启动密钥。

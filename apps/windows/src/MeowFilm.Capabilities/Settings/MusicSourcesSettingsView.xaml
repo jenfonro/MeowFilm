@@ -5,8 +5,6 @@
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  Loaded="View_Loaded" Unloaded="View_Unloaded" IsVisibleChanged="View_IsVisibleChanged"
  DataContextChanged="View_DataContextChanged" SizeChanged="View_SizeChanged"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
- TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True"
  Foreground="{DynamicResource MeowFilm.Brush.Text}" ClipToBounds="True">
  <UserControl.Resources>
@@ -18,7 +16,7 @@
    <Style x:Key="Source.Muted" TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}"/>
    <Style x:Key="Source.Action" TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
     <Setter Property="MinWidth" Value="52"/><Setter Property="Height" Value="30"/><Setter Property="MinHeight" Value="30"/>
-    <Setter Property="Padding" Value="8,0"/><Setter Property="FontSize" Value="13"/><Setter Property="Margin" Value="2,0"/>
+    <Setter Property="Padding" Value="8,0"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="Margin" Value="2,0"/>
    </Style>
    <Style x:Key="Source.Pill" TargetType="Border">
     <Setter Property="CornerRadius" Value="11"/><Setter Property="Height" Value="22"/><Setter Property="Padding" Value="9,0"/>
@@ -57,7 +55,7 @@
         </Style.Triggers>
        </Style></Ellipse.Style>
       </Ellipse>
-      <TextBlock Text="{Binding Name}" FontSize="12" VerticalAlignment="Center">
+      <TextBlock Text="{Binding Name}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" VerticalAlignment="Center">
        <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
         <Style.Triggers>
          <DataTrigger Binding="{Binding State}" Value="unsupported"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/></DataTrigger>
@@ -93,7 +91,7 @@
       </StackPanel>
       <TextBlock Grid.Column="3" Text="{Binding TypeText}" Style="{StaticResource Source.Muted}" VerticalAlignment="Center"/>
       <Border Grid.Column="4" Style="{StaticResource Source.Pill}" AutomationProperties.Name="{Binding StatusText}">
-       <TextBlock Text="{Binding StatusText}" FontSize="12" VerticalAlignment="Center" Foreground="{Binding (TextElement.Foreground),RelativeSource={RelativeSource AncestorType=Border}}"/>
+       <TextBlock Text="{Binding StatusText}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" VerticalAlignment="Center" Foreground="{Binding (TextElement.Foreground),RelativeSource={RelativeSource AncestorType=Border}}"/>
       </Border>
       <ItemsControl Grid.Column="5" ItemsSource="{Binding Platforms}" ItemTemplate="{StaticResource Source.Platform}"
                     VerticalAlignment="Center" Focusable="False" AutomationProperties.Name="平台">
@@ -121,7 +119,7 @@
   </Grid.RowDefinitions>
   <Grid x:Name="SourceTitleRow" Margin="0,0,0,18">
    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-   <TextBlock Text="音源管理" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+   <TextBlock Text="音源管理" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" VerticalAlignment="Center"/>
    <Button Grid.Column="1" Content="检测所选" Style="{StaticResource Settings.Button32}" Click="CheckSelected_Click"
            IsEnabled="{Binding CanCheckSelectedSources}" Margin="0,0,10,0"/>
    <Button Grid.Column="2" Content="删除所选" Style="{StaticResource Settings.Button32}" Click="RemoveSelected_Click"

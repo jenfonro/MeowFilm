@@ -2,14 +2,12 @@
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities" xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- x:Name="Root" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" TextOptions.TextFormattingMode="Display"
- TextOptions.TextRenderingMode="Auto">
+ x:Name="Root">
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}"><Setter Property="Margin" Value="4,0"/><Setter Property="Foreground" Value="#777E90"/><Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers></Style>
   <Style x:Key="Player.FmChoice" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
-   <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
-   <Setter Property="FontSize" Value="16"/><Setter Property="Margin" Value="0,0,0,10"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionTitle}"/><Setter Property="Margin" Value="0,0,0,10"/>
    <Setter Property="MinHeight" Value="64"/><Setter Property="Padding" Value="12"/>
    <Setter Property="HorizontalContentAlignment" Value="Center"/>
    <Setter Property="BorderBrush" Value="#24FFFFFF"/><Setter Property="BorderThickness" Value="1"/>
@@ -52,7 +50,7 @@
    </Style.Triggers>
   </Style>
   <Style x:Key="Player.FmScene" TargetType="Button" BasedOn="{StaticResource Player.FmChoice}">
-   <Setter Property="FontSize" Value="12"/><Setter Property="Margin" Value="2"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/><Setter Property="Margin" Value="2"/>
    <Setter Property="MinHeight" Value="84"/><Setter Property="Padding" Value="2,10"/>
    <Setter Property="Foreground" Value="#C5C3C8"/>
    <Setter Property="Background" Value="#0CFFFFFF"/>
@@ -81,7 +79,7 @@
   </Style>
   <Style x:Key="Player.CurrentQualityItem" TargetType="MenuItem" BasedOn="{StaticResource MeowFilm.MenuItem}">
    <Style.Triggers>
-    <Trigger Property="IsChecked" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/><Setter Property="FontWeight" Value="SemiBold"/></Trigger>
+    <Trigger Property="IsChecked" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/></Trigger>
     <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsChecked" Value="True"/></MultiTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
     <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsHighlighted" Value="True"/></MultiTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
     <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsEnabled" Value="False"/></MultiTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></MultiTrigger>
@@ -117,8 +115,8 @@
      <StackPanel x:Name="MetadataText" Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0" MaxWidth="180"
                 UseLayoutRounding="True" SnapsToDevicePixels="True">
       <StackPanel.Resources><Style TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}"><Setter Property="Foreground" Value="{DynamicResource Capability.Player.Text}"/><Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers></Style></StackPanel.Resources>
-      <TextBlock Text="{Binding CurrentTitle}" FontSize="14" TextTrimming="CharacterEllipsis"/>
-      <TextBlock Text="{Binding CurrentArtist}" FontSize="12" Margin="0,4,0,0" TextTrimming="CharacterEllipsis">
+      <TextBlock Text="{Binding CurrentTitle}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" TextTrimming="CharacterEllipsis"/>
+      <TextBlock Text="{Binding CurrentArtist}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,4,0,0" TextTrimming="CharacterEllipsis">
        <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Capability.Muted}">
         <Setter Property="Foreground" Value="{DynamicResource Capability.Player.Muted}"/>
         <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
@@ -148,7 +146,7 @@
            </Style></Path.Style>
           </Path>
            <TextBlock x:Name="FavoriteBadge" Text="" Width="18" Foreground="#FC3D49"
-                      FontSize="9" FontWeight="SemiBold" Margin="-1,-3,0,0" VerticalAlignment="Top"/>
+                      FontSize="9" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" Margin="-1,-3,0,0" VerticalAlignment="Top"/>
          </StackPanel>
         </Border>
         <ControlTemplate.Triggers>
@@ -188,8 +186,7 @@
      <Button x:Name="QualityButton" Width="80" Click="Quality_Click" ContextMenuOpening="Quality_ContextMenuOpening" AutomationProperties.Name="{Binding CurrentQualityLabel,StringFormat='音质：{0}'}">
       <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Style.Triggers><DataTrigger Binding="{Binding HasQualityButton}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Button.Style>
       <Button.ContextMenu>
-       <ContextMenu x:Name="QualityMenu" Style="{StaticResource MeowFilm.ContextMenu}" Placement="Top" Closed="Quality_Closed" FontSize="13"
-                    FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}">
+       <ContextMenu x:Name="QualityMenu" Style="{StaticResource MeowFilm.ContextMenu}" Placement="Top" Closed="Quality_Closed" FontSize="{StaticResource MeowFilm.Font.Size.Compact}">
         <MenuItem x:Name="SourceListItem" Header="查看更多" Style="{StaticResource MeowFilm.MenuItem}" IsEnabled="{Binding CanSwitchSource}" Click="SourceList_Click" AutomationProperties.Name="查看更多音源"/>
         <Separator/>
        </ContextMenu>
@@ -231,7 +228,7 @@
      <Grid>
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
       <Grid Margin="0,0,0,12">
-        <TextBlock Text="{Binding PlaybackFmTitle}" FontSize="14" FontWeight="Medium" VerticalAlignment="Center"
+        <TextBlock Text="{Binding PlaybackFmTitle}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" VerticalAlignment="Center"
                    Style="{StaticResource Player.FmCaption}" TextAlignment="Center"/>
         <Button x:Name="CloseFmButton" Style="{StaticResource Player.FmClose}" HorizontalAlignment="Right"
                 Content="&#xE711;" Click="CloseFm_Click" AutomationProperties.Name="关闭频道选择"/>
@@ -240,7 +237,7 @@
                     Style="{StaticResource Capability.OverlayScrollViewer}">
        <StackPanel>
        <StackPanel x:Name="FmModeChoices"/>
-       <TextBlock Text="场景模式" FontSize="13" Style="{StaticResource Player.FmCaption}" Margin="0,12,0,12"/>
+       <TextBlock Text="场景模式" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Style="{StaticResource Player.FmCaption}" Margin="0,12,0,12"/>
        <Border CornerRadius="12" Padding="6">
         <Border.Style><Style TargetType="Border">
          <Setter Property="Background" Value="#12FFFFFF"/>
@@ -275,7 +272,7 @@
        <Setter Property="MinHeight" Value="60"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/>
        <Style.Triggers>
         <DataTrigger Binding="{Binding Key}" Value="auto"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-        <DataTrigger Binding="{Binding Current}" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
+        <DataTrigger Binding="{Binding Current}" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/></DataTrigger>
         <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
         <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
         <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
@@ -314,9 +311,9 @@
        <StackPanel>
         <TextBlock Text="当前播放" Style="{StaticResource Settings.Subtitle}" Margin="0,0,0,4"/>
         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-         <TextBlock x:Name="CurrentSourceSymbol" Text="{Binding CurrentSourceSymbol}" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+         <TextBlock x:Name="CurrentSourceSymbol" Text="{Binding CurrentSourceSymbol}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
          <StackPanel Grid.Column="1" Margin="8,0,0,0">
-          <TextBlock x:Name="CurrentSourceQuality" Text="{Binding CurrentSourceQuality}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="CurrentSourceQuality" Text="{Binding CurrentSourceQuality}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" TextTrimming="CharacterEllipsis"/>
           <TextBlock x:Name="CurrentSourceDescription" Text="{Binding CurrentSourceDescription}" Style="{StaticResource Settings.Subtitle}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
          </StackPanel>
         </Grid>
@@ -337,13 +334,13 @@
          <Button Tag="{Binding}" Click="SourceChoice_Click" IsEnabled="{Binding Selectable}" HorizontalContentAlignment="Stretch"
                  Style="{StaticResource Source.Choice}" AutomationProperties.Name="{Binding Provider}">
            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <TextBlock Text="{Binding QualitySymbol}" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+            <TextBlock Text="{Binding QualitySymbol}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
             <StackPanel Grid.Column="1" Margin="8,0,0,0">
-             <TextBlock Text="{Binding Quality}" FontWeight="SemiBold" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-             <TextBlock Margin="0,3,0,0" FontSize="12" TextTrimming="CharacterEllipsis" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"><Run Text="{Binding Platform,Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding Provider,Mode=OneWay}"/></TextBlock>
+             <TextBlock Text="{Binding Quality}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+             <TextBlock Margin="0,3,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" TextTrimming="CharacterEllipsis" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"><Run Text="{Binding Platform,Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding Provider,Mode=OneWay}"/></TextBlock>
              <TextBlock Text="{Binding Recording}" FontSize="11" TextTrimming="CharacterEllipsis" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
             </StackPanel>
-            <TextBlock Grid.Column="2" Margin="12,0,0,0" FontSize="12" VerticalAlignment="Center" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}">
+            <TextBlock Grid.Column="2" Margin="12,0,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" VerticalAlignment="Center" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}">
              <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Text" Value="{Binding State}"/><Style.Triggers><DataTrigger Binding="{Binding Current}" Value="True"><Setter Property="Text" Value="当前"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
             </TextBlock>
            </Grid>
@@ -359,10 +356,10 @@
                Click="SourceChoice_Click" IsEnabled="{Binding CanSwitchSource}" Margin="0,0,8,0">
         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
          <Setter Property="Padding" Value="10,6"/><Setter Property="MinHeight" Value="32"/>
-         <Style.Triggers><DataTrigger Binding="{Binding AutomaticSourceChoice.Current}" Value="True"><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers>
+         <Style.Triggers><DataTrigger Binding="{Binding AutomaticSourceChoice.Current}" Value="True"><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/></DataTrigger></Style.Triggers>
         </Style></Button.Style>
        </Button>
-       <TextBlock Text="正在搜索音源…" FontSize="12" VerticalAlignment="Center" Visibility="{Binding IsLoadingSources,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
+       <TextBlock Text="正在搜索音源…" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" VerticalAlignment="Center" Visibility="{Binding IsLoadingSources,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
       </DockPanel>
      </Grid>
     </Border>
@@ -375,9 +372,9 @@
         Value="{Binding PlaybackRate,Mode=OneWay}" IsEnabled="{Binding CanChangePlaybackRate}"
         PreviewMouseLeftButtonUp="Rate_MouseUp" PreviewKeyUp="Rate_KeyUp" AutomationProperties.Name="播放倍速"/>
        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,8,0,0">
-        <Button Content="−" Click="RateDown_Click" IsEnabled="{Binding CanChangePlaybackRate}" AutomationProperties.Name="降低播放倍速"/>
-        <Button Content="1.0×" Click="RateReset_Click" IsEnabled="{Binding CanChangePlaybackRate}" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="12" AutomationProperties.Name="恢复正常播放倍速"/>
-        <Button Content="+" Click="RateUp_Click" IsEnabled="{Binding CanChangePlaybackRate}" AutomationProperties.Name="提高播放倍速"/>
+        <Button Content="−" Click="RateDown_Click" IsEnabled="{Binding CanChangePlaybackRate}" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" AutomationProperties.Name="降低播放倍速"/>
+        <Button Content="1.0×" Click="RateReset_Click" IsEnabled="{Binding CanChangePlaybackRate}" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" AutomationProperties.Name="恢复正常播放倍速"/>
+        <Button Content="+" Click="RateUp_Click" IsEnabled="{Binding CanChangePlaybackRate}" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" AutomationProperties.Name="提高播放倍速"/>
        </StackPanel>
       </StackPanel>
      </Border>

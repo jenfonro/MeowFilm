@@ -421,6 +421,30 @@ test('TMDB keeps first type plus group occurrence, numeric ID, original rank, an
   assert.deepEqual(movies.items.map((item) => item.tmdbId), [31, 33, 34]);
 });
 
+test('TMDB IDs reject invalid JSON identities without aliasing or suppressing valid integer results', () => {
+  const invalidIDs = [18.9, 1.5, 0.9, -1.5, true, false, '18', '', null, {}, [18], 0, -1, Number.MAX_SAFE_INTEGER + 1];
+  const validItem = mapTMDB('作品', [{ id: 18, media_type: 'tv', name: '作品' }]).items[0];
+  for (const id of invalidIDs) {
+    const output = mapTMDB('作品', [
+      { id, media_type: 'movie', title: '作品' },
+      { id: 18, media_type: 'movie', title: '作品' },
+      { id, media_type: 'tv', name: '作品' },
+      { id: 18, media_type: 'tv', name: '作品' },
+    ]);
+    assert.deepEqual(output.items.map((item) => [item.id, item.tmdbType, item.tmdbId, item.tmdbRank]), [
+      ['tmdb:movie:18', 'movie', 18, 2],
+      ['tmdb:tv:18', 'tv', 18, 4],
+    ], JSON.stringify(id));
+    const invalidItem = { ...validItem, tmdbId: id };
+    assert.deepEqual(invoke({ operation: 'detail', item: invalidItem, payload: { name: '不可应用的详情' } }), invalidItem);
+  }
+  const boundary = mapTMDB('作品', [
+    { id: 1, media_type: 'movie', title: '作品电影' },
+    { id: Number.MAX_SAFE_INTEGER, media_type: 'tv', name: '作品剧集' },
+  ]);
+  assert.deepEqual(boundary.items.map((item) => item.tmdbId), [1, Number.MAX_SAFE_INTEGER]);
+});
+
 test('TMDB fallback is the exact trailing one-to-two ASCII digit query transformation', () => {
   for (const fixture of fallbackCases) {
     assert.deepEqual(invoke({ operation: 'fallback', query: fixture.query }), { query: fixture.expected });
@@ -476,6 +500,84 @@ test('TMDB cards actually return all matching sources in both modes and never du
     }
   }
   assert.equal(tmdb[0].aggregateItems, undefined);
+});
+
+test('same-title TMDB movie and TV cards stay distinct while ambiguous site sources keep their identity', () => {
+  const siteItems = [
+    site({ list: [{ id: 'movie-row', name: '同名作品', opaque: { source: 'a' } }] }).items[0],
+    site({ list: [{ id: 0, name: '同名作品', opaque: { source: 'b' } }] }, { site: sources[1] }).items[0],
+  ];
+  const tmdbItems = mapTMDB('同名作品', [
+    { id: 41, media_type: 'tv', name: '同名作品' },
+    { id: 42, media_type: 'movie', title: '同名作品' },
+  ]).items;
+
+  for (const rawListMode of [false, true]) {
+    const initial = display(siteItems, { tmdbItems: [tmdbItems[0]], rawListMode });
+    assert.equal(initial.items.find((item) => item.sourceKind === 'tmdb').aggregateItems.length, 2);
+    const output = display(siteItems, { tmdbItems, rawListMode, previousOrder: initial.order });
+    const tmdbCards = output.items.filter((item) => item.sourceKind === 'tmdb');
+    assert.deepEqual(tmdbCards.map((item) => [item.id, item.tmdbType, item.tmdbId]), [
+      ['tmdb:tv:41', 'tv', 41],
+      ['tmdb:movie:42', 'movie', 42],
+    ]);
+    assert.ok(tmdbCards.every((item) => item.aggregateItems === undefined));
+    assert.ok(tmdbCards.every((item) => item.aggregateKind === undefined && item.aggregateSourceCount === undefined));
+    assert.equal(new Set(output.order).size, output.items.length);
+    assert.deepEqual(display(siteItems, {
+      tmdbItems: tmdbItems.slice().reverse(), rawListMode, previousOrder: output.order,
+    }), output);
+
+    const siteCards = output.items.filter((item) => item.sourceKind === 'site');
+    assert.ok(siteCards.every((item) => item.tmdbId === 0 && item.tmdbType === ''));
+    if (rawListMode) {
+      assert.equal(siteCards.length, 2);
+      assert.deepEqual(siteCards.map((item) => [item.siteKey, item.detailId]), [
+        [sources[0].siteKey, 'movie-row'],
+        [sources[1].siteKey, 0],
+      ]);
+      assert.deepEqual(siteCards.map((item) => item.raw.opaque.source), ['a', 'b']);
+      assert.ok(siteCards.every((item) => item.aggregateItems === undefined));
+      for (const [index, item] of siteCards.entries()) {
+        for (const key of ['id', 'siteKey', 'siteId', 'installationId', 'generation', 'siteName',
+          'siteDetail', 'detailId', 'rawTitle', 'raw', 'seasonHint', 'seasonHintLabel']) {
+          assert.deepEqual(item[key], siteItems[index][key], key);
+        }
+      }
+    } else {
+      assert.equal(siteCards.length, 1);
+      assert.equal(siteCards[0].aggregateKind, 'site');
+      assert.equal(siteCards[0].aggregateItems.length, 2);
+      assert.equal(siteCards[0].aggregateSourceCount, 2);
+      assert.deepEqual(siteCards[0].aggregateItems, siteItems);
+      assert.deepEqual(siteCards[0].aggregateItems.map((item) => [item.siteKey, item.detailId, item.raw.opaque.source]), [
+        [sources[0].siteKey, 'movie-row', 'a'],
+        [sources[1].siteKey, 0, 'b'],
+      ]);
+    }
+  }
+});
+
+test('title ambiguity uses TMDB type and ID even when movie and TV alias rules produce different groups', () => {
+  for (const title of ['同名作品', '同名作品2']) {
+    const siteItems = site({ list: [{ id: 'site', name: title }] }).items;
+    for (const types of [['movie', 'tv'], ['movie', 'movie'], ['tv', 'tv']]) {
+      const tmdbItems = types.flatMap((media_type, index) => mapTMDB(title, [{
+        id: types[0] === types[1] ? index + 41 : 41, media_type, title, name: title,
+      }]).items);
+      for (const rawListMode of [false, true]) {
+        const output = display(siteItems, { tmdbItems, rawListMode });
+        assert.equal(output.items.length, 3);
+        assert.deepEqual(output.items.filter((item) => item.sourceKind === 'tmdb').map((item) => item.id),
+          tmdbItems.map((item) => item.id));
+        assert.ok(output.items.every((item) => item.aggregateItems === undefined));
+        const card = output.items.find((item) => item.sourceKind === 'site');
+        assert.equal(card.id, siteItems[0].id);
+        assert.equal(card.detailId, 'site');
+        assert.deepEqual(card.raw, siteItems[0].raw);
+      }
+    }
+  }
 });
 
 test('TMDB sources and badges update in place across rounds and older seasons cannot replace newer hints', () => {

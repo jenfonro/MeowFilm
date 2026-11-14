@@ -1,23 +1,22 @@
-<Window x:Class="MeowFilm.Capabilities.MusicDesktopLyricColorWindow" x:ClassModifier="internal"
+<desktop:DesktopWindow x:Class="MeowFilm.Capabilities.MusicDesktopLyricColorWindow" x:ClassModifier="internal"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  Width="430" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
- ShowInTaskbar="False" Topmost="True" UseLayoutRounding="True"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}">
- <Window.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries>
+ ShowInTaskbar="False" Topmost="True">
+ <desktop:DesktopWindow.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries>
   <ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml"/>
- </ResourceDictionary.MergedDictionaries></ResourceDictionary></Window.Resources>
- <Window.Style><Style TargetType="Window">
+ </ResourceDictionary.MergedDictionaries></ResourceDictionary></desktop:DesktopWindow.Resources>
+ <desktop:DesktopWindow.Style><Style TargetType="{x:Type desktop:DesktopWindow}">
   <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}"/>
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
   </Trigger></Style.Triggers>
- </Style></Window.Style>
+ </Style></desktop:DesktopWindow.Style>
  <StackPanel Margin="20">
-  <TextBlock x:Name="ColorLabel" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,16"/>
+  <TextBlock x:Name="ColorLabel" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,16"/>
   <desktop:ColorSelection x:Name="Selection" ValueCommitted="Color_Committed" Margin="0,0,0,20"
                           IsEnabled="{Binding CanEditDesktopLyricSettings}"/>
   <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
@@ -26,4 +25,4 @@
            IsEnabled="{Binding CanEditDesktopLyricSettings}" Style="{StaticResource MeowFilm.PrimaryButton}"/>
   </StackPanel>
  </StackPanel>
-</Window>
+</desktop:DesktopWindow>

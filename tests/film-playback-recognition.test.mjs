@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildEpisodeMap, resolveEpisode } from '../packages/film-playback/src/episodes.js';
-import { matchesResult, normalizeDetail, recognizeCandidates } from '../packages/film-playback/src/recognition.js';
-import { isCandidateAllowed } from '../packages/film-playback/src/policy.js';
+import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode } from '../packages/film-playback/src/episodes.js';
+import { matchesResult, mediaVariants, normalizeDetail, recognizeCandidates,
+  recognizeVariantCandidates } from '../packages/film-playback/src/recognition.js';
+import { compareCandidates, isCandidateAllowed } from '../packages/film-playback/src/policy.js';
 import { createRecognitionRules } from '../packages/film-playback/src/rules.js';
 import { checkTarget, resultDetailId } from '../packages/film-playback/src/identity.js';
 import { encodePanResource } from '@meowfilm/script-host/cat-output';
@@ -19,6 +20,41 @@ const recognize = (raw, options = {}) => recognizeCandidates(normalizeDetail(raw
   { target, source, ...options });
 const coordinates = map => map.map(({ season, episode, globalEpisode }) =>
   [season, episode, globalEpisode]);
+
+test('M3 real HLS variants keep one parent file, distinct opaque selection and observed quality only', async () => {
+  const [parent] = await recognize(detail([{ id: 'opaque-play', name: 'S01E01.Parent.4K.HDR',
+    fps: 60, codec: 'parent-codec' }]), { metadata });
+  const value = { _meow: { version: 1, media: [{ variants: [
+    { url: 'https://hls.invalid/show/high/index.m3u8?part=1', quality: '4K', resolution: '3840x2160', fps: 59.94 },
+    { url: 'https://hls.invalid/low.m3u8', quality: '1080P', resolution: '1920x1080', fps: 25 },
+    { url: 'https://hls.invalid/unknown.m3u8', fps: Infinity },
+  ] }] } };
+  const before = structuredClone(value);
+  const variants = mediaVariants(value), candidates = await recognizeVariantCandidates(parent, variants);
+  assert.equal(new Set(candidates.map(row => row.id)).size, 3);
+  assert.ok(candidates.every(row => row.id !== parent.id && row.parentId === parent.id &&
+    row.fileIdentity === parent.fileIdentity && row.playId === parent.playId &&
+    row.lineId === parent.lineId && row.source.detailId === parent.source.detailId));
+  assert.deepEqual(coordinates(candidates), [[1, 1, 1], [1, 1, 1], [1, 1, 1]]);
+  assert.deepEqual(candidates.map(row => row.quality), ['4k_fps', '1080p', undefined]);
+  assert.deepEqual(candidates.map(row => row.fps), [59.94, 25, undefined]);
+  assert.ok(candidates.every(row => row.codec === undefined));
+  assert.equal(candidates[2].resolution, undefined);
+  const reordered = await recognizeVariantCandidates(parent, [...variants].reverse());
+  assert.deepEqual(reordered.map(row => row.id), candidates.map(row => row.id).reverse());
+  assert.equal([...candidates].sort((a, b) => compareCandidates(a, b))[0].id, candidates[0].id);
+  assert.deepEqual(value, before);
+  assert.deepEqual(mediaVariants({ _meow: { version: 2, media: value._meow.media } }), []);
+  const actual = value._meow.media[0].variants[0];
+  assert.equal(mediaVariants({ _meow: { version: 1, media: [{ variants: [actual, { ...actual }] }] } }).length, 1);
+  assert.throws(() => mediaVariants({ _meow: { version: 1, media: [
+    { variants: [actual, { ...actual, quality: '1080P' }] },
+  ] } }), { code: 'UPSTREAM_FORMAT' });
+  for (const url of ['file:///tmp/media.m3u8', 'https://[', 'https://hls.invalid/a\nb']) {
+    assert.throws(() => mediaVariants({ _meow: { version: 1, media: [{ variants: [{ url }] }] } }),
+      { code: 'UPSTREAM_FORMAT' });
+  }
+});
 
 test('E49 typed projected detail identity is not a UI id, display siteDetail or a String-coerced member', () => {
   const raw = { vod_id: 0, vod_name: '原始标题', vod_remarks: '原备注' };
@@ -37,7 +73,8 @@ test('E49 typed projected detail identity is not a UI id, display siteDetail or 
     source: { key: 'removed', detailId: 0, candidateId: 'old-exact-selection' } });
   assert.deepEqual(filtered.source, { key: 'removed', detailId: 0, candidateId: 'old-exact-selection' });
   assert.deepEqual(filtered.members, [{ sourceKey: 'remaining', detailId: 0 }]);
-  for (const patch of [{ members: [] }, { members: [{ sourceKey: source.key, detailId: null }] },
+  assert.deepEqual(checkTarget({ ...group, members: [] }).members, []);
+  for (const patch of [{ members: [{ sourceKey: source.key, detailId: null }] },
     { members: [{ sourceKey: '', detailId: 0 }] }, { metadataProvider: 'tmdb', metadataId: 42 }]) {
     assert.throws(() => checkTarget({ ...group, ...patch }), { code: 'INVALID_REQUEST' });
   }
@@ -337,6 +374,18 @@ test('E11 structured pan files retain complete private references, original name
   assert.equal(item.id.includes('fid-1'), false);
 });
 
+test('E11 provider video metadata remains raw on the recognized candidate', async () => {
+  const ref = file('fid-video', { name: 'Feature.mkv', path: '/Feature.mkv',
+    resolution: '1920x1080', fps: 59.94, codec: 'HEVC' });
+  const [item] = await recognize({ id: 'detail-a', lines: [{ id: 'line-a', episodes: [
+    { id: 'feature', name: 'Feature.mkv', file: ref },
+  ] }] }, { target: { id: 'tmdb:movie:1', kind: 'movie', title: 'Feature' } });
+  assert.equal(item.resolution, '1920x1080');
+  assert.equal(item.fps, 59.94);
+  assert.equal(item.codec, 'HEVC');
+  assert.equal(item.file.resolution, '1920x1080');
+});
+
 test('E11 data.expand rows keep opaque row IDs separate from original script play IDs', async () => {
   const raw = normalizeDetail(detail([{ id: 'original-script-id', name: '原始分享' }]), { source });
   const expandedFile = file('expanded-fid', { name: 'S02E01.mkv', path: '/实际目录/S02E01.mkv' });
@@ -524,4 +573,39 @@ test('E11 malformed/ambiguous details fail without leaking raw IDs or accepting 
   assert.equal(selected.lines[0].episodes[0].playId, 'two');
   (await assert.rejects(async () => (await recognize({ lines: [{ id: 'flag', label: 'flag',
     episodes: [{ id: 'secret', name: 'S01E01.mkv' }] }] })), { code: 'INVALID_DETAIL' }));
+});
+
+test('verified Douban season evidence takes precedence over raw related-subject seasons', () => {
+  const value = { seasons: [{ id: 'subject-one' }, { id: 'subject-two' }],
+    doubanSeasons: [{ season: 1, episodeCount: 2 }, { season: 2, episodeCount: 1 }] };
+  assert.deepEqual(buildEpisodeMap(value).map(row => [row.season, row.episode, row.globalEpisode]),
+    [[1, 1, 1], [1, 2, 2], [2, 1, 3]]);
+  assert.deepEqual(buildEpisodeMap({ ...value, doubanSeasons: [] }), []);
+});
+
+test('equal season partitions map aired TMDB episodes locally despite different full-season counts', () => {
+  const own = { doubanSeasons: [1, 2, 3, 4].map(season => ({ season, episodeCount: 3 })) };
+  const reference = { seasons: [1, 2, 3, 4].map(season_number => ({
+    season_number, episode_count: 2, episodes: [1, 2].map(episode_number =>
+      ({ season_number, episode_number, name: `S${season_number}E${episode_number}` })),
+  })) };
+  reference.seasons.unshift({ season_number: 0, episode_count: 1 });
+  const rows = matchEpisodeMaps(own, reference);
+  assert.equal(rows.length, 12);
+  assert.deepEqual(rows.filter(row => row.episode.season === 2).map(({ episode, match }) =>
+    [episode.episode, episode.globalEpisode, match?.name]), [[1, 4, 'S2E1'], [2, 5, 'S2E2'], [3, 6, undefined]]);
+  assert.equal(rows[0].episode.name, undefined);
+});
+
+test('different season partitions require unambiguous global evidence to map episode metadata', () => {
+  const own = { doubanSeasons: [{ season: 1, episodeCount: 2 }, { season: 2, episodeCount: 2 }] };
+  const reference = { seasons: [{ season_number: 1, episode_count: 3,
+    episodes: [1, 2, 3].map(episode_number => ({ episode_number, name: `Episode ${episode_number}` })) }] };
+  assert.deepEqual(matchEpisodeMaps(own, reference).map(row => row.match?.name),
+    ['Episode 1', 'Episode 2', 'Episode 3', undefined]);
+  assert.deepEqual(matchEpisodeMaps({ doubanSeasons: [{ season: 2, episodeCount: 2 }] }, reference)
+    .map(row => row.match), [null, null]);
+  const ambiguous = { seasons: [{ season_number: 1, episode_count: 2,
+    episodes: [{ episode_number: 1 }, { episode_number: 1 }] }] };
+  assert.equal(matchEpisodeMaps(own, ambiguous)[0].match, null);
 });

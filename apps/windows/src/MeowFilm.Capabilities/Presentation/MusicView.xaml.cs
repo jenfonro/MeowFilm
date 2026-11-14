@@ -4,6 +4,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
@@ -168,7 +169,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         actions.Children.Add(confirm); actions.Children.Add(cancel);
         var content = new StackPanel { Margin = new(24) };
         content.Children.Add(input); content.Children.Add(actions);
-        var dialog = new Window
+        var dialog = new DesktopWindow
         {
             Owner = Window.GetWindow(this), Title = "重命名歌单",
             Width = 400, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize,
@@ -177,9 +178,6 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         dialog.Resources.MergedDictionaries.Add(new ResourceDictionary
         { Source = new Uri("/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml", UriKind.Relative) });
         dialog.SetResourceReference(BackgroundProperty, "MeowFilm.Brush.Surface");
-        dialog.SetResourceReference(FontFamilyProperty, SystemFonts.MessageFontFamilyKey);
-        TextOptions.SetTextFormattingMode(dialog, TextFormattingMode.Display);
-        TextOptions.SetTextRenderingMode(dialog, TextRenderingMode.Auto);
         confirm.IsEnabled = input.Text.Trim().Length > 0;
         input.TextChanged += (_, _) => confirm.IsEnabled = input.Text.Trim().Length > 0;
         confirm.Click += (_, _) => dialog.DialogResult = true;
@@ -632,15 +630,16 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
                 Margin = new Thickness(0, 0, 10, 0)
             };
             var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            text.Children.Add(new TextBlock
+            var title = new TextBlock
             {
                 Text = song.Title,
-                FontSize = 13,
-                FontWeight = FontWeights.SemiBold,
                 Foreground = new SolidColorBrush(Color.FromRgb(45, 50, 62)),
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 MaxWidth = 150
-            });
+            };
+            title.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Compact");
+            title.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Strong");
+            text.Children.Add(title);
             text.Children.Add(new TextBlock
             {
                 Text = song.Artist,

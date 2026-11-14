@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Automation;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -313,7 +314,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         content.Children.Add(enabled); content.Children.Add(autoDisable);
         var save = new Button { Content = "保存", Style = (Style)FindResource("Settings.PrimaryButton"), HorizontalAlignment = HorizontalAlignment.Right, Margin = new(0, 20, 0, 0) };
         content.Children.Add(save);
-        var dialog = new Window { Owner = Window.GetWindow(this), Title = stored is null ? "添加人工匹配" : "编辑人工匹配",
+        var dialog = new DesktopWindow { Owner = Window.GetWindow(this), Title = stored is null ? "添加人工匹配" : "编辑人工匹配",
             Content = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, Width = 460, Height = 700,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false };
         editor = dialog;

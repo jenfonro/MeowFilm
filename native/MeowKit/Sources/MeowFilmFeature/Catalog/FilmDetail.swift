@@ -38,12 +38,14 @@ public struct FilmSeason: Equatable, Sendable {
     public let id: String
     public let title: String
     public let number: Int?
+    public let posterURL: URL?
     public let episodes: [FilmEpisode]
 
-    public init(id: String, title: String, number: Int? = nil, episodes: [FilmEpisode] = []) {
+    public init(id: String, title: String, number: Int? = nil, posterURL: URL? = nil, episodes: [FilmEpisode] = []) {
         self.id = id
         self.title = title
         self.number = number
+        self.posterURL = posterURL
         self.episodes = episodes
     }
 }

@@ -14,7 +14,7 @@ internal readonly record struct MusicDesktopLyricsWindowState(
     double Left, double Top, double Width, double Height, bool IsLocked, bool UserSized,
     MusicDesktopLyricsGeometry? Geometry);
 
-internal partial class MusicDesktopLyricsWindow : Window
+internal partial class MusicDesktopLyricsWindow : DesktopWindow
 {
     private readonly MusicCapability module;
     private readonly DispatcherTimer pointerObserver;

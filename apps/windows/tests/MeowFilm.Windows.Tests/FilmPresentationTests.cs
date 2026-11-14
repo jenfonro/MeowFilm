@@ -25,7 +25,7 @@ public static class FilmPresentationTests
             () => MusicQualityConsumerTests.Sta(HomePresentation));
         yield return new("film-presentation: more opens data while all cards open the playback page",
             () => MusicQualityConsumerTests.Sta(DataNavigation));
-        yield return new("film-presentation: classified list error stays in the third row and real source selection recovers it",
+        yield return new("film-presentation: classified list error uses the floating notice and real source selection recovers it",
             () => MusicQualityConsumerTests.Sta(PlaybackListFailure));
         yield return new("film-presentation: playback shares the application canvas across poster and theme changes with system contrast",
             () => MusicQualityConsumerTests.Sta(PlaybackCanvas));
@@ -263,7 +263,7 @@ public static class FilmPresentationTests
             var sharedHeading = (Style)view.FindResource("MeowFilm.SectionHeading");
             Check(dataTitle.Text == "热门电影" &&
                 ReferenceEquals(dataTitle.Style, sharedHeading) &&
-                dataTitle.FontSize == 18 && dataTitle.FontWeight == FontWeights.SemiBold,
+                dataTitle.FontSize == 18 && dataTitle.FontWeight == FontWeights.Bold,
                 "data page uses the shared compact section heading");
             var filters = (ItemsControl)view.FindName("DataFilters");
             var filterButtons = Visuals(filters).OfType<Button>()
@@ -368,7 +368,8 @@ public static class FilmPresentationTests
         {
             root["sources"] = JsonNode.Parse(FilmJson.Encode(new[]
             {
-                new { id = "failed-source", title = "失败来源" }, new { id = "valid-source", title = "有效来源" }
+                new { id = "failed-source", title = "失败影片", source = new { name = "失败站点" } },
+                new { id = "valid-source", title = "有效影片", source = new { name = "有效站点" } }
             }).GetRawText());
             root["browsing"] = JsonNode.Parse(FilmJson.Encode(new
             {
@@ -382,27 +383,25 @@ public static class FilmPresentationTests
             "the initial source and its episode reach the playback page");
         var view = new FilmPlaybackView { DataContext = rig.Page };
         var window = WindowFor(view, 1150, 850);
+        var notices = new List<string>();
+        window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
+        { if (args.Message.Length > 0) notices.Add(args.Message); }));
+        rig.Session.OperationFailed += (_, code) => ((NoticeOutlet)view.FindName("Notices")).Message =
+            FilmPlaybackError.Message(code, "播放操作失败");
         try
         {
             window.Show(); window.UpdateLayout(); await Drain();
             var source = (ComboBox)view.FindName("SourcePicker");
-            var status = Visuals(view).OfType<TextBlock>().Single(text =>
-                BindingOperations.GetBindingExpression(text, TextBlock.TextProperty)?.ParentBinding.Path?.Path == "ListStatus");
-            var listRegion = (Grid)status.Parent;
-            var controlRows = (StackPanel)((DockPanel)source.Parent).Parent;
-            var body = (Panel)listRegion.Parent;
             rig.Runtime.Change(root => root["browsing"]!["error"] = "UPSTREAM_FORMAT");
-            await Until(() => rig.Page.ListStatus == "上游数据格式错误",
-                "the upstream format failure reaches the classified list status");
+            await Until(() => rig.Page.ListStatus == "上游数据格式错误" && notices.Contains("上游数据格式错误"),
+                "the upstream format failure reaches the classified floating notice");
             window.UpdateLayout(); await Drain();
-            Check(listRegion.IsVisible && status.Text == "上游数据格式错误" &&
-                status.HorizontalAlignment == HorizontalAlignment.Center && status.VerticalAlignment == VerticalAlignment.Center &&
-                status.TextAlignment == TextAlignment.Center &&
-                ReferenceEquals(controlRows.Parent, body) && controlRows.Children.Count == 2 &&
-                body.Children.IndexOf(listRegion) == body.Children.IndexOf(controlRows) + 1 &&
+            Check(!rig.Page.ShowListMessage &&
+                !Visuals(view).OfType<TextBlock>().Any(text => text.IsVisible && text.Text == "上游数据格式错误") &&
                 rig.Page.Episodes.Count == 0 && rig.Page.Candidates.Count == 0 && !rig.Page.CanBrowseRaw,
-                "the classified error is centered after the source and season rows, not beside them or over the whole page");
-            Check(source.IsEnabled && source.Items.Count == 3 && rig.Page.Sources.Any(choice => choice.Id == "valid-source"),
+                "the classified error leaves no inline error text or stale playable content in the page");
+            Check(source.IsEnabled && source.Items.Count == 3 &&
+                rig.Page.Sources.Any(choice => choice is { Id: "valid-source", Label: "有效站点" }),
                 "the failed third row leaves exact source choices enabled");
             int before = rig.Runtime.Calls.Count(call => call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == "browse");
             rig.Runtime.Intercept = (method, input, _) =>
@@ -422,8 +421,8 @@ public static class FilmPresentationTests
                 return Task.FromResult(FilmRuntimeProbe.Ok(rig.Runtime.Value));
             };
             source.SelectedItem = rig.Page.Sources.Single(choice => choice.Id == "valid-source");
-            await Until(() => rig.Page.SourceId == "valid-source" && rig.Page.Episodes.Count == 1 && !listRegion.IsVisible,
-                "the explicitly selected source restores its episode and hides the list status");
+            await Until(() => rig.Page.SourceId == "valid-source" && rig.Page.Episodes.Count == 1 && rig.Page.ListError.Length == 0,
+                "the explicitly selected source restores its episode and clears the failed directory");
             Check(rig.Page.ListError == "" && !rig.Page.ShowListStatus && rig.Page.Candidates.Single().Id == "recovered" &&
                 rig.Page.CanBrowseRaw && source.IsEnabled &&
                 rig.Runtime.Calls.Count(call => call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == "browse") == before + 1 &&
@@ -541,7 +540,7 @@ public static class FilmPresentationTests
         // Windows can constrain the offscreen window to the session's display width.
         // Keep the tested content width independent of that native window constraint.
         content.Width = width;
-        return new()
+        return new DesktopWindow()
         {
             Content = content,
             Width = width,

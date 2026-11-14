@@ -302,7 +302,7 @@ public static partial class MusicOfficialPlaybackScopeTests
                 current.Background != other.Background, "current quality and hovered action have distinct backgrounds");
             current.SetValue(highlighted, true);
             Check(current.Background == (Brush)current.FindResource("MeowFilm.Brush.ItemSelected") &&
-                current.FontWeight == FontWeights.SemiBold, "hovering current quality preserves its current identity");
+                current.FontWeight == FontWeights.Bold, "hovering current quality preserves its current identity");
             current.SetValue(highlighted, false); other.SetValue(highlighted, false);
             foreach (var item in surface.Menu.Items.OfType<MenuItem>().Where(item => item.IsChecked || item.HasItems).ToArray())
             {

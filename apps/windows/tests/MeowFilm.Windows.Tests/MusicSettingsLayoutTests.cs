@@ -402,38 +402,45 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
             var view = (MusicSettingsView)f.Module.SettingsView;
-            Render(view, 1200, 760); await Drain();
-            foreach (var surface in new Control[] { view, (MusicSourcesSettingsView)view.FindName("SourcesPage") })
+            // Supply inherited typography without adding Loaded to this reference-navigation fixture.
+            var owner = new DesktopWindow { Content = view };
+            try
             {
-                Equal(SystemFonts.MessageFontFamily, surface.FontFamily);
-                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(surface));
-                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(surface));
-                True(surface.UseLayoutRounding && surface.SnapsToDevicePixels, "settings surfaces preserve pixel-aligned system typography");
+                Render(view, 1200, 760); await Drain();
+                True(!view.IsLoaded, "reference navigation keeps its original unmounted fixture boundary");
+                foreach (var surface in new Control[] { view, (MusicSourcesSettingsView)view.FindName("SourcesPage") })
+                {
+                    Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(surface));
+                    Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(surface));
+                    Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(surface));
+                    True(surface.UseLayoutRounding && surface.SnapsToDevicePixels, "settings surfaces preserve pixel-aligned system typography");
+                }
+                var settingsText = Visuals(view).OfType<TextBlock>().Where(text => !string.IsNullOrWhiteSpace(text.Text)).ToArray();
+                True(settingsText.Length > 0 && settingsText.All(text =>
+                    TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&
+                    TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto),
+                    "actual settings labels and values use Display and Auto");
+                var anchors = ReplicaAnchors(view);
+                True(anchors.Select(anchor => (string)anchor.Content).SequenceEqual(new[] { "账号与平台", "搜索", "音质", "歌词与封面", "音源" }), "latest v2 section names");
+                int calls = f.Calls.Log.Count;
+                var scroll = (ScrollViewer)view.FindName("SettingsScroller");
+                for (int index = 0; index < anchors.Length - 1; index++)
+                {
+                    anchors[index].IsChecked = true; Render(view, 1200, 760); await Drain(); view.UpdateLayout();
+                    var section = (Border)view.FindName((string)anchors[index].Tag);
+                    True(Math.Abs(section.TranslatePoint(new Point(), scroll).Y) <= 1, "selected section starts at the viewport top");
+                    Equal(index, Array.IndexOf(anchors, anchors.Single(anchor => anchor.IsChecked == true)));
+                }
+                anchors[^1].IsChecked = true; Render(view, 1200, 760); await Drain();
+                Equal(Visibility.Collapsed, scroll.Visibility); Equal(Visibility.Visible, ((MusicSourcesSettingsView)view.FindName("SourcesPage")).Visibility);
+                anchors[0].IsChecked = true; Render(view, 1200, 760); await Drain();
+                Equal(Visibility.Visible, scroll.Visibility); Equal(Visibility.Collapsed, ((MusicSourcesSettingsView)view.FindName("SourcesPage")).Visibility);
+                True(f.Calls.Log.Skip(calls).All(call => call.Method is "music.officialSources.settings.get" or
+                    "music.quality.settings.get" or "music.sources.list"),
+                    "source navigation reads its native settings and installations without writing");
+                True(!f.Runtime.HasStarted, "reference navigation never starts script execution");
             }
-            var settingsText = Visuals(view).OfType<TextBlock>().Where(text => !string.IsNullOrWhiteSpace(text.Text)).ToArray();
-            True(settingsText.Length > 0 && settingsText.All(text =>
-                TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&
-                TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto),
-                "actual settings labels and values use Display and Auto");
-            var anchors = ReplicaAnchors(view);
-            True(anchors.Select(anchor => (string)anchor.Content).SequenceEqual(new[] { "账号与平台", "搜索", "音质", "歌词与封面", "音源" }), "latest v2 section names");
-            int calls = f.Calls.Log.Count;
-            var scroll = (ScrollViewer)view.FindName("SettingsScroller");
-            for (int index = 0; index < anchors.Length - 1; index++)
-            {
-                anchors[index].IsChecked = true; Render(view, 1200, 760); await Drain(); view.UpdateLayout();
-                var section = (Border)view.FindName((string)anchors[index].Tag);
-                True(Math.Abs(section.TranslatePoint(new Point(), scroll).Y) <= 1, "selected section starts at the viewport top");
-                Equal(index, Array.IndexOf(anchors, anchors.Single(anchor => anchor.IsChecked == true)));
-            }
-            anchors[^1].IsChecked = true; Render(view, 1200, 760); await Drain();
-            Equal(Visibility.Collapsed, scroll.Visibility); Equal(Visibility.Visible, ((MusicSourcesSettingsView)view.FindName("SourcesPage")).Visibility);
-            anchors[0].IsChecked = true; Render(view, 1200, 760); await Drain();
-            Equal(Visibility.Visible, scroll.Visibility); Equal(Visibility.Collapsed, ((MusicSourcesSettingsView)view.FindName("SourcesPage")).Visibility);
-            True(f.Calls.Log.Skip(calls).All(call => call.Method is "music.officialSources.settings.get" or
-                "music.quality.settings.get" or "music.sources.list"),
-                "source navigation reads its native settings and installations without writing");
-            True(!f.Runtime.HasStarted, "reference navigation never starts script execution");
+            finally { owner.Content = null; owner.Close(); }
         });
         yield return Case("replica priority lists preserve 52 pixel rows unnumbered 36 pixel grips and paired panels", async () =>
         {
@@ -948,7 +955,7 @@ public static partial class MusicUiTests
         internal Window Window { get; }
         internal ReplicaMount(FrameworkElement view)
         {
-            Window = new() { Content = view, Width = 1248, Height = 820, Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
+            Window = new DesktopWindow() { Content = view, Width = 1248, Height = 820, Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
             Window.Show();
         }
         public void Dispose() { Window.Content = null; Window.Close(); }

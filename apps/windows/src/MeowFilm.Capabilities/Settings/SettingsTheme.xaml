@@ -15,10 +15,10 @@
  <SolidColorBrush x:Key="Settings.Brush.GripSelected" Color="#D1F0DC"/>
 
  <Style x:Key="Settings.Text" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
-  <Setter Property="FontSize" Value="14"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/>
  </Style>
  <Style x:Key="Settings.Subtitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Muted}">
-  <Setter Property="FontSize" Value="12"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
  </Style>
  <Style x:Key="Settings.SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.SettingsSectionTitle}"/>
  <Style x:Key="Settings.Section" TargetType="Border" BasedOn="{StaticResource MeowFilm.SettingsSection}"/>
@@ -39,7 +39,7 @@
  <Style x:Key="Settings.Button" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
   <Setter Property="MinHeight" Value="32"/><Setter Property="Height" Value="32"/>
   <Setter Property="Padding" Value="14,5"/><Setter Property="Margin" Value="0"/>
-  <Setter Property="FontSize" Value="13"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
@@ -56,8 +56,8 @@
  </Style>
  <Style x:Key="Settings.PrimaryButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.PrimaryButton}">
   <Setter Property="MinHeight" Value="32"/><Setter Property="Height" Value="32"/>
-  <Setter Property="Padding" Value="12,5"/><Setter Property="FontSize" Value="13"/>
-  <Setter Property="FontWeight" Value="SemiBold"/>
+  <Setter Property="Padding" Value="12,5"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
+  <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
  </Style>
  <Style x:Key="Settings.DangerButton" TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Error}"/>
@@ -99,7 +99,7 @@
  </Style>
  <Style x:Key="Settings.ComboBox" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.SettingsComboBox}"/>
  <Style x:Key="Settings.TextBox" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
-  <Setter Property="Height" Value="40"/><Setter Property="MinHeight" Value="0"/><Setter Property="FontSize" Value="14"/>
+  <Setter Property="Height" Value="40"/><Setter Property="MinHeight" Value="0"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/>
   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/><Setter Property="Padding" Value="12,6"/>
  </Style>
  <Style x:Key="Settings.PopupSurface" TargetType="Border">
@@ -108,7 +108,7 @@
   <Setter Property="TextElement.Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/><Setter Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers>
  </Style>
- <Style x:Key="Settings.PopupTitle" TargetType="TextBlock" BasedOn="{StaticResource Settings.SectionTitle}"><Setter Property="FontSize" Value="18"/></Style>
+ <Style x:Key="Settings.PopupTitle" TargetType="TextBlock" BasedOn="{StaticResource Settings.SectionTitle}"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionHeading}"/></Style>
  <Style x:Key="Settings.PopupClose" TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
   <Setter Property="Width" Value="28"/><Setter Property="Height" Value="28"/><Setter Property="MinHeight" Value="28"/><Setter Property="Padding" Value="0"/><Setter Property="FontFamily" Value="{DynamicResource MeowFilm.Font.Icons}"/>
  </Style>

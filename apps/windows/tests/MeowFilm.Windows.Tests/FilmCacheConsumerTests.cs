@@ -18,6 +18,7 @@ public static class FilmCacheConsumerTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Test("supplement fills display gaps without changing Douban identity or episode coordinates", SupplementProjection);
+        yield return Test("trusted Douban seasons take priority over raw related subjects and preserve owner episode coordinates", DoubanSeasonsProjection);
         yield return Test("ordinary presentation restore asks owner without forced refresh or another address read", RestorePresentation);
         yield return Test("refresh acknowledgement updates stale display and never schedules its returned pending stage", RefreshDoesNotPlay);
         yield return Test("same-directory refresh retains exact items while loading and reports failure only through session error", RefreshDirectory);
@@ -26,7 +27,7 @@ public static class FilmCacheConsumerTests
         yield return Test("accepted address retry reacquires the exact candidate and preserves output until replacement", RetryAccepted);
         yield return Test("rejected pending address retry leaves the admitted native preparation alive", RetryPending);
         yield return Test("retry without an attempt delegates the most recent failed candidate to owner", RetryLastFailed);
-        yield return Test("browse refresh and picture settings retry route errors through notices", ActionControls);
+        yield return Test("picture settings retry routes errors through notices", ActionControls);
         yield return Test("failed media exposes picture recovery without covering healthy output", RecoveryControl);
         yield return Test("runtime-relative Douban image identity uses the existing native artwork cache", ImageCache);
     }
@@ -35,15 +36,15 @@ public static class FilmCacheConsumerTests
     {
         var target = new FilmPlaybackTarget("douban:tv:100", "tv", "豆瓣主资料", "douban", "100",
             Season: 1, Episode: 2, GlobalEpisode: 2);
-        var card = new FilmCardItem(target.Id, target.Title, "https://fixture.invalid/old.jpg", "9")
-        { PlaybackContext = new(target) };
-        var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
         var detail = FilmJson.Encode(new
         {
             title = "豆瓣主资料", intro = "", pic = new { normal = "" },
             seasons = new[] { new { season_number = 1, name = "豆瓣第一季",
                 episodes = new[] { new { season = 1, episode = 1 }, new { season = 1, episode = 2 } } } }
         });
+        var card = new FilmCardItem(target.Id, target.Title, "https://fixture.invalid/old.jpg", "9")
+        { PlaybackContext = new(target, Metadata: detail) };
+        var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
         var supplement = FilmJson.Encode(new
         {
             provider = "tmdb", metadataId = 900, kind = "tv", metadata = new
@@ -57,7 +58,10 @@ public static class FilmCacheConsumerTests
                 seasons = new[] { new { season_number = 99, episode_count = 999 } }, number_of_episodes = 999
             }
         });
-        var root = JsonNode.Parse(Snapshot(Guid.NewGuid(), 1, target, detail).GetRawText())!.AsObject();
+        // The resolved metadata view may select Douban after the entry's TMDB
+        // lookup; its fresh owner metadata is not an unresolved seed summary.
+        var root = JsonNode.Parse(Snapshot(Guid.NewGuid(), 1, target, detail,
+            entryResolution: "matched").GetRawText())!.AsObject();
         root["metadataSupplement"] = JsonNode.Parse(supplement.GetRawText());
         root["metadataCache"] = Cache("fresh");
         page.Apply(new(JsonSerializer.SerializeToElement(root)));
@@ -110,6 +114,79 @@ public static class FilmCacheConsumerTests
         return Task.CompletedTask;
     }
 
+    private static Task DoubanSeasonsProjection()
+    {
+        var target = new FilmPlaybackTarget("douban:tv:100", "tv", "豆瓣分季", "douban", "100",
+            Season: 2, Episode: 1, GlobalEpisode: 4);
+        var detail = FilmJson.Encode(new
+        {
+            title = target.Title, pic = new { normal = "/v1/douban/images/cover.jpg" },
+            seasons = new[] { new { id = "100", title = "关联第一季" }, new { id = "200", title = "关联第二季" } },
+            doubanSeasons = new[]
+            {
+                new { season_number = 1, name = "豆瓣第一季", metadataId = "100", episode_count = 3 },
+                new { season_number = 2, name = "豆瓣第二季", metadataId = "200", episode_count = 2 }
+            }
+        });
+        var card = new FilmCardItem(target.Id, target.Title, "", "") { PlaybackContext = new(target, Metadata: detail) };
+        var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
+        var root = JsonNode.Parse(Snapshot(Guid.NewGuid(), 1, target, detail,
+            entryResolution: "matched").GetRawText())!.AsObject();
+        root["episodes"] = JsonNode.Parse("""
+            [
+              {"season":2,"episode":1,"globalEpisode":4,"name":"准确映射集名","still_path":"/v1/tmdb/images/still.jpg","runtime":46,"overview":"准确逐集简介"},
+              {"season":2,"episode":2,"globalEpisode":5}
+            ]
+            """);
+        page.Apply(new(JsonSerializer.SerializeToElement(root)));
+        Check(page.HasSeasons && page.Seasons.Select(row => row.Season).SequenceEqual(new int?[] { 1, 2 }) &&
+            page.Seasons.Select(row => row.Label).SequenceEqual(new[] { "豆瓣第一季", "豆瓣第二季" }) &&
+            page.SelectedSeason?.Season == 2 && page.MetadataSources.Single().MetadataSourceId == "douban:100",
+            "trusted owner seasons remain selectable under one Douban source even when original related subjects have no season coordinates");
+        Check(page.Episodes.Count == 2 && page.Episodes[0] is
+                { Season: 2, Number: 1, GlobalEpisode: 4, Title: "准确映射集名", Duration: "46分钟",
+                    Overview: "准确逐集简介", Image: "/v1/tmdb/images/still.jpg", IsSelected: true } &&
+            page.Episodes[1] is { Season: 2, Number: 2, GlobalEpisode: 5, Title: "", Duration: "",
+                Image: "/v1/douban/images/cover.jpg" } &&
+            page.CaptureRequest.Metadata?.GetProperty("doubanSeasons")[1].GetProperty("metadataId").GetString() == "200",
+            "projected episode fields and the real fallback preserve Douban coordinates and each owner's subject identity");
+        root["metadata"]!["doubanSeasons"]![1]!["episodes"] = root["episodes"]!.DeepClone();
+        root["metadataSupplement"] = JsonNode.Parse("""
+            {"provider":"tmdb","metadataId":900,"kind":"tv","metadata":{"seasons":[
+              {"season_number":2,"episodes":[{"episode_number":1,"name":"不能按同号猜测","still_path":"/wrong.jpg"},
+                {"episode_number":2,"name":"不属于豆瓣第二集","still_path":"/wrong-2.jpg"}]}
+            ]}}
+            """);
+        root["browsing"] = JsonNode.Parse("""
+            {"sourceId":"site","lineId":0,"season":2,"loading":false,"lines":[],"episodes":[
+              {"candidateId":"file-1","season":2,"episode":1,"globalEpisode":4,"name":"原始文件一"},
+              {"candidateId":"file-2","season":2,"episode":2,"globalEpisode":5,"name":"原始文件二"}
+            ]}
+            """);
+        page.Apply(new(JsonSerializer.SerializeToElement(root)));
+        Check(page.Episodes[0] is { CandidateId: "file-1", Title: "准确映射集名",
+                OriginalName: "原始文件一", Image: "/v1/tmdb/images/still.jpg", Duration: "46分钟" } &&
+            page.Episodes[1] is { CandidateId: "file-2", Title: "", Image: "/v1/douban/images/cover.jpg" },
+            "a retained source directory consumes owner-mapped Douban details rather than guessing local TMDB episode coordinates");
+        root["metadata"]!["doubanSeasons"] = new JsonArray();
+        root["metadata"]!["seasons"] = JsonNode.Parse("""[{"season_number":1,"name":"旧季度"}]""");
+        page.Apply(new(JsonSerializer.SerializeToElement(root)));
+        Check(page.Seasons.Count == 0,
+            "a successful empty trusted season list cannot be replaced by raw or old season fields");
+        root["metadata"] = JsonNode.Parse("""
+            {"name":"TMDB分季","seasons":[{"season_number":0,"name":"特别篇"},{"season_number":1,"name":"第一季"}]}
+            """);
+        root["metadataSources"] = JsonNode.Parse("""[{"id":"tmdb:900","provider":"tmdb","metadataId":"900","kind":"tv"}]""");
+        root["metadataSourceId"] = "tmdb:900";
+        root["browsing"]!["season"] = 1;
+        page.Apply(new(JsonSerializer.SerializeToElement(root)));
+        Check(page.Seasons.Select(row => row.Season).SequenceEqual(new int?[] { 0, 1 }) &&
+            page.Seasons.Select(row => row.Label).SequenceEqual(new[] { "特别篇", "第一季" }) &&
+            page.SelectedSeason?.Season == 1,
+            "standard TMDB seasons including specials remain the fallback when there is no trusted Douban projection");
+        return Task.CompletedTask;
+    }
+
     private static async Task RestorePresentation()
     {
         await using var rig = new FilmPlaybackRig();
@@ -145,7 +222,7 @@ public static class FilmCacheConsumerTests
                 ? FilmRuntimeProbe.Ok(JsonSerializer.SerializeToElement(response))
                 : rig.Runtime.Handle(method, input));
         int before = rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt");
-        await rig.Page.RefreshBrowsingAsync();
+        await rig.Page.CommandAsync("browse.refresh");
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         var refresh = rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh");
         Check(FilmJson.Member(refresh.Parameters, "refresh").ValueKind == JsonValueKind.Undefined &&
@@ -208,7 +285,7 @@ public static class FilmCacheConsumerTests
         int reads = rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt");
         try
         {
-            var refresh = rig.Page.RefreshBrowsingAsync();
+            var refresh = rig.Page.CommandAsync("browse.refresh");
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await Until(() => rig.Page.ListLoading);
             Check(rig.Page.Episodes.Single().CandidateId == "cache-current" &&
@@ -381,26 +458,23 @@ public static class FilmCacheConsumerTests
         try
         {
             window.Show(); window.UpdateLayout();
+            int refreshes = rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh");
             rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
-                method == "film.session.command" && FilmJson.Text(input, "action") is "browse.refresh" or "media.retry"
+                method == "film.session.command" && FilmJson.Text(input, "action") == "media.retry"
                     ? FilmRuntimeProbe.Failure("UPSTREAM_ERROR") : rig.Runtime.Handle(method, input));
-            var refresh = (Button)view.FindName("RefreshBrowsingButton");
             var retry = (Button)view.FindName("RetryMediaButton");
             var settings = (Border)view.FindName("SettingsPanel");
-            Check(refresh.IsEnabled && retry.IsEnabled && !settings.IsVisible,
-                "browse refresh remains available while the media retry action belongs to the closed picture settings");
-            refresh.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await Until(() => notices.Count == 1);
-            ((NoticeOutlet)view.FindName("Notices")).Message = "";
+            Check(retry.IsEnabled && !settings.IsVisible,
+                "the media retry action belongs to the closed picture settings");
             ((Button)view.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Until(() => settings.IsVisible && retry.IsVisible);
             Check(retry.IsDescendantOf(settings) &&
                 !((Button)view.FindName("RetryMediaRecoveryButton")).IsVisible,
                 "manual address retry is available inside the picture without covering healthy video");
             retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await Until(() => notices.Count == 2);
+            await Until(() => notices.Count == 1);
             Check(notices.All(message => message == "上游服务请求失败") &&
-                rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh") == 1 &&
+                rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh") == refreshes &&
                 rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "media.retry") == 1 &&
                 rig.Native.Commits == 1 && rig.Native.Stops == 0 && rig.Session.HasOutput,
                 "actual button input reports rejection through the existing notice outlet and preserves playback");

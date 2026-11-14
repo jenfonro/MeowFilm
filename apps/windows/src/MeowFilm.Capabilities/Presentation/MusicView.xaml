@@ -29,8 +29,8 @@
    <Setter Property="Background" Value="Transparent"/>
    <Setter Property="BorderThickness" Value="0,0,0,1"/>
    <Setter Property="Padding" Value="8,0"/>
-   <Setter Property="FontSize" Value="12"/>
-   <Setter Property="FontWeight" Value="Normal"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
+   <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Normal}"/>
   </Style>
   <Style x:Key="Playlist.Row" TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
    <Setter Property="Background" Value="Transparent"/>
@@ -154,7 +154,7 @@
     <RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <Grid>
      <StackPanel x:Name="SearchHeading" Visibility="{Binding IsSearchPage,Converter={StaticResource Visible}}" Margin="0,4,0,24">
-      <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="SemiBold"
+      <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
       <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
        <Button Content="综合" Tag="overview" Click="SearchTab_Click" AutomationProperties.Name="综合搜索结果">
@@ -162,7 +162,7 @@
          <Style.Triggers><DataTrigger Binding="{Binding IsSearchOverview}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
-          <Setter Property="FontWeight" Value="SemiBold"/>
+          <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
          </DataTrigger></Style.Triggers>
         </Style></Button.Style>
        </Button>
@@ -171,7 +171,7 @@
          <Style.Triggers><DataTrigger Binding="{Binding IsSearchSongs}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
-          <Setter Property="FontWeight" Value="SemiBold"/>
+          <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
          </DataTrigger></Style.Triggers>
         </Style></Button.Style>
        </Button>
@@ -180,7 +180,7 @@
          <Style.Triggers><DataTrigger Binding="{Binding IsSearchPlaylists}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
-          <Setter Property="FontWeight" Value="SemiBold"/>
+          <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
          </DataTrigger></Style.Triggers>
         </Style></Button.Style>
        </Button>
@@ -209,7 +209,7 @@
      </Border>
      <Grid Grid.Column="1" Margin="22,2,0,2">
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="SemiBold"
+      <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
       <TextBlock Grid.Row="1" Text="{Binding DetailSubtitle}" Margin="0,14,0,0" Style="{StaticResource Capability.Muted}" TextTrimming="CharacterEllipsis"/>
       <WrapPanel Grid.Row="2">
@@ -270,7 +270,7 @@
     </StackPanel>
    <DockPanel Margin="0,0,0,10" Visibility="{Binding IsContentDetailPage,Converter={StaticResource Visible}}">
     <StackPanel Orientation="Horizontal">
-     <TextBlock Text="{Binding DetailSectionTitle}" FontSize="18" FontWeight="SemiBold"/>
+     <TextBlock Text="{Binding DetailSectionTitle}" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"/>
      <TextBlock Text="{Binding DetailCountText}" FontSize="11" Margin="3,1,0,0"
                 Foreground="{DynamicResource MeowFilm.Brush.Muted}" VerticalAlignment="Top"/>
     </StackPanel>
@@ -327,8 +327,8 @@
          </Grid>
         </Border>
         <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14" Style="{StaticResource Playlist.SongTitle}"/>
-         <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12"
+         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Style="{StaticResource Playlist.SongTitle}"/>
+         <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Caption}"
                     Foreground="{DynamicResource MeowFilm.Brush.Muted}" Margin="0,2,0,0"/>
         </StackPanel>
        </Grid>
@@ -425,8 +425,8 @@
          </Grid>
         </Border>
         <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14" Style="{StaticResource Playlist.SongTitle}"/>
-         <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12"
+         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Style="{StaticResource Playlist.SongTitle}"/>
+         <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Caption}"
                     Foreground="{DynamicResource MeowFilm.Brush.Muted}" Margin="0,2,0,0"/>
         </StackPanel>
        </Grid>
@@ -498,7 +498,7 @@
     <Grid KeyboardNavigation.TabNavigation="Cycle">
      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <TextBlock Text="创建歌单" HorizontalAlignment="Center" VerticalAlignment="Center"
-                FontSize="20" FontWeight="SemiBold"/>
+                FontSize="{StaticResource MeowFilm.Font.Size.Title}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"/>
      <Button x:Name="ClosePlaylistDialogButton" Content="&#xE711;"
              Style="{StaticResource MeowFilm.IconButton}" Width="32" Height="32" MinHeight="32"
              HorizontalAlignment="Right" VerticalAlignment="Center"
@@ -516,7 +516,7 @@
                  IsHitTestVisible="False"/>
       <TextBlock x:Name="PlaylistNameCount" Text="0 / 200"
                  Margin="15,0,15,10" HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                 FontSize="12" Foreground="{DynamicResource MeowFilm.Brush.Muted}"
+                 FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Foreground="{DynamicResource MeowFilm.Brush.Muted}"
                  IsHitTestVisible="False"/>
      </Grid>
      <Button x:Name="CreatePlaylistButton" Grid.Row="2" Content="创建"

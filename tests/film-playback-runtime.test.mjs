@@ -28,11 +28,11 @@ const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); ret
 const source = { key: 'film-source', engine: 'cat', installationId: 'script', siteId: 'fixture',
   generation: 1, name: 'Fixture source' };
 const movie = { id: 'film:fixture', kind: 'movie', title: 'Fixture Film' };
-async function setup(t, { invoke, tokenProvider } = {}) {
+async function setup(t, { invoke, tokenProvider, metadata } = {}) {
   mkdirSync(root, { recursive: true });
   const directory = mkdtempSync(join(root, 'case-'));
   const identity = { sessionId: randomUUID() };
-  const calls = [], reads = [];
+  const calls = [], reads = [], metadataCalls = [];
   const server = http.createServer((request, response) => {
     reads.push({ url: request.url, cookie: request.headers.cookie, range: request.headers.range });
     if (request.headers.cookie !== 'film-fixture=private') { response.writeHead(403); response.end(); return; }
@@ -69,7 +69,16 @@ async function setup(t, { invoke, tokenProvider } = {}) {
       },
     }, async close() {},
   };
-  const modules = [cat], film = connectFilmPlayback(modules, { dataRoot: directory });
+  const modules = [cat];
+  if (metadata) modules.push({ id: 'tmdb', version: '0.1.0', contract: 'tmdb.data.v1', methods: {
+    'tmdb.data.settings.get': async () => ({ ok: true, contract: 'tmdb.data.v1',
+      value: { revision: 'film-fixture', apiKey: 'fixture-key' } }),
+    'tmdb.data.request': async input => {
+      metadataCalls.push(structuredClone(input));
+      return { ok: true, contract: 'tmdb.data.v1', value: await metadata(input) };
+    },
+  }, async close() {} });
+  const film = connectFilmPlayback(modules, { dataRoot: directory });
   if (tokenProvider) modules.push(createNeteaseTokenModule({ provider: tokenProvider }));
   const app = createAppRuntime({ ...identity, modules });
   await app.start();
@@ -89,7 +98,7 @@ async function setup(t, { invoke, tokenProvider } = {}) {
     rmSync(directory, { recursive: true });
   });
   const headers = () => ({ 'x-meow-request-id': randomUUID() });
-  return { rpc, snapshot, command, open, pending, calls, reads, address, app, client, film, headers };
+  return { rpc, snapshot, command, open, pending, calls, reads, metadataCalls, address, app, client, film, headers };
 }
 
 async function observation(f, id, query = '', signal) {
@@ -121,6 +130,134 @@ async function observation(f, id, query = '', signal) {
     async close() { controller.abort(); await reader.cancel().catch(() => {}); },
   };
 }
+
+test('film HTTP snapshots omit absent entrySurface and preserve supplied entry provenance', async t => {
+  const f = await setup(t);
+  for (const entrySurface of [undefined, 'home', 'search']) {
+    const id = await f.open(entrySurface === undefined ? {} : { entrySurface });
+    const value = await f.snapshot(id);
+    assert.deepEqual(value.entryTarget, movie);
+    assert.equal(value.entryResolution, null);
+    assert.equal(Object.hasOwn(value, 'entrySurface'), entrySurface !== undefined);
+    if (entrySurface !== undefined) assert.equal(value.entrySurface, entrySurface);
+  }
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.reads, []);
+});
+
+test('film HTTP rejects a supplied empty entry group even with an exact resume target', async t => {
+  const f = await setup(t);
+  const empty = { id: 'group:empty', kind: 'group', title: movie.title, members: [] };
+  for (const resumeTarget of [movie,
+    { id: 'source:fixture:0', kind: 'source', title: movie.title, source: { key: source.key, detailId: 0 } },
+    { ...empty, members: [{ sourceKey: source.key, detailId: 0 }] }]) {
+    const reply = await f.rpc('session.open', { platform: 'test', target: empty, resumeTarget, sources: [source] });
+    assert.equal(reply.ok, false);
+    assert.equal(reply.code, 'SOURCE_NOT_FOUND');
+  }
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.reads, []);
+});
+
+test('film HTTP keeps a discovered seed group revoked across source replacement and metadata refresh', async t => {
+  const f = await setup(t, { metadata: ({ path }) => {
+    assert.equal(path, '/3/search/multi'); return { results: [] };
+  } });
+  const seed = { id: 'douban:movie:51', kind: 'movie', title: movie.title, metadataProvider: 'douban', metadataId: '51' };
+  const id = await f.open({ target: seed });
+  await f.command(id, 'search.more');
+  await until(async () => (await f.snapshot(id)).searchComplete);
+  assert.deepEqual((await f.snapshot(id)).target.members, [{ sourceKey: source.key, detailId: 0 }]);
+  okay(await f.client.call('cat.script.edit', { installationId: source.installationId, changed: true }));
+  const revoked = await f.snapshot(id);
+  assert.equal(revoked.stage, 'unavailable');
+  assert.equal(revoked.error, 'SOURCE_NOT_FOUND');
+  assert.deepEqual(revoked.target.members, []);
+  await f.command(id, 'browse.refresh');
+  okay(await f.rpc('data.invalidate', { domain: 'tmdb' }));
+  const reply = await f.rpc('session.command', { sessionId: id, action: 'search.more' });
+  assert.equal(reply.ok, false);
+  assert.equal(reply.code, 'SOURCE_NOT_FOUND');
+  assert.deepEqual(await f.snapshot(id), revoked);
+  assert.deepEqual(f.metadataCalls.map(row => row.path), ['/3/search/multi']);
+  assert.deepEqual(f.calls.map(row => row.operation), ['search']);
+  assert.deepEqual(f.reads, []);
+});
+
+test('film HTTP seed reentry preserves provenance and restores exact TMDB coordinates without a seed lookup', async t => {
+  const seasons = [1, 2].map(season => ({ season_number: season, episode_count: 3,
+    episodes: [1, 2, 3].map(episode => ({ season_number: season, episode_number: episode,
+      name: `Episode ${episode}`, air_date: '2020-01-01' })) }));
+  const f = await setup(t, { metadata: ({ path }) => {
+    if (path === '/3/search/multi') return { results: [
+      { media_type: 'person', name: 'An unused result without an ID' },
+      { id: 19, media_type: 'tv', name: 'Fixture Series' },
+    ] };
+    if (path === '/3/tv/19') return { id: 19, name: 'Fixture Series', status: 'Ended', genres: [], seasons,
+      credits: { cast: [], crew: [] }, similar: { results: [] }, images: { posters: [], backdrops: [], logos: [] } };
+    assert.equal(path, '/3/tv/19/season/2');
+    return seasons[1];
+  } });
+  const initial = okay(await f.rpc('settings.get'));
+  okay(await f.rpc('settings.set', { ...initial, iosAutoPrepare: false }));
+  const seed = { id: 'douban:tv:51', kind: 'tv', title: 'Fixture Series', metadataProvider: 'douban', metadataId: '51' };
+  const resumeTarget = { id: 'tmdb:tv:19', kind: 'tv', title: 'Fixture Series', metadataProvider: 'tmdb',
+    metadataId: 19, season: 2, episode: 3, globalEpisode: 6 };
+  for (let reentry = 0; reentry < 2; reentry++) {
+    const id = await f.open({ platform: 'ios', target: seed, resumeTarget,
+      metadata: { id: '51', title: 'Fixture Series' }, entrySurface: 'home' });
+    const value = await f.snapshot(id);
+    assert.equal(value.entryResolution, 'matched');
+    assert.equal(value.entrySurface, 'home');
+    assert.deepEqual(value.entryTarget, seed);
+    assert.deepEqual(value.target, resumeTarget);
+    assert.equal(value.metadata.id, 19);
+    assert.equal(value.attempt, null);
+    assert.deepEqual(value.episodes.map(row => row.episode), [1, 2, 3]);
+    okay(await f.rpc('session.release', { sessionId: id }));
+  }
+  assert.deepEqual(f.metadataCalls.map(row => row.path), ['/3/tv/19', '/3/tv/19/season/2']);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.reads, []);
+});
+
+test('film HTTP no-match seed reentry restores exact group and hints without repeating search or reading video', async t => {
+  const f = await setup(t, { metadata: ({ path }) => {
+    assert.equal(path, '/3/search/multi'); return { results: [] };
+  } });
+  const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Fixture Film', metadataProvider: 'douban', metadataId: '51' };
+  const seedMetadata = { id: '51', title: 'Fixture Film', poster_path: '/fixture-poster.jpg' };
+  const first = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata });
+  assert.equal((await f.snapshot(first)).entryResolution, 'unmatched');
+  assert.deepEqual((await f.snapshot(first)).metadata, seedMetadata);
+  await f.command(first, 'search.more');
+  await until(async () => (await f.snapshot(first)).sources.length === 1);
+  const row = (await f.snapshot(first)).sources[0];
+  await f.command(first, 'browse', { sourceId: row.id });
+  await until(async () => (await f.snapshot(first)).browsing.episodes.length === 1);
+  const episode = (await f.snapshot(first)).browsing.episodes[0];
+  await f.command(first, 'select.candidate', { candidateId: episode.candidateId });
+  const attempt = await f.pending(first), saved = await f.snapshot(first);
+  okay(await f.rpc('session.release', { sessionId: first }));
+  const before = f.calls.length;
+  const second = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, resumeTarget: saved.target,
+    resultHints: [{ sourceKey: source.key, items: [{ id: row.source.detailId, title: row.title }] }] });
+  const restored = await f.snapshot(second);
+  assert.deepEqual(restored.entryTarget, seed);
+  assert.deepEqual(restored.target, saved.target);
+  assert.equal(restored.entryResolution, 'unmatched');
+  assert.deepEqual(restored.metadata, seedMetadata);
+  assert.deepEqual(restored.sources.map(value => value.source), [row.source]);
+  assert.equal(restored.attempt, null);
+  assert.equal(f.calls.length, before);
+  await f.command(second, 'play');
+  const resumed = await f.pending(second);
+  assert.equal(resumed.candidate.id, attempt.candidate.id);
+  assert.equal(f.calls.filter(row => row.operation === 'search').length, 1);
+  assert.equal(f.calls.filter(row => row.operation === 'detail').length, 1, 'same-owner detail comes from the data cache');
+  assert.equal(f.metadataCalls.filter(row => row.path === '/3/search/multi').length, 1);
+  assert.deepEqual(f.reads, []);
+});
 
 test('film HTTP source discovery, exact list selection, private first-read routing and real watch events', async t => {
   const f = await setup(t), id = await f.open();
@@ -832,13 +969,18 @@ async function catManifestFixture(t, { document, format, contentType, encoding, 
   assert.ok(snapshot.attempt, JSON.stringify(snapshot));
   assert.equal(snapshot.attempt.prepareOnly, true);
   const receipt = okay(await rpc('session.attempt', { sessionId: id, attemptId: snapshot.attempt.id }));
-  assert.deepEqual(await readState(), before, 'prepare must issue zero media reads and zero management requests');
-  assert.deepEqual(transportReads, [], 'preparation must not issue a transport request');
-  return { receipt, path, readState, before, client, rpc, id, cat, transportReads,
+  const discovered = /\.m3u8(?:$|\?)/i.test(path) ? [path] : [], prepared = await readState();
+  assert.deepEqual(prepared.reads.map(read => [read.method, read.url, read.range]),
+    [...before.reads.map(read => [read.method, read.url, read.range]), ...discovered.map(url => ['GET', url, null])],
+    'only the selected .m3u8 parent may be read for metadata; no variant, key, init or segment is fetched');
+  assert.equal(prepared.managementReads, before.managementReads);
+  if (!discovered.length) assert.deepEqual(prepared, before, 'other receipt preparation stays cold');
+  assert.deepEqual(transportReads, [], 'SDK discovery stays inside the Worker, not the media transport');
+  return { receipt, path, readState, before, discovered, client, rpc, id, cat, events, transportReads,
     aggregateOrigin: status.aggregate.origin, attemptId: snapshot.attempt.id };
 }
 
-test('real Cat Worker prepared HLS/DASH receipts validate original UTF-8 and remain cold until the first read',
+test('real Cat Worker prepared HLS/DASH receipts validate original UTF-8 without pre-reading binary resources',
   { timeout: 30000 }, async t => {
     const Decoder = globalThis.TextDecoder;
     t.mock.method(globalThis, 'TextDecoder', function(label, options) {
@@ -890,8 +1032,8 @@ test('real Cat Worker prepared HLS/DASH receipts validate original UTF-8 and rem
           }
           assert.equal(references.length, 2);
         }
-        assert.deepEqual((await f.readState()).reads.map(read => read.url), [document.path],
-          'only the requested root is read; preparation and parsing cannot fetch binary resources');
+        assert.deepEqual((await f.readState()).reads.map(read => read.url), [...f.discovered, document.path],
+          'metadata discovery and the requested root cannot fetch binary resources');
         for (const [index, reference] of references.entries()) {
           assert.equal(new URL(reference).origin, new URL(f.receipt.url).origin);
           const child = await fetch(reference);
@@ -900,7 +1042,7 @@ test('real Cat Worker prepared HLS/DASH receipts validate original UTF-8 and rem
         }
         const finished = await f.readState();
         assert.deepEqual(finished.reads.map(read => read.url),
-          [document.path, ...(invalid ? [] : Object.keys(assets))]);
+          [...f.discovered, document.path, ...(invalid ? [] : Object.keys(assets))]);
         assert.ok(finished.reads.every(read => read.cookie === headers.Cookie));
         assert.equal(finished.managementReads, f.before.managementReads);
         assert.deepEqual(okay(await f.rpc('library.get')).history, []);
@@ -912,6 +1054,51 @@ test('real Cat Worker prepared HLS/DASH receipts validate original UTF-8 and rem
         assert.deepEqual(await f.readState(), finished, 'release must prevent another upstream request');
       });
     }
+  });
+
+test('M3 real Cat HTTP and SSE select the observed HLS variant with existing candidateId only',
+  { timeout: 30000 }, async t => {
+    const path = '/proxy/show/master.m3u8';
+    const highPath = '/proxy/show/high/index.m3u8?part=1', lowPath = '/proxy/low.m3u8';
+    const document = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=3840x2160,FRAME-RATE=59.94\n' +
+      'high/index.m3u8?part=1\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,FRAME-RATE=25\n' +
+      '../low.m3u8\n';
+    const leaf = '#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3,\nnever-read.ts\n#EXT-X-ENDLIST\n';
+    const f = await catManifestFixture(t, { document, path, format: 'hls',
+      contentType: 'application/vnd.apple.mpegurl', headers: { Cookie: 'synthetic-hls-variant' },
+      assets: { [highPath]: [...Buffer.from(leaf)], [lowPath]: [...Buffer.from(leaf)] } });
+    let snapshot = okay(await f.rpc('session.snapshot', { sessionId: f.id }));
+    const candidates = snapshot.candidates;
+    assert.equal(candidates.length, 2);
+    const high = candidates.find(row => row.quality === '4k_fps');
+    const low = candidates.find(row => row.quality === '1080p');
+    assert.ok(high && low);
+    assert.notEqual(high.id, low.id);
+    assert.deepEqual([high.resolution, high.fps, low.resolution, low.fps],
+      ['3840x2160', 59.94, '1920x1080', 25]);
+    assert.deepEqual(high.source, low.source);
+    assert.equal(high.lineId, low.lineId);
+    assert.equal(snapshot.attempt.candidate.id, high.id);
+    assert.equal(f.receipt.format, 'hls');
+    assert.equal(new URL(f.receipt.url).origin + '/', f.receipt.mediaOrigin);
+    const first = await fetch(f.receipt.url);
+    assert.equal(first.status, 200);
+    assert.ok((await first.text()).includes('#EXTINF:3,'));
+    assert.deepEqual((await f.readState()).reads.map(read => read.url), [path, highPath]);
+    okay(await f.rpc('session.command', { sessionId: f.id, action: 'select.candidate', candidateId: low.id }));
+    do { snapshot = await f.events.next(); } while (snapshot.attempt?.candidate.id !== low.id);
+    const selected = okay(await f.rpc('session.attempt', { sessionId: f.id, attemptId: snapshot.attempt.id }));
+    assert.equal(selected.format, 'hls');
+    assert.equal(new URL(selected.url).origin + '/', selected.mediaOrigin);
+    const second = await fetch(selected.url);
+    assert.equal(second.status, 200);
+    assert.ok((await second.text()).includes('#EXTINF:3,'));
+    const finished = await f.readState();
+    assert.deepEqual(finished.reads.map(read => read.url), [path, highPath, lowPath]);
+    assert.ok(finished.reads.every(read => read.cookie === 'synthetic-hls-variant'));
+    assert.equal(finished.managementReads, f.before.managementReads);
+    assert.deepEqual(okay(await f.rpc('library.get')).history, []);
+    assert.equal(okay(await f.rpc('session.snapshot', { sessionId: f.id })).current, null);
   });
 
 test('real Cat Worker FMF01 identity, extensionless text and gzip HLS/MPD preserve the original media base',

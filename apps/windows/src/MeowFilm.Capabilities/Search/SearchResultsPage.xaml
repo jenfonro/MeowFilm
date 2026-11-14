@@ -3,8 +3,6 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
- TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries>
@@ -40,7 +38,7 @@
     </Border>
    </ControlTemplate></Setter.Value></Setter>
    <Style.Triggers>
-    <DataTrigger Binding="{Binding Selected}" Value="True"><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
+    <DataTrigger Binding="{Binding Selected}" Value="True"><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/></DataTrigger>
     <MultiDataTrigger><MultiDataTrigger.Conditions>
      <Condition Binding="{Binding Selected}" Value="True"/>
      <Condition Binding="{Binding IsEnabled,RelativeSource={RelativeSource Self}}" Value="True"/>
@@ -54,7 +52,7 @@
  <Grid Margin="40,20,24,20" MaxWidth="1490">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
   <StackPanel Margin="0,0,0,24">
-   <TextBlock Text="{Binding Query}" FontSize="23" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+   <TextBlock Text="{Binding Query}" FontSize="23" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" TextTrimming="CharacterEllipsis"/>
    <DockPanel Margin="0,14,0,0">
     <StackPanel x:Name="FilmTools" DockPanel.Dock="Right" Orientation="Horizontal" Visibility="Collapsed" Margin="16,0,0,0">
      <TextBlock Text="{Binding MetadataStatus}" Margin="0,0,16,0" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>

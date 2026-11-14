@@ -11,7 +11,7 @@ using System.Windows.Threading;
 
 namespace MeowFilm.Desktop;
 
-public sealed partial class ShellWindow : Window
+public sealed partial class ShellWindow : DesktopWindow
 {
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(5);

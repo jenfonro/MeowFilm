@@ -35,7 +35,7 @@ public sealed class MusicLyricWordView : Control
 
     private readonly RectangleGeometry highlightClip = new();
     private DrawingGroup? normalText, highlightedText;
-    private Geometry? outline;
+    private MusicLyricOutline? outline;
     private Size textSize;
     private double progress;
     private MusicLyricList? presenter;
@@ -123,7 +123,7 @@ public sealed class MusicLyricWordView : Control
     {
         StopHighlight();
         normalText = highlightedText = null;
-        outline = null;
+        outline?.Invalidate();
         InvalidateMeasure();
         InvalidateVisual();
         presenter?.InvalidateViewport();
@@ -137,6 +137,17 @@ public sealed class MusicLyricWordView : Control
             e.Property == FontStretchProperty || e.Property == FlowDirectionProperty ||
             e.Property == LanguageProperty || e.Property == TextOptions.TextFormattingModeProperty)
             InvalidateText();
+        else if (e.Property == StrokeProperty && Stroke is null ||
+            e.Property == StrokeThicknessProperty && StrokeThickness <= 0)
+        {
+            outline?.Dispose();
+            outline = null;
+        }
+        else if (e.Property == TextOptions.TextRenderingModeProperty || e.Property == TextOptions.TextHintingModeProperty)
+        {
+            outline?.Invalidate();
+            InvalidateVisual();
+        }
         else if (e.Property == DesktopTheme.IsHighContrastProperty) InvalidateVisual();
     }
 
@@ -193,24 +204,14 @@ public sealed class MusicLyricWordView : Control
         Paint(highlightedText!, highContrast ? SystemColors.HighlightBrush : Highlight);
         if (Stroke is not null && StrokeThickness > 0)
         {
-            outline ??= Outline(normalText!);
-            drawing.DrawGeometry(null, new Pen(highContrast ? SystemColors.WindowBrush : Stroke, StrokeThickness)
-                { LineJoin = PenLineJoin.Round }, outline);
+            outline ??= new(this);
+            outline.Draw(drawing, normalText!, highContrast ? SystemColors.WindowBrush : Stroke, StrokeThickness);
         }
         drawing.DrawDrawing(normalText);
         // The mutable clip is retained by WPF. Animation never invalidates this control's text layout.
         drawing.PushClip(highlightClip);
         drawing.DrawDrawing(highlightedText);
         drawing.Pop();
-    }
-    private static Geometry Outline(DrawingGroup drawing)
-    {
-        var geometry = new GeometryGroup { Transform = drawing.Transform };
-        foreach (var child in drawing.Children)
-            if (child is GlyphRunDrawing glyph) geometry.Children.Add(glyph.GlyphRun.BuildGeometry());
-            else if (child is DrawingGroup group) geometry.Children.Add(Outline(group));
-        geometry.Freeze();
-        return geometry;
     }
     protected override AutomationPeer OnCreateAutomationPeer() => new WordPeer(this);
     private sealed class WordPeer(MusicLyricWordView owner) : FrameworkElementAutomationPeer(owner)

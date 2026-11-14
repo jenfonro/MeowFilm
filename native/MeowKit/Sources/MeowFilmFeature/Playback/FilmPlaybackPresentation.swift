@@ -33,15 +33,19 @@ enum FilmPlaybackPresentation {
                             posterURL: image(poster) ?? supplementalPoster ?? (poster == nil && !hasDetail ? baseline.item.posterURL : nil),
                             largePosterURL: large ?? supplementalPoster ?? (poster == nil && !hasDetail ? baseline.item.largePosterURL : nil),
                             score: rating == nil && !hasDetail ? baseline.item.score : score.map { String(format: "%.1f", $0) } ?? "",
-                            subtitle: baseline.item.subtitle)
-        let seasonField = field(fields, "seasons", "doubanSeasons")
+                            subtitle: baseline.item.subtitle, metadataSeed: baseline.item.metadataSeed)
+        let seasonField = field(fields, "doubanSeasons", "seasons")
         let seasonRows = seasonField == nil && !succeeded(snapshot.metadataCache, component: "seasons")
             ? displayMetadata?.seasons : seasonField?.filmArray ?? []
         let seasons = seasonRows?.compactMap { raw -> FilmSeason? in
             guard let row = raw.filmObject, let number = integer(row["season_number"] ?? row["season"]) else { return nil }
-            let episodes = snapshot.episodes.filter { $0.position.season == number }.map(episode)
+            let poster = artwork(row["poster_path"])
+            let episodes = snapshot.episodes.filter { $0.position.season == number }.map {
+                episode($0, fallbackArtworkURL: poster ?? item.posterURL ?? item.largePosterURL)
+            }
             return .init(id: row["id"]?.filmScalar ?? "season-\(number)",
-                         title: text(row, "name", "title") ?? "第 \(number) 季", number: number, episodes: episodes)
+                         title: text(row, "name", "title") ?? "第 \(number) 季", number: number,
+                         posterURL: poster, episodes: episodes)
         } ?? baseline.seasons
         let primaryCast = cast(fields), supplementalCast = cast(supplement)
         let cast = primaryCast.flatMap { $0.isEmpty ? nil : $0 } ??
@@ -73,10 +77,11 @@ enum FilmPlaybackPresentation {
                           seasons: seasons, cast: cast, similarItems: similar)
     }
 
-    static func episode(_ value: FilmPlaybackEpisode) -> FilmEpisode {
-        .init(id: value.displayID, title: value.name ?? "\(value.position.episode!)",
+    static func episode(_ value: FilmPlaybackEpisode, fallbackArtworkURL: URL? = nil) -> FilmEpisode {
+        .init(id: value.displayID, title: value.name ?? "",
               number: value.position.episode, summary: value.raw["overview"]?.filmText ?? "",
-              artworkURL: artwork(value.raw["still_path"]), releaseDate: value.raw["air_date"]?.filmText)
+              artworkURL: artwork(value.raw["still_path"]) ?? fallbackArtworkURL,
+              releaseDate: value.raw["air_date"]?.filmText)
     }
 
     static func artwork(_ value: RuntimeValue?) -> URL? {

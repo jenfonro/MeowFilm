@@ -3,8 +3,6 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
- TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
@@ -12,8 +10,7 @@
   <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#343845"/>
   <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#6C7280"/>
   <Style x:Key="Catalog.SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
-   <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
-   <Setter Property="FontSize" Value="18"/><Setter Property="FontWeight" Value="SemiBold"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionHeading}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
    <Setter Property="LineHeight" Value="24"/><Setter Property="LineStackingStrategy" Value="BlockLineHeight"/>
   </Style>
@@ -47,24 +44,21 @@
   </Style>
   <Style x:Key="Catalog.SectionMore" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
    <Setter Property="Margin" Value="0"/><Setter Property="Padding" Value="12,4"/>
-   <Setter Property="MinHeight" Value="30"/><Setter Property="FontSize" Value="12"/>
+   <Setter Property="MinHeight" Value="30"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
   </Style>
   <Style x:Key="Catalog.SongTitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
-   <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
-   <Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="Normal"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Normal}"/>
    <Setter Property="LineHeight" Value="20"/><Setter Property="LineStackingStrategy" Value="BlockLineHeight"/>
    <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
   </Style>
   <Style x:Key="Catalog.SongArtist" TargetType="TextBlock" BasedOn="{StaticResource Capability.Muted}">
-   <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
-   <Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Normal"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Normal}"/>
    <Setter Property="LineHeight" Value="18"/><Setter Property="LineStackingStrategy" Value="BlockLineHeight"/>
    <Setter Property="TextTrimming" Value="CharacterEllipsis"/><Setter Property="Margin" Value="0,2,0,0"/>
   </Style>
 
   <Style x:Key="Catalog.Flat" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
-   <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
    <Setter Property="Margin" Value="0"/><Setter Property="Padding" Value="0"/><Setter Property="BorderThickness" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
     <Border Background="Transparent" Padding="{TemplateBinding Padding}"><ContentPresenter VerticalAlignment="Center" HorizontalAlignment="Stretch"/></Border>
@@ -82,8 +76,8 @@
    <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="#555D68"/></Trigger></Style.Triggers>
   </Style>
   <Style x:Key="Catalog.PlaylistTitle" TargetType="TextBlock" BasedOn="{StaticResource Catalog.SongTitle}">
-   <Setter Property="Foreground" Value="#4B4F58"/><Setter Property="FontSize" Value="13"/>
-   <Setter Property="FontWeight" Value="Normal"/>
+   <Setter Property="Foreground" Value="#4B4F58"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
+   <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Normal}"/>
   </Style>
   <Style x:Key="Catalog.SongButton" TargetType="Button" BasedOn="{StaticResource Catalog.Flat}">
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
@@ -95,7 +89,7 @@
    <Setter Property="BorderBrush" Value="Transparent"/>
    <Setter Property="Margin" Value="0,0,24,0"/>
    <Setter Property="Padding" Value="0"/>
-   <Setter Property="FontSize" Value="16"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionTitle}"/>
    <Setter Property="Height" Value="36"/>
    <Setter Property="MinHeight" Value="0"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
@@ -112,7 +106,7 @@
    <Setter Property="Foreground" Value="#70798A"/>
    <Setter Property="Margin" Value="0"/>
    <Setter Property="Padding" Value="0"/>
-   <Setter Property="FontSize" Value="16"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionTitle}"/>
    <Setter Property="Height" Value="36"/>
    <Setter Property="MinHeight" Value="0"/>
   </Style>
@@ -122,7 +116,7 @@
    <Setter Property="MinHeight" Value="0"/>
    <Setter Property="Margin" Value="0,0,12,0"/>
    <Setter Property="Padding" Value="14,2"/>
-   <Setter Property="FontSize" Value="13"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
    <Setter Property="Foreground" Value="#495164"/>
    <Setter Property="Background" Value="#F4F5F7"/>
    <Setter Property="BorderBrush" Value="#E3E5E9"/>
@@ -183,7 +177,7 @@
      <Grid.Style><Style TargetType="Grid"><Setter Property="Background" Value="#E7EAF0"/><Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger></Style.Triggers></Style></Grid.Style>
      <art:ArtworkImage Address="{Binding Cover}"/>
      <TextBlock Text="{Binding Title}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="10"
-                FontSize="16" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap">
+                FontSize="{StaticResource MeowFilm.Font.Size.SectionTitle}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" TextAlignment="Center" TextWrapping="Wrap">
       <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}"><Setter Property="Foreground" Value="#30394D"/><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
      </TextBlock>
      <Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankCoverHost}"/>
@@ -208,7 +202,7 @@
    <Button Tag="{Binding}" Click="Card_Click" IsEnabled="{Binding CanOpen}" Style="{StaticResource Catalog.Flat}" Margin="0,0,0,12" AutomationProperties.Name="{Binding Title}">
     <Grid Height="72">
      <Grid.ColumnDefinitions><ColumnDefinition Width="44"/><ColumnDefinition Width="76"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-     <TextBlock Text="{Binding RankText}" FontSize="20" VerticalAlignment="Center" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}"/>
+     <TextBlock Text="{Binding RankText}" FontSize="{StaticResource MeowFilm.Font.Size.Title}" VerticalAlignment="Center" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}"/>
      <art:ArtworkImage Grid.Column="1" Address="{Binding Cover}" Width="64" Height="64" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
      <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="8,0,16,0">
       <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.SongTitle}"/>
@@ -226,14 +220,14 @@
     <Grid x:Name="BannerFrame" Background="#E7EAF0" local:CardClip.Radius="8">
      <Grid.Height><MultiBinding Converter="{StaticResource Catalog.BannerHeight}"><Binding Path="ActualWidth" ElementName="BannerFrame"/><Binding Path="AspectRatio" ElementName="BannerImage"/></MultiBinding></Grid.Height>
      <art:ArtworkImage x:Name="BannerImage" Address="{Binding Cover}" Stretch="Uniform"/>
-     <TextBlock Text="{Binding Title}" VerticalAlignment="Bottom" Margin="12" FontWeight="SemiBold" TextWrapping="Wrap"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
+     <TextBlock Text="{Binding Title}" VerticalAlignment="Bottom" Margin="12" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" TextWrapping="Wrap"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
     </Grid>
    </Button>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.Ranking">
    <Button x:Name="RankingHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,20,20" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <Border Background="{DynamicResource MeowFilm.Brush.Surface}" CornerRadius="12" Padding="20" Height="154">
-     <StackPanel><DockPanel Margin="0,0,0,14"><TextBlock DockPanel.Dock="Right" Text="{Binding UpdateFrequency}" Style="{StaticResource Capability.Muted}" FontSize="11"/><TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="16" TextTrimming="CharacterEllipsis"/></DockPanel>
+     <StackPanel><DockPanel Margin="0,0,0,14"><TextBlock DockPanel.Dock="Right" Text="{Binding UpdateFrequency}" Style="{StaticResource Capability.Muted}" FontSize="11"/><TextBlock Text="{Binding Title}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" FontSize="{StaticResource MeowFilm.Font.Size.SectionTitle}" TextTrimming="CharacterEllipsis"/></DockPanel>
       <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="96"/><ColumnDefinition/></Grid.ColumnDefinitions>
        <Grid Width="80" Height="80" HorizontalAlignment="Left"><art:ArtworkImage Address="{Binding ThirdPreviewCover}" Margin="12,12,-10,-4" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding SecondPreviewCover}" Margin="6,6,-5,-2" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding FirstPreviewCover}" local:CardClip.Radius="4"/><Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/><Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" local:CardClip.Radius="4" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/></Grid>
        <ItemsControl Grid.Column="1" ItemsSource="{Binding PreviewSongs}"><ItemsControl.ItemTemplate><DataTemplate><Grid Height="27"><Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition/><ColumnDefinition Width="20"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Rank}" Style="{StaticResource Capability.Muted}"/><TextBlock Grid.Column="1" TextTrimming="CharacterEllipsis"><Run Text="{Binding Title}"/><Run Text=" − "/><Run Text="{Binding Artist}" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/></TextBlock><TextBlock Grid.Column="2" Text="{Binding Movement}" Foreground="{DynamicResource MeowFilm.Brush.Accent}" HorizontalAlignment="Right"/></Grid></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
@@ -463,7 +457,7 @@
      <ItemsControl ItemsSource="{Binding VisibleChannelTabs}">
       <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
       <ItemsControl.ItemTemplate><DataTemplate><Button Tag="{Binding}" Content="{Binding Title}" Click="Card_Click" IsEnabled="{Binding CanOpen}">
-       <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Catalog.ChannelTab}"><Style.Triggers><DataTrigger Value="True"><DataTrigger.Binding><MultiBinding Converter="{StaticResource Catalog.ChannelSelected}"><Binding/><Binding Path="DataContext.CurrentChannelKey" RelativeSource="{RelativeSource AncestorType=local:MusicCatalogView}"/></MultiBinding></DataTrigger.Binding><Setter Property="Foreground" Value="#30394D"/><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+       <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Catalog.ChannelTab}"><Style.Triggers><DataTrigger Value="True"><DataTrigger.Binding><MultiBinding Converter="{StaticResource Catalog.ChannelSelected}"><Binding/><Binding Path="DataContext.CurrentChannelKey" RelativeSource="{RelativeSource AncestorType=local:MusicCatalogView}"/></MultiBinding></DataTrigger.Binding><Setter Property="Foreground" Value="#30394D"/><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/></DataTrigger></Style.Triggers></Style></Button.Style>
       </Button></DataTemplate></ItemsControl.ItemTemplate>
      </ItemsControl>
     </ScrollViewer>
@@ -603,9 +597,9 @@
        <Grid>
         <StackPanel VerticalAlignment="Top" Margin="0,2,52,0">
          <TextBlock Text="{Binding VipPage.Account.DisplayName}" Foreground="White"
-                    FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    FontSize="{StaticResource MeowFilm.Font.Size.SectionTitle}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" TextTrimming="CharacterEllipsis"/>
          <TextBlock Text="{Binding VipPage.Account.Membership}" Foreground="#CFC1C2"
-                    FontSize="12" Margin="0,8,0,0" TextTrimming="CharacterEllipsis">
+                    FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,8,0,0" TextTrimming="CharacterEllipsis">
           <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers>
            <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
           </Style.Triggers></Style></TextBlock.Style>
@@ -637,7 +631,7 @@
           <RowDefinition Height="24"/>
          </Grid.RowDefinitions>
          <TextBlock Text="{Binding VipPage.Sign.Text}" Foreground="#312923"
-                    FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    FontSize="{StaticResource MeowFilm.Font.Size.SectionTitle}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" TextTrimming="CharacterEllipsis"/>
          <TextBlock Grid.Row="1" Text="{Binding VipPage.Sign.SubText}" Foreground="#9B7D68"
                     FontSize="11" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
          <ItemsControl Grid.Row="2" ItemsSource="{Binding VipPage.Sign.Days}"
