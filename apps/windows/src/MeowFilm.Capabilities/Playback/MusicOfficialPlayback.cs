@@ -93,25 +93,28 @@ public sealed partial class MusicCapability
         // Account notifications may arrive off-dispatcher. Fence the selection snapshot
         // even when a script is playing, so its next explicit search uses new authority.
         Interlocked.Increment(ref selectionSourcesRevision);
-        // Automatic preload may currently be planning any official platform,
-        // not only the active recording. Retire the whole speculative owner at
-        // invalidation time so no stale plan can start a transfer afterward.
-        CancelMusicPreload();
-        var state = musicRecovery;
-        if (state?.Pending?.Media.Target is { Official: true } pending && pending.Platform == platform)
-            CancelPendingMedia(state, "AUTH_REQUIRED");
-        if (state?.Media is null || state.Media.Target is { Official: true } active && active.Platform == platform)
-            Interlocked.Increment(ref officialAccountEpoch);
-        bool revokeActive = state?.Media?.Target is { Official: true } target && target.Platform == platform;
-        // Fence at notification time, before dispatching UI cleanup.
-        if (revokeActive)
-            try { state!.Access.Cancel(); } catch (ObjectDisposedException) { }
-        if (!Presentation.Dispatcher.HasShutdownStarted)
+        // Native authority is already fenced. Inspect and retire UI-owned resources
+        // on their dispatcher, against the authority current when cleanup runs.
+        if (!Presentation.Dispatcher.HasShutdownStarted && !Presentation.Dispatcher.HasShutdownFinished)
             _ = Presentation.Dispatcher.InvokeAsync(() =>
             {
-                if (stopping) return;
+                if (stopping || disposed) return;
+                bool Revoked(MusicOnlineTarget? target) =>
+                    target is { Official: true, AccountScope: { } scope } && target.Platform == platform &&
+                    !application.IsOfficialPlaybackCurrent(platform, scope, target.Generation);
+                var state = musicRecovery;
+                bool revokeActive = Revoked(state?.Media?.Target);
+                if (revokeActive || preparedAudio is { } prepared &&
+                    MusicDto.Text(prepared.Receipt, "platform") == platform &&
+                    !application.IsOfficialPlaybackCurrent(platform, prepared.Scope,
+                        MusicDto.Integer(prepared.Receipt, "generation")))
+                    CancelMusicPreload();
+                if (state is not null && Revoked(state.Pending?.Media.Target))
+                    CancelPendingMedia(state, "AUTH_REQUIRED");
                 Changed(nameof(CanLoadMoreSources));
-                if (!revokeActive || state is null || !ReferenceEquals(musicRecovery, state)) return;
+                if (!revokeActive || state is null) return;
+                Interlocked.Increment(ref officialAccountEpoch);
+                try { state.Access.Cancel(); } catch (ObjectDisposedException) { }
                 TrackMusicRecovery(StopRevoked());
                 async Task StopRevoked()
                 {

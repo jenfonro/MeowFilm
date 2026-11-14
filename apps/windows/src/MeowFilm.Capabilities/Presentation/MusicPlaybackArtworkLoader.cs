@@ -31,6 +31,10 @@ public sealed partial class MusicCapability
             long epoch = owner.presentationCacheEpoch;
             if (song is null || address != owner.CurrentArtwork)
                 return await inner.AcquireAsync(address, cancellationToken);
+            // A warm document cache and a synchronous image lease need no I/O await.
+            // Decode and encode frozen artwork away from the presentation dispatcher.
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+            cancellationToken.ThrowIfCancellationRequested();
             var raw = JsonNode.Parse(song.Raw.GetRawText())!.AsObject();
             string key = MusicRecordingPresentationCache.Key(raw);
             var cache = new MusicRecordingPresentationCache(owner.cacheStore);

@@ -126,6 +126,83 @@ public static partial class MusicOfficialPlaybackScopeTests
             await play.WaitAsync(TimeSpan.FromSeconds(5));
             Check(f.Output.NetworkOpens == 0 && !f.Output.HasMedia && f.App.Plans.Count == 1);
         });
+        yield return Case("background account revocation defers playback cancellation until dispatcher cleanup", async () =>
+        {
+            await using var f = await Scene.Create();
+            await f.Play(Song("first"));
+            var playbackToken = f.Output.PlaybackToken;
+            int uiThread = Environment.CurrentManagedThreadId, cancelledOn = 0, stops = f.Output.Stops;
+            using var registration = playbackToken.Register(() =>
+                Volatile.Write(ref cancelledOn, Environment.CurrentManagedThreadId));
+            await WithDelayedAccountNotification(f, "wy", () =>
+            {
+                Check(!f.App.IsOfficialPlaybackCurrent("wy", "fixture", 7),
+                    "authority is revoked before its UI notification is dispatched");
+                Check(!playbackToken.IsCancellationRequested && Volatile.Read(ref cancelledOn) == 0 &&
+                    f.Output.HasMedia && f.Output.Stops == stops,
+                    "the publishing worker must not cancel or mutate UI-owned playback");
+                return Task.CompletedTask;
+            });
+            await Until(() => !f.Output.HasMedia);
+            Check(playbackToken.IsCancellationRequested && Volatile.Read(ref cancelledOn) == uiThread &&
+                f.Output.StopThread == uiThread && f.Output.Stops == stops + 1,
+                "dispatcher cleanup cancels and stops the revoked playback once");
+        });
+        yield return Case("delayed account revocation preserves another platform playback", async () =>
+        {
+            await using var f = await Scene.Create();
+            await f.Play(Song("first"), Song("other", alternate: true));
+            CancellationToken accepted = default;
+            int stops = 0;
+            await WithDelayedAccountNotification(f, "wy", async () =>
+            {
+                f.App.Failures["wy"] = "AUTH_REQUIRED";
+                await f.Module.StepAsync(true);
+                Check(f.Output.HasMedia && f.Module.CurrentSource == "QQ 音乐" &&
+                    f.Module.CurrentTitle == "Track other" &&
+                    f.Output.Identity == f.Module.QueueSurfaceRows.Single(row => row.IsCurrent).EntryId, f.Module.Status);
+                accepted = f.Output.PlaybackToken; stops = f.Output.Stops;
+            });
+            Check(f.Output.HasMedia && !accepted.IsCancellationRequested && f.Output.Stops == stops &&
+                f.Module.CurrentSource == "QQ 音乐" && f.Module.CurrentTitle == "Track other",
+                "a delayed notification for NetEase must preserve the accepted QQ authority");
+        });
+        yield return Case("delayed account revocation preserves a renewed authority", async () =>
+        {
+            await using var f = await Scene.Create();
+            await f.Play(Song("first"), Song("renewed"));
+            CancellationToken accepted = default;
+            int stops = 0;
+            await WithDelayedAccountNotification(f, "wy", async () =>
+            {
+                f.App.Renew("wy");
+                await f.Module.StepAsync(true);
+                Check(f.App.IsOfficialPlaybackCurrent("wy", "fixture", 8) &&
+                    !f.App.IsOfficialPlaybackCurrent("wy", "fixture", 7) &&
+                    f.Output.HasMedia && f.Module.CurrentSource == "网易云音乐" &&
+                    f.Module.CurrentTitle == "Track renewed" &&
+                    f.Output.Identity == f.Module.QueueSurfaceRows.Single(row => row.IsCurrent).EntryId,
+                    "playback has accepted a distinct current generation before the old event is delivered");
+                accepted = f.Output.PlaybackToken; stops = f.Output.Stops;
+            });
+            Check(f.Output.HasMedia && !accepted.IsCancellationRequested && f.Output.Stops == stops &&
+                f.Module.CurrentTitle == "Track renewed",
+                "a delayed revocation must not cancel the replacement authorization on the same platform");
+        });
+        yield return Case("revoked known resolution is rejected before delayed dispatcher cleanup", async () =>
+        {
+            await using var f = await Scene.Create();
+            f.App.HoldResolution = true;
+            var play = f.Play(Song("first"));
+            await f.App.ResolutionEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WithDelayedAccountNotification(f, "wy", async () =>
+            {
+                f.App.ResolutionRelease.TrySetResult();
+                await play.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(f.Output.NetworkOpens == 0 && !f.Output.HasMedia && f.App.Plans.Count == 1,
+                    "native authority rejects the late known result while UI cleanup is still held");
+            });
+        });
         yield return Case("context menu mouse and keyboard openings rebuild current quality choices", async () =>
         {
             foreach (bool keyboard in new[] { false, true })
@@ -499,6 +576,47 @@ public static partial class MusicOfficialPlaybackScopeTests
             if (!predicate()) await Task.Delay(1);
         }
     }
+    private static async Task WithDelayedAccountNotification(Scene scene, string platform, Func<Task> whileQueued)
+    {
+        var dispatcher = scene.Module.Presentation.Dispatcher;
+        var queued = new List<DispatcherOperation>();
+        int publishingThread = 0;
+        void Hold(object? sender, DispatcherHookEventArgs args)
+        {
+            if (Environment.CurrentManagedThreadId != Volatile.Read(ref publishingThread)) return;
+            args.Operation.Priority = DispatcherPriority.Inactive;
+            queued.Add(args.Operation);
+        }
+        try
+        {
+            // Pause dispatch while the worker posts, then retain its callbacks at
+            // Inactive priority so new playback can settle before the old notice.
+            using (dispatcher.DisableProcessing())
+            {
+                dispatcher.Hooks.OperationPosted += Hold;
+                try
+                {
+                    Task.Run(() =>
+                    {
+                        Check(!dispatcher.CheckAccess(), "the notification must originate off-dispatcher");
+                        Volatile.Write(ref publishingThread, Environment.CurrentManagedThreadId);
+                        try { scene.App.Revoke(platform); }
+                        finally { Volatile.Write(ref publishingThread, 0); }
+                    }).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                }
+                finally { dispatcher.Hooks.OperationPosted -= Hold; }
+            }
+            Check(queued.Count > 0 && queued.All(operation => operation.Status == DispatcherOperationStatus.Pending),
+                "the real notification callbacks remain queued during the observed action");
+            await whileQueued();
+        }
+        finally
+        {
+            foreach (var operation in queued)
+                if (operation.Status == DispatcherOperationStatus.Pending) operation.Priority = DispatcherPriority.Normal;
+        }
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+    }
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly MusicPlaybackCacheTests.Fixture Files = new();
@@ -575,7 +693,9 @@ public static partial class MusicOfficialPlaybackScopeTests
         internal bool VerifiedQuality = true;
         internal int MediaLookups, Authorizations, DiscoveryReturns;
         internal CancellationToken DiscoveryToken, ResolutionToken;
+        private readonly object authority = new();
         private readonly HashSet<string> revoked = [];
+        private readonly Dictionary<string, long> generations = [];
         private event Action<string>? invalidated;
         public override event Action<string>? AccountDetailsInvalidated
         {
@@ -584,11 +704,24 @@ public static partial class MusicOfficialPlaybackScopeTests
         }
         internal void Revoke(string platform)
         {
-            revoked.Add(platform);
+            lock (authority) revoked.Add(platform);
             invalidated?.Invoke(platform);
         }
-        public override bool IsOfficialPlaybackCurrent(string platform, string scope, long generation) =>
-            scope == "fixture" && generation == 7 && !revoked.Contains(platform);
+        internal void Renew(string platform)
+        {
+            lock (authority)
+            {
+                generations[platform] = generations.GetValueOrDefault(platform, 7) + 1;
+                revoked.Remove(platform);
+            }
+        }
+        private long Generation(string platform) { lock (authority) return generations.GetValueOrDefault(platform, 7); }
+        public override bool IsOfficialPlaybackCurrent(string platform, string scope, long generation)
+        {
+            lock (authority)
+                return scope == "fixture" && generation == generations.GetValueOrDefault(platform, 7) &&
+                    !revoked.Contains(platform);
+        }
         internal async Task<JsonElement> Ok(string method, object? parameters = null)
         {
             var reply = await ExecuteAsync(method, parameters);
@@ -603,7 +736,7 @@ public static partial class MusicOfficialPlaybackScopeTests
             {
                 ["ok"] = true, ["kind"] = "official", ["platform"] = platform,
                 ["songId"] = song["songId"]!.DeepClone(), ["sourceKey"] = Key(song, platform),
-                ["scope"] = "fixture", ["generation"] = 7, ["quality"] = request == "auto" ? MediaQuality : request,
+                ["scope"] = "fixture", ["generation"] = Generation(platform), ["quality"] = request == "auto" ? MediaQuality : request,
                 ["requestedQuality"] = request, ["actualQuality"] = MediaQuality, ["qualityVerified"] = VerifiedQuality,
                 ["playbackVerified"] = false, ["qualityPolicySignature"] = policy.GetProperty("signature").GetString(),
                 ["qualityCacheSignature"] = Signature(platform),
@@ -645,10 +778,10 @@ public static partial class MusicOfficialPlaybackScopeTests
                     candidates = raw["sources"]!.AsArray().OfType<JsonObject>()
                         .Where(row => !(HideKnown && LJ.S(row["source"]) == "wy"))
                         .Select(row => new { platform = LJ.S(row["source"]), sourceKey = LJ.S(row["sourceKey"]),
-                            scope = "fixture", generation = 7 }), authorizationRequired = false });
+                            scope = "fixture", generation = Generation(LJ.S(row["source"])) }), authorizationRequired = false });
             }
             if (method == "music.official.cacheContext")
-                return Element(new { ok = true, scope = "fixture", generation = 7,
+                return Element(new { ok = true, scope = "fixture", generation = Generation(input.GetProperty("platform").GetString()!),
                     sourceKey = input.GetProperty("sourceKey").GetString(),
                     qualityCacheSignature = Signature(input.GetProperty("platform").GetString()!) });
             if (method == "music.official.resolve")
@@ -815,8 +948,9 @@ public static partial class MusicOfficialPlaybackScopeTests
         public int Volume { get; set; } = 50;
         public bool PauseRequested => !IsPlaying;
         public string? LastErrorCode => null;
-        internal int NetworkOpens, ReadOpens;
+        internal int NetworkOpens, ReadOpens, Stops, StopThread;
         internal Uri? LastUri;
+        internal CancellationToken PlaybackToken;
         public event PropertyChangedEventHandler? PropertyChanged;
         public event EventHandler? Started;
         public event EventHandler? Ended { add { } remove { } }
@@ -836,6 +970,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         private Task Open(string owner, string identity, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
+            PlaybackToken = token;
             OwnerId = owner; Identity = identity; HasMedia = IsPlaying = true;
             PropertyChanged?.Invoke(this, new(nameof(HasMedia)));
             Started?.Invoke(this, EventArgs.Empty);
@@ -843,6 +978,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         }
         public Task StopAsync()
         {
+            Stops++; StopThread = Environment.CurrentManagedThreadId;
             HasMedia = IsPlaying = false; OwnerId = Identity = null;
             PropertyChanged?.Invoke(this, new(nameof(HasMedia)));
             return Task.CompletedTask;
