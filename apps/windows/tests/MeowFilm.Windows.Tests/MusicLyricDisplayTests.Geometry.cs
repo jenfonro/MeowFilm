@@ -10,6 +10,7 @@ using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
+using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -27,7 +28,7 @@ public static partial class MusicLyricDisplayTests
         await using var f = await Fixture.Create();
         await f.Module.ActivateGlobalSurfaceAsync(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
         var view = new MusicPlayerDetailView(f.Module);
-        var window = new Window { Content = view, Width = 1200, Height = 850,
+        var window = new DesktopWindow { Content = view, Width = 1200, Height = 850,
             Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
         try
         {
@@ -156,7 +157,21 @@ public static partial class MusicLyricDisplayTests
             var list = (ListBox)view.FindName("LyricList");
             var viewport = (FrameworkElement)view.FindName("LyricViewport");
             var fade = (Grid)view.FindName("LyricFadeViewport");
+            var edge = (SidebarBackdrop)view.FindName("LyricEdgeFade");
+            var backdrop = (Border)view.FindName("PageBackdrop");
             var scroll = LyricVisuals(list).OfType<ScrollViewer>().First();
+            Check(fade.OpacityMask is null,
+                "the lyric text layer is not composited through a whole-viewport opacity mask");
+            Check(TextOptions.GetTextRenderingMode(list) == TextRenderingMode.Auto,
+                "detail lyric glyphs use native automatic rendering");
+            Check(ReferenceEquals(edge.Source, backdrop), "the edge fade projects the page's own cover backdrop");
+            Check(ReferenceEquals(backdrop.Background, view.Background),
+                "the projected backdrop is the same PlayerBackground brush as the page");
+            var edgeMask = (LinearGradientBrush)edge.OpacityMask;
+            Check(edgeMask.GradientStops.Select(stop => (stop.Color, stop.Offset)).SequenceEqual(
+                new[] { (Colors.Black, 0d), (Colors.Transparent, .10d),
+                    (Colors.Transparent, .90d), (Colors.Black, 1d) }),
+                "only the upper and lower edges fade; the central eighty percent stays clear");
             foreach (var size in new[] { new Size(1298, 848), new Size(1000, 740) })
             foreach (var key in new[] { Key.Home, Key.End, Key.PageUp })
             {
@@ -174,34 +189,30 @@ public static partial class MusicLyricDisplayTests
                 }) && CenterGap(list, scroll, f.Module.LyricDisplayIndex) < 1);
                 await Dispatcher.Yield(DispatcherPriority.Render);
                 Console.WriteLine($"LYRIC {size} {key}: row={f.Module.LyricDisplayIndex}, centerGap={CenterGap(list, scroll, f.Module.LyricDisplayIndex):F2}");
-                var mask = fade.OpacityMask;
-                var masked = CaptureLyricFrame(fade);
+                var visible = CaptureLyricFrame(fade);
+                var edgeOpacity = edge.Opacity;
                 RenderTargetBitmap clear;
-                try { fade.OpacityMask = null; clear = CaptureLyricFrame(fade); }
-                finally { fade.OpacityMask = mask; }
-                var central = new Int32Rect(0, (int)(masked.PixelHeight * .15), masked.PixelWidth,
-                    (int)(masked.PixelHeight * .7));
-                long original = LyricAlpha(clear, central), visible = LyricAlpha(masked, central);
-                Check(original > 1000 && Math.Abs(visible - original) <= original * .005,
-                    "actual first/last multiline lyric ink is not faded in the viewport middle");
-                // A uniform probe makes the edge opacity observable even when a gap
-                // between real lyric lines happens to land at the sample coordinate.
-                var probe = new Border { Background = Brushes.White, IsHitTestVisible = false };
-                fade.Children.Add(probe); fade.UpdateLayout();
-                try
+                try { edge.Opacity = 0; clear = CaptureLyricFrame(fade); }
+                finally { edge.Opacity = edgeOpacity; }
+                var central = new Int32Rect(0, (int)(visible.PixelHeight * .15), visible.PixelWidth,
+                    (int)(visible.PixelHeight * .7));
+                long withEdge = LyricAlpha(visible, central), withoutEdge = LyricAlpha(clear, central);
+                Check(withoutEdge > 1000 && Math.Abs(withEdge - withoutEdge) <= withoutEdge * .005,
+                    "the edge backdrop does not alter central lyric text");
+                var row = list.ItemContainerGenerator.ContainerFromIndex(f.Module.LyricDisplayIndex) as ListBoxItem;
+                Check(row is not null && row.Opacity == 1,
+                    "active lyric rows are not weakened through whole-row opacity compositing");
+                var edgeFrame = CaptureLyricFrame(edge);
+                byte Alpha(double y)
                 {
-                    var image = CaptureLyricFrame(fade);
-                    byte Alpha(double y)
-                    {
-                        var pixel = new byte[4];
-                        image.CopyPixels(new Int32Rect(image.PixelWidth / 2, (int)(image.PixelHeight * y), 1, 1), pixel, 4, 0);
-                        return pixel[3];
-                    }
-                    Check(Alpha(.05) is > 90 and < 170 && Alpha(.95) is > 90 and < 170,
-                        "only viewport edges fade, independent of the scrolled song boundary");
-                    foreach (double y in new[] { .15, .3, .5, .7, .85 }) Equal((byte)255, Alpha(y));
+                    var pixel = new byte[4];
+                    edgeFrame.CopyPixels(new Int32Rect(edgeFrame.PixelWidth / 2,
+                        (int)(edgeFrame.PixelHeight * y), 1, 1), pixel, 4, 0);
+                    return pixel[3];
                 }
-                finally { fade.Children.Remove(probe); }
+                Check(Alpha(.05) is > 90 and < 170 && Alpha(.95) is > 90 and < 170,
+                    "the upper and lower edge fades remain visible");
+                foreach (double y in new[] { .15, .3, .5, .7, .85 }) Equal((byte)0, Alpha(y));
                 Equal(0, f.Playback.Seeks);
                 if (size.Width == 1298) SaveLyricFrame(view, $"player-lyrics-{key}.png");
             }
@@ -209,14 +220,54 @@ public static partial class MusicLyricDisplayTests
         finally { window.Close(); f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail); }
     }
 
+    private static async Task VerifyLocalEdgeFade()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
+        var view = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+        var window = LyricWindow(view);
+        try
+        {
+            window.Show();
+            var fade = (Grid)view.FindName("LyricFadeViewport");
+            var edge = (SidebarBackdrop)view.FindName("LyricEdgeFade");
+            var backdrop = (Border)view.FindName("PageBackdrop");
+            foreach (var size in new[] { new Size(1298, 848), new Size(1000, 740) })
+            {
+                window.Width = view.Width = size.Width;
+                window.Height = view.Height = size.Height;
+                window.UpdateLayout();
+                await Dispatcher.Yield(DispatcherPriority.Render);
+                Check(fade.OpacityMask is null, "the lyric text layer remains outside the fade surface");
+                Check(ReferenceEquals(edge.Source, backdrop) &&
+                    ReferenceEquals(backdrop.Background, view.Background),
+                    "the local fade keeps the page's actual background projection");
+                var image = CaptureLyricFrame(edge);
+                byte Alpha(double y)
+                {
+                    var pixel = new byte[4];
+                    image.CopyPixels(new Int32Rect(image.PixelWidth / 2,
+                        (int)(image.PixelHeight * y), 1, 1), pixel, 4, 0);
+                    return pixel[3];
+                }
+                Check(Alpha(.05) is > 90 and < 170 && Alpha(.95) is > 90 and < 170,
+                    "both viewport-local edges visibly fade even though the source spans the whole page");
+                foreach (double y in new[] { .15, .3, .5, .7, .85 }) Equal((byte)0, Alpha(y));
+                Console.WriteLine($"LOCAL_EDGE {size}: top={Alpha(.05)}, bottom={Alpha(.95)}, height={image.PixelHeight}");
+            }
+            Equal(0, f.Playback.Seeks);
+        }
+        finally { window.Close(); f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); }
+    }
+
     private static Window LyricWindow(FrameworkElement view)
     {
-        // Session 0 limits native windows to its small monitor; an unclipped canvas
-        // lets the real component still lay out at each requested desktop size.
+        // An unclipped canvas keeps component layout independent of the host
+        // display's native window size.
         view.Width = 1298; view.Height = 848;
         var host = new Canvas();
         host.Children.Add(view);
-        return new()
+        return new DesktopWindow()
         {
             Content = host, Width = 1298, Height = 848, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
             Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false

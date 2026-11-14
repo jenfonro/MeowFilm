@@ -64,7 +64,7 @@ internal sealed class FilmDirectory
     }
 }
 
-internal sealed class FilmDirectoryDialog : Window
+internal sealed class FilmDirectoryDialog : DesktopWindow
 {
     private readonly FilmPlaybackPage page;
     private readonly JsonElement browsing;

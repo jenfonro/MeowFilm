@@ -92,8 +92,11 @@ public sealed class ManagementRowView : Grid
         var check = new CheckBox { IsChecked = state.Selected, Tag = "round", Margin = new(12, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center }; check.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck");
         AutomationProperties.SetName(check, "选择 " + row.Title); check.Click += (_, _) => state.Select(check.IsChecked == true); Children.Add(check);
         var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 8, 12, 8) };
-        var title = new TextBlock { Text = row.Title, FontSize = 15, FontWeight = FontWeights.Medium, TextTrimming = TextTrimming.CharacterEllipsis }; title.SetResourceReference(TextBlock.ForegroundProperty, "MeowFilm.Brush.Text"); text.Children.Add(title);
-        if (row.Detail.Length > 0) { var detail = new TextBlock { Text = row.Detail, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(0, 4, 0, 0) }; detail.SetResourceReference(TextBlock.ForegroundProperty, row.Failed ? "MeowFilm.Brush.Error" : "MeowFilm.Brush.Muted"); text.Children.Add(detail); }
+        var title = new TextBlock { Text = row.Title, TextTrimming = TextTrimming.CharacterEllipsis };
+        title.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Body");
+        title.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Normal");
+        title.SetResourceReference(TextBlock.ForegroundProperty, "MeowFilm.Brush.Text"); text.Children.Add(title);
+        if (row.Detail.Length > 0) { var detail = new TextBlock { Text = row.Detail, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(0, 4, 0, 0) }; detail.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Caption"); detail.SetResourceReference(TextBlock.ForegroundProperty, row.Failed ? "MeowFilm.Brush.Error" : "MeowFilm.Brush.Muted"); text.Children.Add(detail); }
         SetColumn(text, 1); Children.Add(text);
         var enabled = new CheckBox { IsChecked = row.Enabled, VerticalAlignment = VerticalAlignment.Center, Margin = new(8, 0, 12, 0) }; enabled.SetResourceReference(StyleProperty, "MeowFilm.ManagementSwitch"); AutomationProperties.SetName(enabled, "启用 " + row.Title); enabled.Click += (_, _) => row.Toggle(enabled.IsChecked == true); SetColumn(enabled, 2); Children.Add(enabled);
         var edit = ManagementList.Button("编辑", row.Edit); AutomationProperties.SetName(edit, "编辑 " + row.Title); SetColumn(edit, 3); Children.Add(edit);

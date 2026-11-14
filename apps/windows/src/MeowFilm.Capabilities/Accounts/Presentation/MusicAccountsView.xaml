@@ -4,7 +4,6 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
  Foreground="{DynamicResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
@@ -40,7 +39,7 @@
     <Setter Property="VerticalAlignment" Value="Center"/>
     <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
     <Style.Triggers><Trigger Property="local:MusicAccountsView.IsCompactTable" Value="True">
-     <Setter Property="Margin" Value="8,0,0,0"/><Setter Property="FontSize" Value="13"/>
+     <Setter Property="Margin" Value="8,0,0,0"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
     </Trigger></Style.Triggers>
    </Style>
    <Style x:Key="Account.PreferenceSwitch" TargetType="CheckBox" BasedOn="{StaticResource Settings.Switch}">
@@ -114,11 +113,11 @@
        </art:ArtworkImage>
       </Grid>
       <StackPanel Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center">
-       <TextBlock Text="{Binding DisplayName}" Style="{StaticResource Settings.Text}" FontSize="14" LineHeight="21" TextTrimming="CharacterEllipsis"/>
+       <TextBlock Text="{Binding DisplayName}" Style="{StaticResource Settings.Text}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" LineHeight="21" TextTrimming="CharacterEllipsis"/>
        <TextBlock Text="{Binding Membership}" Style="{StaticResource Settings.Subtitle}" FontSize="11" LineHeight="19" TextTrimming="CharacterEllipsis"/>
       </StackPanel>
      </Grid>
-     <TextBlock x:Name="AccountState" Text="{Binding DisplayName}" Style="{StaticResource Settings.Subtitle}" FontSize="13"
+     <TextBlock x:Name="AccountState" Text="{Binding DisplayName}" Style="{StaticResource Settings.Subtitle}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}"
                 VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
     </Grid>
     <DataTemplate.Triggers><DataTrigger Binding="{Binding IsLoggedIn}" Value="True">
@@ -127,7 +126,7 @@
     </DataTrigger></DataTemplate.Triggers>
    </DataTemplate>
    <DataTemplate x:Key="Account.Public">
-    <TextBlock Text="无需登录" Style="{StaticResource Settings.Subtitle}" FontSize="13" VerticalAlignment="Center"/>
+    <TextBlock Text="无需登录" Style="{StaticResource Settings.Subtitle}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" VerticalAlignment="Center"/>
    </DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
@@ -235,7 +234,7 @@
     <Border x:Name="LogoutPopupSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16">
      <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".13"/></Border.Effect>
      <StackPanel>
-      <TextBlock Text="退出此账号？" FontSize="14" Margin="0,0,0,14"/>
+      <TextBlock Text="退出此账号？" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="0,0,0,14"/>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
        <Button x:Name="CancelLogoutButton" Content="取消" Click="CancelLogout_Click" MinWidth="64"
                Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="取消退出账号"/>
@@ -273,7 +272,7 @@
        <Button Content="刷新二维码" Click="RefreshQr_Click" HorizontalAlignment="Center" Margin="0,14,0,0"
                Style="{StaticResource Settings.QuietButton}" IsEnabled="{Binding CanBeginAccountQr}"/>
        <TextBlock Text="{Binding AccountStatus}" Style="{StaticResource Settings.Subtitle}"
-                  HorizontalAlignment="Center" Margin="0,8,0,0" FontSize="13"/>
+                  HorizontalAlignment="Center" Margin="0,8,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Compact}"/>
        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,14,0,0">
         <Button x:Name="SaveQrButton" Content="保存二维码" Click="SaveQr_Click" Style="{StaticResource Settings.Button32}" IsEnabled="{Binding CanSaveAccountQr}"/>
         <Button Content="分享" Click="ShareQr_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" IsEnabled="{Binding CanSaveAccountQr}"/>
@@ -305,7 +304,7 @@
        <Button x:Name="SmsLoginButton" Content="登录" Click="SmsLogin_Click"
                Style="{StaticResource Settings.PrimaryButton}" IsEnabled="{Binding CanLoginAccountSms}"/>
        <TextBlock Text="{Binding AccountStatus}" Style="{StaticResource Settings.Subtitle}"
-                  HorizontalAlignment="Center" Margin="0,12,0,0" FontSize="13"/>
+                  HorizontalAlignment="Center" Margin="0,12,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Compact}"/>
       </StackPanel>
      </Grid>
     </Grid>

@@ -5,7 +5,7 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-internal partial class MusicDesktopLyricColorWindow : Window
+internal partial class MusicDesktopLyricColorWindow : DesktopWindow
 {
     internal static readonly IReadOnlyList<ColorPreset> Presets =
     [

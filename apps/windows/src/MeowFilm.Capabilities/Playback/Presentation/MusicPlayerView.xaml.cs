@@ -452,7 +452,7 @@ public partial class MusicPlayerView : UserControl
             content.Children.Add(icon);
         }
         var label = new TextBlock { Text = choice.Name, TextAlignment = TextAlignment.Center,
-            FontWeight = scene ? FontWeights.Normal : FontWeights.Medium };
+            FontWeight = scene ? FontWeights.Normal : FontWeights.Bold };
         label.SetBinding(TextBlock.ForegroundProperty, new Binding(nameof(Foreground)) { Source = button });
         content.Children.Add(label);
         button.Content = content;

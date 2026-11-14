@@ -85,8 +85,9 @@ public partial class MusicPlayerDetailView : UserControl
             if (e.WidthChanged) InvalidateLyricCenter();
             UpdateLyricViewport();
         };
-        LyricFadeViewport.SizeChanged += (_, _) =>
-            ((LinearGradientBrush)LyricFadeViewport.OpacityMask).EndPoint = new(0, LyricFadeViewport.ActualHeight);
+        // The projection draws the whole page; its fade belongs to the local lyric viewport.
+        LyricEdgeFade.SizeChanged += (_, _) =>
+            ((LinearGradientBrush)LyricEdgeFade.OpacityMask).EndPoint = new(0, LyricEdgeFade.ActualHeight);
         IsVisibleChanged += (_, _) =>
         {
             if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }

@@ -646,15 +646,15 @@ public static partial class MusicCatalogTests
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
-            var view = new MusicCatalogView { DataContext = f.Module };
-            using var source = new HwndSource(new HwndSourceParameters("catalog-system-typography-fixture")
+            var view = new MusicCatalogView { DataContext = f.Module, Width = 900, Height = 700 };
+            var window = new DesktopWindow
             {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 900, Height = 700
-            });
+                Content = view, WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false,
+                Left = -32000, Top = -32000, Width = 900, Height = 700
+            };
             try
             {
-                source.RootVisual = view;
+                window.Show();
                 view.Measure(new(900, 700)); view.Arrange(new Rect(0, 0, 900, 700)); view.UpdateLayout(); await Drain();
                 var buttons = Descendants<Button>(view).Where(b => b.IsVisible).ToArray();
                 var channelMore = (System.Windows.Controls.Primitives.Popup)view.FindName("ChannelMorePopup");
@@ -678,7 +678,7 @@ public static partial class MusicCatalogTests
                 var title = Descendants<TextBlock>(view).First(text => text.IsVisible &&
                     !string.IsNullOrWhiteSpace(text.Text) && text.Style == view.FindResource("Catalog.SectionTitle"));
                 Equal(body, title.FontFamily); Equal(18d, title.FontSize);
-                Equal(FontWeights.SemiBold, title.FontWeight);
+                Equal(FontWeights.Bold, title.FontWeight);
                 var playlist = Descendants<TextBlock>(view).First(text => text.IsVisible &&
                     !string.IsNullOrWhiteSpace(text.Text) && text.Style == view.FindResource("Catalog.PlaylistTitle"));
                 Equal(body, playlist.FontFamily); Equal(13d, playlist.FontSize);
@@ -720,38 +720,38 @@ public static partial class MusicCatalogTests
                     AssertDisplayAutoText(catalogText, "actual catalog headings and captions");
                 }
             }
-            finally { source.RootVisual = null; await Drain(); }
+            finally { window.Content = null; window.Close(); await Drain(); }
         });
         yield return Case("home text follows the system font and entry captions stay pixel aligned after resize", async () =>
         {
             var card = new MusicCatalogCard("500", "每日推荐", "推荐歌曲", "", "playlist", "wy", ActionId: "500",
                 Presentation: MusicCatalogEntryPresentation.Preview);
-            var view = new MusicCatalogView();
+            var view = new MusicCatalogView { Width = 240, Height = 300 };
             card.InitializePreview(new[] { "第一首", "第二首", "第三首" }.Select((title, i) => new MusicRankPreview(title, "", "", i + 1, null)).ToArray());
             var entry = new EntryCard { DataContext = card };
             view.Content = entry;
-            using var source = new HwndSource(new HwndSourceParameters("entry-system-typography-fixture")
+            var window = new DesktopWindow
             {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 240, Height = 300
-            });
+                Content = view, WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false,
+                Left = -32000, Top = -32000, Width = 240, Height = 300
+            };
             void Layout()
             { view.Measure(new(240, 300)); view.Arrange(new Rect(0, 0, 240, 300)); view.UpdateLayout(); }
             try
             {
-                source.RootVisual = view; Layout(); await Drain();
+                window.Show(); Layout(); await Drain();
                 Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(view));
                 Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(view));
                 Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(entry));
                 Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(entry));
                 Equal(SystemFonts.MessageFontFamily, view.FontFamily);
-                Equal(SystemFonts.MessageFontFamily, entry.FontFamily);
+                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(entry));
                 True(view.UseLayoutRounding && entry.UseLayoutRounding && entry.SnapsToDevicePixels,
                     "text and cover layout align to the current display pixels");
                 var alternate = new FontFamily("Arial");
-                view.Resources[SystemFonts.MessageFontFamilyKey] = alternate;
+                window.Resources[SystemFonts.MessageFontFamilyKey] = alternate;
                 await Drain();
-                Equal(alternate, view.FontFamily); Equal(alternate, entry.FontFamily);
+                Equal(alternate, view.FontFamily); Equal(alternate, TextElement.GetFontFamily(entry));
                 var surface = (Grid)entry.FindName("Surface");
                 var caption = (TextBlock)entry.FindName("Caption");
                 var subtitle = caption;
@@ -792,7 +792,7 @@ public static partial class MusicCatalogTests
                         "all preview rows remain outside the footer's layout constraint");
                 }
             }
-            finally { source.RootVisual = null; await Drain(); }
+            finally { window.Content = null; window.Close(); await Drain(); }
         });
         yield return Case("catalog system typography uses Display Auto text and paints neutral glyphs at bitmap DPI", () =>
         {
@@ -802,40 +802,45 @@ public static partial class MusicCatalogTests
                 HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(12, 0, 0, 0) };
             host.Children.Add(text); view.Content = host;
-            Equal(SystemFonts.MessageFontFamily, view.FontFamily);
-            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(view));
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(view));
-            var preview = new ToolTip { Style = (Style)view.FindResource("Capability.SeekPreview") };
-            Equal(SystemFonts.MessageFontFamily, preview.FontFamily);
-            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(preview));
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(preview));
-            True(preview.UseLayoutRounding && preview.SnapsToDevicePixels, "detached seek previews retain pixel-aligned text");
-            foreach (var role in new[] { "Catalog.SectionTitle", "Catalog.SongTitle", "Catalog.PlaylistTitle" })
+            var window = new DesktopWindow { Content = view };
+            try
             {
-                text.Style = (Style)view.FindResource(role);
-                view.Measure(new(200, 52)); view.Arrange(new Rect(0, 0, 200, 52)); view.UpdateLayout();
-                Equal(SystemFonts.MessageFontFamily, text.FontFamily);
-                AssertDisplayAutoText([text], role);
-                // RenderTargetBitmap has no HWND: scaled neutral pixels prove glyph drawing,
-                // not OS subpixel rendering at a monitor's DPI.
-                foreach (var scale in new[] { 1d, 1.25, 1.5, 2 })
+                Equal(SystemFonts.MessageFontFamily, view.FontFamily);
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(view));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(view));
+                var preview = new ToolTip { Style = (Style)view.FindResource("Capability.SeekPreview") };
+                Equal(SystemFonts.MessageFontFamily, preview.FontFamily);
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(preview));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(preview));
+                True(preview.UseLayoutRounding && preview.SnapsToDevicePixels, "detached seek previews retain pixel-aligned text");
+                foreach (var role in new[] { "Catalog.SectionTitle", "Catalog.SongTitle", "Catalog.PlaylistTitle" })
                 {
-                    var bitmap = new RenderTargetBitmap((int)(200 * scale), (int)(52 * scale),
-                        96 * scale, 96 * scale, PixelFormats.Pbgra32);
-                    bitmap.Render(view);
-                    var bytes = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
-                    bitmap.CopyPixels(bytes, bitmap.PixelWidth * 4, 0);
-                    var ink = 0;
-                    for (var index = 0; index < bytes.Length; index += 4)
+                    text.Style = (Style)view.FindResource(role);
+                    view.Measure(new(200, 52)); view.Arrange(new Rect(0, 0, 200, 52)); view.UpdateLayout();
+                    Equal(SystemFonts.MessageFontFamily, text.FontFamily);
+                    AssertDisplayAutoText([text], role);
+                    // RenderTargetBitmap has no HWND: scaled neutral pixels prove glyph drawing,
+                    // not OS subpixel rendering at a monitor's DPI.
+                    foreach (var scale in new[] { 1d, 1.25, 1.5, 2 })
                     {
-                        True(Math.Abs(bytes[index] - bytes[index + 1]) <= 1 &&
-                            Math.Abs(bytes[index + 1] - bytes[index + 2]) <= 1,
-                            "offscreen neutral glyph pixels keep matching RGB channels");
-                        if (bytes[index + 3] > 240 && bytes[index] < 200) ink++;
+                        var bitmap = new RenderTargetBitmap((int)(200 * scale), (int)(52 * scale),
+                            96 * scale, 96 * scale, PixelFormats.Pbgra32);
+                        bitmap.Render(view);
+                        var bytes = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
+                        bitmap.CopyPixels(bytes, bitmap.PixelWidth * 4, 0);
+                        var ink = 0;
+                        for (var index = 0; index < bytes.Length; index += 4)
+                        {
+                            True(Math.Abs(bytes[index] - bytes[index + 1]) <= 1 &&
+                                Math.Abs(bytes[index + 1] - bytes[index + 2]) <= 1,
+                                "offscreen neutral glyph pixels keep matching RGB channels");
+                            if (bytes[index + 3] > 240 && bytes[index] < 200) ink++;
+                        }
+                        True(ink > 50, "offscreen drawing evidence covers actual painted glyphs, not empty output");
                     }
-                    True(ink > 50, "offscreen drawing evidence covers actual painted glyphs, not empty output");
                 }
             }
+            finally { window.Content = null; window.Close(); }
             return Task.CompletedTask;
         });
         yield return Case("home controls execute through automation patterns on a hidden nonactivating source", async () =>
@@ -875,16 +880,16 @@ public static partial class MusicCatalogTests
             {
                 source.RootVisual = root; Layout();
                 Equal(SystemFonts.MessageFontFamily, shell.FontFamily);
-                Equal(SystemFonts.MessageFontFamily, ((Control)f.Module.SettingsView).FontFamily);
-                Equal(SystemFonts.MessageFontFamily, ((Control)f.Module.PlayerView).FontFamily);
+                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(f.Module.SettingsView));
+                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(f.Module.PlayerView));
                 Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Module.SettingsView));
                 Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Module.PlayerView));
                 Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(f.Module.SettingsView));
                 Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(f.Module.PlayerView));
                 var detail = f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 var queue = f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue);
-                Equal(SystemFonts.MessageFontFamily, ((Control)detail).FontFamily);
-                Equal(SystemFonts.MessageFontFamily, ((Control)queue).FontFamily);
+                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(detail));
+                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(queue));
                 Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(detail));
                 Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(queue));
                 Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(detail));
