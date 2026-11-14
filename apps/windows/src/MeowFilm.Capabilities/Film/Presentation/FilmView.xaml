@@ -16,7 +16,6 @@
     <Setter Property="Padding" Value="13,5,11,5"/>
     <Setter Property="Margin" Value="0"/>
     <Setter Property="MinHeight" Value="34"/>
-    <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
     <Setter Property="Cursor" Value="Hand"/>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
      <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
@@ -38,7 +37,6 @@
     <Setter Property="Height" Value="44"/>
     <Setter Property="MinHeight" Value="0"/>
     <Setter Property="Padding" Value="20,0"/>
-    <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
     <Setter Property="Cursor" Value="Hand"/>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
      <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
@@ -73,7 +71,6 @@
     <Setter Property="Padding" Value="14,5"/>
     <Setter Property="Margin" Value="2,0"/>
     <Setter Property="BorderThickness" Value="0"/>
-    <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
     <Setter Property="Cursor" Value="Hand"/>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
      <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"

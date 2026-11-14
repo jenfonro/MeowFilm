@@ -56,7 +56,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
             self.configure(cell, row: row)
             return cell
         }
-        heading.font = .systemFont(ofSize: 15, weight: .semibold)
+        heading.font = .systemFont(ofSize: 15)
         heading.lineBreakMode = .byTruncatingTail
         source.font = .systemFont(ofSize: 11)
         count.font = .systemFont(ofSize: 12)

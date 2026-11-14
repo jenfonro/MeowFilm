@@ -84,7 +84,7 @@
      <Path Data="M 0,7 L 17,7 M 4,0 L 4,5 M 13,0 L 13,5" Stroke="{Binding Foreground,ElementName=Entry}" StrokeThickness="1"/>
      <TextBlock Text="{Binding DayOfMonth}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="9" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,1"/>
     </Grid>
-    <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="17" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
+    <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="17" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
    </Grid>
   <Canvas x:Name="CaptionHost" Grid.Row="1" Margin="10,6" IsHitTestVisible="False">
    <StackPanel x:Name="ContentBlock" Width="{Binding ActualWidth,ElementName=CaptionHost}">

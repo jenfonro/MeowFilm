@@ -87,9 +87,9 @@
    <StackPanel>
     <Grid Margin="0,0,0,8">
      <Grid.ColumnDefinitions><ColumnDefinition Width="136"/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
-     <TextBlock Text="功能说明" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"/>
-     <TextBlock Grid.Column="1" Text="应用内快捷键" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" Margin="0,0,8,0"/>
-     <TextBlock Grid.Column="2" Text="全局快捷键" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" Margin="8,0,0,0"/>
+     <TextBlock Text="功能说明"/>
+     <TextBlock Grid.Column="1" Text="应用内快捷键" Margin="0,0,8,0"/>
+     <TextBlock Grid.Column="2" Text="全局快捷键" Margin="8,0,0,0"/>
     </Grid>
     <ItemsControl x:Name="ShortcutRows">
      <ItemsControl.ItemTemplate><DataTemplate>

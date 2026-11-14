@@ -678,7 +678,7 @@ public static partial class MusicCatalogTests
                 var title = Descendants<TextBlock>(view).First(text => text.IsVisible &&
                     !string.IsNullOrWhiteSpace(text.Text) && text.Style == view.FindResource("Catalog.SectionTitle"));
                 Equal(body, title.FontFamily); Equal(18d, title.FontSize);
-                Equal(FontWeights.Bold, title.FontWeight);
+                Equal(FontWeights.Normal, title.FontWeight);
                 var playlist = Descendants<TextBlock>(view).First(text => text.IsVisible &&
                     !string.IsNullOrWhiteSpace(text.Text) && text.Style == view.FindResource("Catalog.PlaylistTitle"));
                 Equal(body, playlist.FontFamily); Equal(13d, playlist.FontSize);

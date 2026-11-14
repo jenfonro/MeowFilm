@@ -246,6 +246,9 @@ public static class NovelManagementTests
                 AutomationProperties.GetName(item) == "替换规则编辑");
             try
             {
+                var title = NovelTests.Find<TextBlock>(ruleDialog).Single(text => text.Text == "替换规则编辑");
+                Check(title.IsLoaded && title.IsVisible && title.FontSize == 18 && title.FontWeight == FontWeights.Normal,
+                    "the actual rule editor dialog retains its title size and uses regular text");
                 await ReachRuleEditorBottom(ruleDialog, NovelTests.Find<NovelRuleEditor>(ruleDialog).Single());
                 await CaptureDialog(ruleDialog, "rule-editor-product-bottom");
             }

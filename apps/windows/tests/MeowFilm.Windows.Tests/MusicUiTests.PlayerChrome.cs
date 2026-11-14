@@ -301,7 +301,14 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             var queue = (MusicQueueView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue);
+            using var source = new HwndSource(new HwndSourceParameters("queue-chrome-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 386, Height = 420
+            });
+            source.RootVisual = queue;
             Render(queue, 386, 420); await Drain();
+            True(queue.IsLoaded && queue.IsVisible, "queue assertions use the mounted product surface");
             var list = (ListBox)queue.FindName("QueueList");
             var item = list.ItemContainerGenerator.ContainerFromIndex(1) as ListBoxItem ??
                 throw new InvalidOperationException("real queue data generates its real row template");
@@ -351,8 +358,12 @@ public static partial class MusicUiTests
                 "mouse high contrast uses the same readable row colors");
             var currentItem = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(0);
             True(Visuals(currentItem).OfType<TextBlock>().Any(text =>
-                text.Text == f.Module.QueueSurfaceRows[0].Title && text.FontWeight == FontWeights.Bold),
-                "current song retains a non-color indicator in high contrast");
+                text.Text == f.Module.QueueSurfaceRows[0].Title && text.FontWeight == FontWeights.Normal),
+                "current song keeps regular text in high contrast");
+            var currentOverlay = Visuals(currentItem).OfType<Border>().Single(border =>
+                border.Child is System.Windows.Shapes.Path);
+            Equal(1d, currentOverlay.Opacity);
+            True(currentOverlay.IsVisible, "current song retains its playback icon as a non-color indicator in high contrast");
             DesktopTheme.SetIsHighContrast(queue, false);
             item.SetValue(mouseKey, false); row.SetValue(mouseKey, false);
             var play = Visuals(row).OfType<Button>().Single(button => Grid.GetColumnSpan(button) == 3);
@@ -521,9 +532,16 @@ public static partial class MusicUiTests
                 await pendingLyrics.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 Equal(Visibility.Visible, playerSurface.Visibility);
                 var detail = (MusicPlayerDetailView)((ContentControl)shell.FindName("PlayerDetailHost")).Content;
+                var title = (TextBlock)detail.FindName("DetailTitle");
+                Equal(f.Module.CurrentTitle, title.Text);
+                Equal(26d, title.FontSize);
+                Equal(FontWeights.Normal, title.FontWeight);
                 var footer = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
                 var record = (MusicRecordView)detail.FindName("DetailRecord");
                 var cover = (ArtworkImage)record.FindName("Cover");
+                Render(root, 1110, 800); await Drain();
+                True(cover.IsLoaded && cover.IsVisible && cover.ActualWidth > 0 && cover.ActualHeight > 0,
+                    "newly presented artwork has completed its real host layout");
                 Equal("加载中…", ((TextBlock)detail.FindName("LyricState")).Text);
                 True(!Visuals(detail).OfType<NoticeOutlet>().Any(), "normal lyric states stay in the lyric region");
                 var loader = new HeldPlayerArtwork(); ArtworkScope.SetLoader(record, loader);

@@ -83,11 +83,11 @@ struct MusicAccountDetailContent: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(summary.detail(at: now).name ?? platform.title)
-                        .font(.title3.weight(.semibold))
+                        .font(.title3)
                         .lineLimit(2)
                     if account.phase == .requiresValidation {
                         Text(account.phase.title)
-                            .font(.caption.weight(.semibold))
+                            .font(.caption)
                             .foregroundStyle(theme.settingsDanger)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
@@ -177,7 +177,7 @@ private struct MusicAccountSyncSection: View {
         let ready = enabled && sync.automaticRevision != nil && !sync.busy
         VStack(alignment: .leading, spacing: 0) {
             Text("自动同步")
-                .font(.subheadline.weight(.semibold))
+                .font(.subheadline)
                 .padding(.top, 12)
                 .padding(.bottom, 4)
             Toggle("收藏歌曲", isOn: Binding(get: { selection.favorites }, set: { perform(.favorites($0)) }))

@@ -275,7 +275,7 @@ public static class FilmPresentationTests
             var sharedHeading = (Style)view.FindResource("MeowFilm.SectionHeading");
             Check(dataTitle.Text == "热门电影" &&
                 ReferenceEquals(dataTitle.Style, sharedHeading) &&
-                dataTitle.FontSize == 18 && dataTitle.FontWeight == FontWeights.Bold,
+                dataTitle.FontSize == 18 && dataTitle.FontWeight == FontWeights.Normal,
                 "data page uses the shared compact section heading");
             var filters = (ItemsControl)view.FindName("DataFilters");
             var filterButtons = Visuals(filters).OfType<Button>()

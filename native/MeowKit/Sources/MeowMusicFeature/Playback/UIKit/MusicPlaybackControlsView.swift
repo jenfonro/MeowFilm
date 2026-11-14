@@ -45,8 +45,8 @@ final class MusicPlaybackControlsView: UIView {
     private var layout: Layout
     private var fullViewportHeight: CGFloat?
     private var fullSafeHeight: CGFloat?
-    private var compactTitleFont = UIFont.systemFont(ofSize: 14, weight: .semibold)
-    private var titleFont = UIFont.systemFont(ofSize: 14, weight: .semibold)
+    private var compactTitleFont = UIFont.systemFont(ofSize: 14)
+    private var titleFont = UIFont.systemFont(ofSize: 14)
     private var displayedTheme: PageTheme?
     private struct ModeMenuState: Equatable {
         let fence: MusicReferencePlayerFence
@@ -538,9 +538,9 @@ final class MusicPlaybackControlsView: UIView {
     func updateFonts(compatibleWith traits: UITraitCollection) {
         let metrics = UIFontMetrics(forTextStyle: .subheadline)
         compactTitleFont = metrics.scaledFont(
-            for: .systemFont(ofSize: 14, weight: .semibold), compatibleWith: traits)
+            for: .systemFont(ofSize: 14), compatibleWith: traits)
         titleFont = layout == .compact ? compactTitleFont : metrics.scaledFont(
-            for: .systemFont(ofSize: 16, weight: layout == .full ? .medium : .semibold),
+            for: .systemFont(ofSize: 16),
             compatibleWith: traits)
         artist.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(
             for: .systemFont(ofSize: layout == .full ? 13 : 12), compatibleWith: traits)

@@ -141,7 +141,6 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
-                            <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}" />
                             <Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}" />
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -416,7 +415,6 @@
     <Style x:Key="MeowFilm.Heading" TargetType="TextBlock">
         <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" />
         <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Heading}" />
-        <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}" />
         <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
         <Setter Property="TextOptions.TextRenderingMode" Value="Auto" />
         <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
@@ -524,7 +522,6 @@
             <Trigger Property="IsSelected" Value="True">
                 <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}" />
                 <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.AccentText}" />
-                <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}" />
             </Trigger>
             <Trigger Property="IsKeyboardFocused" Value="True">
                 <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Focus}" />
@@ -659,7 +656,7 @@
  </Style>
  <Style x:Key="MeowFilm.SettingsSectionTitle" TargetType="TextBlock">
   <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
-  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionTitle}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionTitle}"/>
   <Setter Property="TextOptions.TextFormattingMode" Value="Display"/><Setter Property="TextOptions.TextRenderingMode" Value="Auto"/>
   <Setter Property="LineHeight" Value="24"/><Setter Property="TextWrapping" Value="NoWrap"/>
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>

@@ -161,7 +161,7 @@
                             </Style.Triggers>
                         </Style>
                     </Border.Style>
-                    <TextBlock Text="m" FontSize="21" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    <TextBlock Text="m" FontSize="21" HorizontalAlignment="Center" VerticalAlignment="Center"
                                Focusable="False">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">

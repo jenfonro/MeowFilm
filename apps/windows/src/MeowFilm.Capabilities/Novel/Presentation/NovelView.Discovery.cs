@@ -56,11 +56,10 @@ public sealed partial class NovelView
             if (FindDiscoveryFocus(VisualTreeHelper.GetChild(parent, i), id) is { } found) return found;
         return null;
     }
-    private static TextBlock DiscoveryText(string value, double size = 12, bool muted = false, bool bold = false)
+    private static TextBlock DiscoveryText(string value, double size = 12, bool muted = false)
     {
         var text = NovelUi.Text(value, size, muted);
         text.Margin = new(0); text.TextWrapping = TextWrapping.NoWrap; text.TextTrimming = TextTrimming.CharacterEllipsis;
-        if (bold) text.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Strong");
         return text;
     }
     private static Viewbox DiscoveryIcon(string data, double size = 14)
@@ -182,7 +181,7 @@ public sealed partial class NovelView
         var tools = DiscoveryTools(); Grid.SetColumn(tools, 1); heading.Children.Add(tools);
         if (categories)
         {
-            var title = DiscoveryText("分类", 26, bold: true); title.VerticalAlignment = VerticalAlignment.Center;
+            var title = DiscoveryText("分类", 26); title.VerticalAlignment = VerticalAlignment.Center;
             heading.Children.Add(title); panel.Children.Add(heading);
             var groups = DiscoveryKindGroups();
             var tabs = new StackPanel { Orientation = Orientation.Horizontal };
@@ -245,7 +244,7 @@ public sealed partial class NovelView
         row.ColumnDefinitions.Add(new()); row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         var text = new Grid { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
         text.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); text.ColumnDefinitions.Add(new());
-        var name = DiscoveryText(title, 17, bold: true); name.MaxWidth = 360; text.Children.Add(name);
+        var name = DiscoveryText(title, 17); name.MaxWidth = 360; text.Children.Add(name);
         var count = DiscoveryText(detail, 11, true); count.Margin = new(12, 0, 0, 0);
         count.VerticalAlignment = VerticalAlignment.Center; Grid.SetColumn(count, 1); text.Children.Add(count); row.Children.Add(text);
         return row;
@@ -340,7 +339,7 @@ public sealed partial class NovelView
         var words = new StackPanel();
         words.Children.Add(DiscoveryText("选读 · " + DiscoverySourceName(book), 11, true));
         var title = DiscoveryButton(book.Name, () => module.RunUi(ct => module.OpenBookAsync(book, ct)));
-        title.Content = DiscoveryText(book.Name, 28, bold: true); title.HorizontalContentAlignment = HorizontalAlignment.Left;
+        title.Content = DiscoveryText(book.Name, 28); title.HorizontalContentAlignment = HorizontalAlignment.Left;
         title.Height = 43; words.Children.Add(title);
         words.Children.Add(DiscoveryText(string.Join(" · ", new[] { book.Author, DiscoveryMetadata(book) }.Where(s => s.Length > 0)), 12, true));
         var intro = DiscoveryText(book.Intro, 13, true); intro.TextWrapping = TextWrapping.Wrap; intro.LineHeight = 23;
@@ -356,7 +355,7 @@ public sealed partial class NovelView
         var panel = new DockPanel(); card.Child = panel;
         var last = module.Library.Entries.Where(e => e.ReadAt is not null).OrderByDescending(e => e.ReadAt).FirstOrDefault();
         var heading = new Grid();
-        heading.Children.Add(DiscoveryText("继续阅读", 13, bold: true));
+        heading.Children.Add(DiscoveryText("继续阅读", 13));
         if (last?.ReadAt is { } readAt)
         {
             int days = (DateTimeOffset.Now.Date - readAt.LocalDateTime.Date).Days;
@@ -385,7 +384,7 @@ public sealed partial class NovelView
         var book = new Grid(); book.ColumnDefinitions.Add(new() { Width = new(57) }); book.ColumnDefinitions.Add(new());
         book.Children.Add(DiscoveryCover(last.Book, 45, 61));
         var info = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        info.Children.Add(DiscoveryText(last.Book.Name, 14, bold: true));
+        info.Children.Add(DiscoveryText(last.Book.Name, 14));
         var author = DiscoveryText(last.Book.Author, 11, true); author.Margin = new(0, 5, 0, 0); info.Children.Add(author);
         Grid.SetColumn(info, 1); book.Children.Add(info); content.Children.Add(book);
         var chapter = DiscoveryText(last.Anchor?.ChapterTitle ?? "", 11, true); chapter.Margin = new(0, 15, 0, 0);
@@ -396,7 +395,7 @@ public sealed partial class NovelView
     {
         var panel = new StackPanel();
         panel.Children.Add(DiscoveryCover(book, 170, 170 * 4d / 3, scale: true));
-        var title = DiscoveryText(book.Name, 14, bold: true); title.Margin = new(0, 10, 0, 0); panel.Children.Add(title);
+        var title = DiscoveryText(book.Name, 14); title.Margin = new(0, 10, 0, 0); panel.Children.Add(title);
         var author = DiscoveryText(string.Join(" · ", new[] { book.Author, NovelJson.Text(book.Data, "kind") }.Where(s => s.Length > 0)), 11, true);
         author.Margin = new(0, 3, 0, 0); panel.Children.Add(author);
         var source = new Grid { Margin = new(0, 7, 0, 0) };
@@ -413,7 +412,7 @@ public sealed partial class NovelView
         var info = new DockPanel { Height = 156 };
         var source = DiscoveryText(DiscoverySourceName(book), 11, true); DockPanel.SetDock(source, Dock.Bottom); info.Children.Add(source);
         var text = new StackPanel();
-        var title = DiscoveryText(book.Name, 15, bold: true); title.Margin = new(0, 0, 26, 0); text.Children.Add(title);
+        var title = DiscoveryText(book.Name, 15); title.Margin = new(0, 0, 26, 0); text.Children.Add(title);
         var author = DiscoveryText(book.Author, 11, true); author.Margin = new(0, 5, 0, 0); text.Children.Add(author);
         var metadata = DiscoveryText(DiscoveryMetadata(book), 11, true); metadata.Margin = new(0, 7, 0, 0); text.Children.Add(metadata);
         var summary = DiscoveryText(book.Intro, 12, true); summary.TextWrapping = TextWrapping.Wrap;

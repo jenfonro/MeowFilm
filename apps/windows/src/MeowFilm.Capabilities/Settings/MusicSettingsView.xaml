@@ -18,7 +18,7 @@
       <ContentPresenter VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}" RecognizesAccessKey="True"/>
      </Border>
      <ControlTemplate.Triggers>
-      <Trigger Property="IsChecked" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/><Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/></Trigger>
+      <Trigger Property="IsChecked" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/><Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/></Trigger>
       <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/></Trigger>
       <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
       <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsChecked" Value="True"/></MultiTrigger.Conditions><Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
@@ -89,7 +89,7 @@
         <StackPanel x:Name="SongSearchPanel">
          <Grid Margin="0,0,0,12">
           <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <TextBlock Text="歌曲搜索" FontSize="15" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" VerticalAlignment="Center"/>
+          <TextBlock Text="歌曲搜索" FontSize="15" VerticalAlignment="Center"/>
           <Button Grid.Column="1" Content="高级设置" Tag="songs" Click="SearchAdvanced_Click" Style="{StaticResource Settings.QuietButton}" IsEnabled="{Binding CanEditSearchPreferences}" AutomationProperties.Name="歌曲搜索高级设置"/>
          </Grid>
          <local:SettingsPriorityList x:Name="SongPriorities" Title="平台优先顺序" Tag="songs" ShowLogos="True" ItemsSource="{Binding SongSearch.Platforms}" CanEdit="{Binding CanEditSearchPreferences}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
@@ -97,7 +97,7 @@
         <StackPanel x:Name="PlaylistSearchPanel" Style="{StaticResource Settings.PairRight}">
          <Grid Margin="0,0,0,12">
           <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <TextBlock Text="歌单搜索" FontSize="15" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" VerticalAlignment="Center"/>
+          <TextBlock Text="歌单搜索" FontSize="15" VerticalAlignment="Center"/>
           <Button Grid.Column="1" Content="高级设置" Tag="playlists" Click="SearchAdvanced_Click" Style="{StaticResource Settings.QuietButton}" IsEnabled="{Binding CanEditSearchPreferences}" AutomationProperties.Name="歌单搜索高级设置"/>
          </Grid>
          <local:SettingsPriorityList x:Name="PlaylistPriorities" Title="平台优先顺序" Tag="playlists" ShowLogos="True" ItemsSource="{Binding PlaylistSearch.Platforms}" CanEdit="{Binding CanEditSearchPreferences}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>

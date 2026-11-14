@@ -21,7 +21,7 @@ final class MusicQueueRowView: UIView {
         layer.cornerRadius = 12
         mark.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         mark.textAlignment = .center
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.font = .systemFont(ofSize: 15)
         artist.font = .systemFont(ofSize: 12)
         title.lineBreakMode = .byTruncatingTail
         artist.lineBreakMode = .byTruncatingTail

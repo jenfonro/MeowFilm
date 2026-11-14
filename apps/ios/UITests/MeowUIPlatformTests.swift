@@ -623,6 +623,7 @@ final class MeowUIPlatformTests: XCTestCase {
         let header = PageHeaderView(themeProvider: TestPageTheme())
         let back = PageHeaderButton(image: PageIcon.image(.back), accessibilityLabel: "返回") {}
         let done = PageHeaderTextButton(title: "完成") {}
+        XCTAssertEqual(done.titleLabel?.font, .systemFont(ofSize: 15))
         header.setLeading(back)
         header.setTrailing([done])
         let custom = PageHeaderTextButton(title: "频道") {}
@@ -646,6 +647,7 @@ final class MeowUIPlatformTests: XCTestCase {
             header.layoutIfNeeded()
             let label = try XCTUnwrap(descendants(header).compactMap { $0 as? UILabel }
                 .first { $0.text == "页面" })
+            XCTAssertEqual(label.font, .systemFont(ofSize: 17))
             let frame = label.convert(label.bounds, to: header)
             XCTAssertEqual(frame.midX, width / 2, accuracy: 0.5)
             XCTAssertEqual(frame.midY, titleFrame.midY, accuracy: 0.5)

@@ -41,7 +41,7 @@ final class MusicSearchResultTabsView: UIView {
             buttons = titles.enumerated().map { index, title in
                 let button = MusicSearchHitButton(type: .system)
                 button.setTitle(title, for: .normal)
-                button.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+                button.titleLabel?.font = .systemFont(ofSize: 17)
                 button.titleLabel?.numberOfLines = 1
                 button.titleLabel?.lineBreakMode = .byClipping
                 button.contentEdgeInsets = .zero
@@ -79,7 +79,7 @@ final class MusicSearchResultTabsView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         var x: CGFloat = 0
-        let font = UIFont.systemFont(ofSize: 17, weight: .semibold)
+        let font = UIFont.systemFont(ofSize: 17)
         for (index, button) in buttons.enumerated() {
             let width = ceil((titles[index] as NSString).size(withAttributes: [.font: font]).width)
             button.frame = CGRect(x: x, y: 0, width: width, height: bounds.height)
@@ -129,7 +129,7 @@ final class MusicSearchSongCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = .clear
         selectionStyle = .none
-        titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: 14)
         subtitleLabel.font = .systemFont(ofSize: 12)
         titleLabel.numberOfLines = 1; subtitleLabel.numberOfLines = 1
         titleLabel.lineBreakMode = .byTruncatingTail; subtitleLabel.lineBreakMode = .byTruncatingTail
@@ -209,7 +209,7 @@ final class MusicSearchSectionHeaderCell: UITableViewCell {
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = .clear; selectionStyle = .none
-        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 18)
         titleLabel.numberOfLines = 1
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.accessibilityIdentifier = "music.search.results.section.title"

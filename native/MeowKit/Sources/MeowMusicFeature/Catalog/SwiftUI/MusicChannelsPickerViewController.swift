@@ -89,7 +89,7 @@ struct MusicChannelsPickerContent: View {
                 .accessibilityLabel("关闭")
                 .accessibilityIdentifier("music.channels.picker.close")
                 Text("选择频道")
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: 20))
                     .foregroundStyle(Color(UIColor(theme.ink)))
                     .frame(maxWidth: .infinity)
                 Color.clear
@@ -114,7 +114,7 @@ struct MusicChannelsPickerContent: View {
                                 select(channel)
                             } label: {
                                 Text(channel.title)
-                                    .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                                    .font(.system(size: 13))
                                     .foregroundStyle(Color(UIColor(selected ? theme.accent : theme.ink)))
                                     .multilineTextAlignment(.center)
                                     .lineLimit(2)

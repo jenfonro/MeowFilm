@@ -89,7 +89,7 @@ struct MusicAccountLoginContent: View {
                 ) { EmptyView() }
                 if state.signedIn {
                     VStack(spacing: 12) {
-                        Text(MusicLoginProgress.confirmed.title).font(.headline)
+                        Text(MusicLoginProgress.confirmed.title).font(.headline.weight(.regular))
                         if state.checkingAccount { ProgressView().accessibilityLabel("读取账号") }
                     }
                     .frame(maxWidth: .infinity, minHeight: 88)
@@ -171,7 +171,7 @@ private struct MusicLoginMethodTabs: View {
         return Button { state.selectMethod(method) } label: {
             VStack(spacing: 8) {
                 Text(title)
-                    .font(.subheadline.weight(selected ? .semibold : .regular))
+                    .font(.subheadline)
                     .foregroundStyle(Color(uiColor: UIColor(selected ? theme.settings.ink : theme.settings.muted)))
                 Capsule()
                     .fill(selected ? Color(uiColor: UIColor(theme.settings.accent)) : Color.clear)
@@ -203,7 +203,7 @@ private struct MusicSMSLoginForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("手机号").font(.subheadline.weight(.semibold))
+            Text("手机号").font(.subheadline)
             AccountInputCapsule(theme: theme) {
                 countryCode
                 divider
@@ -214,7 +214,7 @@ private struct MusicSMSLoginForm: View {
                     .padding(.horizontal, 14)
                     .frame(minHeight: 48)
             }
-            Text("验证码").font(.subheadline.weight(.semibold)).padding(.top, 6)
+            Text("验证码").font(.subheadline).padding(.top, 6)
             AccountInputCapsule(theme: theme) {
                 TextField("", text: Binding(get: { fields.value.code }, set: { fields.setCode($0) }))
                     .keyboardType(.numberPad)

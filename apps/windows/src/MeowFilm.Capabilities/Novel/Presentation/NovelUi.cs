@@ -117,7 +117,6 @@ internal static class NovelUi
         var heading = Text(title, applicationOverlay ? 18 : 17);
         if (applicationOverlay)
         {
-            heading.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Strong");
             heading.Margin = new(0, 0, 0, 12);
             DockPanel.SetDock(heading, Dock.Top); grid.Children.Add(heading);
         }

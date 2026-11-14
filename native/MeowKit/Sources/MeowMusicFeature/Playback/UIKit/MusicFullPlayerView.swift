@@ -105,7 +105,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         sourceStyle.imagePadding = 5
         sourceStyle.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var result = attributes
-            result.font = .systemFont(ofSize: 14, weight: .medium)
+            result.font = .systemFont(ofSize: 14)
             return result
         }
         sourceButton.configuration = sourceStyle
@@ -863,14 +863,14 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
                 label.text = lines.isEmpty && index == 1 ? lyricStatus.text : nil
                 label.textColor = UIColor(content.controlTheme.muted)
                 label.font = UIFontMetrics(forTextStyle: .body).scaledFont(
-                    for: .systemFont(ofSize: baseSize, weight: .medium))
+                    for: .systemFont(ofSize: baseSize))
                 continue
             }
             let isActive = lineIndex == activeIndex
             label.text = lines[lineIndex].text
             label.textColor = UIColor(isActive ? content.controlTheme.ink : content.controlTheme.muted)
             label.font = UIFontMetrics(forTextStyle: .body).scaledFont(
-                for: .systemFont(ofSize: baseSize, weight: isActive ? .semibold : .medium))
+                for: .systemFont(ofSize: baseSize))
         }
         lyricPreview.accessibilityValue = indices.compactMap { $0.map { lines[$0].text } }
             .joined(separator: "\n")

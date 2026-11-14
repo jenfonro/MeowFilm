@@ -52,7 +52,7 @@ public final class PageHeaderTextButton: UIButton {
                 action: @escaping @MainActor () -> Void) {
         super.init(frame: .zero)
         setTitle(title, for: .normal)
-        titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel?.font = .systemFont(ofSize: 15)
         self.accessibilityLabel = accessibilityLabel ?? title
         tintAdjustmentMode = .normal
         addAction(UIAction { _ in action() }, for: .touchUpInside)
@@ -143,7 +143,7 @@ public final class PageHeaderView: UIView {
             stack.setContentHuggingPriority(.required, for: .horizontal)
             stack.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
-        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 17)
         titleLabel.textAlignment = .center
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.numberOfLines = 1

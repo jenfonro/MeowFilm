@@ -207,7 +207,7 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
         var paragraph = new ParagraphStyle(textProperties, appearance.FontSize * appearance.LineHeight);
         if (session?.ContentTitle is { Length: > 0 } title)
         {
-            var titleProperties = new RunStyle(new Typeface(face.FontFamily, FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal),
+            var titleProperties = new RunStyle(new Typeface(face.FontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal),
                 appearance.FontSize * 1.15, foreground, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             Text(title, -1, titleProperties, new ParagraphStyle(titleProperties, appearance.FontSize * appearance.LineHeight * 1.15));
             y += appearance.ParagraphSpacing;

@@ -451,8 +451,7 @@ public partial class MusicPlayerView : UserControl
             icon.SetBinding(Control.ForegroundProperty, new Binding(nameof(Foreground)) { Source = button });
             content.Children.Add(icon);
         }
-        var label = new TextBlock { Text = choice.Name, TextAlignment = TextAlignment.Center,
-            FontWeight = scene ? FontWeights.Normal : FontWeights.Bold };
+        var label = new TextBlock { Text = choice.Name, TextAlignment = TextAlignment.Center };
         label.SetBinding(TextBlock.ForegroundProperty, new Binding(nameof(Foreground)) { Source = button });
         content.Children.Add(label);
         button.Content = content;

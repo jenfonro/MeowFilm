@@ -42,7 +42,7 @@ public sealed partial class NovelView
             content.ColumnDefinitions.Add(new() { Width = new(20) });
             var dot = new System.Windows.Shapes.Ellipse { Width = 4, Height = 4, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
             dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "MeowFilm.Brush.AccentText"); content.Children.Add(dot);
-            var name = DiscoveryText(source.Name, 12, true, selected); name.VerticalAlignment = VerticalAlignment.Center;
+            var name = DiscoveryText(source.Name, 12, true); name.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(name, 1); content.Children.Add(name);
             if (selected) { var check = DiscoveryIcon("M5,12 L9,16 19,6", 12); Grid.SetColumn(check, 2); content.Children.Add(check); }
             row.Content = content; sidebar.Children.Add(row);

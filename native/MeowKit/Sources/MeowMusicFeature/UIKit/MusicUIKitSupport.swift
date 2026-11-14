@@ -79,7 +79,7 @@ final class MusicTrackCell: UITableViewCell {
         contentView.addSubview(artwork)
         contentView.addSubview(labels)
         artwork.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: 16)
         subtitleLabel.font = .systemFont(ofSize: 12)
         subtitleLabel.numberOfLines = 1
         NSLayoutConstraint.activate([
@@ -129,7 +129,7 @@ final class MusicCollectionCell: UITableViewCell {
         contentView.addSubview(artwork)
         contentView.addSubview(labels)
         artwork.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 16)
         subtitleLabel.font = .systemFont(ofSize: 12)
         NSLayoutConstraint.activate([
             artwork.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),

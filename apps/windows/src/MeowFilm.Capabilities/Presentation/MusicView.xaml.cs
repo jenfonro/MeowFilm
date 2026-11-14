@@ -638,7 +638,6 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
                 MaxWidth = 150
             };
             title.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Compact");
-            title.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Strong");
             text.Children.Add(title);
             text.Children.Add(new TextBlock
             {

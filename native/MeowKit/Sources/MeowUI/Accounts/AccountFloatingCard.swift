@@ -54,7 +54,7 @@ public struct AccountCardHeader<Leading: View, Trailing: View>: View {
     public var body: some View {
         HStack(spacing: 10) {
             leading()
-            Text(title).font(.title3.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+            Text(title).font(.title3).fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 4)
             trailing()
@@ -111,7 +111,7 @@ private struct AccountButtonBody: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         configuration.label
-            .font(.body.weight(.semibold))
+            .font(.body)
             .lineLimit(1)
             .minimumScaleFactor(0.8)
             .frame(maxWidth: .infinity, minHeight: 48)

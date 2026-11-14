@@ -55,7 +55,6 @@ public static class AppLauncher
             Text = "正在启动", Margin = new Thickness(24), HorizontalAlignment = HorizontalAlignment.Center
         };
         label.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.SectionHeading");
-        label.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Strong");
         var retry = new Button { Content = "重试", Margin = new Thickness(12), Padding = new Thickness(24, 8, 24, 8), Visibility = Visibility.Collapsed };
         var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         stack.Children.Add(label); stack.Children.Add(retry); launchWindow.Content = stack;

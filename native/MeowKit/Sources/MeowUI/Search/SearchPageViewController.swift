@@ -141,11 +141,11 @@ private final class SearchInputView: UIView {
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         submit.setTitle("搜索", for: .normal)
-        submit.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+        submit.titleLabel?.font = .systemFont(ofSize: 15)
         submit.accessibilityIdentifier = "search.submit"
         target.isHidden = true
         target.showsMenuAsPrimaryAction = true
-        target.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        target.titleLabel?.font = .systemFont(ofSize: 13)
         target.accessibilityIdentifier = "search.target"
         target.setContentCompressionResistancePriority(.required, for: .horizontal)
         let stack = UIStackView(arrangedSubviews: [icon, dividers[0], target, field, dividers[1], submit])

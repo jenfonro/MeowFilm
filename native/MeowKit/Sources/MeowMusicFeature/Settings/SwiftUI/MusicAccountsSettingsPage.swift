@@ -353,7 +353,7 @@ private struct MusicPlatformAccountRow: View {
             MusicPlatformLogo(assetName: platform.settingsLogoName, size: 36, theme: theme)
             VStack(alignment: .leading, spacing: 6) {
                 Text(platform.title)
-                    .font(.body.weight(.medium))
+                    .font(.body)
                     .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
                 if loading {
                     ProgressView().accessibilityLabel("读取账号")
@@ -365,7 +365,7 @@ private struct MusicPlatformAccountRow: View {
             if let account = summary?.account {
                 if account.phase == .signedOut, account.canLogin {
                     Text("登录")
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline)
                         .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                         .frame(minWidth: 44, minHeight: 44)
                         .fixedSize(horizontal: true, vertical: false)

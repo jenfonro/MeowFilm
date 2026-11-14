@@ -42,7 +42,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.accessibilityIdentifier = "music.fm.settings"
-        pageHeader.titleFont = .systemFont(ofSize: 15, weight: .medium)
+        pageHeader.titleFont = .systemFont(ofSize: 15)
         pageHeader.background.isHidden = true
         transition.installEdgeDismissal(on: self)
         icons = Dictionary(uniqueKeysWithValues: MusicFMModeChoice.scenes.map {

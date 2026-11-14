@@ -206,7 +206,7 @@ final class NovelBookCell: UITableViewCell {
     func configure(_ book: NovelBook, subtitle: String? = nil, feature: NovelFeature, theme: PageTheme, loadCover: Bool) {
         cancelImage(); let token = key
         backgroundColor = .clear; textLabel?.text = book.name; textLabel?.textColor = UIColor(theme.ink)
-        textLabel?.font = .preferredFont(forTextStyle: .headline)
+        textLabel?.font = UIFontMetrics(forTextStyle: .headline).scaledFont(for: .systemFont(ofSize: 17), compatibleWith: traitCollection)
         detailTextLabel?.text = [book.author, subtitle ?? book.latestChapterTitle].filter { !$0.isEmpty }.joined(separator: " · ")
         detailTextLabel?.textColor = UIColor(theme.muted); detailTextLabel?.numberOfLines = 2
         imageView?.contentMode = .scaleAspectFit; imageView?.image = UIImage(systemName: "book.closed")
