@@ -56,10 +56,12 @@
     </Style>
    </ListBox.ItemContainerStyle>
   </ListBox>
-  <Button x:Name="Previous" Click="Previous_Click" HorizontalAlignment="Left" VerticalAlignment="Center" Style="{StaticResource ShelfArrow}" AutomationProperties.Name="上一组">
+  <Button x:Name="Previous" Click="Previous_Click" HorizontalAlignment="Left" VerticalAlignment="Center"
+          Style="{Binding NavigationButtonStyle,ElementName=ShelfRoot,TargetNullValue={StaticResource ShelfArrow}}" AutomationProperties.Name="上一组">
    <Button.Tag><PathGeometry Figures="M 8,1 L 1,15 L 8,29"/></Button.Tag>
   </Button>
-  <Button x:Name="Next" Click="Next_Click" HorizontalAlignment="Right" VerticalAlignment="Center" Style="{StaticResource ShelfArrow}" AutomationProperties.Name="下一组">
+  <Button x:Name="Next" Click="Next_Click" HorizontalAlignment="Right" VerticalAlignment="Center"
+          Style="{Binding NavigationButtonStyle,ElementName=ShelfRoot,TargetNullValue={StaticResource ShelfArrow}}" AutomationProperties.Name="下一组">
    <Button.Tag><PathGeometry Figures="M 1,1 L 8,15 L 1,29"/></Button.Tag>
   </Button>
   <local:ShelfPageIndicator x:Name="PageIndicator" Grid.Row="1" Margin="0,12,0,0"

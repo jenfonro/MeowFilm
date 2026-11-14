@@ -104,12 +104,12 @@ public static class FilmPlaybackTests
         await Drain();
         var page = scene.Page;
         var view = scene.Playback;
-        var cards = Named<ItemsControl>(view, "EpisodeCards");
+        var cards = EpisodeItems(view);
         var list = Named<ItemsControl>(view, "EpisodeList");
-        var rail = Named<ScrollViewer>(view, "HorizontalEpisodes");
+        var rail = Named<Shelf>(view, "EpisodeShelf").ScrollHost!;
         Check(page.Episodes.Count > 1 && page.IsHorizontalLayout && !page.IsListLayout &&
             rail.IsVisible && !list.IsVisible, "the explicit TMDB snapshot starts with horizontal episode cards");
-        CheckEpisodeContent(cards, page);
+        await CheckEpisodeContent(cards, page);
         var chosen = page.Episodes[1];
         Click(EpisodeButton(cards, chosen));
         await Drain();
@@ -120,7 +120,7 @@ public static class FilmPlaybackTests
         Check(page.IsListLayout && !page.IsHorizontalLayout && list.IsVisible && !rail.IsVisible,
             "the list button switches the actual episode presentation");
         CheckSelection(scene, chosen);
-        CheckEpisodeContent(list, page);
+        await CheckEpisodeContent(list, page);
         var last = page.Episodes[^1];
         Click(EpisodeButton(list, last));
         await Drain();
@@ -140,18 +140,20 @@ public static class FilmPlaybackTests
         Check(page.IsHorizontalLayout && rail.IsVisible, "the mouse action returns to horizontal cards");
         CheckSelection(scene, last);
 
-        rail.ScrollToLeftEnd();
+        Named<Shelf>(view, "EpisodeShelf").ScrollToIndex(0);
         await Drain();
-        var previous = Named<Button>(view, "EpisodePrevious");
-        var next = Named<Button>(view, "EpisodeNext");
+        var previous = Named<Button>(Named<Shelf>(view, "EpisodeShelf"), "Previous");
+        var next = Named<Button>(Named<Shelf>(view, "EpisodeShelf"), "Next");
         Check(rail.ScrollableWidth > 0 && !previous.IsEnabled && next.IsEnabled,
             "only the forward action is available at the start of the episode rail");
         Click(next);
         await Drain();
-        Check(rail.HorizontalOffset > 0 && previous.IsEnabled, "next pages the actual episode viewport");
+        await FilmPlaybackFixture.Until(() => rail.HorizontalOffset > 0 && Named<Shelf>(view, "EpisodeShelf").IsSettled);
+        Check(previous.IsEnabled, "next pages the actual episode viewport");
         Click(previous);
         await Drain();
-        Check(rail.HorizontalOffset < .5 && !previous.IsEnabled, "previous returns to the rail boundary");
+        await FilmPlaybackFixture.Until(() => rail.HorizontalOffset < .5 && Named<Shelf>(view, "EpisodeShelf").IsSettled);
+        Check(!previous.IsEnabled, "previous returns to the rail boundary");
         CheckSelection(scene, last);
         Check(scene.Source.Calls == 0, "episode and layout interactions remain entirely local");
     }
@@ -237,7 +239,7 @@ public static class FilmPlaybackTests
         await Drain();
         var original = scene.Page;
         var chosen = original.Episodes[^1];
-        Click(EpisodeButton(Named<ItemsControl>(scene.Playback, "EpisodeCards"), chosen));
+        Click(EpisodeButton(EpisodeItems(scene.Playback), chosen));
         Click(Named<Button>(scene.Playback, "ListLayout"));
         await Drain();
         string location = module.CaptureNavigationLocation();
@@ -329,7 +331,7 @@ public static class FilmPlaybackTests
         CheckFlat(view, page, outline: false);
         CheckCurrentStatus(view, page);
         var chosen = page.Episodes[2];
-        Click(EpisodeButton(Named<ItemsControl>(view, "EpisodeCards"), chosen));
+        Click(EpisodeButton(EpisodeItems(view), chosen));
         await Drain();
         CheckSelection(scene, chosen);
         CheckCurrentStatus(view, page);
@@ -355,7 +357,7 @@ public static class FilmPlaybackTests
     {
         var text = SystemColors.WindowTextColor;
         var highlight = SystemColors.HighlightColor;
-        string host = page.IsListLayout ? "EpisodeList" : "EpisodeCards";
+        string host = page.IsListLayout ? "EpisodeList" : "EpisodeShelf";
         foreach (var tile in Tiles(view, host).Concat(Tiles(view, "RelatedItems")))
         {
             var frame = (Border)VisualTreeHelper.GetChild(tile, 0);
@@ -376,7 +378,7 @@ public static class FilmPlaybackTests
 
     private static void CheckCurrentStatus(FilmPlaybackView view, FilmPlaybackPage page)
     {
-        foreach (var tile in Tiles(view, page.IsListLayout ? "EpisodeList" : "EpisodeCards"))
+        foreach (var tile in Tiles(view, page.IsListLayout ? "EpisodeList" : "EpisodeShelf"))
             Check(AutomationProperties.GetItemStatus(tile) ==
                 (ReferenceEquals(tile.Tag, page.SelectedEpisode) ? "当前" : ""),
                 "only the current episode announces its current status");
@@ -390,7 +392,7 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         var page = scene.Page;
         var current = page.SelectedEpisode!;
-        await CheckLift(Tiles(view, "EpisodeCards")[1], Named<ItemsControl>(view, "EpisodeCards"), 144);
+        await CheckLift(Tiles(view, "EpisodeShelf")[1], EpisodeItems(view), 144);
         await CheckLift(Tiles(view, "RelatedItems")[0], Named<ItemsControl>(view, "RelatedItems"), 234);
         Click(Named<Button>(view, "ListLayout"));
         await Drain();
@@ -416,7 +418,7 @@ public static class FilmPlaybackTests
         var shade = frame.Children.OfType<FilmHoverShade>().Single();
         var image = frame.Children.OfType<FrameworkElement>().First();
         var rest = Bounds(tile, host);
-        Check(Math.Abs(rest.Width - tile.ActualWidth) < .5 && mark.Opacity == 0 && shade.Opacity == 0,
+        Check(Math.Abs(rest.Width / tile.ActualWidth - rest.Height / tile.ActualHeight) < .01 && mark.Opacity == 0 && shade.Opacity == 0,
             "a resting tile has no lift scrim or play mark");
         Check(Math.Abs(frame.ActualHeight - frameHeight) < .5, "tile artwork keeps its frame size");
 
@@ -814,7 +816,8 @@ public static class FilmPlaybackTests
     }
 
     private static Button[] Tiles(FilmPlaybackView view, string host) =>
-        Visuals(Named<ItemsControl>(view, host)).OfType<Button>().Where(button => button.Tag is not null).ToArray();
+        Visuals(host == "EpisodeShelf" ? EpisodeItems(view) : Named<ItemsControl>(view, host))
+            .OfType<Button>().Where(button => button.Tag is not null).ToArray();
 
     private static Rect Bounds(FrameworkElement element, Visual root) =>
         element.TransformToAncestor(root).TransformBounds(new Rect(element.RenderSize));
@@ -831,11 +834,17 @@ public static class FilmPlaybackTests
         Check(page.Recommendations.Count > 0 && !page.HasOutput, "recommendations do not imply media playback");
     }
 
-    private static void CheckEpisodeContent(ItemsControl host, FilmPlaybackPage page)
+    private static async Task CheckEpisodeContent(ItemsControl host, FilmPlaybackPage page)
     {
         Check(host.Items.Count == page.Episodes.Count, "the episode presentation binds the complete season");
         foreach (var episode in page.Episodes)
         {
+            if (host is ListBox list)
+            {
+                list.ScrollIntoView(episode);
+                list.UpdateLayout();
+                await Drain();
+            }
             var button = EpisodeButton(host, episode);
             var texts = Visuals(button).OfType<TextBlock>().Select(text => text.Text).ToArray();
             Check(texts.Contains(episode.Label) && texts.Contains(episode.Duration) && texts.Contains(episode.Overview) &&
@@ -851,10 +860,12 @@ public static class FilmPlaybackTests
             scene.Page.Episodes.Count(candidate => candidate.IsSelected) == 1 &&
             scene.Page.CurrentLabel.Length == 0 && !scene.Page.HasOutput,
             "one exact target is selected, but no player title is invented before actual media output");
-        var host = Named<ItemsControl>(scene.Playback, scene.Page.IsListLayout ? "EpisodeList" : "EpisodeCards");
+        var host = scene.Page.IsListLayout ? Named<ItemsControl>(scene.Playback, "EpisodeList") : EpisodeItems(scene.Playback);
         var badges = Visuals(host).OfType<TextBlock>().Where(text => text.IsVisible && text.Text == "当前").ToArray();
-        Check(badges.Length == 1 && Visuals(EpisodeButton(host, selected!)).Contains(badges[0]),
-            "the actual selected episode has the sole current-target badge");
+        var selectedButton = Visuals(host).OfType<Button>().SingleOrDefault(button => ReferenceEquals(button.Tag, selected));
+        Check(selectedButton is null ? badges.Length == 0 :
+            badges.Length == 1 && Visuals(selectedButton).Contains(badges[0]),
+            "only the realized selected episode owns the current-target badge");
     }
 
     private static void CheckInsideViewport(ScrollViewer scroll, FrameworkElement element)
@@ -866,8 +877,18 @@ public static class FilmPlaybackTests
             "page content stays within the vertical viewport while rails own horizontal scrolling");
     }
 
-    private static Button EpisodeButton(ItemsControl host, FilmEpisodeItem episode) =>
-        Visuals(host).OfType<Button>().Single(button => ReferenceEquals(button.Tag, episode));
+    private static ItemsControl EpisodeItems(FilmPlaybackView view) =>
+        Named<ItemsControl>(Named<Shelf>(view, "EpisodeShelf"), "ItemsHost");
+
+    private static Button EpisodeButton(ItemsControl host, FilmEpisodeItem episode)
+    {
+        if (host is ListBox list)
+        {
+            list.ScrollIntoView(episode);
+            list.UpdateLayout();
+        }
+        return Visuals(host).OfType<Button>().Single(button => ReferenceEquals(button.Tag, episode));
+    }
 
     private static T Named<T>(FrameworkElement root, string name) where T : FrameworkElement =>
         root.FindName(name) as T ?? throw new InvalidOperationException("Missing playback control " + name);

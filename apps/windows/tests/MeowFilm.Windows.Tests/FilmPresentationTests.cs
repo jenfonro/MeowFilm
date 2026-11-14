@@ -54,6 +54,15 @@ public static class FilmPresentationTests
             var skeletons = Visuals(view).OfType<LoadingSkeleton>().Where(item => item.IsVisible).ToArray();
             Check(skeletons.Length > 0 && !Visuals(view).OfType<FilmCard>().Any(),
                 "first pending load presents image-free poster and title placeholders");
+            foreach (var row in Visuals(view).OfType<FilmLoadingCards>().Where(row => row.IsVisible && !row.IsGrid))
+            {
+                var cards = row.Children.Cast<FrameworkElement>().Select(card =>
+                    card.TransformToAncestor(row).TransformBounds(new Rect(card.RenderSize))).ToArray();
+                Check(cards.Length > 0 && cards.All(card => card.Left >= -.5 && card.Right <= row.ActualWidth + .5) &&
+                    Math.Abs(cards[0].Left) < .5 && Math.Abs(cards[^1].Right - row.ActualWidth) < .5,
+                    $"loading placeholders fill one complete row ({row.ActualWidth:0.##} wide): " +
+                    string.Join("; ", cards.Select(card => card.ToString(CultureInfo.InvariantCulture))));
+            }
             source.Completion.SetResult();
             await navigation;
             window.UpdateLayout();
@@ -104,7 +113,7 @@ public static class FilmPresentationTests
                 "fixed section order");
             var shelves = Visuals(view).OfType<FilmShelf>().ToArray();
             Check(shelves.Length == 4 && shelves.All(shelf =>
-                ((ListBox)shelf.FindName("ItemsHost")).Items.Count == 12), "four twelve-card rails");
+                ((ListBox)((Shelf)shelf.FindName("Cards")).FindName("ItemsHost")).Items.Count == 12), "four twelve-card rails");
             var more = Visuals(view).OfType<Button>()
                 .Where(button => button.Content as string == "查看更多").ToArray();
             var sharedHeading = (Style)view.FindResource("MeowFilm.SectionHeading");
@@ -165,8 +174,9 @@ public static class FilmPresentationTests
 
             var shelf = shelves[0];
             var rail = shelf.ScrollHost ?? throw new InvalidOperationException("film rail missing");
-            var previous = (Button)shelf.FindName("Previous");
-            var next = (Button)shelf.FindName("Next");
+            var sharedShelf = (Shelf)shelf.FindName("Cards");
+            var previous = (Button)sharedShelf.FindName("Previous");
+            var next = (Button)sharedShelf.FindName("Next");
             Check(rail.ScrollableWidth > 0 && previous.Visibility == Visibility.Collapsed &&
                 next.Visibility == Visibility.Visible, "initial rail exposes only forward paging");
             Check(next.Opacity == 0 && !next.IsHitTestVisible, "resting arrow does not intercept cards");
@@ -174,11 +184,12 @@ public static class FilmPresentationTests
             await Drain();
             Check(next.Opacity == 1 && next.IsHitTestVisible, "keyboard focus reveals the round arrow");
             next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await Until(() => rail.HorizontalOffset > 900 && shelf.IsSettled, "rail advances by about 1000 px");
+            double pageWidth = Math.Round((rail.ViewportWidth + 16) / sharedShelf.CardWidth) * sharedShelf.CardWidth;
+            await Until(() => Math.Abs(rail.HorizontalOffset - pageWidth) < .5 && shelf.IsSettled, "rail advances by complete visible cards");
             Check(previous.Visibility == Visibility.Visible, "backward arrow appears after paging");
 
-            RaiseKey(shelf, Key.End);
-            await Until(() => Math.Abs(rail.HorizontalOffset - rail.ScrollableWidth) < .5 &&
+            RaiseKey(sharedShelf, Key.End);
+            await Until(() => Math.Abs(rail.HorizontalOffset - sharedShelf.MaximumOffset) < .5 &&
                 shelf.IsSettled, "End reaches the final boundary");
             Check(next.Visibility == Visibility.Collapsed, "forward arrow disappears at the boundary");
             var retainedCard = Visuals(shelf).OfType<FilmCard>().First();
@@ -194,13 +205,14 @@ public static class FilmPresentationTests
                 Visuals(shelf).OfType<FilmCard>().Contains(retainedCard) &&
                 Math.Abs(rail.HorizontalOffset - retainedOffset) < .5,
                 "returning to film preserves the rail, realized card and horizontal offset");
-            RaiseKey(shelf, Key.Home);
+            RaiseKey(sharedShelf, Key.Home);
             await Until(() => rail.HorizontalOffset < .5 && shelf.IsSettled, "Home restores the first boundary");
             next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             view.Visibility = Visibility.Collapsed;
             double pausedOffset = rail.HorizontalOffset;
             await Drain();
-            Check(shelf.IsSettled && Math.Abs(rail.HorizontalOffset - pausedOffset) < .5,
+            Check(shelf.IsSettled && Math.Abs(rail.HorizontalOffset - pausedOffset) < .5 &&
+                Math.Abs(module.Sections[0].HorizontalOffset - pageWidth) < .5,
                 "hiding during paging stops the offset clock immediately");
         }
         finally

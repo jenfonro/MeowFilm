@@ -267,7 +267,7 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
 
     internal FilmSectionDefinition Definition { get; }
     internal FilmHomeSectionState State => state;
-    internal double HorizontalOffset { get; set; }
+    public double HorizontalOffset { get; set; }
     internal FilmMetadataCache? Cache { get; private set; }
 
     public string Key => Definition.Key;

@@ -29,13 +29,13 @@ Windows 将影视浏览作为独立的 `FilmCapability` 装配在音乐能力之
 
 ## 展示
 
-首页、`film-data` 与 `film-playback` 根视图均透明，底色由窗口提供；`film-playback` 另在视图内铺一层随海报取色、边缘渐变回窗口色的氛围层，详见[影视播放页](film-playback.md)。首页复用 Windows 动态主题、系统字体、共享 18px 栏目标题、通用按钮字体与状态、焦点、高对比、减少动画和 `ArtworkImage`；影片专属 rail/card 对齐服务器首页的 176×264 海报、14px 圆角、居中标题、粉色评分徽章、悬停遮罩与播放标记（`FilmHoverShade`、`FilmPlayMark`，播放页选集与推荐共用），以及 48px 圆形横向按钮。栏目标题右侧“查看更多”在通用按钮样式上只保留胶囊和方向标记。普通滚轮继续滚动页面，Shift+滚轮、箭头、PageUp/PageDown、Home/End 和圆形按钮操作当前横向栏目。
+首页、`film-data` 与 `film-playback` 根视图均透明，底色由窗口提供；`film-playback` 另在视图内铺一层随海报取色、边缘渐变回窗口色的氛围层，详见[影视播放页](film-playback.md)。首页复用 Windows 动态主题、系统字体、共享 18px 栏目标题、通用按钮字体与状态、焦点、高对比、减少动画和 `ArtworkImage`；影视首页复用音乐首页的共享 `Shelf`，按可用宽度增减完整卡片数量并等比调整整卡尺寸；翻页、末页及缩放后对齐完整卡片边界，保留视口附近虚拟化。卡片以 176×264 海报为比例基准，保留14px 圆角、居中标题、粉色评分徽章、悬停遮罩与播放标记（`FilmHoverShade`、`FilmPlayMark`，播放页选集与推荐共用），以及 48px 圆形横向按钮。栏目标题右侧“查看更多”在通用按钮样式上只保留胶囊和方向标记。普通滚轮继续滚动页面，Shift+滚轮、箭头、PageUp/PageDown、Home/End 和圆形按钮操作当前横向栏目。
 
 `film-data` 复用一个响应式卡片网格，正文显示共享小标题、筛选控件、必要加载／失败状态及从通用按钮派生的胶囊形“加载更多”操作。四个栏目保持独立选择、缓存和分页偏移。正式播放页的数据与命令由 Node film 会话承担，不把首页摘要或本地示例变成片源；首页／栏目导航与搜索交接已接入正式播放会话，平台运行验证另按受测输入记录。Desktop Shell 在三个影视路由保留普通页头、同一搜索框与底部音乐播放器；目标默认影视，可手选音乐，提交进入[统一搜索结果页](film-search.md)，返回恢复原影视页面。搜索交接按[共同契约](../common/film/search.md)传递真实上下文，不消费本地预览数据。播放器详情、队列及播放器音乐路由同样可用，设置页例外。
 
 ## 页面保留与加载骨架
 
-构造和初始化只准备页壳，首次导航才读取业务数据。`CaptureNavigationLocation()` 捕获当前路由，`RestoreNavigationAsync(string location, CancellationToken token)` 通过原有导航入口恢复该位置，由领域状态判断是否需要补齐未完成读取；Ready 分区不重新请求或清空集合，原有筛选、卡片和滚动宿主继续复用。Shell 保留的隐藏模块使用 Collapsed：FilmView 撤销未完成请求并收尾取消状态，FilmShelf 停止滚动动画、暂停 ScrollChanged 挂接，显示后恢复当前 offset；没有隐藏定时翻页。共享卡片悬浮生命周期由 CardMotion 负责。
+构造和初始化只准备页壳，首次导航才读取业务数据。`CaptureNavigationLocation()` 捕获当前路由，`RestoreNavigationAsync(string location, CancellationToken token)` 通过原有导航入口恢复该位置，由领域状态判断是否需要补齐未完成读取；Ready 分区不重新请求或清空集合，原有筛选、卡片和滚动宿主继续复用。Shell 保留的隐藏模块使用 Collapsed：FilmView 撤销未完成请求并收尾取消状态，共享 Shelf 停止滚动动画、暂停 ScrollChanged 挂接，显示后按当前尺寸恢复同一完整卡片锚点；没有隐藏定时翻页。共享卡片悬浮生命周期由 CardMotion 负责。
 
 首次 Pending/Loading 且无结果时，首页按横向可视宽度生成海报与标题骨架，数据页按响应式列数生成两行骨架。真实结果替换相应分区占位，空、失败、取消结束扫光并保留原状态／重试；已有内容的补齐、分页及失败不遮盖卡片。
 

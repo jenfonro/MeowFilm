@@ -19,6 +19,19 @@ public partial class Shelf : UserControl
     public static readonly DependencyProperty CardWidthProperty = DependencyProperty.Register(nameof(CardWidth), typeof(double), typeof(Shelf), new PropertyMetadata(168d));
     public static readonly DependencyProperty MinimumCardWidthProperty = DependencyProperty.Register(nameof(MinimumCardWidth), typeof(double), typeof(Shelf),
         new PropertyMetadata(150d, (value, _) => ((Shelf)value).InvalidateCardLayout()));
+    public static readonly DependencyProperty NavigationButtonStyleProperty = DependencyProperty.Register(
+        nameof(NavigationButtonStyle), typeof(Style), typeof(Shelf));
+    public static readonly DependencyProperty HorizontalOffsetProperty = DependencyProperty.Register(
+        nameof(HorizontalOffset), typeof(double), typeof(Shelf),
+        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault,
+            (value, _) =>
+            {
+                var shelf = (Shelf)value;
+                if (shelf.committingOffset) return;
+                shelf.CancelPointerInput();
+                shelf.StopMotion();
+                shelf.RequestRestore();
+            }));
     private static readonly DependencyProperty AnimatedOffsetProperty = DependencyProperty.Register(
         "AnimatedOffset", typeof(double), typeof(Shelf),
         new PropertyMetadata(0d, (value, args) => ((Shelf)value).ApplyAnimatedOffset((double)args.NewValue)));
@@ -26,6 +39,8 @@ public partial class Shelf : UserControl
     public DataTemplate CardTemplate { get => (DataTemplate)GetValue(CardTemplateProperty); set => SetValue(CardTemplateProperty, value); }
     public IEnumerable? ItemsSource { get => (IEnumerable?)GetValue(ItemsSourceProperty); set => SetValue(ItemsSourceProperty, value); }
     public double CardWidth { get => (double)GetValue(CardWidthProperty); private set => SetValue(CardWidthProperty, value); }
+    public Style? NavigationButtonStyle { get => (Style?)GetValue(NavigationButtonStyleProperty); set => SetValue(NavigationButtonStyleProperty, value); }
+    public double HorizontalOffset { get => (double)GetValue(HorizontalOffsetProperty); set => SetValue(HorizontalOffsetProperty, value); }
     private readonly DispatcherTimer settle;
     private ScrollViewer? rail;
     private ShelfVirtualizingPanel? scrollPanel;
@@ -37,11 +52,12 @@ public partial class Shelf : UserControl
     private int visibleCardCount = 1;
     private bool presentationActive;
     private bool pointerPending, dragging, animating, restorePending, commitLayoutOffset;
-    private bool usesDataContextItems = true, settingDataContextItems;
+    private bool usesDataContextItems = true, settingDataContextItems, committingOffset;
     private long motionGeneration;
     internal ScrollViewer? ScrollHost => rail;
     internal double MaximumOffset => scrollPanel?.MaximumOffset ?? LogicalMaxOffset();
     internal double PresentedOffset => scrollPanel?.HorizontalOffset ?? rail?.HorizontalOffset ?? 0;
+    internal bool IsSettled => !animating;
 
     public Shelf()
     {
@@ -66,6 +82,8 @@ public partial class Shelf : UserControl
         {
             CommitSettledOffset(e.OldValue as MusicCatalogSection);
             offsetSection = e.NewValue as MusicCatalogSection;
+            if (offsetSection is null && !BindingOperations.IsDataBound(this, HorizontalOffsetProperty))
+                StoreOffset(0);
             if (usesDataContextItems && !BindingOperations.IsDataBound(this, ItemsSourceProperty))
             {
                 settingDataContextItems = true;
@@ -124,7 +142,7 @@ public partial class Shelf : UserControl
     {
         scrollPanel = panel;
         var changed = visibleCardCount != count || CardWidth != pitch;
-        var target = restorePending ? offsetSection?.HorizontalOffset ?? 0 : panel.HorizontalOffset;
+        var target = restorePending ? offsetSection?.HorizontalOffset ?? HorizontalOffset : panel.HorizontalOffset;
         var resizing = panel.ViewportWidth > 0 && panel.ViewportWidth != viewport;
         if (changed && (!restorePending || resizing))
         {
@@ -228,7 +246,10 @@ public partial class Shelf : UserControl
     private void DetachScrollHost()
     {
         settle.Stop();
-        CommitSettledOffset(DataContext as MusicCatalogSection);
+        if (DataContext is MusicCatalogSection section) CommitSettledOffset(section);
+        else if (!restorePending && !pointerPending && !dragging && !AreAnyTouchesCapturedWithin)
+            StoreOffset(Math.Clamp(settlingTarget ?? NearestOffset(PresentedOffset, MaximumOffset, CardWidth),
+                0, MaximumOffset));
         CancelPointerInput();
         StopMotion();
         restorePending = true;
@@ -331,6 +352,20 @@ public partial class Shelf : UserControl
     private void CommitOffset()
     {
         if (DataContext is MusicCatalogSection section) section.HorizontalOffset = PresentedOffset;
+        else StoreOffset(PresentedOffset);
+    }
+    private void StoreOffset(double offset)
+    {
+        committingOffset = true;
+        try { SetCurrentValue(HorizontalOffsetProperty, offset); }
+        finally { committingOffset = false; }
+    }
+    internal void ScrollToIndex(int index)
+    {
+        CancelPointerInput();
+        StopMotion();
+        StoreOffset(Math.Max(0, index) * CardWidth);
+        RequestRestore();
     }
     private void CommitSettledOffset(MusicCatalogSection? section)
     {

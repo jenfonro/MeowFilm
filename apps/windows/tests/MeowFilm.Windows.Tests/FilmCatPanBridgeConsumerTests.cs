@@ -126,7 +126,7 @@ public static class FilmCatPanBridgeConsumerTests
                      page.Candidates.Single(row => row.Episode == 2).Id })
         {
             var episode = page.Episodes.Single(row => row.CandidateId == id);
-            var button = Visuals(scene.Element<ItemsControl>("EpisodeCards")).OfType<Button>()
+            var button = Visuals(scene.Element<Shelf>("EpisodeShelf")).OfType<Button>()
                 .Single(row => row.Tag is FilmEpisodeItem item && item.CandidateId == id);
             int before = scene.Native.Inputs.Count;
             Click(button);
