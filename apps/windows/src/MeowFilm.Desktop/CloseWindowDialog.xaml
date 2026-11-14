@@ -21,7 +21,7 @@
      <Button x:Name="DismissButton" DockPanel.Dock="Right" Style="{DynamicResource MeowFilm.IconButton}"
              Content="&#xE711;" Width="30" Height="30" MinHeight="30" Margin="8,0,0,0"
              Click="OnCancelClick" AutomationProperties.Name="取消关闭选择"/>
-     <TextBlock x:Name="DialogTitle" Text="关闭主窗口" FontSize="18" FontWeight="SemiBold"
+     <TextBlock x:Name="DialogTitle" Text="关闭主窗口" Style="{DynamicResource MeowFilm.SectionHeading}" Margin="0"
                 VerticalAlignment="Center" TextWrapping="Wrap"/>
     </DockPanel>
     <CheckBox x:Name="RememberChoice" Content="记住我的选择" Padding="4" Margin="0,0,0,16"

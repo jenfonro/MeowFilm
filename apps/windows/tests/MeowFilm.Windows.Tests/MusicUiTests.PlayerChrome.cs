@@ -51,6 +51,73 @@ public static partial class MusicUiTests
 
     private static IEnumerable<TestCase> PlayerChromeCases()
     {
+        yield return Case("player text in icon controls and popups follows the dynamic body font without replacing icons", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            var player = (MusicPlayerView)f.Module.PlayerView;
+            var window = new DesktopWindow { Content = player, Width = 1110, Height = 100,
+                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false,
+                WindowStyle = WindowStyle.None };
+            var quality = (TextBlock)((Border)((Button)player.FindName("QualityButton")).Content).Child;
+            var desktop = (TextBlock)((Button)player.FindName("DesktopLyricsButton")).Content;
+            var playlist = (System.Windows.Controls.Primitives.Popup)player.FindName("PlaylistPopup");
+            var rate = (System.Windows.Controls.Primitives.Popup)player.FindName("RatePopup");
+            var icons = new[] { "PlaylistButton", "VolumeButton", "MoreButton" }
+                .Select(name => (Button)player.FindName(name)).ToArray();
+            var iconFamily = (FontFamily)player.FindResource("MeowFilm.Font.Icons");
+            var alternate = new FontFamily("Arial");
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                Equal(10d, quality.FontSize); Equal(15d, desktop.FontSize);
+                foreach (var popup in new[] { playlist, rate })
+                {
+                    popup.IsOpen = true; await Drain();
+                    var content = (FrameworkElement)popup.Child;
+                    content.UpdateLayout();
+                    True(popup.IsOpen && content.IsLoaded, "actual player popup content is loaded");
+                    var buttons = Visuals(content).OfType<Button>()
+                        .Where(button => popup == playlist || button.Content is string text && text is "−" or "1.0×" or "+").ToArray();
+                    True(buttons.Length > 0, "popup has its real body-text buttons");
+                    if (popup == rate)
+                    {
+                        True(buttons.Select(button => (string)button.Content).SequenceEqual(new[] { "−", "1.0×", "+" }),
+                            "all three rate controls retain their actual text labels");
+                        Equal(12d, buttons.Single(button => Equals(button.Content, "1.0×")).FontSize);
+                        True(buttons.Where(button => !Equals(button.Content, "1.0×")).All(button => button.FontSize == 16),
+                            "rate adjustment symbols retain their original size");
+                    }
+                    var textControls = new List<DependencyObject> { quality, desktop };
+                    foreach (var button in buttons)
+                    {
+                        var labels = Visuals(button).OfType<TextBlock>().ToArray();
+                        True(labels.Length > 0, "button template renders its body text");
+                        textControls.Add(button); textControls.AddRange(labels);
+                    }
+                    foreach (var expected in new[] { SystemFonts.MessageFontFamily, alternate, SystemFonts.MessageFontFamily })
+                    {
+                        if (ReferenceEquals(expected, alternate)) window.Resources[SystemFonts.MessageFontFamilyKey] = alternate;
+                        else window.Resources.Remove(SystemFonts.MessageFontFamilyKey);
+                        window.UpdateLayout(); content.UpdateLayout(); await Drain();
+                        foreach (var text in textControls)
+                        {
+                            Equal(expected, TextElement.GetFontFamily(text));
+                            Equal(FontWeights.Normal, TextElement.GetFontWeight(text));
+                            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(text));
+                            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(text));
+                        }
+                        foreach (var icon in icons) Equal(iconFamily, icon.FontFamily);
+                    }
+                    popup.IsOpen = false; await Drain();
+                }
+            }
+            finally
+            {
+                window.Resources.Remove(SystemFonts.MessageFontFamilyKey);
+                playlist.IsOpen = false; rate.IsOpen = false; player.Deactivate();
+                window.Content = null; window.Close();
+            }
+        });
         yield return Case("player mode dismissal cannot open detail and releases its input hook", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
@@ -284,7 +351,7 @@ public static partial class MusicUiTests
                 "mouse high contrast uses the same readable row colors");
             var currentItem = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(0);
             True(Visuals(currentItem).OfType<TextBlock>().Any(text =>
-                text.Text == f.Module.QueueSurfaceRows[0].Title && text.FontWeight == FontWeights.SemiBold),
+                text.Text == f.Module.QueueSurfaceRows[0].Title && text.FontWeight == FontWeights.Bold),
                 "current song retains a non-color indicator in high contrast");
             DesktopTheme.SetIsHighContrast(queue, false);
             item.SetValue(mouseKey, false); row.SetValue(mouseKey, false);
@@ -1116,7 +1183,7 @@ public static partial class MusicUiTests
                     Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(title));
                     Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(title));
                     Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(lyrics));
-                    Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(lyrics));
+                    Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(lyrics));
                     var viewport = Visuals(lyrics).OfType<ScrollViewer>().First();
                     True(Math.Abs(viewport.ViewportHeight - lyrics.ActualHeight) < 1,
                         "lyric edge spacing belongs to scrolling rows, not the visible viewport");

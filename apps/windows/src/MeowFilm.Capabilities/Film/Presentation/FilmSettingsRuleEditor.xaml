@@ -7,7 +7,7 @@
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Film/Presentation/FilmSettingsTheme.xaml"/></ResourceDictionary.MergedDictionaries>
    <Style x:Key="Rule.Pattern" TargetType="TextBox" BasedOn="{StaticResource Settings.TextBox}">
-    <Setter Property="Height" Value="34"/><Setter Property="FontSize" Value="13"/>
+    <Setter Property="Height" Value="34"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
     <Setter Property="Padding" Value="8,5"/><Setter Property="HorizontalScrollBarVisibility" Value="Hidden"/>
    </Style>
    <Style x:Key="Rule.Replace" TargetType="TextBox" BasedOn="{StaticResource Rule.Pattern}">
@@ -32,7 +32,7 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <StackPanel Margin="0,0,0,12">
-  <TextBlock Text="{Binding Title,ElementName=Root}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+  <TextBlock Text="{Binding Title,ElementName=Root}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" Margin="0,0,0,8"/>
   <Grid Margin="0,0,0,12">
    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Rule.ReplaceColumn}"/><ColumnDefinition Width="124"/></Grid.ColumnDefinitions>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>

@@ -6,13 +6,10 @@
   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/Controls/CardBrushes.xaml"/>
   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/Controls/OverlayScrollChrome.xaml"/>
  </ResourceDictionary.MergedDictionaries>
- <Style x:Key="Capability.SeekPreview" TargetType="ToolTip">
-  <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
-  <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
-  <Setter Property="TextOptions.TextRenderingMode" Value="Auto"/>
+ <Style x:Key="Capability.SeekPreview" TargetType="{x:Type ToolTip}" BasedOn="{StaticResource MeowFilm.ToolTip}">
   <Setter Property="UseLayoutRounding" Value="True"/>
   <Setter Property="SnapsToDevicePixels" Value="True"/>
-  <Setter Property="FontSize" Value="12"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToolTip">
    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
     BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="16" Padding="{TemplateBinding Padding}">
@@ -277,7 +274,7 @@
    <Setter Property="MinHeight" Value="0"/>
    <Setter Property="Margin" Value="0,0,12,14"/>
    <Setter Property="Padding" Value="8,2"/>
-   <Setter Property="FontSize" Value="13"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
    <Setter Property="Foreground" Value="#495164"/>
    <Setter Property="Background" Value="#F4F5F7"/>
    <Setter Property="BorderBrush" Value="#E3E5E9"/>

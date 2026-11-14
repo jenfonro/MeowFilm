@@ -260,7 +260,7 @@ public static class FilmPresentationTests
             var sharedHeading = (Style)view.FindResource("MeowFilm.SectionHeading");
             Check(dataTitle.Text == "热门电影" &&
                 ReferenceEquals(dataTitle.Style, sharedHeading) &&
-                dataTitle.FontSize == 18 && dataTitle.FontWeight == FontWeights.SemiBold,
+                dataTitle.FontSize == 18 && dataTitle.FontWeight == FontWeights.Bold,
                 "data page uses the shared compact section heading");
             var filters = (ItemsControl)view.FindName("DataFilters");
             var filterButtons = Visuals(filters).OfType<Button>()
@@ -436,7 +436,7 @@ public static class FilmPresentationTests
         // Windows can constrain the offscreen window to the session's display width.
         // Keep the tested content width independent of that native window constraint.
         content.Width = width;
-        return new()
+        return new DesktopWindow()
         {
             Content = content,
             Width = width,

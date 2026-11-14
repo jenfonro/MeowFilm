@@ -8,7 +8,7 @@ using System.Windows.Media;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed class MusicDesktopLyricsUnlockWindow : Window
+internal sealed class MusicDesktopLyricsUnlockWindow : MeowFilm.Desktop.DesktopWindow
 {
     private HwndSource? source;
 

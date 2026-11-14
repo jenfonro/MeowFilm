@@ -8,6 +8,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -499,7 +500,7 @@ public partial class FilmPlaybackView : UserControl
         VideoPicture.ClearValue(HeightProperty);
         PlayerFrame.VerticalAlignment = VerticalAlignment.Stretch;
         var host = new Grid { Background = Brushes.Black }; host.Children.Add(PlayerFrame);
-        var dialog = new Window
+        var dialog = new DesktopWindow
         {
             Title = page.Title, Owner = Window.GetWindow(this), Content = host, DataContext = page, Resources = Resources,
             Width = 640, Height = 360, MinWidth = 380, MinHeight = 214, Background = Brushes.Black,

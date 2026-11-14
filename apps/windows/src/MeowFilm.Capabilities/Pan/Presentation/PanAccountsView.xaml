@@ -3,7 +3,6 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
  Foreground="{DynamicResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>

@@ -65,7 +65,7 @@ internal sealed class FilmDirectory
     }
 }
 
-internal sealed class FilmDirectoryDialog : Window
+internal sealed class FilmDirectoryDialog : DesktopWindow
 {
     private readonly FilmPlaybackPage page;
     private readonly JsonElement browsing;
@@ -86,7 +86,6 @@ internal sealed class FilmDirectoryDialog : Window
         });
         SetResourceReference(BackgroundProperty, "MeowFilm.Brush.Window");
         SetResourceReference(ForegroundProperty, "MeowFilm.Brush.Text");
-        FontFamily = SystemFonts.MessageFontFamily;
         back.SetResourceReference(StyleProperty, "MeowFilm.QuietButton");
         play.SetResourceReference(StyleProperty, "MeowFilm.PrimaryButton");
         play.Margin = new(0, 12, 0, 0);

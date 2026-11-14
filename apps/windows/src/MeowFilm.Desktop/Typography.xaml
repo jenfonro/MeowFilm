@@ -1,0 +1,36 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=System.Runtime">
+    <!-- Shared typography values. The family stays a dynamic system resource. -->
+    <sys:Double x:Key="MeowFilm.Font.Size.Body">14</sys:Double>
+    <sys:Double x:Key="MeowFilm.Font.Size.Compact">13</sys:Double>
+    <sys:Double x:Key="MeowFilm.Font.Size.Caption">12</sys:Double>
+    <sys:Double x:Key="MeowFilm.Font.Size.SectionTitle">16</sys:Double>
+    <sys:Double x:Key="MeowFilm.Font.Size.SectionHeading">18</sys:Double>
+    <sys:Double x:Key="MeowFilm.Font.Size.Title">20</sys:Double>
+    <sys:Double x:Key="MeowFilm.Font.Size.Heading">26</sys:Double>
+    <x:Static x:Key="MeowFilm.Font.Weight.Normal" Member="FontWeights.Normal"/>
+    <x:Static x:Key="MeowFilm.Font.Weight.Strong" Member="FontWeights.Bold"/>
+
+    <Style x:Key="MeowFilm.ToolTip" TargetType="{x:Type ToolTip}">
+        <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+        <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
+        <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Normal}"/>
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+        <Setter Property="TextOptions.TextRenderingMode" Value="Auto"/>
+        <Setter Property="UseLayoutRounding" Value="True"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+    </Style>
+    <Style TargetType="{x:Type ToolTip}" BasedOn="{StaticResource MeowFilm.ToolTip}"/>
+
+    <!-- Popups are separate presentation roots; menus keep their own 13pt role. -->
+    <Style x:Key="MeowFilm.Popup" TargetType="{x:Type Popup}">
+        <Setter Property="TextElement.FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+        <Setter Property="TextElement.FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/>
+        <Setter Property="TextElement.FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Normal}"/>
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+        <Setter Property="TextOptions.TextRenderingMode" Value="Auto"/>
+    </Style>
+    <Style TargetType="{x:Type Popup}" BasedOn="{StaticResource MeowFilm.Popup}"/>
+
+</ResourceDictionary>

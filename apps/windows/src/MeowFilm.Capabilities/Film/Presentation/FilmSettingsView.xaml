@@ -3,8 +3,7 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- x:Name="Root" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
- TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
+ x:Name="Root"
  UseLayoutRounding="True" SnapsToDevicePixels="True" ClipToBounds="True"
  Loaded="View_Loaded" Unloaded="View_Unloaded" IsVisibleChanged="View_IsVisibleChanged" SizeChanged="View_SizeChanged">
  <UserControl.Resources>

@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Automation;
 using MeowFilm.Capabilities.Accounts;
+using MeowFilm.Desktop;
 using Microsoft.Win32;
 
 namespace MeowFilm.Capabilities;
@@ -130,7 +131,7 @@ public sealed partial class MusicCapability
     private static MusicAccountTransferPolicy ChooseTransferPolicy(IReadOnlyList<MusicAccountTransferConflict> conflicts, CancellationToken token)
     {
         var choice = MusicAccountTransferPolicy.Cancel;
-        var dialog = new Window { Title = "导入账号", SizeToContent = SizeToContent.WidthAndHeight, ResizeMode = ResizeMode.NoResize,
+        var dialog = new DesktopWindow { Title = "导入账号", SizeToContent = SizeToContent.WidthAndHeight, ResizeMode = ResizeMode.NoResize,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Application.Current?.MainWindow,
             ShowInTaskbar = false };
         var panel = new StackPanel { Margin = new Thickness(20), MinWidth = 320 };

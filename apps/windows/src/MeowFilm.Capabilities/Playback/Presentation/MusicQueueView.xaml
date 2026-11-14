@@ -4,8 +4,6 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
- TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources>
   <ResourceDictionary>
@@ -37,17 +35,17 @@
   <Grid Margin="0,0,12,14">
    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-    <TextBlock Text="播放列表" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
-    <TextBlock Text="{Binding QueueSurfaceCountText}" FontSize="12" Style="{StaticResource Queue.Text}"
+    <TextBlock Text="播放列表" FontSize="22" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" VerticalAlignment="Center"/>
+    <TextBlock Text="{Binding QueueSurfaceCountText}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Style="{StaticResource Queue.Text}"
                Margin="5,2,0,0" VerticalAlignment="Center"/>
    </StackPanel>
    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
     <Button Content="收藏全部" Click="FavoriteAll_Click" IsEnabled="{Binding CanClearQueueSurface}"
             Style="{StaticResource MeowFilm.IconButton}" Padding="6,4" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
-            FontSize="12" AutomationProperties.Name="收藏全部"/>
+            FontSize="{StaticResource MeowFilm.Font.Size.Caption}" AutomationProperties.Name="收藏全部"/>
     <Button Content="清空" Click="Clear_Click" IsEnabled="{Binding CanClearQueueSurface}"
             Style="{StaticResource MeowFilm.IconButton}" Padding="6,4" FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
-            FontSize="12" AutomationProperties.Name="清空播放列表"/>
+            FontSize="{StaticResource MeowFilm.Font.Size.Caption}" AutomationProperties.Name="清空播放列表"/>
    </StackPanel>
   </Grid>
   <ListBox x:Name="QueueList" Grid.Row="1" ItemsSource="{Binding QueueSurfaceRows}" Background="Transparent"
@@ -97,20 +95,20 @@
         </Border>
        </Grid>
        <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="8,0,8,0">
-        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14">
+        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Body}">
          <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Queue.Text}">
           <Style.Triggers>
-           <DataTrigger Binding="{Binding IsCurrent}" Value="True"><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
+           <DataTrigger Binding="{Binding IsCurrent}" Value="True"><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/></DataTrigger>
            <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="False"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/></Trigger>
            <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding IsCurrent}" Value="True"/><Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=(desktop:DesktopTheme.IsHighContrast)}" Value="False"/></MultiDataTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Accent}"/></MultiDataTrigger>
           </Style.Triggers>
          </Style></TextBlock.Style>
         </TextBlock>
-        <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12"
+        <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Caption}"
                    Style="{StaticResource Queue.Text}" Margin="0,3,0,0"/>
        </StackPanel>
        <TextBlock Grid.Column="2" Text="{Binding Duration}" VerticalAlignment="Center" HorizontalAlignment="Right"
-                  FontSize="12" Style="{StaticResource Queue.Text}"/>
+                  FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Style="{StaticResource Queue.Text}"/>
       </Grid>
      </Button>
      <Button Grid.Column="3" Tag="{Binding}" Click="Remove_Click" Content="&#xE711;"
@@ -141,7 +139,7 @@
     <Button DockPanel.Dock="Right" Content="核对保存结果" Click="ReconcileRecommendation_Click"
             Visibility="{Binding CanReconcileRecommendation,Converter={StaticResource MeowFilm.BoolToVisibility}}"
             Style="{StaticResource MeowFilm.QuietButton}" Padding="6,4"/>
-    <TextBlock Text="{Binding RecommendationTitle}" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+    <TextBlock Text="{Binding RecommendationTitle}" FontSize="{StaticResource MeowFilm.Font.Size.SectionTitle}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" VerticalAlignment="Center"/>
    </DockPanel>
    <ListBox x:Name="RecommendationList" Grid.Row="1" ItemsSource="{Binding RecommendationCandidates}"
             MaxHeight="232" BorderThickness="0" Background="Transparent"
@@ -159,11 +157,11 @@
        <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
        <art:ArtworkImage Address="{Binding Cover}" Width="40" Height="40" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
        <StackPanel Grid.Column="1" Margin="8,0" VerticalAlignment="Center">
-        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14"/>
-        <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12" Margin="0,3,0,0"
+        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Body}"/>
+        <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,3,0,0"
                    Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
        </StackPanel>
-       <TextBlock Grid.Column="2" Text="{Binding Duration}" FontSize="12" VerticalAlignment="Center"
+       <TextBlock Grid.Column="2" Text="{Binding Duration}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" VerticalAlignment="Center"
                   HorizontalAlignment="Right" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
       </Grid>
      </Button>

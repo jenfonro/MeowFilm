@@ -44,12 +44,18 @@ public static class AppLauncher
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
     {
         var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        var launchWindow = new Window
+        DesktopTypography.Install(application);
+        var launchWindow = new DesktopWindow
         {
             Title = "meowfilm", Width = 420, Height = 220, WindowStartupLocation = WindowStartupLocation.CenterScreen,
             ResizeMode = ResizeMode.NoResize, Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(247, 249, 252))
         };
-        var label = new TextBlock { Text = "正在启动", FontSize = 18, Margin = new Thickness(24), HorizontalAlignment = HorizontalAlignment.Center };
+        var label = new TextBlock
+        {
+            Text = "正在启动", Margin = new Thickness(24), HorizontalAlignment = HorizontalAlignment.Center
+        };
+        label.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.SectionHeading");
+        label.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Strong");
         var retry = new Button { Content = "重试", Margin = new Thickness(12), Padding = new Thickness(24, 8, 24, 8), Visibility = Visibility.Collapsed };
         var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         stack.Children.Add(label); stack.Children.Add(retry); launchWindow.Content = stack;

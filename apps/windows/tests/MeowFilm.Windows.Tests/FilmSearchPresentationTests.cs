@@ -74,7 +74,7 @@ public static partial class MusicUiTests
                     Equal(Color.FromRgb(0xE2, 0xE8, 0xF0), ((SolidColorBrush)label.BorderBrush).Color);
                     Equal(Color.FromRgb(0xF8, 0xFA, 0xFC), ((SolidColorBrush)label.Background).Color);
                     Equal(Color.FromRgb(0x6B, 0x72, 0x80), ((SolidColorBrush)subtitle.Foreground).Color);
-                    Equal(new Thickness(8, 2, 8, 2), label.Padding); Equal(10d, subtitle.FontSize); Equal(FontWeights.Medium, subtitle.FontWeight);
+                    Equal(new Thickness(8, 2, 8, 2), label.Padding); Equal(10d, subtitle.FontSize); Equal(FontWeights.Normal, subtitle.FontWeight);
                     Equal(TextTrimming.CharacterEllipsis, subtitle.TextTrimming);
                     if (item.Subtitle.Length < 10) True(label.ActualWidth < 100, "short labels hug their content instead of stretching");
                 }
@@ -160,7 +160,7 @@ public static partial class MusicUiTests
                 Equal(selected ? Visibility.Visible : Visibility.Collapsed, indicator.Visibility);
                 True(button.Focusable && button.IsTabStop && button.FocusVisualStyle is not null &&
                     AutomationProperties.GetName(button) == button.Content + "搜索结果", "category retains focus and accessible native button behavior");
-                Equal(selected ? FontWeights.SemiBold : FontWeights.Normal, button.FontWeight);
+                Equal(selected ? FontWeights.Bold : FontWeights.Normal, button.FontWeight);
                 if (!selected) continue;
                 Equal(new Size(20, 3), indicator.RenderSize);
                 True(Math.Abs(indicator.TranslatePoint(new Point(10, 0), button).X - button.ActualWidth / 2) < .5 &&

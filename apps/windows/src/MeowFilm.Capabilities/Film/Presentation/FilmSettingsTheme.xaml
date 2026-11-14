@@ -34,7 +34,7 @@
  </Style>
  <Style TargetType="DataGridColumnHeader">
   <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
-  <Setter Property="Padding" Value="8,0"/><Setter Property="FontSize" Value="12"/>
+  <Setter Property="Padding" Value="8,0"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
   <Setter Property="HorizontalContentAlignment" Value="Left"/>
   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers>
@@ -65,7 +65,7 @@
   </Style.Triggers>
  </Style>
  <Style x:Key="FilmSettings.CellText" TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
-  <Setter Property="FontSize" Value="13"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/>
  </Style>
  <Style x:Key="FilmSettings.ErrorCell" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
   <Setter Property="ToolTip" Value="{Binding ErrorText}"/>

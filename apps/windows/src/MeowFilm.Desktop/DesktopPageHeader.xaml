@@ -20,7 +20,7 @@
             <ContentControl Content="{Binding Navigation, RelativeSource={RelativeSource AncestorType=local:DesktopPageHeader}}"
                             VerticalContentAlignment="Center" Focusable="False" IsTabStop="False" />
             <TextBlock x:Name="Heading" Grid.Column="1" Visibility="Collapsed"
-                       FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" Margin="8,0,20,0"
+                       Style="{DynamicResource MeowFilm.Title}" VerticalAlignment="Center" Margin="8,0,20,0"
                        AutomationProperties.HeadingLevel="Level1" />
             <ContentControl x:Name="LeadingSlot" Grid.Column="2" Visibility="Collapsed"
                             VerticalContentAlignment="Center" Focusable="False" IsTabStop="False" />

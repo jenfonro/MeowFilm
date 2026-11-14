@@ -62,7 +62,7 @@ public sealed class ArtworkImage : Grid
     private readonly Image image = new() { Stretch = Stretch.UniformToFill };
     private readonly Button retry = new() { Content = "重试",
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-        Visibility = Visibility.Collapsed, Padding = new Thickness(4), FontSize = 11 };
+        Visibility = Visibility.Collapsed, Padding = new Thickness(4) };
     private IArtworkLease? lease;
     private CancellationTokenSource? request;
     private Task? requestTask;
@@ -75,6 +75,7 @@ public sealed class ArtworkImage : Grid
     public bool ShowRetry { get => (bool)GetValue(ShowRetryProperty); set => SetValue(ShowRetryProperty, value); }
     public ArtworkImage()
     {
+        retry.SetResourceReference(Control.FontSizeProperty, "MeowFilm.Font.Size.Caption");
         ClipToBounds = true; Background = Brushes.Transparent; Children.Add(image); Children.Add(retry);
         System.Windows.Automation.AutomationProperties.SetName(retry, "重试图片");
         retry.Click += (_, args) => { args.Handled = true; Restart(); };
