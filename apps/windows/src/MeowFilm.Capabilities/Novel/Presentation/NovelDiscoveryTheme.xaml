@@ -55,7 +55,6 @@
    <ControlTemplate.Triggers>
     <Trigger Property="IsChecked" Value="True">
      <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-     <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
      <Setter TargetName="Underline" Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
     </Trigger>
     <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/></Trigger>
@@ -86,7 +85,6 @@
    <Trigger Property="IsChecked" Value="True">
     <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/>
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-    <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
    </Trigger>
    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>

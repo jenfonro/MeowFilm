@@ -119,7 +119,7 @@
   </Grid.RowDefinitions>
   <Grid x:Name="SourceTitleRow" Margin="0,0,0,18">
    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-   <TextBlock Text="音源管理" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" VerticalAlignment="Center"/>
+   <TextBlock Text="音源管理" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" VerticalAlignment="Center"/>
    <Button Grid.Column="1" Content="检测所选" Style="{StaticResource Settings.Button32}" Click="CheckSelected_Click"
            IsEnabled="{Binding CanCheckSelectedSources}" Margin="0,0,10,0"/>
    <Button Grid.Column="2" Content="删除所选" Style="{StaticResource Settings.Button32}" Click="RemoveSelected_Click"

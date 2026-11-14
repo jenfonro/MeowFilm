@@ -57,7 +57,6 @@
  <Style x:Key="Settings.PrimaryButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.PrimaryButton}">
   <Setter Property="MinHeight" Value="32"/><Setter Property="Height" Value="32"/>
   <Setter Property="Padding" Value="12,5"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
-  <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
  </Style>
  <Style x:Key="Settings.DangerButton" TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Error}"/>

@@ -28,11 +28,11 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 
 资源为 `/MeowFilm.Desktop;component/Theme.xaml`。样式覆盖焦点、键盘、悬停、按下、取消、禁用、卸载、高对比、减少动画与缩放。能力可覆盖明确语义色，不复制未知资源或按领域名分支。通知经 NoticeOutlet/NoticeStack，不添加解释性文字。
 
-应用菜单使用 `MeowFilm.ContextMenu`／`MeowFilm.MenuItem`：根菜单与子菜单共用圆角、阴影留白及 `MeowFilm.FloatingSurface`；动态子项的局部样式须 `BasedOn` 公共项。模板保留富内容 Header、访问键、图标、快捷键文字、普通可勾选项和 WPF 子菜单键盘逻辑。音质仅以公共项派生当前背景与字重，不另建模板或画勾。Shell 对自身及 Owner 链归属该 Shell 的窗口中的 WPF 自动编辑菜单及其内部派生项目只应用外观，不新建、删减或替换剪贴板、拼写／IME 项及 CommandTarget；原生默认菜单没有提供的操作也不自行增加；不接管无 Shell owner 的独立窗口。
+应用菜单使用 `MeowFilm.ContextMenu`／`MeowFilm.MenuItem`：根菜单与子菜单共用圆角、阴影留白及 `MeowFilm.FloatingSurface`；动态子项的局部样式须 `BasedOn` 公共项。模板保留富内容 Header、访问键、图标、快捷键文字、普通可勾选项和 WPF 子菜单键盘逻辑。音质仅以公共项派生当前背景，不另建模板或画勾。Shell 对自身及 Owner 链归属该 Shell 的窗口中的 WPF 自动编辑菜单及其内部派生项目只应用外观，不新建、删减或替换剪贴板、拼写／IME 项及 CommandTarget；原生默认菜单没有提供的操作也不自行增加；不接管无 Shell owner 的独立窗口。
 
 底栏空白使用 `PlayerSurfaceInput` 配对同一轮左键 Down/Up，按下时记录活跃窗口及浮层／队列状态；按钮、滑条等不通过此准入。所属窗口和已打开浮层的 HWND hook 观察 `WM_MOUSEACTIVATE` 的左键触发消息与原生按下，鼠标激活窗口的那一轮只激活；右键／中键激活不占用后续左键。关闭层不使本轮重新准入，不使用延时冷却。队列事实由 Shell 以继承附加属性提供；已活跃窗口中按下底栏空白关闭队列并消费该轮。隐藏取消资格，卸载注销 InputManager 和 HWND hook。合成消息与离屏路由测试只证明适配和状态契约，不证明真实桌面捕获／激活消息实序。
 
-队列外壳四角圆角且保留阴影溢出空间，内层 `QueueHost` 单独按圆角几何裁剪内容；矩形 `ClipToBounds` 不承担圆角裁剪。行高、虚拟化、播放和删除动作保留，整行悬停／键盘焦点显示浅色底与封面播放图标，高对比使用系统窗口／高亮色，当前歌曲另以字重识别。
+队列外壳四角圆角且保留阴影溢出空间，内层 `QueueHost` 单独按圆角几何裁剪内容；矩形 `ClipToBounds` 不承担圆角裁剪。行高、虚拟化、播放和删除动作保留，整行悬停／键盘焦点显示浅色底与封面播放图标，高对比使用系统窗口／高亮色，当前歌曲使用常规字体，高对比模式下通过既有封面播放图标保留非颜色标识。
 
 全应用不提供普通文字悬停提示，包括按钮说明、歌名／片名全称、截断简介、音源信息和禁用内容说明；仅保留进度条的时间预览。控件的无障碍名称、菜单、内容预览和真实操作错误通知不受影响。
 
@@ -40,7 +40,7 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 
 `MeowFilm.OverlayScrollViewer` 复用 `OverlayScrollChrome.Enabled/Active`，不承载业务分派。普通模式只有滚轮、滚动键、纵向平移或所属纵向滚动条操作实际改变位移时才激活；模板内 viewer 的输入准入由其 `TemplatedParent` 接收。页面悬停、普通焦点、程序恢复位移、内容／视口变化和嵌套滚动不激活。空闲 900ms 后在 160ms 内淡出，重新滚动撤销旧淡出；所属 thumb 捕获鼠标期间保留可见与拖动，释放后重新计时。高对比始终显示系统文字色 thumb，减少动画时直接隐藏；卸载或停用撤销输入准入、计时、动画及所属 thumb 捕获，重新加载只恢复订阅、不恢复旧活动。
 
-全应用字体默认由 Desktop 的唯一排版资源拥有：`Typography.xaml` 动态引用 `SystemFonts.MessageFontFamilyKey`，跟随 Windows 当前界面字体，不写死字体名称或打包字体文件；正文默认 14 DIP／Normal 400，强调只使用真实的 Normal 400／Bold 700，普通静态文字使用 Display 文本排版、Auto 抗锯齿和布局／设备像素对齐。`AppLauncher` 在创建首个启动窗口前安装该资源；`DesktopWindow` 作为自有 WPF 窗口的轻量排版根，Shell、启动窗口、独立窗口和业务页面继承同一默认。以后新增普通文字、页面或窗口不再逐处声明 FontFamily、正文 FontSize、正文 FontWeight 或 TextOptions，标题等只选择公共语义角色。图标可使用线框 Path 或专用符号字体；图标容器中的正文保留同一动态系统字体资源覆盖，避免继承图标字族。小说阅读器用户字体／字号和真正透明表面的必要局部例外不由全局默认覆盖。不强制 ClearType 穿透透明表面，也不通过透明文字或整体缩放模拟字体样式。Shell 不设置局部强制灰度例外：队列／通知阴影等合成表面由 WPF 的 Auto 选择适用渲染方式，业务遮罩区的局部例外由其呈现 owner 负责。侧栏只让导航项接收键盘焦点，项级焦点轮廓保留；搜索输入、图标、三模式选择与竖向分隔位于同一字段，公共 `TextBox` 模板只消费控件自身一次 `Padding`，不在 `PART_ContentHost` 再叠加相同间距。`Ctrl+K` 和保留的 `Ctrl+F` 聚焦同一输入，Enter 与按钮提交仍走同一壳入口。普通色彩使用应用渐变背景和轻量分隔，高对比模式恢复系统前景、背景及侧栏边线，窗口外轮廓仍只由 DWM／WindowChrome 持有。
+全应用字体默认由 Desktop 的唯一排版资源拥有：`Typography.xaml` 动态引用 `SystemFonts.MessageFontFamilyKey`，跟随 Windows 当前界面字体，不写死字体名称或打包字体文件；普通文字统一使用常规字体 Normal，正文默认 14 DIP；标题、按钮、选中态与歌词均不加粗，层级只通过字号区分，普通静态文字使用 Display 文本排版、Auto 抗锯齿和布局／设备像素对齐。`AppLauncher` 在创建首个启动窗口前安装该资源；`DesktopWindow` 作为自有 WPF 窗口的轻量排版根，Shell、启动窗口、独立窗口和业务页面继承同一默认。以后新增普通文字、页面或窗口不再逐处声明 FontFamily、正文 FontSize、正文 FontWeight 或 TextOptions，标题等只选择公共语义角色。图标可使用线框 Path 或专用符号字体；图标容器中的正文保留同一动态系统字体资源覆盖，避免继承图标字族。仅小说阅读器正文的用户字体／字号／加粗设置和真正透明表面的必要局部例外不由全局默认覆盖。不强制 ClearType 穿透透明表面，也不通过透明文字或整体缩放模拟字体样式。Shell 不设置局部强制灰度例外：队列／通知阴影等合成表面由 WPF 的 Auto 选择适用渲染方式，业务遮罩区的局部例外由其呈现 owner 负责。侧栏只让导航项接收键盘焦点，项级焦点轮廓保留；搜索输入、图标、三模式选择与竖向分隔位于同一字段，公共 `TextBox` 模板只消费控件自身一次 `Padding`，不在 `PART_ContentHost` 再叠加相同间距。`Ctrl+K` 和保留的 `Ctrl+F` 聚焦同一输入，Enter 与按钮提交仍走同一壳入口。普通色彩使用应用渐变背景和轻量分隔，高对比模式恢复系统前景、背景及侧栏边线，窗口外轮廓仍只由 DWM／WindowChrome 持有。
 
 首页操作验证优先在独立 STA 中对真实控件使用 `IValueProvider`／`IInvokeProvider` 和路由事件。需要 Loaded／可视源时使用不带 `WS_VISIBLE`、带 `WS_EX_NOACTIVATE` 的测试 `HwndSource`；不显示或激活产品窗口，不使用 `SendInput`、系统键盘／鼠标注入或鼠标捕获。样式示意的合成内容不能作为可交互产品窗口交付；真实上游、桌面交互和离屏组件验证分别记录。
 

@@ -33,7 +33,7 @@
    <Border Style="{StaticResource MeowFilm.Surface}" Padding="16" Margin="0,6,0,0"
            KeyboardNavigation.TabNavigation="Cycle" PreviewKeyDown="Editor_KeyDown">
     <StackPanel Width="280">
-     <TextBlock Text="{Binding Label,ElementName=Root}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" Margin="0,0,0,12"/>
+     <TextBlock Text="{Binding Label,ElementName=Root}" Margin="0,0,0,12"/>
      <Grid Height="170" ClipToBounds="True" Margin="0,0,0,12">
       <Border x:Name="HueSurface" Background="Red"/>
       <Border><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="White"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></Border.Background></Border>

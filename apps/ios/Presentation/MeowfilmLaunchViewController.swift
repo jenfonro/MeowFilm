@@ -17,7 +17,7 @@ final class MeowfilmLaunchViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         let label = UILabel()
-        label.font = .preferredFont(forTextStyle: .headline)
+        label.font = UIFontMetrics(forTextStyle: .headline).scaledFont(for: .systemFont(ofSize: 17), compatibleWith: traitCollection)
         label.adjustsFontForContentSizeCategory = true
         label.textAlignment = .center; label.numberOfLines = 0
         switch phase {

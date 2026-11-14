@@ -25,7 +25,7 @@ public static class WindowsDefaultTypographyTests
             VerifyNewRoots);
         yield return Case("dynamic system family override and recovery reaches roots popup and self-drawn text",
             VerifyDynamicFamily);
-        yield return Case("shared semantic roles use real 400 and 700 weights", VerifyRoles);
+        yield return Case("shared text roles keep regular fonts and their size hierarchy", VerifyRoles);
         yield return Case("desktop lyric user colors and sizes remain outside the body default",
             VerifyDesktopLyricExceptions);
         yield return Case("popup menu tooltip and derived window content use the shared family and keep their own roles",
@@ -260,6 +260,7 @@ public static class WindowsDefaultTypographyTests
         var settings = new TextBlock { Text = "设置", Style = (Style)window.FindResource("MeowFilm.SettingsSectionTitle") };
         var title = new TextBlock { Text = "页标题", Style = (Style)window.FindResource("MeowFilm.Title") };
         var lyric = new MusicDesktopLyricTextView { Text = "歌词", Style = (Style)window.FindResource("MeowFilm.Lyric") };
+        var tab = new RadioButton { Content = "设置分类", Style = (Style)window.FindResource("MeowFilm.SettingsArea") };
         window.Width = 640;
         window.Height = 400;
         window.Left = -32000;
@@ -267,7 +268,7 @@ public static class WindowsDefaultTypographyTests
         window.ShowActivated = false;
         window.ShowInTaskbar = false;
         window.WindowStyle = WindowStyle.None;
-        window.Content = new StackPanel { Children = { heading, section, settings, title, lyric } };
+        window.Content = new StackPanel { Children = { heading, section, settings, title, lyric, tab } };
         try
         {
             window.Show();
@@ -275,20 +276,26 @@ public static class WindowsDefaultTypographyTests
             await Drain();
 
             Equal(FontWeights.Normal, (FontWeight)window.FindResource("MeowFilm.Font.Weight.Normal"),
-                "Normal role is the real 400 weight");
-            Equal(FontWeights.Bold, (FontWeight)window.FindResource("MeowFilm.Font.Weight.Strong"),
-                "Strong role is the real 700 weight");
+                "body role is regular");
             Equal(26d, heading.FontSize, "heading role size");
-            Equal(FontWeights.Bold, heading.FontWeight, "heading role is 700");
+            Equal(FontWeights.Normal, heading.FontWeight, "heading role is regular");
             Equal(18d, section.FontSize, "section heading role size");
-            Equal(FontWeights.Bold, section.FontWeight, "section heading role is 700");
+            Equal(FontWeights.Normal, section.FontWeight, "section heading role is regular");
             Equal(16d, settings.FontSize, "settings section title role size");
-            Equal(FontWeights.Bold, settings.FontWeight, "settings section title role is 700");
+            Equal(FontWeights.Normal, settings.FontWeight, "settings section title role is regular");
             Equal(20d, title.FontSize, "title role size");
-            Equal(FontWeights.Bold, title.FontWeight, "title role is 700");
+            Equal(FontWeights.Normal, title.FontWeight, "title role is regular");
             Equal(14d, lyric.FontSize, "body default size reaches lyric role");
-            Equal(FontWeights.Normal, lyric.FontWeight, "lyric role is 400");
+            Equal(FontWeights.Normal, lyric.FontWeight, "lyric role is regular");
             Equal(SystemFonts.MessageFontFamily, lyric.FontFamily, "lyric role follows the system family");
+            foreach (var selected in new[] { false, true, false })
+            {
+                tab.IsChecked = selected;
+                window.UpdateLayout();
+                await Drain();
+                Equal(FontWeights.Normal, tab.FontWeight, "selection keeps regular text");
+                Equal(14d, tab.FontSize, "selection preserves the tab size");
+            }
         }
         finally
         {

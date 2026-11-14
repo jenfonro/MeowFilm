@@ -47,7 +47,7 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDataSource, UITa
         recommendations.dataSource = self; recommendations.delegate = self
         recommendations.accessibilityIdentifier = "music.queue.recommendations"
         recommendations.register(MusicQueueSongCell.self, forCellReuseIdentifier: MusicQueueSongCell.reuseIdentifier)
-        recommendationStatus.font = .systemFont(ofSize: 13, weight: .semibold)
+        recommendationStatus.font = .systemFont(ofSize: 13)
         recommendationStatus.accessibilityIdentifier = "music.queue.recommendation.status"
         view.addSubview(recommendationStatus)
         view.addSubview(recommendations)

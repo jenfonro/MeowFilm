@@ -205,7 +205,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
 
     private func configureTitle() {
         titleLabel.text = detail.title
-        titleLabel.font = .systemFont(ofSize: 32, weight: .bold)
+        titleLabel.font = .systemFont(ofSize: 32)
         titleLabel.numberOfLines = 2
         titleLabel.textAlignment = .center
         titleLabel.accessibilityIdentifier = "film.detail.title"
@@ -232,7 +232,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             self?.logoContainer.isHidden = true
         }
         if let url = detail.logoURL { logo.load(url) }
-        metadata.font = .systemFont(ofSize: 15, weight: .medium)
+        metadata.font = .systemFont(ofSize: 15)
         metadata.numberOfLines = 2
         metadata.textAlignment = .center
         content.addArrangedSubview(inset(metadata, horizontal: 24))
@@ -257,7 +257,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         configuration.cornerStyle = .capsule
         configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
             var attributes = $0
-            attributes.font = .systemFont(ofSize: 17, weight: .semibold)
+            attributes.font = .systemFont(ofSize: 17)
             return attributes
         }
         play.configuration = configuration
@@ -301,7 +301,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         summary.numberOfLines = 2
         summary.accessibilityIdentifier = "film.detail.summary"
         summaryButton.setTitle("展开", for: .normal)
-        summaryButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
+        summaryButton.titleLabel?.font = .systemFont(ofSize: 14)
         summaryButton.accessibilityIdentifier = "film.detail.summary-toggle"
         summaryButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         summaryButton.isHidden = detail.summary.isEmpty
@@ -323,7 +323,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private func configureSections() {
         configureSources()
         seasonButton.contentHorizontalAlignment = .leading
-        seasonButton.titleLabel?.font = .systemFont(ofSize: 21, weight: .bold)
+        seasonButton.titleLabel?.font = .systemFont(ofSize: 21)
         seasonButton.accessibilityIdentifier = "film.detail.season"
         seasonButton.heightAnchor.constraint(equalToConstant: 44).isActive = true
         seasonButton.showsMenuAsPrimaryAction = true
@@ -463,7 +463,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         for (button, title, id) in [(sourceButton, "站点源", "source"), (lineButton, "网盘源", "line")] {
             button.setTitle(title, for: .normal)
             button.accessibilityLabel = title
-            button.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
+            button.titleLabel?.font = .systemFont(ofSize: 14)
             button.titleLabel?.lineBreakMode = .byTruncatingTail
             button.accessibilityIdentifier = "film.detail.\(id)"
             button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
@@ -916,7 +916,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private func addHeading(_ title: String) {
         let label = UILabel()
         label.text = title
-        label.font = .systemFont(ofSize: 21, weight: .bold)
+        label.font = .systemFont(ofSize: 21)
         label.accessibilityTraits = .header
         sectionTitles.append(label)
         let container = inset(label)

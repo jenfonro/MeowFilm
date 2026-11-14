@@ -160,10 +160,10 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
         cover.addSubview(artwork)
         information.addSubview(cover)
 
-        titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        titleLabel.font = .systemFont(ofSize: 20)
         titleLabel.numberOfLines = 2
         titleLabel.lineBreakMode = .byTruncatingTail
-        ownerLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        ownerLabel.font = .systemFont(ofSize: 13)
         countLabel.font = .systemFont(ofSize: 13)
         for label in [titleLabel, ownerLabel, countLabel] {
             label.isAccessibilityElement = false
@@ -410,7 +410,7 @@ final class MusicCollectionStatusFooterView: UIView {
         previousButton.accessibilityIdentifier = "music.collection.previous"
         nextButton.accessibilityIdentifier = "music.collection.next"
         for button in [previousButton, nextButton] {
-            button.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
+            button.titleLabel?.font = .systemFont(ofSize: 14)
             button.layer.cornerRadius = 8
             button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
         }
@@ -608,7 +608,7 @@ final class MusicCollectionTrackCell: UITableViewCell {
 
         artwork.layer.cornerRadius = 6
         artwork.isAccessibilityElement = false
-        titleLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: 16)
         titleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel.font = .systemFont(ofSize: 12)
         subtitleLabel.lineBreakMode = .byTruncatingTail

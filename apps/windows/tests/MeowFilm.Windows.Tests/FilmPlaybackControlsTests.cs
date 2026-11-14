@@ -522,6 +522,9 @@ public static class FilmPlaybackControlsTests
                 var choices = scene.Element<ItemsControl>("MovieCandidates");
                 var button = Visuals(choices).OfType<Button>().Single(candidate => candidate.Tag is FilmCandidateItem);
                 var label = Visuals(button).OfType<TextBlock>().Single(value => value.Text.Contains(longName, StringComparison.Ordinal));
+                var title = Visuals(button).OfType<TextBlock>().Single(value => value.Text == scene.Rig.Page.Candidates.Single().Name);
+                Check(title.FontSize == 14 && title.FontWeight == FontWeights.Normal,
+                    "actual movie candidate titles retain body size and use regular text");
                 Check(Math.Abs(button.ActualWidth - 190) < .5 && choices.ActualWidth <= scene.View.ActualWidth &&
                     label.TextWrapping == TextWrapping.NoWrap && label.TextTrimming == TextTrimming.CharacterEllipsis,
                     "wide and narrow movie rows constrain the real long label instead of expanding the content region");

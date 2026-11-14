@@ -63,7 +63,7 @@ final class MusicCollectionEditorToolbarView: UIView {
         addSubview(selectAll)
 
         done.setTitle("完成", for: .normal)
-        done.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        done.titleLabel?.font = .systemFont(ofSize: 16)
         done.accessibilityLabel = "完成"
         done.accessibilityIdentifier = "music.collection.editor.done"
         done.addAction(UIAction { [weak self] _ in

@@ -118,7 +118,7 @@ final class MusicSearchHistoryCell: UITableViewCell {
         guard fontCategory != category else { return }
         fontCategory = category
         heading.font = UIFontMetrics(forTextStyle: .headline).scaledFont(
-            for: .systemFont(ofSize: 16, weight: .semibold), compatibleWith: traitCollection)
+            for: .systemFont(ofSize: 16), compatibleWith: traitCollection)
         keywordFont = UIFontMetrics(forTextStyle: .subheadline).scaledFont(
             for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
         for button in orderedButtons {
@@ -285,7 +285,7 @@ final class MusicSearchSuggestionsCell: UITableViewCell {
         guard fontCategory != category else { return }
         fontCategory = category
         heading.font = UIFontMetrics(forTextStyle: .headline).scaledFont(
-            for: .systemFont(ofSize: 16, weight: .semibold), compatibleWith: traitCollection)
+            for: .systemFont(ofSize: 16), compatibleWith: traitCollection)
         keywordFont = UIFontMetrics(forTextStyle: .subheadline).scaledFont(
             for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
         empty.font = keywordFont

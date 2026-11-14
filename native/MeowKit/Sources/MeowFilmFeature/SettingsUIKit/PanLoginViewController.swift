@@ -94,7 +94,7 @@ struct PanLoginContent: View {
     private var manual: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(model.provider.credentialFields) { field in
-                Text(field.title).font(.subheadline.weight(.semibold))
+                Text(field.title).font(.subheadline)
                 AccountInputCapsule(theme: theme) {
                     input(field).padding(.horizontal, 18).frame(minHeight: 48)
                 }

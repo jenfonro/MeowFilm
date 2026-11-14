@@ -26,7 +26,7 @@ public final class ManagementDialog: UIViewController {
         let scrim = UIView(); scrim.backgroundColor = UIColor(PageTheme.scrim); scrim.accessibilityIdentifier = "management.dialog.scrim"
         view.addSubview(scrim); scrim.pinEdges(to: view)
         panel.accessibilityIdentifier = "management.dialog.panel"; panel.layer.cornerRadius = 20; panel.clipsToBounds = true; panel.layer.borderWidth = SettingsVisualMetrics.cardBorderWidth
-        headingLabel.text = heading; headingLabel.font = .preferredFont(forTextStyle: .headline, compatibleWith: traitCollection)
+        headingLabel.text = heading; headingLabel.font = UIFontMetrics(forTextStyle: .headline).scaledFont(for: .systemFont(ofSize: 17), compatibleWith: traitCollection)
         headingLabel.adjustsFontForContentSizeCategory = true; headingLabel.numberOfLines = 0; headingLabel.lineBreakMode = .byWordWrapping
         headingLabel.setContentCompressionResistancePriority(.required, for: .vertical)
         let header = UIView(); header.addSubview(headingLabel); headingLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -180,7 +180,7 @@ public final class ManagementImportView: UIView, UITableViewDataSource, UITableV
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     private func applyTypography() {
-        all.titleLabel?.font = UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .systemFont(ofSize: 14, weight: .medium), compatibleWith: traitCollection)
+        all.titleLabel?.font = UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
         count.font = .preferredFont(forTextStyle: .footnote, compatibleWith: traitCollection)
         tableHeight.constant = CGFloat(min(12, max(1, items.count))) * UIFontMetrics(forTextStyle: .subheadline).scaledValue(for: 58, compatibleWith: traitCollection)
         table.reloadData(); setNeedsLayout()
@@ -216,7 +216,7 @@ public final class ManagementImportView: UIView, UITableViewDataSource, UITableV
         let check = UIButton(type: .custom); check.setImage(UIImage(systemName: selected.contains(indexPath.row) ? "checkmark.circle.fill" : "circle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20))?.withTintColor(UIColor(selected.contains(indexPath.row) ? settings.accent : settings.muted), renderingMode: .alwaysOriginal), for: .normal)
         check.accessibilityLabel = "选择 " + item.title; check.widthAnchor.constraint(equalToConstant: 44).isActive = true; check.heightAnchor.constraint(equalToConstant: 44).isActive = true
         check.addAction(UIAction { [weak self] _ in self?.toggle(indexPath.row) }, for: .touchUpInside)
-        let title = UILabel(); title.text = item.title; title.font = UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .systemFont(ofSize: 14, weight: .medium), compatibleWith: tableView.traitCollection); title.textColor = UIColor(settings.ink)
+        let title = UILabel(); title.text = item.title; title.font = UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .systemFont(ofSize: 14), compatibleWith: tableView.traitCollection); title.textColor = UIColor(settings.ink)
         let detail = UILabel(); detail.text = item.detail; detail.font = .preferredFont(forTextStyle: .caption1, compatibleWith: tableView.traitCollection); detail.textColor = UIColor(settings.muted); detail.isHidden = item.detail.isEmpty
         let labels = UIStackView(arrangedSubviews: [title, detail]); labels.axis = .vertical; labels.spacing = 4; labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let status = UILabel(); status.text = item.status; status.font = .preferredFont(forTextStyle: .caption1, compatibleWith: tableView.traitCollection); status.textColor = UIColor(item.status == "已存在" || item.status == "已有" ? settings.warning : settings.accent)

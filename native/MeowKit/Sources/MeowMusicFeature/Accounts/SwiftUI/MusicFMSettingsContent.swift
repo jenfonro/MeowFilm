@@ -52,7 +52,7 @@ public struct MusicFMSettingsContent: View {
                         .accessibilityHidden(true)
                 }
                 Text(choice.title)
-                    .font(scene ? .system(size: 12) : .system(size: 16, weight: .medium))
+                    .font(scene ? .system(size: 12) : .system(size: 16))
                     .multilineTextAlignment(.center)
                 if state.pendingChoice == choice.id {
                     ProgressView().accessibilityLabel("正在切换")

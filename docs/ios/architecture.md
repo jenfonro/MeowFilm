@@ -18,6 +18,10 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
 
+### 常规文字与字号
+
+普通文字遵守仓库 `AGENTS.md` 的统一常规字体限制：UIKit 使用系统 Regular 字体，SwiftUI 不为标题、按钮或选中状态另加粗；默认含粗体的语义字体也明确使用常规字。保留现有字号层级和 Dynamic Type 缩放，歌词的测量与实际绘制使用同一常规字体。阅读器 UI 遵守相同限制，仅可自定义的阅读正文保留用户字体与加粗设置；系统可访问性设置不由应用全局覆盖。
+
 ### 设置语义配色
 
 设置内容使用 `PageTheme.settings` 提供的 `SettingsTheme`，仅由浅／深外观决定，不依赖歌曲、命名预设或自定义基准色。UIKit 与 SwiftUI 统一使用中性不透明卡片、淡中性渐变轮廓、行分隔线和独立输入底／边界；正文、辅助文字与字段提示保持可读对比度。操作、选中和开关为稳定蓝色，危险操作为红色，来源状态使用可读的成功／警告／错误语义色；平台标识与真实颜色数据不重染。

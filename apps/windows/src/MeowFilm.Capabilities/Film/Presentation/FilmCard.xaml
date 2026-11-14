@@ -74,7 +74,7 @@
       </Style.Triggers>
      </Style></Border.Style>
      <TextBlock Text="{Binding TextBadge}" Foreground="{Binding Path=(TextElement.Foreground),ElementName=TextBadge}"
-                FontSize="10" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" LineHeight="15" LineStackingStrategy="BlockLineHeight"
+                FontSize="10" LineHeight="15" LineStackingStrategy="BlockLineHeight"
                 TextTrimming="CharacterEllipsis"/>
     </Border>
     <Border x:Name="ScoreBadge" Width="32" Height="32" CornerRadius="16" Margin="0,8,8,0"
@@ -93,13 +93,13 @@
       ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton,Converter={StaticResource Film.Scale},ConverterParameter=0.1}"
       ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton,Converter={StaticResource Film.Scale},ConverterParameter=0.1}"/>
      </Border.RenderTransform>
-     <TextBlock Text="{Binding Score}" Foreground="White" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"
+     <TextBlock Text="{Binding Score}" Foreground="White" FontSize="{StaticResource MeowFilm.Font.Size.Caption}"
                 HorizontalAlignment="Center" VerticalAlignment="Center"/>
     </Border>
    </Grid>
    <TextBlock Text="{Binding Title}" Margin="0,9,0,0" Height="21"
               Foreground="{DynamicResource MeowFilm.Brush.Text}"
-              FontSize="15" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}" TextAlignment="Center"
+              FontSize="15" TextAlignment="Center"
               TextTrimming="CharacterEllipsis"/>
    <Border x:Name="SiteLabel" Margin="0,3,0,0" Padding="8,2" CornerRadius="8"
            BorderThickness="1" HorizontalAlignment="Center" MaxWidth="176"

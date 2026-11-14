@@ -30,11 +30,11 @@ final class FilmPosterCell: UICollectionViewCell {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: 13)
         titleLabel.numberOfLines = 2
         titleLabel.lineBreakMode = .byTruncatingTail
         contentView.addSubview(titleLabel)
-        badge.font = .systemFont(ofSize: 10, weight: .bold)
+        badge.font = .systemFont(ofSize: 10)
         badge.textColor = .white
         badge.textAlignment = .center
         badge.lineBreakMode = .byTruncatingTail
@@ -46,7 +46,7 @@ final class FilmPosterCell: UICollectionViewCell {
         badgeContainer.layer.shadowRadius = 8
         badgeContainer.layer.shadowOffset = CGSize(width: 0, height: 8)
         badgeContainer.accessibilityIdentifier = "film.poster.badge.container"
-        sourceLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        sourceLabel.font = .systemFont(ofSize: 10)
         sourceLabel.textAlignment = .center
         sourceLabel.lineBreakMode = .byTruncatingTail
         sourceLabel.accessibilityIdentifier = "film.poster.label"
@@ -137,7 +137,7 @@ final class FilmSectionHeader: UICollectionReusableView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 18)
         titleLabel.accessibilityTraits = .header
         more.setTitle("查看更多", for: .normal)
         more.titleLabel?.font = .systemFont(ofSize: 13)

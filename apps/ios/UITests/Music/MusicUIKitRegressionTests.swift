@@ -722,7 +722,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let page = try XCTUnwrap(fixture.page.presentedViewController as? MusicFMSettingsViewController)
         XCTAssertEqual(page.modalPresentationStyle, .custom)
         XCTAssertEqual(page.pageHeader.title, "探索模式")
-        XCTAssertEqual(page.pageHeader.titleFont, .systemFont(ofSize: 15, weight: .medium))
+        XCTAssertEqual(page.pageHeader.titleFont, .systemFont(ofSize: 15))
         XCTAssertTrue(page.pageHeader.background.isHidden)
         XCTAssertEqual(page.overrideUserInterfaceStyle, .light)
         let background = try XCTUnwrap(page.view as? MusicPlayerBackgroundView)
@@ -750,7 +750,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let second = try XCTUnwrap(fixture.page.presentedViewController as? MusicFMSettingsViewController)
         XCTAssertFalse(second === page)
         XCTAssertEqual(second.pageHeader.title, "伤感")
-        XCTAssertEqual(second.pageHeader.titleFont, .systemFont(ofSize: 15, weight: .medium))
+        XCTAssertEqual(second.pageHeader.titleFont, .systemFont(ofSize: 15))
         model.stopFM()
         await waitForResult { fixture.page.presentedViewController == nil }
         XCTAssertTrue(fixture.root.presentedViewController === fixture.page)
@@ -2752,6 +2752,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             .filter { $0.accessibilityIdentifier?.hasPrefix("music.channel.tab.") == true }
             .sorted { $0.frame.minX < $1.frame.minX }
         XCTAssertEqual(buttons.compactMap { $0.title(for: .normal) }, channels.map(\.title))
+        for button in buttons { XCTAssertEqual(button.titleLabel?.font, .systemFont(ofSize: 17)) }
         XCTAssertTrue(try XCTUnwrap(buttons.last).accessibilityTraits.contains(.selected))
         let scroll = try XCTUnwrap(descendants(tabs).compactMap { $0 as? UIScrollView }.first)
         XCTAssertGreaterThan(scroll.contentOffset.x, 0)
@@ -2770,6 +2771,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         }
         XCTAssertNotNil(updated.first { $0.title(for: .normal) == "精选歌单" })
         XCTAssertNil(updated.first { $0.title(for: .normal) == "歌单" })
+        for button in updated { XCTAssertEqual(button.titleLabel?.font, .systemFont(ofSize: 17)) }
     }
 
     func testChannelSwitcherLivesInChromeWhilePagerFillsContent() throws {
@@ -5656,6 +5658,43 @@ final class MusicPlayerContentModelTests: XCTestCase {
         let scroll = try XCTUnwrap(dockViews(player).compactMap { $0 as? MusicRecordScrollView }.first)
         XCTAssertFalse(scroll.point(inside: CGPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), with: nil))
         await content.model.close()
+    }
+
+    func testLyricTextStaysRegularAndFitsItsMeasuredRowAcrossHighlightAndReuse() throws {
+        let preferences = MusicAppearancePreferences()
+        let colors = MusicLyricColors(backgrounds: [.init(rgb: 0xffffff)],
+                                      accent: .init(rgb: 0x4f365d), artwork: false)
+        let line = MusicLyricLine(index: 0, time: 0, end: 5,
+            text: "常规字体歌词需要在窄行中完整换行显示",
+            translation: "The translated lyric also wraps without clipping",
+            words: [.init(time: 0, duration: 5, text: "常规字体歌词需要在窄行中完整换行显示")])
+        for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+            let cell = MusicLyricCell(style: .default, reuseIdentifier: MusicLyricCell.reuseIdentifier)
+            cell.traitOverrides.preferredContentSizeCategory = category
+            let font = UIFontMetrics(forTextStyle: .body).scaledFont(
+                for: .systemFont(ofSize: 18), compatibleWith: cell.traitCollection)
+            let height = MusicLyricCell.height(for: line, width: 320,
+                preferences: preferences, traits: cell.traitCollection)
+            cell.frame = CGRect(x: 0, y: 0, width: 320, height: height)
+            for selected in [false, true, false] {
+                cell.configure(line: line, selected: selected, active: selected, timed: selected,
+                    previewDragging: false, position: 1, rate: 1, playing: false,
+                    preferences: preferences, colors: colors)
+                cell.layoutIfNeeded()
+                let lyrics = dockViews(cell).compactMap { $0 as? UILabel }.filter { $0.text == line.text }
+                XCTAssertEqual(lyrics.count, 2, "Both native lyric layers use the same regular font")
+                for label in lyrics {
+                    XCTAssertEqual(label.font, font)
+                    XCTAssertGreaterThan(label.bounds.width, 0)
+                    XCTAssertLessThanOrEqual(label.sizeThatFits(CGSize(
+                        width: label.bounds.width, height: .greatestFiniteMagnitude)).height, label.bounds.height + 1)
+                }
+                cell.updateState(selected: !selected, active: !selected, timed: false,
+                    previewDragging: true, position: 2, playing: false, rate: 1)
+                for label in lyrics { XCTAssertEqual(label.font, font) }
+                cell.prepareForReuse()
+            }
+        }
     }
 
     func testFullLyricsCenterFirstLineBeforePlaybackAndAdvanceWithoutDownwardCorrection() async throws {

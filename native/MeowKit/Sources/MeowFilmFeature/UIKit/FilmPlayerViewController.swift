@@ -91,7 +91,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         video.accessibilityIdentifier = "film.player.video"
         view.addSubview(video); video.pinEdges(to: view)
         activity.color = .white
-        stateLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        stateLabel.font = .systemFont(ofSize: 14)
         stateLabel.textColor = .white; stateLabel.textAlignment = .center; stateLabel.numberOfLines = 2
         stateLabel.accessibilityIdentifier = "film.player.state"
         let status = UIStackView(arrangedSubviews: [activity, stateLabel])
@@ -122,7 +122,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
 
     private func configureTop() {
         let close = control("返回", id: "close", symbol: "chevron.left") { [weak self] in self?.dismissPlayer() }
-        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 17)
         titleLabel.textColor = .white; titleLabel.numberOfLines = 1
         titleLabel.accessibilityIdentifier = "film.player.title"
         sourceLabel.font = .systemFont(ofSize: 12); sourceLabel.textColor = .lightGray
@@ -155,9 +155,9 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         }
         let separator = UILabel()
         separator.text = "/"; separator.textColor = .lightGray
-        separator.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        separator.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         for label in [position, duration] {
-            label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+            label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
             label.textColor = .white
             label.setContentHuggingPriority(.required, for: .horizontal)
             label.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -542,7 +542,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         configuration.titleLineBreakMode = .byTruncatingTail
         configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
             var attributes = $0
-            attributes.font = .systemFont(ofSize: 12, weight: .semibold)
+            attributes.font = .systemFont(ofSize: 12)
             return attributes
         }
         if let symbol {

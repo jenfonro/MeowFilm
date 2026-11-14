@@ -291,7 +291,7 @@ private final class MusicLibraryCell: UICollectionViewCell {
         artwork.load(item.artwork)
         title.text = item.title
         count.text = item.networkReference.map { $0.platform.title } ?? "\(item.count)首"
-        title.font = .systemFont(ofSize: grid ? 13 : 16, weight: .medium)
+        title.font = .systemFont(ofSize: grid ? 13 : 16)
         count.font = .systemFont(ofSize: 11)
         title.textColor = UIColor(theme.ink); count.textColor = UIColor(theme.muted)
         accessibilityIdentifier = "music.library.collection.\(item.id)"
@@ -316,7 +316,7 @@ private final class MusicLibrarySectionHeader: UICollectionReusableView {
     private let title = UILabel()
     override init(frame: CGRect) {
         super.init(frame: frame)
-        title.font = .systemFont(ofSize: 14, weight: .medium)
+        title.font = .systemFont(ofSize: 14)
         addSubview(title)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

@@ -127,7 +127,7 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
         case .library:
             let title = PageHeaderTextButton(title: page.title) {}
             title.contentHorizontalAlignment = .leading
-            title.titleLabel?.font = .systemFont(ofSize: 20, weight: .semibold)
+            title.titleLabel?.font = .systemFont(ofSize: 20)
             title.accessibilityIdentifier = "app.primary.title"
             title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             header.setTitleView(title)

@@ -55,10 +55,10 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         contentView.layer.insertSublayer(textGradient, above: artwork.layer)
         artwork.onImage = { [weak self] image, _ in self?.applyFeatureColor(from: image) }
         title.numberOfLines = 2; subtitle.numberOfLines = 1; preview.numberOfLines = 3
-        title.font = .systemFont(ofSize: 13, weight: .medium)
+        title.font = .systemFont(ofSize: 13)
         subtitle.font = .systemFont(ofSize: 11)
         preview.font = .systemFont(ofSize: 13)
-        releaseType.font = .systemFont(ofSize: 11, weight: .medium)
+        releaseType.font = .systemFont(ofSize: 11)
         releaseType.textColor = .white
         releaseType.textAlignment = .center
         releaseType.backgroundColor = UIColor.black.withAlphaComponent(0.55)
@@ -162,9 +162,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         title.text = layout == .rankingStack || layout == .artistUpdates || item.coverLabel.isEmpty ?
             item.title : item.title + "\n" + item.coverLabel
         title.font = .systemFont(ofSize: layout == .rankingStack ? 20 :
-                                    layout == .banner || layout == .artistUpdates ? 14 : 13,
-                                 weight: layout == .rankingStack || layout == .artistUpdates ? .semibold :
-                                    layout == .banner ? .regular : .medium)
+                                    layout == .banner || layout == .artistUpdates ? 14 : 13)
         title.numberOfLines = layout == .rankingStack || layout == .artistUpdates ? 1 : 2
         subtitle.text = layout == .rankingStack ? item.ranking?.updateFrequency ?? "" : item.subtitle
         subtitle.font = .systemFont(ofSize: layout == .rankingStack ? 12 : 11)
@@ -483,12 +481,12 @@ private final class MusicBrowseRankingPreviewRow: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        rank.font = .systemFont(ofSize: 13, weight: .semibold)
+        rank.font = .systemFont(ofSize: 13)
         rank.textAlignment = .center
         rank.adjustsFontSizeToFitWidth = true
         song.font = .systemFont(ofSize: 13)
         song.lineBreakMode = .byTruncatingTail
-        change.font = .systemFont(ofSize: 11, weight: .medium)
+        change.font = .systemFont(ofSize: 11)
         change.textAlignment = .center
         addSubview(rank)
         addSubview(song)
@@ -720,7 +718,7 @@ final class MusicBrowseHeader: UICollectionReusableView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        title.font = .systemFont(ofSize: 16, weight: .semibold)
+        title.font = .systemFont(ofSize: 16)
         title.numberOfLines = 1
         play.setImage(PageIcon.image(.play), for: .normal)
         play.accessibilityLabel = "播放全部"

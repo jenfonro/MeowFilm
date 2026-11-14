@@ -197,9 +197,9 @@ private final class MusicSearchChartCardView: UIView {
     private var rows: [String: MusicSearchChartRowButton] = [:]
     private var orderedRows: [MusicSearchChartRowButton] = []
     private var theme = PageTheme()
-    private var titleFont = UIFont.systemFont(ofSize: 16, weight: .semibold)
+    private var titleFont = UIFont.systemFont(ofSize: 16)
     private var songFont = UIFont.systemFont(ofSize: 14)
-    private var rankFont = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
+    private var rankFont = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
     private var playFont = UIFont.systemFont(ofSize: 12)
     private var fontCategory: UIContentSizeCategory?
 
@@ -356,11 +356,11 @@ private final class MusicSearchChartCardView: UIView {
         guard fontCategory != category else { return }
         fontCategory = category
         titleFont = UIFontMetrics(forTextStyle: .headline).scaledFont(
-            for: .systemFont(ofSize: 16, weight: .semibold), compatibleWith: traitCollection)
+            for: .systemFont(ofSize: 16), compatibleWith: traitCollection)
         songFont = UIFontMetrics(forTextStyle: .subheadline).scaledFont(
             for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
         rankFont = UIFontMetrics(forTextStyle: .subheadline).scaledFont(
-            for: .monospacedDigitSystemFont(ofSize: 14, weight: .semibold), compatibleWith: traitCollection)
+            for: .monospacedDigitSystemFont(ofSize: 14, weight: .regular), compatibleWith: traitCollection)
         playFont = UIFontMetrics(forTextStyle: .caption1).scaledFont(
             for: .systemFont(ofSize: 12), compatibleWith: traitCollection)
         heading.font = titleFont; empty.font = songFont

@@ -269,7 +269,7 @@ private final class ManagementRowCell: UITableViewCell {
         selectionStyle = .none; backgroundColor = .clear
         select.widthAnchor.constraint(equalToConstant: 32).isActive = true; select.heightAnchor.constraint(equalToConstant: 44).isActive = true
         select.setPreferredSymbolConfiguration(.init(pointSize: 20), forImageIn: .normal)
-        title.font = .systemFont(ofSize: 14, weight: .medium); title.numberOfLines = 2
+        title.font = .systemFont(ofSize: 14); title.numberOfLines = 2
         detail.font = .systemFont(ofSize: 11); detail.numberOfLines = 2
         let labels = UIStackView(arrangedSubviews: [title, detail]); labels.axis = .vertical; labels.spacing = 3
         labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -307,7 +307,7 @@ private final class ManagementRowCell: UITableViewCell {
         select.accessibilityIdentifier = "management.select.\(row.id)"
         title.text = row.title; title.textColor = UIColor(settings.ink)
         detail.text = row.detail; detail.textColor = UIColor(row.failed ? settings.danger : settings.muted); detail.isHidden = row.detail.isEmpty
-        title.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14, weight: .medium), compatibleWith: traitCollection)
+        title.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
         detail.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 11), compatibleWith: traitCollection)
         title.adjustsFontForContentSizeCategory = true; detail.adjustsFontForContentSizeCategory = true
         title.numberOfLines = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ? 0 : 2

@@ -1101,7 +1101,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         if let label = state.label, let action = state.action {
             let button = UIButton(type: .system)
             button.setTitle(label, for: .normal); button.tintColor = UIColor(theme.ink)
-            button.titleLabel?.font = .systemFont(ofSize: 14, weight: action == .category ? .medium : .regular)
+            button.titleLabel?.font = .systemFont(ofSize: 14)
             if state.showsSkeleton { button.heightAnchor.constraint(equalToConstant: 40).isActive = true }
             button.accessibilityIdentifier = "music.search.results.action.\(tableView.tag).\(section)"
             if action == .category {

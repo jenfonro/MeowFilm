@@ -154,7 +154,7 @@
     <RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <Grid>
      <StackPanel x:Name="SearchHeading" Visibility="{Binding IsSearchPage,Converter={StaticResource Visible}}" Margin="0,4,0,24">
-      <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"
+      <TextBlock Text="{Binding Heading}" FontSize="23"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
       <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
        <Button Content="综合" Tag="overview" Click="SearchTab_Click" AutomationProperties.Name="综合搜索结果">
@@ -162,7 +162,6 @@
          <Style.Triggers><DataTrigger Binding="{Binding IsSearchOverview}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
-          <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
          </DataTrigger></Style.Triggers>
         </Style></Button.Style>
        </Button>
@@ -171,7 +170,6 @@
          <Style.Triggers><DataTrigger Binding="{Binding IsSearchSongs}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
-          <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
          </DataTrigger></Style.Triggers>
         </Style></Button.Style>
        </Button>
@@ -180,7 +178,6 @@
          <Style.Triggers><DataTrigger Binding="{Binding IsSearchPlaylists}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
-          <Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
          </DataTrigger></Style.Triggers>
         </Style></Button.Style>
        </Button>
@@ -209,7 +206,7 @@
      </Border>
      <Grid Grid.Column="1" Margin="22,2,0,2">
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"
+      <TextBlock Text="{Binding Heading}" FontSize="23"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
       <TextBlock Grid.Row="1" Text="{Binding DetailSubtitle}" Margin="0,14,0,0" Style="{StaticResource Capability.Muted}" TextTrimming="CharacterEllipsis"/>
       <WrapPanel Grid.Row="2">
@@ -270,7 +267,7 @@
     </StackPanel>
    <DockPanel Margin="0,0,0,10" Visibility="{Binding IsContentDetailPage,Converter={StaticResource Visible}}">
     <StackPanel Orientation="Horizontal">
-     <TextBlock Text="{Binding DetailSectionTitle}" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"/>
+     <TextBlock Text="{Binding DetailSectionTitle}" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}"/>
      <TextBlock Text="{Binding DetailCountText}" FontSize="11" Margin="3,1,0,0"
                 Foreground="{DynamicResource MeowFilm.Brush.Muted}" VerticalAlignment="Top"/>
     </StackPanel>
@@ -498,7 +495,7 @@
     <Grid KeyboardNavigation.TabNavigation="Cycle">
      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <TextBlock Text="创建歌单" HorizontalAlignment="Center" VerticalAlignment="Center"
-                FontSize="{StaticResource MeowFilm.Font.Size.Title}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"/>
+                FontSize="{StaticResource MeowFilm.Font.Size.Title}"/>
      <Button x:Name="ClosePlaylistDialogButton" Content="&#xE711;"
              Style="{StaticResource MeowFilm.IconButton}" Width="32" Height="32" MinHeight="32"
              HorizontalAlignment="Right" VerticalAlignment="Center"

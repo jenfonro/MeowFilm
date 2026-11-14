@@ -10,7 +10,6 @@
     <sys:Double x:Key="MeowFilm.Font.Size.Title">20</sys:Double>
     <sys:Double x:Key="MeowFilm.Font.Size.Heading">26</sys:Double>
     <x:Static x:Key="MeowFilm.Font.Weight.Normal" Member="FontWeights.Normal"/>
-    <x:Static x:Key="MeowFilm.Font.Weight.Strong" Member="FontWeights.Bold"/>
 
     <Style x:Key="MeowFilm.ToolTip" TargetType="{x:Type ToolTip}">
         <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>

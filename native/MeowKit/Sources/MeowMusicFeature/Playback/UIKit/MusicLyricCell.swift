@@ -15,11 +15,8 @@ final class MusicLyricCell: UITableViewCell {
         label.text = line.text
         let size = CGSize(width: max(0, width - 128), height: .greatestFiniteMagnitude)
         let metrics = UIFontMetrics(forTextStyle: .body)
-        let textHeight = [UIFont.Weight.medium, .semibold].map { weight in
-            label.font = metrics.scaledFont(for: .systemFont(ofSize: 18, weight: weight),
-                                            compatibleWith: traits)
-            return label.sizeThatFits(size).height
-        }.max() ?? 0
+        label.font = metrics.scaledFont(for: .systemFont(ofSize: 18), compatibleWith: traits)
+        let textHeight = label.sizeThatFits(size).height
         guard let translated = preferences.translation(line.translation, expanded: true) else {
             return ceil(textHeight) + 16
         }
@@ -100,7 +97,7 @@ final class MusicLyricCell: UITableViewCell {
 
     private var lyricFont: UIFont {
         UIFontMetrics(forTextStyle: .body).scaledFont(
-            for: .systemFont(ofSize: 18, weight: lyricSelected || active ? .semibold : .medium),
+            for: .systemFont(ofSize: 18),
             compatibleWith: traitCollection)
     }
 

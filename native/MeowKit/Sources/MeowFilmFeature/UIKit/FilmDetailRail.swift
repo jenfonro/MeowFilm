@@ -88,7 +88,7 @@ final class FilmEpisodeButton: FilmPressButton {
         heading.text = episode.number.map {
             episode.title.isEmpty ? "第 \($0) 集" : "\($0). \(episode.title)"
         } ?? episode.title
-        heading.font = .systemFont(ofSize: 14, weight: .medium)
+        heading.font = .systemFont(ofSize: 14)
         heading.numberOfLines = 2
         heading.textAlignment = episode.title.isEmpty ? .center : .natural
         summary.text = episode.summary
@@ -134,7 +134,7 @@ final class FilmCastView: UIView {
         portrait.layer.cornerRadius = 10
         portrait.load(member.portraitURL)
         name.text = member.name
-        name.font = .systemFont(ofSize: 13, weight: .medium)
+        name.font = .systemFont(ofSize: 13)
         name.numberOfLines = 2
         name.textAlignment = .center
         role.text = member.role
@@ -172,7 +172,7 @@ final class FilmRelatedButton: FilmPressButton {
         artwork.layer.cornerRadius = 7
         artwork.load(item.posterURL)
         heading.text = item.title
-        heading.font = .systemFont(ofSize: 13, weight: .medium)
+        heading.font = .systemFont(ofSize: 13)
         heading.numberOfLines = 2
         let stack = UIStackView(arrangedSubviews: [artwork, heading])
         stack.axis = .vertical

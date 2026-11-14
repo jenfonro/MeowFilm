@@ -91,7 +91,7 @@ public static partial class MusicUiTests
                     Equal(Color.FromRgb(0xF9, 0x73, 0x16), ((SolidColorBrush)badge.Background).Color);
                     Equal(Colors.White, ((SolidColorBrush)text.Foreground).Color);
                     Equal(new CornerRadius(8), badge.CornerRadius); Equal(new Thickness(8, 2, 8, 2), badge.Padding);
-                    Equal(10d, text.FontSize); Equal(FontWeights.Bold, text.FontWeight);
+                    Equal(10d, text.FontSize); Equal(FontWeights.Normal, text.FontWeight);
                     Equal(TextTrimming.CharacterEllipsis, text.TextTrimming);
                 }
                 var title = Visuals(card).OfType<TextBlock>().Single(text => text.Text == item.Title);
@@ -160,7 +160,7 @@ public static partial class MusicUiTests
                 Equal(selected ? Visibility.Visible : Visibility.Collapsed, indicator.Visibility);
                 True(button.Focusable && button.IsTabStop && button.FocusVisualStyle is not null &&
                     AutomationProperties.GetName(button) == button.Content + "搜索结果", "category retains focus and accessible native button behavior");
-                Equal(selected ? FontWeights.Bold : FontWeights.Normal, button.FontWeight);
+                Equal(FontWeights.Normal, button.FontWeight);
                 if (!selected) continue;
                 Equal(new Size(20, 3), indicator.RenderSize);
                 True(Math.Abs(indicator.TranslatePoint(new Point(10, 0), button).X - button.ActualWidth / 2) < .5 &&

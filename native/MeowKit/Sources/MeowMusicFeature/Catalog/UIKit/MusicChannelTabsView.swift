@@ -105,12 +105,12 @@ private final class MusicChannelTabButton: UIButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     var preferredWidth: CGFloat {
-        let font = UIFont.systemFont(ofSize: 17, weight: .semibold)
+        let font = UIFont.systemFont(ofSize: 17)
         return max(52, ceil((channel.title as NSString).size(withAttributes: [.font: font]).width) + 24)
     }
 
     func configure(selected: Bool, theme: PageTheme) {
-        titleLabel?.font = .systemFont(ofSize: 17, weight: selected ? .semibold : .regular)
+        titleLabel?.font = .systemFont(ofSize: 17)
         setTitleColor(UIColor(selected ? theme.ink : theme.muted), for: .normal)
         underline.backgroundColor = UIColor(theme.ink)
         underline.isHidden = !selected

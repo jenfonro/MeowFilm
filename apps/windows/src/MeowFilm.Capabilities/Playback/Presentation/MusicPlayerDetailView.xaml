@@ -85,7 +85,7 @@
       <ControlTemplate.Triggers>
        <Trigger Property="IsChecked" Value="True">
         <Setter TargetName="TabSurface" Property="Background" Value="#18FFFFFF"/>
-        <Setter Property="Foreground" Value="#F3F1F4"/><Setter Property="FontWeight" Value="{StaticResource MeowFilm.Font.Weight.Strong}"/>
+        <Setter Property="Foreground" Value="#F3F1F4"/>
        </Trigger>
        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="TabSurface" Property="Background" Value="#10FFFFFF"/></Trigger>
       </ControlTemplate.Triggers>
@@ -247,7 +247,7 @@
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <StackPanel>
     <TextBlock x:Name="DetailTitle" Text="{Binding CurrentTitle}"
-               FontSize="{StaticResource MeowFilm.Font.Size.Heading}" FontWeight="{StaticResource MeowFilm.Font.Weight.Strong}"
+               FontSize="{StaticResource MeowFilm.Font.Size.Heading}"
                TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
     <WrapPanel Opacity=".68" Margin="0,0,0,18">
      <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
