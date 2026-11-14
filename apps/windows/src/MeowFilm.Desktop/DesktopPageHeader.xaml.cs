@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -6,12 +7,23 @@ using System.Windows.Threading;
 
 namespace MeowFilm.Desktop;
 
-internal sealed record DesktopHeaderActionItem(long Generation, DesktopHeaderAction Action)
+internal sealed record DesktopHeaderActionItem(long Generation, DesktopHeaderAction Action) : INotifyPropertyChanged
 {
+    private bool isEnabled = Action.IsEnabled;
+
     public string Label => Action.Label;
     public string AutomationName => Action.AutomationName;
     public bool IsPrimary => Action.IsPrimary;
-    public bool IsEnabled => Action.IsEnabled;
+    public bool IsEnabled => isEnabled;
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public void RefreshEnabled()
+    {
+        var enabled = Action.IsEnabled;
+        if (isEnabled == enabled) return;
+        isEnabled = enabled;
+        PropertyChanged?.Invoke(this, new(nameof(IsEnabled)));
+    }
 }
 
 /// <summary>Owns contribution layout, source subscriptions and the lifetime of mounted header actions.</summary>
@@ -128,11 +140,26 @@ public partial class DesktopPageHeader : UserControl
         slotHost.Visibility = slot is null ? Visibility.Collapsed : Visibility.Visible;
         Heading.Text = string.IsNullOrWhiteSpace(contribution.Title) ? current.HeadingFallback ?? "" : contribution.Title;
         Heading.Visibility = current.HeadingFallback is null ? Visibility.Collapsed : Visibility.Visible;
-        actions.Clear();
-        foreach (var action in contribution.HeaderActions)
-            actions.Add(new(generation, action));
-        foreach (var action in current.AdditionalActions)
-            actions.Add(new(generation, action));
+        var sourceActions = contribution.HeaderActions;
+        var additionalActions = current.AdditionalActions;
+        var sameActions = actions.Count == sourceActions.Count + additionalActions.Count;
+        for (var index = 0; sameActions && index < actions.Count; index++)
+        {
+            var action = index < sourceActions.Count ? sourceActions[index] : additionalActions[index - sourceActions.Count];
+            sameActions = actions[index].Generation == generation && ReferenceEquals(actions[index].Action, action);
+        }
+        if (sameActions)
+        {
+            foreach (var item in actions) item.RefreshEnabled();
+        }
+        else
+        {
+            actions.Clear();
+            foreach (var action in sourceActions)
+                actions.Add(new(generation, action));
+            foreach (var action in additionalActions)
+                actions.Add(new(generation, action));
+        }
         TrailingHeader.Visibility = !leading && slot is not null || actions.Count > 0
             ? Visibility.Visible : Visibility.Collapsed;
         Contribution = contribution;

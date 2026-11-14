@@ -24,6 +24,9 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly HashSet<ShellRequest> _requests = [];
     private readonly List<(IDesktopNavigationSource Source, EventHandler<DesktopNavigationRequestEventArgs> Handler)> _navigationSubscriptions = [];
     private readonly List<(IDesktopSidebarSource Source, EventHandler Handler)> _sidebarSubscriptions = [];
+    private readonly object _moduleChangesGate = new();
+    private readonly Dictionary<IDesktopModule, (bool Navigation, bool Views)> _moduleChanges = new(ReferenceEqualityComparer.Instance);
+    private bool _moduleChangesQueued;
     private TaskCompletionSource _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private ModuleSession? _current, _playerSession;
     private ShellRequest? _activeRequest;
@@ -510,17 +513,54 @@ public sealed partial class ShellWindow : DesktopWindow
         RebuildSidebar();
     });
 
-    private void OnModulePropertyChanged(object? sender, PropertyChangedEventArgs e) => QueueUi(() =>
+    private void OnModulePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        var session = _sessions.FirstOrDefault(item => ReferenceEquals(item.Module, sender));
-        if (session is null) return;
+        if (sender is not IDesktopModule module || _isClosing ||
+            Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
         var all = string.IsNullOrEmpty(e.PropertyName);
-        if (all || e.PropertyName == nameof(IDesktopModule.Navigation)) BindNavigation(session);
-        if (all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView))
-            { if (session.Mounted && ReferenceEquals(session, _current) && _currentPage is null) RefreshSuppliedViews(session); }
-        if (ReferenceEquals(session, _current) || ReferenceEquals(session, _playerSession))
-            ApplyPresentation();
-    });
+        lock (_moduleChangesGate)
+        {
+            _moduleChanges.TryGetValue(module, out var previous);
+            _moduleChanges[module] = (
+                previous.Navigation || all || e.PropertyName == nameof(IDesktopModule.Navigation),
+                previous.Views || all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView));
+            if (_moduleChangesQueued) return;
+            _moduleChangesQueued = true;
+        }
+        try
+        {
+            _ = Dispatcher.InvokeAsync(() =>
+            {
+                try { ApplyModuleChanges(); }
+                catch (Exception) { if (!_isClosing) SetStatus("暂时无法完成操作", error: true); }
+            }, DispatcherPriority.DataBind);
+        }
+        catch (InvalidOperationException) { /* Dispatcher teardown retires this batch. */ }
+    }
+
+    private void ApplyModuleChanges()
+    {
+        KeyValuePair<IDesktopModule, (bool Navigation, bool Views)>[] changes;
+        lock (_moduleChangesGate)
+        {
+            changes = _moduleChanges.ToArray();
+            _moduleChanges.Clear();
+            _moduleChangesQueued = false;
+        }
+        // A skipped presentation must still release its batch admission so a cancelled close can resume updates.
+        if (_isClosing) return;
+        var refreshPresentation = false;
+        foreach (var change in changes)
+        {
+            var session = _sessions.FirstOrDefault(item => ReferenceEquals(item.Module, change.Key));
+            if (session is null) continue;
+            if (change.Value.Navigation) BindNavigation(session);
+            if (change.Value.Views && session.Mounted && ReferenceEquals(session, _current) && _currentPage is null)
+                RefreshSuppliedViews(session);
+            refreshPresentation |= ReferenceEquals(session, _current) || ReferenceEquals(session, _playerSession);
+        }
+        if (refreshPresentation) ApplyPresentation();
+    }
 
     private void OnSettingsClick(object sender, RoutedEventArgs e) => RunUiAction(async () =>
     {

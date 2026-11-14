@@ -46,6 +46,8 @@ public interface IMusicRecommendationSource
 
 `MusicRecommendationQueuePort` 是一个 admission lane，不是第二个存储 owner。
 
+lane 实际取得后，队列事务和快照计算在后台执行；热文档、可立即取得的 lane 或同步完成的存储任务不会把整份文档克隆及歌曲投影留在 WPF Dispatcher。普通下一首没有有效推荐会话时直接交回普通队列操作，不先读取完整推荐快照；有效会话仍在读取后核对当前会话、队列代次与选择，取消和 lane 释放语义不变。
+
 会改变队列或选择的当前入口：
 
 ```text

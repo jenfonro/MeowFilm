@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -80,6 +81,175 @@ public static partial class DesktopTests
             Equal(0, page.Subscribers, "explicit retirement releases the source");
             True(LogicalTreeHelper.GetParent(toggle) is null, "explicit retirement releases the slot");
             source.RootVisual = null;
+        });
+        yield return Case("header retains action buttons and bindings while current enabled states change", async () =>
+        {
+            var enabled = true;
+            var additionalEnabled = false;
+            var executions = 0;
+            var additionalExecutions = 0;
+            var action = new DesktopHeaderAction("action", "执行", _ => { executions++; return Task.CompletedTask; }, () => enabled);
+            var second = new DesktopHeaderAction("second", "第二", _ => Task.CompletedTask);
+            var additional = new DesktopHeaderAction("additional", "追加",
+                _ => { additionalExecutions++; return Task.CompletedTask; }, () => additionalEnabled);
+            var page = new HeaderContributionProbe("stable", new("stable", Actions: [action, second]));
+            var host = new DesktopPageHeader();
+            var root = HeaderRoot(host);
+            host.Present(page, new("fallback"), additionalActions: [additional]);
+            using var source = HeaderSource(root);
+            LayoutHeader(root, 620); await DrainAsync();
+            var items = (ItemsControl)host.FindName("HeaderActions");
+            var buttons = ChromeVisuals(host).OfType<Button>().ToArray();
+            var tags = buttons.Select(button => button.Tag).ToArray();
+            Equal(3, buttons.Length, "source and additional actions are realized");
+            True(buttons[0].IsEnabled && !buttons[2].IsEnabled, "initial dynamic enabled states are bound");
+            var collectionChanges = 0;
+            NotifyCollectionChangedEventHandler changed = (_, _) => collectionChanges++;
+            ((INotifyCollectionChanged)items.Items).CollectionChanged += changed;
+            for (var index = 0; index < 32; index++)
+            {
+                page.Publish(page.Header with { Title = "updated-" + index, Actions = [action, second] });
+                host.Present(page, new("fallback"), additionalActions: [additional]);
+            }
+            await DrainAsync(); LayoutHeader(root, 620);
+            Equal("updated-31", host.Contribution!.Title, "retaining actions still reads the latest contribution");
+            Equal(0, collectionChanges, "same action references in new list containers do not reset the collection");
+            for (var index = 0; index < buttons.Length; index++)
+            {
+                Same(buttons[index], ChromeVisuals(host).OfType<Button>().ElementAt(index), "same action keeps its realized button");
+                Same(tags[index], buttons[index].Tag, "same action keeps its binding item");
+            }
+            foreach (var currentEnabled in new[] { false, true })
+            {
+                enabled = currentEnabled; additionalEnabled = !currentEnabled;
+                await Task.Run(() => page.Publish(page.Header));
+                await DrainAsync(); LayoutHeader(root, 620);
+                Equal(enabled, buttons[0].IsEnabled, "source action enabled changes reach the retained button");
+                Equal(additionalEnabled, buttons[2].IsEnabled, "additional action enabled changes reach the retained button");
+                for (var index = 0; index < buttons.Length; index++)
+                {
+                    Same(buttons[index], ChromeVisuals(host).OfType<Button>().ElementAt(index), "enabled changes do not replace buttons");
+                    Same(tags[index], buttons[index].Tag, "enabled changes do not replace binding items");
+                }
+                if (additionalEnabled) { Click(buttons[2]); await DrainAsync(); }
+            }
+            Equal(1, additionalExecutions, "enabled additional action uses the retained binding");
+            enabled = false;
+            True(buttons[0].IsEnabled, "a not-yet-published change has not updated the button");
+            Click(buttons[0]); await DrainAsync();
+            Equal(0, executions, "execution checks the latest action enabled state before admission");
+            False(buttons[0].IsEnabled, "operation refresh publishes the latest disabled state");
+            enabled = true; page.Publish(page.Header); await DrainAsync();
+            Click(buttons[0]); await DrainAsync(); LayoutHeader(root, 620);
+            Equal(1, executions, "reenabled retained button executes its action");
+            Same(buttons[0], ChromeVisuals(host).OfType<Button>().First(), "operation completion retains the realized button");
+            Same(tags[0], buttons[0].Tag, "operation completion retains the binding item");
+            Equal(0, collectionChanges, "enabled changes and operation completion do not mutate the action collection");
+            ((INotifyCollectionChanged)items.Items).CollectionChanged -= changed;
+            host.Retire(); source.RootVisual = null;
+        });
+        yield return Case("header action replacement reorder and removal reject old realized buttons", async () =>
+        {
+            var executions = 0;
+            var replacementExecutions = 0;
+            var secondExecutions = 0;
+            var action = new DesktopHeaderAction("action", "执行", _ => { executions++; return Task.CompletedTask; });
+            var replacement = new DesktopHeaderAction("action", "执行", _ => { replacementExecutions++; return Task.CompletedTask; });
+            var second = new DesktopHeaderAction("second", "第二", _ => { secondExecutions++; return Task.CompletedTask; });
+            var page = new HeaderContributionProbe("replace", new("replace", Actions: [action, second]));
+            var host = new DesktopPageHeader();
+            var root = HeaderRoot(host);
+            host.Present(page, new("fallback"));
+            using var source = HeaderSource(root);
+            LayoutHeader(root, 620); await DrainAsync();
+            var items = (ItemsControl)host.FindName("HeaderActions");
+            var original = ChromeVisuals(host).OfType<Button>().ToArray();
+            var originalItem = original[0].Tag;
+            page.Publish(page.Header with { Actions = [replacement, second] });
+            await DrainAsync(); LayoutHeader(root, 620);
+            var replaced = ChromeVisuals(host).OfType<Button>().ToArray();
+            False(ReferenceEquals(originalItem, replaced[0].Tag), "same id and label with a new action is a real replacement");
+            foreach (var button in original) Click(button);
+            await DrainAsync();
+            Equal(0, executions + replacementExecutions + secondExecutions, "old buttons cannot execute old or replacement delegates");
+            Click(replaced[0]); await DrainAsync();
+            Equal(1, replacementExecutions, "current button executes the replacement delegate");
+
+            page.Publish(page.Header with { Actions = [second, replacement] });
+            await DrainAsync(); LayoutHeader(root, 620);
+            var reordered = ChromeVisuals(host).OfType<Button>().ToArray();
+            Sequence(["第二", "执行"], reordered.Select(button => (string)button.Content), "realized actions follow the new order");
+            foreach (var button in replaced) Click(button);
+            await DrainAsync();
+            Equal(1, replacementExecutions, "pre-reorder replacement item is no longer admitted");
+            Equal(0, secondExecutions, "pre-reorder second item is no longer admitted");
+            Click(reordered[0]); Click(reordered[1]); await DrainAsync();
+            Equal(1, secondExecutions, "first reordered button executes its exact action");
+            Equal(2, replacementExecutions, "second reordered button executes its exact action");
+
+            page.Publish(page.Header with { Actions = [replacement] });
+            await DrainAsync(); LayoutHeader(root, 620);
+            Equal(1, items.Items.Count, "removing an action updates the public collection");
+            foreach (var button in reordered) Click(button);
+            await DrainAsync();
+            Equal(1, secondExecutions, "removed second action cannot execute");
+            Equal(2, replacementExecutions, "old sequence items cannot execute after removal");
+            var remaining = ChromeVisuals(host).OfType<Button>().Single();
+            Click(remaining); await DrainAsync();
+            Equal(3, replacementExecutions, "remaining current action executes");
+            page.Publish(page.Header with { Actions = [] });
+            await DrainAsync(); LayoutHeader(root, 620);
+            Equal(0, items.Items.Count, "empty action sequence clears the public collection");
+            Equal(0, ChromeVisuals(host).OfType<Button>().Count(), "empty sequence releases realized buttons");
+            Click(remaining); await DrainAsync();
+            Equal(3, replacementExecutions, "last removed item cannot execute");
+            Equal(0, executions, "original delegate was never admitted after replacement");
+            host.Retire(); source.RootVisual = null;
+        });
+        yield return Case("header unload and retirement fence old realized buttons across remount", async () =>
+        {
+            var executions = 0;
+            var action = new DesktopHeaderAction("action", "执行", _ => { executions++; return Task.CompletedTask; });
+            var page = new HeaderContributionProbe("lifetime", new("lifetime", Actions: [action]));
+            var host = new DesktopPageHeader();
+            var root = HeaderRoot(host);
+            host.Present(page, new("fallback"));
+            using var source = HeaderSource(root);
+            LayoutHeader(root, 620); await DrainAsync();
+            var items = (ItemsControl)host.FindName("HeaderActions");
+            var original = ChromeVisuals(host).OfType<Button>().Single();
+            var originalItem = original.Tag;
+            page.Publish(page.Header with { Title = "reloaded" });
+            root.Child = null; await DrainAsync();
+            Equal(0, page.Subscribers, "unload removes the source subscription");
+            Equal(0, items.Items.Count, "unload releases the action collection");
+            Click(original); await DrainAsync();
+            Equal(0, executions, "unloaded button cannot execute");
+            root.Child = host; LayoutHeader(root, 620); await DrainAsync();
+            var reloaded = ChromeVisuals(host).OfType<Button>().Single();
+            False(ReferenceEquals(originalItem, reloaded.Tag), "reload creates a fresh item even for the same action instance");
+            Click(original); await DrainAsync();
+            Equal(0, executions, "old button cannot execute in the new loaded generation");
+            Click(reloaded); await DrainAsync();
+            Equal(1, executions, "reloaded button executes");
+            var reloadedItem = reloaded.Tag;
+            page.Publish(page.Header with { Title = "returned" });
+            host.Retire();
+            var reads = page.Reads;
+            Click(reloaded); await DrainAsync();
+            Equal(reads, page.Reads, "retired queued event cannot read its old source");
+            Equal(0, page.Subscribers, "retirement removes the subscription");
+            Equal(0, items.Items.Count, "retirement releases the action collection");
+            True(host.Contribution is null, "retired queued event cannot restore a contribution");
+            Equal(1, executions, "retired button cannot execute");
+            host.Present(page, new("fallback")); await DrainAsync(); LayoutHeader(root, 620);
+            var returned = ChromeVisuals(host).OfType<Button>().Single();
+            False(ReferenceEquals(reloadedItem, returned.Tag), "return from retirement creates a fresh item");
+            Click(original); Click(reloaded); await DrainAsync();
+            Equal(1, executions, "buttons from both old generations remain rejected");
+            Click(returned); await DrainAsync();
+            Equal(2, executions, "current returned button executes the same action");
+            host.Retire(); source.RootVisual = null;
         });
         yield return Case("shell header centers search in remaining content space and preserves contributions caption and search identity", async () =>
         {

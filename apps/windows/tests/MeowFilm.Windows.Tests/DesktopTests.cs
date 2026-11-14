@@ -23,6 +23,7 @@ public static partial class DesktopTests
         foreach (var test in VisualChromeCases()) yield return test;
         foreach (var test in PresentationCases()) yield return test;
         foreach (var test in HeaderPresentationCases()) yield return test;
+        foreach (var test in NotificationBatchCases()) yield return test;
         foreach (var test in MediaNavigationCases()) yield return test;
         yield return Case("owner scoped sidebar retains visited visual trees and back crosses content types", async () =>
         {
@@ -1241,8 +1242,8 @@ public static partial class DesktopTests
         public string Title => Id;
         public string Version => "test-only";
         public ObservableCollection<NavigationItem> Navigation { get; private set; }
-        public FrameworkElement View { get; }
-        public FrameworkElement SettingsView { get; }
+        public FrameworkElement View { get; private set; }
+        public FrameworkElement SettingsView { get; private set; }
         private FrameworkElement? playerView;
         public FrameworkElement? PlayerView => playerView;
         public int InitializeCount { get; private set; }
@@ -1318,6 +1319,12 @@ public static partial class DesktopTests
             playerView = player;
             _propertyChanged?.Invoke(this, new(nameof(PlayerView)));
         }
+        public void ReplaceViews(FrameworkElement view, FrameworkElement settings)
+        {
+            View = view; SettingsView = settings;
+            Notify(nameof(View)); Notify(nameof(SettingsView));
+        }
+        public void Notify(string? property) => _propertyChanged?.Invoke(this, new(property));
         public void NotifyAll() => _propertyChanged?.Invoke(this, new(null));
         public Task PrepareShutdownAsync() => Task.CompletedTask;
         public Task CancelShutdownPreparationAsync() => Task.CompletedTask;

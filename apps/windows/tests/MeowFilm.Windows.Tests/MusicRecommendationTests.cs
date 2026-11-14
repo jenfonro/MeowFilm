@@ -149,6 +149,9 @@ public static partial class MusicRecommendationTests
         yield return new("Recommendation observers repeating cancel produce no notification loop", ObserverCancel);
         yield return new("Recommendation Changed synchronous dispose does not await itself", ObserverDispose);
         yield return new("Recommendation independent dispose waits active observer", ObserverBarrier);
+        yield return new("Recommendation inactive advance skips cold owner and preserves cancellation without leaking the queue lane", InactiveAdvanceResponsiveness);
+        yield return new("Recommendation hot queue next dispatches during synchronous durable write and selects the exact occurrence", () => OnRecommendationSta(HotQueueNextResponsiveness));
+        yield return new("Recommendation active advance reads off dispatcher and preserves preview admission and next selection", () => OnRecommendationSta(ActiveAdvanceResponsiveness));
         yield return new("Recommendation real native Catalog HTTP to Library and ephemeral feedback", NativeCatalog);
         yield return new("Recommendation real native Catalog read settles before retired session drains", NativeHttpDrain);
         yield return new("Recommendation initial FM request does not block ordinary next", InitialNext);
