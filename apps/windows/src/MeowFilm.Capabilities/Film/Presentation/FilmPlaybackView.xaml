@@ -13,12 +13,11 @@
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
     <ResourceDictionary Source="FilmPlayerStyles.xaml"/>
    </ResourceDictionary.MergedDictionaries>
-   <!-- Playback owns the text/ambient contrast pair, independently of the application theme. -->
+   <!-- Playback text keeps its contrast on the shared light application canvas. -->
    <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#303443"/>
-   <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#616573"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#4B505E"/>
    <local:FilmPlayerHeightConverter x:Key="Film.PlayerHeight"/>
    <local:FilmScaleConverter x:Key="Film.Scale"/>
-   <local:FilmAmbientTintConverter x:Key="Film.AmbientTint"/>
    <Style x:Key="Film.PlaybackAction" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
     <Setter Property="Margin" Value="0"/>
     <Setter Property="MinHeight" Value="36"/>
@@ -241,42 +240,12 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <UserControl.Style><Style TargetType="UserControl">
-  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
+  <Setter Property="Background" Value="Transparent"/>
   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
   </Trigger></Style.Triggers>
  </Style></UserControl.Style>
  <Grid>
-  <!-- Viewport-fixed ambience behind the scrolling page; it fades out where Shell chrome meets this view. -->
-  <Border x:Name="AmbientLayer" IsHitTestVisible="False" Tag="{DynamicResource MeowFilm.Brush.Window}">
-   <Border.Style><Style TargetType="Border">
-    <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-     <Setter Property="Visibility" Value="Collapsed"/>
-    </Trigger></Style.Triggers>
-   </Style></Border.Style>
-   <Border.OpacityMask>
-    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-     <GradientStop Color="#00000000" Offset="0"/>
-     <GradientStop Color="#FF000000" Offset=".09"/>
-     <GradientStop Color="#FF000000" Offset=".72"/>
-     <GradientStop Color="#00000000" Offset="1"/>
-    </LinearGradientBrush>
-   </Border.OpacityMask>
-   <Border x:Name="AmbientTint">
-    <Border.Background>
-     <MultiBinding Converter="{StaticResource Film.AmbientTint}">
-      <Binding Path="PaletteBrush" ElementName="Backdrop"/>
-      <Binding Path="Tag" ElementName="AmbientLayer"/>
-     </MultiBinding>
-    </Border.Background>
-    <Border.OpacityMask>
-     <LinearGradientBrush MappingMode="Absolute" StartPoint="0,0" EndPoint="48,0">
-      <GradientStop Color="#00000000" Offset="0"/>
-      <GradientStop Color="#FF000000" Offset="1"/>
-     </LinearGradientBrush>
-    </Border.OpacityMask>
-   </Border>
-  </Border>
   <ScrollViewer x:Name="PageScroll" Background="Transparent" ScrollChanged="Page_ScrollChanged"
                 Style="{StaticResource MeowFilm.OverlayScrollViewer}"
                 HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
@@ -391,25 +360,6 @@
       </Grid>
      </Grid>
      <Grid x:Name="MetadataPanel" Grid.Column="2" local:CardClip.Radius="16">
-      <!-- The poster covers the entire information region; all content scrolls in front of it. -->
-      <Grid x:Name="MetadataBackdrop" IsHitTestVisible="False">
-       <Grid.Style><Style TargetType="Grid">
-        <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-         <Setter Property="Visibility" Value="Collapsed"/>
-        </Trigger></Style.Triggers>
-       </Style></Grid.Style>
-       <local:FilmPlaybackPoster x:Name="Backdrop" Address="{Binding Backdrop}" IsBackdrop="True"
-                                 IsHitTestVisible="False"/>
-       <Border x:Name="MetadataWash" Background="{DynamicResource MeowFilm.Brush.Window}">
-        <Border.OpacityMask>
-         <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-          <GradientStop Color="#BD000000" Offset="0"/>
-          <GradientStop Color="#BD000000" Offset=".6"/>
-          <GradientStop Color="#D6000000" Offset="1"/>
-         </LinearGradientBrush>
-        </Border.OpacityMask>
-       </Border>
-      </Grid>
       <ScrollViewer x:Name="MetadataScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                     Style="{StaticResource MeowFilm.OverlayScrollViewer}" ScrollChanged="Metadata_ScrollChanged">
        <Grid x:Name="MetadataOverlay">

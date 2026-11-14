@@ -104,7 +104,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         ActiveData = DataSections[0];
         Navigation =
         [
-            new(HomeRoute, "影视", "\uE8B2"),
+            new(HomeRoute, "影视", "\uE8B2") { IconData = "M5,5 L19,5 Q21,5 21,7 L21,18 Q21,20 19,20 L5,20 Q3,20 3,18 L3,7 Q3,5 5,5 M3,10 L21,10 M7,5 L10,10 M14,5 L17,10" },
             new(DataRoute, "影片数据", "\uE8B2", ShowInSidebar: false),
             new(PlaybackRoute, "播放页", "\uE8B2", ShowInSidebar: false)
         ];

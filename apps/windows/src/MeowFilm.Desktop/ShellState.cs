@@ -9,6 +9,7 @@ internal sealed class ShellState : INotifyPropertyChanged
     private bool _isBusy;
     private bool _isError;
     private bool _canGoBack;
+    private bool _canGoForward;
     private bool _canRetry;
     private bool _isInteractive = true;
     private bool _isShutdownConfirmationOpen;
@@ -22,6 +23,7 @@ internal sealed class ShellState : INotifyPropertyChanged
     public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
     public bool IsError { get => _isError; private set => Set(ref _isError, value); }
     public bool CanGoBack { get => _canGoBack; set => Set(ref _canGoBack, value); }
+    public bool CanGoForward { get => _canGoForward; set => Set(ref _canGoForward, value); }
     public bool CanRetry { get => _canRetry; private set => Set(ref _canRetry, value); }
     public bool IsInteractive { get => _isInteractive; set => Set(ref _isInteractive, value); }
     public bool CanCancel => IsBusy && IsInteractive;

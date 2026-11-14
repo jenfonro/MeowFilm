@@ -18,6 +18,28 @@
                 <ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml" />
                 <ResourceDictionary Source="/MeowFilm.Desktop;component/OverlayScrollChrome.xaml" />
             </ResourceDictionary.MergedDictionaries>
+            <Style x:Key="ShellNavigationItem" TargetType="ListBoxItem" BasedOn="{StaticResource MeowFilm.NavigationItem}">
+                <Setter Property="MinHeight" Value="40"/>
+                <Setter Property="Padding" Value="14,6"/>
+            </Style>
+            <DataTemplate x:Key="ShellNavigationTemplate">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Path x:Name="Outline" Data="{Binding IconData}" Width="18" Height="18" Stretch="Uniform"
+                          HorizontalAlignment="Left" VerticalAlignment="Center" StrokeThickness="1.5"
+                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
+                    <TextBlock x:Name="Glyph" Text="{Binding Glyph}" FontFamily="{DynamicResource MeowFilm.Font.Icons}"
+                               FontSize="16" VerticalAlignment="Center" Focusable="False" Visibility="Collapsed"/>
+                    <TextBlock Grid.Column="1" Text="{Binding Title}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                </Grid>
+                <DataTemplate.Triggers>
+                    <DataTrigger Binding="{Binding IconData}" Value="{x:Null}">
+                        <Setter TargetName="Outline" Property="Visibility" Value="Collapsed"/>
+                        <Setter TargetName="Glyph" Property="Visibility" Value="Visible"/>
+                    </DataTrigger>
+                </DataTemplate.Triggers>
+            </DataTemplate>
         </ResourceDictionary>
     </Window.Resources>
     <Window.Style>
@@ -65,7 +87,7 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="203" />
+                <ColumnDefinition Width="216" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
@@ -83,6 +105,7 @@
                         </Style.Triggers>
                     </Style>
                 </Border.Style>
+                <Grid>
                 <local:SidebarBackdrop x:Name="SidebarMaterial" Source="{Binding ElementName=ApplicationBackground}">
                     <local:SidebarBackdrop.Style>
                         <Style TargetType="local:SidebarBackdrop">
@@ -96,6 +119,14 @@
                         </Style>
                     </local:SidebarBackdrop.Style>
                 </local:SidebarBackdrop>
+                <Border x:Name="SidebarTint" Background="#66FFFFFF">
+                    <Border.Style><Style TargetType="Border"><Style.Triggers>
+                        <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                        </Trigger>
+                    </Style.Triggers></Style></Border.Style>
+                </Border>
+                </Grid>
             </Border>
             <StackPanel x:Name="Brand" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,16,0"
                         IsHitTestVisible="False">
@@ -127,29 +158,39 @@
                 <TextBlock Text="meowfilm" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" />
             </StackPanel>
 
-            <ScrollViewer x:Name="SidebarScroll" PreviewMouseWheel="OnSidebarWheel" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Grid.Row="1" Margin="23,8,8,16" Focusable="False" IsEnabled="{Binding IsInteractive}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel Margin="0,0,8,0">
+            <ScrollViewer x:Name="SidebarScroll" PreviewMouseWheel="OnSidebarWheel" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Grid.Row="1" Margin="16,22,8,16" Focusable="False" IsEnabled="{Binding IsInteractive}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel Margin="0,0,8,0">
+                <ListBox x:Name="ModuleNavigationList" Padding="0" ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                         Style="{StaticResource MeowFilm.NavigationList}" IsSynchronizedWithCurrentItem="False"
+                         SelectionChanged="OnModuleSelectionChanged" AutomationProperties.Name="媒体类型">
+                    <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem" BasedOn="{StaticResource ShellNavigationItem}">
+                        <Setter Property="AutomationProperties.Name" Value="{Binding Module.Title}"/>
+                    </Style></ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate><DataTemplate>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Path x:Name="Outline" Data="{Binding Module.Navigation[0].IconData}" Width="18" Height="18"
+                                  HorizontalAlignment="Left" VerticalAlignment="Center" Stretch="Uniform" StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
+                            <TextBlock x:Name="Glyph" Text="{Binding Module.Navigation[0].Glyph}"
+                                       FontFamily="{DynamicResource MeowFilm.Font.Icons}" FontSize="16"
+                                       VerticalAlignment="Center" Focusable="False" Visibility="Collapsed"/>
+                            <TextBlock Grid.Column="1" Text="{Binding Module.Title}" VerticalAlignment="Center"/>
+                        </Grid>
+                        <DataTemplate.Triggers><DataTrigger Binding="{Binding Module.Navigation[0].IconData}" Value="{x:Null}">
+                            <Setter TargetName="Outline" Property="Visibility" Value="Collapsed"/>
+                            <Setter TargetName="Glyph" Property="Visibility" Value="Visible"/>
+                        </DataTrigger></DataTemplate.Triggers>
+                    </DataTemplate></ListBox.ItemTemplate>
+                </ListBox>
+                <Border Height="1" Background="{DynamicResource MeowFilm.Brush.Border}" Margin="14,22,14,16"/>
                 <ListBox ScrollViewer.VerticalScrollBarVisibility="Disabled" x:Name="NavigationList" Padding="0" Style="{StaticResource MeowFilm.NavigationList}"
                          IsSynchronizedWithCurrentItem="False"
-                         ItemContainerStyle="{StaticResource MeowFilm.NavigationItem}"
-                         SelectionChanged="OnNavigationSelectionChanged" AutomationProperties.Name="导航">
-
-                    <ListBox.ItemTemplate>
-                        <DataTemplate DataType="{x:Type local:NavigationItem}">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="25" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="{Binding Glyph}" FontFamily="{DynamicResource MeowFilm.Font.Icons}"
-                                           FontSize="16" VerticalAlignment="Center" Focusable="False" />
-                                <TextBlock Grid.Column="1" Text="{Binding Title}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                            </Grid>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
+                         ItemContainerStyle="{StaticResource ShellNavigationItem}" ItemTemplate="{StaticResource ShellNavigationTemplate}"
+                         SelectionChanged="OnNavigationSelectionChanged" AutomationProperties.Name="内容导航"/>
                 <ListBox ScrollViewer.VerticalScrollBarVisibility="Disabled" x:Name="PublicNavigationList" Margin="0" Padding="0"
                          Style="{StaticResource MeowFilm.NavigationList}"
-                         ItemContainerStyle="{StaticResource MeowFilm.NavigationItem}"
+                         ItemContainerStyle="{StaticResource ShellNavigationItem}"
                          SelectionChanged="OnPublicPageSelectionChanged" AutomationProperties.Name="公共页面">
                     <ListBox.ItemTemplate>
                         <DataTemplate>
@@ -162,8 +203,8 @@
                 </ListBox>
                 <ListBox ScrollViewer.VerticalScrollBarVisibility="Disabled" x:Name="CollectionNavigationList" Margin="0,20,0,0" Padding="0" Style="{StaticResource MeowFilm.NavigationList}"
                          IsSynchronizedWithCurrentItem="False"
-                         ItemContainerStyle="{StaticResource MeowFilm.NavigationItem}"
-                         SelectionChanged="OnNavigationSelectionChanged" AutomationProperties.Name="我的歌单">
+                         ItemContainerStyle="{StaticResource ShellNavigationItem}" ItemTemplate="{StaticResource ShellNavigationTemplate}"
+                         SelectionChanged="OnNavigationSelectionChanged" AutomationProperties.Name="我的">
                     <ListBox.GroupStyle>
                         <GroupStyle>
                             <GroupStyle.HeaderTemplate>
@@ -194,23 +235,12 @@
                             </GroupStyle.HeaderTemplate>
                         </GroupStyle>
                     </ListBox.GroupStyle>
-                    <ListBox.ItemTemplate>
-                        <DataTemplate DataType="{x:Type local:NavigationItem}">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="25" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="{Binding Glyph}" FontFamily="{DynamicResource MeowFilm.Font.Icons}"
-                                           FontSize="16" VerticalAlignment="Center" Focusable="False" />
-                                <TextBlock Grid.Column="1" Text="{Binding Title}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                            </Grid>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
                 </ListBox>
+                <ContentControl x:Name="SidebarContributionHost" HorizontalContentAlignment="Stretch"
+                                VerticalContentAlignment="Top" Focusable="False" IsTabStop="False"/>
             </StackPanel></ScrollViewer>
 
-            <Grid Grid.Column="1" Margin="40,0,12,0">
+            <Grid Grid.Column="1" Margin="34,0,12,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
@@ -222,39 +252,61 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="BackButton" Width="28" Margin="0,0,8,0" Content="&#xE76B;"
+                    <Button x:Name="BackButton" Width="24" Height="32" Margin="0,0,12,0"
                             Click="OnBackClick" IsEnabled="{Binding CanGoBack}"
                             AutomationProperties.Name="返回" AutomationProperties.AcceleratorKey="Alt+Left">
                         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
-                            <Setter Property="BorderThickness" Value="1"/>
-                            <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+                            <Setter Property="BorderThickness" Value="0"/>
                         </Style></Button.Style>
+                        <Path Data="M14,6 L8,12 14,18" Width="7" Height="12" Stretch="Uniform" StrokeThickness="1.5"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                     </Button>
-                    <Grid x:Name="SearchInput" Grid.Column="1" Width="300" MaxWidth="360">
-                        <TextBox x:Name="SearchBox" MinWidth="140" Width="Auto" MaxWidth="360"
-                                 Height="36" MinHeight="36" Padding="38,4,12,4"
+                    <Button x:Name="ForwardButton" Grid.Column="1" Width="24" Height="32"
+                            Style="{StaticResource MeowFilm.IconButton}" Click="OnForwardClick" IsEnabled="{Binding CanGoForward}"
+                            AutomationProperties.Name="前进" AutomationProperties.AcceleratorKey="Alt+Right">
+                        <Path Data="M10,6 L16,12 10,18" Width="7" Height="12" Stretch="Uniform" StrokeThickness="1.5"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                    </Button>
+                </Grid>
+                    <Grid x:Name="SearchInput" MaxWidth="430" Height="34" VerticalAlignment="Center"
+                          shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                        <TextBox x:Name="SearchBox" MinWidth="0" Width="Auto"
+                                 Height="34" MinHeight="34" Padding="36,4,52,4" FontSize="12"
                                  TextChanged="OnSearchTextChanged" KeyDown="OnSearchKeyDown" AutomationProperties.Name="搜索"
-                                 AutomationProperties.AcceleratorKey="Ctrl+F">
+                                 AutomationProperties.AcceleratorKey="Ctrl+K">
                             <TextBox.Style><Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
                                 <Setter Property="BorderBrush" Value="#E3E6ED"/>
                                 <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
                             </Style></TextBox.Style>
                         </TextBox>
-                        <ComboBox x:Name="SearchTargetPicker" Width="68" Height="30" MinHeight="0"
+                        <ComboBox x:Name="SearchTargetPicker" Width="60" Height="28" MinHeight="0" FontSize="12"
                                   Margin="32,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center"
-                                  DisplayMemberPath="Label" SelectedValuePath="Id" Visibility="Collapsed"
-                                  AutomationProperties.Name="搜索目标"/>
-                        <Button x:Name="SearchButton" Content="&#xE721;" Margin="2,0,0,0"
+                                  DisplayMemberPath="Label" SelectedValuePath="Id" Visibility="Collapsed" Padding="4,0,6,0"
+                                  Background="Transparent" BorderThickness="0"
+                                  Style="{StaticResource MeowFilm.ComboBox}" AutomationProperties.Name="搜索目标"/>
+                        <Border x:Name="SearchDivider" Width="1" Height="16" Background="{DynamicResource MeowFilm.Brush.Border}"
+                                Margin="94,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Visibility="Collapsed"/>
+                        <Button x:Name="SearchButton" Margin="2,0,0,0"
                                 Width="32" Height="32" MinHeight="0" HorizontalAlignment="Left" VerticalAlignment="Center"
                                 Click="OnSearchClick" AutomationProperties.Name="搜索">
                             <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
                                 <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
                             </Style></Button.Style>
+                            <Path Data="M17,10.5 A6.5,6.5 0 1 1 4,10.5 A6.5,6.5 0 1 1 17,10.5 M16,16 L21,21"
+                                  Width="15" Height="15" Stretch="Uniform" StrokeThickness="1.5"
+                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                         </Button>
+                        <TextBlock Text="Ctrl K" FontSize="11" Foreground="{DynamicResource MeowFilm.Brush.Muted}"
+                                   Margin="0,0,12,0" HorizontalAlignment="Right" VerticalAlignment="Center" IsHitTestVisible="False"/>
                     </Grid>
-                </Grid>
                 <StackPanel x:Name="CaptionBar" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
                             shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button x:Name="NotificationButton" Style="{StaticResource MeowFilm.CaptionButton}"
+                            IsEnabled="{Binding IsInteractive}" AutomationProperties.Name="通知">
+                        <Path Data="M5,17 L19,17 17,14 17,9 A5,5 0 0 0 7,9 L7,14 Z M10,20 L14,20"
+                              Width="14" Height="16" Stretch="Uniform" StrokeThickness="1.5" StrokeLineJoin="Round"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                    </Button>
                     <Button x:Name="SettingsButton" Style="{StaticResource MeowFilm.CaptionButton}" FontSize="17" Content="&#xE713;"
                             IsEnabled="{Binding IsInteractive}" Click="OnSettingsClick" AutomationProperties.Name="设置" />
                     <Button Style="{StaticResource MeowFilm.CaptionButton}" Content="&#xE921;"

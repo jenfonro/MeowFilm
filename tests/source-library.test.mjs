@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { PrivateDocuments, ScriptHostError } from '@meowfilm/script-host';
 import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { deferred } from '../packages/runtime-bridge/test/http-fixture.js';
+import { serverFor } from '../packages/script-host/test/http-fixture.js';
 
 const source = {
   bookSourceName: 'Books', bookSourceUrl: 'https://books.invalid/', bookSourceGroup: 'test',
@@ -31,7 +33,7 @@ function denied(reply, code) {
 function temp(t) {
   const root = new URL('../tmp/test-results/source-library/', import.meta.url);
   mkdirSync(root, { recursive: true });
-  const path = mkdtempSync(join(root.pathname, 'case-'));
+  const path = mkdtempSync(join(fileURLToPath(root), 'case-'));
   t.after(() => rmSync(path, { recursive: true, force: true }));
   return path;
 }
@@ -682,6 +684,86 @@ test('URL preview downloads once, retains standalone HTML identity and accepts R
     assert.equal(result.failures.length, 0);
     assert.ok(result.items.length > 0);
   }
+});
+
+test('default URL preview follows HTTP redirects without executing candidates or downloading again on confirmation', async t => {
+  const paths = [];
+  const definition = { ...source, enabled: false, jsLib: 'throw new Error("preview must not execute")' };
+  const { socketOrigin } = await serverFor(t, (request, response) => {
+    paths.push(request.url);
+    if (request.url === '/redirect') {
+      response.writeHead(302, { location: '/definitions' }).end();
+    } else response.end(JSON.stringify([definition]));
+  });
+  const module = createSourceRuntimeModule({ platform: 'fixture', dataRoot: temp(t) });
+  const rpc = moduleHttp(t, module);
+  const preview = value(await rpc('library.previewImport', { url: `${socketOrigin}/redirect` }));
+  assert.deepEqual(preview.failures, []);
+  assert.equal(preview.items.length, 1);
+  assert.deepEqual(value(await rpc('library.list')).sources, []);
+  assert.deepEqual(paths, ['/redirect', '/definitions']);
+  const confirmed = value(await rpc('library.import', { text: preview.items[0].definition }));
+  assert.equal(confirmed.sources.length, 1);
+  assert.equal(confirmed.sources[0].enabled, false);
+  assert.deepEqual(paths, ['/redirect', '/definitions']);
+});
+
+test('default URL preview validates initial and redirected protocols and credentials', async t => {
+  const paths = [];
+  const { socketOrigin } = await serverFor(t, (request, response) => {
+    paths.push(request.url);
+    response.writeHead(302, { location: request.url === '/protocol'
+      ? 'file:///source.json' : 'http://user:password@127.0.0.1/source.json' }).end();
+  });
+  const rpc = moduleHttp(t, createSourceRuntimeModule({ platform: 'fixture' }));
+  for (const url of ['not a URL', 'file:///source.json', 'https://user:password@example.invalid/source.json'])
+    denied(await rpc('library.previewImport', { url }), 'INVALID_REQUEST');
+  assert.deepEqual(paths, []);
+  for (const path of ['/protocol', '/credentials'])
+    denied(await rpc('library.previewImport', { url: socketOrigin + path }), 'INVALID_REQUEST');
+  assert.deepEqual(paths, ['/protocol', '/credentials']);
+  assert.deepEqual(value(await rpc('library.list')).sources, []);
+});
+
+test('default URL preview shutdown drains the real HTTP exchange without installing a source', async t => {
+  const entered = deferred(), closed = deferred();
+  const { socketOrigin } = await serverFor(t, (_request, response) => {
+    response.on('close', () => closed.resolve());
+    response.writeHead(200);
+    response.write('[');
+    entered.resolve();
+  });
+  const module = createSourceRuntimeModule({ platform: 'fixture', dataRoot: temp(t) });
+  const rpc = moduleHttp(t, module);
+  const preview = rpc('library.previewImport', { url: socketOrigin + '/held' });
+  await entered.promise;
+  const receipt = await module.close();
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.value.cleanupComplete, true);
+  await closed.promise;
+  denied(await preview, 'CLOSED');
+});
+
+test('URL preview deadline cancels and waits for the actual download before reporting timeout', async t => {
+  const entered = deferred(), aborted = deferred(), drained = deferred();
+  const { module } = setup(t, { respond: async input => {
+    entered.resolve();
+    input.signal.addEventListener('abort', () => aborted.resolve(), { once: true });
+    await drained.promise;
+    return { statusCode: 200, headers: {}, url: input.url, body: JSON.stringify(source) };
+  } });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const preview = module.methods['source.runtime.library.previewImport']({ url: 'https://preview.invalid/held' });
+  let completed = false;
+  preview.then(() => { completed = true; });
+  await entered.promise;
+  t.mock.timers.tick(60_000);
+  await aborted.promise;
+  assert.equal(completed, false);
+  drained.resolve();
+  denied(await preview, 'TIMEOUT');
+  t.mock.timers.reset();
+  assert.deepEqual(value(await module.methods['source.runtime.library.list']()).sources, []);
 });
 
 test('cancelled preview is drained by shutdown and never writes the permanent repository', async t => {

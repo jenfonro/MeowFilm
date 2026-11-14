@@ -8,7 +8,10 @@ public record NavigationItem(
     string Glyph,
     string? Group = null,
     bool ShowInSidebar = true,
-    DesktopNavigationGroupAction? GroupAction = null);
+    DesktopNavigationGroupAction? GroupAction = null)
+{
+    public string? IconData { get; init; }
+}
 
 public sealed class DesktopNavigationGroupAction : ICommand
 {

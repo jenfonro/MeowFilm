@@ -124,6 +124,7 @@ public sealed partial class ShellWindow
         var generation = ++_queueGeneration;
         QueueDismissSurface.Visibility = Visibility.Visible;
         QueueSurface.Visibility = Visibility.Visible;
+        ApplyPresentation();
         AnimateQueue(open: true, generation);
         QueueUi(() => QueueHost.MoveFocus(new(FocusNavigationDirection.First)));
         try
@@ -149,6 +150,7 @@ public sealed partial class ShellWindow
         RetireActivation(ref _queueActivation);
         _queueSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         QueueDismissSurface.Visibility = Visibility.Collapsed;
+        ApplyPresentation();
         AnimateQueue(open: false, _queueGeneration);
         return Task.CompletedTask;
     }

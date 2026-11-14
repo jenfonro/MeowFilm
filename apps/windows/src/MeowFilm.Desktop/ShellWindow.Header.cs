@@ -15,13 +15,16 @@ public sealed partial class ShellWindow
         {
             SearchTargetPicker.ItemsSource = searchPage.Targets;
             SearchTargetPicker.Visibility = Visibility.Visible;
-            SearchBox.Padding = new(104, 4, 12, 4);
+            SearchDivider.Visibility = Visibility.Visible;
+            SearchBox.Padding = new(100, 4, 52, 4);
         }
         // Construct navigation in the window's namescope, then mount that same tree
         // in the component. UserControl XAML cannot register its children's names
         // in the containing window's compile-time namescope.
         ((System.Windows.Controls.Panel)SearchChrome.Parent).Children.Remove(SearchChrome);
+        ((System.Windows.Controls.Panel)SearchInput.Parent).Children.Remove(SearchInput);
         PageHeaderHost.Navigation = SearchChrome;
+        PageHeaderHost.Center = SearchInput;
         PageHeaderHost.ContributionChanged += (_, _) =>
         {
             if (!_isClosing && _current is { } current && PageHeaderHost.Contribution is { } contribution)

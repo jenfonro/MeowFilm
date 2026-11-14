@@ -23,6 +23,7 @@ public sealed partial class ShellWindow : Window
     private readonly TimeProvider _timeProvider;
     private readonly HashSet<ShellRequest> _requests = [];
     private readonly List<(IDesktopNavigationSource Source, EventHandler<DesktopNavigationRequestEventArgs> Handler)> _navigationSubscriptions = [];
+    private readonly List<(IDesktopSidebarSource Source, EventHandler Handler)> _sidebarSubscriptions = [];
     private TaskCompletionSource _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private ModuleSession? _current, _playerSession;
     private ShellRequest? _activeRequest;
@@ -120,6 +121,16 @@ public sealed partial class ShellWindow : Window
                 EventHandler<DesktopNavigationRequestEventArgs> handler = (_, args) => OnNavigationRequested(session, args);
                 source.NavigationRequested += handler;
                 _navigationSubscriptions.Add((source, handler));
+            }
+            if (session.Module is IDesktopSidebarSource sidebar)
+            {
+                EventHandler handler = (_, _) => QueueUi(() =>
+                {
+                    if (!_isClosing && ReferenceEquals(_current, session) && _currentPage is null)
+                        OnSettingsClick(this, new RoutedEventArgs());
+                });
+                sidebar.SettingsRequested += handler;
+                _sidebarSubscriptions.Add((sidebar, handler));
             }
         }
         _suppressSelection = true;
@@ -282,18 +293,28 @@ public sealed partial class ShellWindow : Window
         _generalSettingsHost.Visibility = _currentPage is null && current.IsSettingsOpen && _generalSettingsOpen
             ? Visibility.Visible : Visibility.Collapsed;
         ApplyPlayerPresentation(current);
+        ApplyNavigationOwner(current);
+        var sidebar = (current.Module as IDesktopSidebarSource)?.SidebarView;
+        if (!ReferenceEquals(SidebarContributionHost.Content, sidebar))
+        {
+            SidebarContributionHost.Content = null;
+            if (sidebar is not null) ValidateView(sidebar, SidebarContributionHost);
+            SidebarContributionHost.Content = sidebar;
+        }
         ApplyModuleAccent(current);
         ApplyHeaderPresentation(current);
         ApplyGlobalSurfacePresentation(current);
         bool immersive = _currentPage is null && !current.IsSettingsOpen &&
             current.Module is IDesktopImmersiveSource { IsImmersive: true };
-        RootLayout.ColumnDefinitions[0].Width = new(immersive ? 0 : 203);
+        RootLayout.ColumnDefinitions[0].Width = new(immersive ? 0 : 216);
         PageHeaderHost.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
         SidebarBackground.Visibility = Brand.Visibility = SidebarScroll.Visibility =
             immersive ? Visibility.Collapsed : Visibility.Visible;
         if (immersive) PlayerFrame.Visibility = Visibility.Collapsed;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
             current.IsSettingsOpen || _returnPage is not null || _history.Count > 1;
+        _state.CanGoForward = !_queueOpen && !_playerDetailOpen && _currentPage is null &&
+            !current.IsSettingsOpen && _returnPage is null && _future.Count > 0;
         ApplySearchPresentation();
         foreach (var page in _pages) page.Host.Visibility = ReferenceEquals(page, _currentPage) ? Visibility.Visible : Visibility.Collapsed;
         AutomationProperties.SetName(SettingsButton, "设置");
@@ -310,13 +331,15 @@ public sealed partial class ShellWindow : Window
             var locations = new HashSet<string>(StringComparer.Ordinal);
             foreach (var entry in _history)
                 if (ReferenceEquals(entry.Session, session)) Retain(entry.Destination);
+            foreach (var entry in _future)
+                if (ReferenceEquals(entry.Session, session)) Retain(entry.Destination);
             if (_currentPage is null && ReferenceEquals(_current, session)) Retain(session.Current);
             if (ReferenceEquals(_settingsReturn, session)) Retain(session.Current);
             RetainOrigin(_currentPage);
             RetainOrigin(_returnPage);
             foreach (var request in _requests)
-                if (request.Plan.IsBack && ReferenceEquals(request.Plan.Session, session)) Retain(request.Plan.Destination);
-            if (_retryPlan is { IsBack: true } retry && ReferenceEquals(retry.Session, session)) Retain(retry.Destination);
+                if ((request.Plan.IsBack || request.Plan.IsForward) && ReferenceEquals(request.Plan.Session, session)) Retain(request.Plan.Destination);
+            if (_retryPlan is { } retry && (retry.IsBack || retry.IsForward) && ReferenceEquals(retry.Session, session)) Retain(retry.Destination);
             owner.RetainNavigationLocations(locations);
 
             void Retain(Destination? destination)
@@ -419,6 +442,9 @@ public sealed partial class ShellWindow : Window
         try
         {
             var selected = _sidebar.FirstOrDefault(item => ReferenceEquals(item.Owner, current) && string.Equals(item.Route, route, StringComparison.Ordinal));
+            ModuleNavigationList.SelectedItem = route is not null && route == current.Module.Navigation.FirstOrDefault()?.Route
+                ? current : null;
+            if (ModuleNavigationList.SelectedItem is not null) selected = null;
             NavigationList.SelectedItem = selected?.Group is null ? selected : null;
             CollectionNavigationList.SelectedItem = selected?.Group is not null ? selected : null;
         }
@@ -522,6 +548,15 @@ public sealed partial class ShellWindow : Window
     });
 
     private void OnBackClick(object sender, RoutedEventArgs e) => RunUiAction(GoBackAsync);
+    private void OnForwardClick(object sender, RoutedEventArgs e) => RunUiAction(GoForwardAsync);
+
+    private async Task GoForwardAsync()
+    {
+        if (!_state.CanGoForward) return;
+        var next = _future[^1];
+        PreparePresentation(next.Session);
+        await RunRequestAsync(new(next.Session, next.Destination, IsForward: true));
+    }
 
     private async Task GoBackAsync()
     {
@@ -636,15 +671,15 @@ public sealed partial class ShellWindow : Window
         if (ChannelDialogHost.IsOpen)
         {
             if (!ChannelDialogHost.HandleEscape(e)) ProtectChannelKeyboard(e);
-            if (e.Key == Key.F && e.KeyboardDevice.Modifiers == ModifierKeys.Control ||
-                (e.Key == Key.Left || e.SystemKey == Key.Left) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
+            if (e.Key is Key.F or Key.K && e.KeyboardDevice.Modifiers == ModifierKeys.Control ||
+                (e.Key is Key.Left or Key.Right || e.SystemKey is Key.Left or Key.Right) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
                 e.Handled = true;
             return;
         }
         // Let a native range editor cancel its own gesture before Escape closes
         // the full player. The shell must not depend on a music-specific type.
         if (e.Key == Key.Escape && (Mouse.Captured is Slider || Keyboard.FocusedElement is Slider)) return;
-        if (e.Key == Key.F && e.KeyboardDevice.Modifiers == ModifierKeys.Control &&
+        if (e.Key is Key.F or Key.K && e.KeyboardDevice.Modifiers == ModifierKeys.Control &&
             SearchInput.Visibility == Visibility.Visible && SearchBox.IsEnabled)
         {
             e.Handled = true;
@@ -655,6 +690,11 @@ public sealed partial class ShellWindow : Window
         {
             e.Handled = true;
             RunUiAction(GoBackAsync);
+        }
+        else if ((e.Key == Key.Right || e.SystemKey == Key.Right) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
+        {
+            e.Handled = true;
+            RunUiAction(GoForwardAsync);
         }
         else if (e.Key == Key.Escape && e.KeyboardDevice.Modifiers == ModifierKeys.None && _state.CanCancel)
         {
@@ -687,7 +727,7 @@ public sealed partial class ShellWindow : Window
         if (CloseDialog.IsOpen || ResetDialog.IsOpen || !ChannelDialogHost.IsOpen) return;
         bool In(FrameworkElement control) => e.OriginalSource is DependencyObject target &&
             (ReferenceEquals(target, control) || control.IsAncestorOf(target));
-        if (ChannelDialogHost.HasOutsidePress || In(SearchChrome) || In(SettingsButton) || In(PlayerDetailBackButton) ||
+        if (ChannelDialogHost.HasOutsidePress || In(SearchChrome) || In(SearchInput) || In(SettingsButton) || In(PlayerDetailBackButton) ||
             In(PageHeaderHost) && e.OriginalSource is IInputElement node &&
             System.Windows.Shell.WindowChrome.GetIsHitTestVisibleInChrome(node))
             ChannelDialogHost.HandleOutsidePointer(e, RootLayout);
@@ -800,7 +840,7 @@ public sealed partial class ShellWindow : Window
             if (destination is null && session.Current is null && !session.IsSettingsOpen && session.Module.Navigation.Count > 0)
                 destination = new(session.Module.Navigation[0].Route);
             if (destination is null) return null;
-            if (plan.IsBack)
+            if (plan.IsBack || plan.IsForward)
             {
                 if (string.IsNullOrEmpty(destination.Location)) throw new InvalidOperationException("SHELL_NAVIGATION_LOCATION_MISSING");
                 await session.Module.RestoreNavigationAsync(destination.Location, token);
@@ -808,7 +848,7 @@ public sealed partial class ShellWindow : Window
             else if (destination.IsSearch) await session.Module.SearchAsync(destination.Value, token);
             else await session.Module.NavigateAsync(destination.Value, token);
             token.ThrowIfCancellationRequested();
-            if (!plan.IsBack)
+            if (!plan.IsBack && !plan.IsForward)
             {
                 var location = session.Module.CaptureNavigationLocation();
                 token.ThrowIfCancellationRequested();
@@ -823,11 +863,21 @@ public sealed partial class ShellWindow : Window
     private void CommitDestination(RequestPlan plan, Destination destination)
     {
         var target = (plan.Session, destination);
-        if (plan.IsBack && _history.Count > 1 && _history[^2] == target) _history.RemoveAt(_history.Count - 1);
-        else if (_history.Count == 0 || _history[^1] != target)
+        if (plan.IsBack && _history.Count > 1 && _history[^2] == target)
         {
-            _history.Add(target);
-            if (_history.Count > HistoryLimit) _history.RemoveAt(0);
+            _future.Add(_history[^1]);
+            if (_future.Count > HistoryLimit) _future.RemoveAt(0);
+            _history.RemoveAt(_history.Count - 1);
+        }
+        else
+        {
+            if (plan.IsForward && _future.Count > 0 && _future[^1] == target) _future.RemoveAt(_future.Count - 1);
+            else if (!plan.IsBack) _future.Clear();
+            if (_history.Count == 0 || _history[^1] != target)
+            {
+                _history.Add(target);
+                if (_history.Count > HistoryLimit) _history.RemoveAt(0);
+            }
         }
         plan.Session.Current = destination;
     }
@@ -1092,6 +1142,7 @@ public sealed partial class ShellWindow : Window
         CancelActive();
         CancelPageActivation();
         foreach (var request in _requests.ToArray()) request.Cancel();
+        ModuleNavigationList.ItemsSource = null;
         SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
         foreach (var session in _sessions)
         {
@@ -1100,6 +1151,9 @@ public sealed partial class ShellWindow : Window
         }
         foreach (var (source, handler) in _navigationSubscriptions) source.NavigationRequested -= handler;
         _navigationSubscriptions.Clear();
+        foreach (var (source, handler) in _sidebarSubscriptions) source.SettingsRequested -= handler;
+        _sidebarSubscriptions.Clear();
+        SidebarContributionHost.Content = null;
         RetireHeaderPresentation();
         DisposeGlobalSurfaces();
         _nativeCaption?.Dispose();

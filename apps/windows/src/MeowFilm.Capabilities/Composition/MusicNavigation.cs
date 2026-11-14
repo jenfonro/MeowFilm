@@ -364,7 +364,7 @@ public sealed partial class MusicCapability
     private void RebuildNavigation()
     {
         NavigationItem[] items = [
-            new("catalog-home", "推荐", "\uE80F"),
+            new("catalog-home", "推荐", "\uE80F") { IconData = "M9,18 L9,5 21,3 21,16 M9,8 L21,6 M9,18 A3,2 0 1 1 3,18 A3,2 0 1 1 9,18 M21,16 A3,2 0 1 1 15,16 A3,2 0 1 1 21,16" },
             new("catalog-channels", "频道", "\uE8A9"),
             new("favorites", "我的收藏", "\uEB51", "我的", GroupAction: Presentation.CreatePlaylistAction),
             ..Playlists.Where(item => item.Kind == "playlist").Select(item =>

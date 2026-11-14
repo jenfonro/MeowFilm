@@ -8,6 +8,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
@@ -26,6 +27,8 @@ public static class FilmPresentationTests
             () => MusicQualityConsumerTests.Sta(DataNavigation));
         yield return new("film-presentation: classified list error stays in the third row and real source selection recovers it",
             () => MusicQualityConsumerTests.Sta(PlaybackListFailure));
+        yield return new("film-presentation: playback shares the application canvas across poster and theme changes with system contrast",
+            () => MusicQualityConsumerTests.Sta(PlaybackCanvas));
     }
 
     private static async Task SkeletonPresentation()
@@ -338,11 +341,9 @@ public static class FilmPresentationTests
                 Visuals(playback).OfType<FilmPlaybackView>().Single().DataContext == module.Playback,
                 "playback route presents its selected film through the native page");
             var playerPage = Visuals(playback).OfType<FilmPlaybackView>().Single();
-            var playerGround = playerPage.Background;
             window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background("#FF0000");
-            Check(playerGround is SolidColorBrush { Color.A: 255 } &&
-                ReferenceEquals(playerPage.Background, playerGround),
-                "film playback keeps its own opaque ground when the program theme changes");
+            Check(playerPage.Background is SolidColorBrush { Color.A: 0 },
+                "film playback exposes the shared application canvas when the program theme changes");
             var playbackText = Visuals(playback).OfType<TextBlock>().Where(text => !string.IsNullOrWhiteSpace(text.Text)).ToArray();
             Check(playbackText.Length > 0 && playbackText.All(text =>
                 TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&
@@ -430,6 +431,109 @@ public static class FilmPresentationTests
                 "only explicit source selection requests its exact identity and restores real episodes and raw-directory access");
         }
         finally { view.DataContext = null; window.Content = null; window.Close(); }
+    }
+
+    private static async Task PlaybackCanvas()
+    {
+        await using var rig = new FilmPlaybackRig();
+        await rig.OpenAsync();
+        var view = new FilmPlaybackView { DataContext = rig.Page };
+        var canvas = new Border { Child = view };
+        canvas.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.AppBackground");
+        var window = WindowFor(canvas, 1150, 850);
+        window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.DefaultBackground;
+        try
+        {
+            window.Show(); window.UpdateLayout(); await Drain();
+            var metadata = (Grid)view.FindName("MetadataPanel");
+            Point[] samples = [new(20, 200),
+                metadata.TranslatePoint(new Point(metadata.ActualWidth / 2, 4), canvas)];
+            Color[]? defaultCanvas = null;
+            foreach (string color in new[] { AppearanceColors.DefaultColor, "#FF0000", "#000000" })
+            {
+                window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background(color);
+                view.Visibility = Visibility.Hidden;
+                await Drain();
+                var expected = CanvasSamples(canvas, samples);
+                if (defaultCanvas is null) defaultCanvas = expected;
+                else Check(!expected.SequenceEqual(defaultCanvas), "the application owner applies the selected global hue");
+                view.Visibility = Visibility.Visible;
+                await Drain();
+                foreach (string poster in new[] { FilmPlaybackFixture.Assets + FilmPlaybackFixture.Posters[0],
+                    FilmPlaybackFixture.Assets + FilmPlaybackFixture.Posters[1], "" })
+                {
+                    rig.Runtime.Change(root => root["metadata"]!["poster_path"] = poster);
+                    await Until(() => rig.Page.Poster == poster, "the selected poster reaches the playback page");
+                    Check(CanvasSamples(canvas, samples).SequenceEqual(expected),
+                        "the page margin and metadata region show the same application canvas for every poster");
+                }
+                foreach (var label in new[] { (TextBlock)view.FindName("FilmTitle"),
+                    Visuals((ItemsControl)view.FindName("EpisodeCards")).OfType<TextBlock>()
+                        .First(text => text.Text == rig.Page.Episodes[0].Overview) })
+                {
+                    var ink = ((SolidColorBrush)label.Foreground).Color;
+                    Check(((LinearGradientBrush)canvas.Background).GradientStops
+                        .All(stop => Contrast(ink, stop.Color) >= 4.5),
+                        "playback text and secondary text remain readable on the default and custom application canvas");
+                }
+            }
+            foreach (string name in new[] { "EpisodeCards", "RelatedItems" })
+            {
+                var cards = Visuals((ItemsControl)view.FindName(name)).OfType<FilmPlaybackPoster>().ToArray();
+                Check(cards.Length > 0 && cards.All(card => card.IsVisible &&
+                    card.Children.OfType<Image>().Any(image => image.Source is BitmapSource { PixelWidth: > 0 } &&
+                        image.Stretch == Stretch.UniformToFill)),
+                    "episode and recommendation poster cards retain their normal decoded images and crop");
+            }
+            Check(((Grid)view.FindName("VideoPicture")).Background is SolidColorBrush video && video.Color == Colors.Black,
+                "the video pixel host retains its black canvas");
+
+            window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.DefaultBackground;
+            await Drain();
+            DesktopTheme.SetIsHighContrast(window, true);
+            await Drain();
+            Check(CanvasSamples(canvas, samples).All(sample => sample == SystemColors.WindowColor) &&
+                ((TextBlock)view.FindName("FilmTitle")).Foreground is SolidColorBrush text &&
+                text.Color == SystemColors.WindowTextColor &&
+                ((ToggleButton)view.FindName("FavoriteButton")).Foreground is SolidColorBrush favorite &&
+                favorite.Color == SystemColors.WindowTextColor,
+                "high contrast pairs the system canvas with system text and action colors");
+            DesktopTheme.SetIsHighContrast(window, false);
+            await Drain();
+            Check(CanvasSamples(canvas, samples).SequenceEqual(defaultCanvas!),
+                "leaving high contrast restores the application canvas");
+        }
+        finally { view.DataContext = null; window.Content = null; window.Close(); }
+    }
+
+    private static Color[] CanvasSamples(FrameworkElement element, IEnumerable<Point> samples)
+    {
+        var bitmap = new RenderTargetBitmap((int)element.ActualWidth, (int)element.ActualHeight,
+            96, 96, PixelFormats.Pbgra32);
+        var visual = new DrawingVisual();
+        using (var drawing = visual.RenderOpen())
+            drawing.DrawRectangle(new VisualBrush(element), null, new Rect(element.RenderSize));
+        bitmap.Render(visual);
+        return samples.Select(point =>
+        {
+            var pixel = new byte[4];
+            bitmap.CopyPixels(new Int32Rect((int)point.X, (int)point.Y, 1, 1), pixel, 4, 0);
+            Check(pixel[3] == 255, "canvas samples contain the opaque application owner");
+            return Color.FromRgb(pixel[2], pixel[1], pixel[0]);
+        }).ToArray();
+    }
+
+    private static double Contrast(Color first, Color second)
+    {
+        static double Channel(byte value)
+        {
+            double channel = value / 255d;
+            return channel <= .04045 ? channel / 12.92 : Math.Pow((channel + .055) / 1.055, 2.4);
+        }
+        static double Luminance(Color value) =>
+            .2126 * Channel(value.R) + .7152 * Channel(value.G) + .0722 * Channel(value.B);
+        double a = Luminance(first), b = Luminance(second);
+        return (Math.Max(a, b) + .05) / (Math.Min(a, b) + .05);
     }
 
     private static Window WindowFor(FrameworkElement content, double width, double height)

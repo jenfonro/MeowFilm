@@ -148,6 +148,12 @@ public static partial class MusicUiTests
     private static async Task UnifiedTargets()
     {
         await using var f = await UnifiedScene.Create();
+        var media = (ListBox)f.Shell.FindName("ModuleNavigationList");
+        True(media.Items.OfType<ModuleSession>().Select(item => item.Module)
+            .SequenceEqual(new IDesktopModule[] { f.Music.Module, f.Film, f.Novel }),
+            "the real media selector keeps music film and novel in order and points to the actual capability owners");
+        True(media.Items.OfType<ModuleSession>().All(item => !string.IsNullOrWhiteSpace(item.Module.Navigation[0].IconData)),
+            "each real media home supplies its designed outline icon");
         Equal("music", f.Picker.SelectedValue as string);
         await f.Navigate(f.Film, FilmCapability.HomeRoute);
         Equal("film", f.Picker.SelectedValue as string);
@@ -157,7 +163,9 @@ public static partial class MusicUiTests
         await f.Film.NavigateAsync(FilmCapability.HomeRoute, default); await Drain();
         Equal("保留草稿", f.Input.Text); Equal("music", f.Picker.SelectedValue as string);
         Equal(calls, f.Runtime.SearchOpens);
-        await f.Navigate(f.Music.Module, "favorites");
+        f.Click("BackButton");
+        await SearchFixture.Until(() => f.Music.Module.CaptureNavigationLocation() == "favorites" && f.Status == "");
+        Equal(0, f.Music.Http.HomeRequests);
         Equal("music", f.Picker.SelectedValue as string);
         await f.Submit("原词", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
         Equal("film", f.Page.SelectedTab); Equal("film", f.Picker.SelectedValue as string);
@@ -597,7 +605,19 @@ public static partial class MusicUiTests
         internal void Click(string name) => ((Button)Shell.FindName(name)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         internal async Task Navigate(IDesktopModule module, string route)
         {
-            var list = new[] { "NavigationList", "CollectionNavigationList" }.Select(name => (ListBox)Shell.FindName(name))
+            var media = (ListBox)Shell.FindName("ModuleNavigationList");
+            var session = media.Items.OfType<ModuleSession>().Single(item => ReferenceEquals(item.Module, module));
+            var home = module.Navigation[0].Route;
+            var lists = new[] { "NavigationList", "CollectionNavigationList" }.Select(name => (ListBox)Shell.FindName(name)).ToArray();
+            if (route == home || !lists.Any(list => list.Items.OfType<ShellNavigationEntry>()
+                    .Any(item => ReferenceEquals(item.Owner.Module, module))))
+            {
+                media.SelectedItem = session;
+                await SearchFixture.Until(() => Status == "" && ReferenceEquals(media.SelectedItem, session) &&
+                    module.CaptureNavigationLocation() == home);
+                if (route == home) { await Drain(); return; }
+            }
+            var list = lists
                 .Single(list => list.Items.OfType<ShellNavigationEntry>().Any(item => ReferenceEquals(item.Owner.Module, module) && item.Route == route));
             list.SelectedItem = list.Items.OfType<ShellNavigationEntry>().Single(item => ReferenceEquals(item.Owner.Module, module) && item.Route == route);
             await SearchFixture.Until(() => Status == "" && list.SelectedItem is ShellNavigationEntry selected && selected.Route == route);
