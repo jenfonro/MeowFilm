@@ -16,22 +16,21 @@ public sealed class MusicDesktopLyricTextView : Control
     public string Text { get => (string)GetValue(TextProperty); set => SetValue(TextProperty, value); }
 
     private DrawingGroup? textDrawing;
-    private Geometry? outline;
+    private MusicLyricOutline? outline;
     private Size textSize;
-    private static readonly Pen OutlinePen = CreateOutlinePen();
+    private static readonly Brush OutlineBrush = CreateOutlineBrush();
 
-    private static Pen CreateOutlinePen()
+    private static Brush CreateOutlineBrush()
     {
-        var pen = new Pen(new SolidColorBrush(Color.FromArgb(230, 25, 25, 25)), 1.1)
-        { LineJoin = PenLineJoin.Round };
-        pen.Freeze();
-        return pen;
+        var brush = new SolidColorBrush(Color.FromArgb(230, 25, 25, 25));
+        brush.Freeze();
+        return brush;
     }
 
     private void InvalidateText()
     {
         textDrawing = null;
-        outline = null;
+        outline?.Invalidate();
         InvalidateMeasure();
         InvalidateVisual();
     }
@@ -44,6 +43,11 @@ public sealed class MusicDesktopLyricTextView : Control
             e.Property == FontStretchProperty || e.Property == FlowDirectionProperty ||
             e.Property == LanguageProperty || e.Property == TextOptions.TextFormattingModeProperty)
             InvalidateText();
+        else if (e.Property == TextOptions.TextRenderingModeProperty || e.Property == TextOptions.TextHintingModeProperty)
+        {
+            outline?.Invalidate();
+            InvalidateVisual();
+        }
         else if (e.Property == DesktopTheme.IsHighContrastProperty) InvalidateVisual();
     }
 
@@ -64,8 +68,6 @@ public sealed class MusicDesktopLyricTextView : Control
         using (var drawing = shaped.Open()) drawing.DrawText(text, new());
         // DrawText retains frozen glyph layers; clone once so recoloring can reuse the glyphs.
         textDrawing = shaped.Clone();
-        outline = text.BuildGeometry(new());
-        outline.Freeze();
     }
 
     protected override Size MeasureOverride(Size constraint) { EnsureText(); return textSize; }
@@ -76,7 +78,8 @@ public sealed class MusicDesktopLyricTextView : Control
         EnsureText();
         bool highContrast = SystemParameters.HighContrast || DesktopTheme.GetIsHighContrast(this);
         Paint(textDrawing!, highContrast ? SystemColors.WindowTextBrush : Foreground);
-        drawing.DrawGeometry(null, highContrast ? new Pen(SystemColors.WindowBrush, 1.1) : OutlinePen, outline);
+        outline ??= new(this);
+        outline.Draw(drawing, textDrawing!, highContrast ? SystemColors.WindowBrush : OutlineBrush, 1.1);
         drawing.DrawDrawing(textDrawing);
     }
 
