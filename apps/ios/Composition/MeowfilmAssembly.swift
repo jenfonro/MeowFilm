@@ -279,7 +279,8 @@ final class MeowfilmAssembly: ObservableObject {
         )
     }
 
-    func makeFilmPlayback(item: FilmItem, kind: FilmPlaybackKind) throws -> FilmPlaybackModel {
+    func makeFilmPlayback(item: FilmItem, kind: FilmPlaybackKind,
+                          entrySurface: String? = nil) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
         guard let provider = FilmMetadataProvider(rawValue: item.sourceID), (kind == .movie || kind == .tv) else {
             // A catalog item has no script installation/detail prototype. The
@@ -288,9 +289,11 @@ final class MeowfilmAssembly: ObservableObject {
         }
         let target = FilmPlaybackTarget(id: "\(provider.rawValue):\(kind.rawValue):\(item.id)",
                                         kind: kind, title: item.title, metadataProvider: provider, metadataID: item.id)
+        let metadata = try item.metadataSeed.map(RuntimeJSON.decode)
         return try makeFilmPlayback { [weak self] in
             guard let self else { throw FilmPlaybackError(code: "CLOSED") }
-            return try await self.filmRequest(target: target, resources: resources)
+            return FilmPlaybackRequest(target: target, sources: try await self.filmPlaybackSources(resources: resources),
+                                       metadata: metadata, entrySurface: entrySurface)
         }
     }
 
@@ -318,10 +321,6 @@ final class MeowfilmAssembly: ObservableObject {
         return FilmPlaybackModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
         }, media: filmMedia!, searchContext: searchContext, request: request)
-    }
-
-    private func filmRequest(target: FilmPlaybackTarget, resources: MeowfilmResources) async throws -> FilmPlaybackRequest {
-        FilmPlaybackRequest(target: target, sources: try await filmPlaybackSources(resources: resources))
     }
 
     private func filmPlaybackSources(resources: MeowfilmResources) async throws -> [FilmPlaybackSource] {

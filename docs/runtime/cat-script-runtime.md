@@ -54,6 +54,8 @@ contract: cat.script.v2
 
 `config` 为 JSON object，`sourceRevision` 选择同 installation 的完整上传；网络下载使用 `import`。`sourceType` 只允许 `local`、`network`；本地 `sourceUrl` 为 `null`，网络为 HTTP(S) URL 字符串。旧的 `install` 调用可以继续省略新增元数据。新安装缺省名称为 installationId、类型为 local、URL 为 null、config 为 `{}`、version 为 `0.0.0`。
 
+Cat 工厂启动参数提供当前网站／账户协议的默认命名空间：`baidu/quark/uc/y115/pan123ziyuan/bili/wuming/ali/tgsou/tgchannel/muou/leijing/wogg/livetovod` 为对象，`baidu.cookie` 为空字符串；`sites.list/pans.list/color` 为空数组，`server.url/server.authorization` 为空字符串。显式安装 `config` 的同名字段优先并原样传入，不识别旧配置或猜测远端配置地址。默认对象每次启动独立创建，不复制 pan owner 的账号或 Cookie；这样普通动作中延迟初始化的账户插件不会因命名空间缺失而崩溃。
+
 失败包装为 `{ok:false,contract:"cat.script.v2",code}`，不附带 instance 或失败快照；成功或失败后均可用 `status` 获取权威状态。
 
 新安装缺省 `enabled=true`，取代原来 install 缺省停用的行为；需要只保存源码的旧调用方应显式传 `enabled:false`。同 ID 的 `install/import` 是明确重新导入，保留安装身份、原始 importedAt 和私有卷；省略 enabled 时保留原启用意图，显式 `enabled:false` 则成功后保持停用。省略的 config/version/name 等安装属性保留原值；`import` 明确提交 network 类型、给定名称与 URL。重新导入失败不提交候选名称、来源、URL、配置或启用意图。普通 `update` 不接受这些元数据，不改变安装身份、来源类型或 enabled。
@@ -235,6 +237,10 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 成功但没有正文的响应（例如 void `init` 或未提供搜索结果）返回 JSON `null`，不伪造列表；非 JSON 的文本响应保留为字符串，声明 JSON 却返回非空无效 JSON 仍报错。已声明路由返回的 404 属于脚本 HTTP 响应，不冒充宿主缺少 API。Fastify、direct spider 的错误及 HTTP JSON 的明确错误字段按所属请求输出脱敏诊断，只保留固定分类与受限错误码，不输出原异常文本；HTTP 状态、脚本错误与真实网络证据分别保留。
 
 百度、夸克、UC、天翼和移动的开关只控制已识别分享流程的捕获。别名映射辅助识别线路，不单独证明已接管。开关关闭、接口未知、身份不足或不能准确归属时执行脚本原网络路径；不在运行器内实现 provider 登录、列表、转存或直链解析。
+
+播放条目包含本次调用捕获的唯一内部分享标记时，输出规整按该分享的准确 provider／身份生成 `meow.pan.v1` 资源，不以线路名称作为前置条件，也不改写原 `vod_play_from`。标记可直接出现，或在 URI 解码后的单层 Base64 内容中出现；歧义、对应 provider 关闭或脚本自有 `_meow` 冲突时不接管。没有标记的条目仍按现有线路别名与直接分享解析，不能仅因捕获过一个分享就替换普通文件。真实目录、文件和取址由 pan owner 请求，线路标签不作为站点或网盘身份。
+
+已识别的夸克／UC 列表响应同时提供顶层 `metadata._total` 和 `data.metadata._total`，二者均为当前单个委托根的数量 `1`，与 CatPawRunner 的列表响应契约一致。它不是分享内真实文件总数；后续真实目录仍由 pan owner 请求。token 响应、未知分享与未启用拦截的原网络路径不受影响。
 
 ## 管理同步与生命周期
 

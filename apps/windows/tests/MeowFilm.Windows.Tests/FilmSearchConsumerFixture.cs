@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -15,6 +16,7 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
     private readonly Dictionary<Guid, (JsonElement Value, Channel<JsonElement> Events)> sessions = [];
     private readonly Dictionary<Guid, (JsonElement Value, Channel<JsonElement> Events)> searches = [];
     internal Func<Guid, JsonElement, JsonElement>? SearchOpen;
+    internal Func<Guid, JsonElement, JsonElement>? PlaybackOpen;
     internal Func<JsonElement, JsonElement, JsonElement>? SearchCommand;
     internal Func<JsonElement, JsonElement>? SearchHandoff;
     internal Guid LastSearchId { get; private set; }
@@ -46,7 +48,8 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
             LastSessionId = id;
             var metadata = FilmJson.Member(input, "metadata");
             if (metadata.ValueKind == JsonValueKind.Undefined) metadata = FilmJson.Encode((object)null!);
-            var value = FilmPlaybackFixture.Snapshot(id, 0, FilmJson.Target(input.GetProperty("target")), metadata);
+            var value = PlaybackOpen?.Invoke(id, input) ??
+                FilmPlaybackFixture.Snapshot(id, 0, FilmJson.Target(input.GetProperty("target")), metadata);
             sessions.Add(id, (value, Channel.CreateUnbounded<JsonElement>()));
             return Success(value);
         }
@@ -61,11 +64,14 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
         if (method == "film.session.command" && FilmJson.Text(input, "action") == "search.update")
         {
             // This is an explicit presentation receipt, not a simulation of Node association or playback.
-            var value = FilmPlaybackFixture.Snapshot(sessionId, session.Value.GetProperty("sequence").GetInt64() + 1,
-                FilmJson.Target(session.Value.GetProperty("target")), FilmJson.Member(session.Value, "metadata"));
+            var root = JsonNode.Parse(session.Value.GetRawText())!.AsObject();
+            root["sequence"] = session.Value.GetProperty("sequence").GetInt64() + 1;
+            var value = JsonSerializer.SerializeToElement(root);
             sessions[sessionId] = (value, session.Events);
             return Success(value);
         }
+        if (method == "film.session.command" && FilmJson.Text(input, "action") == "search.more")
+            return Success(session.Value);
         throw new InvalidOperationException("Unexpected consumer call: " + method);
     }
     public async IAsyncEnumerable<JsonElement> EventsAsync(string module, Guid sessionId, long after = 0,
@@ -81,10 +87,12 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
         else
             await foreach (var value in sessions[sessionId].Events.Reader.ReadAllAsync(cancellationToken)) yield return value;
     }
-    internal void Publish(Guid sessionId, FilmPlaybackTarget target, JsonElement metadata)
+    internal void Publish(Guid sessionId, FilmPlaybackTarget target, JsonElement metadata,
+        FilmPlaybackTarget? entryTarget = null, string? entrySurface = null, string? entryResolution = null)
     {
         var session = sessions[sessionId];
-        var value = FilmPlaybackFixture.Snapshot(sessionId, session.Value.GetProperty("sequence").GetInt64() + 1, target, metadata);
+        var value = FilmPlaybackFixture.Snapshot(sessionId, session.Value.GetProperty("sequence").GetInt64() + 1, target, metadata,
+            entryTarget: entryTarget, entrySurface: entrySurface, entryResolution: entryResolution);
         sessions[sessionId] = (value, session.Events);
         session.Events.Writer.TryWrite(value);
     }

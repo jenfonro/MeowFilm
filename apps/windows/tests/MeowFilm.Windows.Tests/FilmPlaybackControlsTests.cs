@@ -413,7 +413,8 @@ public static class FilmPlaybackControlsTests
                 return JsonSerializer.SerializeToElement(row);
             }
             var a = Movie("movie-a"); var b = Movie("movie-b");
-            var rows = FilmJson.Encode(new[] { a, b, Movie("movie-unknown", ""), Movie("movie-hdr", "4k_hdr") });
+            // Product Node snapshots supply the already ordered movie candidates.
+            var rows = FilmJson.Encode(new[] { Movie("movie-hdr", "4k_hdr"), a, b, Movie("movie-unknown", "") });
             void Choices() => scene.Rig.Runtime.Change(root => root["candidates"] = JsonNode.Parse(rows.GetRawText()));
             scene.Rig.Runtime.Target = scene.Rig.Runtime.Target with
             { Id = "tmdb:movie:100", Kind = "movie", Season = null, Episode = null, GlobalEpisode = null };
@@ -426,11 +427,11 @@ public static class FilmPlaybackControlsTests
             void Current(string expected, string phase)
             {
                 scene.View.UpdateLayout();
-                var buttons = Visuals(choices).OfType<Button>().ToArray();
+                var buttons = Visuals(choices).OfType<Button>().Where(button => button.Tag is FilmCandidateItem).ToArray();
                 Check(buttons.Select(button => ((FilmCandidateItem)button.Tag).Id)
                     .SequenceEqual(new[] { "movie-hdr", "movie-a", "movie-b", "movie-unknown" }) &&
-                    buttons.All(button => Math.Abs(button.ActualWidth - 176) < .5),
-                    "all accepted-state updates retain global quality order and the 176-pixel button width");
+                    buttons.All(button => Math.Abs(button.ActualWidth - 190) < .5),
+                    "all accepted-state updates retain Node quality order and the poster candidate width");
                 Check(scene.Rig.Page.Candidates.Single(value => value.Id == "movie-a").DisplayLabel == "1080P · 契约来源" &&
                     scene.Rig.Page.Candidates.Single(value => value.Id == "movie-b").DisplayLabel == "1080P · 契约来源 (2)" &&
                     scene.Rig.Page.Candidates.Single(value => value.IsSelected).Id == expected,
@@ -516,9 +517,9 @@ public static class FilmPlaybackControlsTests
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 scene.View.UpdateLayout();
                 var choices = scene.Element<ItemsControl>("MovieCandidates");
-                var button = Visuals(choices).OfType<Button>().Single();
+                var button = Visuals(choices).OfType<Button>().Single(candidate => candidate.Tag is FilmCandidateItem);
                 var label = Visuals(button).OfType<TextBlock>().Single(value => value.Text.Contains(longName, StringComparison.Ordinal));
-                Check(Math.Abs(button.ActualWidth - 176) < .5 && choices.ActualWidth <= scene.View.ActualWidth &&
+                Check(Math.Abs(button.ActualWidth - 190) < .5 && choices.ActualWidth <= scene.View.ActualWidth &&
                     label.TextWrapping == TextWrapping.NoWrap && label.TextTrimming == TextTrimming.CharacterEllipsis,
                     "wide and narrow movie rows constrain the real long label instead of expanding the content region");
             }

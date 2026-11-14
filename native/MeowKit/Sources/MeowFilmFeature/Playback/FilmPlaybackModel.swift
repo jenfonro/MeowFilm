@@ -35,6 +35,7 @@ public final class FilmPlaybackModel: ObservableObject {
     private var searchScope: [FilmPlaybackSource] = []
     private var searchRevision = -1
     private var reentryTarget: FilmPlaybackTarget?
+    private var reentryError: String?
     private let media: any FilmPlaybackMediaControlling
     private var allocatedSessionID: UUID?
     private var openingTask: Task<Void, Never>?
@@ -154,7 +155,7 @@ public final class FilmPlaybackModel: ObservableObject {
                 } else {
                     base = try await self.makeRequest()
                 }
-                let request = self.reentryTarget.map { base.retargeted($0) } ?? base
+                let request = self.reentryTarget.map { base.retargeted($0, errorCode: self.reentryError) } ?? base
                 guard !self.closed, self.generation == generation else { return }
                 self.searchScope = request.sources
                 // Once admitted, an open is drained rather than cancelled: its
@@ -303,6 +304,7 @@ public final class FilmPlaybackModel: ObservableObject {
         if let current = snapshot, value.sequence <= current.sequence { return }
         snapshot = value
         reentryTarget = value.target
+        reentryError = value.error
         if reconcileMedia { reconcilePreparation() }
     }
 

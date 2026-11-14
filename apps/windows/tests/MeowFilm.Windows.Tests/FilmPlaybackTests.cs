@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Text.Json.Nodes;
 using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
@@ -25,6 +26,8 @@ public static class FilmPlaybackTests
             () => MusicQualityConsumerTests.Sta(ResponsivePlayer));
         yield return new("film-playback: recommendations and navigation restore exact identity and coordinates without old presentation state",
             () => MusicQualityConsumerTests.Sta(NavigationRecovery));
+        yield return new("film-playback: a captured recommendation opens its exact identity after the displayed recommendation list changes",
+            () => MusicQualityConsumerTests.Sta(StaleRecommendation));
         yield return new("film-playback: flat tiles mark one current episode and keep system outlines in high contrast",
             () => MusicQualityConsumerTests.Sta(FlatTiles));
         yield return new("film-playback: hover or focus lifts episode cards rows and recommendations around a centered play mark",
@@ -266,10 +269,10 @@ public static class FilmPlaybackTests
         module.NavigationRequested += (_, request) => routes.Add(request.Route);
         bool rejected = false;
         try { await module.OpenRecommendationAsync(new("outside-recommendations", "其他影片", "", "")); }
-        catch (ArgumentException) { rejected = true; }
+        catch (FilmPlaybackException error) when (error.Code == "CAPABILITY_UNAVAILABLE") { rejected = true; }
         Check(rejected && routes.Count == 0 && ReferenceEquals(scene.Page, restored) &&
             module.CaptureNavigationLocation() == location,
-            "a recommendation outside the actual response cannot navigate or change state");
+            "a card without the required structured playback payload cannot navigate or change state");
         var recommendation = restored.Recommendations.First();
         Click(Visuals(Named<ItemsControl>(scene.Playback, "RelatedItems")).OfType<Button>()
             .Single(button => ReferenceEquals(button.Tag, recommendation)));
@@ -287,6 +290,26 @@ public static class FilmPlaybackTests
         CheckSelection(scene, chosen);
         Check(scene.Source.Calls == calls + 4,
             "only the actual home restoration revalidates its four sections; playback navigation does not reload the catalog");
+    }
+
+    private static async Task StaleRecommendation()
+    {
+        await using var scene = new Scene();
+        await scene.OpenAsync(); await Drain();
+        var captured = scene.Page.Recommendations[0];
+        var request = captured.PlaybackContext!;
+        int homeCalls = scene.Source.Calls;
+        scene.Runtime.Change(root => root["metadata"]!["similar"]!["results"] = new JsonArray());
+        await FilmPlaybackFixture.Until(() => scene.Page.Recommendations.Count == 0);
+        await scene.Module.OpenRecommendationAsync(captured); await Drain();
+        var opened = scene.Runtime.Calls.Last(call => call.Method == "film.session.open").Parameters;
+        Check(scene.Page.Item.Id == captured.Id && scene.Page.Request.Target == request.Target &&
+            FilmJson.Text(opened.GetProperty("target"), "id") == request.Target.Id &&
+            FilmJson.Text(opened.GetProperty("target"), "metadataProvider") == request.Target.MetadataProvider &&
+            FilmJson.Text(opened.GetProperty("target"), "metadataId") == request.Target.MetadataId &&
+            scene.Source.Calls == homeCalls &&
+            !scene.Runtime.Calls.Any(call => call.Method.StartsWith("film.data.", StringComparison.Ordinal)),
+            "a click carries the original structured identity without checking or reloading an old recommendation snapshot");
     }
 
     private static async Task FlatTiles()

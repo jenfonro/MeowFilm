@@ -18,6 +18,6 @@ internal static class FilmSearchPlayback
             { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } value ? value.Clone() : null;
         return new(target, FilmJson.Array(handoff, "sources"), FilmJson.RequiredText(handoff, "query"),
             Optional("results"), Optional("search"), Optional("metadata"), Optional("cacheEntries"),
-            Optional("resultHints"), reference.Clone()) { DataOwner = owner };
+            Optional("resultHints"), reference.Clone(), EntrySurface: "search") { DataOwner = owner };
     }
 }

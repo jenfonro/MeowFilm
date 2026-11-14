@@ -24,6 +24,137 @@ public static class FilmPlaybackContractTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("raw episode with only Node global number displays centrally and selects by candidate identity alone", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            rig.Runtime.Change(root => root["browsing"] = Node(FilmJson.Encode(new
+            {
+                sourceId = "exact-global-episode-source", loading = false, error = (string?)null,
+                lines = Array.Empty<object>(),
+                episodes = new[] { new { globalEpisode = 37, candidateId = "opaque-global-episode", name = "原始文件名 1080P" } },
+                originalEpisodes = Array.Empty<object>()
+            })));
+            await Until(() => rig.Page.Episodes.Count == 1);
+            var episode = rig.Page.Episodes[0];
+            Check(episode.Number is null && episode.GlobalEpisode == 37 && !episode.HasEpisodeTitle &&
+                episode.EpisodeNumberLabel == "第37集" && episode.Label == "第37集" &&
+                episode.OriginalName == "原始文件名 1080P",
+                "the Node global number is display-only, remains centered without a real metadata title, and does not replace the source filename or local coordinate");
+            await rig.Page.SelectEpisodeAsync(episode);
+            var sent = rig.Runtime.Calls.Last(call => call.Method == "film.session.command" &&
+                FilmJson.Text(call.Parameters, "action") == "select.candidate").Parameters;
+            Check(FilmJson.Text(sent, "action") == "select.candidate" &&
+                FilmJson.Text(sent, "candidateId") == "opaque-global-episode" &&
+                !sent.TryGetProperty("season", out _) && !sent.TryGetProperty("episode", out _) &&
+                !sent.TryGetProperty("globalEpisode", out _),
+                "selecting a global-only source episode sends its opaque candidate identity without inventing local coordinates");
+        });
+        yield return Test("site and unknown pan labels keep separate identities and typed line selectors", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            rig.Runtime.Change(root =>
+            {
+                root["sources"] = Node(FilmJson.Encode(new[]
+                {
+                    new { id = "exact-site-result", title = "影片名不是站点名",
+                        source = new { name = "真实站点", key = "cat:fixture:site:1", detailId = 0 } }
+                }));
+                root["browsing"] = Node(FilmJson.Encode(new
+                {
+                    sourceId = "exact-site-result", lineId = 0, loading = false,
+                    lines = new object[]
+                    {
+                        new { id = (object)0, label = "原线路", provider = "quark_tv" },
+                        new { id = (object)"0", label = "未知网盘原标签", provider = "custom-provider" }
+                    }, episodes = Array.Empty<object>()
+                }));
+            });
+            await Until(() => rig.Page.Lines.Count == 2);
+            Check(rig.Page.SelectedSource?.Label == "真实站点" &&
+                rig.Page.SelectedLine is { Label: "夸克", Provider: "quark_tv" } &&
+                rig.Page.Lines[1] is { Label: "未知网盘原标签", Provider: "custom-provider" } &&
+                rig.Page.PlayerPanOptions.All(option => option.Value != "custom-provider"),
+                "station names never become pan labels and an unknown line retains its own provider and label");
+            await rig.Page.BrowseLineAsync(rig.Page.Lines[1]);
+            var command = rig.Runtime.Calls.Last(row => FilmJson.Text(row.Parameters, "action") == "browse").Parameters;
+            Check(FilmJson.Text(command, "sourceId") == "exact-site-result" &&
+                command.GetProperty("lineId").ValueKind == JsonValueKind.String &&
+                command.GetProperty("lineId").GetString() == "0",
+                "unknown pan browsing still sends the exact typed line of the selected site");
+        });
+        yield return Test("metadata raw episode views share real still season and cover fallbacks and movies keep Node candidate order", () =>
+        {
+            foreach (bool raw in new[] { false, true })
+                foreach (string kind in new[] { "tv", "source", "group" })
+                {
+                    var card = Card();
+                    var request = card.PlaybackContext!;
+                    var target = kind == "tv" ? request.Target with { Season = 1, Episode = 1 } :
+                        kind == "source" ? new FilmPlaybackTarget("site:raw", "source", "原始站点",
+                            Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0 })) :
+                        new FilmPlaybackTarget("group:raw", "group", "聚合影片",
+                            Members: FilmJson.Encode(new[] { new { sourceKey = "cat:fixture:site:1", detailId = 0 } }));
+                    var metadata = FilmJson.Encode(new
+                    {
+                        title = target.Title, poster_path = "content-poster", overview = "内容简介",
+                        seasons = new object[]
+                        {
+                            new { season_number = 1, name = "原始第一季", poster_path = "season-poster",
+                                episodes = new object[]
+                                {
+                                    new { season_number = 1, episode_number = 1, name = "真实集名", still_path = "episode-still", overview = "真实集简介" },
+                                    new { season_number = 1, episode_number = 2, name = "" }
+                                } },
+                            new { season_number = 2, name = "原始第二季", episodes = Array.Empty<object>() }
+                        }
+                    });
+                    var rows = FilmJson.Encode(new object[]
+                    {
+                        new { season = 1, episode = 1, candidateId = "one", name = raw ? "实际文件名" : "真实集名",
+                            still_path = raw ? "" : "episode-still", overview = "真实集简介" },
+                        new { season = 1, episode = 2, candidateId = "two", name = "" },
+                        new { season = 2, episode = 1, candidateId = "three", name = "" },
+                        new { season = 2, episode = 2, candidateId = "four", name = "", still_path = "raw-still" }
+                    });
+                    var page = new FilmPlaybackPage(card, request with { Target = target }, null, null);
+                    void Apply(JsonElement detail)
+                    {
+                        var state = Node(Snapshot(Guid.NewGuid(), 1, target, detail,
+                            browsing: FilmJson.Encode(new { sourceId = raw ? "site" : null, lineId = 0, season = 1, loading = false,
+                                lines = Array.Empty<object>(), episodes = rows }), candidates: FilmJson.Encode(new[]
+                            { Candidate("one"), Candidate("two"), Candidate("three"), Candidate("four") })));
+                        state["episodes"] = Node(rows);
+                        page.Apply(new(FilmJson.Encode(state)));
+                    }
+                    Apply(metadata);
+                    Check(page.HasSeasons && page.Seasons.Select(row => row.Label).SequenceEqual(new[] { "原始第一季", "原始第二季" }) &&
+                        page.Episodes.Select(row => row.Image).SequenceEqual(new[] { "episode-still", "season-poster", "content-poster", "raw-still" }) &&
+                        page.Episodes[0].HasEpisodeTitle && page.Episodes[0].Label == "第1集 · 真实集名" &&
+                        !page.Episodes[1].HasEpisodeTitle && page.Episodes[1].Label == "第2集",
+                        "both episode layouts retain actual metadata and the same fallback priority for metadata and source files");
+                    page.SetListLayout(true);
+                    Check(page.ShowEpisodeList && !page.ShowEpisodeCards && page.Episodes[0].Overview == "真实集简介",
+                        "layout selection changes presentation without discarding image or synopsis");
+                    var single = JsonNode.Parse(metadata.GetRawText())!.AsObject();
+                    single["seasons"] = new JsonArray(JsonNode.Parse(metadata.GetProperty("seasons")[0].GetRawText()));
+                    Apply(FilmJson.Encode(single));
+                    Check(!page.HasSeasons && page.Seasons.Single().Label == "原始第一季",
+                        "a single season keeps its real name in the model and hides the redundant season chooser");
+                }
+            var movie = Card("movie");
+            var moviePage = new FilmPlaybackPage(movie, movie.PlaybackContext!, null, null);
+            var movieCandidates = FilmJson.Encode(new[] { Candidate("first", episode: null, quality: "720p"),
+                Candidate("second", episode: null, quality: "4k_hdr") });
+            moviePage.Apply(new(Snapshot(Guid.NewGuid(), 1, movie.PlaybackContext!.Target,
+                movie.PlaybackContext.Metadata!.Value, candidates: movieCandidates)));
+            Check(moviePage.Candidates.Select(row => row.Id).SequenceEqual(new[] { "first", "second" }) &&
+                moviePage.Candidates.All(row => row.Image == moviePage.Poster && row.Overview == moviePage.Overview) &&
+                moviePage.ShowMovieCandidates && !moviePage.HasSeasons,
+                "movie cards use their content poster and synopsis while preserving the Node-supplied order");
+            return Task.CompletedTask;
+        });
         yield return Test("media receipts preserve loopback private intranet and external Node URLs without an origin access policy while retaining data validation", () =>
         {
             string[] addresses =
@@ -164,8 +295,14 @@ public static class FilmPlaybackContractTests
             {
                 root["target"] = Node(FilmJson.Encode(douban.Wire()));
                 root["metadata"] = Node(FilmJson.Encode(new { title = "当前豆瓣资料", rating = new { value = 8.3 } }));
+                root["metadataSources"] = Node(FilmJson.Encode(new[]
+                {
+                    new { id = "tmdb:100", provider = "tmdb", metadataId = "100", kind = "tv", title = "关联样例" },
+                    new { id = "douban:200", provider = "douban", metadataId = "200", kind = "tv", title = "关联样例" }
+                }));
                 root["metadataSourceId"] = "douban:200";
                 root["browsing"] = Node(FilmJson.Encode(new { sourceId = (string?)null, lines = Array.Empty<object>(), episodes = Array.Empty<object>() }));
+                root["episodes"] = new JsonArray();
             });
             await Until(() => rig.Page.ScoreProvider == "豆瓣");
             Check(rig.Page.ActiveTarget.MetadataProvider == "douban" && !rig.Page.HasImageEpisodes && rig.Page.Poster == "" &&
@@ -226,7 +363,8 @@ public static class FilmPlaybackContractTests
                 return JsonSerializer.SerializeToElement(row);
             }
             var a = Movie("a"); var b = Movie("b");
-            var candidates = FilmJson.Encode(new[] { a, b, Movie("unknown", ""), Movie("hdr", "4k_hdr") });
+            // Movie order is the Node snapshot's quality order, not a native sorting policy.
+            var candidates = FilmJson.Encode(new[] { Movie("hdr", "4k_hdr"), a, b, Movie("unknown", "") });
             var sessionId = Guid.NewGuid(); long sequence = 0;
             void Apply(string? current, bool pending)
             {

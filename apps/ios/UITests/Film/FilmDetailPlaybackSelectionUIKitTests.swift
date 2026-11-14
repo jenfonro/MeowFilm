@@ -221,7 +221,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             invoke(try menuAction("第二季", button("film.detail.season", page.view).menu))
             await model.waitForPendingWork()
             try await waitFor("Season two is displayed without selecting an episode") {
-                (self.find("film.detail.season", page.view) as? UIButton)?.title(for: .normal) == "TMDB · 第二季"
+                (self.find("film.detail.season", page.view) as? UIButton)?.title(for: .normal) == "第二季"
             }
 
             let browsed = try XCTUnwrap(model.snapshot)
@@ -288,6 +288,20 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             defer { unmount(page, window) }
             var presentations = 0
             page.onPresentPlayback = { presentations += 1 }
+            if unavailable == .sourceError {
+                try await waitFor("The expected source error is presented on the real active page") {
+                    UIApplication.shared.applicationState == .active &&
+                        page.view.window?.windowScene?.activationState == .foregroundActive &&
+                        page.view.window?.isKeyWindow == true && page.isPageVisible
+                }
+                let alert = try await presentedAlert(page, title: "错误")
+                XCTAssertEqual(alert.message, FilmPlaybackError(code: "STALE_SOURCE").localizedDescription)
+                XCTAssertEqual(alert.actions.map(\.title), ["确定", "重试"])
+                try await runnerAction { $0.alerts.buttons["确定"].tap() }
+                try await waitFor("The acknowledged source error is dismissed on the active page") {
+                    page.presentedViewController == nil && page.canPresentPageAlert
+                }
+            }
             try await visible(page)
             await model.waitForPendingWork()
 
@@ -525,6 +539,14 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
                 page.view.window?.windowScene?.activationState == .foregroundActive &&
                 page.view.window?.isKeyWindow == true && page.isPageVisible && page.canPresentPageAlert
         }
+    }
+    private func presentedAlert(_ page: PageViewController, title: String) async throws -> UIAlertController {
+        try await waitFor("New \(title) presentation") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.title == title && alert.viewIfLoaded?.window != nil &&
+                !alert.isBeingPresented && !alert.isBeingDismissed
+        }
+        return try XCTUnwrap(page.presentedViewController as? UIAlertController)
     }
     private enum FixtureFailure: Error { case prerequisite(String) }
     private func waitFor(_ description: String, file: StaticString = #filePath, line: UInt = #line,

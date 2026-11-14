@@ -58,6 +58,7 @@ enum FilmUIKitPlaybackFixture {
         var fields: RuntimeObject = [
             "sessionId": .string(sessionID.uuidString.lowercased()), "sequence": .number(Double(sequence)),
             "target": target(kind: kind, provider: provider), "stage": .string(attemptID == nil ? "idle" : "pending"),
+            "entryTarget": target(kind: kind, provider: provider), "entryResolution": .null,
             "error": .null, "metadata": .object(["name": .string("星海航线"),
                 "seasons": .array([.object(["id": .number(1), "season_number": .number(1), "name": .string("第一季")]),
                                    .object(["id": .number(2), "season_number": .number(2), "name": .string("第二季")])])]),

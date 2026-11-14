@@ -21,7 +21,7 @@ import { ScriptHost } from '../src/host.js';
 import { CatSession } from '../src/cat-session.js';
 import { syncCatManagement } from '../src/cat-management.js';
 import { cleanHopByHop } from '../src/cat-runtime.js';
-import { normalizeCatOutput } from '../src/cat-output.js';
+import { decodePanResource, normalizeCatOutput } from '../src/cat-output.js';
 import { fault } from '../src/errors.js';
 import { NodeCapabilities } from '../src/node-capabilities.js';
 import { PrivateVolume } from '../src/private-volume.js';
@@ -170,7 +170,7 @@ async function route(request, response) {
       name: 'Fixture ' + options.id,
       api: 'http://127.0.0.1:' + requestedPort + '/api/' + options.id,
       actions: ['home', 'search', 'detail', 'play', 'probe', 'scopedFile', 'cachedNative',
-        'timerBurst', 'parallel', 'pipeLifecycle', 'slow', 'pan', 'panOpaque', 'guestMeow',
+        'timerBurst', 'parallel', 'pipeLifecycle', 'slow', 'pan', 'panOpaque', 'panLists', 'guestMeow',
         'externalPlay'],
     }] } });
     return;
@@ -455,7 +455,9 @@ async function route(request, response) {
         os: {
           platform: os.platform(), arch: os.arch(), hostname: os.hostname(),
           homedir: os.homedir(), tmpdir: os.tmpdir(), cpus: os.cpus().length,
-          loopback: interfaces.lo?.[0]?.address, totalmem: os.totalmem(),
+          loopback: Object.values(interfaces).flat()
+            .find(item => item.family === 'IPv4' && item.internal)?.address,
+          totalmem: os.totalmem(),
           freemem: os.freemem(),
         },
         process: {
@@ -558,6 +560,21 @@ async function route(request, response) {
     const upstream = await external('https://pan.quark.cn/1/clouddrive/share/sharepage/token',
       { pwd_id: 'x', passcode: '' });
     json(response, { upstream: JSON.parse(upstream.body) });
+    return;
+  }
+  if (action === 'panLists') {
+    const host = input.provider === 'uc' ? 'pc-api.uc.cn' : 'drive.quark.cn';
+    const endpoint = 'https://' + host + '/1/clouddrive/share/sharepage/';
+    if (input.capture !== false) {
+      await external(endpoint + 'token', { pwd_id: 'abcd1234', passcode: 'synthetic-share-password' });
+    }
+    if (input.secondShare) {
+      await external(endpoint + 'token', { pwd_id: 'efgh5678', passcode: 'synthetic-second-password' });
+    }
+    const upstream = await external(endpoint + 'detail' + (input.query || ''), input.body || {});
+    const value = JSON.parse(upstream.body);
+    json(response, { upstream: value, upstreamShape: upstream.shape,
+      ...(input.inspectMetadata ? { listTotal: value.metadata._total } : {}) });
     return;
   }
   if (action === 'guestMeow') {
@@ -664,6 +681,71 @@ function delayedSource(name, delay) {
     module.exports.stop = () => server?.close();
   `;
 }
+
+test('Cat factory account namespaces support lazy actions and preserve explicit config per installation',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    const source = `
+      const http = require('http');
+      let server, config;
+      module.exports.start = value => {
+        config = value;
+        return new Promise(resolve => {
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json');
+            if (request.url === '/config' || request.url === '/full-config') {
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'default', name: 'Factory config', api: '/api/default',
+                actions: ['home', 'detail']
+              }] } }));
+              return;
+            }
+            const cookie = config.quark.cookie;
+            response.end(JSON.stringify({
+              cookie: cookie ?? null, baidu: config.baidu, server: config.server,
+              namespaces: Object.keys(config).sort(), sites: config.sites, pans: config.pans,
+              color: config.color, custom: config.custom ?? null
+            }));
+            if (request.url.endsWith('/detail')) config.quark.cookie = 'installation-local';
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+        });
+      };
+      module.exports.stop = () => server?.close();
+    `;
+    const configured = {
+      quark: { cookie: 'synthetic-explicit-cookie' },
+      baidu: { cookie: 'synthetic-baidu-cookie' },
+      server: { url: 'https://configured.invalid', authorization: 'synthetic-auth' },
+      custom: { value: 7 },
+    };
+    for (const installationId of ['factory-empty', 'factory-configured', 'factory-independent']) {
+      assert.equal((await runtime.install({ installationId, source,
+        ...(installationId === 'factory-configured' ? { config: configured } : {}) })).state, 'ready');
+    }
+    const invoke = (installationId, operation = 'home') => runtime.invoke({
+      installationId, siteId: 'default', operation, payload: {},
+    });
+    const empty = await invoke('factory-empty', 'detail');
+    assert.equal(empty.cookie, null);
+    assert.deepEqual(empty.baidu, { cookie: '' });
+    assert.deepEqual(empty.server, { url: '', authorization: '' });
+    assert.deepEqual(empty.sites, { list: [] });
+    assert.deepEqual(empty.pans, { list: [] });
+    assert.deepEqual(empty.color, []);
+    assert.deepEqual(empty.namespaces, ['sites', 'pans', 'color', 'baidu', 'quark', 'uc',
+      'y115', 'pan123ziyuan', 'bili', 'wuming', 'ali', 'tgsou', 'tgchannel', 'muou',
+      'leijing', 'wogg', 'livetovod', 'server'].sort());
+    assert.equal((await invoke('factory-empty')).cookie, 'installation-local');
+    assert.equal((await invoke('factory-independent')).cookie, null);
+    const explicit = await invoke('factory-configured');
+    assert.equal(explicit.cookie, configured.quark.cookie);
+    assert.deepEqual(explicit.baidu, configured.baidu);
+    assert.deepEqual(explicit.server, configured.server);
+    assert.deepEqual(explicit.custom, configured.custom);
+    assert.deepEqual(configured.quark, { cookie: 'synthetic-explicit-cookie' });
+  });
 
 function gatedSource(name, url) {
   return delayedSource(name, 0) + `
@@ -3906,6 +3988,85 @@ test('Cat provider interception is settings-controlled, emits one Cat root and f
     assert.equal(stillApplied._meow, undefined);
     writeSettings(status.settingsPath, value => ({ ...value, port: 0 }));
     await runtime.refresh();
+  });
+
+test('Cat provider list identity distinguishes missing, invalid and unknown shares after capture',
+  { timeout: 30000 }, async t => {
+    const calls = [];
+    const runtime = await installed(t, rootFor(t), {
+      network: async input => {
+        calls.push({ url: input.url, method: input.options.method,
+          body: Buffer.from(input.options.body).toString() });
+        return { statusCode: 200, headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ originalNetwork: true }) };
+      },
+    });
+    const status = await runtime.status();
+    writeSettings(status.settingsPath, value => ({
+      ...value, providers: { ...value.providers, quark: true, uc: true },
+    }));
+    await runtime.refresh();
+    for (const provider of ['quark', 'uc']) {
+      const invoke = async payload => {
+        const output = await runtime.invoke({
+          installationId: 'fixture-a', siteId: 'site-a', operation: 'panLists',
+          payload: { provider, ...payload },
+        });
+        await waitFor(() => runtime.host.get('fixture-a').resources.networkRequests === 0,
+          'provider list interception or fallback retained a native request');
+        return output;
+      };
+      const captures = output => (output._meow?.captures ?? []).map(item => decodePanResource(item.id));
+      for (const body of [
+        { pwd_id: '' }, { pwd_id: 'x' }, { pwd_id: 'root' }, { pwd_id: 'unknown-share' },
+        { pwd_id: null }, { pwd_id: false }, { pwd_id: true }, { pwd_id: ['abcd1234'] },
+        { pwd_id: { id: 'abcd1234' } }, { params: { pwd_id: null } },
+        { pwd_id: null, surl: 'abcd1234' },
+      ]) {
+        const before = calls.length;
+        const result = await invoke({ body });
+        assert.deepEqual(result.upstream, { originalNetwork: true });
+        assert.equal(calls.length, before + 1);
+        assert.equal(calls.at(-1).method, 'POST');
+        assert.equal(calls.at(-1).body, JSON.stringify(body));
+        assert.equal(new URL(calls.at(-1).url).pathname, '/1/clouddrive/share/sharepage/detail');
+        assert.deepEqual(captures(result).map(item => [item.provider, item.shareId, item.password]),
+          [[provider, 'abcd1234', 'synthetic-share-password']]);
+      }
+      for (const query of ['?pwd_id=', '?pwd_id=x', '?pwd_id=unknown-share']) {
+        const before = calls.length;
+        const result = await invoke({ query });
+        assert.deepEqual(result.upstream, { originalNetwork: true });
+        assert.equal(calls.length, before + 1);
+        assert.equal(new URL(calls.at(-1).url).search, query);
+      }
+      const before = calls.length;
+      for (const body of [
+        { pwd_id: 'abcd1234' }, {}, { pwd_id: 'abcd1234', passcode: '' }, { passcode: '' },
+        { pwd_id: 'abcd1234', passcode: 'synthetic-new-password' }, { passcode: 'synthetic-new-password' },
+      ]) {
+        const result = await invoke({ body, inspectMetadata: true });
+        assert.equal(result.upstream.code, 0);
+        assert.match(result.upstream.data.list[0].fid, /^meow_/);
+        assert.equal(result.listTotal, 1);
+        assert.deepEqual(result.upstream.metadata, { _total: 1 });
+        assert.deepEqual(result.upstream.data.metadata, result.upstream.metadata);
+        assert.equal(calls.length, before);
+        assert.deepEqual(captures(result).map(item => [item.provider, item.shareId, item.password]),
+          [[provider, 'abcd1234', body.passcode ?? 'synthetic-share-password']]);
+        assert.deepEqual(result.upstreamShape, {
+          rawHeaders: true, trailers: true, rawTrailers: true,
+          httpVersion: '1.1', major: 1, minor: 1, complete: true,
+        });
+      }
+      for (const payload of [{ capture: false }, { secondShare: true }]) {
+        const before = calls.length;
+        const result = await invoke(payload);
+        assert.deepEqual(result.upstream, { originalNetwork: true });
+        assert.equal(calls.length, before + 1);
+        assert.equal(captures(result).length, payload.secondShare ? 2 : 0);
+      }
+    }
   });
 
 test('Cat old and new management protocols persist synchronized credentials without repeat synchronization',

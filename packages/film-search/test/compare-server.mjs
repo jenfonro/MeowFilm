@@ -84,7 +84,7 @@ const program = vm.createContext({});
 vm.runInContext(readFileSync(new URL('../film-search.js', import.meta.url), 'utf8'), program);
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const invoke = (input) => clone(program.meowfilmProcess(clone(input)));
-const counters = { sites: 0, tmdb: 0, fallback: 0, detail: 0, display: 0, aggregateOutput: 0 };
+const counters = { sites: 0, tmdb: 0, fallback: 0, detail: 0, display: 0, aggregateOutput: 0, ambiguousOutput: 0 };
 const configFor = (rules = []) => ({
   searchDisplayMode: 'both',
   catpawrunnerApiBase: 'https://reference.invalid',
@@ -252,8 +252,12 @@ const displayCases = [
   },
   {
     name: 'movie and TV retain type identity when sharing a group',
+    ambiguousTitle: true,
     query: '星河', rules: [],
-    pages: [{ list: [{ id: 'a', name: '星河', remark: '更新至2集' }] }, { list: [] }],
+    pages: [
+      { list: [{ id: 'a', name: '星河', remark: '更新至2集' }] },
+      { list: [{ id: 'b', name: '星河', remark: '更新至3集' }] },
+    ],
     tmdb: [{ id: 11, media_type: 'tv', name: '星河' }, { id: 12, media_type: 'movie', title: '星河' }],
   },
 ];
@@ -275,7 +279,13 @@ for (const fixture of displayCases) {
         siteItems: clone(siteItems), tmdbItems: clone(tmdbItems),
         pinTmdbFirst: tmdbItems.some((item) => item.score >= 1000), displayMode: 'both',
       };
-      const expected = clone(reference.buildDisplayedResults(state, config, { rawListMode }));
+      const originalExpected = clone(reference.buildDisplayedResults(state, config, { rawListMode }));
+      // Same-title movie/TV candidates cannot identify the site's actual work.
+      // Keep the reference's site-only display instead of its arbitrary TMDB binding.
+      const expected = fixture.ambiguousTitle ? [
+        ...originalExpected.filter((item) => item.sourceKind === 'tmdb'),
+        ...clone(reference.buildDisplayedResults({ ...state, tmdbItems: [] }, config, { rawListMode })),
+      ] : originalExpected;
       const actual = invoke({
         operation: 'display', query: fixture.query, aggregateRules: fixture.rules,
         siteItems, tmdbItems, siteOrder: sources.map((source) => source.siteKey),
@@ -304,7 +314,7 @@ for (const fixture of displayCases) {
       const groups = reference.buildSiteDisplayGroups(clone(siteItems), { tmdbByGroup: byGroup, displayMode: 'both', context: config });
       reference.applyTMDBAggregateIntoCards(byGroup, groups);
       for (const item of actual.items.filter((candidate) => candidate.sourceKind === 'tmdb')) {
-        const enhanced = referenceTMDB.find((candidate) => candidate.id === item.id);
+        const enhanced = (fixture.ambiguousTitle ? tmdbItems : referenceTMDB).find((candidate) => candidate.id === item.id);
         const { displayKey, ...withoutDisplayKey } = item;
         assert.deepEqual(withoutDisplayKey, clone(enhanced), `${fixture.name}: returned TMDB sources and badge; raw=${rawListMode}`);
         if (item.aggregateItems?.length) {
@@ -314,9 +324,11 @@ for (const fixture of displayCases) {
           counters.aggregateOutput++;
         }
       }
+      if (fixture.ambiguousTitle) counters.ambiguousOutput++;
     }
   }
 }
 console.log(`PASS exact reference display/representative/order/raw unaffected-field cases=${counters.display}`);
 console.log(`PASS documented TMDB output correction cases=${counters.aggregateOutput}: returned cards include reference aggregate function results on the first call in either mode; cached inputs stay unchanged`);
+console.log(`PASS documented ambiguous-title correction cases=${counters.ambiguousOutput}: movie/TV identities remain separate, sites use the reference's independent site-only display`);
 console.log(`PASS source=${revision}; all fixed inputs compared against original searchRuntime.js/tmdbRaw.js/normalize.js`);

@@ -12,7 +12,6 @@ const quarkConfig = {
   id: 'quark', host: 'pan.quark.cn', api: 'https://drive.quark.cn/1/clouddrive/',
   query: { pr: 'ucpro', fr: 'pc' }, referer: 'https://pan.quark.cn/', ua: driveUA('quark'),
   sso: 'https://uop.quark.cn', clientId: '532', qrURL: 'https://su.quark.cn/4_eMHBJ',
-  loginHosts: new Set(['pan.quark.cn', 'drive.quark.cn', 'drive-h.quark.cn', 'uop.quark.cn', 'su.quark.cn']),
   tv: {
     id: 'quark_tv', api: 'https://open-api-drive.quark.cn/file',
     token: 'http://api.extscreen.com/quarkdrive/token',
@@ -24,7 +23,6 @@ const ucConfig = {
   id: 'uc', host: 'drive.uc.cn', api: 'https://pc-api.uc.cn/1/clouddrive/',
   query: { pr: 'UCBrowser', fr: 'pc' }, referer: 'https://drive.uc.cn', ua: driveUA('uc'),
   sso: 'https://api.open.uc.cn', clientId: '381', qrURL: 'https://su.uc.cn/1_n0ZCv',
-  loginHosts: new Set(['drive.uc.cn', 'api.open.uc.cn', 'pc-api.uc.cn', 'su.uc.cn']),
   tv: {
     id: 'uc_tv', api: 'https://open-api-drive.uc.cn/file',
     token: 'http://api.extscreen.com/ucdrive/token',
@@ -200,6 +198,31 @@ function itemToken(item) {
     || stringField(item.fidToken) || stringField(item.token);
 }
 
+function videoMetadata(item) {
+  const source = record(item.video_meta) ? { ...item, ...item.video_meta } : item;
+  const number = value => typeof value === 'number' || typeof value === 'string' && value.trim()
+    ? Number(value) : NaN;
+  const width = number(source.video_width ?? source.width ?? source.vwidth);
+  const height = number(source.video_height ?? source.height ?? source.vheight);
+  const dimensions = Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0;
+  const rawFPS = source.fps ?? source.frameRate ?? source.frame_rate;
+  const rational = /^(\d+)\/(\d+)$/.exec(String(rawFPS));
+  const fps = rational ? Number(rational[1]) / Number(rational[2]) : number(rawFPS);
+  const codec = source.video_codec ?? source.codec;
+  const short = dimensions ? Math.min(width, height) : 0;
+  const resolution = dimensions ? `${width}x${height}`
+    : typeof source.resolution === 'string' && source.resolution.trim() ? source.resolution.trim() : undefined;
+  const quality = typeof source.quality === 'string' && source.quality.trim() || (short >= 4320 ? '8K'
+    : short >= 2160 ? '4K' : short >= 1440 ? '2K' : short >= 1080 ? '1080P' : short >= 720 ? '720P' : '');
+  return {
+    ...(record(item.video_meta) ? { video_meta: structuredClone(item.video_meta) } : {}),
+    ...(quality ? { quality } : {}),
+    ...(resolution === undefined ? {} : { resolution }),
+    ...(Number.isFinite(fps) && fps > 0 && fps < 1000 ? { fps } : {}),
+    ...(typeof codec === 'string' && codec.trim() ? { codec: codec.trim() } : {}),
+  };
+}
+
 function totalCount(value) {
   if (value === undefined || value === null) return undefined;
   const raw = stringField(value);
@@ -275,7 +298,7 @@ async function list(config, { share: input }, ctx) {
           kind: 'share', shareId: share.id, shareUrl: share.url, password: share.password,
           stoken: token, fileId: id, fileToken, name, path,
         };
-        const entry = { name, path, file };
+        const entry = { name, path, file, ...videoMetadata(item) };
         if (item.size !== undefined && item.size !== null) {
           const rawSize = stringField(item.size);
           requireValue(/^\d+$/.test(rawSize), 'UPSTREAM_FORMAT');
@@ -528,20 +551,16 @@ async function tvPlay(config, { file, mode }, ctx) {
   return { url: result.url, headers: {}, mode, file };
 }
 
-function loginURL(config, url, base) {
+function loginURL(url, base) {
   let parsed;
   try { parsed = new URL(url, base); } catch { throw new PanError('UPSTREAM_FORMAT'); }
-  requireValue(parsed.protocol === 'https:' && config.loginHosts.has(parsed.hostname)
-    && !parsed.username && !parsed.password && !parsed.port, 'UPSTREAM_FORMAT');
+  requireValue(['http:', 'https:'].includes(parsed.protocol)
+    && !parsed.username && !parsed.password, 'UPSTREAM_FORMAT');
   return parsed;
 }
 
-function combineCookies(...cookies) {
-  return cookies.reduce((result, cookie) => mergeCookie(result, cookie ? cookie.split(/;\s*/) : []), '');
-}
-
 async function qrRequest(config, session, ctx, input, options = {}) {
-  let url = loginURL(config, input);
+  let url = loginURL(input);
   let method = options.method || 'GET';
   let json = options.json;
   const visited = new Set();
@@ -551,7 +570,7 @@ async function qrRequest(config, session, ctx, input, options = {}) {
     const key = `${method} ${url.href}`;
     requireValue(!visited.has(key), 'UPSTREAM_FORMAT');
     visited.add(key);
-    const cookie = combineCookies(session.jar.header(url.href), url.href === input ? options.cookie : '');
+    const cookie = session.jar.header(url.href);
     const response = await requestText(ctx, url.href, {
       method, json, redirect: 'manual', timeout: Math.min(30_000, session.expiresAt - ctx.now()),
       headers: {
@@ -564,7 +583,7 @@ async function qrRequest(config, session, ctx, input, options = {}) {
     session.jar.set(url.href, response.headers['set-cookie'] || []);
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       requireValue(typeof response.headers.location === 'string' && response.headers.location, 'UPSTREAM_FORMAT');
-      const next = loginURL(config, response.headers.location, url);
+      const next = loginURL(response.headers.location, url);
       if (response.status === 303 || ([301, 302].includes(response.status) && method === 'POST')) {
         method = 'GET';
         json = undefined;
@@ -614,7 +633,7 @@ async function loginStart(config, ctx) {
     session.token = firstText(response, ['token']);
     requireValue(session.token, 'UPSTREAM_FORMAT');
     let challengeURL = config.id === 'quark' ? firstText(response, ['qrcode_url', 'qrcodeurl', 'qr_url', 'qrurl']) : '';
-    if (challengeURL) challengeURL = loginURL(config, challengeURL).href;
+    if (challengeURL) challengeURL = loginURL(challengeURL).href;
     else {
       const url = new URL(config.qrURL);
       url.searchParams.set('token', session.token);
@@ -639,7 +658,7 @@ async function loginStart(config, ctx) {
 async function quarkLoginCookie(config, session, ctx, ticket, redirect) {
   const query = `st=${encodeURIComponent(ticket)}&fr=pc&platform=pc`;
   const candidates = [
-    ...(redirect ? [loginURL(config, redirect).href] : []),
+    ...(redirect ? [loginURL(redirect).href] : []),
     `https://drive.quark.cn/account/info?${query}`, `https://pan.quark.cn/account/info?${query}`,
     `https://drive-h.quark.cn/account/info?${query}`,
     `https://drive.quark.cn/?st=${encodeURIComponent(ticket)}`, `https://pan.quark.cn/?st=${encodeURIComponent(ticket)}`,
@@ -655,7 +674,7 @@ async function quarkLoginCookie(config, session, ctx, ticket, redirect) {
       { origin: 'https://pan.quark.cn' })));
     if (validation) {
       if (stringField(validation.code) === '0') {
-        const cookie = combineCookies(session.jar.header('https://pan.quark.cn/'), session.jar.header('https://drive.quark.cn/'));
+        const cookie = session.jar.header(config.api);
         requireValue(cookie, 'AUTH_FAILED');
         return cookie;
       }
@@ -665,13 +684,11 @@ async function quarkLoginCookie(config, session, ctx, ticket, redirect) {
 }
 
 async function ucLoginCookie(config, session, ctx, ticket) {
-  const openCookie = session.jar.header(`${config.sso}/`);
   await optionalLogin(() => qrRequest(config, session, ctx,
-    `https://drive.uc.cn/account/info?st=${encodeURIComponent(ticket)}&fr=pc&platform=pc`, { cookie: openCookie }));
-  const combined = combineCookies(openCookie, session.jar.header('https://drive.uc.cn/'));
+    `https://drive.uc.cn/account/info?st=${encodeURIComponent(ticket)}&fr=pc&platform=pc`));
   await optionalLogin(() => qrRequest(config, session, ctx, apiURL(config, 'transfer/upload/pdir'),
-    { method: 'POST', json: {}, cookie: combined }));
-  const cookie = combineCookies(openCookie, session.jar.header('https://drive.uc.cn/'), session.jar.header('https://pc-api.uc.cn/'));
+    { method: 'POST', json: {} }));
+  const cookie = session.jar.header(config.api);
   requireValue(cookie && /(?:^|;\s*)(?:__)?pu{1,2}s=/i.test(cookie), 'AUTH_FAILED');
   return cookie;
 }

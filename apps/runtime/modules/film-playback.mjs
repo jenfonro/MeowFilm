@@ -59,8 +59,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
       const handoff = search.handoff({ ...reference, sources: input.sources });
       // The Node-owned selection, not a displayed title or client cache seed,
       // supplies the initial target, provenance and fixed recognition rules.
-      return service.open({ ...input, ...handoff,
-        ...(input.resumeTarget ? { target: input.resumeTarget, metadata: null } : {}) },
+      return service.open({ ...input, ...handoff },
         { ruleSnapshot: search.ruleSnapshot(reference), searchHandoff: handoff });
     },
     'session.command': input => {

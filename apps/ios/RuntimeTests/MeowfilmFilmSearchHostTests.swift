@@ -139,6 +139,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         try await waitFor { group.snapshot?.stage == "idle" && !group.opening }
         XCTAssertNil(group.actionError); XCTAssertNil(group.observationError)
         XCTAssertTrue(assembly.filmPlayback === group)
+        XCTAssertEqual(group.snapshot?.entrySurface, "search")
         XCTAssertEqual(group.snapshot?.target.kind, .group)
         XCTAssertEqual(group.snapshot?.target.value["members"]?.filmArray?.count, 2)
         XCTAssertEqual(detail?.searchContext?.snapshot.query, "真实原查询")
@@ -192,6 +193,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         try await waitFor { rawModel.snapshot?.stage == "idle" && !rawModel.opening }
         XCTAssertNil(rawModel.actionError)
         XCTAssertEqual(rawModel.snapshot?.target.kind, .source)
+        XCTAssertEqual(rawModel.snapshot?.entrySurface, "search")
         XCTAssertEqual(rawModel.snapshot?.target.value["source"]?.filmObject?["detailId"], .number(0))
         XCTAssertEqual(rawModel.snapshot?.sources.count, 1, "Raw navigation cannot admit the same-title other IDs")
         let result = try XCTUnwrap(rawModel.snapshot?.sources.first)
@@ -461,9 +463,18 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
     private func dismissKnownMusicNotice(_ root: MeowfilmRootContainerViewController) async throws {
         guard let alert = root.presentedViewController as? UIAlertController else { return }
         // A dedicated simulator can retain an unrelated music Keychain-policy
-        // error. Close only that observed notice; never reset data or retry it.
+        // or document error. Close only that observed notice; never reset data,
+        // retry it, or dismiss a film/application failure.
+        let knownContentRead = [MusicServiceError.storagePolicyMismatch, .corruptDocument,
+                                .targetChanged, .staleResult, .staleRevision,
+                                .revisionConflict, .storageConflict].contains {
+                let prefix = $0.message(operation: "音乐内容读取")
+                let pattern = "^" + NSRegularExpression.escapedPattern(for: prefix) +
+                    "(?:（诊断 [A-Fa-f0-9]{8}）)?$"
+                return alert.message?.range(of: pattern, options: .regularExpression) != nil
+            }
         let known = alert.title == "错误" && alert.actions.map(\.title) == ["取消", "重试"] &&
-            alert.message?.contains(MusicServiceError.storagePolicyMismatch.localizedDescription) == true
+            alert.actions.map(\.style) == [.cancel, .default] && knownContentRead
         XCTAssertTrue(known, "Unexpected notification must not be silently dismissed")
         guard known else { throw HostFailure.unexpectedNotice }
         try await waitFor { !alert.isBeingPresented && alert.transitionCoordinator == nil }

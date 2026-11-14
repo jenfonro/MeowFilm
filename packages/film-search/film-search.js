@@ -10,20 +10,13 @@ const normalizeTMDBInt = (value) => {
   return Number.isFinite(num) ? Math.trunc(num) : 0;
 };
 
-const normalizePositiveInteger = (value) => (
-  typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 0
-);
-
 const normalizeTMDBMediaType = (value) => {
   const raw = normalizeString(value).toLowerCase();
   if (raw === 'movie' || raw === 'tv') return raw;
   return '';
 };
 
-const normalizeTMDBID = (value) => {
-  const id = normalizePositiveInteger(value);
-  return id > 0 ? id : 0;
-};
+const normalizeTMDBID = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
 
 const getTMDBSearchResults = (payload) => (
   payload && Array.isArray(payload.results) ? payload.results : []
@@ -320,11 +313,27 @@ const resolveDisplayedSiteGroupKey = (item, tmdbByGroup, displayMode) => {
 };
 
 const buildTMDBGroupMap = (tmdbItems) => {
-  const map = new Map();
+  const candidatesByGroup = new Map();
+  const identitiesByTitle = new Map();
   (Array.isArray(tmdbItems) ? tmdbItems : []).forEach((item) => {
     const groupKey = normalizeString(item && item.groupKey);
     if (!groupKey) return;
-    map.set(groupKey, item);
+    const identity = `${item.tmdbType}:${item.tmdbId}`;
+    const candidates = candidatesByGroup.get(groupKey) || new Map();
+    candidates.set(identity, item);
+    candidatesByGroup.set(groupKey, candidates);
+    const titleKey = normalizeForGroupKey(item.title);
+    const identities = identitiesByTitle.get(titleKey) || new Set();
+    identities.add(identity);
+    identitiesByTitle.set(titleKey, identities);
+  });
+  const map = new Map();
+  candidatesByGroup.forEach((candidates, groupKey) => {
+    // A title alone cannot select among distinct TMDB movie/TV identities.
+    if (candidates.size !== 1) return;
+    const item = candidates.values().next().value;
+    // Movie and TV titles can be identical even when their alias rules differ.
+    if (identitiesByTitle.get(normalizeForGroupKey(item.title)).size === 1) map.set(groupKey, item);
   });
   return map;
 };

@@ -280,22 +280,29 @@ test('disabled iOS auto preparation and raw source entry do not secretly take me
 });
 
 for (const platform of ['ios', 'windows']) {
-  test(`${platform} can prepare the real Douban first episode while optional metadata association fails`, async t => {
+  test(`${platform} resolves a Douban seed to TMDB before preparing the first episode while optional association fails`, async t => {
     const calls = [], result = value => ({ ok: true, value });
     const target = { id: 'douban:tv:51', kind: 'tv', title: 'Series',
       metadataProvider: 'douban', metadataId: '51' };
     const modules = new Map([
       ['douban', { methods: {
         'douban.data.settings.get': async () => result({ revision: 'douban-a', cookie: 'fixture=cookie' }),
-        'douban.data.request': async () => {
-          calls.push('primary');
-          return result({ id: '51', title: 'Series 第1季', episodes_count: 2, intro: '', genres: [] });
-        },
+        'douban.data.request': async () => { assert.fail('a Douban seed is not an independent metadata playback target'); },
         'douban.data.search': async () => { calls.push('association'); return { ok: false, code: 'UPSTREAM_HTTP' }; },
       } }],
       ['tmdb', { methods: {
         'tmdb.data.settings.get': async () => result({ revision: 'tmdb-a', apiKey: 'fixture-key' }),
-        'tmdb.data.request': async () => { throw error('NOT_CONFIGURED'); },
+        'tmdb.data.request': async ({ path, query }) => {
+          calls.push(path);
+          if (path === '/3/search/multi') {
+            assert.equal(query.page, 1);
+            return result({ results: [{ id: 19, name: 'Series', media_type: 'tv', first_air_date: '2020-01-01' }] });
+          }
+          if (path === '/3/tv/19') return result({ ...tmdbAppended, ...structuredClone(metadata),
+            name: 'Series', genres: [] });
+          assert.equal(path, '/3/tv/19/season/1');
+          return result(structuredClone(metadata.seasons[0]));
+        },
       } }],
       ['cat', { authorizeMedia: async () => false, methods: {
         'cat.script.status': async () => result({ instances: [{ installationId: 'install-a', generation: 1,
@@ -322,10 +329,485 @@ for (const platform of ['ios', 'windows']) {
     assert.equal(f.snapshot(sessionId).error, null);
     assert.equal(f.snapshot(sessionId).current, null);
     assert.deepEqual(f.library.read().history, []);
-    assert.equal(calls.filter(value => value === 'primary').length, 1);
+    assert.equal(f.snapshot(sessionId).entryTarget.metadataProvider, 'douban');
+    assert.equal(f.snapshot(sessionId).target.metadataProvider, 'tmdb');
+    assert.equal(f.snapshot(sessionId).entryResolution, 'matched');
+    assert.deepEqual(calls.filter(value => value.startsWith('/3/')),
+      ['/3/search/multi', '/3/tv/19', '/3/tv/19/season/1']);
     assert.deepEqual(calls.filter(value => ['search', 'detail', 'play'].includes(value)), ['search', 'detail', 'play']);
   });
 }
+
+test('Douban seed settles to a TMDB target or a successful empty aggregate before site search is enabled', async t => {
+  const resolution = deferred(), f = fixture({ data: {
+    async tmdbTargetEntry(target, options) {
+      f.calls.push(['tmdbTargetEntry', target, options.metadata]);
+      return resolution.promise;
+    },
+  } });
+  t.after(() => f.service.close());
+  const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Film', year: 2024,
+    metadataProvider: 'douban', metadataId: '51' };
+  const opened = await f.open({ target: seed, metadata: { id: '51', title: 'Film', year: '2024' },
+    sources: [source('a')], results: [{ sourceKey: 'a', items: [{ id: 'old', title: 'must not be trusted' }] }] });
+  assert.equal(opened.entryResolution, 'loading');
+  assert.deepEqual(opened.entryTarget, seed);
+  assert.equal(f.calls.some(row => row[0] === 'search'), false);
+  await assert.rejects(f.command(opened.sessionId, 'search.more'), { code: 'INVALID_REQUEST' });
+
+  resolution.resolve(null);
+  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched');
+  const unmatched = f.snapshot(opened.sessionId);
+  assert.equal(unmatched.target.kind, 'group');
+  assert.deepEqual(unmatched.target.members, []);
+  assert.equal(unmatched.stage, 'idle');
+  assert.equal(unmatched.error, null);
+  assert.deepEqual(unmatched.sources, []);
+  assert.equal(unmatched.search[0].page, 0);
+  assert.equal(f.calls.some(row => row[0] === 'search'), false);
+
+  await f.command(opened.sessionId, 'search.more');
+  await until(() => f.calls.some(row => row[0] === 'search'));
+  assert.deepEqual(f.calls.filter(row => row[0] === 'search').map(row => row.slice(1)),
+    [['a', 'Film', 1]]);
+});
+
+test('public open rejects every supplied empty group while a Douban seed may create its own empty wait state', async t => {
+  const f = fixture({ data: { async tmdbTargetEntry() { return null; } } });
+  t.after(() => f.service.close());
+  const empty = { id: 'group:empty', kind: 'group', title: 'Film', members: [] };
+  await assert.rejects(f.open({ target: empty }), { code: 'SOURCE_NOT_FOUND' });
+  await assert.rejects(f.open({ target: movie, resumeTarget: empty }), { code: 'SOURCE_NOT_FOUND' });
+  for (const resumeTarget of [movie,
+    { id: 'source:a:0', kind: 'source', title: 'Film', source: { key: 'a', detailId: 0 } },
+    { ...empty, members: [{ sourceKey: 'a', detailId: 0 }] }]) {
+    await assert.rejects(f.open({ target: empty, resumeTarget }), { code: 'SOURCE_NOT_FOUND' });
+  }
+  const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51' };
+  await assert.rejects(f.open({ target: seed, resumeTarget: { ...empty, id: `group:${seed.id}` } }),
+    { code: 'SOURCE_NOT_FOUND' });
+  const opened = await f.open({ target: seed });
+  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched');
+  assert.deepEqual(f.snapshot(opened.sessionId).target, { ...empty, id: `group:${seed.id}` });
+  assert.equal(f.snapshot(opened.sessionId).stage, 'idle');
+  assert.equal(f.snapshot(opened.sessionId).error, null);
+  assert.deepEqual(f.calls, []);
+});
+
+test('Douban seed request failure remains an error and browse.refresh retries it before explicit site search', async t => {
+  let calls = 0;
+  const f = fixture({ data: {
+    async tmdbTargetEntry() {
+      calls++;
+      if (calls === 1) throw error('UPSTREAM_HTTP');
+      return null;
+    },
+  } });
+  t.after(() => f.service.close());
+  const opened = await f.open({ target: { id: 'douban:movie:51', kind: 'movie', title: 'Film',
+    metadataProvider: 'douban', metadataId: '51' }, sources: [source('a')] });
+  await until(() => f.snapshot(opened.sessionId).entryResolution === 'error');
+  const failed = f.snapshot(opened.sessionId);
+  assert.equal(failed.error, 'UPSTREAM_HTTP');
+  assert.equal(failed.stage, 'error');
+  assert.deepEqual(failed.target.members, []);
+  await assert.rejects(f.command(opened.sessionId, 'search.more'), { code: 'INVALID_REQUEST' });
+  assert.equal(f.calls.some(row => row[0] === 'search'), false);
+
+  await f.command(opened.sessionId, 'browse.refresh');
+  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched');
+  assert.equal(calls, 2);
+  assert.equal(f.snapshot(opened.sessionId).error, null);
+  assert.equal(f.calls.some(row => row[0] === 'search'), false);
+  await f.command(opened.sessionId, 'search.more');
+  await until(() => f.calls.some(row => row[0] === 'search'));
+});
+
+test('Douban seed match replaces playback identity with TMDB metadata and never creates a Douban playback target', async t => {
+  const resolved = { target: { id: 'tmdb:movie:42', kind: 'movie', title: 'Film',
+    metadataProvider: 'tmdb', metadataId: 42, year: 2024 },
+  entry: { value: { id: 42, title: 'Film', genres: [], runtime: 120 }, completeness: 'complete',
+    fetchedAt: 10, expiresAt: Date.parse('2030-01-01'), cache: { status: 'fresh', components: {} } } };
+  let lookups = 0, metadataReads = 0;
+  const f = fixture({ data: {
+    async tmdbTargetEntry() { lookups++; return structuredClone(resolved); },
+    async targetMetadata(target) {
+      metadataReads++; assert.equal(target.metadataId, 42);
+      return { id: 42, title: 'Updated metadata' };
+    },
+  } });
+  t.after(() => f.service.close());
+  const opened = await f.open({ platform: 'test', target: { id: 'douban:movie:51', kind: 'movie',
+    title: 'Film', metadataProvider: 'douban', metadataId: '51' }, metadata: { title: 'Film' } });
+  await until(() => f.snapshot(opened.sessionId).entryResolution === 'matched');
+  const snapshot = f.snapshot(opened.sessionId);
+  assert.equal(snapshot.target.id, 'tmdb:movie:42');
+  assert.equal(snapshot.target.metadataProvider, 'tmdb');
+  assert.equal(snapshot.entryTarget.metadataProvider, 'douban');
+  assert.equal(snapshot.metadata.id, 42);
+  assert.deepEqual(snapshot.metadataSources.map(row => row.provider), ['tmdb']);
+  assert.equal(snapshot.error, null);
+  await f.service.invalidate('tmdb');
+  await until(() => f.snapshot(opened.sessionId).metadata?.title === 'Updated metadata');
+  assert.equal(f.snapshot(opened.sessionId).entryResolution, 'matched');
+  assert.deepEqual(f.snapshot(opened.sessionId).entryTarget, snapshot.entryTarget);
+  assert.deepEqual(f.snapshot(opened.sessionId).target, snapshot.target);
+  assert.equal(lookups, 1, 'matched targets refresh metadata without reopening the Douban lookup');
+  assert.equal(metadataReads, 1);
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+});
+
+test('reopening a Douban seed restores its exact TMDB season and episode without another lookup', async t => {
+  const seed = { id: 'douban:tv:51', kind: 'tv', title: 'Series', metadataProvider: 'douban', metadataId: '51' };
+  const seedMetadata = { id: '51', title: 'Series', year: '2020' }, lookups = [];
+  const value = { ...structuredClone(metadata), seasons: [
+    structuredClone(metadata.seasons[0]), { season_number: 2, episode_count: 3, episodes: [1, 2, 3].map(episode => ({
+      season_number: 2, episode_number: episode, name: `Second season ${episode}`, air_date: '2020-02-01',
+    })) },
+  ] };
+  const f = fixture({ data: {
+    async tmdbTargetEntry(target, options) {
+      lookups.push([structuredClone(target), structuredClone(options.metadata)]);
+      return { target: tv, entry: { value: structuredClone(value), cache: { status: 'fresh', components: {} } } };
+    },
+    async seasonMetadata(_target, season) {
+      f.calls.push(['season', season]); return structuredClone(value.seasons.find(row => row.season_number === season));
+    },
+    async detail(source, id) {
+      f.calls.push(['detail', source.key, id]); return detail(['Series.S01E01', 'Series.S02E03']);
+    },
+  } });
+  t.after(() => f.service.close());
+  const first = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, sources: [source('a')] });
+  assert.equal((await f.pending(first.sessionId)).candidate.episode, 1);
+  await f.command(first.sessionId, 'browse.season', { season: 2 });
+  await until(() => !f.snapshot(first.sessionId).browsing.loading);
+  await f.command(first.sessionId, 'select.episode', { episode: { season: 2, episode: 3 } });
+  const selected = await f.pending(first.sessionId), saved = f.snapshot(first.sessionId);
+  assert.equal(selected.candidate.season, 2);
+  assert.equal(selected.candidate.episode, 3);
+  assert.equal(saved.target.globalEpisode, 5);
+  await f.service.release({ sessionId: first.sessionId });
+  const reentered = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata,
+    resumeTarget: saved.target, sources: [source('a')],
+    results: [{ sourceKey: 'a', items: [{ id: 'detail-a', title: 'Series' }] }],
+    search: [{ sourceKey: 'a', page: 1, completed: true }] });
+  const resumed = await f.pending(reentered.sessionId), current = f.snapshot(reentered.sessionId);
+  assert.deepEqual(current.entryTarget, seed);
+  assert.deepEqual(current.target, saved.target);
+  assert.deepEqual(lookups, [[seed, seedMetadata]]);
+  assert.equal(current.entryResolution, 'matched');
+  assert.equal(resumed.prepareOnly, true);
+  assert.deepEqual([resumed.candidate.season, resumed.candidate.episode, resumed.candidate.globalEpisode], [2, 3, 5]);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'search'), [['search', 'a', 'Series', 1]]);
+});
+
+test('an explicit TMDB resume remains authoritative without looking up the Douban seed again', async t => {
+  const reads = [], resumeTarget = { ...tv, metadataId: 99, id: 'tmdb:tv:99',
+    season: 1, episode: 2, globalEpisode: 2 };
+  const f = fixture({ data: {
+    async tmdbTargetEntry() { assert.fail('an exact TMDB resume must not resolve the seed again'); },
+    async targetMetadataEntry(target) {
+      reads.push(target);
+      return { value: { ...structuredClone(metadata), id: target.metadataId },
+        cache: { status: 'fresh', components: {} } };
+    },
+  } });
+  t.after(() => f.service.close());
+  const seed = { id: 'douban:tv:51', kind: 'tv', title: 'Series', metadataProvider: 'douban', metadataId: '51' };
+  const opened = await f.open({ target: seed, metadata: { id: '51', title: 'seed metadata' }, resumeTarget });
+  assert.equal(opened.metadata, null, 'the resumed TMDB target owns displayed metadata');
+  await until(() => f.snapshot(opened.sessionId).stage === 'idle');
+  assert.deepEqual(f.snapshot(opened.sessionId).target, resumeTarget);
+  assert.equal(f.snapshot(opened.sessionId).entryResolution, 'matched');
+  assert.equal(f.snapshot(opened.sessionId).metadata.id, 99);
+  assert.deepEqual(reads, [resumeTarget]);
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+});
+
+test('reopening an unmatched Douban seed preserves exact typed group members, selected file and discovery hints', async t => {
+  const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51' };
+  const seedMetadata = { id: '51', title: 'Film', poster_path: '/poster.jpg', overview: 'Douban display metadata' };
+  let lookups = 0;
+  const f = fixture({ data: {
+    async tmdbTargetEntry() {
+      lookups++;
+      if (lookups === 1) return null;
+      throw error('UPSTREAM_HTTP');
+    },
+    async targetMetadataEntry(target) {
+      return target.kind === 'group' ? null : { value: await this.targetMetadata(target) };
+    },
+    async search(value, query, page) {
+      f.calls.push(['search', value.key, query, page]);
+      return { page, hasMore: false, items: [{ id: 0, title: 'Film' }, { id: '0', title: 'Film' }] };
+    },
+    async detail(value, id) {
+      f.calls.push(['detail', value.key, id]);
+      return { ...detail(['Film.1080p', 'Film.720p']), detailId: id, raw: { id, title: 'Film' } };
+    },
+  } });
+  t.after(() => f.service.close());
+  const first = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, sources: [source('a')] });
+  await until(() => f.snapshot(first.sessionId).entryResolution === 'unmatched');
+  assert.deepEqual(f.snapshot(first.sessionId).metadata, seedMetadata);
+  await f.command(first.sessionId, 'search.more');
+  await until(() => f.snapshot(first.sessionId).searchComplete);
+  const row = f.snapshot(first.sessionId).sources.find(row => row.source.detailId === '0');
+  await f.command(first.sessionId, 'browse', { sourceId: row.id });
+  await until(() => f.snapshot(first.sessionId).browsing.episodes.length === 2);
+  await f.command(first.sessionId, 'select.candidate',
+    { candidateId: f.snapshot(first.sessionId).browsing.episodes[1].candidateId });
+  const selected = await f.pending(first.sessionId), saved = f.snapshot(first.sessionId);
+  assert.equal(selected.candidate.name, 'Film.720p');
+  assert.deepEqual(saved.target.members, [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'a', detailId: '0' }]);
+  await f.service.release({ sessionId: first.sessionId });
+  const before = structuredClone(f.calls);
+  const reentered = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, resumeTarget: saved.target,
+    sources: [source('a')], resultHints: [{ sourceKey: 'a',
+      items: saved.sources.map(row => ({ id: row.source.detailId, title: row.title })) }],
+    search: [{ sourceKey: 'a', page: 1, completed: true }] });
+  await until(() => f.snapshot(reentered.sessionId).stage === 'idle');
+  const current = f.snapshot(reentered.sessionId);
+  assert.equal(current.entryResolution, 'unmatched');
+  assert.deepEqual(current.entryTarget, seed);
+  assert.deepEqual(current.target, saved.target);
+  assert.deepEqual(current.metadata, seedMetadata);
+  assert.deepEqual(current.sources.map(row => row.source.detailId), [0, '0']);
+  assert.deepEqual(current.search.map(row => [row.page, row.completed]), [[1, true]]);
+  assert.equal(current.attempt, null);
+  assert.equal(current.current, null);
+  assert.deepEqual(f.calls, before, 'reopening and restoring a directory must not search, fetch detail or resolve media');
+  await f.command(reentered.sessionId, 'play');
+  const resumed = await f.pending(reentered.sessionId);
+  assert.equal(resumed.candidate.id, selected.candidate.id);
+  assert.equal(resumed.candidate.source.detailId, '0');
+  assert.deepEqual(f.snapshot(reentered.sessionId).target, saved.target);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'search'), [['search', 'a', 'Film', 1]]);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', '0'], ['detail', 'a', '0']]);
+  assert.equal(lookups, 1, 'the resumed group/file must not wait on a second TMDB seed lookup');
+  assert.equal(f.snapshot(reentered.sessionId).error, null);
+});
+
+test('an exact source resume opens directly even when the unused Douban lookup would fail', async t => {
+  const seed = { id: 'douban:tv:51', kind: 'tv', title: 'Series', metadataProvider: 'douban', metadataId: '51' };
+  const seedMetadata = { id: '51', title: 'Series', poster_path: '/series.jpg' };
+  let lookups = 0;
+  const resumeTarget = { id: 'source:a:detail', kind: 'source', title: 'Series',
+    source: { key: 'a', detailId: 'detail-a' } };
+  const f = fixture({ data: {
+    async tmdbTargetEntry() {
+      lookups++; throw error('UPSTREAM_HTTP');
+    },
+    async targetMetadataEntry(target) {
+      return target.kind === 'source' ? null : { value: await this.targetMetadata(target) };
+    },
+  } });
+  t.after(() => f.service.close());
+  const opened = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, resumeTarget, sources: [source('a')] });
+  await until(() => f.snapshot(opened.sessionId).stage === 'idle');
+  assert.equal(f.snapshot(opened.sessionId).entryResolution, 'unmatched');
+  assert.equal(f.snapshot(opened.sessionId).error, null);
+  assert.deepEqual(f.snapshot(opened.sessionId).target, resumeTarget);
+  assert.deepEqual(f.snapshot(opened.sessionId).metadata, seedMetadata);
+  assert.equal(lookups, 0);
+  await f.command(opened.sessionId, 'play');
+  const attempt = await f.pending(opened.sessionId);
+  assert.equal(attempt.candidate.source.detailId, 'detail-a');
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 'detail-a']]);
+  assert.equal(f.calls.some(row => row[0] === 'search'), false);
+});
+
+test('a resumed group is marked unmatched and cannot restore revoked members on refresh or reentry', async t => {
+  let lookups = 0;
+  const f = fixture({ data: { async tmdbTargetEntry() {
+    lookups++; throw error('UPSTREAM_HTTP');
+  } } });
+  t.after(() => f.service.close());
+  const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51' };
+  const resumed = { id: `group:${seed.id}`, kind: 'group', title: seed.title,
+    members: [{ sourceKey: 'a', detailId: 0 }], source: { key: 'a', detailId: 0, lineId: 'line', candidateId: 'file' } };
+  const { sessionId } = await f.open({ target: seed, resumeTarget: resumed, sources: [source('a')] });
+  await until(() => f.snapshot(sessionId).stage === 'idle');
+  assert.equal(f.snapshot(sessionId).entryResolution, 'unmatched');
+  assert.equal(f.snapshot(sessionId).error, null);
+  assert.equal(lookups, 0);
+  await f.service.invalidate({ kind: 'source', engine: 'cat' }, []);
+  const revoked = f.snapshot(sessionId);
+  await f.command(sessionId, 'browse.refresh');
+  await f.service.invalidate('tmdb');
+  assert.deepEqual(f.snapshot(sessionId), revoked);
+  assert.deepEqual(revoked.target.members, []);
+  assert.equal(revoked.stage, 'unavailable');
+  assert.equal(revoked.error, 'SOURCE_NOT_FOUND');
+  assert.equal(lookups, 0);
+  await assert.rejects(f.open({ target: seed, resumeTarget: resumed, sources: [] }), { code: 'SOURCE_NOT_FOUND' });
+  await assert.rejects(f.open({ target: seed, resumeTarget: revoked.target, sources: [source('a')] }),
+    { code: 'SOURCE_NOT_FOUND' });
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+});
+
+test('a discovered Douban group cannot become a seed wait state after its last member is revoked', async t => {
+  const gate = deferred(), entered = deferred();
+  let lookups = 0;
+  const f = fixture({ data: {
+    async tmdbTargetEntry() {
+      lookups++;
+      return lookups === 1 ? null : { target: movie, entry: {
+        value: { id: 17, title: 'Film' }, cache: { status: 'fresh', components: {} },
+      } };
+    },
+    async search(value, query, page) {
+      f.calls.push(['search', value.key, query, page]);
+      if (value.key === 'b') { entered.resolve(); await gate.promise; }
+      return { page, hasMore: false, items: [{ id: `detail-${value.key}`, title: 'Film' }] };
+    },
+  } });
+  t.after(async () => { gate.resolve(); await f.service.close(); });
+  const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51' };
+  const { sessionId } = await f.open({ target: seed, sources: [source('a'), source('b'), source('c')] });
+  await until(() => f.snapshot(sessionId).entryResolution === 'unmatched');
+  await f.command(sessionId, 'search.more');
+  await entered.promise;
+  assert.deepEqual(f.snapshot(sessionId).target.members, [{ sourceKey: 'a', detailId: 'detail-a' }]);
+
+  await f.service.invalidate({ kind: 'source', engine: 'cat', installationId: 'install-a' }, []);
+  const revoked = f.snapshot(sessionId);
+  assert.equal(revoked.stage, 'unavailable');
+  assert.equal(revoked.error, 'SOURCE_NOT_FOUND');
+  assert.deepEqual(revoked.target.members, []);
+  await f.command(sessionId, 'browse.refresh');
+  await f.service.invalidate('tmdb');
+  await assert.rejects(f.command(sessionId, 'search.more'), { code: 'SOURCE_NOT_FOUND' });
+  await assert.rejects(f.command(sessionId, 'search.update', { selectionId: seed.id, revision: 1,
+    sources: [source('a')], results: [{ sourceKey: 'a', items: [{ id: 'revoked-handoff', title: 'Film' }] }],
+    search: [{ sourceKey: 'a', page: 1, completed: true }] }), { code: 'STALE_SOURCE' });
+  await assert.rejects(f.command(sessionId, 'search.update', { selectionId: seed.id, revision: 1,
+    sources: [source('b')], results: [{ sourceKey: 'b', items: [{ id: 'late-handoff', title: 'Film' }] }],
+    search: [{ sourceKey: 'b', page: 1, completed: true }] }), { code: 'SOURCE_NOT_FOUND' });
+  assert.equal(lookups, 1);
+  assert.deepEqual(f.snapshot(sessionId), revoked);
+
+  gate.resolve();
+  await until(() => !f.snapshot(sessionId).search.find(row => row.sourceKey === 'b').loading);
+  const settled = f.snapshot(sessionId);
+  assert.deepEqual(settled.entryTarget, seed);
+  assert.equal(settled.entryResolution, 'unmatched');
+  assert.equal(settled.stage, 'unavailable');
+  assert.equal(settled.error, 'SOURCE_NOT_FOUND');
+  assert.deepEqual(settled.target.members, []);
+  assert.deepEqual(settled.sources, []);
+  assert.deepEqual(settled.search.find(row => row.sourceKey === 'b'),
+    { sourceKey: 'b', page: 0, completed: false, loading: false, error: null });
+  assert.equal(lookups, 1);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'search'),
+    [['search', 'a', 'Film', 1], ['search', 'b', 'Film', 1]]);
+  assert.equal(f.calls.some(row => ['detail', 'resolve', 'prepare'].includes(row[0])), false);
+});
+
+test('Douban seed no-match browse refresh can resolve TMDB without automatically searching sites', async t => {
+  const reads = [];
+  const f = fixture({ data: { async tmdbTargetEntry(target, options) {
+    reads.push(options.refresh);
+    return reads.length === 1 ? null : { target: movie, entry: {
+      value: { id: 17, title: 'Film' }, cache: { status: 'fresh', components: {} },
+    } };
+  } } });
+  t.after(() => f.service.close());
+  const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51' };
+  const { sessionId } = await f.open({ target: seed });
+  await until(() => f.snapshot(sessionId).entryResolution === 'unmatched');
+  await f.command(sessionId, 'browse.refresh');
+  await until(() => f.snapshot(sessionId).entryResolution === 'matched' && f.snapshot(sessionId).stage === 'idle');
+  assert.deepEqual(reads, [false, true]);
+  assert.deepEqual(f.snapshot(sessionId).target, movie);
+  assert.deepEqual(f.snapshot(sessionId).entryTarget, seed);
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+});
+
+test('Douban seed retries still settle after a failed explicit play has advanced the session generation', async t => {
+  let reads = 0;
+  const f = fixture({ data: { async tmdbTargetEntry() {
+    if (++reads < 3) throw error('UPSTREAM_HTTP');
+    return { target: movie, entry: { value: { id: 17, title: 'Film' },
+      cache: { status: 'fresh', components: {} } } };
+  } } });
+  t.after(() => f.service.close());
+  const { sessionId } = await f.open({ target: {
+    id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51',
+  } });
+  await until(() => f.snapshot(sessionId).entryResolution === 'error');
+  await f.command(sessionId, 'play');
+  await until(() => f.snapshot(sessionId).stage === 'error');
+  await f.command(sessionId, 'browse.refresh');
+  await until(() => f.snapshot(sessionId).entryResolution === 'error' && f.snapshot(sessionId).stage === 'error');
+  assert.equal(reads, 2);
+  assert.equal(f.snapshot(sessionId).error, 'UPSTREAM_HTTP');
+  await f.command(sessionId, 'browse.refresh');
+  await until(() => f.snapshot(sessionId).entryResolution === 'matched' && f.snapshot(sessionId).stage === 'idle');
+  assert.equal(reads, 3);
+  assert.equal(f.snapshot(sessionId).error, null);
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+});
+
+for (const previous of ['loading', 'unmatched', 'error']) {
+  test(`TMDB invalidation recovers a ${previous} Douban seed without accepting retired lookup results`, async t => {
+    const gate = deferred(), entered = deferred(), admissions = [];
+    let lookups = 0;
+    const f = fixture({ data: { async tmdbTargetEntry(_target, options) {
+      admissions.push(options.canSchedule); lookups++;
+      if (lookups === 1) {
+        entered.resolve();
+        if (previous === 'loading') return gate.promise;
+        if (previous === 'error') throw error('UPSTREAM_HTTP');
+        return null;
+      }
+      return { target: movie, entry: { value: { id: 17, title: 'Current metadata' },
+        cache: { status: 'fresh', components: {} } } };
+    } } });
+    t.after(async () => { gate.resolve(null); await f.service.close(); });
+    const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51' };
+    const { sessionId } = await f.open({ target: seed });
+    await entered.promise;
+    if (previous !== 'loading') await until(() => f.snapshot(sessionId).entryResolution === previous);
+    await f.service.invalidate('tmdb');
+    await until(() => f.snapshot(sessionId).entryResolution === 'matched' && f.snapshot(sessionId).stage === 'idle');
+    assert.equal(admissions[0](), false);
+    const current = f.snapshot(sessionId);
+    if (previous === 'loading') {
+      gate.resolve({ target: { ...movie, id: 'tmdb:movie:88', metadataId: 88 }, entry: {
+        value: { id: 88, title: 'Retired metadata' }, cache: { status: 'fresh', components: {} },
+      } });
+      await tick(); await tick();
+      assert.deepEqual(f.snapshot(sessionId), current);
+    }
+    assert.equal(lookups, 2);
+    assert.deepEqual(current.target, movie);
+    assert.deepEqual(current.entryTarget, seed);
+    assert.equal(current.error, null);
+    assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  });
+}
+
+test('TMDB invalidation does not restart or republish a stopped unresolved Douban seed', async t => {
+  const gate = deferred(), entered = deferred();
+  let lookups = 0;
+  const f = fixture({ data: { async tmdbTargetEntry() {
+    lookups++; entered.resolve(); return gate.promise;
+  } } });
+  t.after(async () => { gate.resolve(null); await f.service.close(); });
+  const { sessionId } = await f.open({ platform: 'ios', target: {
+    id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51',
+  } });
+  await entered.promise;
+  await f.command(sessionId, 'stop');
+  const stopped = f.snapshot(sessionId);
+  await f.service.invalidate('tmdb');
+  gate.resolve(null); await tick(); await tick();
+  assert.equal(lookups, 1);
+  assert.deepEqual(f.snapshot(sessionId), stopped);
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+});
 
 test('metadata initialization, seasonal browsing, provider selection and invalidation use the fixed owner rules', async t => {
   const previousRules = await rules.snapshot(), reads = [];
@@ -611,15 +1093,15 @@ test('G02-C01 real data does not merge TMDB season fields into a different Douba
         calls.push(['douban', path]); assert.equal(path, '/rexxar/api/v2/tv/20'); return reply(primary);
       },
       'douban.data.search': async () => {
-        calls.push(['douban', 'search']); return reply({ subjects: { items: [] } });
+        calls.push(['douban', 'search']); return reply({ subjects: { items: [
+          { target_id: '20', target_type: 'tv', target: primary },
+        ] } });
       },
     } }],
     ['tmdb', { methods: {
       'tmdb.data.settings.get': async () => reply({ revision: 'tmdb-current' }),
       'tmdb.data.request': async ({ path }) => {
         calls.push(['tmdb', path]);
-        if (path === '/3/search/tv') return reply({ results: [{ id: 19, name: 'Series', first_air_date: '2020-01-01' }],
-          total_pages: 1 });
         if (path === '/3/tv/19') return reply(series);
         assert.equal(path, '/3/tv/19/season/1'); return reply(season);
       },
@@ -628,8 +1110,7 @@ test('G02-C01 real data does not merge TMDB season fields into a different Douba
   const cache = createPlaybackCache(), data = createPlaybackData({ modules, cache });
   const f = fixture({ data });
   t.after(async () => { await f.service.close(); await data.close(); await cache.close(); });
-  const { sessionId } = (await f.open({ target: { id: 'douban:tv:20', kind: 'tv', title: 'Series',
-    metadataProvider: 'douban', metadataId: '20' }, sources: [] }));
+  const { sessionId } = (await f.open({ target: tv, sources: [] }));
   await until(() => f.snapshot(sessionId).stage === 'idle' && f.snapshot(sessionId).metadataSources.length === 2);
   const first = f.snapshot(sessionId).metadataSources.find(row => row.provider === 'douban');
   const second = f.snapshot(sessionId).metadataSources.find(row => row.provider === 'tmdb');
@@ -647,8 +1128,10 @@ test('G02-C01 real data does not merge TMDB season fields into a different Douba
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSourceId === second.id);
   assert.equal(f.snapshot(sessionId).metadata.id, 19);
   assert.deepEqual(f.snapshot(sessionId).episodes[2], { ...season.episodes[2], season: 1, episode: 3, globalEpisode: 3 });
-  assert.deepEqual(calls, [['douban', '/rexxar/api/v2/tv/20'], ['douban', 'search'], ['tmdb', '/3/search/tv'],
-    ['tmdb', '/3/tv/19'], ['tmdb', '/3/tv/19/season/1']]);
+  assert.deepEqual(calls.filter(([provider]) => provider === 'tmdb'),
+    [['tmdb', '/3/tv/19'], ['tmdb', '/3/tv/19/season/1']]);
+  assert.deepEqual(calls.filter(([provider]) => provider === 'douban'),
+    [['douban', 'search'], ['douban', '/rexxar/api/v2/tv/20']]);
 });
 
 for (const pausedAt of ['metadata', 'season']) {
@@ -1483,18 +1966,20 @@ for (const platform of ['ios', 'windows']) {
   });
 
   for (const reliable of [true, false]) {
-    test(`NCR-01 ${platform} late Douban mapping respects explicit global5 instead of first/history (reliable=${reliable})`, async t => {
+    test(`NCR-01 ${platform} late TMDB mapping respects explicit global5 instead of first/history (reliable=${reliable})`, async t => {
       const gate = deferred();
-      const target = { ...tv, metadataProvider: 'douban', globalEpisode: 5 };
+      const target = { ...tv, globalEpisode: 5 };
+      const seasons = reliable ? [{ season_number: 1, episode_count: 2 }, { season_number: 2, episode_count: 3 }]
+        : [{ season_number: 1, episode_count: 2 }, { season_number: 3, episode_count: 5 }];
       const f = fixture({ data: {
-        async targetMetadata() { return { id: 19, title: 'Series' }; },
-        async metadataSources() { return gate.promise; },
+        async targetMetadata() { return gate.promise; },
+        async seasonMetadata(_target, season) { return seasons.find(row => row.season_number === season); },
         async detail(value, id) {
           f.calls.push(['detail', value.key, id]);
           return detail(['Series.S01E01', 'Series.S02E01', 'Series.S02E03']);
         },
       } });
-      t.after(async () => { gate.resolve([]); await f.service.close(); });
+      t.after(async () => { gate.resolve({ id: 19, name: 'Series', seasons }); await f.service.close(); });
       f.library.update(document => {
         document.history.push({ targetId: tv.id, sourceKey: 'a', detailId: 'current', lineId: 'line',
           episode: reliable ? { season: 2, episode: 3, globalEpisode: 5 } : { season: 3, episode: 1 },
@@ -1503,14 +1988,9 @@ for (const platform of ['ios', 'windows']) {
       const { sessionId } = (await f.open({ platform, target, sources: [source('a')],
         results: [{ sourceKey: 'a', items: [{ id: 'current', title: 'Series' }] }],
         search: [{ sourceKey: 'a', page: 1, completed: true }] }));
-      await until(() => f.snapshot(sessionId).error === 'NO_EPISODE_MAPPING');
       assert.deepEqual(f.snapshot(sessionId).target, target);
       assert.equal(f.calls.some(row => ['detail', 'resolve', 'prepare'].includes(row[0])), false);
-      gate.resolve([{ provider: 'douban', metadataId: 19, kind: 'tv', title: 'Series',
-        metadata: { id: 19, title: 'Series' },
-        seasons: reliable ? [{ season: 1, episodeCount: 2 }, { season: 2, episodeCount: 3 }]
-          : [{ season: 1, episodeCount: 2 }, { season: 3, episodeCount: 5 }] }]);
-      await until(() => f.snapshot(sessionId).metadata?.doubanSeasons);
+      gate.resolve({ id: 19, name: 'Series', status: 'Ended', seasons });
       if (reliable) {
         const attempt = await f.pending(sessionId);
         assert.deepEqual(f.snapshot(sessionId).target, { ...target, season: 2, episode: 3 });
@@ -1520,9 +2000,8 @@ for (const platform of ['ios', 'windows']) {
         assert.equal(attempt.position, platform === 'windows' ? 67 : 0);
         assert.equal(attempt.paused, false);
       } else {
-        await delay(2); await delay(2);
+        await until(() => f.snapshot(sessionId).stage === 'unavailable');
         assert.deepEqual(f.snapshot(sessionId).target, target);
-        assert.equal(f.snapshot(sessionId).stage, 'unavailable');
         assert.equal(f.snapshot(sessionId).error, 'NO_EPISODE_MAPPING');
         assert.equal(f.snapshot(sessionId).attempt, null);
         assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
@@ -1821,6 +2300,31 @@ test('browsing expands an immutable shared detail without modifying its cached d
   assert.equal(immutable.lines[0].episodes[0].name, 'Share');
 });
 
+test('provider resolution, frame rate and codec survive browse projection and play candidate publication', async t => {
+  const file = { kind: 'share', provider: 'quark', accountRevision: 2, shareId: 'share-video',
+    fileId: 'video-1', name: 'Film.mkv', path: '/Film.mkv',
+    resolution: '3840x2160', fps: 59.94, codec: 'HEVC' };
+  const f = fixture({ data: {
+    async detail() { return detail([{ id: 'video-1', name: 'Film.mkv', file }]); },
+  } });
+  t.after(() => f.service.close());
+  const { sessionId } = await f.open({ platform: 'test', target: movie,
+    results: [{ sourceKey: 'a', items: [{ id: 'film', title: 'Film' }] }] });
+  await until(() => f.snapshot(sessionId).stage === 'idle');
+  const result = f.snapshot(sessionId).sources[0];
+  await f.command(sessionId, 'browse', { sourceId: result.id });
+  await until(() => f.snapshot(sessionId).browsing.episodes.some(row => row.candidateId));
+  const episode = f.snapshot(sessionId).browsing.episodes[0];
+  assert.deepEqual([episode.resolution, episode.fps, episode.codec], ['3840x2160', 59.94, 'HEVC']);
+  await f.command(sessionId, 'play');
+  const attempt = await f.pending(sessionId);
+  assert.deepEqual([attempt.candidate.resolution, attempt.candidate.fps, attempt.candidate.codec],
+    ['3840x2160', 59.94, 'HEVC']);
+  assert.deepEqual([f.snapshot(sessionId).candidates[0].resolution,
+    f.snapshot(sessionId).candidates[0].fps, f.snapshot(sessionId).candidates[0].codec],
+  ['3840x2160', 59.94, 'HEVC']);
+});
+
 test('source season selection changes the episode row but the original directory remains complete', async t => {
   const seasons = [1, 2].map(season => ({ season_number: season, episode_count: 1,
     episodes: [{ season_number: season, episode_number: 1, air_date: '2020-01-01' }] }));
@@ -1852,21 +2356,58 @@ test('initial metadata failure cannot be bypassed by a play command queued befor
   assert.equal(f.calls.some(call => call[0] === 'search'), false);
 });
 
-test('stop prevents a late metadata association from restarting automatic iOS preparation', async t => {
-  const gate = deferred();
-  const f = fixture({ data: {
-    async targetMetadata() { return { id: 19 }; },
-    async metadataSources() { return gate.promise; },
-  } }); t.after(() => f.service.close());
-  const target = { ...tv, metadataProvider: 'douban' };
-  const { sessionId } = (await f.open({ platform: 'ios', target }));
-  await until(() => f.snapshot(sessionId).error === 'NO_EPISODE_MAPPING');
-  await f.command(sessionId, 'stop');
-  gate.resolve([{ provider: 'douban', metadataId: 19, kind: 'tv', title: 'Series',
-    metadata: { id: 19 }, seasons: [{ season: 1, episodeCount: 2 }] }]);
-  await delay(2); await delay(2);
-  assert.equal(f.snapshot(sessionId).stage, 'stopped');
-  assert.equal(f.calls.some(call => call[0] === 'search'), false);
+for (const ending of ['stop', 'release']) {
+  test(`${ending} prevents late Douban seed resolution from publishing or scheduling automatic iOS preparation`, async t => {
+    const gate = deferred(), entered = deferred();
+    const f = fixture({ data: { async tmdbTargetEntry() { entered.resolve(); return gate.promise; } } });
+    t.after(async () => { gate.resolve(null); await f.service.close(); });
+    const target = { id: 'douban:tv:51', kind: 'tv', title: 'Series', metadataProvider: 'douban', metadataId: 51 };
+    const { sessionId } = await f.open({ platform: 'ios', target });
+    await entered.promise;
+    if (ending === 'stop') await f.command(sessionId, 'stop');
+    else await f.service.release({ sessionId });
+    const stopped = ending === 'stop' ? f.snapshot(sessionId) : null;
+    gate.resolve({ target: tv, entry: { value: structuredClone(metadata), completeness: 'complete',
+      cache: { status: 'fresh', components: {} } } });
+    await tick(); await tick();
+    if (ending === 'stop') {
+      assert.deepEqual(f.snapshot(sessionId), stopped);
+      assert.equal(f.snapshot(sessionId).stage, 'stopped');
+    } else assert.throws(() => f.snapshot(sessionId), { code: 'NOT_FOUND' });
+    assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  });
+}
+
+test('service close drains an admitted Douban lookup without scheduling or publishing its late match', async t => {
+  const gate = deferred(), entered = deferred();
+  let canSchedule, closed = false;
+  const f = fixture({ data: { async tmdbTargetEntry(_target, options) {
+    canSchedule = options.canSchedule; entered.resolve(); return gate.promise;
+  } } });
+  t.after(async () => { gate.resolve(null); await f.service.close(); });
+  const { sessionId } = await f.open({ platform: 'ios', target: {
+    id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51',
+  } });
+  await entered.promise;
+  assert.equal(canSchedule(), true);
+  const events = f.service.events(sessionId).body, frames = [];
+  const ended = once(events, 'end');
+  events.on('data', chunk => frames.push(chunk.toString()));
+  await tick();
+  const closing = f.service.close().then(() => { closed = true; });
+  await tick();
+  assert.equal(canSchedule(), false);
+  assert.equal(closed, false, 'close must await completion of the already admitted lookup');
+  await ended;
+  const before = [...frames];
+  gate.resolve({ target: movie, entry: { value: { id: 17, title: 'Late metadata' },
+    cache: { status: 'fresh', components: {} } } });
+  await closing;
+  assert.deepEqual(frames, before);
+  assert.equal(closed, true);
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  assert.equal(f.resources.size, 0);
+  assert.throws(() => f.snapshot(sessionId), { code: 'CLOSED' });
 });
 
 test('promoting a warming neighbor cancels only prefetch, keeps its lease and never takes it back after completion', async t => {
@@ -2103,6 +2644,24 @@ test('purification changes do not revoke an explicitly selected source outside s
   assert.equal(f.snapshot(sessionId).current.attemptId, selected.id);
 });
 
+test('a direct source target bypasses smart purification but remains scoped to its source generation', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  const target = { id: 'raw:sports:0', kind: 'source', title: 'Raw programme', source: { key: 'a', detailId: 0 } };
+  const { sessionId } = await f.open({ platform: 'windows', target,
+    sources: [source('a', '体育源'), source('b')] });
+  const current = await f.current(sessionId);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 0]]);
+  assert.equal(f.calls.some(row => row[0] === 'search'), false);
+  assert.equal(current.candidate.source.key, 'a');
+  assert.equal(current.candidate.source.detailId, 0);
+  await f.service.invalidate({ kind: 'source', engine: 'cat', installationId: 'install-a' }, []);
+  assert.equal(f.snapshot(sessionId).current, null);
+  assert.equal(f.snapshot(sessionId).attempt, null);
+  assert.equal(f.snapshot(sessionId).error, 'STALE_SOURCE');
+  assert.equal(f.resources.size, 0);
+  assert.equal(f.calls.filter(row => row[0] === 'resolve').length, 1);
+});
+
 for (const update of ['settings', 'rename']) {
   test(`removing purification by ${update} reopens discovery before relaxing a fixed-pan quality gate`, async t => {
     const f = fixture({ data: { async detail(value) {
@@ -2170,6 +2729,232 @@ function runtimeDataFixture(invoke, metadataRequest = () => ({ ...tmdbAppended, 
   const cache = createPlaybackCache({ now }), data = createPlaybackData({ modules, cache, now });
   return { data, calls, metadataCalls, async close() { await data.close(); await cache.close(); } };
 }
+
+const hlsVariants = () => [
+  { url: 'https://manifest.invalid/show/high/index.m3u8?part=1', quality: '4K', resolution: '3840x2160', fps: 59.94 },
+  { url: 'https://manifest.invalid/low.m3u8', quality: '1080P', resolution: '1920x1080', fps: 25 },
+];
+const hlsDescriptor = (variants = hlsVariants()) => ({ url: 'https://manifest.invalid/show/master.m3u8',
+  headers: { 'X-Playback': 'synthetic' }, format: 'hls', drm: { scheme: 'clearkey' },
+  _meow: { version: 1, media: [{ variants }] } });
+const hlsTarget = { id: 'raw:hls', kind: 'source', title: '原始正片',
+  source: { key: 'a', detailId: 'hls', lineId: 'original', playId: 'master' } };
+const hlsDetail = () => ({ id: 'hls', lines: [{ id: 'original', label: '原始线路', episodes: [
+  { id: 'master', name: '正片' }, { id: 'other-file', name: '另一文件.4K' },
+] }] });
+
+test('M3 first quality discovers only the selected HLS parent, then opaque selection and failures stay within its variants', async t => {
+  const switching = deferred(), switchGate = deferred();
+  let holdHigh = false;
+  const owner = runtimeDataFixture(({ operation, payload }) => {
+    if (operation === 'detail') return hlsDetail();
+    assert.equal(operation, 'play');
+    assert.equal(payload.id, 'master', 'no unrelated file is probed or used as an unnumbered alternative');
+    return hlsDescriptor();
+  });
+  const f = fixture({ data: { ...owner.data, async resolve(candidate, options) {
+    if (holdHigh && candidate.variant?.quality === '4K') { switching.resolve(); await switchGate.promise; }
+    return owner.data.resolve(candidate, options);
+  } } });
+  t.after(async () => { switchGate.resolve(); await f.service.close(); await owner.close(); });
+  const { sessionId } = await f.open({ target: hlsTarget });
+  await until(() => f.snapshot(sessionId).stage === 'idle');
+  assert.deepEqual(owner.calls, []);
+  await f.command(sessionId, 'quality', { quality: '1080p' });
+  const low = await f.pending(sessionId);
+  const candidates = f.snapshot(sessionId).candidates.filter(row => row.name === '正片');
+  assert.deepEqual(candidates.map(row => row.quality).sort(), ['1080p', '4k_fps']);
+  assert.equal(new Set(candidates.map(row => row.id)).size, 2);
+  assert.equal(low.candidate.quality, '1080p');
+  assert.equal(low.candidate.episode, undefined);
+  assert.equal(low.candidate.season, undefined);
+  const high = candidates.find(row => row.quality === '4k_fps');
+  assert.deepEqual([high.resolution, high.fps, high.lineId, high.source.detailId],
+    ['3840x2160', 59.94, 'original', 'hls']);
+  assert.equal(f.service.attempt({ sessionId, attemptId: low.id }).url, hlsVariants()[1].url);
+  assert.deepEqual(owner.calls.map(row => row.operation), ['detail', 'play']);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'prepare').map(row => row[1]), [hlsVariants()[1].url]);
+
+  await f.command(sessionId, 'media.started', { attemptId: low.id });
+  await f.command(sessionId, 'media.progress', { attemptId: low.id, position: 41, duration: 90, paused: true });
+  holdHigh = true;
+  await f.command(sessionId, 'select.candidate', { candidateId: high.id });
+  await switching.promise;
+  await f.command(sessionId, 'play');
+  assert.notEqual(f.snapshot(sessionId).stage, 'playing', 'old sibling output cannot satisfy the new exact variant intent');
+  assert.equal(f.snapshot(sessionId).target.source.candidateId, high.id);
+  switchGate.resolve();
+  const chosen = await f.pending(sessionId);
+  assert.equal(chosen.candidate.id, high.id);
+  assert.deepEqual([chosen.position, chosen.paused], [41, true]);
+  assert.equal(f.service.attempt({ sessionId, attemptId: chosen.id }).url, hlsVariants()[0].url);
+  await f.command(sessionId, 'media.started', { attemptId: chosen.id });
+  await f.command(sessionId, 'media.progress', { attemptId: chosen.id, position: 44, duration: 90, paused: true });
+  await f.command(sessionId, 'media.failed', { attemptId: chosen.id });
+  const replacement = await f.pending(sessionId);
+  assert.equal(replacement.candidate.id, low.candidate.id);
+  assert.deepEqual([replacement.position, replacement.paused], [44, true]);
+  assert.equal(f.service.attempt({ sessionId, attemptId: replacement.id }).url, hlsVariants()[1].url);
+  await f.command(sessionId, 'media.failed', { attemptId: replacement.id });
+  await until(() => f.snapshot(sessionId).stage === 'unavailable');
+  assert.equal(f.snapshot(sessionId).attempt, null);
+  assert.deepEqual(owner.calls.filter(row => row.operation === 'play').map(row => row.payload.id), ['master']);
+  assert.ok(f.calls.filter(row => row[0] === 'prepare').every(row =>
+    [hlsVariants()[0].url, hlsVariants()[1].url].includes(row[1])));
+});
+
+test('M3 saved variant reentry rediscovers only its exact parent and never substitutes another variant or master', async t => {
+  const firstOwner = runtimeDataFixture(({ operation }) => operation === 'detail' ? hlsDetail() : hlsDescriptor());
+  const first = fixture({ data: firstOwner.data });
+  t.after(async () => { await first.service.close(); await firstOwner.close(); });
+  const { sessionId } = await first.open({ target: hlsTarget });
+  await first.command(sessionId, 'quality', { quality: '1080p' });
+  const selected = await first.pending(sessionId), saved = first.snapshot(sessionId).target;
+  await first.service.release({ sessionId });
+  for (const mode of ['exact', 'quality', 'missing']) {
+    const missing = mode === 'missing';
+    const owner = runtimeDataFixture(({ operation, payload }) => {
+      if (operation === 'detail') return hlsDetail();
+      assert.equal(operation, 'play'); assert.equal(payload.id, 'master');
+      return hlsDescriptor(missing ? hlsVariants().slice(0, 1) : hlsVariants());
+    });
+    const f = fixture({ data: owner.data });
+    t.after(async () => { await f.service.close(); await owner.close(); });
+    const reopened = await f.open({ platform: mode === 'quality' ? 'test' : 'windows', target: saved });
+    if (mode === 'quality') await f.command(reopened.sessionId, 'quality', { quality: '4k_fps' });
+    if (missing) {
+      await until(() => f.snapshot(reopened.sessionId).stage === 'unavailable');
+      assert.equal(f.snapshot(reopened.sessionId).attempt, null);
+      assert.deepEqual(f.snapshot(reopened.sessionId).target, saved);
+      assert.equal(f.calls.some(row => row[0] === 'prepare'), false);
+    } else {
+      const restored = await f.pending(reopened.sessionId);
+      if (mode === 'quality') {
+        assert.equal(restored.candidate.quality, '4k_fps', 'explicit first quality is applied after exact-parent discovery');
+        assert.notEqual(restored.candidate.id, selected.candidate.id);
+      } else assert.equal(restored.candidate.id, selected.candidate.id);
+      assert.equal(f.service.attempt({ sessionId: reopened.sessionId, attemptId: restored.id }).url,
+        hlsVariants()[mode === 'quality' ? 0 : 1].url);
+    }
+    assert.deepEqual(owner.calls.map(row => row.operation), ['detail', 'play']);
+  }
+});
+
+test('M3 an HLS parent without actual variants cannot turn discovery into a quality preparation bypass', async t => {
+  const owner = runtimeDataFixture(({ operation, payload }) => {
+    if (operation === 'detail') return hlsDetail();
+    assert.equal(operation, 'play'); assert.equal(payload.id, 'master');
+    return hlsDescriptor([]);
+  });
+  const f = fixture({ data: owner.data });
+  t.after(async () => { await f.service.close(); await owner.close(); });
+  const { sessionId } = await f.open({ target: hlsTarget });
+  await f.command(sessionId, 'quality', { quality: '1080p' });
+  await until(() => f.snapshot(sessionId).stage === 'unavailable');
+  assert.equal(f.snapshot(sessionId).attempt, null);
+  assert.equal(f.calls.some(row => row[0] === 'prepare'), false);
+  assert.deepEqual(owner.calls.map(row => row.operation), ['detail', 'play']);
+});
+
+test('M3 exact media retry refreshes observed quality, reapplies its constraint and never substitutes a missing variant', async t => {
+  let revision = 0, clock = Date.now();
+  const owner = runtimeDataFixture(({ operation, payload }) => {
+    if (operation === 'detail') return hlsDetail();
+    assert.equal(operation, 'play'); assert.equal(payload.id, 'master');
+    const variants = revision === 0 ? [] : hlsVariants();
+    if (revision === 2) Object.assign(variants[0], { quality: '1080P', resolution: '1920x1080', fps: 25 });
+    return hlsDescriptor(revision === 3 ? variants.slice(1) : variants);
+  }, undefined, { now: () => clock });
+  const f = fixture({ data: owner.data });
+  t.after(async () => { await f.service.close(); await owner.close(); });
+  const { sessionId } = await f.open({ target: hlsTarget });
+  await f.command(sessionId, 'play');
+  const parent = await f.current(sessionId);
+  await f.command(sessionId, 'media.progress', { attemptId: parent.id, position: 37, duration: 90, paused: true });
+  revision = 1;
+  await f.command(sessionId, 'media.retry', { attemptId: parent.id });
+  const high = await f.pending(sessionId);
+  assert.equal(high.candidate.quality, '4k_fps');
+  assert.deepEqual([high.position, high.paused], [37, true]);
+  assert.equal(f.service.attempt({ sessionId, attemptId: high.id }).url, hlsVariants()[0].url);
+  await f.command(sessionId, 'media.started', { attemptId: high.id });
+  revision = 2;
+  clock += 181_000;
+  const beforeQuality = f.calls.filter(row => row[0] === 'prepare');
+  await f.command(sessionId, 'quality', { quality: '4k_fps' });
+  await until(() => f.snapshot(sessionId).stage === 'unavailable');
+  assert.equal(f.snapshot(sessionId).candidates.find(row => row.id === high.candidate.id).quality, '1080p');
+  assert.deepEqual(f.calls.filter(row => row[0] === 'prepare'), beforeQuality,
+    'expired parent metadata is re-evaluated before a new quality-constrained preparation');
+  await f.command(sessionId, 'media.retry', { attemptId: high.id });
+  await until(() => f.snapshot(sessionId).error === 'NO_MATCH');
+  const rejected = f.snapshot(sessionId);
+  assert.deepEqual([rejected.candidates.find(row => row.id === high.candidate.id).quality,
+    rejected.candidates.find(row => row.id === high.candidate.id).resolution,
+    rejected.candidates.find(row => row.id === high.candidate.id).fps],
+    ['1080p', '1920x1080', 25]);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'prepare'), beforeQuality,
+    'a refreshed variant that no longer matches the current quality is not prepared');
+  const prepared = f.calls.filter(row => row[0] === 'prepare');
+  revision = 3;
+  await f.command(sessionId, 'media.retry', { attemptId: high.id });
+  await until(() => f.snapshot(sessionId).error === 'MEDIA_UNAVAILABLE');
+  const failed = f.snapshot(sessionId);
+  assert.equal(failed.error, 'MEDIA_UNAVAILABLE');
+  assert.equal(failed.attempt, null);
+  assert.equal(failed.current.candidate.id, high.candidate.id);
+  assert.equal(failed.target.source.candidateId, high.candidate.id);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'prepare'), prepared, 'missing exact variant prepares no master or sibling');
+  assert.deepEqual(owner.calls.filter(row => row.operation === 'play').map(row => row.payload.id),
+    ['master', 'master', 'master', 'master', 'master']);
+});
+
+test('M3 retrying a parent after variants appear selects the requested quality instead of the highest sibling', async t => {
+  let revision = 0;
+  const owner = runtimeDataFixture(({ operation, payload }) => {
+    if (operation === 'detail') return hlsDetail();
+    assert.equal(operation, 'play'); assert.equal(payload.id, 'master');
+    return hlsDescriptor(revision === 0 ? [] : hlsVariants());
+  });
+  const f = fixture({ data: owner.data });
+  t.after(async () => { await f.service.close(); await owner.close(); });
+  const { sessionId } = await f.open({ target: hlsTarget });
+  await f.command(sessionId, 'play');
+  const parent = await f.current(sessionId);
+  await f.command(sessionId, 'media.progress', { attemptId: parent.id, position: 28, duration: 90, paused: true });
+  await f.command(sessionId, 'quality', { quality: '1080p' });
+  await until(() => f.snapshot(sessionId).stage === 'unavailable');
+  assert.equal(f.snapshot(sessionId).candidates[0].quality, undefined);
+  revision = 1;
+  await f.command(sessionId, 'media.retry', { attemptId: parent.id });
+  const selected = await f.pending(sessionId);
+  assert.equal(selected.candidate.quality, '1080p');
+  assert.deepEqual([selected.position, selected.paused], [28, true]);
+  assert.equal(f.service.attempt({ sessionId, attemptId: selected.id }).url, hlsVariants()[1].url);
+});
+
+test('M3 stopping an accepted HLS discovery drains it without registering variants or preparing a late address', async t => {
+  const entered = deferred(), gate = deferred(), settled = deferred();
+  const owner = runtimeDataFixture(async ({ operation }) => {
+    if (operation === 'detail') return hlsDetail();
+    entered.resolve(); await gate.promise; return hlsDescriptor();
+  });
+  const f = fixture({ data: { ...owner.data, async resolve(...args) {
+    try { return await owner.data.resolve(...args); } finally { settled.resolve(); }
+  } } });
+  t.after(async () => { gate.resolve(); await f.service.close(); await owner.close(); });
+  const { sessionId } = await f.open({ target: hlsTarget, platform: 'windows' });
+  await entered.promise;
+  await f.command(sessionId, 'stop');
+  gate.resolve();
+  await settled.promise; await tick();
+  const value = f.snapshot(sessionId);
+  assert.equal(value.stage, 'stopped');
+  assert.equal(value.attempt, null);
+  assert.ok(value.candidates.every(row => row.resolution === undefined && row.fps === undefined));
+  assert.equal(f.calls.some(row => row[0] === 'prepare'), false);
+  assert.deepEqual(owner.calls.map(row => row.operation), ['detail', 'play']);
+});
 
 test('a new generation-1 owner verifies hinted detail despite stale nonmatching raw and stops at its first hit', async t => {
   const old = runtimeDataFixture(({ operation }) => {
@@ -2791,7 +3576,7 @@ for (const resume of [false, true]) for (const carrier of ['group', 'tmdb']) {
 for (const carrier of ['group', 'tmdb']) {
   test(`E49 trusted initial handoff does not reset an explicit metadata resume target (carrier=${carrier})`, async t => {
     const target = groupTarget();
-    const currentTarget = { ...movie, id: target.id, metadataProvider: 'douban', metadataId: 81,
+    const currentTarget = { ...movie, id: target.id, metadataId: 81,
       title: 'User selected metadata' };
     const currentMetadata = { id: 81, title: currentTarget.title, selected: true };
     const f = fixture({ data: { async targetMetadata(value) {
@@ -3264,7 +4049,16 @@ for (const ending of ['stop', 'release', 'source', 'metadata']) {
         await f.command(sessionId, 'search.update', searchContext(target, 2, { metadataTarget: movie }));
         assert.equal(f.snapshot(sessionId).stage, 'stopped');
       } else if (ending === 'source') {
+        assert.equal(before.stage, 'unavailable');
+        assert.equal(before.error, 'SOURCE_NOT_FOUND');
+        assert.deepEqual(before.target.members, []);
         await assert.rejects(f.command(sessionId, 'search.update', searchContext(target, 2)), { code: 'STALE_SOURCE' });
+        await assert.rejects(f.command(sessionId, 'search.update', searchContext(target, 2, {
+          sources: [source('b')], metadataTarget: movie,
+          results: [{ sourceKey: 'b', items: [{ detailId: 'late-b', title: 'Film' }] }],
+          search: [{ sourceKey: 'b', page: 1, completed: true }],
+        })), { code: 'SOURCE_NOT_FOUND' });
+        assert.deepEqual(f.snapshot(sessionId), before);
       }
     }
     assert.deepEqual(f.calls.filter(row => ['metadata', 'search', 'detail', 'resolve', 'prepare'].includes(row[0])),
@@ -3837,7 +4631,7 @@ test('metadata refresh retains stale success and the active file, then publishes
       reads.push(options.refresh === true);
       return { value: { id: 17, title: phase === 'updated' ? 'Updated' : 'Original',
         overview: phase === 'updated' ? '' : 'Saved overview' },
-      fetchedAt: phase === 'updated' ? 20 : 10, expiresAt: phase === 'stale' ? 11 : 100,
+      fetchedAt: phase === 'updated' ? 20 : 10, expiresAt: phase === 'stale' ? 11 : Date.parse('2030-01-01'),
       completeness: 'complete', cache: { status: phase === 'stale' ? 'stale' : 'fresh',
         ...(phase === 'stale' ? { error: { code: 'NETWORK_ERROR' } } : {}),
         components: { detail: { status: 'ready', fetchedAt: phase === 'updated' ? 20 : 10 } } } };
@@ -3863,6 +4657,98 @@ test('metadata refresh retains stale success and the active file, then publishes
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   assert.equal(f.calls.filter(row => row[0] === 'resolve').length, resolutions);
   assert.deepEqual(reads, [false, true, false]);
+});
+
+test('stale initial metadata remains displayable without automatic search and cannot start playback until refreshed', async t => {
+  let fresh = false;
+  const reads = [];
+  const f = fixture({ data: { async targetMetadataEntry(_target, options) {
+    reads.push(options.refresh === true);
+    return { value: { id: 17, title: fresh ? 'Fresh Film' : 'Saved Film' },
+      expiresAt: fresh ? Date.parse('2030-01-01') : 1,
+      cache: { status: fresh ? 'fresh' : 'stale', components: {},
+        ...(fresh ? {} : { error: { code: 'UPSTREAM_HTTP' } }) } };
+  } } });
+  t.after(() => f.service.close());
+  const { sessionId } = await f.open({ platform: 'windows' });
+  await until(() => f.snapshot(sessionId).stage === 'idle');
+  assert.equal(f.snapshot(sessionId).metadata.title, 'Saved Film');
+  assert.equal(f.snapshot(sessionId).metadataCache.status, 'stale');
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  await f.command(sessionId, 'play');
+  await until(() => f.snapshot(sessionId).stage === 'error');
+  assert.equal(f.snapshot(sessionId).error, 'UPSTREAM_HTTP');
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  fresh = true;
+  await f.command(sessionId, 'play');
+  await f.pending(sessionId);
+  assert.equal(f.snapshot(sessionId).metadata.title, 'Fresh Film');
+  assert.equal(f.snapshot(sessionId).metadataCache.status, 'fresh');
+  assert.deepEqual(reads, [false, false, false]);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'search').map(row => row[1]), ['a']);
+});
+
+for (const refreshed of ['success', 'failure']) {
+  test(`a long-lived movie refreshes expired metadata before new playback (${refreshed})`, async t => {
+    const at = Date.parse('2026-11-08T12:00:00Z');
+    let reads = 0;
+    const f = fixture({ data: { async targetMetadataEntry() {
+      reads++;
+      if (reads > 1 && refreshed === 'failure') throw error('TIMEOUT');
+      return { value: { id: 17, title: reads === 1 ? 'Saved Film' : 'Updated Film' },
+        fetchedAt: at + (reads === 1 ? 0 : 1000), expiresAt: at + (reads === 1 ? 1000 : 2000),
+        cache: { status: 'fresh', components: {} } };
+    } } });
+    t.after(() => f.service.close());
+    const { sessionId } = await f.open();
+    await until(() => f.snapshot(sessionId).stage === 'idle');
+    assert.equal(f.snapshot(sessionId).metadataCache.status, 'fresh');
+    f.advance(1000);
+    assert.equal(f.snapshot(sessionId).metadataCache.status, 'stale');
+    assert.equal(f.calls.some(row => row[0] === 'search'), false);
+    await f.command(sessionId, 'play');
+    if (refreshed === 'success') {
+      await f.pending(sessionId);
+      assert.equal(f.snapshot(sessionId).metadataCache.status, 'fresh');
+      assert.equal(f.snapshot(sessionId).metadata.title, 'Updated Film');
+    } else {
+      await until(() => f.snapshot(sessionId).stage === 'error');
+      assert.equal(f.snapshot(sessionId).error, 'TIMEOUT');
+      assert.equal(f.snapshot(sessionId).metadataError, 'TIMEOUT');
+      assert.equal(f.snapshot(sessionId).metadataCache.status, 'stale');
+      assert.equal(f.snapshot(sessionId).metadata.title, 'Saved Film');
+      assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+    }
+    assert.equal(reads, 2);
+  });
+}
+
+test('an expired season makes otherwise fresh TV metadata stale and is refreshed before episode playback', async t => {
+  const at = Date.parse('2026-11-08T12:00:00Z');
+  let seasonReads = 0;
+  const f = fixture({ data: {
+    async seasonMetadataEntry(_target, season) {
+      seasonReads++;
+      assert.equal(season, 1);
+      return { value: structuredClone(metadata.seasons[0]), fetchedAt: at,
+        expiresAt: at + (seasonReads === 1 ? 1000 : 86_400_000),
+        cache: { status: 'fresh', components: {} } };
+    },
+    async detail() { return detail(['Series.S01E01', 'Series.S01E02']); },
+  } });
+  t.after(() => f.service.close());
+  const { sessionId } = await f.open({ target: { ...tv, season: 1, episode: 1 } });
+  await until(() => f.snapshot(sessionId).stage === 'idle');
+  assert.equal(f.snapshot(sessionId).metadataCache.status, 'fresh');
+  f.advance(1000);
+  assert.equal(f.snapshot(sessionId).metadataCache.status, 'stale');
+  assert.equal(f.calls.some(row => row[0] === 'search'), false);
+  await f.command(sessionId, 'play');
+  const selected = await f.pending(sessionId);
+  assert.equal(f.snapshot(sessionId).metadataCache.status, 'fresh');
+  assert.equal(selected.candidate.season, 1);
+  assert.equal(selected.candidate.episode, 1);
+  assert.equal(seasonReads, 3, 'refresh and playback both consult the shared season owner');
 });
 
 test('browsing a newly declared count-unknown season loads real episodes without changing the playing target', async t => {
@@ -3939,42 +4825,53 @@ test('refreshing a browsed source refreshes only its detail and line and keeps o
   assert.equal(f.calls.some(row => row[0] === 'resolve'), false);
 });
 
-test('only a unique verified TMDB association supplements a Douban page without changing its identity', async t => {
-  const target = { id: 'douban:movie:51', kind: 'movie', metadataProvider: 'douban', metadataId: 51, title: 'Film' };
+test('only a unique verified TMDB association supplements an explicitly selected auxiliary Douban view', async t => {
+  const selectedMetadata = { id: 51, title: 'Film' };
   const f = fixture({ data: {
-    async metadataSources(target, { metadata: value }) { return [
-      { provider: 'douban', metadataId: 51, kind: 'movie', title: 'Film', metadata: value, association: { kind: 'identity' } },
-      { provider: 'tmdb', metadataId: 17, kind: 'movie', title: 'Film', metadata: { overview: 'Supplement' },
-        association: { kind: 'title-year', targetProvider: 'douban', targetMetadataId: 51 } },
+    async targetMetadata(target) { return target.metadataProvider === 'douban' ? selectedMetadata : { id: 17, title: 'Film' }; },
+    async metadataSources() { return [
+      { provider: 'douban', metadataId: 51, kind: 'movie', title: 'Film', metadata: selectedMetadata,
+        association: { kind: 'title-year', targetProvider: 'tmdb', targetMetadataId: 17 } },
+      { provider: 'tmdb', metadataId: 17, kind: 'movie', title: 'Film', metadata: { id: 17, overview: 'Supplement' },
+        association: { kind: 'identity' } },
     ]; },
   } });
   t.after(() => f.service.close());
-  const { sessionId } = await f.open({ target });
-  await until(() => f.snapshot(sessionId).metadataSupplement !== null);
+  const { sessionId } = await f.open({ target: movie });
+  await until(() => f.snapshot(sessionId).metadataSources.length === 2);
+  const selected = f.snapshot(sessionId).metadataSources.find(row => row.provider === 'douban');
+  await f.command(sessionId, 'browse.metadata', { metadataSourceId: selected.id });
+  await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSupplement !== null);
   assert.equal(f.snapshot(sessionId).metadataSupplement.metadata.overview, 'Supplement');
-  assert.deepEqual(f.snapshot(sessionId).target, target);
+  assert.deepEqual(f.snapshot(sessionId).target, { ...movie, metadataProvider: 'douban', metadataId: 51 });
+  assert.deepEqual(f.snapshot(sessionId).entryTarget, movie);
   assert.equal(f.calls.some(row => row[0] === 'resolve'), false);
 });
 
-test('cache refresh replaces association proof rather than retaining a removed supplement', async t => {
+test('cache refresh replaces association proof rather than retaining a removed auxiliary supplement', async t => {
   let associated = true;
-  const target = { id: 'douban:movie:51', kind: 'movie', metadataProvider: 'douban', metadataId: 51, title: 'Film' };
+  const selectedMetadata = { id: 51, title: 'Film' };
   const f = fixture({ data: {
-    async metadataSources(target, { metadata: value }) { return [
-      { provider: 'douban', metadataId: 51, kind: 'movie', title: 'Film', metadata: value, association: { kind: 'identity' } },
+    async targetMetadata(target) { return target.metadataProvider === 'douban' ? selectedMetadata : { id: 17, title: 'Film' }; },
+    async metadataSources() { return [
+      { provider: 'douban', metadataId: 51, kind: 'movie', title: 'Film', metadata: selectedMetadata,
+        association: { kind: 'identity' } },
       ...(associated ? [{ provider: 'tmdb', metadataId: 17, kind: 'movie', title: 'Film',
-        metadata: { overview: 'Verified supplement' },
+        metadata: { id: 17, overview: 'Verified supplement' },
         association: { kind: 'title-year', targetProvider: 'douban', targetMetadataId: 51 } }] : []),
     ]; },
   } });
   t.after(() => f.service.close());
-  const { sessionId } = await f.open({ target });
-  await until(() => f.snapshot(sessionId).metadataSupplement);
+  const { sessionId } = await f.open({ target: movie });
+  await until(() => f.snapshot(sessionId).metadataSources.length === 2);
+  const selected = f.snapshot(sessionId).metadataSources.find(row => row.provider === 'douban');
+  await f.command(sessionId, 'browse.metadata', { metadataSourceId: selected.id });
+  await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSupplement);
   associated = false;
   await f.command(sessionId, 'browse.refresh');
   await until(() => f.snapshot(sessionId).metadataSources.length === 1);
   assert.equal(f.snapshot(sessionId).metadataSupplement, null);
-  assert.deepEqual(f.snapshot(sessionId).target, target);
+  assert.deepEqual(f.snapshot(sessionId).target, { ...movie, metadataProvider: 'douban', metadataId: 51 });
 });
 
 for (const ending of ['stop', 'source']) {

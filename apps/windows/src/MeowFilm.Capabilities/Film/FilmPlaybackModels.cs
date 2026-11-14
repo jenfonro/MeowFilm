@@ -125,8 +125,9 @@ public sealed record FilmPlaybackTarget(string Id, string Kind, string Title,
                 Source is { } selected && (selected.ValueKind != JsonValueKind.Object ||
                     FilmJson.Text(selected, "key").Length == 0 || !FilmJson.IsIdentity(FilmJson.Member(selected, "detailId")))))
             throw new FilmPlaybackException("INVALID_REQUEST");
-        // A revocation snapshot can retain its selected file with no remaining
-        // members. ParametersFor fences an actual open to nonempty admitted members.
+        // Public snapshots may contain Node's unresolved Douban wait group.
+        // Initial waiting reentry omits resume; a revoked Douban resume is sent
+        // intact so Node rejects it instead of starting a new seed lookup.
     }
 }
 
@@ -134,7 +135,8 @@ public sealed record FilmPlaybackTarget(string Id, string Kind, string Title,
 public sealed record FilmPlaybackRequest(FilmPlaybackTarget Target,
     IReadOnlyList<JsonElement>? Sources = null, string? Query = null,
     JsonElement? Results = null, JsonElement? Search = null, JsonElement? Metadata = null,
-    JsonElement? CacheEntries = null, JsonElement? ResultHints = null, JsonElement? SearchReference = null)
+    JsonElement? CacheEntries = null, JsonElement? ResultHints = null, JsonElement? SearchReference = null,
+    string? EntrySurface = null, FilmPlaybackTarget? ResumeTarget = null)
 {
     // Only the producer of the original source results/cache may bind this proof.
     // Navigation persistence intentionally loses it: process-local authority is not JSON.
@@ -144,6 +146,8 @@ public sealed record FilmPlaybackRequest(FilmPlaybackTarget Target,
     internal FilmPlaybackRequest Own() => this with
     {
         Target = Target with { Source = Target.Source?.Clone(), Members = Target.Members?.Clone() },
+        ResumeTarget = ResumeTarget is { } resume
+            ? resume with { Source = resume.Source?.Clone(), Members = resume.Members?.Clone() } : null,
         Sources = Sources?.Select(value => value.Clone()).ToArray(),
         Results = Results?.Clone(), Search = Search?.Clone(), Metadata = Metadata?.Clone(), CacheEntries = CacheEntries?.Clone(),
         ResultHints = ResultHints?.Clone(), SearchReference = SearchReference?.Clone()
@@ -228,6 +232,7 @@ internal sealed class FilmPlaybackSnapshot
             !Guid.TryParse(FilmJson.RequiredText(value, "sessionId"), out var id) ||
             FilmJson.Member(value, "sequence").ValueKind != JsonValueKind.Number ||
             !FilmJson.Member(value, "sequence").TryGetInt64(out long sequence) || sequence < 0 ||
+            FilmJson.Member(value, "entryTarget").ValueKind != JsonValueKind.Object ||
             FilmJson.Member(value, "sources").ValueKind != JsonValueKind.Array ||
             FilmJson.Member(value, "episodes").ValueKind != JsonValueKind.Array ||
             FilmJson.Member(value, "candidates").ValueKind != JsonValueKind.Array ||
@@ -238,6 +243,8 @@ internal sealed class FilmPlaybackSnapshot
         Sequence = sequence;
         Target = FilmJson.Target(FilmJson.Member(Raw, "target"));
         Target.Validate();
+        EntryTarget = FilmJson.Target(FilmJson.Member(Raw, "entryTarget"));
+        EntryTarget.Validate();
         MetadataCache = FilmMetadataCache.Read(FilmJson.Member(Raw, "metadataCache"));
         MetadataSupplement = FilmMetadataSupplement.Read(FilmJson.Member(Raw, "metadataSupplement"));
     }
@@ -245,6 +252,8 @@ internal sealed class FilmPlaybackSnapshot
     internal Guid SessionId { get; }
     internal long Sequence { get; }
     internal FilmPlaybackTarget Target { get; }
+    internal FilmPlaybackTarget EntryTarget { get; }
+    internal string EntrySurface => FilmJson.Text(Raw, "entrySurface");
     internal FilmMetadataCache? MetadataCache { get; }
     internal FilmMetadataSupplement? MetadataSupplement { get; }
     internal JsonElement Metadata => FilmJson.Member(Raw, "metadata");
@@ -256,7 +265,7 @@ internal sealed class FilmPlaybackSnapshot
 }
 
 public sealed record FilmSelection(string? Id, string Label, int? Season = null, JsonElement? WireId = null,
-    string? MetadataSourceId = null);
+    string? MetadataSourceId = null, string? Provider = null);
 
 public sealed record FilmCandidateItem(string Id, string Name, string Path, string Quality,
     string? Provider, string SourceKey, JsonElement DetailId, JsonElement LineId,
@@ -264,13 +273,15 @@ public sealed record FilmCandidateItem(string Id, string Name, string Path, stri
 {
     public string DisplayLabel { get; init; } = "";
     public bool IsSelected { get; init; }
-    internal static int DisplayRank(string quality) => quality switch
-    {
-        "4k_hdr" => 0, "4k_fps" => 1, "4k" => 2, "1080p" => 3, "720p" => 4, _ => 5
-    };
+    public string Image { get; init; } = "";
+    public string Overview { get; init; } = "";
+    public JsonElement Resolution { get; init; }
+    public JsonElement Fps { get; init; }
+    public string Codec { get; init; } = "";
     private static string QualityLabel(string quality) => quality switch
     {
-        "4k_hdr" => "4K HDR", "4k_fps" => "4K 60帧", "4k" => "4K", "1080p" => "1080P", "720p" => "720P", _ => "未知画质"
+        "4k_hdr" => "4K HDR", "4k_fps" => "4K 60帧", "4k" => "4K", "1080p" => "1080P", "720p" => "720P",
+        "" => "未知画质", _ => quality
     };
     internal static FilmCandidateItem Read(JsonElement value)
     {
@@ -280,7 +291,10 @@ public sealed record FilmCandidateItem(string Id, string Name, string Path, stri
             FilmJson.RequiredText(source, "key"), FilmJson.Identity(source, "detailId", required: true), FilmJson.Identity(value, "lineId"),
             FilmJson.Integer(value, "season"), FilmJson.Integer(value, "episode"), FilmJson.Integer(value, "globalEpisode"))
         {
-            DisplayLabel = QualityLabel(FilmJson.Text(value, "quality")) + " · " + FilmJson.Text(source, "name")
+            DisplayLabel = QualityLabel(FilmJson.Text(value, "quality")) + " · " + FilmJson.Text(source, "name"),
+            Resolution = FilmJson.Member(value, "resolution"),
+            Fps = FilmJson.Member(value, "fps"),
+            Codec = FilmJson.Text(value, "codec")
         };
     }
 }

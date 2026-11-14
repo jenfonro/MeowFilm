@@ -35,15 +35,15 @@ public static class FilmCacheConsumerTests
     {
         var target = new FilmPlaybackTarget("douban:tv:100", "tv", "豆瓣主资料", "douban", "100",
             Season: 1, Episode: 2, GlobalEpisode: 2);
-        var card = new FilmCardItem(target.Id, target.Title, "https://fixture.invalid/old.jpg", "9")
-        { PlaybackContext = new(target) };
-        var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
         var detail = FilmJson.Encode(new
         {
             title = "豆瓣主资料", intro = "", pic = new { normal = "" },
             seasons = new[] { new { season_number = 1, name = "豆瓣第一季",
                 episodes = new[] { new { season = 1, episode = 1 }, new { season = 1, episode = 2 } } } }
         });
+        var card = new FilmCardItem(target.Id, target.Title, "https://fixture.invalid/old.jpg", "9")
+        { PlaybackContext = new(target, Metadata: detail) };
+        var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
         var supplement = FilmJson.Encode(new
         {
             provider = "tmdb", metadataId = 900, kind = "tv", metadata = new
@@ -57,7 +57,10 @@ public static class FilmCacheConsumerTests
                 seasons = new[] { new { season_number = 99, episode_count = 999 } }, number_of_episodes = 999
             }
         });
-        var root = JsonNode.Parse(Snapshot(Guid.NewGuid(), 1, target, detail).GetRawText())!.AsObject();
+        // The resolved metadata view may select Douban after the entry's TMDB
+        // lookup; its fresh owner metadata is not an unresolved seed summary.
+        var root = JsonNode.Parse(Snapshot(Guid.NewGuid(), 1, target, detail,
+            entryResolution: "matched").GetRawText())!.AsObject();
         root["metadataSupplement"] = JsonNode.Parse(supplement.GetRawText());
         root["metadataCache"] = Cache("fresh");
         page.Apply(new(JsonSerializer.SerializeToElement(root)));

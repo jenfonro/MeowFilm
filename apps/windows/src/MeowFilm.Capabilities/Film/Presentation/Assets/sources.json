@@ -1,5 +1,5 @@
 {
-  "previewBoundary": "输入 FilmCardItem 的 Id、Title、原 Poster 和 Score 原样保留；除上述输入字段外，年份、国家、季集数、类型、导演、演员、剧情简介、单集标题、单集简介、单集时长与推荐均为本地预览数据，可能与所选现实影片不对应。所有栏目的预览剧照均复用《漫长的季节》设计素材，不声称对应所选影片或真实集数。相关推荐统一为剧集，使用本地公开海报并按 tv 打开。无观看进度、真实播放、详情请求或持久化。图片版权归原权利人；来源记录仅用于追溯。",
+  "usage": "图片仅供显式注入的原生展示测试使用，不提供产品默认 metadata、集数、推荐或播放状态。产品页面消费运行器返回的真实资料与图片地址。图片版权归原权利人；本文件保留资源来源与派生记录。",
   "images": [
     {
       "file": "episode-01.jpg",
@@ -478,12 +478,5 @@
     }
   ],
   "totalJpegBytes": 1231787,
-  "sampleData": {
-    "selectedItem": "FilmPlaybackPage.Item is the original FilmCardItem instance. Title, Poster and Item.Score are direct projections; they are never replaced by preview values.",
-    "metadata": "All metadata other than the input card title, original poster and score is local sample data and may not describe the selected real film. Movie/anime/show profiles are authored category samples; the tv profile borrows year, country, genre and credits from retained The Long Season subject.json. No current film lookup occurs.",
-    "episodes": "Movie has one feature; tv/anime/show each have a 12-episode sample season. All episode titles and Chinese overviews are locally authored illustrative text, not verified real episode synopses. Durations are fixed samples (movie 118, tv 60, anime 24, show 90 minutes).",
-    "recommendations": "Six local tv recommendations from seven crime/mystery series. A same-title candidate is omitted; The Long Season supplies the seventh candidate. Preview ids begin preview:tv:. Recommendation scores are empty rather than invented.",
-    "ui": "No explanatory preview notice is added to page metadata or UI. Document this boundary in the Windows documentation during main-session integration."
-  },
   "designReference": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets"
 }

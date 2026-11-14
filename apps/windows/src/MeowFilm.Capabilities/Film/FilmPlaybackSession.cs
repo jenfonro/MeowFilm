@@ -183,7 +183,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             }
             connection = captured; rpc = client;
             searchScope = FilmJson.Array(opening.Parameters, "sources");
-            searchSelection = FilmJson.Target(opened.Raw.GetProperty("target"));
+            searchSelection = opened.EntryTarget;
             targetPage.FreezeSearchScope(FilmPlaybackOpen.OriginalSources(openParameters, searchScope));
             runtimeRevoke = captured.Revoked.Register(() =>
             {
@@ -322,7 +322,8 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         if (!IsCurrentPage(targetPage) || rpc is null || snapshot is null || connection is null ||
             searchSelection is null || connection.Revoked.IsCancellationRequested) return;
         if (FilmJson.Text(snapshot.Raw, "stage") == "stopped" ||
-            snapshot.Target.Kind == "group" && snapshot.Target.Members!.Value.GetArrayLength() == 0) return;
+            snapshot.Target.Kind == "group" && snapshot.Target.Members!.Value.GetArrayLength() == 0 &&
+            !targetPage.IsUnmatchedDoubanEntry) return;
         if (targetPage.SearchContext is not { } context ||
             !FilmPlaybackOpen.SameOwner(targetPage.Request.DataOwner, connection)) return;
         var parameters = FilmJson.Encode(new

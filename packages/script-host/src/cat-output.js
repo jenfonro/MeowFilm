@@ -4,7 +4,7 @@ import { clone, fault, requireValue } from './errors.js';
 export const extensionKey = '_meow';
 export const ownedExtension = Symbol('meow.cat.extension');
 const names = { baidu: '百度', quark: '夸克', uc: 'UC', tianyi: '天翼', yidong: '移动' };
-const hosts = { baidu: ['pan.baidu.com'], quark: ['pan.quark.cn', 'drive-pc.quark.cn'],
+const hosts = { baidu: ['pan.baidu.com'], quark: ['pan.quark.cn', 'drive.quark.cn', 'drive-pc.quark.cn'],
   uc: ['drive.uc.cn', 'pc-api.uc.cn', 'fast.uc.cn'], tianyi: ['cloud.189.cn', 'h5.cloud.189.cn'],
   yidong: ['caiyun.139.com', 'yun.139.com'] };
 const defaults = { baidu: ['百度', '百度网盘', 'baidu'], quark: ['夸克', '夸父', 'quark'],
@@ -58,13 +58,15 @@ export function panProvider(flag, settings) {
 }
 function metadata(record) {
   const source = record.video_meta && typeof record.video_meta === 'object' ? { ...record, ...record.video_meta } : record;
-  const width = Number(source.video_width ?? source.width ?? source.vwidth), height = Number(source.video_height ?? source.height ?? source.vheight);
+  const number = value => typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
+  const width = number(source.video_width ?? source.width ?? source.vwidth), height = number(source.video_height ?? source.height ?? source.vheight);
+  const dimensions = Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0;
   let resolution = typeof record.resolution === 'string' ? record.resolution : '';
-  if (width > 0 && height > 0) resolution = `${width}x${height}`;
+  if (dimensions) resolution = `${width}x${height}`;
   const rawFPS = source.fps ?? source.frameRate ?? source.frame_rate;
   const rational = /^(\d+)\/(\d+)$/.exec(String(rawFPS));
-  const fps = rational ? Number(rational[1]) / Number(rational[2]) : Number(rawFPS);
-  const short = width > 0 && height > 0 ? Math.min(width, height) : 0;
+  const fps = rational ? Number(rational[1]) / Number(rational[2]) : number(rawFPS);
+  const short = dimensions ? Math.min(width, height) : 0;
   const quality = short >= 2160 ? '4K' : short >= 1440 ? '2K' : short >= 1080 ? '1080P'
     : short >= 720 ? '720P' : short > 0 ? `${short}P` : '';
   return { ...(resolution ? { resolution } : {}), ...(quality ? { quality } : {}),
@@ -93,6 +95,8 @@ export function normalizeCatOutput(input, { shares = [], settings, installationI
   }
   if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
   const canExtend = !Object.hasOwn(result, extensionKey);
+  const capturedShares = canExtend ? shares.map(share =>
+    ({ share, marker: 'meow_' + shareIdentity(share) })) : [];
   const resources = [], media = [];
   let routed = false;
   const map = value => {
@@ -124,25 +128,31 @@ export function normalizeCatOutput(input, { shares = [], settings, installationI
     if (typeof item.vod_play_from !== 'string' || typeof item.vod_play_url !== 'string') continue;
     const flags = item.vod_play_from.split('$$$'), lines = item.vod_play_url.split('$$$');
     for (let lineIndex = 0; lineIndex < Math.min(flags.length, lines.length); lineIndex++) {
-      const provider = panProvider(flags[lineIndex], settings);
-      const intercept = canExtend && provider && settings.providers[provider];
-      const candidates = intercept ? shares.filter(share => share.provider === provider) : [];
+      const namedProvider = panProvider(flags[lineIndex], settings);
       const parts = lines[lineIndex].split('#');
       let changed = false;
       const rewritten = parts.map((part, episodeIndex) => {
         const separator = part.indexOf('$');
         const raw = separator >= 0 ? part.slice(separator + 1) : part;
         const local = map(raw);
-        if (!intercept) return separator >= 0 ? part.slice(0, separator + 1) + local : local;
-        let share = parseShare(raw);
-        if (!share) {
+        if (!canExtend) return separator >= 0 ? part.slice(0, separator + 1) + local : local;
+        let matching = [];
+        if (capturedShares.length) {
           let expanded = raw;
-          try { expanded += Buffer.from(decodeURIComponent(raw), 'base64').toString(); } catch {}
-          const matching = candidates.filter(item => expanded.includes('meow_' + shareIdentity(item)));
-          if (matching.length === 1) share = matching[0];
+          try {
+            const decoded = decodeURIComponent(raw);
+            expanded = decoded + Buffer.from(decoded, 'base64').toString();
+          } catch {}
+          matching = capturedShares.filter(item => expanded.includes(item.marker));
         }
-        if (!share || share.provider !== provider)
+        let share = matching.length === 1 ? matching[0].share : null;
+        if (!matching.length && namedProvider && settings.providers[namedProvider]) {
+          share = parseShare(raw);
+          if (share?.provider !== namedProvider) share = null;
+        }
+        if (!share || !settings.providers[share.provider])
           return separator >= 0 ? part.slice(0, separator + 1) + local : local;
+        const provider = share.provider;
         const id = encodePanResource({ ...share, installationId, siteId });
         resources.push({ kind: 'pan', provider, installationId, siteId, vodIndex, lineIndex,
           episodeIndex, id });
