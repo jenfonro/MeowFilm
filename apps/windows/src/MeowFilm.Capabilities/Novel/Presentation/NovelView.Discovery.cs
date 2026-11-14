@@ -59,9 +59,8 @@ public sealed partial class NovelView
     private static TextBlock DiscoveryText(string value, double size = 12, bool muted = false, bool bold = false)
     {
         var text = NovelUi.Text(value, size, muted);
-        text.SetResourceReference(StyleProperty, muted ? "Novel.Discovery.Muted" : "Novel.Discovery.Text");
         text.Margin = new(0); text.TextWrapping = TextWrapping.NoWrap; text.TextTrimming = TextTrimming.CharacterEllipsis;
-        if (bold) text.FontWeight = FontWeights.SemiBold;
+        if (bold) text.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Strong");
         return text;
     }
     private static Viewbox DiscoveryIcon(string data, double size = 14)

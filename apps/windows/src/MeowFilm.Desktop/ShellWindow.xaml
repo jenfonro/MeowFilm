@@ -125,6 +125,29 @@
                 </Border>
                 </Grid>
             </Border>
+            <Border x:Name="SidebarEdge" Grid.Column="1" Grid.RowSpan="2" Width="30"
+                    HorizontalAlignment="Left" IsHitTestVisible="False">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background">
+                            <Setter.Value>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                    <GradientStop Color="#12395467" Offset="0"/>
+                                    <GradientStop Color="#00395467" Offset="1"/>
+                                </LinearGradientBrush>
+                            </Setter.Value>
+                        </Setter>
+                        <Style.Triggers>
+                            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                            </Trigger>
+                            <DataTrigger Binding="{Binding Visibility, ElementName=SidebarBackground}" Value="Collapsed">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+            </Border>
             <StackPanel x:Name="Brand" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,16,0"
                         IsHitTestVisible="False">
                 <Border Width="29" Height="29" CornerRadius="15" Margin="0,0,10,0">
@@ -272,7 +295,6 @@
                                  TextChanged="OnSearchTextChanged" KeyDown="OnSearchKeyDown" AutomationProperties.Name="搜索"
                                  AutomationProperties.AcceleratorKey="Ctrl+K">
                             <TextBox.Style><Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
-                                <Setter Property="BorderBrush" Value="#E3E6ED"/>
                                 <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
                             </Style></TextBox.Style>
                         </TextBox>
