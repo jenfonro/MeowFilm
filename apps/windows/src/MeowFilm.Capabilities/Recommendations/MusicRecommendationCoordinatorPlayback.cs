@@ -39,6 +39,11 @@ public sealed partial class MusicRecommendationCoordinator
     public async Task<bool> TryAdvanceAsync(string entryId, bool naturalEnd, bool play,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            if (session is not { } active || !CurrentLocked(active)) return false;
+        }
         Task? commit = null;
         Session? target;
         long epoch = queue.Epoch;

@@ -25,6 +25,7 @@ public static partial class MusicOfficialPlaybackScopeTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in NativeNextTrackCases()) yield return test;
         yield return Case("complete file on another known recording wins before any URL resolution or discovery", async () =>
         {
             await using var f = await Scene.Create(files: true);
@@ -619,19 +620,20 @@ public static partial class MusicOfficialPlaybackScopeTests
     }
     private sealed class Scene : IAsyncDisposable
     {
-        internal readonly MusicPlaybackCacheTests.Fixture Files = new();
+        internal readonly MusicPlaybackCacheTests.Fixture Files;
         internal readonly Output Output = new();
         internal readonly OfficialApp App;
         internal readonly MusicCapability Module;
-        private Scene(bool files)
+        private Scene(bool files, IMusicPlayback? playback = null, byte[]? bytes = null)
         {
+            Files = new(bytes);
             Files.Clock.Now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             App = new(new MusicNativeApplication(Files.Store, new NoNode(), Files.CacheStore, new NoHttp()), Files);
-            Module = new(App, Files.Store, Output, files ? Files.Cache : null, new Dialogs(), cacheStore: Files.CacheStore);
+            Module = new(App, Files.Store, playback ?? Output, files ? Files.Cache : null, new Dialogs(), cacheStore: Files.CacheStore);
         }
-        internal static async Task<Scene> Create(bool files = false)
+        internal static async Task<Scene> Create(bool files = false, IMusicPlayback? playback = null, byte[]? bytes = null)
         {
-            var scene = new Scene(files);
+            var scene = new Scene(files, playback, bytes);
             await scene.Module.InitializeAsync(default);
             await scene.SetQuality("flac");
             await scene.App.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
@@ -742,7 +744,7 @@ public static partial class MusicOfficialPlaybackScopeTests
                 ["qualityCacheSignature"] = Signature(platform),
                 ["url"] = new Uri(files.Origin, platform + ".wav").AbsoluteUri,
                 ["headers"] = new JsonObject(), ["expiresAt"] = files.Clock.Now + 60000,
-                ["duration"] = 1d, ["size"] = 0, ["full"] = false,
+                ["duration"] = song["duration"]!.DeepClone(), ["size"] = 0, ["full"] = false,
                 ["delivery"] = platform + "-official"
             };
         }

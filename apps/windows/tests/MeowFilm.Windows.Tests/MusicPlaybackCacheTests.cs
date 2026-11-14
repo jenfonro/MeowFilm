@@ -549,15 +549,16 @@ public static class MusicPlaybackCacheTests
         internal readonly MemoryStore Store = new();
         internal readonly CacheDocumentStore CacheStore;
         internal readonly Clock Clock = new();
-        internal readonly byte[] Bytes = Wav();
+        internal readonly byte[] Bytes;
         internal int Requests;
         private readonly TcpListener listener = new(IPAddress.Loopback, 0);
         private readonly CancellationTokenSource lifetime = new();
         private readonly Task server;
         internal readonly Uri Origin;
         internal readonly MusicAudioFileCache Cache;
-        internal Fixture()
+        internal Fixture(byte[]? bytes = null)
         {
+            Bytes = bytes ?? Wav();
             CacheStore = new(Store);
             Directory.CreateDirectory(Root); listener.Start();
             Origin = new Uri("http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port + "/");
@@ -636,7 +637,9 @@ public static class MusicPlaybackCacheTests
                         await stream.WriteAsync(Bytes.AsMemory(0, PrefixLength), lifetime.Token);
                         PrefixSent.TrySetResult();
                         await ReleaseBody.Task.WaitAsync(lifetime.Token);
-                        await stream.WriteAsync(Bytes.AsMemory(PrefixLength), lifetime.Token);
+                        try { await stream.WriteAsync(Bytes.AsMemory(PrefixLength), lifetime.Token); }
+                        catch (IOException) when (!lifetime.IsCancellationRequested)
+                        { /* A cancelled reader can close this response before its held body is released. */ }
                     } else await stream.WriteAsync(Bytes, lifetime.Token);
                 }
             }

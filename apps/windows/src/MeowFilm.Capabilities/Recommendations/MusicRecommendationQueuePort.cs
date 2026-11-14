@@ -76,7 +76,8 @@ public sealed class MusicRecommendationQueuePort
     };
     internal async Task<T> InLaneAsync<T>(Func<MusicLibraryOwner, CancellationToken, Task<T>> operation, CancellationToken token)
     {
-        await lane.WaitAsync(token).ConfigureAwait(false);
+        // Owning an available lane must not run hot library snapshots on the UI caller.
+        await lane.WaitAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try { return await operation(library, token).ConfigureAwait(false); }
         finally { lane.Release(); }
     }
