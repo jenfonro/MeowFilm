@@ -275,7 +275,6 @@
                   HorizontalAlignment="Center" Margin="0,8,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Compact}"/>
        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,14,0,0">
         <Button x:Name="SaveQrButton" Content="保存二维码" Click="SaveQr_Click" Style="{StaticResource Settings.Button32}" IsEnabled="{Binding CanSaveAccountQr}"/>
-        <Button Content="分享" Click="ShareQr_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" IsEnabled="{Binding CanSaveAccountQr}"/>
        </StackPanel>
       </StackPanel>
       <StackPanel x:Name="SmsPanel" Visibility="Collapsed" VerticalAlignment="Center">

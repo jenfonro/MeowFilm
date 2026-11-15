@@ -4,7 +4,6 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace MeowFilm.Capabilities;
@@ -277,13 +276,6 @@ public partial class MusicAccountsView : UserControl
     private async void SaveQr_Click(object sender, RoutedEventArgs e)
     {
         if (Owner is { } owner) await owner.SaveAccountQrAsync();
-    }
-
-    private void ShareQr_Click(object sender, RoutedEventArgs e)
-    {
-        if (Owner?.AccountQrImage is not BitmapSource image) return;
-        try { Clipboard.SetImage(image); }
-        catch { }
     }
 
     private void LoginPopup_Opened(object? sender, EventArgs e)
