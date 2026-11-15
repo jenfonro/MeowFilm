@@ -39,7 +39,7 @@ final class MeowfilmNovelHostTests: XCTestCase {
         XCTAssertEqual(sourceModule["version"], .string("0.3.0"))
         XCTAssertEqual(sourceModule["contract"], .string("source.runtime.v2"))
         let sourceMethods = ["load", "unload", "invoke", "status", "close",
-            "library.list", "library.get", "library.previewImport", "library.import", "library.save", "library.update", "library.remove",
+            "library.list", "library.get", "library.apply", "library.previewImport", "library.import", "library.save", "library.update", "library.remove",
             "library.export", "library.invoke", "library.image", "library.releaseImage", "web.pending", "web.respond",
             "rules.process"].map { "source.runtime." + $0 }
         XCTAssertEqual(sourceModule["methods"].array?.compactMap(\.string), sourceMethods.sorted())

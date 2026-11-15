@@ -8,7 +8,8 @@ namespace MeowFilm.Capabilities;
 internal sealed class NovelSourceDraft
 {
     internal string Protocol { get; }
-    private readonly JsonObject original;
+    internal bool HasInput { get; private set; }
+    private JsonObject original;
     private readonly Dictionary<string, string> edits = [];
     internal NovelSourceTab[] Tabs => NovelSourceFields.Tabs(Protocol);
     internal NovelSourceDraft(string protocol, string? definition = null)
@@ -36,7 +37,17 @@ internal sealed class NovelSourceDraft
     private static string Text(JsonNode? value) => value is null ? "" : value is JsonValue scalar && scalar.TryGetValue<string>(out var text) ? text : value.ToJsonString();
     private string OriginalText(NovelSourceField field) => field.Kind == NovelSourceFieldKind.Json ? Original(field)?.ToJsonString() ?? "null" : Text(Original(field));
     internal string Text(NovelSourceField field) => edits.TryGetValue(field.Key, out var text) ? text : OriginalText(field);
-    internal void Set(NovelSourceField field, string text) { if (text == OriginalText(field)) edits.Remove(field.Key); else edits[field.Key] = text; }
+    internal void Set(NovelSourceField field, string text)
+    {
+        if (text == Text(field)) return;
+        HasInput = true;
+        if (text == OriginalText(field)) edits.Remove(field.Key); else edits[field.Key] = text;
+    }
+    internal void MarkSaved(string definition)
+    {
+        original = JsonNode.Parse(definition)!.AsObject();
+        edits.Clear(); HasInput = false;
+    }
     internal bool Bool(string key, bool fallback = true) { string text = Text(new NovelSourceField(key, key)).Trim().ToLowerInvariant(); return text.Length == 0 ? fallback : text is not ("false" or "0"); }
     internal void SetBool(string key, bool value) => Set(new(key, key, Kind: NovelSourceFieldKind.Bool), value ? "true" : "false");
     internal NovelSourceField[] ExtensionFields

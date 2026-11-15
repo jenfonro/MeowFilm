@@ -32,10 +32,13 @@ public sealed class ManagementList : Grid
         var card = new Border { CornerRadius = new(22), BorderThickness = new(1), Padding = new(8, 8, 8, 76), ClipToBounds = true };
         card.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
         var items = new Grid(); items.Children.Add(list); items.Children.Add(empty); card.Child = items; SetRow(card, 1); Children.Add(card);
+        items.SizeChanged += (_, e) => items.Clip = new RectangleGeometry(new Rect(new Point(), e.NewSize), 14, 14);
+        list.SetResourceReference(StyleProperty, "MeowFilm.ManagementList");
         var template = new DataTemplate(typeof(ManagementRow)) { VisualTree = new FrameworkElementFactory(typeof(ManagementRowView)) }; list.ItemTemplate = template;
         list.SetValue(VirtualizingPanel.IsVirtualizingProperty, true); list.SetValue(VirtualizingPanel.VirtualizationModeProperty, VirtualizationMode.Recycling);
         list.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Disabled);
-        var container = new Style(typeof(ListBoxItem)); container.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch)); container.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0))); list.ItemContainerStyle = container;
+        list.SetValue(ScrollViewer.VerticalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
+        list.SetResourceReference(ItemsControl.ItemContainerStyleProperty, "MeowFilm.ManagementListItem");
         list.SetValue(ScrollViewer.CanContentScrollProperty, true); empty.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.MutedText");
         var footer = new DockPanel { LastChildFill = true }; var actions = new StackPanel { Orientation = Orientation.Horizontal };
         inverse = Button("反选", () => { selected.SymmetricExceptWith(rows.Select(r => r.Id)); Changed(); });

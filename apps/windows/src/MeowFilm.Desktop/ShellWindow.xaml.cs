@@ -107,7 +107,7 @@ public sealed partial class ShellWindow : DesktopWindow
         ResetDialog.ExitRequested += OnUserDataResetExit;
         AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
         {
-            Notices.Show(e.Outlet, e.Message);
+            Notices.Show(e.Identity, e.Message);
             e.Handled = true;
         }));
         InitializePresentationMotion();

@@ -122,6 +122,7 @@ internal static class Program
                 // Platform callbacks are composed before this attachment. Host
                 // restoration is App-owned and independent of the selected page.
                 _ = film.StartSourcesAsync();
+                _ = novel.StartSourcesAsync();
                 var settings = shell.MediaControls ?? throw new InvalidOperationException("MEDIA_CONTROLS_MISSING");
                 var attachment = pendingMediaAttachment = new AppMediaWindowAttachment(window, settings);
                 music.AttachDesktopLyricsOwner(window, shell.RestoreFromTray);

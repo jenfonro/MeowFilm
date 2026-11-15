@@ -37,12 +37,20 @@ public sealed partial class NovelSettingsView
     }
     private async Task SaveRuleAsync(NovelRule rule, CancellationToken token)
     {
+        ValidateRuleData(rule);
         var next = module.Library.Rules.ToList(); int at = next.FindIndex(r => r.Id == rule.Id);
         if (at < 0) next.Add(rule); else next[at] = rule; await SaveRulesAsync(next, token);
     }
+    private static void ValidateRuleData(NovelRule rule)
+    {
+        if (string.IsNullOrEmpty(rule.Id) || rule.Pattern is null || rule.Name is null || rule.Group is null ||
+            rule.Replacement is null || rule.Scope is null || rule.ExcludeScope is null)
+            throw new InvalidDataException("替换规则格式不对");
+        if (rule.TimeoutMillisecond <= 0) throw new InvalidDataException("超时毫秒数无效");
+    }
     private async Task SaveRulesAsync(IReadOnlyList<NovelRule> rules, CancellationToken token)
     {
-        await module.Library.SaveRulesAsync(rules, token); await module.ReprocessCurrentAsync(token); Refresh();
+        await module.Library.SaveRulesAsync(rules, token); Refresh();
     }
     private Task MoveRuleAsync(NovelRule rule, bool top, CancellationToken token)
     {
@@ -95,7 +103,11 @@ public sealed partial class NovelSettingsView
         for (int index = 0; index < entries.Length; index++)
         {
             token.ThrowIfCancellationRequested();
-            try { rules.Add(NovelRuleImport.Parse(entries[index].GetRawText()).Single()); }
+            try
+            {
+                var rule = NovelRuleImport.Parse(entries[index].GetRawText()).Single();
+                ValidateRuleData(rule); rules.Add(rule);
+            }
             catch (OperationCanceledException) { throw; }
             catch { failures.Add($"规则 {index + 1} 无效"); }
         }

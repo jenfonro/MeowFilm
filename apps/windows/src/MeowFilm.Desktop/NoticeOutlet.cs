@@ -51,6 +51,7 @@ public sealed class NoticeOutlet : FrameworkElement
         };
     }
     private void ParentVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) => Schedule();
+    public void Post(string message) => root?.RaiseEvent(new DesktopNoticeEventArgs(this, message, transient: true));
     private void Queue() { pending = true; Schedule(); }
     private void Schedule()
     {
@@ -68,8 +69,9 @@ public sealed class NoticeOutlet : FrameworkElement
     private void Publish(string message) => root?.RaiseEvent(new DesktopNoticeEventArgs(this, message ?? ""));
 }
 
-public sealed class DesktopNoticeEventArgs(NoticeOutlet source, string message) : RoutedEventArgs(NoticeOutlet.NoticeEvent, source)
+public sealed class DesktopNoticeEventArgs(NoticeOutlet source, string message, bool transient = false) : RoutedEventArgs(NoticeOutlet.NoticeEvent, source)
 {
     public NoticeOutlet Outlet { get; } = source;
+    public object Identity { get; } = transient ? new object() : source;
     public string Message { get; } = message;
 }

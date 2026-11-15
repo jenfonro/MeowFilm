@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
 
@@ -9,7 +10,13 @@ public sealed partial class NovelCapability
     private CancellationTokenSource? discovery;
     private long discoveryGeneration;
     private int explorePage;
-    private bool discoveryNeedsReload = true, retryDiscoveryReset;
+    private bool discoveryInvalidated = true, retryDiscoveryReset;
+    private bool discoveryNeedsReload
+    {
+        get => discoveryInvalidated ||
+            NovelDiscoveryKinds.Select(Kinds, ExploreKind, Route == HomeRoute)?.Url != ExploreKind?.Url;
+        set => discoveryInvalidated = value;
+    }
     public NovelSource? ExploreSource { get; private set; }
     public NovelKind? ExploreKind { get; private set; }
     public IReadOnlyList<NovelKind> Kinds { get; private set; } = [];
@@ -82,18 +89,16 @@ public sealed partial class NovelCapability
                 }
                 source = current;
                 var nextKinds = Kinds;
-                var nextKind = ExploreKind;
                 if (reloadKinds)
                 {
                     var result = await Sources.InvokeAsync(source, "exploreKinds", new { }, cancellation);
                     cancellation.ThrowIfCancellationRequested();
                     if (generation != discoveryGeneration) return false;
                     nextKinds = NovelJson.Decode<NovelKind[]>(result.GetProperty("kinds"));
-                    nextKind = nextKinds.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k.Url) && k.Url == requestedKind?.Url)
-                        ?? nextKinds.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k.Url));
                 }
-                else if (changedKind)
-                    nextKind = nextKinds.FirstOrDefault(k => k.Url == kind!.Url && !string.IsNullOrWhiteSpace(k.Url));
+                var nextKind = reloadKinds ? NovelDiscoveryKinds.Select(nextKinds, requestedKind, Route == HomeRoute) :
+                    changedKind ? NovelDiscoveryKinds.Groups(nextKinds, Route == HomeRoute).SelectMany(group => group.Kinds)
+                        .FirstOrDefault(candidate => candidate.Url == kind!.Url) : ExploreKind;
                 if (nextKind is null)
                 {
                     Kinds = nextKinds; ExploreKind = null; DiscoverBooks.Clear(); MoreDiscovery = false; explorePage = 0;
@@ -118,12 +123,14 @@ public sealed partial class NovelCapability
                 return true;
             }
             catch (OperationCanceledException) { throw; }
-            catch
+            catch (Exception error)
             {
                 cancellation.ThrowIfCancellationRequested();
                 if (generation == discoveryGeneration)
                 {
-                    DiscoveryState = NovelDiscoveryState.Failed; DiscoveryError = "发现加载失败";
+                    DiscoveryState = NovelDiscoveryState.Failed;
+                    DiscoveryError = error is BridgeException { Code: "WEB_INTERACTION_REQUIRED" }
+                        ? "书源需要网页验证" : "发现加载失败";
                     Notice = "发现加载失败，请重试";
                 }
                 return false;

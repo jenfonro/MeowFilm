@@ -20,7 +20,7 @@ public static partial class NovelTests
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         await using var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules,
             TestWorkspace.DataPath("novel-web-cookie-scope"), deadline.Token);
-        var sources = new NovelSourceService(runtime);
+        var sources = NovelTestSources.Create(runtime);
         await using var rules = new NovelRuleProgram(runtime);
         var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
         try

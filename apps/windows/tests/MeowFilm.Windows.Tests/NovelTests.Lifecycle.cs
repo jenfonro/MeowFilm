@@ -218,7 +218,7 @@ public static partial class NovelTests
         foreach (bool cancel in new[] { false, true })
         {
             await using var store = new MemoryStore(); var runtime = new Runtime();
-            await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
+            await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
             await module.InitializeAsync(default);
             FrameworkElement view = owner == "view" ? module.View : module.SettingsView;
             var root = new Grid();

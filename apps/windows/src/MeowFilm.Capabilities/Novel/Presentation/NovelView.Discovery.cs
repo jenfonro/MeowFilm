@@ -128,12 +128,12 @@ public sealed partial class NovelView
     }
     private FrameworkElement DiscoveryTools()
     {
-        var tools = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        var tools = new StackPanel { Orientation = Orientation.Horizontal, Height = 44, VerticalAlignment = VerticalAlignment.Top };
         var choices = module.Sources.Sources.Where(NovelCapability.CanExplore).ToList();
         if (module.ExploreSource is { } selected && !choices.Any(s => s.InstallationId == selected.InstallationId))
             choices.Insert(0, selected);
         var sources = new ComboBox { ItemsSource = choices, SelectedItem = module.ExploreSource,
-            Width = 154, MaxDropDownHeight = 300, Margin = new(0, 0, 16, 0) };
+            Width = 154, MaxDropDownHeight = 300, Margin = new(0, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center };
         sources.SetResourceReference(StyleProperty, "Novel.Discovery.Source");
         AutomationProperties.SetName(sources, "发现书源"); AutomationProperties.SetAutomationId(sources, "novel.discovery.source");
         sources.SelectionChanged += (_, _) =>
@@ -156,139 +156,147 @@ public sealed partial class NovelView
     private FrameworkElement DiscoveryTabs(IEnumerable<NovelKind> kinds)
     {
         var tabs = new StackPanel { Orientation = Orientation.Horizontal };
-        foreach (var kind in kinds.Where(k => !string.IsNullOrWhiteSpace(k.Url)))
+        foreach (var kind in kinds)
         {
-            var tab = new RadioButton { Content = kind.Title, IsChecked = module.ExploreKind?.Url == kind.Url };
-            tab.SetResourceReference(StyleProperty, "Novel.Discovery.Tab");
-            AutomationProperties.SetName(tab, kind.Title);
-            AutomationProperties.SetAutomationId(tab, "novel.discovery.kind:" + kind.Url);
-            tab.Checked += (_, _) =>
-            {
-                if (kind.Url != module.ExploreKind?.Url)
-                    module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, kind, false, ct));
-            };
-            tabs.Children.Add(tab);
+            tabs.Children.Add(DiscoveryTab(kind.Title, kind, module.ExploreKind?.Url == kind.Url,
+                "novel.discovery.kind:" + kind.Url));
         }
-        return new ScrollViewer { Content = tabs, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, PanningMode = PanningMode.HorizontalOnly };
+        return DiscoveryNavigation(tabs);
+    }
+    private RadioButton DiscoveryTab(string title, NovelKind kind, bool selected, string id)
+    {
+        var tab = new RadioButton { Content = title, IsChecked = selected, GroupName = "novel.discovery.channels" };
+        tab.SetResourceReference(StyleProperty, "Novel.Discovery.Tab");
+        AutomationProperties.SetName(tab, title); AutomationProperties.SetAutomationId(tab, id);
+        tab.Checked += (_, _) =>
+        {
+            if (kind.Url != module.ExploreKind?.Url)
+                module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, kind, false, ct));
+        };
+        tab.PreviewKeyDown += DiscoveryNavigation_KeyDown;
+        tab.Loaded += (_, _) => { if (tab.IsChecked == true) tab.BringIntoView(); };
+        return tab;
+    }
+    private FrameworkElement DiscoveryChannels(IReadOnlyList<NovelDiscoveryGroup> groups)
+    {
+        var tabs = new StackPanel { Orientation = Orientation.Horizontal };
+        foreach (var group in groups)
+        {
+            if (string.IsNullOrWhiteSpace(group.Title))
+            {
+                foreach (var kind in group.Kinds)
+                    tabs.Children.Add(DiscoveryTab(kind.Title, kind, module.ExploreKind?.Url == kind.Url,
+                        "novel.discovery.kind:" + kind.Url));
+                continue;
+            }
+            var entry = group.Kinds.FirstOrDefault(kind => kind.Url == module.ExploreKind?.Url) ?? group.Kinds[0];
+            tabs.Children.Add(DiscoveryTab(group.Title, entry, group.Kinds.Any(kind => kind.Url == module.ExploreKind?.Url),
+                "novel.discovery.group:" + group.Kinds[0].Url));
+        }
+        return DiscoveryNavigation(tabs);
+    }
+    private static ScrollViewer DiscoveryNavigation(Panel choices)
+    {
+        KeyboardNavigation.SetDirectionalNavigation(choices, KeyboardNavigationMode.Cycle);
+        var scroll = new ScrollViewer { Content = choices, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, PanningMode = PanningMode.HorizontalOnly,
+            HorizontalContentAlignment = HorizontalAlignment.Left };
+        scroll.Resources.MergedDictionaries.Add(new()
+            { Source = new Uri("/MeowFilm.Desktop;component/SettingsScrollChrome.xaml", UriKind.Relative) });
+        scroll.SetResourceReference(StyleProperty, "MeowFilm.SettingsScrollViewer");
+        return scroll;
+    }
+    private static void DiscoveryNavigation_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is not RadioButton { Parent: Panel panel } current ||
+            e.Key is not (Key.Home or Key.End or Key.Left or Key.Right)) return;
+        var choices = panel.Children.OfType<RadioButton>().ToArray();
+        int index = Array.IndexOf(choices, current);
+        int next = e.Key switch { Key.Home => 0, Key.End => choices.Length - 1,
+            Key.Left => (index + choices.Length - 1) % choices.Length, _ => (index + 1) % choices.Length };
+        choices[next].Focus(); choices[next].IsChecked = true; choices[next].BringIntoView(); e.Handled = true;
     }
     private FrameworkElement BuildDiscovery(bool categories)
     {
         var panel = new StackPanel { MaxWidth = 1100 };
         AutomationProperties.SetName(panel, categories ? "小说分类" : "小说首页");
-        var heading = new Grid { MinHeight = categories ? 44 : 55 };
+        var groups = NovelDiscoveryKinds.Groups(module.Kinds, rankingsOnly: !categories);
+        bool showBooks = categories || NovelDiscoveryKinds.IsRanking(module.Kinds, module.ExploreKind);
+        var heading = new Grid { MinHeight = 44 };
         heading.ColumnDefinitions.Add(new()); heading.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         var tools = DiscoveryTools(); Grid.SetColumn(tools, 1); heading.Children.Add(tools);
+        heading.Children.Add(categories ? DiscoveryChannels(groups) : DiscoveryTabs(groups.SelectMany(group => group.Kinds)));
+        panel.Children.Add(DiscoveryRule(heading));
         if (categories)
         {
-            var title = DiscoveryText("分类", 26); title.VerticalAlignment = VerticalAlignment.Center;
-            heading.Children.Add(title); panel.Children.Add(heading);
-            var groups = DiscoveryKindGroups();
-            var tabs = new StackPanel { Orientation = Orientation.Horizontal };
-            foreach (var group in groups.Where(g => g.Title.Length > 0 && g.Kinds.Count > 0))
-            {
-                var entry = group.Kinds.FirstOrDefault(k => k.Url == module.ExploreKind?.Url) ?? group.Kinds[0];
-                var tab = new RadioButton { Content = group.Title, IsChecked = group.Kinds.Any(k => k.Url == module.ExploreKind?.Url) };
-                tab.SetResourceReference(StyleProperty, "Novel.Discovery.Tab");
-                AutomationProperties.SetName(tab, group.Title);
-                AutomationProperties.SetAutomationId(tab, "novel.discovery.group:" + entry.Url);
-                tab.Checked += (_, _) => module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, entry, false, ct));
-                tabs.Children.Add(tab);
-            }
-            if (tabs.Children.Count > 0)
-                panel.Children.Add(DiscoveryRule(new ScrollViewer { Content = tabs, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-                    VerticalScrollBarVisibility = ScrollBarVisibility.Disabled }));
-            else heading.Margin = new(0, 0, 0, 22);
-            if (groups.Count > 0) panel.Children.Add(DiscoveryFilters(groups));
-            var section = DiscoverySectionHeading(module.ExploreKind?.Title ?? "书籍", $"{module.DiscoverBooks.Count} 本作品");
-            section.Margin = new(0, 24, 0, 17); panel.Children.Add(section);
+            var current = groups.FirstOrDefault(group => group.Kinds.Any(kind => kind.Url == module.ExploreKind?.Url));
+            if (current is not null && !string.IsNullOrWhiteSpace(current.Title)) panel.Children.Add(DiscoveryFilters(current));
         }
         else
         {
-            heading.Children.Add(DiscoveryTabs(module.Kinds)); panel.Children.Add(DiscoveryRule(heading));
-            panel.Children.Add(DiscoveryFeatureRow());
-            var section = DiscoverySectionHeading(module.ExploreKind?.Title ?? "书籍", module.ExploreSource?.Name ?? "");
+            if (showBooks && module.DiscoverBooks.Count > 0) panel.Children.Add(DiscoveryFeatureRow());
             var all = DiscoveryButton("全部分类", () => module.Request(NovelCapability.CategoriesRoute));
             var label = new StackPanel { Orientation = Orientation.Horizontal };
             label.Children.Add(new TextBlock { Text = "全部分类", VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 0, 8, 0) });
             label.Children.Add(DiscoveryIcon("M10,6 L16,12 10,18"));
-            all.Content = label; all.HorizontalAlignment = HorizontalAlignment.Right; Grid.SetColumn(all, 1); section.Children.Add(all);
-            section.Margin = new(0, 25, 0, 16); panel.Children.Add(section);
+            all.Content = label; all.HorizontalAlignment = HorizontalAlignment.Right;
+            all.Margin = new(0, 25, 0, 16); panel.Children.Add(all);
         }
         // 1100 = 6 × 170 + 5 × 16; category rows use 3 × 350⅔ + 2 × 24.
         var books = new NovelBookGrid(categories ? 3 : 6, categories ? 310 : 138, categories ? 24 : 16, 22);
         AutomationProperties.SetName(books, categories ? "分类结果" : "发现书籍");
-        foreach (var book in module.DiscoverBooks)
-            books.Children.Add(categories ? DiscoveryCatalogBook(book) : DiscoveryTile(book));
+        if (showBooks)
+            foreach (var book in module.DiscoverBooks)
+                books.Children.Add(categories ? DiscoveryCatalogBook(book) : DiscoveryTile(book));
         panel.Children.Add(books);
-        AddDiscoveryStatus(panel);
-        if (module.MoreDiscovery)
+        AddDiscoveryStatus(panel, categories);
+        if (showBooks && module.MoreDiscovery)
         {
             var more = DiscoveryButton("加载更多", () => module.RunUi(ct =>
                 module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, false, ct)));
             more.IsEnabled = !module.LoadingDiscovery; more.Margin = new(0, 18, 0, 0);
             more.HorizontalAlignment = HorizontalAlignment.Center; panel.Children.Add(more);
         }
-        var frame = new Grid { Margin = new(32, 25, 32, 16) }; frame.Children.Add(panel);
+        var frame = new Grid { Margin = new(32, 12, 32, 16) }; frame.Children.Add(panel);
         var scroll = NovelUi.Scroll(frame); scroll.HorizontalContentAlignment = HorizontalAlignment.Stretch;
         return scroll;
     }
     private static Border DiscoveryRule(UIElement child)
     {
-        var rule = new Border { Child = child, BorderThickness = new(0, 0, 0, 1), Margin = new(0, 0, 0, 22) };
+        var rule = new Border { Child = child, BorderThickness = new(0, 0, 0, 1), Margin = new(0, 0, 0, 16) };
         rule.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); return rule;
     }
-    private static Grid DiscoverySectionHeading(string title, string detail)
+    private FrameworkElement DiscoveryFilters(NovelDiscoveryGroup group)
     {
-        var row = new Grid { MinHeight = 25 };
-        row.ColumnDefinitions.Add(new()); row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        var text = new Grid { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
-        text.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); text.ColumnDefinitions.Add(new());
-        var name = DiscoveryText(title, 17); name.MaxWidth = 360; text.Children.Add(name);
-        var count = DiscoveryText(detail, 11, true); count.Margin = new(12, 0, 0, 0);
-        count.VerticalAlignment = VerticalAlignment.Center; Grid.SetColumn(count, 1); text.Children.Add(count); row.Children.Add(text);
-        return row;
-    }
-    private List<(string Title, List<NovelKind> Kinds)> DiscoveryKindGroups()
-    {
-        var result = new List<(string, List<NovelKind>)>();
-        string title = ""; List<NovelKind>? group = null;
-        foreach (var kind in module.Kinds)
+        var row = new Grid { MinHeight = 36, Margin = new(0, 0, 0, 18) };
+        AutomationProperties.SetName(row, "当前频道筛选");
+        row.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); row.ColumnDefinitions.Add(new());
+        var label = new TextBlock { Text = group.Title, MaxWidth = 150,
+            TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = group.Title };
+        label.SetResourceReference(StyleProperty, "MeowFilm.FilterLabel");
+        var labelSlot = new Grid { Height = 36, VerticalAlignment = VerticalAlignment.Top, Margin = new(0, 0, 14, 0) };
+        labelSlot.Children.Add(label); row.Children.Add(labelSlot);
+        var choices = new StackPanel { Orientation = Orientation.Horizontal };
+        foreach (var kind in group.Kinds)
         {
-            if (string.IsNullOrWhiteSpace(kind.Url)) { title = kind.Title; group = null; continue; }
-            if (group is null) { group = []; result.Add((title, group)); }
-            group.Add(kind);
-        }
-        return result;
-    }
-    private FrameworkElement DiscoveryFilters(List<(string Title, List<NovelKind> Kinds)> groups)
-    {
-        var rows = new StackPanel();
-        foreach (var group in groups)
-        {
-            var row = new Grid { MinHeight = 34 };
-            row.ColumnDefinitions.Add(new() { Width = new(55) }); row.ColumnDefinitions.Add(new());
-            var label = DiscoveryText(group.Title.Length > 0 ? group.Title : "分类", 12, true);
-            label.VerticalAlignment = VerticalAlignment.Center; label.ToolTip = label.Text; row.Children.Add(label);
-            var choices = new WrapPanel(); Grid.SetColumn(choices, 1);
-            foreach (var kind in group.Kinds)
+            var choice = new RadioButton { Content = kind.Title, IsChecked = kind.Url == module.ExploreKind?.Url,
+                GroupName = "novel.discovery.kinds" };
+            choice.SetResourceReference(StyleProperty, "Novel.Discovery.Choice");
+            AutomationProperties.SetName(choice, kind.Title);
+            AutomationProperties.SetAutomationId(choice, "novel.discovery.kind:" + kind.Url);
+            choice.Checked += (_, _) =>
             {
-                var choice = new RadioButton { Content = kind.Title, IsChecked = kind.Url == module.ExploreKind?.Url,
-                    GroupName = "novel.discovery.kinds" };
-                choice.SetResourceReference(StyleProperty, "Novel.Discovery.Choice");
-                AutomationProperties.SetName(choice, kind.Title);
-                AutomationProperties.SetAutomationId(choice, "novel.discovery.kind:" + kind.Url);
-                choice.Checked += (_, _) =>
-                {
-                    if (kind.Url != module.ExploreKind?.Url)
-                        module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, kind, false, ct));
-                };
-                choices.Children.Add(choice);
-            }
-            row.Children.Add(choices); rows.Children.Add(row);
+                if (kind.Url != module.ExploreKind?.Url)
+                    module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, kind, false, ct));
+            };
+            choice.PreviewKeyDown += DiscoveryNavigation_KeyDown;
+            choice.Loaded += (_, _) => { if (choice.IsChecked == true) choice.BringIntoView(); };
+            choices.Children.Add(choice);
         }
-        var panel = new Border { Child = rows, Padding = new(20, 9, 20, 9) };
-        panel.SetResourceReference(StyleProperty, "Novel.Discovery.Surface"); return panel;
+        var capsule = new Border { Child = DiscoveryNavigation(choices), HorizontalAlignment = HorizontalAlignment.Left };
+        capsule.SetResourceReference(StyleProperty, "MeowFilm.FilterGroup");
+        Grid.SetColumn(capsule, 1); row.Children.Add(capsule);
+        return row;
     }
     private FrameworkElement DiscoveryFeatureRow()
     {
@@ -429,7 +437,7 @@ public sealed partial class NovelView
         var border = new Border { Child = row, Padding = new(0, 0, 0, 22), BorderThickness = new(0, 0, 0, 1) };
         border.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); return border;
     }
-    private void AddDiscoveryStatus(Panel panel)
+    private void AddDiscoveryStatus(Panel panel, bool categories)
     {
         string text = module.DiscoveryState switch
         {
@@ -437,7 +445,7 @@ public sealed partial class NovelView
             NovelDiscoveryState.Cancelling => "正在取消…",
             NovelDiscoveryState.Cancelled => "已取消",
             NovelDiscoveryState.Unavailable => module.ExploreSource is null ? "无可用发现书源" : "书源不可用",
-            NovelDiscoveryState.Empty => module.ExploreKind is null ? "暂无可用分类" : "暂无书籍",
+            NovelDiscoveryState.Empty => module.ExploreKind is null ? categories ? "暂无可用分类" : "暂无可用榜单" : "暂无书籍",
             _ => ""
         };
         if (text.Length > 0)
@@ -465,7 +473,11 @@ public sealed partial class NovelView
         shownDiscoveryFailure = module.DiscoveryGeneration;
         try
         {
-            await NovelUi.DialogAsync(this, "发现加载失败", DiscoveryText(module.ExploreSource?.Name ?? "书源", 14),
+            var body = new StackPanel();
+            body.Children.Add(DiscoveryText(module.ExploreSource?.Name ?? "书源", 14));
+            if (module.DiscoveryError is { Length: > 0 } detail && detail != "发现加载失败")
+                body.Children.Add(DiscoveryText(detail, 14));
+            await NovelUi.DialogAsync(this, "发现加载失败", body,
                 "重试", async ct =>
                 {
                     await module.RetryDiscoveryAsync(ct);

@@ -1,6 +1,8 @@
 # 永久书源仓库与原生交互
 
-`source@0.3.0` 使用 `source.runtime.v2`，与既有 `load/unload/invoke/status/close` 同时装配。运行器独占 `<dataRoot>/source/library.json`，原生客户端只缓存 `SourceRecord`，书架、历史、阅读锚点和排版仍由原生业务拥有。没有 `dataRoot` 的独立测试模块只保留会话内仓库；正式 App 沿用公共 `dataRoot` 装配。
+`source@0.3.0` 使用 `source.runtime.v2`，与既有 `load/unload/invoke/status/close` 同时装配。书架、历史、阅读锚点和排版由原生业务拥有；书源定义与管理配置只有一个持久化 owner，执行实例、Cookie 和私有变量仍由运行器拥有。
+
+`createSourceRuntimeModule` 缺省 `configurationOwner:"runtime"`，用于 iOS 现行装配：运行器独占 `<dataRoot>/source/library.json`。Windows aggregate 显式选择 `"native"`：原生配置格式见 [Windows 小说](../windows/novel.md#书源配置与设置保存)，书源库仅在内存应用原生配置快照，磁盘只读写 `<dataRoot>/source/private.json`。Windows 不读取、迁移、回退或删除旧混合库。没有 `dataRoot` 的独立模块只保留会话内状态。
 
 所有方法使用 `source.runtime.` 前缀，HTTP 为 `POST /v1/source/<operation>`。响应成功为 `{ok:true,contract:"source.runtime.v2",value}`，失败为 `{ok:false,contract:"source.runtime.v2",code}`，错误不携带源代码、Cookie 或底层异常。
 
@@ -10,6 +12,7 @@
 | --- | --- | --- |
 | `library.list` | `{}` | `{sources:[SourceRecord]}` |
 | `library.get` | `{installationId}` | `{source:SourceRecord,definition:string}` |
+| `library.apply` | `{revision,sources:[SourceConfiguration]}`，仅 native owner | `{revision,sources:[SourceRecord]}` |
 | `library.previewImport` | `{text?,url?,fileName?}`，text/url 二选一 | `{items:[{index,name,sourceUrl,group,protocol,exists,definition}],failures:[{index,name,code}]}` |
 | `library.import` | `{text?,url?,fileName?}`，text/url 二选一 | `{sources:[SourceRecord],failures:[{index,name,code}]}` |
 | `library.save` | `{installationId,expectedRevision,definition:string}` | `{source:SourceRecord}` |
@@ -20,17 +23,25 @@
 
 普通 RPC 只消费各操作列出的参数，额外键不参与动作或触发未知参数拒绝；`library.update` 只修改表中的五个管理字段，不将其他 patch 成员写入来源身份、定义、私有数据或执行配置。身份、revision/CAS、取消和资源释放条件不变。
 
-`SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，另投影用于管理排序／操作的 `weight,lastUpdateTime,respondTime,hasExplore`；恢复失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。order 是有符号安全整数，列表按 order、名称、installationId 排序。无源返回空列表。
+native owner 拒绝 `library.import/save/update/remove`，返回 `PERMISSION_DENIED`；配置写入不走这些运行器方法。`library.list/get/export` 只投影本次已接收的内存配置；启动不会仅凭私有状态恢复书源。
 
-导入接受当前 Legado JSON 对象或数组、`sources/bookSources/data` 数组容器、逐行 JSON，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码继续遵循现有 16 MiB 格式边界。管理字段使用 `enabled`、`customOrder` 和 `enabledExplore/exploreUrl`；其他普通键不回填这些字段。
+`SourceConfiguration` 只含 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,definition`，不含 actions、Cookie、变量或 generation。`sources` 是含启用和禁用源的完整集合，可以为空；相对上次快照缺失的源视为移除，不按增量 patch 合并。快照 revision 与每源 revision 均为正安全整数；重复身份／URL、缺失或错误类型、协议／定义不匹配、JSON 与大小错误在撤销任何旧实例前拒绝。全局旧 revision 返回 `STALE_SOURCE`，同 revision 不同内容返回 `SOURCE_INTEGRITY`；每源租约也不得倒退或在同 revision 改写内容。
+
+`library.apply` 只处理真实变化、失败重试和移除项；相同快照幂等，成功源不重复初始化，禁用源不执行。替换或移除会撤销旧调用、Web 与图片并等待实际清理。初始化失败在当前已保存 revision 上返回该源 `errorCode`，关闭执行准入，不回写配置或恢复旧定义；清理失败仍为 `SOURCE_CLEANUP`。精确快照可重试失败项，后继快照使旧应用结果失效。运行器恢复后须重新接收最新原生快照才能执行。
+
+native owner 的私有文档为 `{schema:1,sources:[{installationId,private:{cookies,storage}}]}`，定义不落盘。当前 generation 的私有写入只更新这个文档，不产生第二份配置；损坏或写入失败不以空数据覆盖。本会话已登记的源移除时，在真实资源清理成功后删除相应私有项；尚未在本会话登记的磁盘私有项不会因快照缺项自动移除。
+
+`SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，另投影用于管理排序／操作的 `weight,lastUpdateTime,respondTime,hasExplore`；恢复或应用失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。order 是有符号安全整数，`library.list` 按 order、名称、installationId 排序。无源返回空列表。
+
+以下导入、试运行与保存流程属于 runtime owner。导入接受当前 Legado JSON 对象或数组、`sources/bookSources/data` 数组容器、逐行 JSON，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码继续遵循现有 16 MiB 格式边界。管理字段使用 `enabled`、`customOrder` 和 `enabledExplore/exploreUrl`；其他普通键不回填这些字段。
 
 `library.previewImport` 仅下载、解析和识别定义，不安装、不执行候选、不修改永久库或创建私有源数据。URL 只下载一次；返回的定义包含来源身份和当前管理元数据，客户端确认所选条目后将这些定义一次性传给 `library.import`，不再下载。预览也受取消／关闭排空约束，失败条目不隐藏有效项。
 
-URL 导入和预览使用同一 HTTP(S) 下载，初始地址及每次重定向均拒绝非 HTTP(S) 或内嵌凭据；不按来源域名设白名单。既定 60 秒下载截止直接取消网络，等待真实交换收口后返回 `TIMEOUT`；取消或关闭不发布候选或写入永久库。此行为由公共 source owner 提供，Windows 与 iOS 入口共用。
+runtime owner 的 URL 导入和预览使用同一 HTTP(S) 下载，初始地址及每次重定向均拒绝非 HTTP(S) 或内嵌凭据；不按来源域名设白名单。既定 60 秒下载截止直接取消网络，等待真实交换收口后返回 `TIMEOUT`；取消或关闭不发布候选或写入永久库。iOS 继续使用这个公共 source owner；Windows native owner 的配置导入由原生服务提供，采用相同的地址、取消和保存边界，不调用运行器库导入，见[Windows 小说](../windows/novel.md#书源配置与设置保存)。
 
 `library.get` 返回原协议定义加上当前管理的名称、分组、启停和排序，未改规则与扩展值保留原类型；编辑保存不能把列表操作恢复为旧元数据。
 
-save 先试运行完整候选，随后原子替换仓库；语法、初始化、取消或写盘失败保留原定义及 revision，并恢复可用的旧运行实例。禁用不删除定义或私有状态，重新启用恢复；remove 删除该源及其私有值，撤销 Web、图片和运行任务。客户端不保存原始定义用来恢复安装；get 仅供编辑，export 仅包含定义和管理字段，不导出 Cookie、缓存和私有变量。
+runtime owner 的 save 先试运行完整候选，随后原子替换仓库；语法、初始化、取消或写盘失败保留原定义及 revision，并恢复可用的旧运行实例。禁用不删除定义或私有状态，重新启用恢复；remove 删除该源及其私有值，撤销 Web、图片和运行任务。该模式下客户端不保存原始定义用来恢复安装；get 仅供编辑，export 仅包含定义和管理字段，不导出 Cookie、缓存和私有变量。
 
 仓库文件整体写入临时文件、fsync、rename，沿用 `PrivateDocuments` 的私有权限与链接校验。损坏文件返回 `CORRUPT_STORAGE`，不可读／不可写返回 `STORAGE_ERROR`，均不以空库覆写。运行器关闭前排空已接受的写入和真实宿主资源；仅取消信号不算清理完成。
 

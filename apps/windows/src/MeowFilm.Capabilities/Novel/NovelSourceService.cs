@@ -1,18 +1,26 @@
 using System.Text.Json;
+using System.IO;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed class NovelSourceProjectionChange(bool initial) : EventArgs
+internal sealed class NovelSourceProjectionChange(IReadOnlySet<string> retired) : EventArgs
 {
-    internal bool Initial => initial;
+    internal IReadOnlySet<string> Retired => retired;
 }
 
-/// <summary>Projection of the runtime-owned source repository, with revision-bound invocation leases.</summary>
-public sealed class NovelSourceService(IRuntimeClient runtime)
+/// <summary>Native source configuration and revision-bound execution through the runtime.</summary>
+public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore store)
 {
+    private readonly NovelSourceConfiguration configuration = new(store);
     private readonly NovelWork work = new();
     private readonly NovelWork visuals = new();
+    private readonly NovelWork applications = new();
+    private readonly SemaphoreSlim applying = new(1, 1);
+    private IRuntimeClient? appliedClient;
+    private CancellationToken appliedRevoked;
+    private long appliedRevision;
     private readonly HashSet<string> imageReferences = [];
     private readonly SemaphoreSlim changes = new(1, 1);
     private readonly Dictionary<string, CancellationTokenSource> leases = [];
@@ -26,6 +34,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
     private ActiveWeb? activeWeb;
     public IReadOnlyList<NovelSource> Sources => sources;
     public event EventHandler? Changed;
+    public event EventHandler<string>? ApplyFailed;
     internal event EventHandler? Resumed;
     public Func<JsonElement, CancellationToken, Task<object?>>? InteractAsync { get; set; }
     private async Task<JsonElement> CallAsync(string operation, object payload, CancellationToken token, bool acceptReceipt = false)
@@ -45,26 +54,92 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
         {
             if (!onlyMissing || !initialized)
             {
-                var result = await CallAsync("library.list", new { }, ct);
-                Publish(NovelJson.Decode<NovelSource[]>(result.GetProperty("sources")));
+                await configuration.LoadAsync(ct, reload: !onlyMissing);
+                PublishConfiguration();
             }
             return true;
         }
         finally { changes.Release(); }
     }, token);
+    private void PublishConfiguration()
+    {
+        Publish(configuration.Snapshot.Sources.Select(item =>
+        {
+            var source = item.Source();
+            var previous = sources.FirstOrDefault(s => s.InstallationId == item.InstallationId && s.Revision == item.Revision);
+            return previous is null ? source : source with { Actions = previous.Actions, ErrorCode = previous.ErrorCode };
+        }).ToArray());
+    }
+    public async Task StartAsync(CancellationToken token = default)
+    {
+        await EnsureReadyAsync(token); ScheduleApplication(false);
+    }
+    private void ScheduleApplication(bool reportFailure)
+    {
+        _ = Apply();
+        async Task Apply()
+        {
+            try
+            {
+                await applications.Run(async ct => { await ApplyLatestAsync(ct); return true; });
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception) { if (reportFailure) ApplyFailed?.Invoke(this, "书源配置已保存，运行器暂未生效"); }
+        }
+    }
+    private async Task ApplyLatestAsync(CancellationToken token, bool force = false)
+    {
+        await applying.WaitAsync(token);
+        try
+        {
+            while (true)
+            {
+                var next = configuration.Snapshot;
+                var connection = runtime is IRuntimeConnectionSource capture ? await capture.CaptureConnectionAsync(token) : null;
+                var client = connection?.Client ?? runtime;
+                var revoked = connection?.Revoked ?? default;
+                if (!force && ReferenceEquals(appliedClient, client) && !appliedRevoked.IsCancellationRequested &&
+                    appliedRevision == next.Revision) return;
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, revoked);
+                var envelope = await client.CallAsync("source.runtime.library.apply",
+                    NovelJson.Value(new { revision = next.Revision, sources = next.Sources }), linked.Token);
+                linked.Token.ThrowIfCancellationRequested();
+                if (!envelope.GetProperty("ok").GetBoolean()) throw new BridgeException(envelope.GetProperty("code").GetString()!);
+                var value = envelope.GetProperty("value");
+                if (value.GetProperty("revision").GetInt64() != next.Revision) throw new BridgeException("INVALID_RESPONSE");
+                if (!ReferenceEquals(configuration.Snapshot, next)) { force = true; continue; }
+                var projected = NovelJson.Decode<NovelSource[]>(value.GetProperty("sources"));
+                if (projected.Length != next.Sources.Length || projected.Any(source =>
+                    !next.Sources.Any(item => item.InstallationId == source.InstallationId && item.Revision == source.Revision)))
+                    throw new BridgeException("INVALID_RESPONSE");
+                appliedClient = client; appliedRevoked = revoked; appliedRevision = next.Revision;
+                Publish(next.Sources.Select(item =>
+                {
+                    var applied = projected.Single(source => source.InstallationId == item.InstallationId);
+                    return item.Source() with { Actions = applied.Actions, ErrorCode = applied.ErrorCode };
+                }).ToArray());
+                if (projected.Any(source => source.Enabled && source.ErrorCode is not null))
+                    ApplyFailed?.Invoke(this, "书源配置已保存，部分书源未能生效");
+                return;
+            }
+        }
+        finally { applying.Release(); }
+    }
     private void Publish(IReadOnlyList<NovelSource> values)
     {
         bool initial = !initialized; initialized = true;
         values = values.OrderBy(s => s.Order).ThenBy(s => s.Name, StringComparer.CurrentCulture).ThenBy(s => s.InstallationId, StringComparer.Ordinal).ToArray();
-        if (sources.Count == values.Count && sources.Zip(values).All(pair =>
+        if (!initial && sources.Count == values.Count && sources.Zip(values).All(pair =>
             (pair.First with { Actions = pair.Second.Actions }) == pair.Second && pair.First.Actions.SequenceEqual(pair.Second.Actions))) return;
+        var retired = new HashSet<string>(StringComparer.Ordinal);
         foreach (var prior in sources)
         {
             var next = values.FirstOrDefault(s => s.InstallationId == prior.InstallationId);
-            if (next is null || !next.Enabled || next.Revision != prior.Revision) Retire(prior.InstallationId);
+            if (next is null || !next.Enabled || next.Revision != prior.Revision)
+            { retired.Add(prior.InstallationId); Retire(prior.InstallationId); }
         }
         sources = values;
-        Changed?.Invoke(this, new NovelSourceProjectionChange(initial));
+        Changed?.Invoke(this, new NovelSourceProjectionChange(retired));
     }
     private void Retire(string id)
     {
@@ -86,7 +161,10 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
         s.Revision == source.Revision && s.Enabled);
     public Task<JsonElement> InvokeAsync(NovelSource source, string action, object payload, CancellationToken token = default) => work.Run(async ct =>
     {
+        await EnsureReadyAsync(ct);
+        await ApplyLatestAsync(ct, force: sources.Any(s => s.InstallationId == source.InstallationId && s.ErrorCode is not null));
         if (!IsCurrent(source)) throw new BridgeException("STALE_SOURCE");
+        if (sources.First(s => s.InstallationId == source.InstallationId).ErrorCode is { } code) throw new BridgeException(code);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, SourceToken(source));
         var invocation = Guid.NewGuid().ToString("N");
         invoking[invocation] = (linked.Token, source);
@@ -195,59 +273,117 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
         catch (BridgeException) { /* The invocation delivers the fixed runtime error to its caller. */ }
     }
     public Task<JsonElement> ImportAsync(string? text = null, string? url = null, string? fileName = null,
-        CancellationToken token = default)
+        CancellationToken token = default) => work.Run(async ct =>
     {
-        var payload = new Dictionary<string, object>();
-        if (text is not null) payload["text"] = text;
-        if (url is not null) payload["url"] = url;
-        if (fileName is not null) payload["fileName"] = fileName;
-        return EditAsync("library.import", payload, token);
-    }
+        var input = await ImportTextAsync(text, url, ct);
+        await changes.WaitAsync(ct);
+        try
+        {
+            await configuration.LoadAsync(ct);
+            var value = await configuration.ImportAsync(input, fileName, url, ct);
+            PublishConfiguration(); ScheduleApplication(true); return value;
+        }
+        finally { changes.Release(); }
+    }, token);
     public Task<JsonElement> PreviewImportAsync(string? text = null, string? url = null, string? fileName = null,
-        CancellationToken token = default)
+        CancellationToken token = default) => work.Run(async ct =>
     {
-        var payload = new Dictionary<string, object>();
-        if (text is not null) payload["text"] = text;
-        if (url is not null) payload["url"] = url;
-        if (fileName is not null) payload["fileName"] = fileName;
-        return work.Run(ct => CallAsync("library.previewImport", payload, ct), token);
+        await configuration.LoadAsync(ct);
+        return configuration.Preview(await ImportTextAsync(text, url, ct), fileName, url);
+    }, token);
+    private static async Task<string> ImportTextAsync(string? text, string? url, CancellationToken token)
+    {
+        if ((text is null) == (url is null)) throw new BridgeException("INVALID_REQUEST");
+        if (text is not null) return string.IsNullOrWhiteSpace(text) ? throw new BridgeException("INVALID_REQUEST") : text;
+        static Uri Address(string value, Uri? origin = null)
+        {
+            if (!(origin is null ? Uri.TryCreate(value, UriKind.Absolute, out var result) :
+                    Uri.TryCreate(origin, value, out result)) || result.Scheme is not ("http" or "https") || result.UserInfo.Length != 0)
+                throw new BridgeException("INVALID_REQUEST");
+            return result;
+        }
+        var uri = Address(url!); var visited = new HashSet<Uri>();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(60));
+        using var client = new System.Net.Http.HttpClient(new System.Net.Http.HttpClientHandler
+            { AllowAutoRedirect = false, UseCookies = false }) { Timeout = Timeout.InfiniteTimeSpan };
+        try
+        {
+            while (visited.Add(uri))
+            {
+                using var response = await client.GetAsync(uri, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                {
+                    uri = Address(response.Headers.Location?.OriginalString ?? throw new BridgeException("UPSTREAM_RESPONSE"), uri);
+                    continue;
+                }
+                if (!response.IsSuccessStatusCode) throw new BridgeException("UPSTREAM_RESPONSE");
+                await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
+                using var output = new MemoryStream();
+                byte[] buffer = new byte[65536];
+                int count;
+                while ((count = await body.ReadAsync(buffer, deadline.Token)) != 0)
+                {
+                    if (output.Length + count > LocalDocumentStore.MaximumSourceBytes) throw new BridgeException("LIMIT");
+                    output.Write(buffer, 0, count);
+                }
+                try { return new System.Text.UTF8Encoding(false, true).GetString(output.ToArray()).TrimStart('\uFEFF'); }
+                catch (System.Text.DecoderFallbackException) { throw new BridgeException("SOURCE_ENCODING"); }
+            }
+            throw new BridgeException("UPSTREAM_RESPONSE");
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new BridgeException("TIMEOUT"); }
     }
-    public Task<JsonElement> GetAsync(NovelSource source, CancellationToken token = default) => work.Run(ct =>
-        CallAsync("library.get", new { installationId = source.InstallationId }, ct), token);
+    public Task<JsonElement> GetAsync(NovelSource source, CancellationToken token = default) => work.Run(async ct =>
+    {
+        await configuration.LoadAsync(ct); var item = configuration.Require(source);
+        return NovelJson.Value(new { source = item.Source(), definition = item.Definition });
+    }, token);
     public Task<JsonElement> SaveAsync(NovelSource source, string definition, CancellationToken token = default) => work.Run(async ct =>
     {
         await changes.WaitAsync(ct);
         try
         {
-            var receipt = await CallAsync("library.save", new { installationId = source.InstallationId, expectedRevision = source.Revision, definition }, ct);
-            var saved = NovelJson.Decode<NovelSource>(receipt.GetProperty("source"));
-            // The save receipt is authoritative. A subsequent list failure must
-            // not lose its revision and make retrying this editor stale.
-            Publish(sources.Where(s => s.InstallationId != saved.InstallationId).Append(saved).ToArray());
-            return receipt;
+            await configuration.LoadAsync(ct);
+            var saved = await configuration.SaveAsync(source, source.Protocol, definition, ct);
+            PublishConfiguration(); ScheduleApplication(true);
+            return NovelJson.Value(new { source = saved.Source() });
         }
         finally { changes.Release(); }
     }, token);
+    public Task<JsonElement> SaveDraftAsync(string protocol, string definition, CancellationToken token = default) =>
+        EditAsync(async ct =>
+        {
+            var saved = await configuration.SaveAsync(null, protocol, definition, ct);
+            return NovelJson.Value(new { source = saved.Source() });
+        }, token);
     public Task<JsonElement> UpdateAsync(NovelSource source, object patch, CancellationToken token = default) =>
-        EditAsync("library.update", new { installationId = source.InstallationId, expectedRevision = source.Revision, patch }, token);
+        EditAsync(async ct => { await configuration.UpdateAsync(source, NovelJson.Value(patch), ct);
+            return NovelJson.Value(new { source = configuration.Snapshot.Sources.Single(s => s.InstallationId == source.InstallationId).Source() }); }, token);
     public Task<JsonElement> RemoveAsync(NovelSource source, CancellationToken token = default) =>
-        EditAsync("library.remove", new { installationId = source.InstallationId, expectedRevision = source.Revision }, token);
-    public Task<JsonElement> ExportAsync(string[] ids, CancellationToken token = default) => work.Run(ct =>
-        CallAsync("library.export", new { installationIds = ids }, ct), token);
-    private Task<JsonElement> EditAsync(string operation, object payload, CancellationToken token) => work.Run(async ct =>
+        EditAsync(async ct => { await configuration.RemoveAsync(source, ct); return NovelJson.Value(new { removed = true }); }, token);
+    public Task<JsonElement> ExportAsync(string[] ids, CancellationToken token = default) => work.Run(async ct =>
+    {
+        await configuration.LoadAsync(ct);
+        string text = "[" + string.Join(',', ids.Select(id => configuration.Snapshot.Sources.FirstOrDefault(s =>
+            s.InstallationId == id)?.Definition ?? throw new BridgeException("SOURCE_NOT_FOUND"))) + "]";
+        return NovelJson.Value(new { text });
+    }, token);
+    private Task<JsonElement> EditAsync(Func<CancellationToken, Task<JsonElement>> update, CancellationToken token) => work.Run(async ct =>
     {
         await changes.WaitAsync(ct);
         try
         {
-            var value = await CallAsync(operation, payload, ct);
-            var list = await CallAsync("library.list", new { }, ct);
-            Publish(NovelJson.Decode<NovelSource[]>(list.GetProperty("sources")));
+            await configuration.LoadAsync(ct);
+            var value = await update(ct);
+            PublishConfiguration(); ScheduleApplication(true);
             return value;
         }
         finally { changes.Release(); }
     }, token);
     public Task<string> ImageAsync(NovelSource source, string url, string bookUrl, string kind, CancellationToken token) => work.Run(async ct =>
     {
+        await ApplyLatestAsync(ct);
         if (!IsCurrent(source)) throw new BridgeException("STALE_SOURCE");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, SourceToken(source));
         var value = await CallAsync("library.image", new { installationId = source.InstallationId, revision = source.Revision,
@@ -280,6 +416,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
     {
         foreach (var id in leases.Keys.ToArray()) Retire(id);
         await visuals.PauseAsync();
+        await applications.PauseAsync();
         await work.PauseAsync();
         try { await Task.WhenAll(imageReferences.ToArray().Select(ReleaseImageAsync)); }
         finally
@@ -289,5 +426,5 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
             finally { pumpCancellation?.Dispose(); pumpCancellation = null; webPump = null; }
         }
     }
-    public void Resume() { work.Resume(); visuals.Resume(); Resumed?.Invoke(this, EventArgs.Empty); }
+    public void Resume() { work.Resume(); visuals.Resume(); applications.Resume(); appliedRevision = 0; Resumed?.Invoke(this, EventArgs.Empty); }
 }
