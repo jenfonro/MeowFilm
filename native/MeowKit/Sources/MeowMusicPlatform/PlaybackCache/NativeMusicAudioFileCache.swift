@@ -14,7 +14,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private let transport: any NativeMusicAudioCacheTransport
     private let inspector: any NativeMusicAudioCacheInspecting
     private let capacity: Int64
-    private let requiresCachesDirectory: Bool
+    private let testBaseURL: URL?
     private let timing: NativeMusicAudioCacheTiming
     private let presentationCache: (any MusicPresentationCaching)?
     private var directory: NativeMusicAudioCacheDirectory?
@@ -43,7 +43,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         transport = URLSessionNativeMusicAudioCacheTransport()
         inspector = NativeMusicAudioCacheInspector()
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
-        requiresCachesDirectory = true
+        testBaseURL = nil
         timing = .init()
     }
 
@@ -54,18 +54,18 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         self.rootURL = rootURL; self.clock = clock; self.transport = transport; self.inspector = inspector
         self.presentationCache = presentationCache
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
-        requiresCachesDirectory = true
+        testBaseURL = nil
         timing = .init()
     }
 
-    // A smaller bound for deterministic eviction regression; production cannot
-    // enlarge the reference's 256 MiB limit through public configuration.
-    init(rootURL: URL, clock: @escaping @Sendable () -> Date,
+    // Tests provide an existing private base and a smaller eviction bound;
+    // production cannot override Caches or the reference's 256 MiB limit.
+    init(rootURL: URL, baseURL: URL, clock: @escaping @Sendable () -> Date,
          transport: any NativeMusicAudioCacheTransport, inspector: any NativeMusicAudioCacheInspecting,
          capacity: Int64, timing: NativeMusicAudioCacheTiming = .init(), presentationCache: (any MusicPresentationCaching)? = nil) {
         self.rootURL = rootURL; self.clock = clock; self.transport = transport; self.inspector = inspector
         self.capacity = max(0, min(capacity, NativeMusicAudioCacheHTTPPolicy.maximumBytes))
-        requiresCachesDirectory = false
+        testBaseURL = baseURL
         self.timing = timing
         self.presentationCache = presentationCache
     }
@@ -387,8 +387,10 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
               rootURL.host == nil || rootURL.host == "",
               rootURL.query == nil, rootURL.fragment == nil else { throw NativeMusicAudioCacheFailure.miss }
         var ownedURL = rootURL
-        var baseURL = URL(fileURLWithPath: "/", isDirectory: true)
-        if requiresCachesDirectory {
+        let baseURL: URL
+        if let testBaseURL {
+            baseURL = testBaseURL
+        } else {
             // Resolve ONLY the system-provided existing base, never a caller's
             // potentially hostile path. Production will not create a download
             // or a backed-up Documents/Application Support media library.
@@ -947,7 +949,7 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
     private let lockDescriptor: Int32
     private let identity: NativeMusicAudioCacheStamp
 
-    init(url: URL, baseURL: URL = URL(fileURLWithPath: "/", isDirectory: true),
+    init(url: URL, baseURL: URL,
          prepareMarker: (Int32) throws -> Void = NativeMusicAudioCacheProtection.apply(to:)) throws {
         let fd = try Self.openDirectory(url, baseURL: baseURL, createLeaf: true)
         var lockFD: Int32 = -1
@@ -1102,7 +1104,7 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
         guard url.isFileURL, url.baseURL == nil, url.host == nil || url.host == "",
               url.query == nil, url.fragment == nil, url.path.hasPrefix("/"),
               !url.path.utf8.contains(0) else { throw NativeMusicAudioCacheFailure.miss }
-        let prefix = baseURL.path == "/" ? "/" : baseURL.path + "/"
+        let prefix = baseURL.path + "/"
         guard url.path.hasPrefix(prefix) else { throw NativeMusicAudioCacheFailure.miss }
         let parts = url.path.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard !parts.isEmpty, parts.allSatisfy({ $0 != "." && $0 != ".." && !$0.contains("\\") }) else {

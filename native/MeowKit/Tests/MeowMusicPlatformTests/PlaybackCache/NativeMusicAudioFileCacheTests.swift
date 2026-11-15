@@ -69,7 +69,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
     func testFailedNewMarkerPreparationRollsBackOnlyTheNewlyCreatedFile() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
-        XCTAssertThrowsError(try NativeMusicAudioCacheDirectory(url: f.root, prepareMarker: { _ in
+        XCTAssertThrowsError(try NativeMusicAudioCacheDirectory(url: f.root, baseURL: f.parent, prepareMarker: { _ in
             throw NativeMusicAudioCacheFailure.miss
         }))
         XCTAssertEqual(try f.names(), [])
@@ -88,7 +88,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         let marker = f.root.appendingPathComponent(".owner")
         try Data().write(to: marker)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: marker.path)
-        XCTAssertThrowsError(try NativeMusicAudioCacheDirectory(url: f.root))
+        XCTAssertThrowsError(try NativeMusicAudioCacheDirectory(url: f.root, baseURL: f.parent))
         XCTAssertEqual(try f.names(), [".owner"])
         XCTAssertEqual(try Data(contentsOf: marker), Data())
     }
@@ -97,7 +97,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
         let marker = f.root.appendingPathComponent(".owner"), replacement = Data("not-our-marker".utf8)
-        XCTAssertThrowsError(try NativeMusicAudioCacheDirectory(url: f.root, prepareMarker: { _ in
+        XCTAssertThrowsError(try NativeMusicAudioCacheDirectory(url: f.root, baseURL: f.parent, prepareMarker: { _ in
             try FileManager.default.removeItem(at: marker)
             try replacement.write(to: marker)
             throw NativeMusicAudioCacheFailure.miss
@@ -105,7 +105,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: marker), replacement)
     }
 
-    func testTrustedBaseDoesNotRequireReadingItsAncestors() throws {
+    func testTrustedBaseDoesNotRequireReadingItsAncestors() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
         let base = f.root, root = base.appendingPathComponent("audio", isDirectory: true)
@@ -122,8 +122,22 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
             try directory.writeIndex(index)
             XCTAssertEqual(try directory.readIndex(), index)
         }
-        let reopened = try NativeMusicAudioCacheDirectory(url: root, baseURL: base)
-        XCTAssertEqual(try reopened.readIndex(), index)
+        do {
+            let reopened = try NativeMusicAudioCacheDirectory(url: root, baseURL: base)
+            XCTAssertEqual(try reopened.readIndex(), index)
+        }
+        let cache = NativeMusicAudioFileCache(rootURL: root, baseURL: base, clock: { f.clock.now() },
+            transport: AudioCacheTestTransport(), inspector: AudioCacheTestInspector(), capacity: 256 * 1024 * 1024)
+        await cache.storeAfterPlayback(f.request())
+        let hit = await f.hit(cache)
+        XCTAssertNotNil(hit)
+        await cache.close()
+        let reopened = NativeMusicAudioFileCache(rootURL: root, baseURL: base, clock: { f.clock.now() },
+            transport: AudioCacheTestTransport(), inspector: AudioCacheTestInspector(), capacity: 256 * 1024 * 1024)
+        let restored = await f.hit(reopened)
+        XCTAssertEqual(restored?.fileURL, hit?.fileURL)
+        XCTAssertNotNil(restored)
+        await reopened.close()
     }
 
     func testProductionCachesBaseCanonicalizationStillRejectsDescendantSymlinks() async throws {
@@ -543,7 +557,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         await cache.storeAfterPlayback(f.request()); await cache.clear(); await cache.close()
         XCTAssertEqual(try Data(contentsOf: sentinel), original)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), ["sentinel"])
-        let nested = NativeMusicAudioFileCache(rootURL: f.root.appendingPathComponent("child"),
+        let nested = NativeMusicAudioFileCache(rootURL: f.root.appendingPathComponent("child"), baseURL: f.parent,
             clock: { f.clock.now() }, transport: AudioCacheTestTransport(), inspector: AudioCacheTestInspector(),
             capacity: 256 * 1024 * 1024)
         await nested.storeAfterPlayback(f.request()); await nested.close()
@@ -691,7 +705,8 @@ struct AudioCacheTestFixture: Sendable {
         defer { free(pointer) }
         parent = URL(fileURLWithPath: String(cString: pointer), isDirectory: true)
             .appendingPathComponent("meow-audio-cache-test-" + UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
         root = parent.appendingPathComponent("cache", isDirectory: true)
     }
     func cleanup() { try? FileManager.default.removeItem(at: parent) }
@@ -700,7 +715,7 @@ struct AudioCacheTestFixture: Sendable {
                inspector: any NativeMusicAudioCacheInspecting = AudioCacheTestInspector(),
                capacity: Int64 = 256 * 1024 * 1024,
                timing: NativeMusicAudioCacheTiming = .init()) -> NativeMusicAudioFileCache {
-        NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() },
+        NativeMusicAudioFileCache(rootURL: root, baseURL: parent, clock: { clock.now() },
                                   transport: transport, inspector: inspector, capacity: capacity, timing: timing)
     }
     func request(song: String = "one", quality: String = "flac", platform: String = "tx", generation: Int = 1,
