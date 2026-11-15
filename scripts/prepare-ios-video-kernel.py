@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the locked FFmpeg source closure, not a downloaded player binary."""
+"""Verify the core-only KSPlayer sources and build their locked FFmpeg closure."""
 import argparse
 from contextlib import contextmanager
 import fcntl
@@ -15,11 +15,12 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+import urllib.error
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache/ios-video-kernel"
 SHARED_CACHE = Path.home() / "Developer/cache/ffmpeg"
-PACKAGE = ROOT / "native/VideoKernel/.cache"
+PACKAGE = ROOT / "native/KSPlayer/.cache"
 LOCK_PATH = ROOT / "scripts/ios-video-kernel.json"
 
 
@@ -58,30 +59,133 @@ def shared_lock(identity):
         yield
 
 
-def archive_for(name, source):
-    path = SHARED_CACHE / "downloads" / (source["sha256"] + ".tar.gz")
+def download_source(url, partial):
+    request = urllib.request.Request(url, headers={"User-Agent": "Meowfilm-source-prepare"})
+    if not url.startswith(("https://", "http://")):
+        openers = [lambda: urllib.request.urlopen(request, timeout=60)]
+    else:
+        proxy = "http://10.0.0.1:7890"
+        openers = [
+            lambda: urllib.request.build_opener(
+                urllib.request.ProxyHandler({"https": proxy, "http": proxy})).open(request, timeout=10),
+            lambda: urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=60)
+        ]
+    for index, opener in enumerate(openers):
+        try:
+            with opener() as response, partial.open("wb") as output:
+                length = 0
+                for block in iter(lambda: response.read(1024 * 1024), b""):
+                    length += len(block)
+                    if length > 64 * 1024 * 1024:
+                        raise ValueError("source download exceeds the download boundary")
+                    output.write(block)
+            return
+        except OSError:
+            if index == len(openers) - 1:
+                raise
+
+
+def source_download(name, url, checksum, suffix):
+    path = SHARED_CACHE / "downloads" / (checksum + suffix)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with shared_lock("download-" + source["sha256"]):
+    with shared_lock("download-" + checksum):
         if not path.exists():
             partial = path.with_suffix(".partial")
             try:
-                request = urllib.request.Request(source["url"], headers={"User-Agent": "Meowfilm-source-prepare"})
-                with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
-                    # Source archives only. The lock must not be repointed to a binary.
-                    length = 0
-                    for block in iter(lambda: response.read(1024 * 1024), b""):
-                        length += len(block)
-                        if length > 64 * 1024 * 1024:
-                            raise ValueError("source archive exceeds the download boundary")
-                        output.write(block)
-                if digest(partial) != source["sha256"]:
-                    raise ValueError(name + " archive hash mismatch")
+                download_source(url, partial)
+                if digest(partial) != checksum:
+                    raise ValueError(name + " source hash mismatch")
                 partial.replace(path)
             finally:
                 partial.unlink(missing_ok=True)
-        if path.is_symlink() or digest(path) != source["sha256"]:
-            raise ValueError(name + " archive hash mismatch")
+        if path.is_symlink() or digest(path) != checksum:
+            raise ValueError(name + " source hash mismatch")
     return path
+
+
+def archive_for(name, source):
+    return source_download(name, source["url"], source["sha256"], ".tar.gz")
+
+
+def file_for(name, source, relative, checksum):
+    # The fixed FFmpegKit repository contains binary XCFrameworks. Fetch only
+    # its reviewed source target and provenance files; none of those binaries
+    # is an accepted build input.
+    return source_download(name, source["url"] + relative, checksum, ".source")
+
+
+def source_members(name, source):
+    if "files" in source:
+        for relative, checksum in source["files"].items():
+            path = PurePosixPath(relative)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("unsafe source file path")
+            yield relative, file_for(name, source, relative, checksum).read_bytes(), False
+        return
+    with tarfile.open(archive_for(name, source), "r:gz") as contents:
+        for member in contents:
+            parts = PurePosixPath(member.name).parts
+            if len(parts) < 2:
+                continue
+            if member.name.startswith("/") or ".." in parts or member.issym() or member.islnk():
+                raise ValueError("unsafe source archive member")
+            if member.isdir():
+                continue
+            if not member.isfile():
+                raise ValueError("non-file source archive member")
+            yield str(PurePosixPath(*parts[1:])), contents.extractfile(member).read(), bool(member.mode & 0o111)
+
+
+def verify_core_sources(lock, upstreams=None):
+    core = lock.get("corePackage")
+    if core is None:
+        return
+    root = ROOT / core["path"]
+    manifest_path = ROOT / core["manifest"]
+    patch_path = ROOT / core["patch"]
+    if digest(manifest_path) != core["manifestSHA256"] or digest(patch_path) != core["patchSHA256"]:
+        raise ValueError("reviewed KSPlayer core source manifest or patch changed")
+    manifest = json.loads(manifest_path.read_text())
+    expected = manifest["files"]
+    actual = {"Package.swift"} | {
+        path.relative_to(root).as_posix()
+        for directory in ("Sources", "Tests") for path in (root / directory).rglob("*") if path.is_file()
+    }
+    if actual != set(expected):
+        raise ValueError("unexpected KSPlayer core compile input")
+    for relative, checksum in expected.items():
+        path = root / relative
+        if (PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts
+                or path.is_symlink() or digest(path) != checksum):
+            raise ValueError("modified KSPlayer core source: " + relative)
+    if upstreams is not None:
+        # Reconstruct the exact compiled closure from the verified upstream
+        # bytes and the one reviewed local patch, including locally owned
+        # lifecycle hooks and the source-only package definition.
+        with tempfile.TemporaryDirectory(prefix="core-verify-", dir=CACHE) as temporary:
+            staged = Path(temporary)
+            for relative, origin in manifest["origins"].items():
+                if upstreams[origin["source"]]["files"].get(origin["path"]) != origin["sha256"]:
+                    raise ValueError("KSPlayer core upstream identity mismatch")
+                target = staged / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(CACHE / "sources" / origin["source"] / origin["path"], target)
+            run(["patch", "-f", "-F", "0", "-p1", "-i", str(patch_path)], cwd=staged,
+                log=CACHE / "source-prepare.log")
+            if {path.relative_to(staged).as_posix() for path in staged.rglob("*") if path.is_file()} != set(expected):
+                raise ValueError("KSPlayer core patch closure mismatch")
+            if any(digest(staged / relative) != checksum for relative, checksum in expected.items()):
+                raise ValueError("KSPlayer core patch output mismatch")
+
+
+def native_lock_digest(lock):
+    # Swift/source-only bridge edits do not rebuild identical FFmpeg objects.
+    # Their own source identities are verified independently before packaging.
+    recipe = {key: lock[key] for key in ("schema", "libraries", "patch", "configure", "requiredComponents",
+                                       "requiredFilterSymbols", "targets")
+              if key in lock}
+    recipe["sources"] = {"ffmpeg": lock["sources"]["ffmpeg"]}
+    return hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
 
 
 def prepare_sources(lock):
@@ -90,39 +194,26 @@ def prepare_sources(lock):
     if digest(patch) != lock["patch"]["sha256"]:
         raise ValueError("reviewed FFmpeg patch hash mismatch")
     for name, source in lock["sources"].items():
-        archive = archive_for(name, source)
         destination = CACHE / "sources" / name
         destination.mkdir(parents=True, exist_ok=True)
         expected = {}
-        with tarfile.open(archive, "r:gz") as contents:
-            for member in contents:
-                parts = PurePosixPath(member.name).parts
-                if len(parts) < 2:
-                    continue
-                relative = PurePosixPath(*parts[1:])
-                if member.name.startswith("/") or ".." in parts or member.issym() or member.islnk():
-                    raise ValueError("unsafe source archive member")
-                if member.isdir():
-                    continue
-                if not member.isfile():
-                    raise ValueError("non-file source archive member")
-                data = contents.extractfile(member).read()
-                original_hash = hashlib.sha256(data).hexdigest()
-                target = destination / str(relative)
-                allowed = {original_hash}
-                if name == "ffmpeg" and str(relative) in lock["patch"]["files"]:
-                    entry = lock["patch"]["files"][str(relative)]
-                    if original_hash != entry["upstream"]:
-                        raise ValueError("patch no longer applies to locked upstream")
-                    allowed.add(entry["patched"])
-                if target.exists():
-                    if target.is_symlink() or digest(target) not in allowed:
-                        raise ValueError("modified source cache: " + str(relative))
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(data)
-                    target.chmod(0o755 if member.mode & 0o111 else 0o644)
-                expected[str(relative)] = original_hash
+        for relative, data, executable in source_members(name, source):
+            original_hash = hashlib.sha256(data).hexdigest()
+            target = destination / relative
+            allowed = {original_hash}
+            if name == "ffmpeg" and relative in lock["patch"]["files"]:
+                entry = lock["patch"]["files"][relative]
+                if original_hash != entry["upstream"]:
+                    raise ValueError("patch no longer applies to locked upstream")
+                allowed.add(entry["patched"])
+            if target.exists():
+                if target.is_symlink() or digest(target) not in allowed:
+                    raise ValueError("modified source cache: " + relative)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                target.chmod(0o755 if executable else 0o644)
+            expected[relative] = original_hash
         if name == "ffmpeg":
             states = {digest(destination / file) == hashes["patched"]
                       for file, hashes in lock["patch"]["files"].items()}
@@ -145,10 +236,25 @@ def prepare_sources(lock):
         inventory_hash = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
         if inventory_hash != source["inventorySHA256"]:
             raise ValueError("source inventory differs from the reviewed closure")
-        inventories[name] = {"revision": source["revision"], "archiveSHA256": source["sha256"],
+        inventories[name] = {"revision": source["revision"], "archiveSHA256": source.get("sha256"),
                              "inventorySHA256": inventory_hash, "files": expected}
+    verify_core_sources(lock, inventories)
     write_json(CACHE / "source-receipt.json", inventories)
     return {name: value["inventorySHA256"] for name, value in inventories.items()}
+
+
+def verify_configuration(build, lock, name):
+    configuration = (build / "config_components.h").read_text() + (build / "config.h").read_text()
+    for component in lock["requiredComponents"]:
+        if "#define CONFIG_" + component + " 1" not in configuration:
+            raise ValueError(name + " missing required component " + component)
+    if lock.get("requiredFilterSymbols"):
+        # FFmpeg's public buffer source/sink filters are unconditional entries
+        # in the generated registry, not CONFIG_*_FILTER components.
+        registry = (build / "libavfilter/filter_list.c").read_text()
+        for symbol in lock["requiredFilterSymbols"]:
+            if not re.search(r"^\s*&" + re.escape(symbol) + r"\s*,", registry, re.MULTILINE):
+                raise ValueError(name + " missing required filter " + symbol)
 
 
 def build_target(name, target, lock, sources):
@@ -174,8 +280,8 @@ def build_target(name, target, lock, sources):
         # No NASM requirement for the macOS test executor / Intel simulator.
         # Device ARM assembly stays enabled.
         configure += ["--disable-x86asm"]
-    inputs = {"lockSHA256": digest(LOCK_PATH), "prepareSHA256": digest(Path(__file__)),
-              "sources": sources, "target": target, "sdkVersion": sdk_version, "sdkPath": sdk,
+    inputs = {"lockSHA256": native_lock_digest(lock), "prepareSHA256": digest(Path(__file__)),
+              "sources": {"ffmpeg": sources["ffmpeg"]}, "target": target, "sdkVersion": sdk_version, "sdkPath": sdk,
               "compiler": compiler_version, "xmlHeaderSHA256": digest(xml_header),
               "environment": {key: os.environ[key] for key in (
                   "CFLAGS", "CPPFLAGS", "CXXFLAGS", "ASFLAGS", "LDFLAGS", "ARFLAGS",
@@ -224,10 +330,7 @@ def build_target(name, target, lock, sources):
         log = CACHE / "logs" / (name + ".log")
         if configured != configuration_identity or not (build / "config.h").exists():
             run(configure, cwd=build, log=log)
-        configuration = (build / "config_components.h").read_text() + (build / "config.h").read_text()
-        for component in lock["requiredComponents"]:
-            if "#define CONFIG_" + component + " 1" not in configuration:
-                raise ValueError(name + " missing required component " + component)
+        verify_configuration(build, lock, name)
         write_json(configuration_path, configuration_identity)
         run(["make", "-j2"], cwd=build, log=log)
         run(["make", "install"], cwd=build, log=log)
@@ -278,14 +381,15 @@ def verify_install(prefix, receipt, lock, complete=False):
 
 def current_recipe(name, receipt, lock):
     inputs = receipt.get("inputs", {})
-    return (name in lock["targets"] and inputs.get("lockSHA256") == digest(LOCK_PATH)
+    return (name in lock["targets"] and inputs.get("lockSHA256") == native_lock_digest(lock)
             and inputs.get("prepareSHA256") == digest(Path(__file__))
             and inputs.get("target") == lock["targets"][name]
-            and inputs.get("sources") == {key: source["inventorySHA256"] for key, source in lock["sources"].items()}
+            and inputs.get("sources") == {"ffmpeg": lock["sources"]["ffmpeg"]["inventorySHA256"]}
             and receipt.get("fingerprint") == hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest())
 
 
 def package_artifacts(lock):
+    verify_core_sources(lock)
     available = {}
     for name, target in lock["targets"].items():
         receipt = CACHE / "build" / name / "receipt.json"
@@ -308,7 +412,9 @@ def package_artifacts(lock):
     packaged = PACKAGE / "prepare-receipt.json"
     previous = json.loads(packaged.read_text()) if packaged.exists() else {}
     if previous.get("identity") == identity:
+        previous["sourceLockSHA256"] = digest(LOCK_PATH)
         verify_packaged(previous, lock)
+        write_json(packaged, previous)
         return previous
     # Rebuild only this script-owned generated artifact directory. No user
     # code, tracked product, build cache or test results live inside it.
@@ -346,6 +452,7 @@ def package_artifacts(lock):
 
 
 def verify_packaged(receipt, lock):
+    verify_core_sources(lock)
     if (receipt.get("schema") != 1 or receipt.get("status") != "complete"
             or receipt.get("sourceLockSHA256") != digest(LOCK_PATH)):
         raise ValueError("source lock/schema changed after build")

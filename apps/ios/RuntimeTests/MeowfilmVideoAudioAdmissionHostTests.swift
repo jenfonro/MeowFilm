@@ -2,6 +2,7 @@ import XCTest
 import UIKit
 import AVFoundation
 import MeowContracts
+import KSPlayer
 @testable import MeowPlayback
 @testable import MeowMusicFeature
 
@@ -9,6 +10,54 @@ import MeowContracts
 /// fallible system audio operation is controlled; this is not device audio proof.
 @MainActor
 final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
+    func testNativeFailureWhileAudioAdmissionWaitsCannotRetireHealthyDonor() async throws {
+        let gate = AudioAdmissionGate(entered: expectation(description: "candidate audio admission waiting"))
+        defer { gate.open() }
+        let audio = AudioAdmissionActions()
+        audio.beforeActivation = { _ in try gate.wait() }
+        let controller = PlaybackController(audioSessionActions: audio.actions)
+        var handoffs = 0
+        let film = try controller.bindVideo(owner: "film", willCommit: { handoffs += 1; return nil }) { _ in }
+        let host = try AudioAdmissionHost(controller: controller, film: film)
+        addTeardownBlock { try await host.close() }
+        let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
+        let donor = controller.playAttempt(resource: try .init(id: "healthy-music", url: movie, title: "Donor"),
+            owner: "music", autoplay: false)
+        let item = try XCTUnwrap(controller.player.currentItem)
+        var releases = 0
+        let media = try PlaybackVideoMediaLease(attemptID: "failed-after-frame",
+            input: .init(resourceID: "failed-after-frame", url: movie, title: "Candidate")) { releases += 1 }
+        let candidate = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()))
+        try await candidate.prepare()
+        film.surface.stage(candidate.output.presentationView)
+        try await candidate.renderFirstVideoFrame()
+        let admission = controller.admitVideo(owner: film.owner, candidate: candidate)
+        let activation = Task {
+            try await controller.prepareVideoAudio(admission: admission, owner: film.owner, paused: false)
+        }
+        await fulfillment(of: [gate.entered], timeout: 10)
+        // Real picture output preceded admission. Only the core's failure
+        // delivery is controlled; no synthetic first-frame/clock is supplied.
+        let sender = KSMEPlayer(url: movie, options: KSOptions())
+        candidate.kernel.finish(player: sender, error: NSError(domain: "SyntheticNativeFailure", code: Int.max))
+        await sender.shutdownAndWait()
+        gate.open()
+        try await activation.value
+        do {
+            _ = try controller.commitVideo(candidate, lease: film, admission: admission, paused: false)
+            XCTFail("a failure during audio admission must invalidate the candidate")
+        } catch { XCTAssertEqual(error as? PlaybackVideoError, .decodingFailed) }
+        XCTAssertEqual(controller.currentAttempt, donor)
+        XCTAssertTrue(controller.player.currentItem === item)
+        XCTAssertEqual(handoffs, 0)
+        controller.cancelVideoAdmission(candidate: candidate)
+        try await candidate.close()
+        let audioFailure = await candidate.systemRelease?.value
+        XCTAssertNil(audioFailure)
+        XCTAssertEqual(releases, 1)
+        XCTAssertEqual(audio.deactivations, 1)
+    }
+
     func testAudioActivationFailureAfterPictureReadinessPreservesMusicUntilAnExplicitRetry() async throws {
         let audio = AudioAdmissionActions()
         audio.failActivation = true
@@ -547,7 +596,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
                 input: .init(resourceID: "controller-first", url: movie, title: "Synthetic video")) {}
             let transport = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()))
             try await transport.prepare()
-            film.surface.stage(transport.output.presentationLayer)
+            film.surface.stage(transport.output.presentationView)
             try await transport.renderFirstVideoFrame()
             let admission = controller.admitVideo(owner: film.owner, candidate: transport)
             try await controller.prepareVideoAudio(admission: admission, owner: film.owner, paused: false)

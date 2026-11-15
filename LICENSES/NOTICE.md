@@ -712,8 +712,9 @@ The upstream licensing overview is reproduced in `FFmpeg-LICENSE.md`; the
 LGPL texts are `LGPL-2.1-only.txt` and `LGPL-3.0-only.txt`. These filenames
 identify the texts, not a removal of upstream's “or later” grant.
 
-- iOS uses avformat, avcodec, avutil, swresample and swscale, built with
-  `--disable-gpl --disable-nonfree --enable-version3` (LGPLv3 or later).
+- iOS uses avformat, avcodec, avutil, avfilter, swresample and swscale, built with
+  `--enable-gpl --disable-nonfree --enable-version3` (GPLv3 or later),
+  including the core's upstream deinterlacing filters.
   The exact recipe and source adaptations are in `scripts/ios-video-kernel.json`
   and `native/VideoKernel/patches/ffmpeg-native-output.patch`.
 - Windows builds a private avformat/avcodec/avutil demux library with decoders,
@@ -725,15 +726,28 @@ identify the texts, not a removal of upstream's “or later” grant.
   The upstream IJG notices and the unchanged-source statement are reproduced
   in `FFmpeg-IJG-NOTICE.txt` for the iOS decoding build.
 
-The iOS sample-buffer renderer, resampling and bounded queue implementation
-references and adapts KSPlayer by kintan/kingslay and its contributors, fixed at
+The iOS native player compiles the complete necessary KSPlayer core by
+kintan/kingslay and its contributors, fixed at
 `d0d063ab1f045735129b6617591ad2148d88d5db`:
 <https://github.com/kingslay/KSPlayer/tree/d0d063ab1f045735129b6617591ad2148d88d5db>.
 This revision's `LICENSE` is GPLv3, **not MIT** (upstream text SHA-256
 `8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903`).
 The repository's existing `GPL-3.0-only.txt` supplies the same license terms;
-no duplicate GPLv3 body is kept. The adaptation uses current FFmpeg public APIs
-and Apple sample buffers, without KSPlayer's UI or FFmpegKit private shim.
+no duplicate GPLv3 body is kept. `native/KSPlayer` contains the source-only
+core target, exact upstream file mapping and local patch. It includes decoding,
+filtering, native audio, VideoToolbox, Metal/sample-buffer output, tracks and
+subtitle parsing, while excluding upstream player controls, pages and demos.
+The local changes keep system media ownership in the App and provide explicit
+native cancellation, output confirmation and resource drain.
+
+The source-only FFmpegKit C/header bridge is pinned to
+`c32be9bfb628042737ad3ef622e930c5c7b15954` in kingslay/FFmpegKit:
+<https://github.com/kingslay/FFmpegKit/tree/c32be9bfb628042737ad3ef622e930c5c7b15954>.
+Only the reviewed source closure is compiled against the locally built FFmpeg;
+no FFmpegKit XCFramework, Vulkan, libplacebo or mpv binary is shipped. Its exact
+source hashes, license source and local adaptations are recorded by the player
+source manifest and `scripts/ios-video-kernel.json`. This revision's root
+`LICENSE` is GPLv3; the existing `GPL-3.0-only.txt` supplies its license text.
 
 Windows also builds libxml2 2.14.6 from
 <https://download.gnome.org/sources/libxml2/2.14/libxml2-2.14.6.tar.xz>,

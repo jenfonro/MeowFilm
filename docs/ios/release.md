@@ -8,9 +8,9 @@
 
 `build-ios.sh`、`test-native.sh compile|all` 自动准备这些输入；直接运行 Xcode 前先准备相同目标的载体与载荷。可用 `MEOWFILM_BUILD_NODE` 指定构建工具 Node 路径；它不改变 App 内嵌版本。工程嵌入并签名 NodeMobile 和 MeowScriptHost，载荷及适用许可随 App 分发。影视规则／搜索程序由 Node 加载，共用 `scripts/script-host-native.json` 锁定的 QuickJS-NG 0.18.0 原生载体、派生补丁与 Unicode 表，不再通过 SwiftPM 静态链接另一套客户端规则核心；中央引擎 MIT 与 `Unicode-3.0.txt` 由 Xcode 随 App 打包。CI 两个工作流均恢复锁定依赖，不使用系统已装 Node 的隐式状态。
 
-视频输入由 `scripts/prepare-ios-video-kernel.py` 按 `scripts/ios-video-kernel.json` 锁定的 FFmpeg 8.1.2 源码、补丁与目标构建；`build-ios.sh` 准备 `ios-arm64`，原生测试入口选择对应 Mac／模拟器目标。`native/VideoKernel` 的 `MeowVideoKernel` 经 `MeowPlayback` 静态接入，负责解复用、解码与系统 sample-buffer 输出，不是 Node addon，也不是新增的业务／媒体会话 owner。视频来源与适用许可引用 `LICENSES` 的唯一正文。目标产物准备和工程资源齐全不代表合并后的 iOS App 已编译、签名或真实播放通过，须分别取得平台证据。
+视频输入由 `scripts/prepare-ios-video-kernel.py` 按 `scripts/ios-video-kernel.json` 锁定的 FFmpeg 8.1.2 源码、补丁与目标构建；`build-ios.sh` 准备 `ios-arm64`，原生测试入口选择对应 Mac／模拟器目标。`native/KSPlayer` 按固定来源与源码映射构建实际 KSPlayer 核心及必要依赖／原生输出，排除上游播放控件和 Demo；产物与回执位于 `native/KSPlayer/.cache/`。`native/VideoKernel` 的 `MeowVideoKernel` 经 `MeowPlayback` 接入，承担电影静默候选、实际首帧、命令与真实关闭适配，不再保留第二套 C decoder。两包都不拥有业务或 App 系统媒体会话。视频来源与适用许可引用 `LICENSES` 的唯一正文。目标产物准备和工程资源齐全不代表合并后的 iOS App 已编译、签名或真实播放通过，须分别取得平台证据。
 
-下载及 FFmpeg 完整依赖库按[构建依赖缓存](../common/dependency-cache.md)跨副本复用。缓存命中仍验证来源与文件身份，同配方正在构建时等待；本副本的源码、编译目录、安装输入及 XCFramework 打包路径保持不变。`--sources-only`、`--target`、`--verify` 调用方式不变。
+下载及 FFmpeg 完整依赖库按[构建依赖缓存](../common/dependency-cache.md)跨副本复用。缓存命中仍验证来源与文件身份，同配方正在构建时等待；源码、编译目录和安装输入归本副本，目标 slice 打包到上述核心目录。`--sources-only`、`--target`、`--verify` 调用方式不变。
 
 设备与模拟器目标分别校验，不能按构建机架构猜测产物平台。原生构建回执记录签名前文件身份；侧载重签后的运行校验依赖正式签名域及内置构建身份，不要求 Mach-O 签名区保持原始 hash。该规则只适用于 App 内置载体，不开放上传原生代码或削弱桌面引擎校验。详细边界见[运行底座预检](runtime-preflight.md)。
 
