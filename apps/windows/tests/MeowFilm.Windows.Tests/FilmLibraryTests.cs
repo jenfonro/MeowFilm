@@ -7,7 +7,7 @@ using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class FilmLibraryTests
+public static partial class FilmLibraryTests
 {
     private static TestCase Test(string name, Func<Task> run) => new("film-library: " + name, run);
     public static IEnumerable<TestCase> Cases()
@@ -80,6 +80,11 @@ public static class FilmLibraryTests
                 !bytes.Contains("private-file-reference", StringComparison.Ordinal) &&
                 !bytes.Contains("original-query", StringComparison.Ordinal), "no short-lived private reference is serialized");
         });
+        yield return Test("raw roots records nested extensions exact keys and numbers survive unrelated edits and cold reopen", RawPersistence);
+        yield return Test("bad and ambiguous favorite records stay isolated and unchanged through unrelated writes", IsolatedRecords);
+        yield return Test("duplicate identity members fence every candidate without last-member guessing", AmbiguousIdentityMembers);
+        yield return Test("real favorite CAS conflicts never overwrite another writer or publish success", CasConflict);
+        yield return Test("group favorites keep member identities without persisting source or search credentials", GroupPrivacy);
         yield return Test("failed CAS never publishes a favorite and corrupt documents are not silently reset", async () =>
         {
             var store = new FilmMemoryStore();

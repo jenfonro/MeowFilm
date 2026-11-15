@@ -19,8 +19,45 @@ final class FilmPlaybackCacheTests: XCTestCase {
         XCTAssertEqual(snapshot.metadataCache?.components["credits"], .object(["status": .string("empty")]))
         XCTAssertEqual(snapshot.metadataError, "UPSTREAM_HTTP")
         XCTAssertNil(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot()).metadataCache)
-        XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
-            metadataCache: .object(["status": .string("unknown"), "components": .object([:])]))))
+        let unknown = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            metadata: metadata, metadataCache: .object(["status": .string("unknown"), "components": .object([:])])))
+        XCTAssertEqual(unknown.metadata, metadata)
+        XCTAssertEqual(unknown.metadataCache?.status, .stale)
+    }
+
+    func testUnreadableAuxiliaryCacheEvidenceIsConservativelyStaleWithoutRejectingPlayback() throws {
+        let metadata: RuntimeValue = .object(["overview": .string("主资料")])
+        for cache in [
+            RuntimeValue.string("unrecognized cache"),
+            .object(["status": .number(1), "components": .object([:])]),
+            .object(["status": .string("fresh"), "components": .array([])]),
+            .object(["components": .object([:]), "error": .object(["code": .array([])])]),
+        ] {
+            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+                current: FilmPlaybackFixture.current("current"), metadata: metadata, metadataCache: cache))
+            XCTAssertEqual(snapshot.sessionID, FilmPlaybackFixture.sessionID)
+            XCTAssertEqual(snapshot.current?.attemptID, "current")
+            XCTAssertEqual(snapshot.metadata, metadata)
+            XCTAssertEqual(snapshot.metadataCache?.status, .stale)
+            XCTAssertNil(snapshot.metadataCache?.errorCode)
+        }
+        let fresh = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            metadataCache: .object(["status": .string("fresh"), "components": .object([:]),
+                                    "error": .object(["code": .array([])])])))
+        XCTAssertEqual(fresh.metadataCache?.status, .fresh)
+        XCTAssertNil(fresh.metadataCache?.errorCode)
+    }
+
+    func testUnknownCacheStatusRetainsIndependentComponentCompletionEvidence() throws {
+        let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            metadata: .object(["name": .string("新资料")]),
+            metadataCache: .object(["status": .string("refreshing"),
+                                    "components": .object(["detail": .object(["status": .string("ready")])])])))
+        let detail = FilmPlaybackPresentation.detail(snapshot, original: originalDetail())
+        XCTAssertEqual(snapshot.metadataCache?.status, .stale)
+        XCTAssertEqual(detail.title, "新资料")
+        XCTAssertTrue(detail.summary.isEmpty, "A completed component must not revive omitted old content.")
+        XCTAssertNil(detail.item.posterURL)
     }
 
     func testOrdinaryReentryAndExplicitRefreshLeaveCurrentMediaAndPositionUntouched() async throws {

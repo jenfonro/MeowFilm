@@ -11,14 +11,13 @@ internal sealed class NovelSourceDraft
     private readonly JsonObject original;
     private readonly Dictionary<string, string> edits = [];
     internal NovelSourceTab[] Tabs => NovelSourceFields.Tabs(Protocol);
-    internal string EnabledKey => Protocol == "yiciyuan" ? "enable" : "enabled";
     internal NovelSourceDraft(string protocol, string? definition = null)
     {
         Protocol = protocol;
         original = definition is null ? new JsonObject { ["bookSourceType"] = 0, ["enabledCookieJar"] = true,
-            ["enabledExplore"] = true, [EnabledKey] = true } : JsonNode.Parse(definition) switch
+            ["enabledExplore"] = true, ["enabled"] = true } : JsonNode.Parse(definition) switch
             { JsonObject value => value, JsonValue value when protocol == "qysg" && value.TryGetValue<string>(out _) => new() { ["html"] = value.DeepClone() }, _ => throw new InvalidDataException() };
-        if (definition is null) original[protocol switch { "legado" => "ruleSearch", "yiciyuan" => "ruleSearchList", _ => "html" }] =
+        if (definition is null) original[protocol == "legado" ? "ruleSearch" : "html"] =
             protocol == "legado" ? new JsonObject() : JsonValue.Create("");
     }
     private static JsonObject Object(JsonNode? value) => value switch
@@ -44,8 +43,7 @@ internal sealed class NovelSourceDraft
     {
         get
         {
-            var known = Tabs.SelectMany(t => t.Fields).Select(f => f.Path).Concat(["bookSourceType", EnabledKey, "enabledExplore", "enabledCookieJar"])
-                .Concat(Protocol == "yiciyuan" ? ["enabled", "customOrder"] : Array.Empty<string>()).ToHashSet();
+            var known = Tabs.SelectMany(t => t.Fields).Select(f => f.Path).Concat(["bookSourceType", "enabled", "enabledExplore", "enabledCookieJar"]).ToHashSet();
             var fields = new List<NovelSourceField>();
             foreach (var (key, value) in original.Where(pair => !known.Contains(pair.Key)))
             {
@@ -66,7 +64,7 @@ internal sealed class NovelSourceDraft
     {
         var result = (JsonObject)original.DeepClone();
         var fields = Tabs.SelectMany(t => t.Fields).Concat(ExtensionFields).Concat([
-            new("bookSourceType", "内容类型", Kind: NovelSourceFieldKind.Number), new(EnabledKey, "启用", Kind: NovelSourceFieldKind.Bool),
+            new("bookSourceType", "内容类型", Kind: NovelSourceFieldKind.Number), new("enabled", "启用", Kind: NovelSourceFieldKind.Bool),
             new("enabledExplore", "发现", Kind: NovelSourceFieldKind.Bool), new("enabledCookieJar", "CookieJar", Kind: NovelSourceFieldKind.Bool)]);
         foreach (var field in fields)
         {
@@ -82,8 +80,6 @@ internal sealed class NovelSourceDraft
             if (parts.Length == 1) result[parts[0]] = value;
             else { var group = Object(result[parts[0]]); group[parts[1]] = value; result[parts[0]] = group; }
         }
-        if (Protocol == "yiciyuan" && edits.ContainsKey(new NovelSourceField(EnabledKey, "").Key)) result["enabled"] = result[EnabledKey]?.DeepClone();
-        if (Protocol == "yiciyuan" && edits.ContainsKey(new NovelSourceField("serialNumber", "").Key)) result["customOrder"] = result["serialNumber"]?.DeepClone();
         foreach (string key in new[] { "bookSourceName", "bookSourceUrl" })
         {
             string value = Text(result[key]).Trim();

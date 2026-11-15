@@ -75,8 +75,24 @@ final class NovelRuleProcessorTests: XCTestCase {
         second.excludeScope = "猫"
         let excluded = try await processor.transform(original, book: book, source: source, rules: [second], conversion: "none")
         XCTAssertEqual(excluded, original)
-        var invalid = first; invalid.pattern = "["; invalid.isRegex = true
-        do { try await processor.validate(invalid); XCTFail("Invalid regex must be visible") } catch { XCTAssertTrue(error is NovelError) }
+        await processor.close()
+    }
+    func testRegexCompilationFailureRejectsTheWholeTransformAndTheOwnerRecovers() async throws {
+        let processor = rpc.rules, source = Self.source()
+        let book = NovelBook(installationId: source.id, bookUrl: "book", name: "猫")
+        let original = NovelContent(title: "广告发", blocks: [.init(text: "原文")])
+        var first = NovelRule(); first.pattern = "广告"; first.scopeTitle = true; first.scopeContent = false
+        var invalid = NovelRule(); invalid.pattern = "["; invalid.isRegex = true; invalid.order = 1
+        do {
+            _ = try await processor.transform(original, book: book, source: source, rules: [first, invalid], conversion: "none")
+            XCTFail("Invalid regex must fail at actual execution without publishing an earlier rule")
+        } catch let error as NovelError {
+            if case .ruleExecution = error {} else { XCTFail("Expected an execution error, got \(error)") }
+        }
+        XCTAssertEqual(original, .init(title: "广告发", blocks: [.init(text: "原文")]))
+        invalid.isEnabled = false
+        let recovered = try await processor.transform(original, book: book, source: source, rules: [first, invalid], conversion: "traditional")
+        XCTAssertEqual(recovered, .init(title: "發", blocks: original.blocks))
         await processor.close()
     }
     func testRealRegexBudgetInterruptsWithoutReturningPartialTransformation() async throws {

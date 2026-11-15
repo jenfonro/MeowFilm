@@ -33,11 +33,9 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest() 
       } catch (error) { return failure(error); }
     })());
   }
-  method('settings.get', input => {
-    if (Object.keys(input).length) throw metadataFailure('INVALID_REQUEST');
-    return store.get();
-  });
-  method('settings.update', input => store.update(input));
+  method('settings.get', () => store.get());
+  method('settings.update', input => store.update(Object.fromEntries(Object.keys(store.read())
+    .filter(key => Object.hasOwn(input, key)).map(key => [key, input[key]]))));
   method('request', async (input, signal) => {
     const settings = store.read();
     return (id === 'douban' ? (await import('./metadata/douban.mjs')).requestDouban : requestTMDB)(input,

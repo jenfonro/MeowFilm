@@ -175,7 +175,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         advancing = true;
         try
         {
-            var settings = module.Library.Appearance;
+            var settings = module.Library.Appearance.ForReading();
             if (settings.Mode == "scroll")
             {
                 if (!surface.AdvanceScroll((12 + settings.AutoSpeed * 12) * .05) && !await surface.TurnAsync(1)) PauseReading();
@@ -205,11 +205,11 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         PauseReading();
         var panel = new DockPanel(); var tools = NovelUi.Bar(); DockPanel.SetDock(tools, Dock.Top); panel.Children.Add(tools);
         var labels = chapters.ToArray();
-        if (module.Library.Appearance.Conversion != "none")
+        if (module.Library.Appearance.ReadingConversion != "none")
         {
             var result = await module.Rules.InvokeAsync(new { operation = "transform", title = "",
                 blocks = labels.Select(c => new NovelBlock("text", c.Name)).ToArray(), rules = Array.Empty<NovelRule>(),
-                conversion = module.Library.Appearance.Conversion }, token);
+                conversion = module.Library.Appearance.ReadingConversion }, token);
             var names = result.GetProperty("blocks");
             for (int i = 0; i < labels.Length; i++) labels[i] = labels[i] with { Name = NovelJson.Text(names[i], "text") };
         }

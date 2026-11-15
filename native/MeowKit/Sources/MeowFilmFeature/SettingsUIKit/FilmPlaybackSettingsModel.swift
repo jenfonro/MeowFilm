@@ -22,9 +22,9 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         if draft == nil { draft = value }
     }
 
-    public func loadLibrary() async throws {
+    public func loadLibrary(area: FilmPlaybackLibrary.Area = .manual) async throws {
         try begin(); defer { busy = false }
-        library = try FilmPlaybackLibrary(await transport.call("library.get"))
+        library = try FilmPlaybackLibrary(await transport.call("library.get"), area: area)
     }
 
     public func edit(_ transform: (inout FilmPlaybackPreferences) -> Void) {
@@ -59,8 +59,8 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
             "action": .string("save"), "item": .object(item.value),
         ]))
         guard let values = result.filmArray else { throw FilmPlaybackError.invalidResponse }
-        let saved = try values.map(FilmManualMatch.init)
-        if library != nil { library?.manual = saved }
+        let saved = try FilmPlaybackLibrary.items(values, transform: FilmManualMatch.init)
+        if library?.area == .manual { library?.manual = saved }
     }
 
     public func removeManual(id: String) async throws {
@@ -69,8 +69,8 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
             "action": .string("remove"), "id": .string(id),
         ]))
         guard let values = result.filmArray else { throw FilmPlaybackError.invalidResponse }
-        let saved = try values.map(FilmManualMatch.init)
-        if library != nil { library?.manual = saved }
+        let saved = try FilmPlaybackLibrary.items(values, transform: FilmManualMatch.init)
+        if library?.area == .manual { library?.manual = saved }
     }
 
     public func removeBlock(_ block: FilmPlaybackBlock? = nil) async throws {
@@ -100,7 +100,7 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
 
     private func remove(_ fields: RuntimeObject) async throws {
         try begin(); defer { busy = false }
-        library = try FilmPlaybackLibrary(await transport.call("library.remove", parameters: .object(fields)))
+        library = try FilmPlaybackLibrary(await transport.call("library.remove", parameters: .object(fields)), area: .blocks)
     }
 
     private func begin() throws {

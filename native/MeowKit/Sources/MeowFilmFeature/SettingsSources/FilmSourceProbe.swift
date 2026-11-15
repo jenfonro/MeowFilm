@@ -169,17 +169,6 @@ struct FilmSourceProbe {
             case .object, .array: break
             default: steps.append(.init(operation, "failed", "INVALID_RESPONSE")); return nil
             }
-            for response in [value, value.catField("data") ?? .null] {
-                let status = response.catField("statusCode")
-                let httpFailure: Bool
-                if case .number(let code)? = status { httpFailure = code >= 400 } else { httpFailure = false }
-                if httpFailure || response.catField("ok") == .bool(false) || response.catField("success") == .bool(false) ||
-                    !Self.text(response, "error").isEmpty {
-                    let message = Self.pick(response, ["message", "msg", "error"])
-                    let code = httpFailure ? "HTTP_" + Self.pick(response, ["statusCode"]) : "SCRIPT_ERROR"
-                    steps.append(.init(operation, "failed", message.isEmpty ? code : message)); return nil
-                }
-            }
             steps.append(.init(operation, "success"))
             return value
         } catch is CancellationError { throw CancellationError() }

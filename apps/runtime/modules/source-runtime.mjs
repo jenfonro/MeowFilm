@@ -22,7 +22,7 @@ import { contracts } from '../contracts.mjs';
 
 export const sourceRuntimeContract = contracts.source.contract;
 const sourceBytes = SCRIPT_LIMITS.maxSourceBytes;
-const protocols = new Set(['legado', 'yiciyuan', 'qysg', 'cat']);
+const protocols = new Set(['legado', 'qysg', 'cat']);
 const codes = contracts.source.codes;
 
 class Failure extends Error {
@@ -37,11 +37,6 @@ const requireValue = (condition, code = 'INVALID_REQUEST') => {
 };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const digest = value => createHash('sha256').update(value).digest('hex');
-
-function fields(value, allowed, required = allowed) {
-  requireValue(object(value) && Object.keys(value).every(key => allowed.includes(key)) &&
-    required.every(key => Object.hasOwn(value, key)));
-}
 
 function text(value, maximum = 128) {
   requireValue(typeof value === 'string' && value.trim().length > 0 &&
@@ -227,15 +222,16 @@ export function createSourceRuntimeModule({
     host.captureInitialization(params.installationId)?.();
   };
 
-  function method(allowed, required, body) {
+  function method(parametersUsed, body) {
     return async (parameters = {}, context = {}) => {
       try {
         requireValue(object(context));
         const { signal } = context;
         requireValue(signal === undefined || signal instanceof AbortSignal);
         guard(signal);
-        fields(parameters, allowed, required);
-        const captured = snapshot(parameters);
+        requireValue(object(parameters));
+        const captured = snapshot(Object.fromEntries(parametersUsed
+          .filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]])));
         const active = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, active);
         guard(active);
@@ -277,13 +273,13 @@ export function createSourceRuntimeModule({
   }
 
   const methods = {
-    'source.runtime.rules.process': method(['request'], ['request'], async (params, signal) => {
+    'source.runtime.rules.process': method(['request'], async (params, signal) => {
       try { return await rules.process(params.request, { signal }); }
       catch (error) { throw new Failure(error?.code); }
     }),
     'source.runtime.load': method([
       'sourceRevision', 'installationId', 'revision', 'expectedRevision', 'protocol', 'version', 'metadata',
-    ], ['sourceRevision', 'installationId', 'revision', 'expectedRevision'], (params, signal) => {
+    ], (params, signal) => {
       guard(signal);
       identifier(params.installationId);
       requireValue(!library.owns(params.installationId), 'STALE_SOURCE');
@@ -434,7 +430,6 @@ export function createSourceRuntimeModule({
     }),
     'source.runtime.unload': method(
       ['installationId', 'revision', 'generation'],
-      ['installationId', 'revision'],
       (params, signal) => {
         guard(signal);
         identifier(params.installationId);
@@ -470,7 +465,7 @@ export function createSourceRuntimeModule({
     ),
     'source.runtime.invoke': method([
       'installationId', 'revision', 'generation', 'action', 'payload', 'timeoutMs',
-    ], ['installationId', 'revision', 'generation', 'action', 'payload'], async (params, signal) => {
+    ], async (params, signal) => {
       identifier(params.installationId);
       requireValue(!library.owns(params.installationId), 'STALE_SOURCE');
       identifier(params.action);
@@ -508,7 +503,7 @@ export function createSourceRuntimeModule({
       }
       return value ?? null;
     }),
-    'source.runtime.status': method([], undefined, (_params, signal) => {
+    'source.runtime.status': method([], (_params, signal) => {
       guard(signal);
       return { instances: [...bindings.values()].map(binding => {
         const live = operations.has(binding.installationId)
@@ -517,36 +512,31 @@ export function createSourceRuntimeModule({
         return instance({ ...binding, generation: live?.generation }, live);
       }) };
     }),
-    'source.runtime.close': async (params = {}) => {
+    'source.runtime.close': async () => {
       try {
-        fields(params, []);
         return success(await shutdown());
       } catch (error) { return failure(error); }
     },
   };
 
-  const libraryFields = {
-    'library.list': [[], []],
-    'library.get': [['installationId'], ['installationId']],
-    'library.previewImport': [['text', 'url', 'fileName'], []],
-    'library.import': [['text', 'url', 'fileName'], []],
-    'library.save': [['installationId', 'expectedRevision', 'definition'],
-      ['installationId', 'expectedRevision', 'definition']],
-    'library.update': [['installationId', 'expectedRevision', 'patch'],
-      ['installationId', 'expectedRevision', 'patch']],
-    'library.remove': [['installationId', 'expectedRevision'], ['installationId', 'expectedRevision']],
-    'library.export': [['installationIds'], ['installationIds']],
-    'library.invoke': [['installationId', 'revision', 'action', 'payload'],
-      ['installationId', 'revision', 'action', 'payload']],
-    'library.image': [['installationId', 'revision', 'url', 'bookUrl', 'kind'],
-      ['installationId', 'revision', 'url', 'bookUrl', 'kind']],
-    'library.releaseImage': [['reference'], ['reference']],
+  const libraryParameters = {
+    'library.list': [],
+    'library.get': ['installationId'],
+    'library.previewImport': ['text', 'url', 'fileName'],
+    'library.import': ['text', 'url', 'fileName'],
+    'library.save': ['installationId', 'expectedRevision', 'definition'],
+    'library.update': ['installationId', 'expectedRevision', 'patch'],
+    'library.remove': ['installationId', 'expectedRevision'],
+    'library.export': ['installationIds'],
+    'library.invoke': ['installationId', 'revision', 'action', 'payload'],
+    'library.image': ['installationId', 'revision', 'url', 'bookUrl', 'kind'],
+    'library.releaseImage': ['reference'],
   };
-  for (const [name, [allowed, required]] of Object.entries(libraryFields)) {
-    methods[`source.runtime.${name}`] = method(allowed, required, (params, signal) => {
-      if (params.installationId !== undefined) identifier(params.installationId);
-      if (params.expectedRevision !== undefined) integer(params.expectedRevision, 1);
-      if (params.revision !== undefined) integer(params.revision, 1);
+  for (const [name, parametersUsed] of Object.entries(libraryParameters)) {
+    methods[`source.runtime.${name}`] = method(parametersUsed, (params, signal) => {
+      if (parametersUsed.includes('installationId')) identifier(params.installationId);
+      if (parametersUsed.includes('expectedRevision')) integer(params.expectedRevision, 1);
+      if (parametersUsed.includes('revision')) integer(params.revision, 1);
       if (name === 'library.import' || name === 'library.previewImport') {
         requireValue((typeof params.text === 'string') !== (typeof params.url === 'string'));
         requireValue(params.text === undefined || typeof params.text === 'string');
@@ -554,8 +544,7 @@ export function createSourceRuntimeModule({
         requireValue(params.fileName === undefined || typeof params.fileName === 'string');
       }
       if (name === 'library.update') {
-        fields(params.patch, ['name', 'group', 'enabled', 'enabledExplore', 'order'], []);
-        requireValue(Object.keys(params.patch).length > 0);
+        requireValue(object(params.patch));
         for (const key of ['name', 'group']) if (params.patch[key] !== undefined) {
           requireValue(typeof params.patch[key] === 'string' &&
             (key !== 'name' || params.patch[key].trim().length > 0));
@@ -582,8 +571,8 @@ export function createSourceRuntimeModule({
       return library.methods[name](params, signal);
     });
   }
-  methods['source.runtime.web.pending'] = method([], [], () => web.pending());
-  methods['source.runtime.web.respond'] = method(['id', 'result', 'cancelled'], ['id'], params => {
+  methods['source.runtime.web.pending'] = method([], () => web.pending());
+  methods['source.runtime.web.respond'] = method(['id', 'result', 'cancelled'], params => {
     identifier(params.id);
     requireValue(params.cancelled === undefined || typeof params.cancelled === 'boolean');
     requireValue(!(params.cancelled === true && Object.hasOwn(params, 'result')));

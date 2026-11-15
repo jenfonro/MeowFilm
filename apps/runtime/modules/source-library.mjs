@@ -37,7 +37,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     return { installationId, revision, name, sourceUrl, group, order, enabled, enabledExplore,
       protocol, weight: number('weight', 0), lastUpdateTime: number('lastUpdateTime', 0),
       respondTime: number('respondTime', 180000),
-      hasExplore: Boolean(raw.exploreUrl || raw.ruleFindUrl || actions.includes('explore')),
+      hasExplore: Boolean(raw.exploreUrl || actions.includes('explore')),
       actions: [...actions], ...(state?.errorCode ? { errorCode: state.errorCode } : {}) };
   }
   function persist(next = records) {
@@ -77,12 +77,9 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     return object(value) ? value : { html: value };
   }
   function managedDefinition(item) {
-    const value = { ...definitionObject(item.definition), bookSourceName: item.name,
+    return { ...definitionObject(item.definition), bookSourceName: item.name,
       bookSourceUrl: item.sourceUrl, bookSourceGroup: item.group, customOrder: item.order,
       enabled: item.enabled, enabledExplore: item.enabledExplore };
-    if (item.protocol === 'yiciyuan' || Object.hasOwn(value, 'enable')) value.enable = item.enabled;
-    if (item.protocol === 'yiciyuan' || Object.hasOwn(value, 'serialNumber')) value.serialNumber = item.order;
-    return value;
   }
   function runtimeDefinition(item) {
     const normalized = parseDefinition(item.definition);
@@ -98,16 +95,16 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     const sourceUrl = String(source.bookSourceUrl ?? old?.sourceUrl ??
       (normalized.protocol === 'qysg' ? origin || `qysg:${fallbackName || hash(definition)}` : '')).trim();
     require(sourceUrl.length > 0);
-    const order = raw.customOrder ?? raw.serialNumber ?? old?.order ?? source.customOrder ?? records.size;
+    const order = raw.customOrder ?? old?.order ?? source.customOrder ?? records.size;
     require(Number.isSafeInteger(Number(order)));
     return {
       installationId: old?.installationId ?? randomUUID(), revision: (old?.revision ?? 0) + 1,
       name: String(source.bookSourceName ?? old?.name ?? fallbackName).trim() || sourceUrl,
       sourceUrl, group: String(source.bookSourceGroup ?? old?.group ?? ''),
-      order: Number(order), enabled: bool(raw.enabled ?? raw.enable,
+      order: Number(order), enabled: bool(raw.enabled,
         old?.enabled ?? bool(source.enabled, true)),
       enabledExplore: bool(raw.enabledExplore, old?.enabledExplore ??
-        Boolean(source.enabledExplore ?? (source.exploreUrl || source.ruleFindUrl))),
+        Boolean(source.enabledExplore ?? source.exploreUrl)),
       protocol: normalized.importedProtocol, actions: old?.actions ?? [],
       definition, private: structuredClone(old?.private ?? emptyPrivate()),
     };
@@ -441,7 +438,9 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       return replace(item, old, signal);
     }),
     'library.update': (params, signal) => manage(signal, async () => {
-      const old = record(params.installationId, params.expectedRevision), patch = params.patch;
+      const old = record(params.installationId, params.expectedRevision);
+      const patch = Object.fromEntries(['name', 'group', 'enabled', 'enabledExplore', 'order']
+        .filter(key => Object.hasOwn(params.patch, key)).map(key => [key, params.patch[key]]));
       const item = { ...structuredClone(old), ...patch, revision: old.revision + 1 };
       item.definition = JSON.stringify(managedDefinition(item));
       if (patch.enabled === true && (!old.enabled || !states.get(old.installationId)?.accepting)) {

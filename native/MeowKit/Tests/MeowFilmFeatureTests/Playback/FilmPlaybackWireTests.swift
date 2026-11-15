@@ -3,6 +3,66 @@ import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmPlaybackWireTests: XCTestCase {
+    func testUnknownPreferenceEntriesAreNotExecutedOrAllowedToRejectTheSnapshot() throws {
+        var preferences = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
+        preferences["ruleOrder"] = .array([.string("keyword"), .string("future-rule"),
+                                           .object(["extra": .bool(true)]), .string("quality")])
+        preferences["panOrder"] = .array([.string("quark"), .string("future-provider"), .number(1), .string("baidu")])
+        preferences["extra"] = .object(["ruleOrder": .string("unused")])
+        var fields = try FilmPlaybackFixture.snapshot().filmRequiredObject()
+        fields["preferences"] = .object(preferences)
+        let snapshot = try FilmPlaybackSnapshot(value: .object(fields))
+        XCTAssertEqual(snapshot.preferences.ruleOrder, [.keyword, .quality])
+        XCTAssertEqual(snapshot.preferences.panOrder, [.quark, .baidu])
+        XCTAssertEqual(snapshot.preferences.iosAutoPrepare, true)
+        XCTAssertEqual(snapshot.preferences.value.filmObject?["ruleOrder"], preferences["ruleOrder"])
+        XCTAssertEqual(snapshot.preferences.value.filmObject?["panOrder"], preferences["panOrder"])
+        var edited = snapshot.preferences
+        edited.keywords = ["新关键词"]
+        XCTAssertEqual(edited.value.filmObject?["ruleOrder"], preferences["ruleOrder"])
+        XCTAssertEqual(edited.value.filmObject?["panOrder"], preferences["panOrder"])
+        edited.ruleOrder = [.quality, .keyword]
+        XCTAssertEqual(edited.value.filmObject?["ruleOrder"], .array([.string("quality"), .string("keyword")]))
+        XCTAssertEqual(edited.value.filmObject?["panOrder"], preferences["panOrder"])
+    }
+
+    func testUnusableSupplementDoesNotRejectPrimaryMetadataOrAnActiveAttempt() throws {
+        let target = FilmPlaybackTarget(id: "douban:tv:100", kind: .tv, title: "豆瓣",
+            metadataProvider: .douban, metadataID: "100")
+        let metadata: RuntimeValue = .object(["title": .string("主资料")])
+        for supplement in [
+            RuntimeValue.bool(false),
+            .object(["provider": .string("future-provider"), "metadata": .object([:])]),
+            .object(["provider": .string("tmdb"), "metadataId": .object([:]),
+                     "kind": .string("tv"), "metadata": .object([:])]),
+        ] {
+            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+                stage: "pending", attempt: FilmPlaybackFixture.attempt("pending"), metadata: metadata,
+                target: .object(target.value), metadataSupplement: supplement))
+            XCTAssertEqual(snapshot.target.id, target.id)
+            XCTAssertEqual(snapshot.metadata, metadata)
+            XCTAssertEqual(snapshot.attempt?.id, "pending")
+            XCTAssertNil(snapshot.metadataSupplement)
+        }
+    }
+
+    func testAuxiliaryToleranceDoesNotAdmitInvalidSessionSequenceOrExecutionMaterials() throws {
+        for (key, value) in [
+            ("sessionId", RuntimeValue.string("not-a-uuid")),
+            ("sequence", .string("1")),
+            ("attempt", .object(["id": .string("pending")])),
+            ("current", .object(["attemptId": .string("current")])),
+        ] {
+            var fields = try FilmPlaybackFixture.snapshot().filmRequiredObject()
+            fields[key] = value
+            fields["metadataCache"] = .object(["status": .string("future")])
+            fields["metadataSupplement"] = .bool(false)
+            XCTAssertThrowsError(try FilmPlaybackSnapshot(value: .object(fields))) {
+                XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+            }
+        }
+    }
+
     func testManualShareSourceDoesNotRequireOrInventScriptInstallation() throws {
         let pan: RuntimeValue = .object(["key": .string("manual:fixture"), "engine": .string("pan"),
                                         "name": .string("私人分享"), "detailId": .number(0)])

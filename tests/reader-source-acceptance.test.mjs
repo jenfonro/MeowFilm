@@ -41,7 +41,7 @@ function exitEvidence({ code, signal, stderr }) {
   return `code=${code}, signal=${signal}\n${stderr}`;
 }
 
-test('Reader inventory accepts CatVod, QYSG, Legado, Yiciyuan and split JSON arrays without copying secrets', async t => {
+test('Reader inventory accepts CatVod, QYSG, Legado and split JSON arrays without copying secrets', async t => {
   const { directory, output } = area(t);
   const privateValue = 'SYNTHETIC-PRIVATE-VALUE';
   writeFileSync(join(directory, 'cat.js'), `
@@ -71,25 +71,16 @@ test('Reader inventory accepts CatVod, QYSG, Legado, Yiciyuan and split JSON arr
     legado('Two'),
   ]));
 
-  writeFileSync(join(directory, 'yiciyuan.json'), JSON.stringify({
-    bookSourceName: 'Legacy',
-    bookSourceUrl: 'https://books.invalid/',
-    ruleSearchUrl: 'https://books.invalid/search?key=searchKey',
-    ruleSearchList: 'class.book',
-    ruleSearchName: 'class.name@text',
-    ruleSearchNoteUrl: 'tag.a@href',
-  }));
-
   const result = await run(['--scripts', directory, '--output', output]);
   assert.equal(result.code, 0, exitEvidence(result));
   const text = readFileSync(output, 'utf8');
   const report = JSON.parse(text);
   assert.equal(report.schema, 2);
   assert.equal(report.kind, 'source');
-  assert.equal(report.summary.sources, 6);
-  assert.equal(report.summary.initialized, 6);
+  assert.equal(report.summary.sources, 5);
+  assert.equal(report.summary.initialized, 5);
   assert.deepEqual(report.rows.map(row => row.protocol).sort(),
-    ['cat', 'legado', 'legado', 'qysg', 'qysg', 'yiciyuan']);
+    ['cat', 'legado', 'legado', 'qysg', 'qysg']);
   assert.equal(report.rows.every(row =>
     row.cleanup === 'complete' && row.unload === 'complete' && row.sourceUnchanged), true);
   assert.equal(report.summary.declaredActions > 5, true);
@@ -336,75 +327,62 @@ test('live Spider acceptance requires business actions while offline initializat
   }
 });
 
-for (const protocol of ['legado', 'yiciyuan']) {
-  test(`live ${protocol} acceptance derives book details, TOC and content from actual responses`, async t => {
-    const { directory, output } = area(t);
-    const requests = [];
-    const pages = {
-      '/search': '<div class="book"><h2>Fixture</h2><a href="/book/1">open</a></div>',
-      '/book/1': '<h1>Fixture</h1><a class="toc" href="/toc/1">contents</a>',
-      '/toc/1': '<li><a href="/chapter/1">Chapter One</a></li>',
-      '/chapter/1': '<article>SYNTHETIC-PRIVATE-CONTENT</article>',
-    };
-    const server = createServer((request, response) => {
-      const url = new URL(request.url, 'http://fixture.invalid');
-      requests.push(url.pathname);
-      response.setHeader('Content-Type', 'text/html; charset=utf-8');
-      response.statusCode = pages[url.pathname] ? 200 : 404;
-      response.end(pages[url.pathname] ?? 'missing');
-    });
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    t.after(() => new Promise(resolve => server.close(resolve)));
-    const origin = `http://127.0.0.1:${server.address().port}`;
-    const source = protocol === 'legado' ? {
-      searchUrl: `${origin}/search?key={{key}}`,
-      ruleSearch: { bookList: '.book', name: 'h2@text', bookUrl: 'a@href' },
-      ruleBookInfo: { name: 'h1@text', tocUrl: '.toc@href' },
-      ruleToc: { chapterList: 'li', chapterName: 'a@text', chapterUrl: 'a@href' },
-      ruleContent: { content: 'article@text' },
-    } : {
-      ruleSearchUrl: `${origin}/search?key=searchKey`,
-      ruleSearchList: '.book',
-      ruleSearchName: 'h2@text',
-      ruleSearchNoteUrl: 'a@href',
-      ruleBookName: 'h1@text',
-      ruleChapterUrl: '.toc@href',
-      ruleChapterList: 'li',
-      ruleChapterName: 'a@text',
-      ruleContentUrl: 'a@href',
-      ruleBookContent: 'article@text',
-    };
-    writeFileSync(join(directory, 'source.json'), JSON.stringify({
-      bookSourceName: 'Fixture',
-      bookSourceUrl: origin,
-      ...source,
-    }));
-    const records = join(directory, 'records.json');
-    writeFileSync(records, JSON.stringify({
-      source: { 'source.json': { actions: { image: { url: `${origin}/cover`, body: '' } } } },
-    }));
-
-    const result = await run([
-      '--scripts', directory, '--records', records, '--output', output, '--live',
-    ]);
-    assert.equal(result.code, 0, exitEvidence(result));
-    const text = readFileSync(output, 'utf8'), report = JSON.parse(text), row = report.rows[0];
-    assert.equal(row.protocol, protocol);
-    assert.equal(row.importedProtocol, protocol);
-    assert.deepEqual(row.actions.map(action => [action.operation, action.state]), [
-      ['search', 'returned'], ['bookInfo', 'returned'], ['toc', 'returned'],
-      ['content', 'returned'], ['loginStatus', 'returned'], ['image', 'returned'],
-    ]);
-    assert.deepEqual(requests, ['/search', '/book/1', '/toc/1', '/chapter/1']);
-    assert.equal(report.summary.declaredActions, 6);
-    assert.equal(report.summary.invokedActions, 6);
-    assert.equal(row.unload, 'complete');
-    assert.equal(row.cleanup, 'complete');
-    assert.equal(row.sourceUnchanged, true);
-    assert.equal(text.includes('SYNTHETIC-PRIVATE-CONTENT'), false);
-    assert.equal(text.includes(origin), false);
+test('live Legado acceptance derives book details, TOC and content from actual responses', async t => {
+  const { directory, output } = area(t);
+  const requests = [];
+  const pages = {
+    '/search': '<div class="book"><h2>Fixture</h2><a href="/book/1">open</a></div>',
+    '/book/1': '<h1>Fixture</h1><a class="toc" href="/toc/1">contents</a>',
+    '/toc/1': '<li><a href="/chapter/1">Chapter One</a></li>',
+    '/chapter/1': '<article>SYNTHETIC-PRIVATE-CONTENT</article>',
+  };
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, 'http://fixture.invalid');
+    requests.push(url.pathname);
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.statusCode = pages[url.pathname] ? 200 : 404;
+    response.end(pages[url.pathname] ?? 'missing');
   });
-}
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const source = {
+    searchUrl: `${origin}/search?key={{key}}`,
+    ruleSearch: { bookList: '.book', name: 'h2@text', bookUrl: 'a@href' },
+    ruleBookInfo: { name: 'h1@text', tocUrl: '.toc@href' },
+    ruleToc: { chapterList: 'li', chapterName: 'a@text', chapterUrl: 'a@href' },
+    ruleContent: { content: 'article@text' },
+  };
+  writeFileSync(join(directory, 'source.json'), JSON.stringify({
+    bookSourceName: 'Fixture',
+    bookSourceUrl: origin,
+    ...source,
+  }));
+  const records = join(directory, 'records.json');
+  writeFileSync(records, JSON.stringify({
+    source: { 'source.json': { actions: { image: { url: `${origin}/cover`, body: '' } } } },
+  }));
+
+  const result = await run([
+    '--scripts', directory, '--records', records, '--output', output, '--live',
+  ]);
+  assert.equal(result.code, 0, exitEvidence(result));
+  const text = readFileSync(output, 'utf8'), report = JSON.parse(text), row = report.rows[0];
+  assert.equal(row.protocol, 'legado');
+  assert.equal(row.importedProtocol, 'legado');
+  assert.deepEqual(row.actions.map(action => [action.operation, action.state]), [
+    ['search', 'returned'], ['bookInfo', 'returned'], ['toc', 'returned'],
+    ['content', 'returned'], ['loginStatus', 'returned'], ['image', 'returned'],
+  ]);
+  assert.deepEqual(requests, ['/search', '/book/1', '/toc/1', '/chapter/1']);
+  assert.equal(report.summary.declaredActions, 6);
+  assert.equal(report.summary.invokedActions, 6);
+  assert.equal(row.unload, 'complete');
+  assert.equal(row.cleanup, 'complete');
+  assert.equal(row.sourceUnchanged, true);
+  assert.equal(text.includes('SYNTHETIC-PRIVATE-CONTENT'), false);
+  assert.equal(text.includes(origin), false);
+});
 
 test('live QYSG acceptance exercises every declared Reader action with chained and supplied inputs', async t => {
   const { directory, output } = area(t);

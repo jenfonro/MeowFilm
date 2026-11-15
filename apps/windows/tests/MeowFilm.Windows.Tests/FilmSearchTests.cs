@@ -18,6 +18,7 @@ public static class FilmSearchTests
         yield return Case("accepted open stopped or retired before receipt keeps only its ID until explicit resume or release", OpenPublication);
         yield return Case("close waits for accepted open then stops releases and drains observation", Close);
         yield return Case("runtime unavailable and malformed snapshots remain real errors", Errors);
+        yield return Case("unknown display states auxiliary round and isolated bad cards do not stop healthy results", AuxiliaryStates);
         yield return Case("Node source snapshots preserve enabled search scope order and cover option", FilmSourcesTests.SearchWire);
     }
     private static TestCase Case(string name, Func<Task> action) => new("film-search: " + name, () => MusicQualityConsumerTests.Sta(action));
@@ -271,6 +272,58 @@ public static class FilmSearchTests
         f.Runtime.SearchOpen = (_, _) => FilmJson.Encode(new { sessionId = "bad", query = "无效" });
         var malformed = f.Service.Start("无效"); await malformed.Work;
         Check(malformed.SitesState == FilmSearchChannelState.Error && malformed.Error.Length > 0, "invalid snapshots surface failure");
+    }
+    private static async Task AuxiliaryStates()
+    {
+        await using var f = new SearchFixture();
+        var member = SearchFixture.Member(f.Sources.Sources[0], 0, "健康");
+        var card = SearchFixture.Card("healthy", "site", "健康", [member]);
+        JsonElement Projection(Guid id, string query, long revision = 1)
+        {
+            var root = JsonNode.Parse(SearchFixture.Snapshot(id, query, [card], [member],
+                revision: revision, hasMore: true).GetRawText())!.AsObject();
+            root["siteState"] = "future-site-state"; root["metadataState"] = new JsonObject { ["future"] = true };
+            root["round"] = new JsonObject { ["nested"] = new JsonArray(1, 2) };
+            root["cards"]!.AsArray().Insert(0, JsonNode.Parse("""{"displayKey":[{}],"title":"坏展示"}"""));
+            root["cards"]!.AsArray().Insert(0, null);
+            root["rawCards"]!.AsArray().Insert(0, JsonNode.Parse("""{"displayKey":[{}],"title":"坏原始展示"}"""));
+            root["rawCards"]!.AsArray().Insert(0, null);
+            return JsonSerializer.SerializeToElement(root);
+        }
+        f.Runtime.SearchOpen = (id, input) => Projection(id, FilmJson.Text(input, "query"));
+        var session = f.Service.Start("健康"); await SearchFixture.Settle(session);
+        Check(session.Error == "" && session.CanLoadMore && session.Items.Count == 1 &&
+            JsonElement.DeepEquals(session.Items[0], card) && session.RawItems.Count == 1 &&
+            session.SitesState == FilmSearchChannelState.Unknown && session.MetadataState == FilmSearchChannelState.Unknown &&
+            session.Snapshot.GetProperty("round").ValueKind == JsonValueKind.Object &&
+            session.Snapshot.GetProperty("cards").GetArrayLength() == 3 &&
+            session.Snapshot.GetProperty("rawCards").GetArrayLength() == 3,
+            "control uses loading/hasMore, unknown display state projects without claiming completion, and raw auxiliary values survive");
+        f.Runtime.SearchCommand = (_, _) => Projection(Guid.Parse(session.Id), session.Query, 2);
+        await f.Service.LoadMoreAsync();
+        Check(session.Revision == 2 && f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "more"),
+            "an unknown display state does not revoke real pagination");
+        await f.Service.StopAsync();
+        Check(session.Error == "" && !session.CanLoadMore && session.Items.Count == 1,
+            "a stop receipt consumes real control state without rejecting auxiliary state values");
+        f.Runtime.SearchOpen = (id, input) =>
+        {
+            var root = JsonNode.Parse(Projection(id, FilmJson.Text(input, "query")).GetRawText())!.AsObject();
+            root["cards"] = JsonNode.Parse("""[null,{"displayKey":[{}]}]""");
+            return JsonSerializer.SerializeToElement(root);
+        };
+        var invalid = f.Service.Start("无可用列表"); await invalid.Work;
+        Check(invalid.Error == "INVALID_RESPONSE" && invalid.Items.Count == 0,
+            "a nonempty unusable list remains a real failure, not a fabricated successful empty search");
+        f.Runtime.SearchOpen = (id, input) =>
+        {
+            var root = JsonNode.Parse(Projection(id, FilmJson.Text(input, "query")).GetRawText())!.AsObject();
+            root["rawCards"] = JsonNode.Parse("""[null,{"displayKey":[{}]}]""");
+            return JsonSerializer.SerializeToElement(root);
+        };
+        var invalidRaw = f.Service.Start("无可用原始列表"); await invalidRaw.Work;
+        Check(invalidRaw.Error == "INVALID_RESPONSE" && invalidRaw.RawItems.Count == 0,
+            "an unusable nonempty raw view is not published as selectable empty cards");
     }
 }
 

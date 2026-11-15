@@ -186,7 +186,7 @@ final class FilmHomeModelTests: XCTestCase {
         XCTAssertEqual(model.sections, seed)
         XCTAssertEqual(model.error, .runtime(code: "NETWORK_ERROR"))
 
-        let staleCache = try FilmMetadataCache(value: .object([
+        let staleCache = FilmMetadataCache(value: .object([
             "status": .string("stale"), "error": .object(["code": .string("UPSTREAM_HTTP")]),
             "components": .object(["items": .object(["state": .string("ready")])])
         ]))

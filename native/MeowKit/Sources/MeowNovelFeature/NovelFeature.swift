@@ -74,7 +74,6 @@ public final class NovelFeature: ObservableObject {
         for session in sessions.values { session.reprocess() }
     }
     public func saveRules(_ value: [NovelRule]) async throws {
-        for rule in value { try await rules.validate(rule) }
         try await library.saveRules(value); try await reloadLocal()
         for session in sessions.values { session.reprocess() }
     }

@@ -115,26 +115,41 @@ public static class FilmHomeTests
         Check(FilmJson.Text(request.Parameters.GetProperty("query"), "category") == "最新" &&
             FilmJson.Text(request.Parameters.GetProperty("query"), "type") == "日本" &&
             FilmJson.Bool(request.Parameters, "refresh"), "explicit refresh sends the selected filter and force flag");
-        try
-        {
-            await source.LoadAsync(section with { Category = "任意" }, 0, 12, default);
-            throw new InvalidOperationException("Expected unknown film filter rejection");
-        }
-        catch (ArgumentException)
-        {
-        }
+        await source.LoadAsync(section with { Key = "future-display", Title = "不同展示标题", Category = "任意", Type = "新筛选" }, 0, 12, default);
+        var extended = runtime.Calls.Last().Parameters;
+        Check(FilmJson.Text(extended, "path") == "/rexxar/api/v2/subject/recent_hot/movie" &&
+            FilmJson.Text(extended.GetProperty("query"), "category") == "任意" &&
+            FilmJson.Text(extended.GetProperty("query"), "type") == "新筛选" &&
+            !extended.TryGetProperty("title", out _) && !extended.TryGetProperty("key", out _),
+            "request materials are independent of the local menu and display title; display fields are not forwarded");
 
         runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(Entry("stale", "UPSTREAM_ERROR")));
         var stale = (FilmHomePage)await source.LoadAsync(filtered, 0, 24, default);
-        Check(stale.Count == 3 && stale.Cache.Status == "stale" && stale.Cache.ErrorCode == "UPSTREAM_ERROR" &&
-            stale.Cache.Components.GetProperty("baseData").GetProperty("status").GetString() == "ready",
+        Check(stale.Count == 3 && stale.Cache is { Status: "stale", ErrorCode: "UPSTREAM_ERROR" } cache &&
+            cache.Components.GetProperty("baseData").GetProperty("status").GetString() == "ready",
             "a failed refresh returns old success together with its actual cache error and component state");
+        foreach (string auxiliary in new[] { "null", "17", """{"status":"future-state","components":[],"error":{"code":"UPSTREAM_ERROR"}}""" })
+        {
+            var entry = JsonSerializer.Deserialize<JsonElement>($$$"""
+                {"value":{{{raw.GetRawText()}}},"cache":{{{auxiliary}}},"count":{},"start":[],"extra":{"nested":true}}
+                """);
+            runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(entry));
+            var page = (FilmHomePage)await source.LoadAsync(section, 0, 12, default);
+            Check(page.Count == 3 && page.Cache?.Status != "fresh",
+                "unconsumed auxiliary fields do not gate the actual list or turn an unknown cache state into fresh");
+            if (page.Cache is { } unknown)
+                Check(unknown.Status == "future-state" && unknown.ErrorCode == "UPSTREAM_ERROR",
+                    "raw diagnostic state and real refresh failure remain available");
+        }
         runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Failure("UPSTREAM_ERROR"));
         await Failure(() => source.LoadAsync(section, 0, 12, default), "UPSTREAM_ERROR");
         runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(FilmJson.Encode(new
         {
             value = new { items = "invalid" }, cache = new { status = "fresh", components = new { } }
         })));
+        await Failure(() => source.LoadAsync(section, 0, 12, default), "INVALID_RESPONSE");
+        runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(
+            JsonSerializer.Deserialize<JsonElement>("""{"value":{"items":[null,{"title":[]}]},"cache":null}""")));
         await Failure(() => source.LoadAsync(section, 0, 12, default), "INVALID_RESPONSE");
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();

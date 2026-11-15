@@ -219,7 +219,7 @@ test('TMDB GET paths do not require a registered resource or normalized source I
   }
 });
 
-test('TMDB rejects malformed path/query data and fields outside the GET request contract', async () => {
+test('TMDB rejects malformed required path/query data before using the network', async () => {
   const { context, calls } = fixture();
   for (const path of [
     'https://untrusted.invalid/3/movie/42', '//untrusted.invalid/3/movie/42',
@@ -229,17 +229,29 @@ test('TMDB rejects malformed path/query data and fields outside the GET request 
   ]) {
     await assert.rejects(requestTMDB({ path }, context), failure('INVALID_REQUEST'), path);
   }
-  for (const input of [
-    null, [], {}, { path: '/3/movie/42', method: 'GET' }, { path: '/3/movie/42', method: 'POST' },
-    { path: '/3/movie/42', headers: {} }, { path: '/3/movie/42', url: 'https://untrusted.invalid' },
-    { path: '/3/movie/42', body: {} }, { path: '/3/movie/42', followRedirect: true },
-  ]) {
+  for (const input of [null, [], {}]) {
     await assert.rejects(requestTMDB(input, context), failure('INVALID_REQUEST'));
   }
   assert.equal(calls.length, 0);
 });
 
-test('TMDB rewrites only the image fields in place across nested results and preserves business values', async () => {
+test('TMDB ignores request extras without giving them transport or credential authority', async () => {
+  const { context, calls } = fixture({ id: 42 }, { ...defaults, accessToken: 'fixture-token' });
+  const input = { path: '/3/movie/42', query: { language: 'en-US' } };
+  const expected = await requestTMDB(input, context);
+  for (const extra of [null, 'ignored', 42, [], { nested: { poster_path: 42, imageSize: 'w1' } }]) {
+    assert.deepEqual(await requestTMDB({ ...input, method: extra, headers: extra, url: extra,
+      body: extra, followRedirect: extra, accessToken: extra, future: extra }, context), expected);
+    assert.deepEqual(calls.at(-1), calls[0]);
+  }
+  assert.deepEqual(await requestTMDB({ ...input, method: 'POST', headers: { Authorization: 'untrusted' },
+    url: 'https://untrusted.invalid', body: { query: 'override' }, followRedirect: false }, context), expected);
+  assert.deepEqual(calls.at(-1), calls[0]);
+  assert.equal(calls[0].method, 'GET');
+  assert.deepEqual(calls[0].headers, { Accept: 'application/json', Authorization: 'Bearer fixture-token' });
+});
+
+test('TMDB rewrites images on metadata paths and leaves unconsumed extension branches untouched', async () => {
   const value = {
     page: 2, total_pages: 5, total_results: 91,
     results: [{
@@ -258,6 +270,8 @@ test('TMDB rewrites only the image fields in place across nested results and pre
       empty: { poster_path: '', backdrop_path: null, ordinary_path: null },
       ordinary: { image_url: 'https://business.invalid/image.jpg', base_url: 'https://business.invalid/',
         secure_base_url: 'https://business.invalid/' },
+      future: { poster_path: 42, images: { logos: [{ file_path: 'not-an-image-path' }] },
+        nested: { backdrop_path: { different: 'type' } } },
     }],
   };
   const expected = structuredClone(value);
@@ -273,6 +287,48 @@ test('TMDB rewrites only the image fields in place across nested results and pre
   const { context } = fixture(value);
   assert.deepEqual(await requestTMDB({ path: '/3/search/multi' }, context), expected);
   assert.equal(value.results[0].poster_path, '/poster.jpg');
+});
+
+test('TMDB isolates bad image records within a list but never turns an entirely bad list into empty success', async () => {
+  const good = { id: 42, title: '可用', poster_path: '/fixture.jpg',
+    extension: { poster_path: { unused: true } } };
+  const bad = { id: 43, poster_path: 'https://untrusted.invalid/not-a-source-path.jpg' };
+  const result = await requestTMDB({ path: '/3/search/multi' },
+    fixture({ results: [bad, good, null, 7] }).context);
+  assert.deepEqual(result, { results: [{ ...good, poster_path: '/v1/tmdb/images/original/fixture.jpg' }] });
+  await assert.rejects(requestTMDB({ path: '/3/search/multi' },
+    fixture({ results: [bad, null, 7] }).context), failure('UPSTREAM_FORMAT'));
+  assert.deepEqual(await requestTMDB({ path: '/3/search/multi' }, fixture({ results: [] }).context), { results: [] });
+  const cast = await requestTMDB({ path: '/3/movie/42/credits' },
+    fixture({ cast: [{ id: 2, profile_path: [] }, { id: 1, profile_path: '/person.jpg' }] }).context);
+  assert.deepEqual(cast, { cast: [{ id: 1, profile_path: '/v1/tmdb/images/original/person.jpg' }] });
+});
+
+test('TMDB keeps usable details and list entries when optional image or related branches are unusable', async () => {
+  const main = { id: 42, title: '可用详情', poster_path: '/fixture.jpg' };
+  const optional = { results: [null], images: { posters: [{ file_path: 'bad' }] },
+    credits: { cast: [{ id: 1, profile_path: 'bad' }] },
+    seasons: [{ id: 2, poster_path: 'bad' }], next_episode_to_air: { still_path: 'bad' } };
+  const expected = { ...main, poster_path: '/v1/tmdb/images/original/fixture.jpg' };
+  const detail = await requestTMDB({ path: '/3/movie/42' }, fixture({ ...main, ...optional,
+    recommendations: { results: [{ ...main, ...optional }] } }).context);
+  assert.deepEqual(detail, { ...expected, recommendations: { results: [expected] } });
+  assert.deepEqual(await requestTMDB({ path: '/3/search/movie' },
+    fixture({ results: [{ ...main, ...optional }] }).context), { results: [expected] });
+  assert.deepEqual(await requestTMDB({ path: '/3/movie/42' },
+    fixture({ ...main, cast: [{ profile_path: 'bad' }] }).context), expected);
+});
+
+test('TMDB still fails when a requested top-level list is entirely unusable rather than omitting it', async () => {
+  for (const [path, key, item] of [
+    ['/3/search/movie', 'results', { id: 42, poster_path: 'bad' }],
+    ['/3/movie/42/credits', 'cast', { id: 1, profile_path: 'bad' }],
+    ['/3/movie/42/images', 'posters', { file_path: 'bad' }],
+    ['/3/tv/42/season/1', 'episodes', { id: 2, still_path: 'bad' }],
+  ]) {
+    await assert.rejects(requestTMDB({ path }, fixture({ [key]: [item] }).context), failure('UPSTREAM_FORMAT'));
+    assert.deepEqual(await requestTMDB({ path }, fixture({ [key]: [] }).context), { [key]: [] });
+  }
 });
 
 test('TMDB image sizes use original by default and positive w/h specifications without a synthetic ceiling', async () => {

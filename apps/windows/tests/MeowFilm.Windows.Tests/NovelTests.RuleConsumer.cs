@@ -67,10 +67,6 @@ public static partial class NovelTests
             try { await rules.IdentityAsync(Book()); throw new InvalidOperationException("Rule RPC failure became success"); }
             catch (BridgeException error) { Check(error.Code == code); }
         }
-        runtime.Respond = (_, _) => Task.FromResult(Json(new { ok = true, contract = "source.runtime.v2", value = new { valid = false, errors = new[] { "invalid" } } }));
-        try { await rules.ValidateAsync(new() { Pattern = "[" }); throw new InvalidOperationException("Invalid rule accepted"); }
-        catch (System.IO.InvalidDataException error) { Check(error.Message == "INVALID_RULE"); }
-
         var physical = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         CancellationToken accepted = default;

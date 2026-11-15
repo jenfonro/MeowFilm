@@ -42,6 +42,8 @@ await runtime.close();
 
 每个 provider 只有一份当前账号。`settings.set` **整份替换**该账号配置，不是合并；clear 删除凭据但保留递增 revision。`configured/fields` 只说明哪些字段非空，不证明账号有效或具备会员资格。普通配置读取、刷新及登录结果不回传原始秘密；不存在“读取 Cookie”接口。不同 provider 不互相读写凭据。
 
+普通操作忽略未消费参数，不按字段白名单拒绝请求。`settings.set` 只提取所选 provider 定义的凭据字段，其他字段不会进入持久配置、认证或网络；已定义的字段仍按实际凭据类型及 HTTP 头要求处理。只含未知凭据字段的请求投影为空配置，仍遵循整份替换语义。顶层附加的 `method/url/headers` 等不能改变实际操作或目标，clear 也不会消费附带的 credentials。此处只规定请求投影，不改变本地账号文档的恢复、格式或持久化组织。
+
 账号状态中的 `status` 只有 `signedIn/expired/signedOut`。无凭据为 `signedOut`；已有凭据且本进程未收到明确账号认证失败时为 `signedIn`，不是永久有效性保证。`refresh` 成功后为 `signedIn`，明确账号认证失败后为 `expired`；网络、超时、上游格式等错误不改变此前状态，也不删除凭据。此观察状态不另建持久库，重新启动后由设置页对已配置账号再次刷新确认。分享密码错误不作为账号失效依据。
 
 七个 provider 均支持 `refresh`。Cookie-only 账号使用只读账号接口检测，不列分享、不转存；支持密码或 token 的账号按其协议刷新。天翼只有 Cookie 时也可检测；用户名与密码仍用于普通登录，不绕过验证码。手动配置后由客户端显式刷新，只有成功回执才将本次登录视为完成。
@@ -67,6 +69,8 @@ await runtime.close();
 | `play` | `{provider,file,mode}` | `{url,headers,mode,file?}` |
 
 `list` 只返回 provider 所支持的视频后缀，不增加字幕匹配、剧集规则或逐文件 M3U8 预请求。按上游分页语义完整消费列表与目录；无固定总数、深度或页数截断。重复目录防环；声明还有下一页却重复／空页时报格式错误，不把失败或部分列表包装成完整空成功。
+
+分享请求仅将 `share.url/password` 交给 provider；嵌套扩展和顶层额外参数不透传为网络选项、HTTP 头或账号凭据。`file` 仍是原样回传的 provider 结构化引用，不因普通 extra 放宽其身份、账号代次或操作模式要求。
 
 `name/path` 保留原始名称与目录路径；size 若超过安全整数则为十进制字符串。`file` 是必须完整原样回传的结构化引用，包含 `kind/provider/accountRevision` 及 provider 所需分享 ID、文件 ID、提取码、令牌等；所有数字 ID 用字符串。它不是文件名索引或旧 `vod_play_url`，不使用 `#/$/*`、Base64 播放 ID。引用可能含分享秘密，应由调用方按敏感结果处理，不写日志。
 

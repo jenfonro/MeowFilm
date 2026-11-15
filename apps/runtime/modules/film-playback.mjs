@@ -119,8 +119,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
     events(path, context) {
       if (closed) throw fail('CLOSED');
       const id = path.pathname.split('/')[4];
-      const keys = [...path.searchParams.keys()];
-      requireValue(keys.length <= 1 && keys.every(key => key === 'after'));
+      requireValue(path.searchParams.getAll('after').length <= 1);
       const after = path.searchParams.has('after') ? Number(path.searchParams.get('after')) : -1;
       requireValue(Number.isSafeInteger(after) && after >= -1);
       return search.has(id) ? search.events(id, after, context) : service.events(id, after, context);

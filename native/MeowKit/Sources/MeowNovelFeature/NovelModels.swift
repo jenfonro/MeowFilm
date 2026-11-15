@@ -152,6 +152,18 @@ public struct NovelBlock: Codable, Equatable, Sendable {
     public var alt: String?
     public init(text: String) { type = "text"; self.text = text }
     public init(src: String, alt: String = "") { type = "image"; self.src = src; self.alt = alt }
+    private enum CodingKeys: String, CodingKey { case type, text, src, alt }
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        switch try fields.decode(String.self, forKey: .type) {
+        case "text": self.init(text: try fields.decode(String.self, forKey: .text))
+        case "image":
+            let src = try fields.decode(String.self, forKey: .src)
+            guard !src.isEmpty else { throw NovelError.invalidResponse }
+            self.init(src: src, alt: (try? fields.decode(String.self, forKey: .alt)) ?? "")
+        default: throw NovelError.invalidResponse
+        }
+    }
 }
 public struct NovelContent: Codable, Equatable, Sendable {
     public var title: String

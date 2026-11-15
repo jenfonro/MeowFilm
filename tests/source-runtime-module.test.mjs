@@ -1601,13 +1601,12 @@ for (const [field, value] of [
   });
 }
 
-test('source CAS and field rejection retain a complete candidate; exact revisions never follow the latest', async t => {
+test('source CAS and metadata limits retain a complete candidate; exact revisions never follow the latest', async t => {
   const { rpc, installations } = mockSourceRuntime(t);
   await load(rpc, { protocol: 'cat', source: catSource });
   await upload(rpc, catSource, 'source.js', 'fixture', 5);
   const next = { installationId: 'fixture', sourceRevision: 5, revision: 5, expectedRevision: 1, protocol: 'cat' };
   denied(await rpc('load', { ...next, expectedRevision: 4 }), 'STALE_SOURCE');
-  denied(await rpc('load', { ...next, contentHash: '0'.repeat(64) }), 'INVALID_REQUEST');
   denied(await rpc('load', { ...next, metadata: { text: 'x'.repeat(32768) } }), 'LIMIT');
   assert.equal(installations.length, 1);
   // The deterministic owner supports update through the same installation surface.
@@ -1619,6 +1618,38 @@ test('source CAS and field rejection retain a complete candidate; exact revision
   const installed = okay(await rpc('load', { installationId: 'another', sourceRevision: 2, revision: 2, expectedRevision: 0, protocol: 'cat' })).instance;
   assert.equal(installed.revision, 2);
   assert.equal(okay(await rpc('load', next)).instance.revision, 5);
+});
+
+test('ordinary source RPC extras never reach installation or invocation owners', async t => {
+  const { module, rpc, installations, invocations } = mockSourceRuntime(t);
+  const sourceRevision = await upload(rpc, fixtureSource);
+  const instance = okay(await rpc('load', {
+    installationId: 'fixture', sourceRevision, revision: 1, expectedRevision: 0,
+    contentHash: '0'.repeat(64), permissions: { storage: ['injected'] },
+    source: 'for (;;) {}', enabled: false, extra: { nested: ['unused'] },
+  })).instance;
+  assert.equal(installations.length, 1);
+  assert.deepEqual(Object.keys(installations[0]).sort(), ['installationId', 'protocol', 'source',
+    'contentHash', 'version', 'metadata', 'permissions', 'enabled'].sort());
+  assert.deepEqual(JSON.parse(installations[0].source), fixtureSource);
+  assert.deepEqual(installations[0].permissions, { storage: [] });
+  assert.equal(installations[0].enabled, true);
+  const identity = { installationId: instance.installationId, revision: instance.revision,
+    generation: instance.generation };
+  assert.deepEqual(okay(await rpc('invoke', {
+    ...identity, action: 'search', payload: { keyword: 'same' },
+    operation: 'destroy', siteId: 'injected', expectedRevision: [], metadata: false,
+    extra: { source: 'for (;;) {}' },
+  })), { keyword: 'same' });
+  assert.deepEqual(invocations, [{ installationId: identity.installationId,
+    generation: identity.generation, siteId: 'source', operation: 'search', payload: { keyword: 'same' } }]);
+  assert.deepEqual(okay(await rpc('status', { installationId: false, revision: [], extra: null })).instances,
+    [instance]);
+  assert.equal(okay(await rpc('unload', {
+    ...identity, expectedRevision: 'unused', extra: { nested: true },
+  })).unloaded, true);
+  assert.deepEqual(okay(await module.methods['source.runtime.close']({ extra: { unused: true } })),
+    { closed: true, cleanupComplete: true });
 });
 
 test('source equal revisions retain canonical definition and metadata identity without restarting', async t => {

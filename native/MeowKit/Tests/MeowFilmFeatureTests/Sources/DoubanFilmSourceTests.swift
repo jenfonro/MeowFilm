@@ -178,6 +178,33 @@ final class DoubanFilmSourceTests: XCTestCase {
         }
     }
 
+    func testAuxiliaryCacheChangesDoNotDiscardAUsableHomeOrCategory() async throws {
+        for cache in [
+            RuntimeValue?.none,
+            .object(["status": .string("future-status"), "components": .object([:]),
+                     "error": .object(["code": .array([])])]),
+            .object(["status": .string("fresh"), "components": .string("unusable")]),
+        ] {
+            let fixture = FilmMetadataHTTPFixture(response: { _ in
+                var fields = try Self.entry(items: [
+                    .object(["id": .string("100"), "title": .string("主业务")]),
+                ]).filmRequiredObject()
+                fields["cache"] = cache
+                return .object(fields)
+            })
+            defer { fixture.close() }
+            let client = try fixture.connection()
+            addTeardownBlock { await client.close() }
+            let source = DoubanFilmSource { client }
+            let home = try await source.loadHome()
+            XCTAssertEqual(home.map { $0.items.map(\.id) }, Array(repeating: ["100"], count: 4))
+            XCTAssertTrue(home.allSatisfy { $0.cache?.status == .stale && $0.cache?.errorCode == nil })
+            let category = try await source.loadCategory(.movie, filters: [:], offset: 0)
+            XCTAssertEqual(category.items.map(\.id), ["100"])
+            XCTAssertEqual(category.cache?.status, .stale)
+        }
+    }
+
     func testExplicitRefreshAndStaleEntryPreserveContentErrorAndRuntimeImageReferences() async throws {
         let fixture = FilmMetadataHTTPFixture(response: { _ in
             Self.entry(items: [.object(["id": .string("100"), "title": .string("旧资料"), "pic": .object([

@@ -145,10 +145,12 @@ test('Cat direct JSON preserves 12 MiB payloads Unicode keys config and manageme
   const rpc = moduleHttp(t, module);
   const config = { 中文: '配置', é: 1, 'e\u0301': 2 };
   assert.equal((await rpc.upload('cat', 1, Buffer.from('module.exports = {};'))).ok, true);
-  assert.equal((await rpc('install', { installationId: 'cat', sourceRevision: 1,
-    contentHash: '0'.repeat(64) })).code, 'INVALID_ARGUMENT');
-  assert.equal((await rpc('install', { installationId: 'cat', sourceRevision: 1, config })).ok, true);
+  assert.equal((await rpc('install', { installationId: 'cat', sourceRevision: 1, config,
+    contentHash: { ignored: true }, source: ['not the uploaded source'], method: 'DELETE' })).ok, true);
   assert.deepEqual(captured[0].config, config);
+  assert.equal(captured[0].source, 'module.exports = {};');
+  assert.equal(typeof captured[0].contentHash, 'string');
+  assert.equal(Object.hasOwn(captured[0], 'method'), false);
   const payload = { text: 'x'.repeat(12 * 1024 * 1024), ...config };
   const siteId = '站点 / ' + '猫'.repeat(200);
   assert.deepEqual((await rpc('invoke', { installationId: 'cat', siteId, operation: 'home', payload })).value, payload);
@@ -174,7 +176,30 @@ test('Cat internal receipt purpose reaches the runtime without entering script p
   assert.equal(calls[0].options.signal.aborted, false);
   assert.deepEqual(okay(await invoke(input)), input.payload);
   assert.equal(Object.hasOwn(calls[1].options, 'mediaPurpose'), false);
-  assert.equal((await invoke({ ...input, mediaPurpose: 'receipt' })).code, 'INVALID_ARGUMENT');
+  assert.deepEqual(okay(await invoke({ ...input, mediaPurpose: { ignored: true }, extra: ['unused'] })), input.payload);
+  assert.deepEqual(calls[2].target, input);
+  assert.equal(Object.hasOwn(calls[2].options, 'mediaPurpose'), false);
+});
+
+test('Cat ordinary extras are inert and never become installation, network or execution options', async t => {
+  const received = [];
+  const module = createCatScriptModule({ dataRoot: temporary, runtimeFactory: () => ({
+    status() { return { instances: [] }; },
+    import(input) { received.push(input); return { imported: true }; },
+    edit(input) { received.push(input); return { edited: true }; },
+    close() {},
+  }) });
+  t.after(() => module.close());
+  const rpc = moduleHttp(t, module);
+  assert.deepEqual(okay(await rpc('status', { installationId: {}, enabled: ['ignored'] })), { instances: [] });
+  const imported = { installationId: 'cat', name: 'Fixture', sourceUrl: 'https://fixture.invalid/source' };
+  okay(await rpc('import', { ...imported, source: { ignored: true }, contentHash: false,
+    headers: { Authorization: 'synthetic-unused' }, config: [1], method: 'DELETE' }));
+  assert.deepEqual(received[0], imported);
+  const edited = { installationId: 'cat', name: 'Edited' };
+  okay(await rpc('edit', { ...edited, enabled: {}, sourceRevision: [1], config: false }));
+  assert.deepEqual(received[1], edited);
+  assert.equal((await rpc('import', { ...imported, sourceUrl: null })).code, 'INVALID_ARGUMENT');
 });
 
 test('Cat complete source accepts exactly 16 MiB and rejects the next byte without replacing it', async t => {

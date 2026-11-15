@@ -39,7 +39,7 @@ contract: cat.script.v2
 
 ### 安装管理参数与结果
 
-以下为 `cat.script.v2` / `cat@0.2.0` 的管理方法。未知参数被拒绝，成功结果通过完整 JSON value 返回。
+以下为 `cat.script.v2` / `cat@0.2.0` 的管理方法。普通参数只取本操作需要的字段，额外字段不参与安装、网络、凭据或执行；成功结果通过完整 JSON value 返回。必要身份、执行材料及取消条件仍在实际操作处处理。
 
 | 方法 | 请求字段 | 成功时解码后的结果 |
 | --- | --- | --- |
@@ -58,7 +58,7 @@ Cat 工厂启动参数提供当前网站／账户协议的默认命名空间：`
 
 失败包装为 `{ok:false,contract:"cat.script.v2",code}`，不附带 instance 或失败快照；成功或失败后均可用 `status` 获取权威状态。
 
-新安装缺省 `enabled=true`，取代原来 install 缺省停用的行为；需要只保存源码的旧调用方应显式传 `enabled:false`。同 ID 的 `install/import` 是明确重新导入，保留安装身份、原始 importedAt 和私有卷；省略 enabled 时保留原启用意图，显式 `enabled:false` 则成功后保持停用。省略的 config/version/name 等安装属性保留原值；`import` 明确提交 network 类型、给定名称与 URL。重新导入失败不提交候选名称、来源、URL、配置或启用意图。普通 `update` 不接受这些元数据，不改变安装身份、来源类型或 enabled。
+新安装缺省 `enabled=true`，只保存源码时显式传 `enabled:false`。同 ID 的 `install/import` 是明确重新导入，保留安装身份、原始 importedAt 和私有卷；省略 enabled 时保留原启用意图，显式 `enabled:false` 则成功后保持停用。省略的 config/version/name 等安装属性保留原值；`import` 明确提交 network 类型、给定名称与 URL。重新导入失败不提交候选名称、来源、URL、配置或启用意图。普通 `update` 不消费这些元数据，不改变安装身份、来源类型或 enabled。
 
 源码先经过 UTF-8、宿主源码字节边界和 CommonJS 语法验证。候选 enabled=true 时，还需停止旧 Worker 并等待其真实退出，再由候选完成 Cat 初始化及能力发现，之后提交源码与设置。候选 enabled=false 时不执行脚本，只验证源码并提交；若是已停用项重新导入或更新，保留最后成功的站点描述，首次停用导入的 sites 为空。其新运行能力要等以后启用成功才确定，导入成功不能代替运行就绪。`edit` 不启动脚本；名称编辑不会改变类型，URL 编辑只适用于已存在的 network 类型。
 

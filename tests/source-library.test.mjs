@@ -121,12 +121,9 @@ test('library manages batch imports, origin updates, revisions, edits, ordering 
   denied(await rpc('library.get', { installationId: item.installationId }), 'SOURCE_NOT_FOUND');
 });
 
-test('URL and BOM file imports preserve batch failures and export managed legacy and HTML sources', async t => {
-  const legacy = { bookSourceName: 'Legacy', bookSourceUrl: 'https://legacy.invalid/',
-    ruleSearchList: '.book', ruleSearchName: 'h2@text', ruleSearchUrl: 'https://legacy.invalid/search',
-    ruleBookContent: 'article@text', ruleFindUrl: 'All::https://legacy.invalid/explore' };
+test('URL and BOM file imports preserve batch failures and export managed Legado and HTML sources', async t => {
   const { rpc, calls } = setup(t, { respond: input => ({ statusCode: 200, headers: {},
-    url: input.url, body: '\uFEFF' + JSON.stringify([legacy, { invalid: true }]) }) });
+    url: input.url, body: '\uFEFF' + JSON.stringify([source, { invalid: true }]) }) });
   const imported = value(await rpc('library.import', { url: 'https://sources.invalid/library.json' }));
   assert.equal(calls[0].url, 'https://sources.invalid/library.json');
   assert.equal(imported.sources.length, 1);
@@ -134,15 +131,15 @@ test('URL and BOM file imports preserve batch failures and export managed legacy
   let item = imported.sources[0];
   item = value(await rpc('library.update', { installationId: item.installationId,
     expectedRevision: item.revision, patch: { enabled: false, enabledExplore: false,
-      order: -7, group: 'Legacy metadata' } })).source;
+      order: -7, group: 'Managed metadata' } })).source;
   const exported = value(await rpc('library.export', { installationIds: [item.installationId] })).text;
   const reimported = value(await rpc('library.import', { text: '\uFEFF' + exported })).sources[0];
   assert.equal(reimported.installationId, item.installationId);
-  assert.equal(reimported.protocol, 'yiciyuan');
+  assert.equal(reimported.protocol, 'legado');
   assert.equal(reimported.enabled, false);
   assert.equal(reimported.enabledExplore, false);
   assert.equal(reimported.order, -7);
-  assert.equal(reimported.group, 'Legacy metadata');
+  assert.equal(reimported.group, 'Managed metadata');
   const html = value(await rpc('library.import', { fileName: 'standalone.html',
     text: '<script>function search(){return [];}</script>' })).sources[0];
   const htmlExport = JSON.parse(value(await rpc('library.export', {
@@ -153,6 +150,52 @@ test('URL and BOM file imports preserve batch failures and export managed legacy
   assert.match(htmlExport.html, /function search/);
   const restoredHtml = value(await rpc('library.import', { text: JSON.stringify([htmlExport]) })).sources[0];
   assert.equal(restoredHtml.installationId, html.installationId);
+});
+
+test('ordinary RPC extras are inert and management patches cannot replace source-owned fields', async t => {
+  const { rpc, calls } = setup(t);
+  const current = { ...source };
+  delete current.enabledExplore;
+  delete current.exploreUrl;
+  const extras = { enable: false, serialNumber: -90, ruleFindUrl: 'All::https://unused.invalid/' };
+  let item = await importSource(rpc, { ...current, ...extras });
+  assert.equal(item.enabled, true);
+  assert.equal(item.order, 0);
+  assert.equal(item.enabledExplore, false);
+  assert.equal(item.hasExplore, false);
+  const irrelevant = { revision: { ignored: true }, expectedRevision: ['unused'], extra: { deep: [1] } };
+  assert.deepEqual(value(await rpc('library.list', { ...irrelevant, installationId: false })).sources, [item]);
+  const before = value(await rpc('library.get', { installationId: item.installationId, ...irrelevant }));
+  item = value(await rpc('library.update', {
+    installationId: item.installationId, expectedRevision: item.revision,
+    revision: false, extra: ['unused'], patch: {
+      name: 'Renamed', order: 4, enabledExplore: true, extra: { deep: false },
+      installationId: 'injected', revision: 99, sourceUrl: 'https://unused.invalid/',
+      protocol: 'qysg', definition: '<script>throw 1</script>', actions: [],
+      private: { cookies: [['injected', []]], storage: [] },
+    },
+  })).source;
+  assert.equal(item.installationId, before.source.installationId);
+  assert.equal(item.sourceUrl, before.source.sourceUrl);
+  assert.equal(item.protocol, 'legado');
+  assert.deepEqual(item.actions, before.source.actions);
+  assert.equal(item.name, 'Renamed');
+  assert.equal(item.order, 4);
+  const managed = JSON.parse(value(await rpc('library.get', {
+    installationId: item.installationId, ...irrelevant,
+  })).definition);
+  for (const [key, value] of Object.entries(extras)) assert.deepEqual(managed[key], value);
+  assert.equal(managed.enabled, true);
+  assert.equal(managed.enabledExplore, true);
+  assert.equal(managed.customOrder, 4);
+  assert.deepEqual(managed.ruleSearch, source.ruleSearch);
+  assert.equal(value(await invoke(rpc, item, 'search', { keyword: 'unchanged' })).books[0].name, 'Result');
+  assert.equal(calls.at(-1).url, 'https://books.invalid/search?key=unchanged');
+  assert.equal(calls.at(-1).options.headers.cookie, undefined);
+  const exported = JSON.parse(value(await rpc('library.export', {
+    installationIds: [item.installationId], installationId: { unused: true }, ...irrelevant,
+  })).text)[0];
+  for (const [key, value] of Object.entries(extras)) assert.deepEqual(exported[key], value);
 });
 
 test('failed definition initialization and disk transactions preserve the published definition', async t => {
@@ -283,7 +326,7 @@ test('Web login, dynamic request and cancellation bind responses and cookies to 
   assert.equal(request.installationId, first.installationId);
   assert.equal(request.mode, 'login');
   assert.equal(Object.hasOwn(request, 'generation'), false);
-  value(await rpc('web.respond', { id: request.id, result: {
+  value(await rpc('web.respond', { id: request.id, extra: { ignored: true }, installationId: false, result: {
     url: 'https://books.invalid/login', headers: { 'set-cookie': ['fixture=private; Path=/; Secure'] },
     data: 'logged in',
   } }));
@@ -643,13 +686,13 @@ test('import preview is read-only, preserves protocols and metadata, and imports
   const candidates = [
     { ...source, enabled: false, weight: 7, respondTime: 12, lastUpdateTime: 42,
       jsLib: 'throw new Error("preview must not execute")', extension: { kept: [null, 3, true] } },
-    { bookSourceName: '异次元', bookSourceUrl: 'https://legacy-preview.invalid/', enable: false,
-      ruleSearchList: '.book', ruleSearchUrl: 'https://legacy-preview.invalid/?searchKey' },
+    { ...source, bookSourceName: 'Current extras', bookSourceUrl: 'https://extra-preview.invalid/',
+      enabled: false, enable: true, serialNumber: -1, ruleFindUrl: { ignored: true } },
     { bookSourceName: '轻悦时光', bookSourceUrl: 'https://qysg-preview.invalid/', html: '<script>throw new Error("not executed")</script>' },
   ];
   const preview = value(await rpc('library.previewImport', { text: JSON.stringify({ bookSources: candidates }) }));
   assert.deepEqual(preview.failures, []);
-  assert.deepEqual(preview.items.map(item => item.protocol), ['legado', 'yiciyuan', 'qysg']);
+  assert.deepEqual(preview.items.map(item => item.protocol), ['legado', 'legado', 'qysg']);
   assert.ok(preview.items.every(item => item.exists === false));
   assert.deepEqual(value(await rpc('library.list')).sources, []);
   assert.equal(disk.read('library.json'), null);

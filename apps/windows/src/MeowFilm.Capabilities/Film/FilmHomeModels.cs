@@ -127,31 +127,6 @@ internal static class FilmDataFilters
         };
     }
 
-    internal static bool IsAllowedRequest(FilmSectionDefinition section)
-    {
-        ArgumentNullException.ThrowIfNull(section);
-        var home = FilmSectionDefinition.Home.SingleOrDefault(candidate =>
-            candidate.Key == section.Key);
-        if (home is null || home.Title != section.Title || home.Kind != section.Kind)
-            return false;
-
-        return section.Key switch
-        {
-            "movie" => Values(Movie, "category").Contains(section.Category) &&
-                Values(Movie, "area").Contains(section.Type),
-            "tv" => section.Category == "tv" &&
-                (Values(Tv, "category").Where(value => value != "all")
-                    .Concat(Values(Tv, "area"))).Contains(section.Type),
-            "anime" => section.Category == "tv" && section.Type == "tv_animation",
-            "show" => section.Category == "show" && Values(Show, "area").Contains(section.Type),
-            _ => false
-        };
-    }
-
-    private static IEnumerable<string> Values(
-        IReadOnlyList<FilmFilterRowDefinition> rows,
-        string key) =>
-        rows.Single(row => row.Key == key).Options.Select(option => option.Value);
 }
 
 public sealed class FilmFilterOption : INotifyPropertyChanged

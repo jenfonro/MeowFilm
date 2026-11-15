@@ -4,12 +4,11 @@ import MeowUI
 
 @MainActor
 final class FilmPlaybackLibraryController: FilmSettingsListController {
-    enum Area { case manual, blocks }
     private let owner: FilmPlaybackSettingsModel
-    private let area: Area
+    private let area: FilmPlaybackLibrary.Area
     private var task: Task<Void, Never>?
 
-    init(owner: FilmPlaybackSettingsModel, area: Area, themeProvider: any PageThemeProviding) {
+    init(owner: FilmPlaybackSettingsModel, area: FilmPlaybackLibrary.Area, themeProvider: any PageThemeProviding) {
         self.owner = owner; self.area = area
         super.init(themeProvider: themeProvider)
         switch area {
@@ -27,10 +26,10 @@ final class FilmPlaybackLibraryController: FilmSettingsListController {
         observe(owner) { [weak self] in self?.update() }
     }
 
-    override func pageDidBecomeVisible() { run { [owner] in try await owner.loadLibrary() } }
+    override func pageDidBecomeVisible() { run { [owner, area] in try await owner.loadLibrary(area: area) } }
 
     private func update() {
-        guard let library = owner.library else {
+        guard let library = owner.library, library.area == area else {
             sections = [.init(title: "", rows: [.init(title: "加载中", id: "film.playback-library.loading")])]
             render(); return
         }

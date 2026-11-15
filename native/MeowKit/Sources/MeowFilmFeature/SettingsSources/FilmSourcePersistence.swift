@@ -58,7 +58,6 @@ func parseFilmCat(_ value: RuntimeValue) throws -> FilmCatSource {
         let cat = try JSONDecoder().decode(FilmCatSource.self, from: RuntimeJSON.encode(value))
         let timestamps = [cat.importedAt, cat.updatedAt].compactMap { $0 }
         guard !cat.installationId.isEmpty, !cat.name.isEmpty, ["local", "network"].contains(cat.sourceType),
-              ["idle", "updated", "unchanged", "failed"].contains(cat.updateState),
               cat.generation >= 0, cat.generation <= 9_007_199_254_740_991,
               timestamps.allSatisfy({ $0 >= 0 && $0 <= 9_007_199_254_740_991 }),
               cat.sites.allSatisfy({ !$0.key.isEmpty }), Set(cat.sites.map { $0.identity(installationId: cat.installationId) }).count == cat.sites.count else {

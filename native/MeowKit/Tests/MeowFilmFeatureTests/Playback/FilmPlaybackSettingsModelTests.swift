@@ -60,6 +60,121 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertEqual(calls.count, 1)
     }
 
+    func testManualPageUsesHistoryIdentityAndKeepsHealthyRowsDespiteUnrelatedMaterials() async throws {
+        let first = FilmManualMatch(targetID: "target-one", title: "第一条")
+        let second = FilmManualMatch(targetID: "target-two", title: "第二条")
+        let history: RuntimeValue = .object([
+            "targetId": .string("history-target"), "title": .string("可选影片"),
+            "position": .object(["unused": .bool(true)]), "duration": .string("unused"), "updatedAt": .null,
+        ])
+        var fields = try FilmPlaybackFixture.library(manual: [.object(first.value), .null, .object(second.value)],
+            history: [.bool(false), history, .object(["title": .string("没有身份")])]).filmRequiredObject()
+        fields["preferences"] = .string("not consumed by this page")
+        fields["blocks"] = .object(["unused": .array([])])
+        let receipt = RuntimeValue.object(fields)
+        let server = FilmPlaybackWireServer(handler: { _, _ in receipt })
+        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        try await model.loadLibrary()
+        XCTAssertEqual(model.library?.area, .manual)
+        XCTAssertEqual(model.library?.manual, [first, second])
+        XCTAssertEqual(model.library?.history.map(\.targetID), ["history-target"])
+        XCTAssertEqual(model.library?.history.map(\.title), ["可选影片"])
+        XCTAssertEqual(model.library?.history.first?.value["position"], history.filmObject?["position"])
+        XCTAssertNil(model.preferences, "The library read must not publish a preference receipt.")
+        XCTAssertFalse(model.busy)
+    }
+
+    func testExplicitOrderRestoreReplacesOnlyThatGroupsUnconsumedValues() async throws {
+        var fields = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
+        guard var rules = fields["ruleOrder"]?.filmArray, var providers = fields["panOrder"]?.filmArray else {
+            return XCTFail("Fixture")
+        }
+        rules.append(.string("future-rule")); providers.append(.object(["unused": .bool(true)]))
+        fields["ruleOrder"] = .array(rules); fields["panOrder"] = .array(providers)
+        let original = RuntimeValue.object(fields)
+        let server = FilmPlaybackWireServer(handler: { operation, parameters in
+            operation == "settings.get" ? original : parameters
+        })
+        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        try await model.loadPreferences()
+        model.edit { $0.keywords = ["新关键词"] }
+        try await model.savePreferences()
+        XCTAssertEqual(model.preferences?.value.filmObject?["ruleOrder"], .array(rules))
+        XCTAssertEqual(model.preferences?.value.filmObject?["panOrder"], .array(providers))
+        model.restoreDraft(.ruleOrder)
+        try await model.savePreferences()
+        XCTAssertEqual(model.preferences?.value.filmObject?["ruleOrder"],
+                       FilmPlaybackPreferences.defaults.value.filmObject?["ruleOrder"])
+        XCTAssertEqual(model.preferences?.value.filmObject?["panOrder"], .array(providers))
+    }
+
+    func testBlocksPageOnlyConsumesItsTypedBlockRows() async throws {
+        let block: RuntimeValue = .object([
+            "targetId": .string("target"), "sourceKey": .string("source-key"),
+            "detailId": .number(0), "lineId": .string("0"),
+        ])
+        let receipt: RuntimeValue = .object([
+            "preferences": .bool(false), "history": .object(["unused": .number(1)]),
+            "manual": .string("unused"),
+            "blocks": .array([.null, block, .object(["targetId": .string("missing-identity")])]),
+        ])
+        let server = FilmPlaybackWireServer(handler: { _, _ in receipt })
+        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        try await model.loadLibrary(area: .blocks)
+        XCTAssertEqual(model.library?.area, .blocks)
+        let saved = try XCTUnwrap(model.library?.blocks.first)
+        XCTAssertEqual(model.library?.blocks.count, 1)
+        XCTAssertEqual(saved.value, block.filmObject)
+        XCTAssertEqual(saved.detailID, .number(0))
+        XCTAssertEqual(saved.lineID, .string("0"))
+        XCTAssertFalse(model.busy)
+    }
+
+    func testSelectedLibraryListRejectsUnusableContentAndMalformedRootsButAllowsAnActualEmptyList() throws {
+        for (area, key) in [(FilmPlaybackLibrary.Area.manual, "manual"), (.blocks, "blocks")] {
+            for value in [RuntimeValue.null, .array([]), .string("not an object"),
+                          .object([:]), .object([key: .object([:])]),
+                          .object([key: .array([.null, .object(["unrelated": .bool(true)])])])] {
+                XCTAssertThrowsError(try FilmPlaybackLibrary(value, area: area)) {
+                    XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+                }
+            }
+            let empty = try FilmPlaybackLibrary(.object([key: .array([])]), area: area)
+            XCTAssertEqual(empty.area, area)
+            XCTAssertTrue(empty.manual.isEmpty)
+            XCTAssertTrue(empty.blocks.isEmpty)
+        }
+    }
+
+    func testManualMutationReceiptsIsolateBadRowsWithoutPublishingUnusableLists() async throws {
+        let first = FilmManualMatch(targetID: "first", title: "第一条")
+        let second = FilmManualMatch(targetID: "second", title: "第二条")
+        let server = FilmPlaybackWireServer(handler: { operation, value in
+            if operation == "library.get" { return FilmPlaybackFixture.library() }
+            if value.filmObject?["action"] == .string("remove") {
+                return .array([.null, .object(second.value)])
+            }
+            return .array([.object(first.value), .bool(false)])
+        })
+        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        try await model.loadLibrary()
+        try await model.saveManual(first)
+        XCTAssertEqual(model.library?.manual, [first])
+        try await model.removeManual(id: first.id)
+        XCTAssertEqual(model.library?.manual, [second])
+
+        let unusable = FilmPlaybackWireServer(handler: { operation, _ in
+            operation == "library.get" ? FilmPlaybackFixture.library(manual: [.object(first.value)]) : .array([.null])
+        })
+        let failed = FilmPlaybackSettingsModel(transport: unusable.transport)
+        try await failed.loadLibrary()
+        let before = failed.library
+        do { try await failed.saveManual(second); XCTFail("An unusable receipt must not publish an empty library.") }
+        catch { XCTAssertEqual(error as? FilmPlaybackError, .invalidResponse) }
+        XCTAssertEqual(failed.library, before)
+        XCTAssertFalse(failed.busy)
+    }
+
     func testManualSavePreservesNumericZeroAndFailureDoesNotPublishRemoval() async throws {
         var item = FilmManualMatch(targetID: "tmdb:tv:19", title: "星河")
         item.value["sourceKey"] = .string("accurate-source")

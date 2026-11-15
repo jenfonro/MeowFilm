@@ -21,6 +21,7 @@ actor FilmUIKitPlaybackSettingsStore {
     }
     func setSaveFailure(_ value: Bool) { saveFailure = value }
     func calls() -> [FilmUIKitPlaybackServer.Call] { log }
+    func librarySnapshot() -> RuntimeValue { library }
     private var library: RuntimeValue {
         .object(["preferences": preferences, "manual": .array(manual.map(RuntimeValue.object)),
                  "history": .array(history), "blocks": .array(blocks)])

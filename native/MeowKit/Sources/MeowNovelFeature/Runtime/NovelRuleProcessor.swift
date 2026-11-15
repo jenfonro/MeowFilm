@@ -72,12 +72,6 @@ public actor NovelRuleProcessor {
               index >= 0, index < Double(chapters.count) else { return nil }
         return Int(index)
     }
-    public func validate(_ rule: NovelRule) async throws {
-        let output = try await invoke(["operation": .string("validateRule"), "rule": try .encoding(rule)])
-        guard output["valid"].bool == true else {
-            throw NovelError.invalidRule(output["errors"].array?.compactMap(\.string) ?? ["净化规则无效"])
-        }
-    }
     public func transform(_ content: NovelContent, book: NovelBook, source: NovelSource,
                           rules: [NovelRule], conversion: String) async throws -> NovelContent {
         let output = try await invoke(["operation": .string("transform"), "title": .string(content.title),

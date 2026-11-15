@@ -144,8 +144,7 @@ public struct NovelSourceClient: Sendable {
     }
     public func search(_ source: NovelSource, keyword: String, page: Int) async throws -> [NovelBook] {
         let value = try await invoke(source, action: "search", payload: .object(["keyword": .string(keyword), "page": .number(Double(page))]))
-        guard let books = value["books"].array else { throw NovelError.invalidResponse }
-        return try books.map { try NovelBook.parse($0, source: source) }
+        return try books(value["books"], source: source)
     }
     public func kinds(_ source: NovelSource) async throws -> [NovelExploreKind] {
         let value = try await invoke(source, action: "exploreKinds")
@@ -154,8 +153,13 @@ public struct NovelSourceClient: Sendable {
     }
     public func explore(_ source: NovelSource, url: String, page: Int) async throws -> [NovelBook] {
         let value = try await invoke(source, action: "explore", payload: .object(["url": .string(url), "page": .number(Double(page))]))
-        guard let items = value["books"].array else { throw NovelError.invalidResponse }
-        return try items.map { try NovelBook.parse($0, source: source) }
+        return try books(value["books"], source: source)
+    }
+    private func books(_ value: RuntimeValue, source: NovelSource) throws -> [NovelBook] {
+        guard let items = value.array else { throw NovelError.invalidResponse }
+        let books = items.compactMap { try? NovelBook.parse($0, source: source) }
+        guard items.isEmpty || !books.isEmpty else { throw NovelError.invalidResponse }
+        return books
     }
     public func detail(_ book: NovelBook, source: NovelSource) async throws -> NovelBook {
         let value = try await invoke(source, action: "bookInfo", payload: payload(book))

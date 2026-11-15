@@ -18,9 +18,11 @@
 | `library.export` | `{installationIds:[string]}` | `{text:string}` |
 | `library.invoke` | `{installationId,revision,action,payload}` | 动作原值 |
 
+普通 RPC 只消费各操作列出的参数，额外键不参与动作或触发未知参数拒绝；`library.update` 只修改表中的五个管理字段，不将其他 patch 成员写入来源身份、定义、私有数据或执行配置。身份、revision/CAS、取消和资源释放条件不变。
+
 `SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，另投影用于管理排序／操作的 `weight,lastUpdateTime,respondTime,hasExplore`；恢复失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。order 是有符号安全整数，列表按 order、名称、installationId 排序。无源返回空列表。
 
-导入接受 Legado、异次元 JSON 对象或数组、`sources/bookSources/data` 数组容器、逐行 JSON，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析、验证与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码继续遵循现有 16 MiB 格式边界。
+导入接受当前 Legado JSON 对象或数组、`sources/bookSources/data` 数组容器、逐行 JSON，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码继续遵循现有 16 MiB 格式边界。管理字段使用 `enabled`、`customOrder` 和 `enabledExplore/exploreUrl`；其他普通键不回填这些字段。
 
 `library.previewImport` 仅下载、解析和识别定义，不安装、不执行候选、不修改永久库或创建私有源数据。URL 只下载一次；返回的定义包含来源身份和当前管理元数据，客户端确认所选条目后将这些定义一次性传给 `library.import`，不再下载。预览也受取消／关闭排空约束，失败条目不隐藏有效项。
 
@@ -41,17 +43,18 @@ save 先试运行完整候选，随后原子替换仓库；语法、初始化、
 | `identity` | `book` | `{name,author,key}` |
 | `merge` | `books` | `{books}`，保留 `groupKey` 与各源 `candidates` |
 | `matchChapter` | `chapters,anchor` | `{index:int|null,requiresSelection:bool}` |
-| `validateRule` | `rule` | `{valid,errors:[string]}` |
 | `transform` | `title,blocks,rules,book?,source?,conversion?` | `{title,blocks}` |
 | `matchUrl` | `pattern,url` | boolean |
 
-`matchUrl` 使用无额外 flags 的 `new RegExp(pattern).exec(url)`，仅原匹配从 0 开始且长度等于完整 URL 才返回 true；不重写正则或将部分命中当作成功。请求只允许这六种 operation 及表中字段，不接受任意程序、源码或执行入口。源定义中的脚本仍走既有隔离来源调用。
+`matchUrl` 使用无额外 flags 的 `new RegExp(pattern).exec(url)`，仅原匹配从 0 开始且长度等于完整 URL 才返回 true；不重写正则或将部分命中当作成功。请求分派固定为这五种 operation，只取对应字段；附加字段不会成为程序、源码或执行入口。源定义中的脚本仍走既有隔离来源调用。规则保存、导入和管理不依赖独立检查 RPC。
 
 `@meowfilm/novel-rules` 提供受信纯程序，`source-rules.mjs` 通过共享 `NativeJsonProgram` 在独立 Runtime／线程执行。原生一次提交完整规则列表；Node owner 按原 order 升序、相同 order 保持输入顺序，跳过禁用规则，每条以 `timeoutMillisecond`（缺省 3000ms）调用，最后以空规则和单独 3000ms 执行简繁转换。预算为正安全整数，不增加业务上限，也不以固定总超时截断多规则。普通小说计算默认 3000ms，`matchUrl` 为 2000ms；其他 `NativeJsonProgram.invoke(value,{signal,timeoutMs})` 调用的既有默认仍为 2000ms。每次预算在排队请求获得执行时使用，取消贯穿整次 transform。
 
 JS 公开 `createRuntimeClient().call("source.runtime.rules.process",...)` 使用共享 `requestWithoutDeadline()`，不以客户端默认 30000ms 或单次 `options.timeout` 截断排队及多规则执行；调用方用 `signal` 取消，客户端关闭撤销本地交换，Node owner 继续负责真实资源排空。其他 RPC 的默认及显式 timeout 不变。
 
-只在全部步骤成功后返回完整正文；异常、超时或取消不返回中间正文。`validateRule` 保留原校验结果；非法 RPC／正则／启用规则或转换参数返回 `INVALID_REQUEST`，原生执行超时为 `TIMEOUT`，取消为 `CANCELLED`，关闭为 `CLOSED`，原生资源预算失败为 `LIMIT`，载体身份或 ABI 不符为 `CAPABILITY_UNAVAILABLE`，其他执行异常为 `SOURCE_FAILURE`，不携带规则或正文。失败调用等待实际原生线程和 Runtime 释放，后续调用才重建同一程序；关闭拒绝排队工作并等待全部已接受的 transform 和真实资源排空。
+净化只消费实际执行规则的 pattern、replacement、scope 和预算，不检查 name/group 等管理字段或非文本块的图片成员；禁用、scope 不匹配或没有目标文本的规则不编译正则，也不因无效规则材料阻断正文。
+
+只在全部步骤成功后返回完整正文；异常、超时或取消不返回中间正文。无法消费实际输入、实际执行的坏正则／规则或转换参数返回 `INVALID_REQUEST`，原生执行超时为 `TIMEOUT`，取消为 `CANCELLED`，关闭为 `CLOSED`，原生资源预算失败为 `LIMIT`，载体身份或 ABI 不符为 `CAPABILITY_UNAVAILABLE`，其他执行异常为 `SOURCE_FAILURE`，不携带规则或正文。失败调用等待实际原生线程和 Runtime 释放，后续调用才重建同一程序；关闭拒绝排队工作并等待全部已接受的 transform 和真实资源排空。
 
 净化规则配置、书架、历史、偏好与原文仍由原生存储拥有；Node 只执行请求中的计算，不创建规则配置仓库。原生仅在页面／会话仍有效时发布结果；远端 URL 匹配结束不能恢复已取消或退休的 Web 待办，也不获得 Cookie／profile 写权限。
 

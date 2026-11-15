@@ -24,9 +24,9 @@ internal sealed class FilmHomeException(string code) : Exception(code)
     internal string Code { get; } = code;
 }
 
-internal sealed class FilmHomePage(IReadOnlyList<FilmCardItem> items, FilmMetadataCache cache) : IReadOnlyList<FilmCardItem>
+internal sealed class FilmHomePage(IReadOnlyList<FilmCardItem> items, FilmMetadataCache? cache) : IReadOnlyList<FilmCardItem>
 {
-    internal FilmMetadataCache Cache { get; } = cache;
+    internal FilmMetadataCache? Cache { get; } = cache;
     public int Count => items.Count;
     public FilmCardItem this[int index] => items[index];
     public IEnumerator<FilmCardItem> GetEnumerator() => items.GetEnumerator();
@@ -46,8 +46,6 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentNullException.ThrowIfNull(section);
-        if (!FilmDataFilters.IsAllowedRequest(section))
-            throw new ArgumentException("Unknown film section.", nameof(section));
         if (start < 0) throw new ArgumentOutOfRangeException(nameof(start));
         if (limit < 1) throw new ArgumentOutOfRangeException(nameof(limit));
         cancellationToken.ThrowIfCancellationRequested();
@@ -62,8 +60,7 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
                 refresh = section.Refresh ? true : (bool?)null
             }, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            var cache = FilmMetadataCache.Read(FilmJson.Member(entry, "cache")) ??
-                throw new FilmHomeException("INVALID_RESPONSE");
+            var cache = FilmMetadataCache.Read(FilmJson.Member(entry, "cache"));
             return new FilmHomePage(Parse(FilmJson.Member(entry, "value"), section, start), cache);
         }
         catch (FilmPlaybackException error)
@@ -100,11 +97,12 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
                 id = $"{section.Key}:{itemIndex.ToString(CultureInfo.InvariantCulture)}:{title}";
             result.Add(new(id, title, Poster(item), Score(item))
             {
-                PlaybackContext = metadataId.Length == 0 ? null : new(new(
-                    $"douban:{section.Kind}:{metadataId}", section.Kind == "movie" ? "movie" : "tv",
+                PlaybackContext = metadataId.Length == 0 || section.Kind is not ("movie" or "tv") ? null : new(new(
+                    $"douban:{section.Kind}:{metadataId}", section.Kind,
                     title, "douban", metadataId), Metadata: item.Clone(), EntrySurface: "home")
             });
         }
+        if (items.GetArrayLength() > 0 && result.Count == 0) throw new FilmHomeException("INVALID_RESPONSE");
         return result;
     }
 

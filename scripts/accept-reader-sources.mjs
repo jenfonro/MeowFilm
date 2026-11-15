@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const defaultOutput = join(root, 'tmp/test-results/script-sources/acceptance.json');
-const protocols = new Set(['auto', 'legado', 'yiciyuan', 'qysg', 'cat']);
+const protocols = new Set(['auto', 'legado', 'qysg', 'cat']);
 const sourceOrder = [
   'search', 'exploreKinds', 'explore', 'bookInfo', 'toc',
   'content', 'loginStatus', 'login', 'image',
@@ -162,10 +162,6 @@ function detectedProtocol(value, extension) {
   if (typeof source.html === 'string' && /<script\b/i.test(source.html)) return 'qysg';
   if (['ruleSearch', 'ruleBookInfo', 'ruleToc', 'ruleContent'].some(key => source[key] !== undefined)) {
     return 'legado';
-  }
-  if (['ruleSearchList', 'ruleBookName', 'ruleChapterList', 'ruleBookContent']
-    .some(key => source[key] !== undefined)) {
-    return 'yiciyuan';
   }
   if (qysgSource(source)) return 'qysg';
   if (typeof source.script === 'string' || typeof source.source === 'string') return 'cat';

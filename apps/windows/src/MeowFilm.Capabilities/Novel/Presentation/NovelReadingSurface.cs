@@ -90,6 +90,7 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
     }
     public void Present(NovelBookSession value, NovelAppearance settings)
     {
+        settings = settings.ForReading();
         bool contentChanged = !ReferenceEquals(session, value) || session?.Chapter?.ChapterUrl != anchor.ChapterUrl ||
             !ReferenceEquals(displayedBlocks, value.Blocks);
         session = value;

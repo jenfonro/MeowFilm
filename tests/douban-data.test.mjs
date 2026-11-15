@@ -107,11 +107,10 @@ test('Rexxar GET accepts source paths without a registered resource list', async
   assert.equal(fixture.calls.length, paths.length);
 });
 
-test('Rexxar request rejects malformed path/query data and fields outside its GET contract', async () => {
+test('Rexxar request rejects malformed required path/query data', async () => {
   const request = async () => assert.fail('invalid request must not use the network');
   const inputs = [
-    null, [], {}, { path: '/rexxar/api/v2/movie/1', url: 'https://other.test' },
-    { path: '/rexxar/api/v2/movie/1', method: 'POST' }, { path: '/rexxar/api/v2/movie/1', headers: {} },
+    null, [], {},
     ...['https://m.douban.com/rexxar/api/v2/movie/1', '//other.test',
       '/rexxar/api/v2/movie/1?method=POST', '/rexxar/api/v2/movie/1#x',
       '/rexxar/api/v2/movie/1\\other', '/rexxar/api/v2/movie/1\n'].map(path => ({ path })),
@@ -119,6 +118,24 @@ test('Rexxar request rejects malformed path/query data and fields outside its GE
       { '\r\nCookie': 'x' }].map(query => ({ path: '/rexxar/api/v2/movie/1', query })),
   ];
   for (const input of inputs) await assert.rejects(requestDouban(input, { settings: defaults, request }), failure('INVALID_REQUEST'));
+});
+
+test('Rexxar request ignores extras without accepting transport or credential overrides', async () => {
+  const extras = [null, 'ignored', 42, [], { nested: { cover_url: 'javascript:unused' } }];
+  const fixture = upstream(Array.from({ length: extras.length + 2 }, () => reply({ id: '1' })));
+  const context = { settings: settings({ cookie: 'synthetic=CONFIGURED' }), request: fixture.request };
+  const input = { path: '/rexxar/api/v2/movie/1', query: { start: 0 } };
+  const expected = await requestDouban(input, context);
+  for (const extra of extras) {
+    assert.deepEqual(await requestDouban({ ...input, method: extra, headers: extra, url: extra,
+      cookie: extra, body: extra, followRedirect: extra, future: extra }, context), expected);
+    assert.deepEqual(fixture.calls.at(-1), fixture.calls[0]);
+  }
+  assert.deepEqual(await requestDouban({ ...input, method: 'POST', headers: { cookie: 'UNTRUSTED' },
+    url: 'https://untrusted.invalid', cookie: 'UNTRUSTED', body: 'override', followRedirect: true }, context), expected);
+  assert.deepEqual(fixture.calls.at(-1), fixture.calls[0]);
+  assert.equal(fixture.calls[0].method, 'GET');
+  assert.equal(fixture.calls[0].headers.cookie, 'synthetic=CONFIGURED');
 });
 
 test('Rexxar query values are encoded as data, preserving array filters without turning them into routes', async () => {
@@ -349,12 +366,39 @@ test('normal search titles and result text are not interaction signals', async (
   }), failure('UPSTREAM_FORMAT'));
 });
 
-test('search rejects unsupported pagination, URL overrides, empty queries and unknown inputs', async () => {
+test('search rejects missing, empty or malformed query text', async () => {
   const request = async () => assert.fail('invalid input must not use the network');
-  for (const input of [null, [], {}, { query: null }, { query: '' }, { query: '  ' }, { query: 'a\nb' },
-    { query: 'x', start: 0 }, { query: 'x', url: 'https://other.test' }, { query: 'x', headers: {} }]) {
+  for (const input of [null, [], {}, { query: null }, { query: '' }, { query: '  ' }, { query: 'a\nb' }]) {
     await assert.rejects(searchDouban(input, { settings: defaults, request }), failure('INVALID_REQUEST'));
   }
+});
+
+test('search consumes only query text and ignores unused pagination and extra response fields', async () => {
+  const extras = [null, 'unused', [], { nested: { cover_url: 'javascript:unused' } }];
+  const fixture = upstream(extras.map(extra => reply(html(sampleSearch({ count: extra, start: extra, extra })))));
+  let expected;
+  for (const extra of extras) {
+    const result = await searchDouban({ query: '测试', start: extra, count: extra,
+      method: extra, headers: extra, url: extra, body: extra, extra },
+    { settings: defaults, request: fixture.request });
+    expected ??= result;
+    assert.deepEqual(result, expected);
+    assert.deepEqual(fixture.calls.at(-1), fixture.calls[0]);
+    assert.equal(new URL(fixture.calls.at(-1).url).searchParams.has('start'), false);
+  }
+});
+
+test('search isolates bad entries including bad images while retaining healthy siblings and real empty results', async () => {
+  const good = sampleSearch().items[0];
+  const bad = [null, { id: 0, title: '坏 ID' }, { id: 2 }, { id: 3, title: '坏评分', rating: { value: 'bad' } },
+    { id: 4, title: '坏图片', cover_url: 'javascript:unused' }];
+  const run = items => searchDouban({ query: '测试' }, { settings: defaults,
+    request: upstream([reply(html(sampleSearch({ items })))]).request });
+  const expected = await run([good]);
+  const mixed = await run([bad[0], { ...good, unused: { cover_url: 'javascript:unused' } }, ...bad.slice(1)]);
+  assert.deepEqual(mixed, expected);
+  await assert.rejects(run(bad), failure('UPSTREAM_FORMAT'));
+  assert.deepEqual((await run([])).subjects.items, []);
 });
 
 test('missing or malformed page data is a format error; page JavaScript is never evaluated', async () => {
@@ -426,17 +470,20 @@ test('a login or challenge-shaped URL is not a network gate when the response is
   assert.equal(fixture.calls.length, 2);
 });
 
-test('known source image domains and aliases produce identical identities while preserving specifications', () => {
+test('known source image domains and aliases produce identical identities only on consumed image paths', () => {
   const domains = ['img.douban.com', 'img1.douban.com', 'img2.doubanio.com', 'img3.doubanio.com',
     'img9.doubanio.com', 'img123.doubanio.com', 'img.doubanio.com',
     'img.doubanio.cmliussss.net', 'img.doubanio.cmliussss.com'];
   for (const domain of domains) {
-    const value = rewriteDoubanImages({ nested: [{ unexpected_key: `https://${domain}/view/photo/l/public/p1.jpg` }],
+    const value = rewriteDoubanImages({ cover_url: `https://${domain}/view/photo/l/public/p1.jpg`,
+      nested: [{ unexpected_key: `https://${domain}/view/photo/l/public/p1.jpg`, cover_url: 'javascript:unused' }],
       cover: { small: `//${domain}/view/photo/s/public/p1.jpg` } }, defaults);
-    assert.equal(value.nested[0].unexpected_key, '/v1/douban/images/view/photo/l/public/p1.jpg');
+    assert.equal(value.cover_url, '/v1/douban/images/view/photo/l/public/p1.jpg');
+    assert.deepEqual(value.nested, [{
+      unexpected_key: `https://${domain}/view/photo/l/public/p1.jpg`, cover_url: 'javascript:unused',
+    }]);
     assert.equal(value.cover.small, '/v1/douban/images/view/photo/s/public/p1.jpg');
-    assert.notEqual(value.cover.small, value.nested[0].unexpected_key);
-    assert.equal(JSON.stringify(value).includes(domain), false);
+    assert.notEqual(value.cover.small, value.cover_url);
   }
 });
 
@@ -449,7 +496,7 @@ test('configured image prefix and image relay wrappers collapse into the same re
       url: 'https://movie.douban.com/subject/1/', uri: 'douban://douban.com/movie/1' };
     const result = rewriteDoubanImages(source, config);
     assert.equal(result.pic.normal, '/v1/douban/images/view/photo/l/public/p1.jpg');
-    assert.equal(result.also_image, result.pic.normal);
+    assert.equal(result.also_image, source.also_image);
     assert.equal(result.url, source.url);
     assert.equal(result.uri, source.uri);
     assert.equal(source.pic.normal, url);
@@ -546,6 +593,61 @@ test('unregistered and signed HTTP image URLs remain usable without a generic ru
   const source = { url: 'https://movie.douban.com/subject/1292052/', share_url: 'https://www.douban.com/doubanapp/dispatch',
     uri: 'douban://douban.com/movie/1292052', title: '普通电影链接不能改' };
   assert.deepEqual(rewriteDoubanImages(source, defaults), source);
+});
+
+test('Rexxar image projection isolates bad list entries without scanning unrelated response branches', async () => {
+  const good = { id: '1', pic: { normal: '/view/photo/m/public/p1.jpg',
+    unused: { url: 'javascript:unused' } }, future: { cover_url: 'javascript:unused' } };
+  const bad = { id: '2', cover_url: 'javascript:bad' };
+  const source = { items: [bad, good, null], extra: { images: { raw: 'javascript:unused' } } };
+  const result = await requestDouban({ path: '/rexxar/api/v2/subject/recent_hot/movie' },
+    { settings: defaults, request: upstream([reply(source)]).request });
+  const expected = structuredClone(source);
+  expected.items = [{ ...good, pic: { ...good.pic, normal: '/v1/douban/images/view/photo/m/public/p1.jpg' } }];
+  assert.deepEqual(result, expected);
+  assert.deepEqual(source.items, [bad, good, null]);
+  for (const items of [[bad], [bad, null]]) {
+    await assert.rejects(requestDouban({ path: '/rexxar/api/v2/subject/recent_hot/movie' },
+      { settings: defaults, request: upstream([reply({ items })]).request }), failure('UPSTREAM_FORMAT'));
+  }
+  await assert.rejects(requestDouban({ path: '/rexxar/api/v2/movie/2' },
+    { settings: defaults, request: upstream([reply(bad)]).request }), failure('UPSTREAM_FORMAT'));
+});
+
+test('Rexxar retains usable main details and rows while omitting unusable optional image and related branches', async () => {
+  const main = { id: '1', title: '可用详情', cover_url: '/view/photo/m/public/p1.jpg' };
+  const optional = { items: [null], subject_collection_items: [null],
+    credits: [{ avatar: 'javascript:bad' }], author: { avatar: 'javascript:bad' },
+    pic: { normal: 'javascript:bad' }, episodes: [{ image: 'javascript:bad' }],
+    cover: { type: 'photo', url: 'https://movie.douban.com/photos/photo/2/',
+      image: { large: { url: 'javascript:bad' } } },
+    photos: [{ type: 'photo', image: { large: { url: 'javascript:bad' } } }],
+    target: { cover_url: 'javascript:bad' }, subjects: { items: [{ cover_url: 'javascript:bad' }] },
+    contents: { items: [null] }, subject_collection: { subject_collection_items: [null] } };
+  const expected = { ...main, cover_url: '/v1/douban/images/view/photo/m/public/p1.jpg' };
+  assert.deepEqual(await requestDouban({ path: '/rexxar/api/v2/movie/1' },
+    { settings: defaults, request: upstream([reply({ ...main, ...optional })]).request }), expected);
+  assert.deepEqual(await requestDouban({ path: '/rexxar/api/v2/subject/recent_hot/movie' },
+    { settings: defaults, request: upstream([reply({ items: [{ ...main, ...optional }] })]).request }),
+  { items: [expected] });
+  assert.deepEqual(await requestDouban({ path: '/rexxar/api/v2/movie/1' },
+    { settings: defaults, request: upstream([reply({ ...main, subjects: { items: [] },
+      contents: { items: [null, main] } })]).request }),
+  { ...expected, subjects: { items: [] }, contents: { items: [expected] } });
+});
+
+test('Rexxar still fails on entirely unusable requested top-level lists and preserves real empty lists', async () => {
+  for (const [path, key, item] of [
+    ['/rexxar/api/v2/subject/recent_hot/movie', 'items', { id: '1', cover_url: 'javascript:bad' }],
+    ['/rexxar/api/v2/movie/1/credits', 'credits', { avatar: 'javascript:bad' }],
+    ['/rexxar/api/v2/movie/1/celebrities', 'credits', { avatar: 'javascript:bad' }],
+    ['/rexxar/api/v2/movie/1/photos', 'photos', 'javascript:bad'],
+  ]) {
+    await assert.rejects(requestDouban({ path },
+      { settings: defaults, request: upstream([reply({ [key]: [item] })]).request }), failure('UPSTREAM_FORMAT'));
+    assert.deepEqual(await requestDouban({ path },
+      { settings: defaults, request: upstream([reply({ [key]: [] })]).request }), { [key]: [] });
+  }
 });
 
 test('ordinary business links with image-like suffixes remain intact within a Rexxar list', async () => {

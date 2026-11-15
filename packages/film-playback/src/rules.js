@@ -12,7 +12,6 @@ export const filmRuleKernelRevision = createHash('sha256')
   .update('unicode:5840a921ac11664b505ee37b1219f518fff2a04972fe848b4bdf1e85c5a0bd83;')
   .update(filmRuleSource).digest('hex');
 const executors = new WeakMap();
-const groups = ['episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules'];
 const fail = code => Object.assign(new Error(code), { code });
 const nativeErrors = {
   TIMEOUT: 'TIMEOUT', CANCELLED: 'CANCELLED', RESOURCE_LIMIT: 'RESOURCE_LIMIT',
@@ -36,20 +35,6 @@ export function validRuleText(value) {
   return true;
 }
 
-export function validateRules(value, { partial = false } = {}) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw fail('INVALID_RULES');
-  for (const group of groups) {
-    if (partial && !Object.hasOwn(value, group)) continue;
-    const rows = value[group], matching = group === 'episodeRules' || group === 'movieRules';
-    if (!Array.isArray(rows) || rows.some(row => matching
-      ? !row || typeof row !== 'object' || !validRuleText(row.pattern) ||
-        row.replace !== undefined && !validRuleText(row.replace) ||
-        row.flags !== undefined && !validRuleText(row.flags)
-      : !validRuleText(row))) throw fail('INVALID_RULES');
-  }
-  return value;
-}
-
 // The capability stays inside Node. JSON snapshots contain only rules/revision.
 export function bindRuleSnapshot(snapshot, invoke) {
   executors.set(snapshot, invoke);
@@ -60,7 +45,6 @@ export async function invokeFilmRules(rules, request, { signal } = {}) {
   const invoke = rules && executors.get(rules);
   if (invoke) return invoke({ ...request, rules: rules.rules }, { signal });
   const draft = rules?.rules ?? rules;
-  if (draft !== undefined) validateRules(draft, { partial: true });
   const program = new NativeJsonProgram(filmRuleSource);
   try { return await program.invoke({ ...request, rules: draft }, { signal }); }
   catch (error) { throw filmRuleFailure(error); }
@@ -75,8 +59,6 @@ export async function invokeRecognition(rules, request, options) {
 
 /** One call per page/metadata batch. Saved snapshots reuse their owner's program. */
 export function createRecognitionRules(rules) {
-  const draft = rules?.rules ?? rules;
-  if (draft !== undefined) validateRules(draft, { partial: true });
   const batch = (requests, options) => invokeRecognition(rules,
     { operation: 'recognition.batch', requests }, options);
   const one = async (request, options) => (await batch([request], options))[0];

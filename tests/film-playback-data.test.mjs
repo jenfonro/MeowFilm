@@ -347,6 +347,32 @@ test('E01/E49 detail aliases retain the original typed vod_id despite conflictin
   }
 });
 
+test('independent bad search and metadata rows do not discard healthy siblings or forge an empty success', async t => {
+  const f = fixture(t);
+  const rows = [{ vod_id: 0, vod_name: 'Film' }, null, { vod_id: '0', vod_name: 'Other' }, false];
+  f.handlers.cat.invoke = () => success({ list: rows, pagecount: 2 });
+  const page = await f.data.search(source, 'mixed', 1);
+  assert.deepEqual(page.items, [rows[0], rows[2]]);
+  assert.deepEqual(page.raw.list, page.items);
+  assert.equal(page.hasMore, true);
+  f.handlers.cat.invoke = () => success({ list: [null, false] });
+  await assert.rejects(f.data.search(source, 'all bad', 1), { code: 'UPSTREAM_FORMAT' });
+  f.handlers.tmdb.request = () => success({ results: [{ id: 42, title: 'Film' }, null, { id: false }] });
+  assert.deepEqual((await f.data.metadata('tmdb', '/3/search/movie', { query: 'mixed' })).results,
+    [{ id: 42, title: 'Film' }]);
+  const unused = { media_type: 'person', name: 'No film identity is needed' };
+  f.handlers.tmdb.request = () => success({ results: [null, unused, { id: 42, media_type: 'movie', title: 'Film' }] });
+  assert.deepEqual((await f.data.metadata('tmdb', '/3/search/multi', { query: 'mixed' })).results,
+    [unused, { id: 42, media_type: 'movie', title: 'Film' }]);
+  f.handlers.douban.search = params => {
+    assert.deepEqual(params, { query: 'mixed' });
+    return success({ subjects: { items: [null, { target_id: '51', target: doubanValue() }] } });
+  };
+  const found = await f.data.metadata('douban', 'search', { query: 'mixed', method: { ignored: true },
+    append_to_response: [1], extra: null }, { imageSize: { unused: true } });
+  assert.deepEqual(found.subjects.items, [{ target_id: '51', target: doubanValue() }]);
+});
+
 test('E38/E42/N1 Cat and portable media accept normal local and external HTTP addresses', async t => {
   const f = fixture(t);
   for (const candidate of [rawCandidate(), rawCandidate(portable)]) {

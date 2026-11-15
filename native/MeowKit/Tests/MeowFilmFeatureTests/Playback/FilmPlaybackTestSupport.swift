@@ -65,9 +65,9 @@ enum FilmPlaybackFixture {
         .init(target: .init(id: "tmdb:tv:19", kind: .tv, title: "星河", metadataProvider: .tmdb, metadataID: "19"), sources: [])
     }
     static func library(preferences: FilmPlaybackPreferences = .defaults,
-                        manual: [RuntimeValue] = []) -> RuntimeValue {
-        .object(["version": .number(1), "preferences": preferences.value, "history": .array([]),
-                 "manual": .array(manual), "blocks": .array([])])
+                        manual: [RuntimeValue] = [], history: [RuntimeValue] = [], blocks: [RuntimeValue] = []) -> RuntimeValue {
+        .object(["version": .number(1), "preferences": preferences.value, "history": .array(history),
+                 "manual": .array(manual), "blocks": .array(blocks)])
     }
 }
 

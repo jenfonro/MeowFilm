@@ -124,10 +124,19 @@ test('Cat HTTP rejects malformed raw uploads without side effects and persists a
       siteId: 'default', operation: 'home' })), { value: 'changed' });
     assert.deepEqual(await call('install', { installationId: 'no-source', name: 'bad', sourceUrl }),
       { ok: false, contract: 'cat.script.v2', code: 'INVALID_ARGUMENT' });
-    assert.deepEqual(await call('edit', { installationId: 'remote', name: 'bad', sourceType: 'local' }),
-      { ok: false, contract: 'cat.script.v2', code: 'INVALID_ARGUMENT' });
-    assert.deepEqual(await call('update', { installationId: 'remote', sourceUrl }),
-      { ok: false, contract: 'cat.script.v2', code: 'INVALID_ARGUMENT' });
+    const edited = await result(call, await call('edit', { installationId: 'remote',
+      name: '改名', sourceType: { ignored: 'local' } }));
+    assert.equal(edited.name, '改名');
+    assert.equal(edited.sourceType, 'network');
+    assert.equal(edited.generation, invalid.generation);
+    assert.equal(edited.sourceUrl, sourceUrl);
+    body = source('changed');
+    const current = await result(call, await call('update', { installationId: 'remote',
+      sourceUrl: 'http://unused.invalid/ignored', name: ['ignored'], enabled: false }));
+    assert.equal(current.sourceUrl, sourceUrl);
+    assert.equal(current.sourceType, 'network');
+    assert.equal(current.name, '改名');
+    assert.equal(current.enabled, true);
   });
 
 test('Cat management HTTP preserves large authoritative snapshots as complete JSON values', async t => {

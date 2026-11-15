@@ -64,8 +64,9 @@ test('seven providers expose actual capabilities and configurations persist in p
 test('invalid credentials, unsupported operations and stale references reject before network effects', async t => {
   const { service, requests } = setup(t);
   for (const input of [
-    { provider: 'baidu', credentials: { password: 'not-a-supported-field' } },
     { provider: 'unknown', credentials: {} },
+    { provider: 'baidu', credentials: null },
+    { provider: 'baidu', credentials: { cookie: 42 } },
     { provider: 'quark', credentials: { cookie: 'x\r\nInjected: yes' } },
     { provider: 'uc_tv', credentials: { expiresAt: -1 } },
   ]) await assert.rejects(service.invoke('settings.set', input), { code: 'INVALID_REQUEST' });
@@ -79,6 +80,59 @@ test('invalid credentials, unsupported operations and stale references reject be
   await assert.rejects(service.invoke('play', { provider: 'quark_tv', file: stored(), mode: 'automatic' }),
     { code: 'UNSUPPORTED_OPERATION' });
   assert.equal(requests.length, 0);
+});
+
+test('ordinary request extras are inert and only provider-defined credential fields are stored or sent', async t => {
+  const { service, root, requests } = setup(t, () => response({ errno: 0, login_info: { bdstoken: 'synthetic' } }));
+  const available = await service.invoke('providers');
+  for (const extra of [null, 'unused', 42, [], { nested: { cookie: 'untrusted' } }]) {
+    const ignored = { extra, method: extra, url: extra, headers: extra, body: extra, accountRevision: extra };
+    assert.deepEqual(await service.invoke('providers', ignored), available);
+    assert.deepEqual(await service.invoke('settings.get', ignored), await service.invoke('settings.get'));
+    const saved = await service.invoke('settings.set', { ...ignored, provider: 'baidu',
+      credentials: { cookie: 'synthetic=COOKIE', password: extra, authorization: extra,
+        url: extra, headers: extra, future: extra } });
+    assert.equal(saved.configured, true);
+    assert.deepEqual(saved.fields, ['cookie']);
+    const stored = JSON.parse(readFileSync(join(root, 'pan/accounts.json')));
+    assert.deepEqual(stored.accounts.baidu.credentials, { cookie: 'synthetic=COOKIE' });
+    const refreshed = await service.invoke('refresh', { ...ignored, provider: 'baidu' });
+    assert.equal(refreshed.refreshed, true);
+    assert.equal(refreshed.account.revision, saved.revision);
+    const { signal, ...actual } = requests.at(-1);
+    assert.ok(signal instanceof AbortSignal);
+    assert.equal(actual.method, 'GET');
+    assert.equal(actual.headers.Cookie, 'synthetic=COOKIE');
+    if (requests.length > 1) {
+      const { signal: _firstSignal, ...first } = requests[0];
+      assert.deepEqual(actual, first);
+    }
+  }
+  const cleared = await service.invoke('settings.clear', { provider: 'baidu',
+    credentials: { cookie: 'must-not-be-saved' }, headers: { Cookie: 'must-not-be-sent' } });
+  assert.equal(cleared.configured, false);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'pan/accounts.json'))).accounts.baidu.credentials, {});
+  const unsupported = await service.invoke('settings.set', { provider: 'baidu',
+    credentials: { password: 'not-a-baidu-credential' } });
+  assert.equal(unsupported.configured, false);
+  assert.deepEqual(unsupported.fields, []);
+});
+
+test('list projects share URL and password without forwarding nested or top-level transport overrides', async t => {
+  const { service, requests } = setup(t, input => response(new URL(input.url).pathname.endsWith('/token')
+    ? { code: 0, data: { stoken: 'synthetic-share-token' } } : { code: 0, data: { list: [], total: 0 } }));
+  await service.invoke('settings.set', { provider: 'quark', credentials: { cookie: 'synthetic=COOKIE' } });
+  const input = { provider: 'quark', share: { url: 'https://pan.quark.cn/s/synthetic', password: 'abcd' } };
+  const expected = await service.invoke('list', input);
+  const initial = requests.map(({ signal, ...request }) => request);
+  for (const extra of [null, 'unused', [], { nested: { url: 'https://untrusted.invalid' } }]) {
+    const ignored = { method: extra, url: extra, headers: extra, cookie: extra, credentials: extra, extra };
+    const { url: _unusedURL, ...shareExtras } = ignored;
+    assert.deepEqual(await service.invoke('list', { ...input, ...ignored, share: { ...input.share, ...shareExtras } }), expected);
+    assert.deepEqual(requests.slice(-2).map(({ signal, ...request }) => request), initial);
+  }
+  assert.deepEqual(JSON.parse(initial[0].body), { pwd_id: 'synthetic', passcode: 'abcd' });
+  assert.equal(initial[0].headers.cookie, 'synthetic=COOKIE');
 });
 
 test('failed atomic configuration write does not publish new account state; damaged documents are not reset', async t => {
@@ -277,9 +331,9 @@ test('QR pending, scanned, concurrent confirmation and repeated polling expose s
     entered.resolve(); await release.promise;
     return confirmedQR();
   }));
-  const login = await service.invoke('login.start', { provider: 'baidu' });
+  const login = await service.invoke('login.start', { provider: 'baidu', future: { sessionId: 'unused' } });
   assert.deepEqual(login.challenge, { type: 'image', url: `data:image/png;base64,${Buffer.from('synthetic-qr-image').toString('base64')}` });
-  const input = { sessionId: login.sessionId };
+  const input = { sessionId: login.sessionId, provider: 'unused', future: { headers: ['unused'] } };
   assert.equal((await service.invoke('login.poll', input)).status, 'pending');
   assert.equal((await service.invoke('login.poll', input)).status, 'scanned');
   const calls = Array.from({ length: 4 }, () => service.invoke('login.poll', input));

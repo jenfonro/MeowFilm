@@ -5,14 +5,9 @@ public struct FilmPlaybackHistory: Equatable, Sendable {
     public let value: RuntimeObject
     public let targetID: String
     public let title: String
-    public let position: Double
-    public let duration: Double?
-    public let updatedAt: Double
     init(_ raw: RuntimeValue) throws {
         value = try raw.filmRequiredObject()
         targetID = try value.filmString("targetId"); title = try value.filmString("title")
-        position = try value.filmNumber("position"); duration = value["duration"]?.filmNumber
-        updatedAt = try value.filmNumber("updatedAt")
     }
 }
 
@@ -60,15 +55,29 @@ public struct FilmPlaybackBlock: Equatable, Sendable {
 }
 
 public struct FilmPlaybackLibrary: Equatable, Sendable {
-    public let preferences: FilmPlaybackPreferences
+    public enum Area: Equatable, Sendable { case manual, blocks }
+
+    public let area: Area
     public let history: [FilmPlaybackHistory]
     public var manual: [FilmManualMatch]
     public let blocks: [FilmPlaybackBlock]
-    init(_ value: RuntimeValue) throws {
+    init(_ value: RuntimeValue, area: Area) throws {
         let fields = try value.filmRequiredObject()
-        preferences = try FilmPlaybackPreferences(fields.filmValue("preferences"))
-        history = try fields.filmArray("history").map(FilmPlaybackHistory.init)
-        manual = try fields.filmArray("manual").map(FilmManualMatch.init)
-        blocks = try fields.filmArray("blocks").map(FilmPlaybackBlock.init)
+        self.area = area
+        switch area {
+        case .manual:
+            manual = try Self.items(fields.filmArray("manual"), transform: FilmManualMatch.init)
+            history = fields["history"]?.filmArray?.compactMap { try? FilmPlaybackHistory($0) } ?? []
+            blocks = []
+        case .blocks:
+            blocks = try Self.items(fields.filmArray("blocks"), transform: FilmPlaybackBlock.init)
+            history = []; manual = []
+        }
+    }
+
+    static func items<Item>(_ values: [RuntimeValue], transform: (RuntimeValue) throws -> Item) throws -> [Item] {
+        let items = values.compactMap { try? transform($0) }
+        guard values.isEmpty || !items.isEmpty else { throw FilmPlaybackError.invalidResponse }
+        return items
     }
 }

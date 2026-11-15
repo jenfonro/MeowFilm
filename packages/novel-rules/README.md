@@ -14,7 +14,6 @@ sessions, rule configuration, persistence and layout.
 | `identity` | `book` | `{name,author,key}` |
 | `merge` | `books` | `{books:[representative + groupKey + candidates]}` |
 | `matchChapter` | `chapters,anchor` | `{index,requiresSelection}` |
-| `validateRule` | `rule` | `{valid,errors}` |
 | `transform` | `title,blocks,book,source,rules,conversion` | `{title,blocks}` |
 | `matchUrl` | `pattern,url` | boolean, true only when the original JavaScript match covers the complete URL |
 
@@ -33,10 +32,13 @@ Replacement fields follow the Reader management model: `pattern`, `replacement`,
 `isRegex`, `isEnabled`, `scopeTitle`, `scopeContent`, `scope`, `excludeScope`,
 `timeoutMillisecond`, `order`, `name`, `group`, and the native-owned `id`.
 Empty replacement is valid. Rules execute in ascending order, preserving input
-order for ties. Regular expressions use JavaScript global replacement (including
+order for ties. Names, groups, IDs and other management-only members do not
+participate in transformation. Regular expressions use JavaScript global replacement (including
 capture substitutions); literal replacement treats `$` literally. Scope and
 exclusion accept comma, semicolon or newline-separated exact source URLs or
-normalized book names. Empty scope means all; exclusion wins. Consecutive text
+normalized book names. Empty scope means all; exclusion wins. Disabled,
+out-of-scope rules and rules without target text do not compile patterns or
+consume invalid rule materials. Consecutive text
 blocks are paragraphs joined with newlines for replacement, including
 cross-paragraph matches; changed text is split back into paragraphs. Images keep
 their URLs, metadata and relative order unchanged and separate text runs. A rule
@@ -52,10 +54,12 @@ additionally reject late results, but are not a replacement for native
 interruption. After rule application the owner invokes with empty rules to apply
 `conversion`: `none`, `simplified` or `traditional`, with a separate 3000 ms budget.
 Other novel operations default to 3000 ms; `matchUrl` uses 2000 ms. Requests contain
-only the six fixed operations, never program source.
+one of the five fixed operations. Only the operation's inputs are consumed;
+extra members cannot become program source or an execution entry point.
 
-Invalid transform input or enabled rules return `INVALID_REQUEST`; validation
-itself preserves `{valid,errors}`. Timeouts remain `TIMEOUT`, cancellation remains
+There is no independent rule-check operation or automatic management preflight.
+Unusable actual input, replacement patterns or budgets return `INVALID_REQUEST`
+when consumed by transformation. Timeouts remain `TIMEOUT`, cancellation remains
 `CANCELLED`, and closed owners return `CLOSED`. A failed native invocation is fully
 released before a new invocation recreates the program; close rejects queued
 work and waits for active native resources and all admitted transforms. Native

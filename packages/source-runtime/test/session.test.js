@@ -4,7 +4,6 @@ import {
   createCapabilityClient,
   detectSourceProtocol,
   hostApiVersion,
-  importYiciyuanSource,
   normalizeSourceDefinition,
   SourceSession,
 } from '../src/index.js';
@@ -242,27 +241,12 @@ test('Legado WebView requests preserve absent optional method and body fields', 
   }]);
 });
 
-test('Yiciyuan input is imported into the Legado contract without executing source code', () => {
-  const imported = importYiciyuanSource({
-    bookSourceName: 'Legacy',
-    bookSourceUrl: 'https://legacy.invalid/',
-    bookSourceType: '漫画',
-    ruleSearchUrl: '@header:{"X-Test":"yes"} https://legacy.invalid/search?key=searchKey|gbk',
-    ruleSearchList: 'class.book',
-    ruleSearchName: 'tag.h2@text',
-    ruleSearchNoteUrl: 'tag.a@href',
-    ruleChapterList: 'class.chapter',
-    ruleChapterName: 'tag.a@text',
-    ruleContentUrl: 'tag.a@href',
-    ruleBookContent: '$.data.content',
-  });
-  assert.equal(imported.__importedFrom, 'yiciyuan');
-  assert.equal(imported.bookSourceType, 2);
-  assert.match(imported.searchUrl, /\{\{key\}\}/);
-  assert.match(imported.searchUrl, /"charset":"gbk"/);
-  assert.equal(imported.ruleSearch.bookList, 'class.book');
-  assert.equal(imported.ruleToc.chapterName, 'tag.a@text');
-  assert.equal(imported.ruleContent.content, '$.data.content');
+test('current Legado definitions keep unrelated keys without interpreting them', () => {
+  const source = { ...legadoSource, enable: false, serialNumber: -7,
+    ruleSearchList: 'not a current rule', ruleFindUrl: 'not an explore URL' };
+  assert.equal(detectSourceProtocol(source), 'legado');
+  assert.deepEqual(normalizeSourceDefinition(source),
+    { protocol: 'legado', importedProtocol: 'legado', source });
 });
 
 test('QYSG protocol detection accepts case-insensitive script markup', () => {

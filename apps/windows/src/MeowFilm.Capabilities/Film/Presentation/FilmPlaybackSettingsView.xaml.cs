@@ -164,6 +164,8 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     private static void ReplaceOrder(ObservableCollection<OrderItem> items, string[] order)
     {
+        order = order.Distinct(StringComparer.Ordinal).ToArray();
+        foreach (var item in items.Where(item => !order.Contains(item.Id, StringComparer.Ordinal)).ToArray()) items.Remove(item);
         for (int index = 0; index < order.Length; index++)
         {
             var item = items.FirstOrDefault(item => item.Id == order[index]);
@@ -181,7 +183,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         items.Move(source, destination);
         var order = items.Select(item => item.Id).ToArray();
         var draft = ReferenceEquals(list, RuleOrder) ? preferences with { RuleOrder = order } : preferences with { PanOrder = order };
-        bool saved = await MutateAsync(() => service.SavePreferencesAsync(draft),
+        bool saved = await MutateAsync(() => service.SavePreferencesAsync(draft, ReferenceEquals(list, RuleOrder) ? "ruleOrder" : "panOrder"),
             value => { preferences = value; PopulateOrders(); }, "设置已保存");
         if (!saved && ticket == generation) PopulateOrders();
     }
@@ -192,7 +194,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         if (preferences is null || !Idle) return;
         var draft = Draft();
-        await MutateAsync(() => service.SavePreferencesAsync(draft), saved =>
+        await MutateAsync(() => service.SavePreferencesAsync(draft, section == "clean" ? "siteCleanKeywords" : "keywords"), saved =>
         {
             preferences = saved;
             if (section == "clean") CleanKeywords.Text = string.Join(",", saved.SiteCleanKeywords);
@@ -208,7 +210,8 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             "rule" => value with { RuleOrder = defaults.RuleOrder }, "pan" => value with { PanOrder = defaults.PanOrder },
             "keywords" => value with { Keywords = defaults.Keywords }, _ => value with { SiteCleanKeywords = defaults.SiteCleanKeywords }
         };
-        await MutateAsync(() => service.SavePreferencesAsync(next), saved =>
+        string field = group switch { "rule" => "ruleOrder", "pan" => "panOrder", "keywords" => "keywords", _ => "siteCleanKeywords" };
+        await MutateAsync(() => service.SavePreferencesAsync(next, field), saved =>
         {
             preferences = saved;
             if (group == "keywords") Keywords.Text = string.Join(",", saved.Keywords);

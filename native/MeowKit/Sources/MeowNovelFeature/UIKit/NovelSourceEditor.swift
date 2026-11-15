@@ -42,7 +42,7 @@ final class NovelSourceEditor: ManagementPageViewController {
             self?.typeButton.configuration?.title = title
         } })
         controls.addArrangedSubview(typeButton)
-        for (key, label) in [(draft.enabledKey, "启用"), ("enabledExplore", "发现"), ("enabledCookieJar", "CookieJar")] {
+        for (key, label) in [("enabled", "启用"), ("enabledExplore", "发现"), ("enabledCookieJar", "CookieJar")] {
             controls.addArrangedSubview(ManagementFormView.check(label, value: draft.bool(key)) { [weak self] value in self?.draft.setBool(key, value) })
         }
         options.showsHorizontalScrollIndicator = false; options.addSubview(controls); controls.translatesAutoresizingMaskIntoConstraints = false

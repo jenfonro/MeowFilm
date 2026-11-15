@@ -1570,12 +1570,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
 
     func testBlocksRequireConfirmationAndUseExactOrBulkReceiptsWithoutChangingHistory() async throws {
         let history: RuntimeValue = .object(["targetId": .string("history-target"), "title": .string("观看记录"),
-            "position": .number(95), "duration": .number(600), "updatedAt": .number(1_700_000_000_000)])
+            "position": .object(["unused": .number(95)]), "duration": .number(600), "updatedAt": .string("unused")])
         let block: RuntimeValue = .object(["targetId": .string("blocked-target"), "sourceKey": .string("source-key"),
             "detailId": .number(0), "lineId": .number(0)])
         let otherBlock: RuntimeValue = .object(["targetId": .string("other-target"), "sourceKey": .string("source-key"),
             "detailId": .number(1), "lineId": .number(0)])
-        let store = FilmUIKitPlaybackSettingsStore(history: [history], blocks: [block, otherBlock])
+        let store = FilmUIKitPlaybackSettingsStore(manual: [["id": .bool(false)]],
+            history: [history], blocks: [.null, block, otherBlock])
         let owner = FilmPlaybackSettingsModel(transport: store.transport)
         let blocks = FilmPlaybackLibraryController(owner: owner, area: .blocks,
                                                    themeProvider: FilmPlaybackUIKitTheme())
@@ -1604,7 +1605,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await waitFor { owner.library?.blocks.isEmpty == true && !owner.busy }
         writes = await store.calls().filter { $0.operation == "library.remove" }
         XCTAssertEqual(writes.last?.input, .object(["kind": .string("blocks")]))
-        XCTAssertEqual(owner.library?.history.count, 1, "Settings do not remove playback history")
+        let stored = await store.librarySnapshot()
+        XCTAssertEqual(stored.filmObject?["history"], .array([history]), "Settings do not remove or rewrite playback history")
         XCTAssertEqual(page.sections.first?.rows.map(\.title), ["暂无记录"])
     }
 

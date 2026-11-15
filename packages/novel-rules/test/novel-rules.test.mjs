@@ -165,12 +165,32 @@ test('conversion runs after cleanup and only transforms display text', () => {
   assert.equal(transform({ title: '讀書', conversion: 'simplified' }).title, '读书');
 });
 
-test('validation rejects invalid regex and nonpositive timeout but permits empty replacement', () => {
-  assert.deepEqual(process({ operation: 'validateRule', rule: rule({}) }), { valid: true, errors: [] });
-  assert.deepEqual(process({ operation: 'validateRule', rule: rule({ pattern: '[', isRegex: true }) }),
-    { valid: false, errors: ['pattern'] });
-  assert.deepEqual(process({ operation: 'validateRule', rule: rule({ timeoutMillisecond: 0 }) }),
-    { valid: false, errors: ['timeoutMillisecond'] });
+test('rule budgets are consumed only by actual replacements', () => {
+  for (const timeoutMillisecond of [0, -1, '3000']) {
+    assert.throws(() => transform({ rules: [rule({ timeoutMillisecond })] }), /INVALID_RULE/);
+  }
+  assert.equal(transform({ rules: [
+    rule({ scope: 'other book', pattern: '[', isRegex: true, timeoutMillisecond: 0 }),
+    rule({ excludeScope: '雨夜来信', pattern: '[', isRegex: true, timeoutMillisecond: 0 }),
+    rule({ scopeTitle: false, scopeContent: false, pattern: '[', isRegex: true, timeoutMillisecond: 0 }),
+  ] }).blocks[0].text, '正文广告');
+});
+
+test('unusable active scope does not silently become an unrestricted replacement', () => {
+  for (const field of ['scope', 'excludeScope']) {
+    assert.throws(() => transform({ rules: [rule({ [field]: { name: 'other book' } })] }), /INVALID_RULE/);
+  }
+});
+
+test('transform ignores management fields, unrelated input and non-text block members', () => {
+  const image = { type: 'image', src: { untouched: true }, text: ['not consumed'], extra: { value: 4 } };
+  const result = transform({
+    book: false, source: ['not used without scope'], extra: { source: 'throw 1' },
+    blocks: [{ type: 'text', text: '正文广告' }, image],
+    rules: [rule({ name: { future: true }, group: [1], extra: { nested: true },
+      regex: true, enable: false, sortOrder: -20 })],
+  });
+  assert.deepEqual(result, { title: '广告·雨夜来信', blocks: [{ type: 'text', text: '正文' }, image] });
 });
 
 test('invalid enabled rule fails the operation rather than returning a partial chapter', () => {

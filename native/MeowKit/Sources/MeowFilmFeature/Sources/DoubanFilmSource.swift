@@ -58,10 +58,10 @@ public struct DoubanFilmSource: FilmCategorySource {
         let result = try await client.call(module: .film, operation: "data.metadata.entry", parameters: .object(parameters))
         try Task.checkCancellation()
         guard !client.isClosed else { throw RuntimeHTTPError.closed }
-        guard let fields = result.filmObject, let value = fields["value"], let cache = fields["cache"] else {
+        guard let fields = result.filmObject, let value = fields["value"] else {
             throw FilmHomeError.invalidResponse
         }
-        return (try RuntimeJSON.encode(value), try FilmMetadataCache(value: cache))
+        return (try RuntimeJSON.encode(value), FilmMetadataCache(value: fields["cache"] ?? .null))
     }
 
     static func categoryQuery(_ category: FilmCategory, filters: [String: String], offset: Int) -> RuntimeObject {
