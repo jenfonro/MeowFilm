@@ -8,5 +8,8 @@
     ".": "./film-rules.js",
     "./playback": "./playback-rules.js"
   },
-  "files": ["film-rules.js", "playback-rules.js"]
+  "files": ["film-rules.js", "playback-rules.js"],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
 }

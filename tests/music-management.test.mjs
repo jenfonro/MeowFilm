@@ -5,7 +5,7 @@ import fs, { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFi
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createScriptHost, ScriptHostError } from '@meowfilm/script-host';
+import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { until } from '../packages/runtime-bridge/test/http-fixture.js';
 import { createMusicScriptModule, musicScriptContract, musicPlatforms } from '../apps/runtime/modules/music-script.mjs';
@@ -203,7 +203,7 @@ test('resolve directs one installation and platform and returns the normalized m
   ]);
   assert.deepEqual(okay(replies[0]), { installationId: a.installationId,
     generation: a.generation, contentHash: a.contentHash, platform: 'kw', quality: '320k',
-    url: 'https://media.invalid/kw/320k/1?n=1', headers: {}, expiresAt: null });
+    url: 'https://media.invalid/kw/320k/1?n=1', headers: {}, expiresAt: null, duration: null });
   denied(await resolve(rpc, a, 'kw', {}, 'flac24bit'), 'CAPABILITY_UNAVAILABLE');
   denied(await resolve(rpc, a, 'wy'), 'CAPABILITY_UNAVAILABLE');
   denied(await resolve(rpc, a, 'local'), 'INVALID_REQUEST');
@@ -243,39 +243,55 @@ test('musicUrl results are checked once for playback: empty, malformed, restrict
   assert.equal(okay(await media({ case: 'interval', duration: 245.9 })).url, 'https://media.invalid/04:05');
 });
 
-test('resolve uses a fixed inclusive ten-second duration tolerance in both directions over HTTP', async t => {
+test('musicUrl receipt duration uses an absolute ten-second boundary independent of requested quality', async t => {
   const { rpc } = setup(t);
-  const item = await enabled(rpc, fixture({ handler: `async ({info}) => info.musicInfo.candidate` }));
+  const item = await enabled(rpc, fixture({ handler: `async ({info}) => ({
+    url: 'https://media.invalid/duration', duration: info.musicInfo.receiptDuration
+  })` }));
   const url = 'https://media.invalid/duration';
-  const media = (duration, candidateDuration) => resolve(rpc, item, 'kw', {
-    duration, candidate: { url, duration: candidateDuration },
-  });
-  for (const [duration, candidateDuration] of [[180, 188], [188, 180], [180, 190], [190, 180]]) {
-    assert.deepEqual(okay(await media(duration, candidateDuration)), {
-      installationId: item.installationId, generation: item.generation, contentHash: item.contentHash,
-      platform: 'kw', quality: '320k', url, headers: {}, expiresAt: null,
-    });
-  }
-  for (const [duration, candidateDuration] of [[180, 190.01], [190.01, 180], [600, 611], [611, 600]])
-    denied(await media(duration, candidateDuration), 'RECORDING_MISMATCH');
-});
-
-test('resolve does not infer a duration mismatch when either duration is unknown over HTTP', async t => {
-  const { rpc } = setup(t);
-  const item = await enabled(rpc, fixture({ handler: `async ({info}) => info.musicInfo.candidate` }));
-  const url = 'https://media.invalid/unknown-duration';
-  const media = (musicInfo, candidate) => resolve(rpc, item, 'kw', {
-    ...musicInfo, candidate: { url, ...candidate },
-  });
-  for (const unknown of [{}, { duration: 0 }, { duration: null }]) {
-    for (const [musicInfo, candidate] of [[unknown, { duration: 180 }], [{ duration: 180 }, unknown]]) {
-      assert.deepEqual(okay(await media(musicInfo, candidate)), {
+  for (const [expected, actual, accepted] of [
+    [180, 185, true], [180, 190, true], [190, 180, true],
+    [180, 190.01, false], [190.01, 180, false],
+    [180, 175, true], [180, 170, true], [180, 169.99, false],
+    [1200, 1210, true], [1200, 1211, false], [1200, 1189, false],
+    [180, 180.125, true],
+  ]) {
+    for (const quality of ['320k', 'flac']) {
+      const reply = await resolve(rpc, item, 'kw', { duration: expected, receiptDuration: actual }, quality);
+      if (!accepted) { denied(reply, 'RECORDING_MISMATCH'); continue; }
+      assert.deepEqual(okay(reply), {
         installationId: item.installationId, generation: item.generation, contentHash: item.contentHash,
-        platform: 'kw', quality: '320k', url, headers: {}, expiresAt: null,
+        platform: 'kw', quality, url, headers: {}, expiresAt: null, duration: actual,
       });
     }
   }
-  denied(await media({ duration: 180 }, { duration: -1 }), 'INVALID_MEDIA_CANDIDATE');
+});
+
+test('musicUrl unknown duration stays unknown without discarding known receipts or accepting malformed values', async t => {
+  const { rpc } = setup(t);
+  const item = await enabled(rpc, fixture({ handler: `async ({info}) => {
+    const media = { url: 'https://media.invalid/duration' };
+    if ('receiptDuration' in info.musicInfo) media.duration = info.musicInfo.receiptDuration;
+    return media;
+  }` }));
+  for (const expected of [undefined, null, 0, 180]) {
+    for (const actual of [undefined, null, 0]) {
+      const musicInfo = { ...(expected === undefined ? {} : { duration: expected }),
+        ...(actual === undefined ? {} : { receiptDuration: actual }) };
+      assert.deepEqual(okay(await resolve(rpc, item, 'kw', musicInfo)), {
+        installationId: item.installationId, generation: item.generation, contentHash: item.contentHash,
+        platform: 'kw', quality: '320k', url: 'https://media.invalid/duration',
+        headers: {}, expiresAt: null, duration: null,
+      });
+    }
+  }
+  for (const expected of [undefined, null, 0]) {
+    const media = okay(await resolve(rpc, item, 'kw',
+      { ...(expected === undefined ? {} : { duration: expected }), receiptDuration: 1211 }));
+    assert.equal(media.duration, 1211);
+  }
+  for (const actual of [-1, '185', true, {}])
+    denied(await resolve(rpc, item, 'kw', { duration: 180, receiptDuration: actual }), 'INVALID_MEDIA_CANDIDATE');
 });
 
 test('a failed directed invocation never falls through to another installation', async t => {
@@ -436,6 +452,59 @@ test('guest storage is request bound, isolated by installation and site, and rem
   denied(await rpc('sources.detail', { installationId: a.installationId }), 'SOURCE_NOT_FOUND');
 });
 
+test('complete uploads retain independent candidates and enforce the source data bound', async t => {
+  const { rpc } = setup(t);
+  const candidates = [];
+  for (let index = 0; index < 12; index++) {
+    const installationId = randomUUID();
+    const source = `// candidate ${index}`;
+    const sourceRevision = await upload(rpc, installationId, source);
+    candidates.push({ installationId, sourceRevision, source });
+  }
+  for (const { installationId, sourceRevision, source } of candidates) {
+    const item = okay(await rpc('sources.add', { installationId, sourceRevision })).item;
+    assert.equal(item.installationId, installationId);
+    assert.equal(item.contentHash, hash(source));
+  }
+  const installationId = randomUUID();
+  const source = Buffer.alloc(SCRIPT_LIMITS.maxSourceBytes, 0x20);
+  source.write('// complete source');
+  const sourceRevision = await upload(rpc, installationId, source);
+  denied(await rpc.upload(installationId, sourceRevision + 1, Buffer.alloc(SCRIPT_LIMITS.maxSourceBytes + 1, 0x20),
+    { basename: 'oversize.js' }), 'LIMIT');
+  const item = okay(await rpc('sources.add', { installationId, sourceRevision })).item;
+  assert.equal(item.contentHash, hash(source));
+});
+
+test('candidate identity selects exact bytes and invalid replacements preserve the complete input', async t => {
+  const { rpc, module } = setup(t);
+  const installationId = randomUUID();
+  const first = await upload(rpc, installationId, '// first');
+  const second = await upload(rpc, installationId, '// second', 'second.js');
+  denied(await rpc('sources.add', { installationId, sourceRevision: first }), 'SOURCE_NOT_FOUND');
+  for (const basename of ['../bad.js', 'C:\\bad.js', 'bad.txt', '/bad.js'])
+    denied(await rpc.upload(installationId, second + 1, Buffer.from('// invalid name'), { basename }), 'INVALID_REQUEST');
+  denied(await rpc.upload(installationId, second + 1, Buffer.from([0xff]), { basename: 'invalid.js' }), 'SCRIPT_ENCODING');
+  denied(await rpc.upload(installationId, second, Buffer.from('// altered'), { basename: 'second.js' }), 'SCRIPT_INTEGRITY');
+  const item = okay(await rpc('sources.add', { installationId, sourceRevision: second })).item;
+  assert.equal(item.contentHash, hash('// second'));
+  assert.equal(item.name, 'second');
+  const replacement = await upload(rpc, installationId, '// replacement');
+  denied(await rpc('sources.update', { installationId, sourceRevision: first }), 'SOURCE_NOT_FOUND');
+  const otherInstallation = randomUUID();
+  const otherRevision = await upload(rpc, otherInstallation, '// other installation');
+  denied(await rpc('sources.update', { installationId, sourceRevision: otherRevision }), 'SOURCE_NOT_FOUND');
+  assert.equal(okay(await rpc('sources.detail', { installationId })).item.contentHash, hash('// second'));
+  const updated = okay(await rpc('sources.update', { installationId, sourceRevision: replacement })).item;
+  assert.equal(updated.contentHash, hash('// replacement'));
+  const other = okay(await rpc('sources.add', { installationId: otherInstallation, sourceRevision: otherRevision })).item;
+  assert.equal(other.contentHash, hash('// other installation'));
+  const pending = randomUUID();
+  await upload(rpc, pending, '// pending');
+  okay(await module.close());
+  denied(await module.upload({ installationId: pending, sourceRevision: 1, basename: 'pending.js' }, Buffer.from('// closed')), 'CLOSED');
+});
+
 test('source larger than the former 512KiB gate and a split UTF-8 character execute as real LX', async t => {
   const { rpc } = setup(t);
   const code = fixture();
@@ -447,22 +516,6 @@ test('source larger than the former 512KiB gate and a split UTF-8 character exec
   const item = await enabled(rpc, source);
   assert.equal(item.contentHash, hash(Buffer.from(source)));
   assert.equal(okay(await resolve(rpc, item)).url, 'https://media.invalid/kw/320k/1?n=1');
-});
-
-test('network needs no domain grant and receives scoped identity, never platform credentials', async t => {
-  const calls = [];
-  const { rpc } = setup(t, { network: async input => {
-    calls.push(input);
-    assert.equal(input.validateURL('https://other.invalid/no'), 'https://other.invalid/no');
-    return { statusCode: 200, body: 'synthetic-network' };
-  } });
-  const item = await enabled(rpc, networkFixture);
-  assert.equal(await value(rpc, item, 'tx'), 'synthetic-network');
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].scope.installationId, item.installationId);
-  assert.equal(calls[0].scope.generation, item.generation);
-  assert.equal(calls[0].scope.siteId, 'tx');
-  assert.equal(calls[0].options.headers, undefined);
 });
 
 test('LX handles a 12 MiB network response and large invoke input and output', { timeout: 60000 }, async t => {

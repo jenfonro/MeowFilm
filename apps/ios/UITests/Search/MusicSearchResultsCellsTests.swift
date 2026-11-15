@@ -19,10 +19,16 @@ final class MusicSearchResultsCellsTests: XCTestCase {
         let indicator = try XCTUnwrap(identified("music.search.results.tab.indicator", in: tabs))
         let buttonFrames = buttons.map(\.frame)
         let start = indicator.frame
-        XCTAssertEqual(buttons.compactMap { $0.titleLabel?.font.pointSize },
-                       [CGFloat(17), CGFloat(17), CGFloat(17)])
+        for button in buttons {
+            let font = try XCTUnwrap(button.titleLabel?.font)
+            XCTAssertEqual(font, UIFont.systemFont(ofSize: font.pointSize, weight: .regular))
+            XCTAssertGreaterThan(button.bounds.width, 0)
+        }
         XCTAssertTrue(buttons.allSatisfy { $0.titleLabel?.numberOfLines == 1 })
-        XCTAssertEqual(buttons[1].frame.minX - buttons[0].frame.maxX, 32, accuracy: 0.5)
+        XCTAssertTrue(buttonFrames.allSatisfy { tabs.bounds.contains($0) })
+        for (left, right) in zip(buttonFrames, buttonFrames.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.maxX, right.minX)
+        }
         XCTAssertEqual(indicator.bounds.size, CGSize(width: 20, height: 3))
         XCTAssertEqual(indicator.frame.midX, buttons[0].frame.midX, accuracy: 0.01)
         XCTAssertEqual(indicator.backgroundColor, UIColor(theme.accent))

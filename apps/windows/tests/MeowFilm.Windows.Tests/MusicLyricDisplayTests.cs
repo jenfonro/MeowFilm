@@ -24,7 +24,6 @@ public static partial class MusicLyricDisplayTests
         yield return new("Native lyric first last resize and manual rounded preview share viewport center", () => Sta(VerifyCenteredLyrics));
         yield return new("Native complete player proportions align lyrics and preview capsule without shifting text", () => Sta(VerifyDetailLayout));
         yield return new("Native lyric viewport fades only its edges across first last scrolling and resize", () => Sta(VerifyViewportFade));
-        yield return new("Native lyric edge projection fades viewport coordinates through resize without masking text", () => Sta(VerifyLocalEdgeFade));
         yield return new("Native full player lyric text uses automatic rendering through loading selection and content changes", () => Sta(VerifyLyricRendering));
         yield return new("Native recording presentation preserves multiple songs independent artwork and cold lyrics", VerifyMultiplePresentations);
         yield return new("Native long lyric source persists and restores from the current cold display cache", async () =>

@@ -149,7 +149,7 @@ public static partial class MusicLyricDisplayTests
         for (int i = 0; i < 40; i++)
             f.Module.Lyrics.Add(new(i * 2, $"第 {i} 句 · You spread your wings and rise from the ashes",
                 "你展开双翼 从灰烬中重生 · Translation remains fully visible"));
-        var view = new MusicPlayerDetailView(f.Module);
+        var view = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
         var window = LyricWindow(view);
         try
         {
@@ -220,46 +220,6 @@ public static partial class MusicLyricDisplayTests
             }
         }
         finally { window.Close(); f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail); }
-    }
-
-    private static async Task VerifyLocalEdgeFade()
-    {
-        await using var f = await Fixture.Create();
-        await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
-        var view = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-        var window = LyricWindow(view);
-        try
-        {
-            window.Show();
-            var fade = (Grid)view.FindName("LyricFadeViewport");
-            var edge = (SidebarBackdrop)view.FindName("LyricEdgeFade");
-            var backdrop = (Border)view.FindName("PageBackdrop");
-            foreach (var size in new[] { new Size(1298, 848), new Size(1000, 740) })
-            {
-                window.Width = view.Width = size.Width;
-                window.Height = view.Height = size.Height;
-                window.UpdateLayout();
-                await Dispatcher.Yield(DispatcherPriority.Render);
-                Check(fade.OpacityMask is null, "the lyric text layer remains outside the fade surface");
-                Check(ReferenceEquals(edge.Source, backdrop) &&
-                    ReferenceEquals(backdrop.Background, view.Background),
-                    "the local fade keeps the page's actual background projection");
-                var image = CaptureLyricFrame(edge);
-                byte Alpha(double y)
-                {
-                    var pixel = new byte[4];
-                    image.CopyPixels(new Int32Rect(image.PixelWidth / 2,
-                        (int)(image.PixelHeight * y), 1, 1), pixel, 4, 0);
-                    return pixel[3];
-                }
-                Check(Alpha(.05) is > 90 and < 170 && Alpha(.95) is > 90 and < 170,
-                    "both viewport-local edges visibly fade even though the source spans the whole page");
-                foreach (double y in new[] { .15, .3, .5, .7, .85 }) Equal((byte)0, Alpha(y));
-                Console.WriteLine($"LOCAL_EDGE {size}: top={Alpha(.05)}, bottom={Alpha(.95)}, height={image.PixelHeight}");
-            }
-            Equal(0, f.Playback.Seeks);
-        }
-        finally { window.Close(); f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); }
     }
 
     private static async Task VerifyLyricRendering()

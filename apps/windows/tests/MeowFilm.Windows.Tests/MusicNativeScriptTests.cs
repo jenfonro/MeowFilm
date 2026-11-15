@@ -11,7 +11,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Windows.Tests;
 
 /// <summary>The native adapter of the shared music module. Management semantics, persistence and the
-/// musicUrl result contract are covered by tests/windows-music-script.test.mjs against real QuickJS.</summary>
+/// musicUrl result contract are covered by tests/music-management.test.mjs against real QuickJS.</summary>
 public static class MusicNativeScriptTests
 {
     public static IEnumerable<TestCase> Cases()
