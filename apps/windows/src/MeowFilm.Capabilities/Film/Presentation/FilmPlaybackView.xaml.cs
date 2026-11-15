@@ -17,6 +17,8 @@ public partial class FilmPlaybackView : UserControl
     private const double MetadataFade = 20;
     private (bool Top, bool Bottom, double Height) metadataFade;
     private FilmPlaybackPage? boundPage, seekingPage;
+    private FilmEpisodeDirectory? shownDirectory;
+    private bool restoringDirectory, shownList;
     private FilmDirectoryDialog? directory;
     private Window? playerWindow;
     private bool pip, selectingControl;
@@ -53,7 +55,7 @@ public partial class FilmPlaybackView : UserControl
             UpdateControlSelections();
             PageScroll.ScrollToTop();
             MetadataScroll.ScrollToTop();
-            EpisodeShelf.ScrollToIndex(0);
+            RestoreDirectory();
             RelatedScroll.ScrollToLeftEnd();
             UpdateMedia();
             ShowPlayerControls();
@@ -147,19 +149,66 @@ public partial class FilmPlaybackView : UserControl
         e.Handled = true;
         if (DataContext is not FilmPlaybackPage page) return;
         page.SetListLayout(false);
-        // Return to the selected episode, including one chosen near the end of the list.
-        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
-        {
-            if (!IsVisible || !ReferenceEquals(DataContext, page)) return;
-            int index = page.SelectedEpisode is { } selected ? page.Episodes.ToList().IndexOf(selected) : 0;
-            EpisodeShelf.ScrollToIndex(index);
-        }));
     }
 
     private void PageChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!Dispatcher.CheckAccess()) { _ = Dispatcher.BeginInvoke(new Action(UpdateMedia)); return; }
-        UpdateMedia();
+        if (!Dispatcher.CheckAccess())
+        {
+            _ = Dispatcher.BeginInvoke(new Action(() => PageChanged(sender, e)));
+            return;
+        }
+        if (e.PropertyName is nameof(FilmPlaybackPage.EpisodeDirectory) or nameof(FilmPlaybackPage.Episodes) or
+            nameof(FilmPlaybackPage.ShowEpisodeList) || string.IsNullOrEmpty(e.PropertyName))
+            RestoreDirectory();
+        if (e.PropertyName == nameof(FilmPlaybackPage.MediaView) || string.IsNullOrEmpty(e.PropertyName))
+            UpdateMedia();
+    }
+
+    private void RestoreDirectory()
+    {
+        bool list = boundPage?.ShowEpisodeList == true;
+        bool changedLayout = list && !shownList;
+        shownList = list;
+        if (!changedLayout && ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory)) return;
+        shownDirectory = boundPage?.EpisodeDirectory;
+        restoringDirectory = true;
+        var directory = shownDirectory;
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            if (!ReferenceEquals(directory, shownDirectory)) return;
+            if (FindScroll(EpisodeList) is { } scroll)
+            {
+                scroll.ScrollToVerticalOffset(directory?.VerticalOffset ?? 0);
+                scroll.UpdateLayout();
+            }
+            restoringDirectory = false;
+        }));
+    }
+
+    private void EpisodeList_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (!restoringDirectory && EpisodeList.IsVisible && ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory) &&
+            shownDirectory is { } directory && e.OriginalSource is ScrollViewer scroll)
+            directory.VerticalOffset = scroll.VerticalOffset;
+    }
+
+    private void EpisodeList_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (FindScroll(EpisodeList) is not { } scroll ||
+            e.Delta > 0 && scroll.VerticalOffset > .5 ||
+            e.Delta < 0 && scroll.ScrollableHeight - scroll.VerticalOffset > .5) return;
+        PageScroll.RaiseEvent(new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
+            { RoutedEvent = Mouse.MouseWheelEvent, Source = PageScroll });
+        e.Handled = true;
+    }
+
+    private static ScrollViewer? FindScroll(DependencyObject parent)
+    {
+        if (parent is ScrollViewer scroll) return scroll;
+        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+            if (FindScroll(VisualTreeHelper.GetChild(parent, index)) is { } child) return child;
+        return null;
     }
 
     private void UpdateMedia()

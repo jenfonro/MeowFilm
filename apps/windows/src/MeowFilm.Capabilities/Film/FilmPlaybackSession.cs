@@ -481,6 +481,8 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     }
 
     private static string DisplayError(FilmPlaybackSnapshot value) =>
+        FilmJson.Text(value.Raw, "errorStage") is "prepare" or "playback" &&
+            FilmJson.Text(value.Raw, "error") is { Length: > 0 } native ? native :
         FilmJson.Text(value.Raw, "metadataError") is { Length: > 0 } metadata ? metadata :
         value.MetadataCache?.ErrorCode is { Length: > 0 } cache ? cache :
         FilmJson.Text(value.Browsing, "error") is { Length: > 0 } browsing ? browsing :
@@ -577,7 +579,8 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             {
                 try
                 {
-                    var failed = await client.CommandAsync(candidateSnapshot.SessionId, "media.failed", new { attemptId = id });
+                    var failed = await client.CommandAsync(candidateSnapshot.SessionId, "media.failed",
+                        new { attemptId = id, code = Code(error) });
                     if (generation == ownerGeneration) Apply(new(failed));
                 }
                 catch (Exception reportError) { page?.SetConnectionError(Code(reportError)); }
@@ -845,9 +848,10 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             }
         }
     }
-    private void MediaFailed(object? sender, EventArgs args) => Track(ReportTerminalAsync("media.failed"));
+    private void MediaFailed(object? sender, EventArgs args) =>
+        Track(ReportTerminalAsync("media.failed", media.FailureCode ?? PlaybackError.PlaybackFailed));
     private void MediaEnded(object? sender, EventArgs args) => Track(ReportTerminalAsync("media.ended"));
-    private async Task ReportTerminalAsync(string action)
+    private async Task ReportTerminalAsync(string action, string? code = null)
     {
         if (current is not { } input || snapshot is not { } state || rpc is not { } client ||
             media.Identity != input.Receipt.AttemptId || input.TerminalReported ||
@@ -879,7 +883,8 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             }
             // Loss before business admission is a failed attempt, not completed viewing.
             var value = await client.CommandAsync(state.SessionId, input.Started ? action : "media.failed",
-                new { attemptId = input.Receipt.AttemptId });
+                new { attemptId = input.Receipt.AttemptId,
+                    code = action == "media.failed" ? code : input.Started ? null : PlaybackError.OpenFailed });
             if (generation == ownerGeneration) Apply(new(value));
             if (progressFailure is not null) throw progressFailure;
         }
@@ -965,6 +970,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                     }
                     pending = null; current = null; processingId = ""; revokedPublicationId = ""; continuingFrom = "";
                     snapshot = null; rpc = null; connection = null; retainedWindow = null; presenting = false;
+                    page?.ReleaseDirectories();
                     rate = 1; aspect = null;
                     runtimeRevoke.Dispose();
                     pendingPublication = null;

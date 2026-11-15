@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -88,6 +89,17 @@ internal static class FilmPlaybackError
         PlaybackError.HttpTruncated or PlaybackError.ReadTruncated => "媒体响应不完整",
         PlaybackError.ResourceRevoked or PlaybackError.ReadRevoked => "媒体授权已失效",
         PlaybackError.RateUnsupported => "当前媒体不支持此倍速",
+        PlaybackError.OpenFailed => "媒体打开失败",
+        PlaybackError.PlaybackFailed or PlaybackError.CallbackFailed => "媒体播放失败",
+        PlaybackError.NativeUnavailable => "媒体引擎不可用",
+        PlaybackError.HttpFormatUnsupported or PlaybackError.ReadFormatUnsupported or PlaybackError.UnsupportedUri => "媒体格式不受支持",
+        PlaybackError.ReadFailed => "媒体读取失败",
+        PlaybackError.ReadSeekFailed => "媒体跳转失败",
+        PlaybackError.ReadChanged => "媒体内容已变更，请重新取址",
+        PlaybackError.HttpServerFailed or PlaybackError.HttpStatusFailed => "媒体服务请求失败",
+        PlaybackError.HttpEncodingUnsupported => "媒体编码不受支持",
+        PlaybackError.HttpInvalidRange or PlaybackError.HttpRangeRejected => "媒体范围读取失败",
+        PlaybackError.AdaptiveEncryptionUnsupported => "媒体加密方式不受支持",
         _ => failure
     };
 }
@@ -165,6 +177,11 @@ internal static class FilmJson
     internal static JsonElement Encode(object value) => JsonSerializer.SerializeToElement(value, Options);
     internal static JsonElement Member(JsonElement value, string name) =>
         value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var member) ? member : default;
+    internal static bool Equal(JsonElement left, JsonElement right) =>
+        left.ValueKind == right.ValueKind &&
+        (left.ValueKind == JsonValueKind.Undefined || JsonElement.DeepEquals(left, right));
+    internal static JsonElement Copy(JsonElement value) =>
+        value.ValueKind == JsonValueKind.Undefined ? default : value.Clone();
     internal static string Text(JsonElement value, string name) => String(Member(value, name));
     internal static string String(JsonElement value) =>
         value.ValueKind == JsonValueKind.String ? value.GetString()! :
@@ -276,15 +293,29 @@ public sealed record FilmSelection(string? Id, string Label, int? Season = null,
 
 public sealed record FilmCandidateItem(string Id, string Name, string Path, string Quality,
     string? Provider, string SourceKey, JsonElement DetailId, JsonElement LineId,
-    int? Season = null, int? Episode = null, int? GlobalEpisode = null)
+    int? Season = null, int? Episode = null, int? GlobalEpisode = null) : INotifyPropertyChanged
 {
     public string DisplayLabel { get; init; } = "";
-    public bool IsSelected { get; init; }
+    public bool IsSelected { get; private set; }
+    internal void Select(bool value)
+    {
+        if (IsSelected == value) return;
+        IsSelected = value;
+        PropertyChanged?.Invoke(this, new(nameof(IsSelected)));
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
     public string Image { get; init; } = "";
     public string Overview { get; init; } = "";
     public JsonElement Resolution { get; init; }
     public JsonElement Fps { get; init; }
     public string Codec { get; init; } = "";
+    internal bool SameDisplay(FilmCandidateItem other) =>
+        Id == other.Id && Name == other.Name && Path == other.Path && Quality == other.Quality &&
+        Provider == other.Provider && SourceKey == other.SourceKey && Season == other.Season &&
+        Episode == other.Episode && GlobalEpisode == other.GlobalEpisode && DisplayLabel == other.DisplayLabel &&
+        Image == other.Image && Overview == other.Overview && Codec == other.Codec &&
+        FilmJson.Equal(DetailId, other.DetailId) && FilmJson.Equal(LineId, other.LineId) &&
+        FilmJson.Equal(Resolution, other.Resolution) && FilmJson.Equal(Fps, other.Fps);
     private static string QualityLabel(string quality) => quality switch
     {
         "4k_hdr" => "4K HDR", "4k_fps" => "4K 60帧", "4k" => "4K", "1080p" => "1080P", "720p" => "720P",
@@ -299,8 +330,8 @@ public sealed record FilmCandidateItem(string Id, string Name, string Path, stri
             FilmJson.Integer(value, "season"), FilmJson.Integer(value, "episode"), FilmJson.Integer(value, "globalEpisode"))
         {
             DisplayLabel = QualityLabel(FilmJson.Text(value, "quality")) + " · " + FilmJson.Text(source, "name"),
-            Resolution = FilmJson.Member(value, "resolution"),
-            Fps = FilmJson.Member(value, "fps"),
+            Resolution = FilmJson.Copy(FilmJson.Member(value, "resolution")),
+            Fps = FilmJson.Copy(FilmJson.Member(value, "fps")),
             Codec = FilmJson.Text(value, "codec")
         };
     }

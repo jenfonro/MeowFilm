@@ -165,6 +165,14 @@ full。一个 32 MiB 有界内存缓存拥有数据、完整度、过期时间�
 `<dataRoot>/film-metadata/<provider>/<身份散列>.json` 原子持久，复用相同缓存owner；
 请求身份不以明文文件名或持久请求对象泄露凭据。历史／人工匹配／屏蔽属于独立资料库。
 
+会话保留已读取资料的线路／季集投影及浏览选择，不拥有第二份 TTL。
+每次浏览 detail 仍经过 data owner 的来源有效性和缓存判定；相同不可变条目或实际相同内容
+复用规整详情、完整识别目录和所选线路投影，不因取址、失败或进度快照重新识别。
+分享扩展从原 detail 的分享行重新交给 data owner 判定盘列表／账号有效性，
+不能以已展开的展示行绕过列表期限。真实资料变化更新投影，撤权或会话释放不保留旧目录资格。
+元数据季集 map 按资料引用复用，可见集另随北京时间日期和 preview 改变；
+已加载季和关联资料不变时切回沿用原投影。上述引用只用于派生复用，不替代来源／账号／配置验证。
+
 元数据状态是组件级的 `ready/empty/missing/failed`；正常空值和未公布排期是成功数据，
 摘要不能冒充详情，季度概要不能冒充逐集响应。`metadata.entry.cache` 包含
 `status:'fresh'|'stale'`、可选 `error:{code}` 及 `components`；各成功组件保留各自
@@ -254,7 +262,7 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   不重新匹配、继续全站搜索或替换其他文件。
 - `search.more` 只加载尚未完成来源的下一页；菜单打开不产生请求。
   `browse {sourceId,lineId?}` 只读所选 detail／必要分享列表，`sourceId:null` 返回
-  纯 metadata。完整线路不重复请求盘列表。
+  纯 metadata。切回已加载线路沿用上次选择，盘列表有效命中不重复请求上游。
 - `browse.metadata {metadataSourceId,keepSource?}` 只能选择已证明关联；
   `keepSource:true` 保留当前站点／线路，只切分季资料。关联查询不阻塞主资料匹配。
   同一作品的豆瓣 subject 按已确认分季归入一个豆瓣选项，各季保留原 subject 身份。
@@ -270,6 +278,8 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
 - `browse.refresh {refresh?}` 默认显式刷新当前元数据及所看季、或准确站点详情／线路目录。
   `refresh:false` 用于普通页面恢复，仅让owner判定是否过期／缺资料，不强刷。
   保留旧成功展示并报告刷新错误，不更换当前播放文件、目标坐标或媒体lease。
+  已加载目录在校验期间以 `browsing.refreshing:true` 保留 rows，不先发布空目录再还原。
+  新成功资料已删除的线路／文件不能因随后扩展失败而回滚复活。
   snapshot 的 `metadataCache` 报告资料/当前季刷新状态；`metadataSupplement` 仅在豆瓣
   与唯一TMDB可靠关联时提供原TMDB资料供图文／演职员／相似作品填缺，不改主身份或季集。
 - `select.episode {episode}` 选择真实 metadata 坐标；
@@ -322,9 +332,11 @@ data: JSON
 只保留当前状态并随背压合并，不积累无限事件历史。重新连接先交当前快照；
 断开观察不关闭业务会话，也不停止实际媒体。snapshot 含 entryTarget、entrySurface、target、stage、metadata、
 metadataSources、sources、search、browsing、episodes、candidates、attempt、current、
-preferences、error、reportError 和 prefetch；不含 URL、头、分享密码、playId 或 DRM key。
+preferences、error、errorStage、reportError 和 prefetch；不含 URL、头、分享密码、playId 或 DRM key。
+仍发送完整快照，sequence 语义不变；没有新增目录 revision 或差量协议。
 
-`browsing.episodes` 是具体站源按可靠季映射过滤的选集；失败时为空，错误由客户端
+`browsing.episodes` 是具体站源按可靠季映射过滤的选集；首次加载失败或线路真实缺失时为空，
+已有有效展示的刷新失败不清空目录。错误由客户端
 统一浮层显示，来源菜单仍可切换。`browsing.originalEpisodes` 保留完整所选线路供原始目录，
 目录浏览不转存、不自动播放。纯 metadata 的 `episodes` 仅包含真实资料。
 电影候选按质量排序；原生提供固定宽度、截断长文案。
@@ -348,11 +360,23 @@ preferences、error、reportError 和 prefetch；不含 URL、头、分享密码
 同文件 variant 切换承接进度与暂停，失败后允许同父其它真实质量续选。
 网盘 prepare 仍按原稳定文件身份复用，普通 provider play 不增加 transcode／quality 参数。
 
-原生在真实输出后发送 `media.started {attemptId}`；`media.failed` 统一续选；
+原生在真实输出后发送 `media.started {attemptId}`；
+`media.failed {attemptId,code?}` 只接受准确 pending／current attempt，按既有排除／续选规则处理；
 `media.progress {attemptId,position,duration,paused}` 为秒；`media.ended` 触发真实
 下一集或 ended。历史只在真实播放后写入，进度节流为 12 秒，暂停、停止、结束强制。
 观看上报仅在 play 明确返回 `watchReport:true` 时调用正式 report action，准确保留
 原 flag/id，拒绝任意回调 URL。错误单独显示在 `reportError`。
+
+`code` 只允许双方公开 native 播放失败码及既有 Film／Bridge 安全业务码的有限白名单，
+不接受任意文本、URL 或 PiP 控制错误。native 阶段由 pending／current 推导为
+`prepare`／`playback`，业务回执码为 `receipt`；最终 `error` 对应该反馈时附带可空
+`errorStage`。未传 code 仍走同一入口；通用 `FAILED` 归为 `UPSTREAM_ERROR`／`receipt`，
+不伪造原生原因，未登记码拒绝为 `INVALID_REQUEST`。反馈码仅进入快照，不作为 RPC 失败重新抛出。
+同一次自动续选保留首次原生原因，后续取址泛错不覆盖；真实输出成功、定向重试或新的播放动作
+重置该原因，旧输出的反馈不能污染后发动作。Cat／source 请求失败按其有限公开码映射为
+HTTP、格式、脚本、权限、来源状态等类别，未知错误仍为 `UPSTREAM_ERROR`。
+选择期间继续发布真实来源／候选失败进展，但不反复发布临时 `session.error`；
+最终无可用结果才发布准确失败。不改变准确文件播放的匹配范围。
 
 候选 prepare／commit 与旧输入退役是两阶段。native dispose 通过三身份释放 lease；
 已释放 receipt 不能再次获取或 started，但内部当前／候选至多两个身份仍可接受

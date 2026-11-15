@@ -666,12 +666,26 @@
      </DataTemplate></ItemsControl.ItemTemplate>
     </ItemsControl>
     <local:Shelf x:Name="EpisodeShelf" ItemsSource="{Binding Episodes}" MinimumCardWidth="208"
+                 HorizontalOffset="{Binding EpisodeDirectory.HorizontalOffset,Mode=TwoWay}"
                  NavigationButtonStyle="{StaticResource Film.ShelfArrow}"
                  Visibility="{Binding ShowEpisodeCards,Converter={StaticResource MeowFilm.BoolToVisibility}}"
                  CardTemplate="{StaticResource Film.EpisodeCard}"
                  AutomationProperties.Name="横向选集列表"/>
     <ItemsControl x:Name="EpisodeList" ItemsSource="{Binding Episodes}" AutomationProperties.Name="逐集列表"
+                  MaxHeight="{Binding ActualHeight,ElementName=PageScroll}"
+                  VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                  VirtualizingPanel.ScrollUnit="Pixel" ScrollViewer.CanContentScroll="True"
+                  ScrollViewer.ScrollChanged="EpisodeList_ScrollChanged"
+                  PreviewMouseWheel="EpisodeList_MouseWheel"
                   Visibility="{Binding ShowEpisodeList,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+     <ItemsControl.Template><ControlTemplate TargetType="ItemsControl">
+      <ScrollViewer CanContentScroll="True" HorizontalScrollBarVisibility="Disabled"
+                    VerticalScrollBarVisibility="Auto" PanningMode="VerticalOnly"
+                    Style="{StaticResource MeowFilm.OverlayScrollViewer}">
+       <ItemsPresenter/>
+      </ScrollViewer>
+     </ControlTemplate></ItemsControl.Template>
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
      <ItemsControl.ItemTemplate><DataTemplate>
       <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" Margin="0,0,0,16"
               local:CardMotion.Enabled="True" Tag="{Binding}" Click="Episode_Click" IsEnabled="{Binding CanSelect}"

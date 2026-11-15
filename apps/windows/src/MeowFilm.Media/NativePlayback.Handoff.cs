@@ -34,6 +34,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
     private long _handoffSequence;
     private Task? _handoffRetirement;
     private Task<bool>? _handoffPreparation;
+    private Task? _handoffCommit;
     // Per-instance native-worker observation used by deterministic lifecycle tests.
     private Action<MediaPlayer?>? _handoffWorkerCompleted = null;
 
@@ -256,6 +257,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         if (prepared?.Resource is { } resource) resource.CheckCurrent();
         if (prepared is null || _handoffFailure is not { } failure ||
             _runtimeHandoffIntent is not null && !prepared.RuntimeOutputReady ||
+            _handoffPreparation is not { IsCompletedSuccessfully: true } ||
             _handoffReady is not { Task.IsCompletedSuccessfully: true } ||
             _handoffOpening is not { IsCancellationRequested: false } ||
             _handoffTarget is not { } target || !HandoffScopeCurrent(target))
@@ -264,10 +266,15 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             throw Error(PlaybackError.Superseded);
         }
         bool failed = false;
+        TaskCompletionSource? commit = null;
         await _commands.WaitAsync(token);
         try
         {
             if (!CommitAllowed()) return false;
+            // Discard can run while these native controls yield the dispatcher.
+            // Its drain must join this use before stopping or disposing the candidate.
+            commit = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            _handoffCommit = commit.Task;
             var current = _session;
             float rate = current is { Released: false } ? current.Player.Rate : _retiredHandoffRate;
             await Task.Run(() =>
@@ -349,7 +356,15 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             if (runtimeIntent is not null) ObserveVideoOutput(prepared);
             if (current is not null) failed = await ReleaseNativeAsync(current, detachView: false);
         }
-        finally { _commands.Release(); }
+        finally
+        {
+            if (commit is not null)
+            {
+                if (ReferenceEquals(_handoffCommit, commit.Task)) _handoffCommit = null;
+                commit.TrySetResult();
+            }
+            _commands.Release();
+        }
         if (failed)
         {
             _releaseFaulted = true;
@@ -406,14 +421,8 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
     {
         ThrowIfDisposed();
         if (_releaseFaulted) throw Error(PlaybackError.ReleaseFailed);
-        var current = _session;
         _handoffDonorRetired = true;
-        if (current is not null)
-        {
-            CaptureHandoffControls(current);
-            current.Player.Mute = true;
-            current.Invalidate();
-        }
+        _session?.Invalidate();
         _handoffOpening?.Cancel();
         Set(ref _isPlaying, false, nameof(IsPlaying));
         Set(ref _hasMedia, false, nameof(HasMedia));
@@ -422,6 +431,11 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         try
         {
             if (_generation != generation) return;
+            if (_session is { Released: false } current)
+            {
+                CaptureHandoffControls(current);
+                current.Player.Mute = true;
+            }
             await RetireAsync();
         }
         finally { _commands.Release(); }
@@ -468,6 +482,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         var window = _runtimeHandoffWindow;
         var detach = _handoffDetach;
         var preparation = _handoffPreparation;
+        var commit = _handoffCommit;
         var intent = _runtimeHandoffIntent;
         var preceding = _handoffRetirement is { IsCompletedSuccessfully: false } ? _handoffRetirement : null;
         // Admit the new owner before old resources asynchronously drain. A stale
@@ -475,9 +490,11 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         _runtimeHandoffWindow = null; _runtimeHandoffIntent = nextRuntimeIntent;
         _handoffOpening = null; _handoffSession = null; _handoffReady = null; _handoffFailure = null; _handoffTarget = null;
         _handoffPreparation = null;
+        _handoffCommit = null;
         _handoffLifetime = default;
         _handoffDetach = null;
-        var retirement = opening is null && prepared is null && window is null && detach is null && preparation is null
+        var retirement = opening is null && prepared is null && window is null && detach is null &&
+            preparation is null && commit is null
             ? preceding ?? Task.CompletedTask : Drain();
         _handoffRetirement = retirement;
         if (intent is not null) intent.Retirement ??= retirement;
@@ -498,6 +515,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             catch { failed = true; }
             try { if (preparation is not null) failed |= await preparation; }
             catch { failed = true; }
+            if (commit is not null) await commit;
             try { opening?.Dispose(); }
             catch { failed = true; }
             try { if (prepared is not null) failed |= await ReleaseNativeAsync(prepared, detachView: false); }

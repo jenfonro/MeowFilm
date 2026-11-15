@@ -23,9 +23,26 @@ const errorCodes = new Set([
   'CAPABILITY_UNAVAILABLE', 'UNSUPPORTED_OPERATION', 'PAN_FAILURE', 'SOURCE_FAILURE', 'CAT_FAILURE',
   'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'STORAGE_ERROR', 'CORRUPT_STORAGE',
   'MEDIA_UNAVAILABLE', 'INVALID_RULES', 'CACHE_LOAD_FAILED', 'STALE_METADATA',
+  'PERMISSION_DENIED', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED', 'COMMIT_UNKNOWN',
 ]);
+const sourceErrorCodes = {
+  INVALID_ARGUMENT: 'INVALID_REQUEST', HOST_CLOSED: 'CLOSED', SERVICE_CLOSED: 'CLOSED',
+  STALE_SESSION: 'STALE_SOURCE', DISABLED: 'SOURCE_DISABLED', STARTING: 'CAPABILITY_UNAVAILABLE',
+  LIMIT: 'RESOURCE_LIMIT', UPSTREAM_HTTP_ERROR: 'UPSTREAM_HTTP', HTTP_ERROR: 'UPSTREAM_HTTP',
+  INVALID_JSON: 'UPSTREAM_FORMAT', INVALID_RESPONSE: 'UPSTREAM_FORMAT',
+  SCRIPT_EXCEPTION: 'SCRIPT_FAILURE', SERVICE_ERROR: 'CAT_FAILURE',
+  SOURCE_INTEGRITY: 'SOURCE_FAILURE', SOURCE_ENCODING: 'SOURCE_FAILURE',
+  SOURCE_CLEANUP: 'SOURCE_FAILURE', SCRIPT_CLEANUP: 'SCRIPT_FAILURE',
+  UNSUPPORTED_PROTOCOL: 'UNSUPPORTED_OPERATION', UNSUPPORTED_ACTION: 'UNSUPPORTED_OPERATION',
+  UNSUPPORTED_RULE: 'UNSUPPORTED_OPERATION', UNSUPPORTED_DEPENDENCY: 'CAPABILITY_UNAVAILABLE',
+  UNSUPPORTED_SCRIPT_ASYNC: 'SCRIPT_PROTOCOL_ERROR', UNSUPPORTED_OPTION: 'UNSUPPORTED_OPERATION',
+  UNSUPPORTED_CRYPTO: 'CAPABILITY_UNAVAILABLE', VIRTUAL_ROUTE_NOT_FOUND: 'NOT_FOUND',
+  UNMAPPED_LOCAL_URL: 'UPSTREAM_FORMAT', STORAGE_CONFLICT: 'STORAGE_ERROR',
+  ALREADY_EXISTS: 'CAT_FAILURE', SERVICE_EXISTS: 'CAT_FAILURE', ROLLBACK_UNAVAILABLE: 'UNSUPPORTED_OPERATION',
+};
 const safeError = error => fail(error?.name === 'AbortError' ? 'CANCELLED'
-  : errorCodes.has(error?.code) ? error.code : 'UPSTREAM_ERROR');
+  : errorCodes.has(error?.code) ? error.code
+    : Object.hasOwn(sourceErrorCodes, error?.code) ? sourceErrorCodes[error.code] : 'UPSTREAM_ERROR');
 const accountDependency = (provider, revision) => ({ kind: 'account', domain: provider,
   ...(revision === undefined ? {} : { revision }) });
 
@@ -287,7 +304,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       return clone(searchPage(entry.value, page));
     });
   }
-  async function detail(source, detailId, { signal, canSchedule, refresh = false } = {}) {
+  async function detailEntry(source, detailId, { signal, canSchedule, refresh = false } = {}) {
     source = checkSource(source);
     requireValue(isIdentifier(detailId));
     const deps = sourceDependencies(source);
@@ -298,8 +315,11 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
         detailValue(raw, source, detailId);
         return raw;
       }, { ttl: HOUR, dependencies: deps, signal: ownedSignal, checkSchedule, refresh });
-      return detailValue(clone(entry.value), source, detailId);
+      return entry;
     });
+  }
+  async function detail(source, detailId, options = {}) {
+    return detailValue(clone((await detailEntry(source, detailId, options)).value), source, detailId);
   }
   async function readAccounts(signal, deps = providers.map(provider => accountDependency(provider)), checkSchedule) {
     const value = await call('pan', 'settings.get', {}, signal, deps, checkSchedule);
@@ -910,7 +930,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       .then(() => metadataCache.close());
     return closing;
   }
-  return { catalog, search, detail, expand, metadata, metadataEntry, targetMetadata, targetMetadataEntry, tmdbTargetEntry,
+  return { catalog, search, detail, detailEntry, expand, metadata, metadataEntry, targetMetadata, targetMetadataEntry, tmdbTargetEntry,
     seasonMetadata, seasonMetadataEntry, metadataSources, resolve, refresh, invalidateAddress,
     report, accounts, seed, handoff, cachedEntry, invalidate, close };
 }

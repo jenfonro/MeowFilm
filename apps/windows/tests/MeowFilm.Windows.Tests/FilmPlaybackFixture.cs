@@ -356,6 +356,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
     public string? Identity { get; private set; }
     public bool HasOutput { get; private set; }
     public bool Buffering { get; private set; }
+    public string? FailureCode { get; private set; }
     public bool Paused { get; private set; }
     public double Position { get; private set; }
     public double Duration { get; private set; } = 600;
@@ -456,6 +457,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
     internal async Task TerminalAsync(bool ended)
     {
         long terminalGeneration = generation;
+        FailureCode = ended ? null : PlaybackError.PlaybackFailed;
         HasOutput = false; Scope = null;
         SetBuffering(false);
         if (AcceptedLease is { } lease) { AcceptedLease = null; await lease.DisposeAsync(); }

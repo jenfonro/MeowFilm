@@ -28,30 +28,49 @@ export function createMetadataRequest() {
   };
 }
 
-async function imageExchange(url, headers, signal) {
+export function createMetadataImageTransport() {
+  const agents = { 'http:': new http.Agent({ keepAlive: true }), 'https:': new https.Agent({ keepAlive: true }) };
+  return {
+    open: (target, signal) => openMetadataImage(target, signal, agents),
+    async close() {
+      const sockets = new Set(Object.values(agents).flatMap(agent =>
+        [...Object.values(agent.sockets).flat(), ...Object.values(agent.freeSockets).flat()]));
+      const drained = [...sockets].map(socket => socket.closed ? undefined
+        : new Promise(done => socket.once('close', done)));
+      for (const agent of Object.values(agents)) agent.destroy();
+      await Promise.all(drained);
+    },
+  };
+}
+
+async function imageExchange(url, headers, signal, agents) {
   const resources = [], drained = [];
-  let disposing;
+  let request, response, disposing;
   function own(resource) {
     resources.push(resource);
     drained.push(new Promise(done => resource.once('close', done)));
     return resource;
   }
   const dispose = () => disposing ??= (async () => {
+    // A completed response has detached its socket for reuse. Only an
+    // unfinished exchange still owns a socket whose close must be awaited.
+    const socket = request?.socket;
+    const socketClosed = !response?.readableEnded && socket && !socket.closed
+      ? new Promise(done => socket.once('close', done)) : undefined;
     for (const resource of resources) resource.destroy();
-    await Promise.all(drained);
+    await Promise.all([...drained, socketClosed]);
   })();
   try {
-    const response = await new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
       const target = new URL(address(url));
       const transport = target.protocol === 'https:' ? https : http;
-      const request = own(transport.request(target, { method: 'GET', agent: false, signal,
+      request = own(transport.request(target, { method: 'GET', agent: agents[target.protocol], signal,
         headers: { ...headers, 'accept-encoding': 'identity' } }, reply => {
-        own(reply);
+        response = own(reply);
         // The stream can fail before the bridge has installed its pipeline.
         reply.on('error', () => {});
-        resolve(reply);
+        resolve();
       }));
-      request.once('socket', own);
       request.on('error', () => reject(metadataFailure(signal.aborted ? 'CANCELLED' : 'NETWORK_ERROR')));
       request.end();
     });
@@ -138,11 +157,11 @@ function inspectImageStart(response, signal) {
 }
 
 /** Returns an owned stream, never a buffered image or an upstream redirect.
- * dispose waits for the real request, response and socket to close. */
-export async function openMetadataImage({ url, headers }, signal) {
+ * dispose drains request/response closure; unfinished sockets are revoked. */
+async function openMetadataImage({ url, headers }, signal, agents) {
   for (let hop = 0; ; hop++) {
     if (signal.aborted) throw metadataFailure('CANCELLED');
-    const exchange = await imageExchange(url, headers, signal);
+    const exchange = await imageExchange(url, headers, signal, agents);
     const { response, dispose } = exchange;
     try {
       if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
