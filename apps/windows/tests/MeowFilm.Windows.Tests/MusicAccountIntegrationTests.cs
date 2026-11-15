@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.IO;
 using System.Text;
@@ -13,6 +15,7 @@ using MeowFilm.Capabilities.Library;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
+using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -178,6 +181,8 @@ public static class MusicAccountIntegrationTests
             }
             finally { window.Close(); }
         });
+        yield return Case("visible WY QR polling respects owner cooldown and stops when login closes", VisibleQrPolling);
+        yield return Case("QR waiting states retain popup text without notices and terminal results notify once", QrNotices);
         yield return Case("native import cancellation before validation cannot persist late credentials", async () =>
         {
             await using var f = await Fixture.Create();
@@ -354,6 +359,123 @@ public static class MusicAccountIntegrationTests
             }
             finally { await Unknown(f.DisposeAsync().AsTask()); }
         });
+    }
+    private static async Task VisibleQrPolling()
+    {
+        await using var f = await Fixture.Create();
+        f.Module.SelectedAccount = f.Module.Accounts[0];
+        f.Transport.LimitQrPolling = true;
+        var view = new MusicAccountsView { DataContext = f.Module };
+        var window = new Window { Content = view, Width = 620, Height = 1000,
+            Left = -32000, Top = -32000, ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+        var popup = (Popup)view.FindName("LoginPopup");
+        try
+        {
+            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            popup.IsOpen = true;
+            await f.Module.BeginAccountQrAsync();
+            await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+            Check(popup.IsOpen && ((Image)view.FindName("AccountQrImage")).IsVisible);
+            await Until(() => f.Transport.QrPollTimes.Count >= 2 && !f.Module.AccountBusy);
+            var polls = f.Transport.QrPollTimes.ToArray();
+            Check(polls.Length >= 2 && Volatile.Read(ref f.Transport.QrRateLimits) == 0 &&
+                f.Module.HasAccountQr && f.Module.AccountStatus == "等待扫码");
+            Check(polls.Zip(polls.Skip(1), (before, after) => Stopwatch.GetElapsedTime(before, after))
+                .All(interval => interval >= TimeSpan.FromSeconds(3)));
+            int stopped = f.Transport.QrPollTimes.Count;
+            popup.IsOpen = false;
+            await Until(() => !f.Module.HasAccountQr && !f.Module.AccountBusy);
+            await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+            await Task.Delay(TimeSpan.FromMilliseconds(3300));
+            Check(f.Transport.QrPollTimes.Count == stopped && Volatile.Read(ref f.Transport.QrRateLimits) == 0);
+        }
+        finally { window.Close(); await f.Module.LeaveAccountQrAsync(); }
+    }
+    private static async Task QrNotices()
+    {
+        foreach (bool expired in new[] { false, true })
+        {
+            await using var f = await Fixture.Create();
+            f.Module.SelectedAccount = f.Module.Accounts[0];
+            var view = new MusicAccountsView { DataContext = f.Module };
+            var window = new Window { Content = view, Width = 620, Height = 1000,
+                Left = -32000, Top = -32000, ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+            var popup = (Popup)view.FindName("LoginPopup");
+            var qrMode = (Button)view.FindName("QrModeButton");
+            var smsMode = (Button)view.FindName("SmsModeButton");
+            var qrText = ((StackPanel)view.FindName("QrPanel")).Children.OfType<TextBlock>().Single();
+            var notices = new List<DesktopNoticeEventArgs>();
+            window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, notice) =>
+            { if (notice.Message.Length > 0) notices.Add(notice); }));
+            try
+            {
+                window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+                popup.IsOpen = true;
+                smsMode.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                await f.Module.BeginAccountQrAsync();
+                await CheckVisibleStatus("等待扫码");
+                foreach (string state in new[] { "waiting", "waiting", "confirming", "confirming", "waiting", "confirming" })
+                {
+                    // SMS mode has stopped the view's automatic loop before manual admission.
+                    await Until(() => !f.Module.AccountBusy);
+                    int before = f.Transport.QrPollTimes.Count;
+                    string previous = f.Module.AccountStatus;
+                    await f.Configure(new { qrStatus = state });
+                    f.Transport.HoldQrPoll = true; f.Transport.Arrived = Signal(); f.Transport.Release = Signal();
+                    var poll = f.Module.CheckAccountQrAsync();
+                    try
+                    {
+                        await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                        await CheckVisibleStatus(previous);
+                    }
+                    finally
+                    {
+                        f.Transport.Release.TrySetResult();
+                        await poll.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    await CheckVisibleStatus(state == "waiting" ? "等待扫码" : "等待确认");
+                    Check(f.Transport.QrPollTimes.Count == before + 1 && f.Module.HasAccountQr);
+                }
+                await Until(() => !f.Module.AccountBusy);
+                await f.Configure(new { qrStatus = "authenticated", expired });
+                int terminalPolls = f.Transport.QrPollTimes.Count;
+                await f.Module.CheckAccountQrAsync();
+                await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                string expected = expired ? "会话无效或已过期" : "会话验证成功";
+                Check(!f.Module.HasAccountQr && f.Module.AccountStatus == expected &&
+                    f.Module.SelectedAccount!.State == (expired ? "none" : "verified"));
+                Check(notices.Count == 1 && notices[0].Message == expected && view.IsAncestorOf(notices[0].Outlet));
+                var accountOutlet = notices[0].Outlet;
+                await f.Calls.CompleteInternalAccountReadAsync(f.Module, "tx");
+                await f.Module.CheckAccountQrAsync();
+                await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                Check(f.Module.AccountStatus == expected);
+                Check(f.Transport.QrPollTimes.Count == terminalPolls + 1);
+                Check(notices.Count(notice => ReferenceEquals(notice.Outlet, accountOutlet)) == 1);
+            }
+            finally
+            {
+                f.Transport.Release?.TrySetResult();
+                window.Close(); await f.Module.LeaveAccountQrAsync();
+            }
+
+            async Task CheckVisibleStatus(string expected)
+            {
+                qrMode.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                try
+                {
+                    await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                    Check(popup.IsOpen && qrText.IsVisible && qrText.Text == expected &&
+                        f.Module.AccountStatus == expected && notices.Count == 0);
+                }
+                finally
+                {
+                    smsMode.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                }
+            }
+        }
     }
     private static async Task DetailsDisplayFailure()
     {
@@ -745,6 +867,11 @@ public static class MusicAccountIntegrationTests
         throw new InvalidOperationException("Expected " + expected);
     }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static async Task Until(Func<bool> condition)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        while (!condition()) await Task.Delay(20, deadline.Token);
+    }
     private static string? AccountState(JsonElement result) => result.GetProperty("items")[0].GetProperty("state").GetString();
     private static async Task Unknown(Task task)
     {
@@ -876,18 +1003,32 @@ public static class MusicAccountIntegrationTests
         public string QrStatus = "waiting";
         public string? CatalogFailure;
         public int Requests, CatalogRequests, Verifications;
+        public readonly ConcurrentQueue<long> QrPollTimes = new();
+        public int QrRateLimits;
+        private long? lastQrPoll;
         public bool Expired;
         public TaskCompletionSource? Arrived, Release;
-        public bool HoldValidation, HoldCatalog;
+        public bool HoldValidation, HoldCatalog, HoldQrPoll, LimitQrPolling;
         internal async Task<JsonElement> Respond(MusicPlatformRuntimeFixture.Call call, CancellationToken cancellationToken)
         {
             if (call.Operation == "qr.cancel") return MusicPlatformRuntimeFixture.Json(new { cancelled = true });
             Interlocked.Increment(ref Requests);
             if (call.Operation == "qr.create") {
+                lastQrPoll = null;
                 return MusicPlatformRuntimeFixture.Json(new { challengeId = call.Parameters.GetProperty("challengeId").GetString(),
                     url = "https://music.163.com/login?codekey=SYNTHETIC_QR", expiresAt = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeMilliseconds(), imageBase64 = (string?)null });
             }
             if (call.Operation == "qr.poll") {
+                long now = Stopwatch.GetTimestamp();
+                QrPollTimes.Enqueue(now);
+                if (LimitQrPolling && lastQrPoll is { } previous &&
+                    Stopwatch.GetElapsedTime(previous, now) < TimeSpan.FromSeconds(3))
+                {
+                    Interlocked.Increment(ref QrRateLimits);
+                    throw new MusicPlatformException("RATE_LIMITED");
+                }
+                lastQrPoll = now;
+                if (HoldQrPoll) { HoldQrPoll = false; Arrived!.TrySetResult(); await Release!.Task.WaitAsync(cancellationToken); }
                 if (QrStatus != "authenticated") return MusicPlatformRuntimeFixture.Json(new { status = QrStatus });
                 if (Expired) throw new MusicPlatformException("AUTH_EXPIRED");
                 Interlocked.Increment(ref Verifications);

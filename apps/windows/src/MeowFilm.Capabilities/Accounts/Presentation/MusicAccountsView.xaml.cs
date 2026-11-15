@@ -343,7 +343,7 @@ public partial class MusicAccountsView : UserControl
             while (QrVisible && ReferenceEquals(observed, owner) &&
                 owner.HasAccountQr && owner.AccountQrIdentity == challenge)
             {
-                await Task.Delay(TimeSpan.FromSeconds(2), cancellation.Token);
+                await Task.Delay(TimeSpan.FromSeconds(3), cancellation.Token);
                 if (!QrVisible || !ReferenceEquals(observed, owner) || !owner.HasAccountQr ||
                     owner.AccountQrIdentity != challenge) break;
                 if (owner.CanCheckAccountQr) await owner.CheckAccountQrAsync(cancellation.Token);

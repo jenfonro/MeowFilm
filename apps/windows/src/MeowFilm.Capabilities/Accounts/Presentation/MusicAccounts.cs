@@ -66,10 +66,11 @@ public sealed partial class MusicCapability
     public bool AccountBusy => accountCancellation is not null || !accountSettlement.IsCompleted;
     public bool CanManageAccount => !stopping && !accountTransferBusy && selectedAccount is not null && !AccountBusy && !accountQrSaving;
     public string AccountStatus => accountStatus;
+    public string AccountNotice => accountStatus is "等待扫码" or "等待确认" ? "" : accountStatus;
     private void AccountBindings()
     {
         foreach (string property in new[] { nameof(SelectedAccount), nameof(SelectedAccountPlatform), nameof(AccountBusy),
-            nameof(CanManageAccount), nameof(CanTransferAccounts), nameof(AccountStatus) }) Changed(property);
+            nameof(CanManageAccount), nameof(CanTransferAccounts), nameof(AccountStatus), nameof(AccountNotice) }) Changed(property);
         AccountQrBindings();
         AccountSmsBindings();
         AccountDetailsBindings();
@@ -258,7 +259,8 @@ public sealed partial class MusicCapability
         accountMayWrite = operation != "sms.send" && (operation != "qr.begin" || platform == "kg");
         if (!accountSmsOperation) ClearAccountSms();
         if (operation != "qr.poll") { ClearAccountQr(); RetireCatalogSession(); }
-        accountStatus = ""; AccountBindings();
+        if (operation != "qr.poll") accountStatus = "";
+        AccountBindings();
         try { await RunAsync(async () =>
         {
             if (stopping || epoch != accountEpoch) return;
