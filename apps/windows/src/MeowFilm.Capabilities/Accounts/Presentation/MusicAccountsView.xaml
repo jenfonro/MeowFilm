@@ -222,7 +222,7 @@
            Style="{StaticResource Settings.Button32}" Margin="0,16,0,0"
            Visibility="{Binding LibrarySync.HasConfirmation,Converter={StaticResource MeowFilm.BoolToVisibility}}"
            IsEnabled="{Binding LibrarySync.CanEdit}"/>
-   <desktop:NoticeOutlet Message="{Binding AccountStatus}"/>
+   <desktop:NoticeOutlet Message="{Binding AccountNotice}"/>
    <desktop:NoticeOutlet Message="{Binding FeedbackStatus}"/>
    <desktop:NoticeOutlet Message="{Binding LibrarySync.Status}"/>
   </StackPanel>
