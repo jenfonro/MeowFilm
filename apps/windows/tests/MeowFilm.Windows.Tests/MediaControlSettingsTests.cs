@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using System.Windows.Input;
 using MeowFilm.AppHost;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 using static MeowFilm.Windows.Tests.QualityFixture;
@@ -58,7 +59,7 @@ public static class MediaControlSettingsTests
     {
         var store = new DocumentStore();
         store.Data[AppAppearance.DocumentNamespace] = [1, 2, 3];
-        store.Data["music.library.v1"] = [4, 5, 6];
+        store.Data[MusicLibraryOwner.DocumentNamespace] = [4, 5, 6];
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         await owner.SaveAsync(owner.Preferences with { GlobalEnabled = false });
@@ -80,7 +81,7 @@ public static class MediaControlSettingsTests
         Check(data["bindings"]![0]!["global"] is null, "cleared keys remain unassigned after persistence");
         Check(store.WriteNames.SetEquals([AppMediaControlSettings.DocumentNamespace]));
         Check(store.Data[AppAppearance.DocumentNamespace].SequenceEqual(new byte[] { 1, 2, 3 }));
-        Check(store.Data["music.library.v1"].SequenceEqual(new byte[] { 4, 5, 6 }));
+        Check(store.Data[MusicLibraryOwner.DocumentNamespace].SequenceEqual(new byte[] { 4, 5, 6 }));
     }
     private static async Task WriteFailures()
     {

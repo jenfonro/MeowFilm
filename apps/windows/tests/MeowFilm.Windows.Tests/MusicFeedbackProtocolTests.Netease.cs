@@ -1,6 +1,3 @@
-using System.Net;
-using System.Net.Http;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Feedback;
@@ -12,8 +9,6 @@ namespace MeowFilm.Windows.Tests;
 
 public static partial class MusicFeedbackProtocolTests
 {
-    private const string IdentityPath = "/weapi/w/nuser/account/get";
-    private const string ReportPath = "/api/clientlog/encrypt/upload";
     private static readonly Guid Playback = Guid.Parse("00000000-0000-4000-8000-000000000042");
     private static readonly DateTimeOffset Occurred = DateTimeOffset.FromUnixTimeMilliseconds(1800000000123);
     private static MusicFeedbackStart Start(MusicFeedbackAttempt attempt) => new(attempt, new("wy", "42"), 200, 0, 1, false)
@@ -24,693 +19,399 @@ public static partial class MusicFeedbackProtocolTests
 
     private static IEnumerable<TestCase> NeteaseCases()
     {
-        yield return Case("construction and disposal do not acquire accounts or fabricate end", async () =>
-        {
+        yield return Case("construction and disposal neither acquire borrowed accounts nor fabricate end", async () => {
             await using var f = await Fixture.Create();
             await f.Protocol.DisposeAsync(); await f.Protocol.DisposeAsync();
             Equal(0, f.Calls); Equal(0, f.Accounts.Acquisitions); Equal(0, f.Accounts.Disposals);
-            True(!f.Handler.Disposed);
-            using var request = MusicPlatformRequests.WyWithCookie("/api/v3/song/detail",
-                new() { ["c"] = "[]" }, null, MusicClientContextFixture.Wy, true);
-            _ = await f.Http.SendAsync("wy", request, CancellationToken.None);
+            _ = await f.Runtime.Client.RequestAsync("wy", "feedback.qualify", new { }, f.Account, default);
             Equal(1, f.Calls);
         });
-        yield return Case("FM flat NCBL records retain original time source and media-wall seconds", async () =>
-        {
+        yield return Case("FM semantic facts retain original occurrence time and exact fractional listening", async () => {
             await using var f = await Fixture.Create();
             var input = Start(f.Attempt) with { Source = "userfm", Mode = "playFm", Algorithm = "fixture-alg" };
-            var pending = NeteasePlaybackTransport.Start(f.Account, input, 1);
-            var start = Record(pending, pending.Start!, "_plv");
-            Equal("42", Text(start["id"])); Equal("song", Text(start["type"]));
-            using var startSyntax = JsonDocument.Parse(start.ToJsonString());
-            Equal(JsonValueKind.Number, startSyntax.RootElement.GetProperty("id").ValueKind);
-            Equal(42L, startSyntax.RootElement.GetProperty("id").GetInt64());
-            Equal("userfm", Text(start["source"])); Equal("fixture-alg", Text(start["alg"]));
-            Equal("0", Text(start["time"])); Equal("0", Text(start["realtime"]));
-            Equal(input.AdmittedAt.ToUnixTimeMilliseconds().ToString(), Text(start["_logTime"]));
-            var terminal = new NeteasePlaybackEvent(Guid.NewGuid(), End().EndedAt.ToUnixTimeMilliseconds(),
-                false, 17.5, 8.75, "playend", 2);
-            var finish = Record(pending with { End = terminal }, terminal, "_pld");
-            Equal("17", Text(finish["time"])); Equal("8", Text(finish["realtime"]));
-            Equal("2", Text(finish["play_speed"])); True(start["play_speed"] is null);
-            True(terminal is { Time: 17.5, Realtime: 8.75 }); // Wire truncation must not change stored listening facts.
-            Equal("playend", Text(finish["end"]));
-            foreach (var json in new[] { start, finish })
-                foreach (string absent in new[] { "json", "action", "mainsite", "mainsiteWeb", "refer", "deviceId",
-                    "download", "wifi", "mode", "position", "duration", "rate", "sourcetype", "is_heart" })
-                    True(!json.ContainsKey(absent));
-            await using var session = await f.Protocol.StartAsync(f.Account, input);
-            Equal(input.Recording, session.Recording);
-            await f.Protocol.DrainAsync();
-            await session.FinishAsync(End() with { Listened = 8.75, MediaListened = 17.5, Rate = 2,
-                Reason = "playend", Position = 193.25 });
-            await session.FinishAsync(End() with { Listened = 8.75, MediaListened = 17.5, Rate = 2,
-                Reason = "playend", Position = 193.25 });
-            await f.Protocol.DrainAsync();
-            Equal(2, f.Filenames.Count); Equal(0, f.Saved().Length);
+            await using var session = await f.Protocol.StartAsync(f.Account, input); await f.Protocol.DrainAsync();
+            var start = f.Uploads.Single();
+            Equal("start", start.GetProperty("event").GetString());
+            Equal(input.AdmittedAt.ToUnixTimeMilliseconds() / 1000d, start.GetProperty("occurredAt").GetDouble());
+            Equal(0d, start.GetProperty("listened").GetDouble()); Equal(0d, start.GetProperty("mediaListened").GetDouble());
+            var target = start.GetProperty("target"); Equal("42", target.GetProperty("nativeId").GetString());
+            Equal("userfm", target.GetProperty("source").GetString()); Equal("fixture-alg", target.GetProperty("algorithm").GetString());
+            var end = End() with { Listened = 8.75, MediaListened = 17.5, Rate = 2, Reason = "playend", Position = 193.25 };
+            await session.FinishAsync(end); await session.FinishAsync(end); await f.Protocol.DrainAsync();
+            Equal(2, f.Uploads.Count); Equal(0, f.Saved().Length);
+            var terminal = f.Uploads[1]; Equal("end", terminal.GetProperty("event").GetString());
+            Equal(8.75, terminal.GetProperty("listened").GetDouble()); Equal(17.5, terminal.GetProperty("mediaListened").GetDouble());
+            Equal(2d, terminal.GetProperty("rate").GetDouble()); Equal("playend", terminal.GetProperty("reason").GetString());
+            Equal(end.EndedAt.ToUnixTimeMilliseconds() / 1000d, terminal.GetProperty("occurredAt").GetDouble());
+            True(!terminal.TryGetProperty("cookie", out _) && !terminal.TryGetProperty("MUSIC_U", out _));
         });
-        foreach (var vector in new (string Source, string Id, string Type)[]
-        {
-            ("list", "7", "list"), ("album", "8", "album"), ("search", " 原始关键词 & 歌手 ", "track"),
-            ("dailySongRecommend", "", "dailyRecommend"), ("song", "", "track"), ("userfm", "", ""),
-            ("search_song_detail_page_song_rec", "", "track"), ("queue-source-fixture", "", "track"),
-            ("unknown", "", "")
-        })
-            yield return Case("original provenance " + vector.Source, () =>
-            {
-                var input = Start(new()) with { Source = vector.Source, SourceId = vector.Id,
-                    SourceType = vector.Type, Algorithm = "occurrence-alg" };
+        foreach (var vector in new (string Source, string Id)[] {
+            ("list", "7"), ("album", "8"), ("search", " 原始关键词 & 歌手 "),
+            ("dailySongRecommend", ""), ("song", ""), ("userfm", ""),
+            ("search_song_detail_page_song_rec", ""), ("queue-source-fixture", ""), ("unknown", "") })
+            yield return Case("original provenance " + vector.Source, () => {
+                var input = Start(new()) with { Source = vector.Source, SourceId = vector.Id, Algorithm = "occurrence-alg" };
                 var pending = NeteasePlaybackTransport.Start(Account(), input, 1);
-                var json = Record(pending, pending.Start!, "_plv");
-                Equal(vector.Source == "unknown" ? "" : vector.Source, Text(json["source"]));
-                Equal(vector.Id, Text(json["sourceId"])); Equal("occurrence-alg", Text(json["alg"]));
+                Equal(vector.Source == "unknown" ? null : vector.Source, pending.Source);
+                Equal(vector.Id.Length == 0 ? null : vector.Id, pending.SourceId); Equal("occurrence-alg", pending.Algorithm);
                 return Task.CompletedTask;
             });
         foreach (string source in new[] { "search_song_detail_page_song_rec", "playlist", "likeMusic", "queue-source-fixture", "moreRcmd" })
-            yield return Case("live queue sourceMap remains exact " + source, () =>
-            {
+            yield return Case("queue sourceMap remains exact " + source, () => {
                 var origin = Origin("queue", "queue-recommendations", source);
-                var input = Start(new()) with { Source = source, SourceType = "track",
-                    IsQueueRecommendation = true, Algorithm = origin.Algorithm, Recommendation = origin };
-                var pending = NeteasePlaybackTransport.Start(Account(), input, 1);
-                var end = new NeteasePlaybackEvent(Guid.NewGuid(), End().EndedAt.ToUnixTimeMilliseconds(), false, 5, 5, "ui");
-                Equal(source, Text(Record(pending, pending.Start!, "_plv")["source"]));
-                var json = Record(pending with { End = end }, end, "_pld");
-                Equal(source, Text(json["source"])); Equal("occurrence-alg", Text(json["alg"]));
-                True(json["sourceId"] is null);
+                var pending = NeteasePlaybackTransport.Start(Account(), Start(new()) with { Source = source,
+                    IsQueueRecommendation = true, Algorithm = origin.Algorithm, Recommendation = origin }, 1);
+                Equal(source, pending.Source); Equal("occurrence-alg", pending.Algorithm); True(pending.SourceId is null);
                 return Task.CompletedTask;
             });
-        yield return Case("heartbeat uses real scene original context and per-song algorithm", () =>
-        {
+        yield return Case("heartbeat scene and per-song upstream attribution never invent a local source ID", () => {
             var origin = Origin("heartbeat", "heartbeat", "") with { SourceType = "playlist", SourceId = "700" };
-            var input = Start(new()) with { Source = "aiMode", SourceId = "700", Mode = "ai",
-                Algorithm = origin.Algorithm, Recommendation = origin };
+            var input = Start(new()) with { Source = "aiMode", SourceId = "700", Mode = "ai", Algorithm = origin.Algorithm, Recommendation = origin };
             var pending = NeteasePlaybackTransport.Start(Account(), input, 1);
-            var json = Record(pending, pending.Start!, "_plv");
-            Equal("heartbeat", Text(json["play_scene"])); True(json["source"] is null && json["sourceId"] is null);
-            Equal("occurrence-alg", Text(json["alg"]));
-            var mapped = NeteasePlaybackTransport.Start(Account(), input with
-                { Recommendation = origin with { Provider = "queue-recommendations", FeedbackSource = "upstream-heart",
-                    Metadata = JsonSerializer.SerializeToElement(new { feedbackSourceId = "upstream-42" }) } }, 1);
-            Equal("upstream-heart", Text(Record(mapped, mapped.Start!, "_plv")["source"]));
-            Equal("upstream-42", Text(Record(mapped, mapped.Start!, "_plv")["sourceId"]));
-            var similar = NeteasePlaybackTransport.Start(Account(), Start(new()) with
-                { Recommendation = Origin("similar", "similar", ""), Algorithm = "similar-alg" }, 1);
-            True(Record(similar, similar.Start!, "_plv")["source"] is null);
-            return Task.CompletedTask;
+            Equal("heartbeat", pending.PlayScene); True(pending.Source is null && pending.SourceId is null);
+            Equal("occurrence-alg", pending.Algorithm);
+            var mapped = NeteasePlaybackTransport.Start(Account(), input with { Recommendation = origin with {
+                Provider = "queue-recommendations", FeedbackSource = "upstream-heart", Metadata = JsonSerializer.SerializeToElement(new { feedbackSourceId = "upstream-42" }) } }, 1);
+            Equal("upstream-heart", mapped.Source); Equal("upstream-42", mapped.SourceId);
+            var similar = NeteasePlaybackTransport.Start(Account(), Start(new()) with { Recommendation = Origin("similar", "similar", "") }, 1);
+            True(similar.Source is null); return Task.CompletedTask;
         });
-        yield return Case("metadata contains only original MUSIC_U and no official identity", () =>
-        {
-            using var doc = JsonDocument.Parse(NeteasePlaybackTransport.Metadata(Account()));
-            Equal(1, doc.RootElement.EnumerateObject().Count());
-            Equal("synthetic-session", doc.RootElement.GetProperty("MUSIC_U").GetString());
-            return Task.CompletedTask;
-        });
-        yield return Case("response client cookies cannot replace the original upload authorization", async () =>
-        {
-            await using var f = await Fixture.Create();
-            var before = await f.Clients.Owner.AcquireWyAsync();
-            f.Reply = (request, _, _) =>
-            {
-                var response = Default(request);
-                response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_RESPONSE; Domain=.music.163.com");
-                return Task.FromResult(response);
-            };
-            await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-            await session.FinishAsync(End()); await f.Protocol.DrainAsync();
-            True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync()));
-            Equal(2, f.Filenames.Count); // Every upload header was checked against the exact account Cookie.
-        });
-        foreach (var vector in new (string Body, string Code)[]
-        {
-            ("{\"code\":200,\"profile\":null}", "AUTH_EXPIRED"),
-            ("{\"code\":200,\"profile\":{\"userId\":124,\"nickname\":\"synthetic\"}}", "IDENTITY_MISMATCH"),
-            ("{\"code\":200,\"profile\":{\"userId\":123,\"nickname\":\"synthetic\"},\"account\":{\"id\":124}}", "IDENTITY_MISMATCH"),
-            ("{\"code\":301}", "AUTH_EXPIRED")
-        })
-            yield return Case("live identity qualification fails before listening admission " + vector.Code + vector.Body.Length, async () =>
-            {
-                await using var f = await Fixture.Create();
-                f.Reply = (_, _, _) => Task.FromResult(Response(vector.Body));
-                await Error(() => f.Protocol.QualifyAccountAsync(f.Account, default), vector.Code);
-                Equal(0, f.Saved().Length); Equal(0, f.Filenames.Count);
-                // Direct adapter admission is local; its independent drain still
-                // refuses to upload to an unauthenticated or mismatched account.
-                await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt));
-                await f.Protocol.DrainAsync(); Equal(vector.Code, f.Protocol.LastError);
-                Equal(0, f.Filenames.Count); Equal(0, f.Saved().Length);
+        foreach (string code in new[] { "AUTH_EXPIRED", "IDENTITY_MISMATCH", "VERIFICATION_REQUIRED" })
+            yield return Case("canonical live qualification failure prevents upload " + code, async () => {
+                await using var f = await Fixture.Create(); f.Reply = (_, _, _) => throw new MusicPlatformException(code);
+                await Error(() => f.Protocol.QualifyAccountAsync(f.Account, default), code);
+                await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
+                Equal(code, f.Protocol.LastError); Equal(0, f.Saved().Length); Equal(0, f.Uploads.Count);
+                int calls = f.Calls;
+                await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(calls, f.Calls);
+                await Error(() => session.FinishAsync(End()), "START_UNCONFIRMED");
             });
-        yield return Case("WY removes extra recording duration precheck while retaining exact ID rejection", async () =>
-        {
+        yield return Case("Unicode scalar provenance survives durable admission upload and current cold read", async () => {
+            await using var f = await Fixture.Create(); f.Offline = true;
+            var input = Start(f.Attempt) with { Source = "source\n", SourceId = "keyword\n & 原样", Algorithm = "算法\n🙂" };
+            await using var session = await f.Protocol.StartAsync(f.Account, input); await f.Protocol.DrainAsync();
+            var pending = f.Saved().Single();
+            Equal(input.Source, pending.Source); Equal(input.SourceId, pending.SourceId); Equal(input.Algorithm, pending.Algorithm);
+            Equal(0, f.Uploads.Count); await f.Protocol.DisposeAsync();
+            await using var settings = new MusicFeedbackSettingsOwner(f.Store); await settings.ReadAsync();
+            await using var cold = new NativeMusicFeedbackProtocol(f.Accounts, f.Runtime.Client, f.Clock, f.Store, settings);
+            f.Offline = false; await cold.InitializeAsync(); await cold.DrainAsync();
+            var target = f.Uploads.Single().GetProperty("target");
+            Equal(input.Recording.Id, target.GetProperty("nativeId").GetString());
+            Equal(input.Source, target.GetProperty("source").GetString());
+            Equal(input.SourceId, target.GetProperty("sourceId").GetString());
+            Equal(input.Algorithm, target.GetProperty("algorithm").GetString());
+            Equal(0, f.Saved().Length); True(cold.LastError is null);
+        });
+        foreach (var vector in new (string RecordingId, string Kind, string Source)[] {
+            ("123456789012345678", "playlist", "list"), ("recording\n/" + new string('i', 80), "album", "album") })
+            yield return Case("controller canonical " + vector.Kind + " retains long ID and raw attribution through cold outbox", async () => {
+                await using var f = await Fixture.Create(); int qualifications = 0;
+                f.Reply = (call, _, _) => {
+                    if (call.Operation == "feedback.qualify" && ++qualifications > 1)
+                        throw new MusicPlatformException("NETWORK_ERROR");
+                    return Task.FromResult(f.Default(call));
+                };
+                await using var controller = new MusicFeedbackController(f.Settings, f.Protocol, f.Accounts, f.Clock);
+                string sourceId = "真实集合\n/" + new string('l', 2400);
+                var context = JsonSerializer.SerializeToElement(new { sourcePlatform = "wy", sourceType = vector.Kind, sourceId });
+                var song = MusicSongFixture.Online("wy", vector.RecordingId, "song", "artist", "", 200);
+                controller.Select(new("entry", MusicSongFixture.Element(song), context)); controller.Started("entry", 0, 200);
+                await controller.DrainAsync(); f.Clock.Advance(5); controller.Observe("entry", 5, 200, true);
+                controller.Finish(); await controller.DrainAsync();
+                var pending = f.Saved().Single();
+                Equal(vector.RecordingId, pending.RecordingId); Equal(vector.Source, pending.Source); Equal(sourceId, pending.SourceId);
+                True(pending.Start is not null && pending.End is { Time: 5, Realtime: 5 });
+                Equal(0, f.Uploads.Count); await controller.DisposeAsync();
+                await using var settings = new MusicFeedbackSettingsOwner(f.Store); await settings.ReadAsync();
+                await using var cold = new NativeMusicFeedbackProtocol(f.Accounts, f.Runtime.Client, f.Clock, f.Store, settings);
+                f.Reply = null; await cold.InitializeAsync(); await cold.DrainAsync();
+                Equal(2, f.Uploads.Count); Equal("start", f.Uploads[0].GetProperty("event").GetString());
+                Equal("end", f.Uploads[1].GetProperty("event").GetString());
+                foreach (var upload in f.Uploads) {
+                    var target = upload.GetProperty("target");
+                    Equal(vector.RecordingId, target.GetProperty("nativeId").GetString());
+                    Equal(vector.Source, target.GetProperty("source").GetString()); Equal(sourceId, target.GetProperty("sourceId").GetString());
+                }
+                Equal(5d, f.Uploads[1].GetProperty("listened").GetDouble());
+                Equal(5d, f.Uploads[1].GetProperty("mediaListened").GetDouble());
+                Equal(0, f.Saved().Length); True(cold.LastError is null);
+            });
+        foreach (string kind in new[] { "search", "search-song" })
+            yield return Case("controller retains complete raw search attribution " + kind, async () => {
+                await using var f = await Fixture.Create();
+                await using var controller = new MusicFeedbackController(f.Settings, f.Protocol, f.Accounts, f.Clock);
+                string keyword = "原始关键词\n & " + new string('词', 700);
+                var context = JsonSerializer.SerializeToElement(new { sourceType = kind, searchKeyword = keyword });
+                controller.Select(new("entry", MusicSongFixture.Element(MusicSongFixture.Online("wy", "123456789012345678", "song", "artist", "", 200)), context));
+                controller.Started("entry", 0, 200); await controller.DrainAsync();
+                var target = f.Uploads.Single().GetProperty("target");
+                Equal("123456789012345678", target.GetProperty("nativeId").GetString());
+                Equal("search", target.GetProperty("source").GetString()); Equal(keyword, target.GetProperty("sourceId").GetString());
+                f.Clock.Advance(5); controller.Observe("entry", 5, 200, true); controller.Finish(); await controller.DrainAsync();
+                Equal(2, f.Uploads.Count); Equal(keyword, f.Uploads[1].GetProperty("target").GetProperty("sourceId").GetString());
+                Equal(0, f.Saved().Length); True(controller.LastError is null);
+            });
+        yield return Case("controller consumes a large current song without imposing an event-sized song gate", async () => {
             await using var f = await Fixture.Create();
-            foreach (var invalid in new[]
-            {
-                Start(new()) with { Recording = new("tx", "001FixtureMID") },
-                Start(new()) with { Recording = new("wy", "042") },
-                Start(new()) with { Recording = new("wy", "42", "7") }
-            }) await Error(() => f.Protocol.StartAsync(f.Account, invalid), "IDENTITY_MISMATCH");
-            // Ambiguous trusted mappings cannot be rescued by a song-detail read.
+            await using var controller = new MusicFeedbackController(f.Settings, f.Protocol, f.Accounts, f.Clock);
+            var song = MusicSongFixture.Element(MusicSongFixture.Online("wy", "42", new string('x', 300000), "artist", "", 200));
+            True(System.Text.Encoding.UTF8.GetByteCount(song.GetRawText()) < 8 * 1024 * 1024);
+            controller.Select(new("entry", song)); controller.Started("entry", 0, 200); await controller.DrainAsync();
+            var upload = f.Uploads.Single();
+            Equal("42", upload.GetProperty("target").GetProperty("nativeId").GetString());
+            True(JsonSerializer.SerializeToUtf8Bytes(upload).Length <= NeteasePlaybackOutboxDocument.MaximumEventBytes);
+            f.Clock.Advance(5); controller.Observe("entry", 5, 200, true); controller.Finish(); await controller.DrainAsync();
+            Equal(2, f.Uploads.Count); Equal(0, f.Saved().Length); True(controller.LastError is null);
+        });
+        yield return Case("canonical KG required fields never use ID shape or mutual echoes as proof", () => {
+            string hash = "hash\n/" + new string('h', 80), albumAudioId = "audio\n/" + new string('9', 80);
+            var native = new JsonObject { ["hash"] = hash, ["albumAudioId"] = albumAudioId, ["mixsongid"] = "unused-echo" };
+            var source = MusicSongFixture.Online("kg", "independent-native-id", "song", "artist", "", 200, native: native);
+            var recording = new MusicFeedbackRecording("kg", hash, albumAudioId);
+            Equal(recording, MusicFeedbackIdentity.Resolve(MusicSongFixture.Element(source), "kg"));
+            var song = MusicSongFixture.Online("kw", "primary", "song", "artist", "", 200);
+            song["sources"]!.AsArray().Add(source["sources"]![0]!.DeepClone());
+            native["hash"] = "another-hash";
+            song["sources"]!.AsArray().Add(MusicSongFixture.Online("kg", "another-native-id", "song", "artist", "", 200, native: native)["sources"]![0]!.DeepClone());
+            True(MusicFeedbackIdentity.Resolve(MusicSongFixture.Element(song), "kg") is null);
+            Equal(recording, MusicFeedbackIdentity.Resolve(MusicSongFixture.Element(song), "kg", recording));
+            return Task.CompletedTask;
+        });
+        yield return Case("ordinary recording ID shapes pass through while platform association remains native", async () => {
+            await using var f = await Fixture.Create();
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(new()) with { Recording = new("tx", "MID") }), "IDENTITY_MISMATCH");
+            foreach (var recording in new[] { new MusicFeedbackRecording("wy", "042"), new("wy", "42", "7"), new("wy", new string('9', 80)) }) {
+                await using var session = await f.Protocol.StartAsync(f.Account, Start(new()) with { Recording = recording, Duration = 0, PlaybackId = Guid.NewGuid() });
+                await f.Protocol.DrainAsync(); Equal(recording.Id, f.Uploads.Last().GetProperty("target").GetProperty("nativeId").GetString());
+            }
             var song = MusicSongFixture.Online("tx", "MID", "song", "artist", "", 200);
-            song["sources"] = new JsonArray(
-                song["sources"]![0]!.DeepClone(),
+            song["sources"] = new JsonArray(song["sources"]![0]!.DeepClone(),
                 MusicSongFixture.Online("wy", "42", "song", "artist", "", 200)["sources"]![0]!.DeepClone(),
                 MusicSongFixture.Online("wy", "43", "song", "artist", "", 200)["sources"]![0]!.DeepClone());
             True(MusicFeedbackIdentity.Resolve(MusicSongFixture.Element(song), "wy") is null);
-            await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt) with { Duration = 0 });
-            await f.Protocol.DrainAsync();
-            True(f.Paths.All(path => path is IdentityPath or ReportPath)); Equal(1, f.Filenames.Count);
         });
-        yield return Case("invalid local numbers and text reject before persistent admission or HTTP", async () =>
-        {
+        yield return Case("invalid native numbers and Unicode scalars reject before durable admission", async () => {
             await using var f = await Fixture.Create();
-            foreach (var input in new[]
-            {
-                Start(new()) with { Duration = double.NaN }, Start(new()) with { Duration = -1 },
-                Start(new()) with { Rate = double.PositiveInfinity }, Start(new()) with { Rate = 0 },
-                Start(new()) with { Position = 201 }, Start(new()) with { PlaybackId = Guid.Empty },
-                Start(new()) with { AdmittedAt = default }, Start(new()) with { Algorithm = "\ud800" },
-                Start(new()) with { SourceId = "keyword\n" }, Start(new()) with { Source = "source\n" }
-            }) await AnyFeedbackError(() => f.Protocol.StartAsync(f.Account, input));
+            foreach (var input in new[] { Start(new()) with { Duration = double.NaN }, Start(new()) with { Duration = -1 },
+                Start(new()) with { Rate = double.PositiveInfinity }, Start(new()) with { Rate = 0 }, Start(new()) with { Position = 201 },
+                Start(new()) with { PlaybackId = Guid.Empty }, Start(new()) with { AdmittedAt = default },
+                Start(new()) with { Algorithm = "\ud800" }, Start(new()) with { SourceId = "\ud800" }, Start(new()) with { Source = "\udc00" },
+                Start(new()) with { Recording = new("wy", "\ud800") } })
+                await Error(() => f.Protocol.StartAsync(f.Account, input), "INVALID_REQUEST");
             Equal(0, f.Calls); Equal(0, f.Saved().Length);
         });
-        yield return Case("long high-rate and delayed-dispatch facts are not bounded by dispatch elapsed", async () =>
-        {
+        yield return Case("serialized event byte budget rejects admission and oversized current cold storage", async () => {
             await using var f = await Fixture.Create();
-            var input = Start(f.Attempt) with { Duration = 90000, Rate = 32 };
-            await using var session = await f.Protocol.StartAsync(f.Account, input); await f.Protocol.DrainAsync();
-            await session.FinishAsync(End() with { Listened = 100, MediaListened = 3200,
-                Rate = 32, Duration = 0, Position = 3200 });
-            await f.Protocol.DrainAsync(); Equal(2, f.Filenames.Count);
+            var input = Start(f.Attempt) with { Source = new string('s', NeteasePlaybackOutboxDocument.MaximumEventBytes) };
+            await Error(() => f.Protocol.StartAsync(f.Account, input), "LIMIT"); Equal(0, f.Calls); Equal(0, f.Saved().Length);
+            var bytes = NeteasePlaybackOutboxDocument.Encode([NeteasePlaybackTransport.Start(f.Account, input, 1)]);
+            await Error(() => {
+                _ = NeteasePlaybackOutboxDocument.Decode(new(bytes, DocumentFingerprint.FromBytes(bytes)));
+                return Task.CompletedTask;
+            }, "CORRUPT_STORAGE");
         });
-        foreach (var end in new[]
-        {
-            End() with { Listened = double.NaN }, End() with { MediaListened = -1 },
-            End() with { Duration = -1 }, End() with { Position = double.PositiveInfinity },
-            End() with { Rate = 0 }, End() with { Reason = "fabricated" },
-            End() with { PlaybackId = Guid.NewGuid() }, End() with { EndedAt = default }
-        })
-            yield return Case("invalid terminal facts cannot be corrected into a second end " + end, async () =>
-            {
+        yield return Case("high-rate delayed-dispatch facts are not bounded by dispatch elapsed", async () => {
+            await using var f = await Fixture.Create();
+            await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt) with { Duration = 90000, Rate = 32 }); await f.Protocol.DrainAsync();
+            await session.FinishAsync(End() with { Listened = 100, MediaListened = 3200, Rate = 32, Duration = 0, Position = 3200 });
+            await f.Protocol.DrainAsync(); Equal(2, f.Uploads.Count);
+        });
+        foreach (var end in new[] { End() with { Listened = double.NaN }, End() with { MediaListened = -1 }, End() with { Duration = -1 },
+            End() with { Position = double.PositiveInfinity }, End() with { Rate = 0 }, End() with { Reason = "fabricated" },
+            End() with { PlaybackId = Guid.NewGuid() }, End() with { EndedAt = default } })
+            yield return Case("invalid terminal facts remain single-shot " + end, async () => {
                 await using var f = await Fixture.Create();
                 await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-                await Error(() => session.FinishAsync(end), "INVALID_REQUEST");
-                await Error(() => session.FinishAsync(End()), "INSTANCE_MISMATCH");
-                Equal(1, f.Filenames.Count);
+                await Error(() => session.FinishAsync(end), "INVALID_REQUEST"); await Error(() => session.FinishAsync(End()), "INSTANCE_MISMATCH");
+                Equal(1, f.Uploads.Count);
             });
-        yield return Case("natural end preserves observed position zero time and original wall clock", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-            await session.FinishAsync(End() with { Listened = 0, MediaListened = 0,
-                Position = 193.25, Reason = "playend", EndedAt = Occurred.AddSeconds(5) });
-            await f.Protocol.DrainAsync(); Equal(2, f.Filenames.Count);
-            var pending = NeteasePlaybackTransport.Start(f.Account, Start(new()), 1);
-            var value = new NeteasePlaybackEvent(Guid.NewGuid(), 0, false, 0, 0, "playend");
-            Equal("0", Text(Record(pending with { End = value }, value, "_pld")["_logTime"]));
+        yield return Case("natural end preserves zero listening and original wall clock", async () => {
+            await using var f = await Fixture.Create(); await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
+            await session.FinishAsync(End() with { Listened = 0, MediaListened = 0, Position = 193.25, Reason = "playend", EndedAt = Occurred.AddSeconds(5) });
+            await f.Protocol.DrainAsync(); Equal(2, f.Uploads.Count); Equal(0d, f.Uploads[1].GetProperty("listened").GetDouble());
+            Equal(Occurred.AddSeconds(5).ToUnixTimeMilliseconds() / 1000d, f.Uploads[1].GetProperty("occurredAt").GetDouble());
         });
-        yield return Case("concurrent duplicate local start shares one session during held upload", async () =>
-        {
-            await using var f = await Fixture.Create();
-            var entered = Signal(); var release = Signal();
-            f.Reply = async (request, _, _) =>
-            {
-                if (request.RequestUri!.AbsolutePath == ReportPath)
-                { entered.TrySetResult(); await release.Task; }
-                return Default(request);
-            };
-            var a = f.Protocol.StartAsync(f.Account, Start(f.Attempt));
-            try
-            {
-                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                var b = f.Protocol.StartAsync(f.Account, Start(f.Attempt));
-                await using var session = await a; True(ReferenceEquals(session, await b));
+        yield return Case("duplicate local start shares attempt and cannot change account or facts", async () => {
+            await using var f = await Fixture.Create(); var entered = Signal(); var release = Signal();
+            f.Reply = async (call, _, _) => { if (call.Operation == "feedback.upload") { entered.TrySetResult(); await release.Task; } return f.Default(call); };
+            var originalAccount = f.Account;
+            var generation = new MusicPlatformSession(originalAccount.Platform, originalAccount.Scope,
+                originalAccount.Generation + 1, originalAccount.UserId, originalAccount.Cookie);
+            var credential = new MusicPlatformSession(originalAccount.Platform, originalAccount.Scope,
+                originalAccount.Generation, originalAccount.UserId, "MUSIC_U=changed");
+            try {
+                var first = f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var second = f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await using var session = await first; True(ReferenceEquals(session, await second));
                 await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt) with { Algorithm = "changed" }), "INSTANCE_MISMATCH");
                 await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt) with { IsQueueRecommendation = true }), "INSTANCE_MISMATCH");
-                await Error(() => f.Protocol.StartAsync(new("wy", f.Account.Scope, 2, "123", f.Account.Cookie),
-                    Start(f.Attempt)), "INSTANCE_MISMATCH");
-                await Error(() => f.Protocol.StartAsync(new("wy", f.Account.Scope, 1, "123", "MUSIC_U=changed"),
-                    Start(f.Attempt)), "INSTANCE_MISMATCH");
-            }
-            finally { release.TrySetResult(); }
-            await f.Protocol.DrainAsync(); Equal(1, f.Filenames.Count);
+                await Error(() => f.Protocol.StartAsync(generation, Start(f.Attempt)), "SESSION_CHANGED");
+                await Error(() => f.Protocol.StartAsync(credential, Start(f.Attempt)), "SESSION_CHANGED");
+            } finally { release.TrySetResult(); }
+            await f.Protocol.DrainAsync(); Equal(1, f.Uploads.Count);
+            int calls = f.Calls; f.Accounts.Value = generation;
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "INSTANCE_MISMATCH");
+            f.Accounts.Value = credential;
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "INSTANCE_MISMATCH");
+            await Error(() => f.Protocol.StartAsync(originalAccount, Start(f.Attempt)), "SESSION_CHANGED");
+            Equal(calls, f.Calls); Equal(1, f.Uploads.Count);
         });
-        foreach (string code in new[] { "\"200\"", "true", "0", "500", "null" })
-            yield return Case("bad business code never confirms or replays file " + code, async () =>
-            {
+        foreach (string code in new[] { "NETWORK_ERROR", "TIMEOUT", "REDIRECT_DENIED", "LIMIT", "INVALID_RESPONSE", "UPSTREAM_UNCONFIRMED", "AUTH_EXPIRED", "FORBIDDEN", "RATE_LIMITED" })
+            yield return Case("canonical unknown upload is terminal without replay " + code, async () => {
                 await using var f = await Fixture.Create();
-                f.Reply = (request, _, _) => Task.FromResult(request.RequestUri!.AbsolutePath == ReportPath
-                    ? Response("{\"code\":" + code + ",\"data\":{\"successfiles\":[\"" + Filename(request) + "\"]}}")
-                    : Default(request));
+                f.Reply = (call, _, _) => Task.FromResult(call.Operation == "feedback.upload" ? MusicPlatformRuntimeFixture.Json(new { status = "unknown", errorCode = code }) : f.Default(call));
                 await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-                Equal("UPSTREAM_UNCONFIRMED", f.Protocol.LastError); Equal(0, f.Saved().Length);
-                await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(1, f.Filenames.Count);
+                Equal(code, f.Protocol.LastError); Equal(0, f.Saved().Length);
+                await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(1, f.Uploads.Count);
                 await Error(() => session.FinishAsync(End()), "START_UNCONFIRMED");
             });
-        yield return Case("numeric code plus exact filename confirms the file", async () =>
-        {
-            await using var f = await Fixture.Create();
-            f.Reply = (request, _, _) => Task.FromResult(request.RequestUri!.AbsolutePath == ReportPath
-                ? Response("{\"code\":2e2,\"data\":{\"successfiles\":[\"" + Filename(request) + "\"]}}")
-                : Default(request));
-            await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-            True(f.Protocol.LastError is null); Equal(0, f.Saved().Length);
-            await session.FinishAsync(End()); await f.Protocol.DrainAsync(); Equal(2, f.Filenames.Count);
-        });
-        foreach (string body in new[]
-        {
-            "{\"code\":200}", "{\"code\":200,\"data\":{\"successfiles\":[]}}",
-            "{\"code\":200,\"data\":{\"successfiles\":[\"other\"]}}",
-            "{\"code\":200,\"data\":{\"successfiles\":true}}"
-        })
-            yield return Case("missing or mismatched filename never confirms " + body, async () =>
-            {
-                await using var f = await Fixture.Create();
-                f.Reply = (request, _, _) => Task.FromResult(request.RequestUri!.AbsolutePath == ReportPath ? Response(body) : Default(request));
-                await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-                Equal("UPSTREAM_UNCONFIRMED", f.Protocol.LastError);
-                await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(1, f.Filenames.Count);
-            });
-        foreach (var vector in new (string Result, string Error)[]
-        {
-            ("network", "NETWORK_ERROR"), ("timeout", "TIMEOUT"), ("redirect", "REDIRECT_DENIED"),
-            ("limit", "LIMIT"), ("malformed", "INVALID_RESPONSE"), ("http-error", "UPSTREAM_UNCONFIRMED"),
-            ("401", "AUTH_EXPIRED"), ("403", "FORBIDDEN"), ("429", "RATE_LIMITED")
-        })
-            yield return Case("unknown upload is single-shot " + vector.Result, async () =>
-            {
-                await using var f = await Fixture.Create();
-                f.Reply = (request, _, _) =>
-                {
-                    if (request.RequestUri!.AbsolutePath != ReportPath) return Task.FromResult(Default(request));
-                    if (vector.Result == "network") throw new HttpRequestException("synthetic-private-error");
-                    if (vector.Result == "timeout") throw new OperationCanceledException();
-                    var response = Response(vector.Result == "limit" ? new string(' ', 65537) :
-                        vector.Result == "malformed" ? "not-json" : "{}");
-                    response.StatusCode = vector.Result switch
-                    {
-                        "redirect" => HttpStatusCode.TemporaryRedirect, "http-error" => HttpStatusCode.BadGateway,
-                        "401" => HttpStatusCode.Unauthorized, "403" => HttpStatusCode.Forbidden,
-                        "429" => HttpStatusCode.TooManyRequests, _ => HttpStatusCode.OK
-                    };
-                    return Task.FromResult(response);
-                };
-                await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-                Equal(vector.Error, f.Protocol.LastError); Equal(0, f.Saved().Length);
-                await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(1, f.Filenames.Count);
-            });
-        yield return Case("terminal is locally single-shot while upload has an unknown outcome", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
+        yield return Case("terminal remains single-shot while upload outcome is unknown", async () => {
+            await using var f = await Fixture.Create(); await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
             var entered = Signal(); var release = Signal();
-            f.Reply = async (request, _, _) =>
-            {
-                if (request.RequestUri!.AbsolutePath == ReportPath)
-                { entered.TrySetResult(); await release.Task; throw new HttpRequestException("synthetic-private"); }
-                return Default(request);
-            };
-            try
-            {
-                await session.FinishAsync(End()); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                await session.FinishAsync(End());
+            f.Reply = async (call, _, _) => { if (call.Operation == "feedback.upload") { entered.TrySetResult(); await release.Task; return MusicPlatformRuntimeFixture.Json(new { status = "unknown", errorCode = "NETWORK_ERROR" }); } return f.Default(call); };
+            try {
+                await session.FinishAsync(End()); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); await session.FinishAsync(End());
                 await Error(() => session.FinishAsync(End() with { Listened = 6 }), "INSTANCE_MISMATCH");
                 await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "INSTANCE_ENDED");
-            }
-            finally { release.TrySetResult(); }
+            } finally { release.TrySetResult(); }
             await f.Protocol.DrainAsync(); Equal("NETWORK_ERROR", f.Protocol.LastError);
-            await session.FinishAsync(End()); await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-            Equal(2, f.Filenames.Count); Equal(0, f.Saved().Length);
+            await session.FinishAsync(End()); await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(2, f.Uploads.Count); Equal(0, f.Saved().Length);
         });
-        foreach (int stage in new[] { 1, 2 })
-            yield return Case("account generation is fenced after physical step " + stage, async () =>
-            {
-                await using var f = await Fixture.Create();
-                f.Reply = (request, _, count) =>
-                { if (count == stage) f.Accounts.Current = false; return Task.FromResult(Default(request)); };
-                await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-                Equal(stage, f.Calls); True(f.Protocol.LastError == "SESSION_CHANGED");
-                True(!f.Saved().Any(v => v.StartConfirmed));
-                await Error(() => session.FinishAsync(End()), "SESSION_CHANGED");
+        foreach (int stage in new[] { 1, 2, 3, 4 })
+            yield return Case("exact account fence stops later dispatch but settles entered writes at step " + stage, async () => {
+                await using var f = await Fixture.Create(); var admitted = Signal();
+                f.Reply = async (call, _, count) => {
+                    await admitted.Task;
+                    if (count == stage) { f.Accounts.Current = false; f.Protocol.AuthorizationChanged(accountChanged: true); }
+                    return f.Default(call);
+                };
+                IMusicFeedbackSession admittedSession;
+                try { admittedSession = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); }
+                finally { admitted.TrySetResult(); }
+                await using var session = admittedSession; await f.Protocol.DrainAsync();
+                if (stage <= 2) await Error(() => session.FinishAsync(End()), "SESSION_CHANGED");
+                else { await session.FinishAsync(End()); await f.Protocol.DrainAsync(); }
+                Equal(stage, f.Calls); Equal(stage / 2, f.Uploads.Count); Equal(0, f.Saved().Length);
+                await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(stage, f.Calls);
             });
-        foreach (int stage in new[] { 3, 4 })
-            yield return Case("finish retains original account fence after start ACK at step " + stage, async () =>
-            {
-                await using var f = await Fixture.Create();
-                await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-                f.Reply = (request, _, count) =>
-                { if (count == stage) f.Accounts.Current = false; return Task.FromResult(Default(request)); };
-                await session.FinishAsync(End()); await f.Protocol.DrainAsync();
-                Equal(stage, f.Calls); Equal("SESSION_CHANGED", f.Protocol.LastError);
-                Equal(0, f.Saved().Length);
-            });
-        yield return Case("finish repeats live qualification and expired login never sends end", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-            f.Reply = (_, _, _) => Task.FromResult(Response("{\"code\":301}"));
-            await session.FinishAsync(End()); await f.Protocol.DrainAsync();
-            Equal("AUTH_EXPIRED", f.Protocol.LastError); Equal(1, f.Filenames.Count);
-            await session.FinishAsync(End()); await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-            Equal(1, f.Filenames.Count); Equal(0, f.Saved().Length);
+        yield return Case("finish repeats live qualification and expired login never sends end", async () => {
+            await using var f = await Fixture.Create(); await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
+            f.Reply = (_, _, _) => throw new MusicPlatformException("AUTH_EXPIRED");
+            await session.FinishAsync(End()); await f.Protocol.DrainAsync(); Equal("AUTH_EXPIRED", f.Protocol.LastError); Equal(1, f.Uploads.Count);
+            await session.FinishAsync(End()); await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(1, f.Uploads.Count); Equal(0, f.Saved().Length);
         });
-        yield return Case("controller excludes real progress before live account qualification", async () =>
-        {
-            await using var f = await Fixture.Create(); var clock = new FactClock();
-            await using var controller = new MusicFeedbackController(f.Settings, f.Protocol, f.Accounts, clock);
+        yield return Case("controller excludes progress before live account qualification", async () => {
+            await using var f = await Fixture.Create(); var clock = new FactClock(); await using var controller = new MusicFeedbackController(f.Settings, f.Protocol, f.Accounts, clock);
             var entered = Signal(); var release = Signal();
-            f.Offline = false;
-            f.Reply = async (request, _, count) =>
-            {
-                if (count == 1) { entered.TrySetResult(); await release.Task; }
-                // A failed second identity read proves the playback file has
-                // never entered SendAsync; it leaves inspectable local facts.
-                if (count > 1) throw new HttpRequestException("synthetic preflight offline");
-                return Default(request);
-            };
-            controller.Select(new("entry", MusicSongFixture.Element(
-                MusicSongFixture.Online("wy", "42", "song", "artist", "", 200))));
-            controller.Started("entry", 0, 0);
-            try
-            {
-                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                clock.Advance(30); controller.Observe("entry", 30, 0, true);
-            }
-            finally { release.TrySetResult(); }
-            await controller.DrainAsync();
-            clock.Advance(7); controller.Observe("entry", 37, 0, true);
-            controller.Finish(); await controller.DrainAsync();
-            var pending = f.Saved().Single();
-            Equal(Occurred.AddSeconds(30).ToUnixTimeMilliseconds(), pending.Start!.At);
-            True(pending.End is { Time: 7, Realtime: 7 }); Equal(0, f.Filenames.Count);
+            f.Reply = async (call, _, count) => { if (count == 1) { entered.TrySetResult(); await release.Task; } if (count > 1) throw new MusicPlatformException("NETWORK_ERROR"); return f.Default(call); };
+            controller.Select(new("entry", MusicSongFixture.Element(MusicSongFixture.Online("wy", "42", "song", "artist", "", 200)))); controller.Started("entry", 0, 0);
+            try { await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); clock.Advance(30); controller.Observe("entry", 30, 0, true); } finally { release.TrySetResult(); }
+            await controller.DrainAsync(); clock.Advance(7); controller.Observe("entry", 37, 0, true); controller.Finish(); await controller.DrainAsync();
+            var pending = f.Saved().Single(); Equal(Occurred.AddSeconds(30).ToUnixTimeMilliseconds(), pending.Start!.At);
+            True(pending.End is { Time: 7, Realtime: 7 }); Equal(0, f.Uploads.Count);
         });
-        yield return Case("close cancels unqualified account lookup without waiting for its late response", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await using var controller = new MusicFeedbackController(f.Settings, f.Protocol, f.Accounts, f.Clock);
+        yield return Case("close abandons unqualified logical waiter but protocol owns physical lookup", async () => {
+            await using var f = await Fixture.Create(); await using var controller = new MusicFeedbackController(f.Settings, f.Protocol, f.Accounts, f.Clock);
             var entered = Signal(); var cancelled = Signal(); var release = Signal();
-            f.Reply = async (request, token, _) =>
-            {
-                using var registration = token.Register(() => cancelled.TrySetResult());
-                entered.TrySetResult(); await release.Task; return Default(request);
-            };
-            controller.Select(new("entry", MusicSongFixture.Element(
-                MusicSongFixture.Online("wy", "42", "song", "artist", "", 200))));
-            controller.Started("entry", 0, 0);
-            try
-            {
-                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                var prepare = controller.PrepareShutdownAsync();
-                await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                await prepare.WaitAsync(TimeSpan.FromSeconds(5));
-                Equal(0, f.Saved().Length); Equal(0, f.Filenames.Count);
-                True(!f.Protocol.DrainAsync().IsCompleted);
-            }
-            finally { release.TrySetResult(); }
-            await f.Protocol.DrainAsync();
-            Equal(0, f.Saved().Length); Equal(0, f.Filenames.Count);
+            f.Reply = async (call, token, _) => { using var registration = token.Register(() => cancelled.TrySetResult()); entered.TrySetResult(); await release.Task; return f.Default(call); };
+            controller.Select(new("entry", MusicSongFixture.Element(MusicSongFixture.Online("wy", "42", "song", "artist", "", 200)))); controller.Started("entry", 0, 0);
+            try {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); var prepare = controller.PrepareShutdownAsync(); await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await prepare.WaitAsync(TimeSpan.FromSeconds(5)); Equal(0, f.Saved().Length); True(!f.Protocol.DrainAsync().IsCompleted);
+            } finally { release.TrySetResult(); }
+            await f.Protocol.DrainAsync(); Equal(0, f.Saved().Length); Equal(0, f.Uploads.Count);
         });
-        yield return Case("pre-cancellation and stale accounts create no disk or HTTP work", async () =>
-        {
-            await using var f = await Fixture.Create();
-            using var stop = new CancellationTokenSource(); stop.Cancel();
-            await Cancelled(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt), stop.Token));
-            f.Accounts.Current = false;
-            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "SESSION_CHANGED");
-            Equal(0, f.Calls); Equal(0, f.Saved().Length);
+        yield return Case("pre-cancellation and stale account admit no durable or runtime work", async () => {
+            await using var f = await Fixture.Create(); using var stop = new CancellationTokenSource(); stop.Cancel();
+            await Cancelled(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt), stop.Token)); f.Accounts.Current = false;
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "SESSION_CHANGED"); Equal(0, f.Calls); Equal(0, f.Saved().Length);
         });
         foreach (string action in new[] { "token", "protocol", "prepare" })
-            yield return Case("cancellation retains physical ownership and rejects late ACK " + action, async () =>
-            {
-                await using var f = await Fixture.Create(); using var stop = new CancellationTokenSource();
-                var entered = Signal(); var cancelled = Signal(); var release = Signal();
-                f.Reply = async (request, token, _) =>
-                {
-                    if (request.RequestUri!.AbsolutePath == ReportPath)
-                    {
-                        using var registration = token.Register(() => cancelled.TrySetResult());
-                        entered.TrySetResult(); await release.Task;
-                    }
-                    return Default(request);
-                };
-                Task completion = Task.CompletedTask;
-                await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt), stop.Token);
-                try
-                {
-                    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                    if (action == "protocol") completion = f.Protocol.DisposeAsync().AsTask();
-                    else if (action == "prepare") completion = f.Protocol.PrepareShutdownAsync();
-                    else stop.Cancel();
-                    await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                    var drain = f.Protocol.DrainAsync(); True(!drain.IsCompleted);
-                    if (action == "protocol") True(!completion.IsCompleted);
+            yield return Case("dispatched upload settles once and physical owner drains " + action, async () => {
+                await using var f = await Fixture.Create(); using var stop = new CancellationTokenSource(); var entered = Signal(); var release = Signal(); bool cancellable = true;
+                f.Reply = async (call, token, _) => { if (call.Operation == "feedback.upload") { cancellable = token.CanBeCanceled; entered.TrySetResult(); await release.Task; } return f.Default(call); };
+                Task completion = Task.CompletedTask; await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt), stop.Token);
+                try {
+                    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); True(!cancellable);
+                    if (action == "protocol") completion = f.Protocol.DisposeAsync().AsTask(); else if (action == "prepare") completion = f.Protocol.PrepareShutdownAsync(); else stop.Cancel();
+                    True(!f.Protocol.DrainAsync().IsCompleted); if (action == "protocol") True(!completion.IsCompleted);
                     if (action == "prepare") await completion.WaitAsync(TimeSpan.FromSeconds(5));
-                }
-                finally { release.TrySetResult(); }
-                await completion; await f.Protocol.DrainAsync();
-                Equal(0, f.Saved().Length); Equal(1, f.Filenames.Count);
-                Equal(0, f.Accounts.Disposals); True(!f.Handler.Disposed);
+                } finally { release.TrySetResult(); }
+                await completion; await f.Protocol.DrainAsync(); Equal(0, f.Saved().Length); Equal(1, f.Uploads.Count); Equal(0, f.Accounts.Disposals);
             });
-        yield return Case("idle session disposal never fabricates end or revokes safe pending", async () =>
-        {
-            await using var f = await Fixture.Create(); f.Offline = true;
-            var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
+        yield return Case("idle disposal never fabricates end or revokes safe pending", async () => {
+            await using var f = await Fixture.Create(); f.Offline = true; var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
             await session.DisposeAsync(); await session.DisposeAsync(); await f.Protocol.DrainAsync();
-            await Error(() => session.FinishAsync(End()), "CLOSED");
-            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "INSTANCE_ENDED");
-            Equal(1, f.Saved().Length); Equal(0, f.Filenames.Count);
+            await Error(() => session.FinishAsync(End()), "CLOSED"); await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "INSTANCE_ENDED");
+            Equal(1, f.Saved().Length); Equal(0, f.Uploads.Count);
         });
-        yield return Case("session release leaves independent outbox owning physical terminal cleanup", async () =>
-        {
-            await using var f = await Fixture.Create();
-            var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
-            var entered = Signal(); var release = Signal();
-            f.Reply = async (request, _, _) =>
-            {
-                if (request.RequestUri!.AbsolutePath == ReportPath)
-                { entered.TrySetResult(); await release.Task; throw new HttpRequestException("synthetic-private"); }
-                return Default(request);
-            };
-            try
-            {
-                await session.FinishAsync(End()); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
-                True(!f.Protocol.DrainAsync().IsCompleted);
-            }
-            finally { release.TrySetResult(); }
-            await f.Protocol.DrainAsync(); Equal(0, f.Saved().Length);
-            Equal("NETWORK_ERROR", f.Protocol.LastError); Equal(2, f.Filenames.Count);
-            await session.DisposeAsync();
-            await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(2, f.Filenames.Count);
+        yield return Case("session release leaves outbox owning physical terminal cleanup", async () => {
+            await using var f = await Fixture.Create(); var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await f.Protocol.DrainAsync();
+            var entered = Signal(); var release = Signal(); f.Reply = async (call, _, _) => { if (call.Operation == "feedback.upload") { entered.TrySetResult(); await release.Task; return MusicPlatformRuntimeFixture.Json(new { status = "unknown", errorCode = "NETWORK_ERROR" }); } return f.Default(call); };
+            try {
+                await session.FinishAsync(End()); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)); True(!f.Protocol.DrainAsync().IsCompleted);
+            } finally { release.TrySetResult(); }
+            await f.Protocol.DrainAsync(); Equal(0, f.Saved().Length); Equal("NETWORK_ERROR", f.Protocol.LastError); Equal(2, f.Uploads.Count);
+            await session.DisposeAsync(); await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync(); Equal(2, f.Uploads.Count);
         });
-        yield return Case("cancelled duplicate waiter cannot revoke original pending local admission", async () =>
-        {
-            await using var f = await Fixture.Create(); using var stop = new CancellationTokenSource();
-            f.Store.HoldNext = true;
+        yield return Case("cancelled duplicate waiter cannot revoke admitted local CAS", async () => {
+            await using var f = await Fixture.Create(); using var stop = new CancellationTokenSource(); f.Store.HoldNext = true;
             var original = f.Protocol.StartAsync(f.Account, Start(f.Attempt));
-            try
-            {
-                await f.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                var duplicate = f.Protocol.StartAsync(f.Account, Start(f.Attempt), stop.Token); stop.Cancel();
-                await Cancelled(() => duplicate); True(!original.IsCompleted);
-            }
+            try { await f.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); var duplicate = f.Protocol.StartAsync(f.Account, Start(f.Attempt), stop.Token); stop.Cancel(); await Cancelled(() => duplicate); True(!original.IsCompleted); }
             finally { f.Store.Release.TrySetResult(); }
-            await using var session = await original;
-            await f.Protocol.DrainAsync(); Equal(1, f.Filenames.Count);
+            await using var session = await original; await f.Protocol.DrainAsync(); Equal(1, f.Uploads.Count);
         });
-        foreach (string cookie in new[] { "MUSIC_U=x\r\nHost: other.invalid", "MUSIC_U=x; MUSIC_U=y", "__csrf=synthetic" })
-            yield return Case("credential injection duplicate or missing login rejects locally " + cookie.Length, async () =>
-            {
-                await using var f = await Fixture.Create();
-                await Error(() => f.Protocol.StartAsync(new("wy", "synthetic", 1, "123", cookie), Start(f.Attempt)),
-                    cookie.StartsWith("__csrf", StringComparison.Ordinal) ? "AUTH_REQUIRED" : "INVALID_CREDENTIALS");
-                Equal(0, f.Calls); Equal(0, f.Saved().Length);
-            });
-        yield return Case("QQ and KG keep their device credential and TLS guards", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await Error(() => f.Protocol.StartAsync(new("tx", "synthetic", 1, "123", "musicid=123; musickey=key"),
-                Start(new()) with { Recording = new("tx", "001FixtureMID") }), "DEVICE_CONTEXT_REQUIRED");
-            await Error(() => f.Protocol.StartAsync(new("tx", "synthetic", 1, "124", "musicid=123; musickey=key"),
-                Start(new()) with { Recording = new("tx", "001FixtureMID") }), "INVALID_CREDENTIALS");
-            await Error(() => f.Protocol.StartAsync(new("kg", "synthetic", 1, "123", "userid=123; token=key"),
-                Start(new()) with { Recording = new("kg", new string('A', 32), "7") }), "DEVICE_CONTEXT_REQUIRED");
-            await Error(() => f.Protocol.StartAsync(new("kg", "synthetic", 1, "123",
-                "userid=123; token=key; KUGOU_API_MID=123; KUGOU_API_GUID=abc; KUGOU_API_DEV=synthetic"),
-                Start(new()) with { Recording = new("kg", new string('A', 32), "7") }), "UNVERIFIED_TLS_PROTOCOL");
-            Equal(0, f.Calls);
+        yield return Case("independent attempts retain no native rate ledger or remote receipt history", async () => {
+            await using var f = await Fixture.Create(); f.Reply = (_, _, _) => throw new MusicPlatformException("AUTH_EXPIRED");
+            for (int i = 0; i < 81; i++) { await using var session = await f.Protocol.StartAsync(f.Account, Start(new()) with { PlaybackId = Guid.NewGuid() }); await f.Protocol.DrainAsync(); }
+            Equal(81, f.Calls); Equal(0, f.Saved().Length); Equal(0, f.Uploads.Count);
         });
-        foreach (string url in new[]
-        {
-            NeteasePlaybackTransport.UploadUrl,
-            "https://clientlog3.music.163.com/api/clientlog/encrypt/upload",
-            "https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=false",
-            "https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true&extra=1",
-            "https://clientlog.music.163.com/eapi/feedback/weblog",
-            "https://clientlog3.music.163.com/other?multiupload=true",
-            "http://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true"
-        })
-            yield return Case("upload permissions are exact and do not enlarge ordinary HTTP " + url, async () =>
-            {
-                await using var f = await Fixture.Create();
-                using var ordinary = new HttpRequestMessage(HttpMethod.Post, url);
-                True(!MusicPlatformHttp.IsAllowedOrigin("wy", ordinary.RequestUri!));
-                try { await f.Http.SendAsync("wy", ordinary, default); throw new Exception("ordinary origin accepted"); }
-                catch (MusicPlatformException error) { Equal("ORIGIN_DENIED", error.Code); }
-                using var native = new HttpRequestMessage(HttpMethod.Post, url) { Content = new MultipartFormDataContent() };
-                if (url != NeteasePlaybackTransport.UploadUrl)
-                {
-                    try { await f.Http.SendFeedbackJsonAsync("wy", native, default); throw new Exception("route accepted"); }
-                    catch (MusicPlatformException error) { Equal("ORIGIN_DENIED", error.Code); }
-                }
-                Equal(0, f.Calls);
-            });
-        yield return Case("independent attempts retain no rate ledger or remote receipt history", async () =>
-        {
-            await using var f = await Fixture.Create();
-            f.Reply = (_, _, _) => Task.FromResult(Response("{\"code\":200,\"profile\":null}"));
-            for (int i = 0; i < 81; i++)
-            {
-                await using var session = await f.Protocol.StartAsync(f.Account, Start(new()) with { PlaybackId = Guid.NewGuid() });
-                await f.Protocol.DrainAsync();
-            }
-            Equal(81, f.Calls); Equal(0, f.Saved().Length); Equal(0, f.Filenames.Count);
-        });
-    }
-
-    private static JsonObject Record(NeteasePlaybackPending pending, NeteasePlaybackEvent value, string action)
-    {
-        string text = Encoding.UTF8.GetString(NeteasePlaybackTransport.Records(pending, value));
-        True(text.EndsWith('\n') && text.Count(c => c == '\n') == 1);
-        string[] parts = text[..^1].Split('\x01');
-        Equal(3, parts.Length); Equal((value.At / 1000).ToString(), parts[0]); Equal(action, parts[1]);
-        return JsonNode.Parse(parts[2])!.AsObject();
     }
     private static MusicRecommendationFeedback Origin(string kind, string provider, string source) =>
-        new("session", "batch", "entry", "wy", kind, provider, "song", "", "occurrence-alg", "", "",
-            true, false, source);
-    private static MusicPlatformSession Account() => new("wy", "synthetic-account", 1, "123",
-        "MUSIC_U=synthetic-session; __csrf=synthetic-csrf");
-    private static string Filename(HttpRequestMessage request) =>
-        ((MultipartFormDataContent)request.Content!).Single().Headers.ContentDisposition!.FileName!.Trim('"');
-    private static HttpResponseMessage Default(HttpRequestMessage request) => request.RequestUri!.AbsolutePath switch
-    {
-        IdentityPath => Response("{\"code\":200,\"profile\":{\"userId\":123,\"nickname\":\"synthetic\"},\"account\":{\"id\":123}}"),
-        "/weapi/v3/song/detail" => Response("{\"code\":200,\"songs\":[{\"id\":42,\"dt\":200000}]}"),
-        ReportPath => Response(JsonSerializer.Serialize(new { code = 200, data = new { successfiles = new[] { Filename(request) } } })),
-        _ => throw new Exception("Unexpected endpoint")
-    };
+        new("session", "batch", "entry", "wy", kind, provider, "song", "", "occurrence-alg", "", "", true, false, source);
+    private static MusicPlatformSession Account() => new("wy", "synthetic-account", 1, "123", "MUSIC_U=synthetic-session; __csrf=synthetic-csrf");
     private sealed class Accounts : IMusicPlatformSessionSource, IDisposable
     {
-        internal bool Current = true;
-        internal int Acquisitions, Disposals;
-        internal MusicPlatformSession Value = Account();
-        public ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken token)
-        { token.ThrowIfCancellationRequested(); Interlocked.Increment(ref Acquisitions); return ValueTask.FromResult<MusicPlatformSession?>(Current ? Value : null); }
-        public bool IsCurrent(MusicPlatformSession account) => Current;
+        internal bool Current = true; internal int Acquisitions, Disposals; internal MusicPlatformSession Value = Account();
+        public ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken token) { token.ThrowIfCancellationRequested(); Interlocked.Increment(ref Acquisitions); return ValueTask.FromResult<MusicPlatformSession?>(Current ? Value : null); }
+        public bool IsCurrent(MusicPlatformSession account) => Current && ReferenceEquals(account, Value);
         public void Dispose() => Disposals++;
     }
     private sealed class Store : IDocumentStore
     {
-        private readonly Dictionary<string, byte[]> rows = [];
-        internal bool HoldNext;
+        private readonly Dictionary<string, byte[]> rows = []; internal bool HoldNext;
         internal readonly TaskCompletionSource Entered = Signal(), Release = Signal();
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        {
-            lock (rows)
-            {
-                var bytes = rows.GetValueOrDefault(ns)?.ToArray();
-                return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
-            }
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
-        {
-            if (HoldNext)
-            {
-                HoldNext = false; Entered.TrySetResult(); await Release.Task;
-            }
-            lock (rows)
-            {
-                var old = rows.GetValueOrDefault(ns);
-                if ((old is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(old)) != expected)
-                    throw new DocumentStoreException(DocumentStoreError.Conflict);
-                rows[ns] = bytes.ToArray(); return DocumentFingerprint.FromBytes(bytes.Span);
-            }
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) { lock (rows) { var bytes = rows.GetValueOrDefault(ns)?.ToArray(); return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes))); } }
+        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default) {
+            if (HoldNext) { HoldNext = false; Entered.TrySetResult(); await Release.Task; }
+            lock (rows) { var old = rows.GetValueOrDefault(ns); if ((old is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(old)) != expected) throw new DocumentStoreException(DocumentStoreError.Conflict); rows[ns] = bytes.ToArray(); return DocumentFingerprint.FromBytes(bytes.Span); }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     private sealed class FactClock : TimeProvider
     {
-        private long ticks;
-        public override long TimestampFrequency => 1000;
-        public override long GetTimestamp() => ticks;
-        public override DateTimeOffset GetUtcNow() => Occurred.AddMilliseconds(ticks);
-        internal void Advance(int seconds) => ticks += seconds * 1000;
-    }
-    private sealed class Handler(Fixture owner) : HttpMessageHandler
-    {
-        internal bool Disposed;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) => owner.Send(request, token);
-        protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
+        private long ticks; public override long TimestampFrequency => 1000; public override long GetTimestamp() => ticks;
+        public override DateTimeOffset GetUtcNow() => Occurred.AddMilliseconds(ticks); internal void Advance(int seconds) => ticks += seconds * 1000;
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        internal readonly MusicFeedbackAttempt Attempt = new();
-        internal readonly Accounts Accounts = new();
-        internal MusicPlatformSession Account => Accounts.Value;
-        internal readonly Handler Handler;
-        internal readonly MusicPlatformHttp Http;
-        internal readonly NativeMusicFeedbackProtocol Protocol;
-        internal readonly MusicClientContextFixture Clients;
-        internal readonly Store Store = new();
-        internal readonly MusicFeedbackSettingsOwner Settings;
-        internal readonly FactClock Clock = new();
-        internal readonly List<string> Filenames = [], Paths = [];
-        internal Func<HttpRequestMessage, CancellationToken, int, Task<HttpResponseMessage>>? Reply;
-        internal bool Offline;
-        private int calls;
-        internal int Calls => Volatile.Read(ref calls);
-        private Fixture()
-        {
-            Handler = new(this); Http = MusicPlatformHttp.CreateWithHandler(Handler); Clients = new(Http, clock: Clock);
-            Settings = new(Store); Protocol = new(Accounts, Http, Clients.Owner, Clock, Store, Settings);
-        }
-        internal static async Task<Fixture> Create()
-        {
-            var f = new Fixture(); await f.Settings.ReadAsync(); await f.Settings.SaveAsync(0, ["wy"]); return f;
-        }
-        internal NeteasePlaybackPending[] Saved() => NeteasePlaybackOutboxDocument.Decode(
-            Store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace).GetAwaiter().GetResult());
-        internal async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken token)
-        {
+        internal readonly MusicFeedbackAttempt Attempt = new(); internal readonly Accounts Accounts = new(); internal MusicPlatformSession Account => Accounts.Value;
+        internal readonly MusicPlatformRuntimeFixture Runtime = new(); internal readonly NativeMusicFeedbackProtocol Protocol;
+        internal readonly Store Store = new(); internal readonly MusicFeedbackSettingsOwner Settings; internal readonly FactClock Clock = new();
+        internal readonly List<JsonElement> Uploads = [];
+        internal Func<MusicPlatformRuntimeFixture.Call, CancellationToken, int, Task<JsonElement>>? Reply; internal bool Offline;
+        private int calls; internal int Calls => Volatile.Read(ref calls);
+        private Fixture() { Settings = new(Store); Runtime.Client.BindSessions(Accounts); Runtime.OnRequest = Send; Protocol = new(Accounts, Runtime.Client, Clock, Store, Settings); }
+        internal static async Task<Fixture> Create() { var f = new Fixture(); await f.Settings.ReadAsync(); await f.Settings.SaveAsync(0, ["wy"]); return f; }
+        internal NeteasePlaybackPending[] Saved() => NeteasePlaybackOutboxDocument.Decode(Store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace).GetAwaiter().GetResult());
+        internal JsonElement Default(MusicPlatformRuntimeFixture.Call call) => call.Operation switch {
+            "feedback.qualify" => MusicPlatformRuntimeFixture.Json(new { qualified = true }),
+            "feedback.upload" => MusicPlatformRuntimeFixture.Json(new { status = "confirmed" }), _ => throw new InvalidOperationException(call.Operation) };
+        private async Task<JsonElement> Send(MusicPlatformRuntimeFixture.Call call, CancellationToken token) {
             int count = Interlocked.Increment(ref calls);
-            Equal(HttpMethod.Post, request.Method); Equal("https", request.RequestUri!.Scheme);
-            Paths.Add(request.RequestUri.AbsolutePath);
-            if (request.RequestUri.AbsolutePath is IdentityPath or ReportPath)
-            {
-                Equal("Meowfilm (Windows)", string.Join(" ", request.Headers.GetValues("User-Agent")));
-                Equal(Account.Cookie, request.Headers.GetValues("Cookie").Single()); True(!request.Headers.Contains("Referer"));
-            }
-            if (request.RequestUri.AbsolutePath == ReportPath)
-            {
-                Equal(NeteasePlaybackTransport.UploadUrl, request.RequestUri.ToString());
-                True(request.Content is MultipartFormDataContent);
-                var part = ((MultipartFormDataContent)request.Content!).Single();
-                Equal("file", part.Headers.ContentDisposition!.Name!.Trim('"'));
-                Equal("multipart/form-data", part.Headers.ContentType!.MediaType);
-                string filename = Filename(request);
-                True(filename.StartsWith("play_", StringComparison.Ordinal) && Guid.TryParseExact(filename[5..], "N", out _));
-                True(!Filenames.Contains(filename)); Filenames.Add(filename);
-                byte[] bytes = await part.ReadAsByteArrayAsync(token);
-                True(bytes.AsSpan(0, 4).SequenceEqual("NCBL"u8));
-                True(!Encoding.UTF8.GetString(bytes).Contains("synthetic-session", StringComparison.Ordinal));
-            }
-            if (Offline) throw new HttpRequestException("synthetic preflight offline");
-            return Reply is null ? Default(request) : await Reply(request, token, count);
+            if (call.Operation == "feedback.upload") { var events = call.Parameters.GetProperty("events"); Equal(1, events.GetArrayLength()); Uploads.Add(events[0].Clone()); }
+            if (Offline) throw new MusicPlatformException("NETWORK_ERROR"); return Reply is null ? Default(call) : await Reply(call, token, count);
         }
-        public async ValueTask DisposeAsync()
-        {
-            Store.Release.TrySetResult();
-            await Protocol.DisposeAsync(); await Settings.DisposeAsync(); await Clients.DisposeAsync(); Http.Dispose();
-        }
+        public async ValueTask DisposeAsync() { Store.Release.TrySetResult(); try { await Protocol.DisposeAsync(); await Settings.DisposeAsync(); } finally { await Runtime.DisposeAsync(); } }
     }
 }

@@ -2,18 +2,18 @@ import XCTest
 import Foundation
 import MeowAccounts
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 import MeowJSON
 @testable import MeowMusicPlatform
 
 @MainActor final class MusicNativeHomeOwnerTests: XCTestCase {
-    private let homePath = "/eapi/link/page/rcmd/resource/show"
-
     func testColdDisplayScopeReadsOnlyLocalRevisionAndDoesNotAcceptAccount() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
         let record = try XCTUnwrap(f.store.peek(f.identity))
         let display = try await f.service.nativeHomeDisplayScope()
         try await f.service.checkNativeHomeDisplayScope(display)
-        let calls = await f.http.recorded(), statuses = try await f.service.statuses()
+        let calls = await f.platform.recorded(), statuses = try await f.service.statuses()
         XCTAssertTrue(calls.isEmpty); XCTAssertEqual(statuses.first?.phase, .requiresValidation)
         XCTAssertEqual(f.store.peek(f.identity), record)
         // A copied display identity cannot be turned into a network binding.
@@ -23,7 +23,7 @@ import MeowJSON
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         XCTAssertTrue(display.authorization.isActive)
 
-        await f.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": 500])])
+        await f.platform.fail("account.verify", code: "UPSTREAM_HTTP")
         do { _ = try await f.service.nativeHomeBinding(); XCTFail("Offline verification succeeded") }
         catch { XCTAssertEqual(error as? MusicServiceError, .upstreamFailed) }
         let afterFailure = try await f.service.nativeHomeDisplayScope()
@@ -32,17 +32,17 @@ import MeowJSON
         XCTAssertFalse(display.authorization.isActive)
 
         let restarted = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: f.store),
-            scopes: [.netease: f.identity], transport: f.http, clock: { [clock = f.clock] in clock.now() })
+            scopes: [.netease: f.identity], platformClient: f.runtime.makeClient(), clock: { [clock = f.clock] in clock.now() })
         _ = try await restarted.setAccess(available: true, generation: 1)
         let cold = try await restarted.nativeHomeDisplayScope()
         XCTAssertEqual(cold.scope, display.scope); XCTAssertNotEqual(cold.revision, display.revision)
-        let requests = await f.http.recorded()
-        XCTAssertEqual(requests.filter { $0.request.url.path == "/weapi/w/nuser/account/get" }.count, 1)
+        let requests = await f.platform.recorded()
+        XCTAssertEqual(requests.filter { $0.operation == "account.verify" }.count, 1)
         _ = await restarted.close()
     }
 
     func testDisplayScopeMatchesExistingSnapshotNamespaceAfterSuccessfulValidation() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
         let display = try await f.service.nativeHomeDisplayScope()
         let network = try await f.service.nativeHomeBinding()
         XCTAssertEqual(display.scope, network.scope)
@@ -55,33 +55,38 @@ import MeowJSON
         _ = await f.service.close()
     }
 
-    func testGuestHasStableScopedBindingAndEmptyActivityWithoutAccountHTTP() async throws {
-        let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
+    func testGuestHasStableScopedBindingAndUsesCanonicalHomeWithoutAccountValidation() async throws {
+        let f = try MusicNativeFixture(platform: .netease, restored: false); try await f.enable()
         let first = try await f.service.nativeHomeBinding()
         let second = try await f.service.nativeHomeBinding()
         XCTAssertFalse(first.loggedIn); XCTAssertEqual(first, second)
-        let bytes = try await f.service.nativeHomePayload(.artistActivity(), binding: first)
-        let root = try MusicQQWire.decode(bytes), data = try MusicQQWire.object(root["data"])
-        XCTAssertEqual(root["capability"] as? String, "authentication-required")
-        XCTAssertEqual((data["newWorks"] as? [Any])?.count, 0)
-        XCTAssertEqual(data["hasMore"] as? Bool, false)
-        for request in [MusicNativeHomeRequest.home(), .featured(), .vipSongs, .songMetadata(ids: ["101"]), .playlistMetadata(ids: ["501"])] {
-            do { _ = try await f.service.nativeHomePayload(request, binding: first); XCTFail("Anonymous route replaced") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
+        let payload: RuntimeValue = .object(["sections": .array([]), "capability": .string("authentication-required")])
+        for operation in ["artistActivity", "home", "channel", "songs", "playlists"] {
+            await f.platform.replies(operation, payload)
         }
-        let records = await f.http.recorded(); XCTAssertTrue(records.isEmpty)
+        let bytes = try await f.service.nativeHomePayload(.artistActivity(), binding: first)
+        XCTAssertEqual(try RuntimeJSON.decode(bytes), payload)
+        for request in [MusicNativeHomeRequest.home(), .featured(), .vipSongs, .songMetadata(ids: ["101"]), .playlistMetadata(ids: ["501"])] {
+            let value = try await f.service.nativeHomePayload(request, binding: first)
+            XCTAssertEqual(try RuntimeJSON.decode(value), payload)
+        }
+        let records = await f.platform.recorded()
+        XCTAssertEqual(records.map(\.operation), ["artistActivity", "home", "home", "channel", "songs", "playlists"])
+        XCTAssertFalse(records.contains { $0.operation == "account.verify" || $0.operation == "account.profile" })
         XCTAssertTrue(first.authorization.isActive)
         _ = await f.service.close()
     }
 
     func testFinishedFailedCancelledOrExpiredLoginReturnsToGuestWithoutRevivingOldGrants() async throws {
         for ending in ["failed", "cancelled", "expired"] {
-            let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
+            let f = try MusicNativeFixture(platform: .netease, restored: false); try await f.enable()
+            await f.platform.replies("audio", .object(["url": .string("https://media.invalid/current.mp3"),
+                "actualQuality": .string("128k"), "full": .bool(true)]))
             let old = try await f.service.nativeHomeBinding()
             let oldOptions = try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101")
             let oldOption = try XCTUnwrap(oldOptions.first)
             if ending == "failed" {
-                await f.http.replies("/eapi/login/qrcode/unikey", [try MusicNeteaseFixture.response(["code": 500])])
+                await f.platform.fail("qr.create", code: "UPSTREAM_HTTP")
                 do { _ = try await f.service.beginLogin(platform: .netease); XCTFail("Expected QR failure") }
                 catch { XCTAssertEqual(error as? MusicServiceError, .upstreamFailed) }
             } else {
@@ -90,8 +95,11 @@ import MeowJSON
                 catch { XCTAssertEqual(error as? MusicServiceError, .busy) }
                 if ending == "expired" {
                     f.clock.advance(181)
+                    await f.platform.replies("qr.poll", .object(["status": .string("expired")]))
                     let progress = try await f.service.checkLogin(challengeID: challenge.id)
                     XCTAssertEqual(progress, .expired)
+                    let requests = await f.platform.recorded()
+                    XCTAssertEqual(requests.filter { $0.operation == "qr.poll" }.count, 1)
                 } else { await f.service.cancelLogin(challengeID: challenge.id) }
             }
             XCTAssertFalse(old.authorization.isActive)
@@ -116,23 +124,24 @@ import MeowJSON
                 XCTFail("Guest restored a private capability")
             } catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
             XCTAssertNil(f.store.peek(f.identity))
-            let calls = await f.http.recorded()
-            XCTAssertFalse(calls.contains { $0.request.url.path.contains("vip") || $0.request.url.path.contains("nuser") })
+            let calls = await f.platform.recorded()
+            XCTAssertFalse(calls.contains { $0.operation == "account.verify" || $0.operation == "account.profile" })
             _ = await f.service.close()
         }
     }
 
     func testConfirmedAuthenticationDenialAllowsGuestWithoutHidingOtherFailures() async throws {
-        for (code, expected) in [(500, MusicServiceError.upstreamFailed), (429, .rateLimited), (460, .verificationRequired)] {
-            let f = try MusicNeteaseNativeFixture(); try await f.enable()
-            await f.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": code])])
+        for (code, expected) in [("UPSTREAM_HTTP", MusicServiceError.upstreamFailed), ("RATE_LIMITED", .rateLimited),
+                                 ("VERIFICATION_REQUIRED", .verificationRequired)] {
+            let f = try MusicNativeFixture(platform: .netease); try await f.enable()
+            await f.platform.fail("account.verify", code: code)
             do { _ = try await f.service.nativeHomeBinding(); XCTFail("Failure became guest") }
             catch { XCTAssertEqual(error as? MusicServiceError, expected) }
             XCTAssertNotNil(f.store.peek(f.identity))
             _ = await f.service.close()
         }
-        let denied = try MusicNeteaseNativeFixture(); try await denied.enable()
-        await denied.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": 301])])
+        let denied = try MusicNativeFixture(platform: .netease); try await denied.enable()
+        await denied.platform.fail("account.verify", code: "AUTH_EXPIRED")
         let guest = try await denied.service.nativeHomeBinding()
         XCTAssertFalse(guest.loggedIn)
         let repeated = try await denied.service.nativeHomeBinding()
@@ -142,12 +151,12 @@ import MeowJSON
             XCTFail("Guest home authorized private recommendations")
         } catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
         XCTAssertNil(denied.store.peek(denied.identity))
-        let deniedRequests = await denied.http.recorded()
-        XCTAssertEqual(deniedRequests.filter { $0.request.url.path == "/weapi/w/nuser/account/get" }.count, 1)
+        let deniedRequests = await denied.platform.recorded()
+        XCTAssertEqual(deniedRequests.filter { $0.operation == "account.verify" }.count, 1)
         XCTAssertEqual(denied.store.calls().filter { $0 == "remove" }.count, 1)
         _ = await denied.service.close()
 
-        let locked = try MusicNeteaseNativeFixture(); try await locked.enable()
+        let locked = try MusicNativeFixture(platform: .netease); try await locked.enable()
         locked.store.fail("read")
         do { _ = try await locked.service.nativeHomeBinding(); XCTFail("Keychain failure became guest") }
         catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
@@ -175,9 +184,9 @@ import MeowJSON
     }
 
     func testNetworkFailureKeepsLastAccountScopeAndFence() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
         let original = try await f.service.nativeHomeBinding()
-        await f.http.replies(homePath, [try MusicNeteaseFixture.response(["code": 500])])
+        await f.platform.fail("home", code: "UPSTREAM_HTTP")
         do { _ = try await f.service.nativeHomePayload(.home(), binding: original); XCTFail("Network failure hidden") }
         catch { XCTAssertEqual(error as? MusicServiceError, .upstreamFailed) }
         let current = try await f.service.nativeHomeBinding()
@@ -188,7 +197,7 @@ import MeowJSON
     }
 
     func testColdRestoreKeepsPersistentScopeWithoutReusingSessionFenceOrWritingCredential() async throws {
-        let f = try MusicNeteaseNativeFixture(), record = try XCTUnwrap(f.store.peek(f.identity))
+        let f = try MusicNativeFixture(platform: .netease), record = try XCTUnwrap(f.store.peek(f.identity))
         try await f.enable()
         let first = try await f.service.nativeHomeBinding()
         XCTAssertEqual(f.store.peek(f.identity), record)
@@ -199,7 +208,7 @@ import MeowJSON
         // durable record/configured identity, not the prior owner or its token.
         let restartedAccounts = AccountSessionCoordinator(store: f.store)
         let restarted = NativeMusicAccountService(accounts: restartedAccounts, scopes: [.netease: f.identity],
-            transport: f.http, clock: { [clock = f.clock] in clock.now() })
+            platformClient: f.runtime.makeClient(), clock: { [clock = f.clock] in clock.now() })
         _ = try await restarted.setAccess(available: true, generation: 1)
         let restored = try await restarted.nativeHomeBinding()
         XCTAssertTrue(restored.loggedIn)
@@ -209,14 +218,14 @@ import MeowJSON
         XCTAssertTrue(restored.authorization.isActive)
         XCTAssertEqual(f.store.peek(f.identity), record)
         XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, 1, "Only fixture seeding writes the record")
-        let requests = await f.http.recorded()
-        XCTAssertEqual(requests.filter { $0.request.url.path == "/weapi/w/nuser/account/get" }.count, 2,
+        let requests = await f.platform.recorded()
+        XCTAssertEqual(requests.filter { $0.operation == "account.verify" }.count, 2,
                        "A matching snapshot scope never bypasses real account validation")
         _ = await restarted.close()
     }
 
     func testProtectionChangesFenceButNotPersistentAccountScope() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
         let first = try await f.service.nativeHomeBinding(), record = f.store.peek(f.identity)
         let writes = f.store.calls().filter { $0 == "write" }.count
         _ = try await f.service.setAccess(available: false, generation: 2)
@@ -236,14 +245,11 @@ import MeowJSON
     }
 
     func testVerifiedCredentialReplacementRotatesPersistentScopeAndLogoutReturnsGuestScope() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
         let first = try await f.service.nativeHomeBinding(), record = try XCTUnwrap(f.store.peek(f.identity))
         let writes = f.store.calls().filter { $0 == "write" }.count
-        await f.http.replies("/weapi/w/nuser/account/get", [
-            try MusicNeteaseFixture.response(["code": 200, "profile": ["userId": 42]],
-                headers: ["set-cookie": "MUSIC_U=synthetic-home-renewed; Path=/"]),
-            try MusicNeteaseFixture.response(["code": 200, "profile": ["userId": 42]])
-        ])
+        await f.platform.replies("account.verify", .object(["userId": .string("101"),
+            "cookie": .string("MUSIC_U=synthetic-home-renewed")]))
         _ = try await f.service.validate(platform: .netease)
         let replaced = try await f.service.nativeHomeBinding(), replacement = try XCTUnwrap(f.store.peek(f.identity))
         XCTAssertTrue(replaced.loggedIn); XCTAssertFalse(first.authorization.isActive)
@@ -255,6 +261,7 @@ import MeowJSON
 
         // The new credential is now stable. Another verification must not
         // invent yet another persistence namespace or revive an old fence.
+        await f.platform.clearReply("account.verify")
         _ = try await f.service.validate(platform: .netease)
         let verified = try await f.service.nativeHomeBinding()
         XCTAssertEqual(verified.scope, replaced.scope)
@@ -286,9 +293,10 @@ import MeowJSON
     }
 
     func testAuthenticationFailureRevokesPersonalizedBindingAndAllowsGuestWithoutPayloadReplay() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
         let original = try await f.service.nativeHomeBinding()
-        await f.http.replies(homePath, [try MusicNeteaseFixture.response(["code": 301])])
+        await f.platform.fail("home", code: "AUTH_EXPIRED")
+        await f.platform.replies("artistActivity", .object(["sections": .array([])]))
         do { _ = try await f.service.nativeHomePayload(.home(), binding: original); XCTFail("Expired payload accepted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
         XCTAssertFalse(original.authorization.isActive)
@@ -303,8 +311,8 @@ import MeowJSON
         do { _ = try await f.service.nativeHomePayload(.home(), binding: original); XCTFail("Old home binding revived") }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         _ = try await f.service.nativeHomePayload(.artistActivity(), binding: guest)
-        let records = await f.http.recorded()
-        XCTAssertEqual(records.filter { $0.request.url.path == homePath }.count, 1, "No anonymous retry hidden inside the account port")
+        let records = await f.platform.recorded()
+        XCTAssertEqual(records.filter { $0.operation == "home" }.count, 1, "No anonymous retry hidden inside the account port")
         XCTAssertNil(f.store.peek(f.identity))
         _ = await f.service.close()
     }
@@ -366,9 +374,9 @@ import MeowJSON
     }
 
     func testCredentialRemovalFailureCannotBecomeGuest() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
         f.store.fail("remove")
-        await f.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": 301])])
+        await f.platform.fail("account.verify", code: "AUTH_EXPIRED")
         do { _ = try await f.service.nativeHomeBinding(); XCTFail("Incomplete invalidation became guest") }
         catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
         let snapshot = await f.accounts.snapshot(for: f.identity)
@@ -376,8 +384,8 @@ import MeowJSON
         do { _ = try await f.service.nativeHomeBinding(); XCTFail("Storage failure became guest") }
         catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
         XCTAssertNotNil(f.store.peek(f.identity))
-        let calls = await f.http.recorded()
-        XCTAssertEqual(calls.filter { $0.request.url.path == "/weapi/w/nuser/account/get" }.count, 1)
+        let calls = await f.platform.recorded()
+        XCTAssertEqual(calls.filter { $0.operation == "account.verify" }.count, 1)
         _ = await f.service.close()
     }
 
@@ -534,7 +542,7 @@ import MeowJSON
             try await f.service.nativeHomePayload(.home(), binding: binding)
         }
         await fulfillment(of: [gate.entered], timeout: 3)
-        let replacement = CredentialRecord(credential: try MusicNeteaseFixture.credential("99"))
+        let replacement = CredentialRecord(credential: try MusicAccountFixture.credential(99, platform: .netease))
         try f.store.write(replacement, for: f.identity)
         await gate.release()
         await fulfillment(of: [pending.finished, gate.departed], timeout: 3)
@@ -586,8 +594,8 @@ import MeowJSON
     }
 }
 
-/// Deterministic account-owner gates; production continues to use fixed native
-/// providers. No injected method exposes or returns a credential to the feature.
+/// Non-cooperative owner workers remain separate from the real runtime fixture:
+/// URLSession cancellation alone cannot prove that an injected worker drained.
 private actor MusicHomeOwnerProvider: MusicAccountProvider, MusicNeteaseHomeProvider {
     private var verifyGate: MusicAccountQueueOwnerGate?, revokeGate: MusicAccountQueueOwnerGate?
     private var payloadGate: MusicAccountQueueOwnerGate?
@@ -602,18 +610,18 @@ private actor MusicHomeOwnerProvider: MusicAccountProvider, MusicNeteaseHomeProv
     func failRecommendations(_ error: MusicServiceError?) { recommendationFailure = error }
     func counts() -> (verifies: Int, payloads: Int, recommendations: Int) { (verifies, payloads, recommendations) }
     func nativeID(_ credential: AccountCredential) throws -> String {
-        try MusicNeteaseWire.id(MusicQQWire.decode(credential.dataRepresentation())["accountID"])
+        try MusicAccountFixture.userID(credential)
     }
-    func verify(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         verifies += 1
         if let verifyGate { self.verifyGate = nil; await verifyGate.wait() }
         try Task.checkCancellation()
         if let verifyFailure { throw verifyFailure }
         return .init(credential: credential, nickname: "合成账号", nativeID: try nativeID(credential))
     }
-    func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified { try await verify(credential) }
+    func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await verify(credential) }
     func revoke() async { if let revokeGate { self.revokeGate = nil; await revokeGate.wait() } }
-    func homePayload(_ request: MusicNativeHomeRequest, credential: AccountCredential,
+    func homePayload(_ request: MusicNativeHomeRequest,
                      authorize: @escaping @Sendable () async throws -> Void) async throws -> Data {
         try await authorize()
         payloads += 1
@@ -623,20 +631,20 @@ private actor MusicHomeOwnerProvider: MusicAccountProvider, MusicNeteaseHomeProv
         // this late reply even when the provider does not honor cancellation.
         if let gate { await gate.wait() }
         if let failure { throw failure }
-        return Data(#"{"code":200,"data":{"blocks":[]}}"#.utf8)
+        return Data(#"{"sections":[]}"#.utf8)
     }
     func createQR(id: UUID) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
-    func pollQR(id: UUID) throws -> MusicQQLoginResult { throw MusicServiceError.unsupported }
+    func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) throws -> MusicQQRecommendation {
+    func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation {
         recommendations += 1
         if let recommendationFailure { throw recommendationFailure }
         return .init(rows: [], nextPage: nil)
     }
-    func collectionRows(credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String, credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func capabilities(mid: String, credential: AccountCredential) throws -> [String] { throw MusicServiceError.unsupported }
-    func resolve(mid: String, quality: String, credential: AccountCredential) throws -> JSONValue { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func capabilities(mid: String) throws -> [String] { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> JSONValue { throw MusicServiceError.unsupported }
 }
 
 private struct MusicHomeOwnerFixture {
@@ -651,7 +659,7 @@ private struct MusicHomeOwnerFixture {
         service = NativeMusicAccountService(accounts: accounts,
             scopes: [.netease: identity, .qq: try MusicAccountFixture.identity("tx")],
             providers: [.netease: provider, .qq: MusicHomeOwnerProvider()])
-        try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+        try store.write(.init(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
     }
     func enable() async throws { _ = try await service.setAccess(available: true, generation: 1) }
 }

@@ -85,7 +85,7 @@ public sealed partial class MusicCapability
                 RequireCatalogContent();
                 return MusicCatalogDto.Read(reply, card.Platform, card.Kind, "")
                     .SelectMany(section => section.Items).Where(item => item.Song is not null).Take(3)
-                    .Select((item, index) => new MusicRankPreview(item.Title, item.Subtitle, item.Cover, index + 1, null)).ToArray();
+                    .Select((item, index) => new MusicRankPreview(item.Title, item.Subtitle, item.Cover, index + 1, null, item.Song)).ToArray();
             }
             catch { return []; } // Optional failure is retained for this page, not retried by hovering.
             finally { if (entered) catalogPreviewSlots.Release(); }
@@ -106,9 +106,7 @@ public sealed partial class MusicCapability
             if (!currentAction()) return;
             var songs = MusicCatalogDto.Read(reply, card.Platform, card.Kind, "").SelectMany(s => s.Items)
                 .Where(c => c.Song is not null).Select(c => c.Song!.Raw).ToArray();
-            MusicDto.Require(songs.Length is > 0 and <= 1000 &&
-                (!reply.TryGetProperty("more", out var more) || more.ValueKind == JsonValueKind.False));
-            ValidatePersonalCatalog(reply, Target(card.Kind, card.Platform, card.Title, parameters), songs.Length);
+            MusicDto.Require(songs.Length > 0);
             await RunAsync(async () =>
             {
                 if (!currentAction()) return;

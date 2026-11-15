@@ -2,14 +2,14 @@
 
 ## 所有权
 
-- `MusicLibraryOwner` 是 `music.library.v1` 的唯一 writer。
+- `MusicLibraryOwner` 是 `music.library.v2` 的唯一 writer；永久歌曲规则见[共同歌曲仓库](../common/music/smart-playback.md)，图片规则见[共享展示资源](../common/music/presentation-resources.md)。
 - 元数据平台顺序、启用集合和本地歌词均属于当前曲库文档；设置页、歌词页、平台协议和脚本不能直接写保护存储。
 - 普通设置、读取本地歌词和保存本地歌词不调用脚本服务。只有实际查询已启用洛雪音源时才进入脚本执行边界。
 - 设置控件即时保存，没有“保存设置”或“重新读取设置”按钮，也没有独立服务端配置副本。
 
 ## 当前文档区域
 
-`music.library.v1` 只接受 `MusicLibraryState.CurrentAreas` 和当前脚本存储 key。未知区域、重复 key、非当前 schema、损坏字段或关系错误使整份文档失败，且不会写回原数据。
+`music.library.v2` 只接受 `MusicLibraryState.CurrentAreas`；脚本存储不在此文档。未知区域、重复 key、非当前 schema、损坏字段或关系错误使整份文档失败，且不会写回原数据。
 
 元数据相关区域为：
 
@@ -49,10 +49,10 @@ native-local-lyrics
 
 1. 当前歌曲已明确关联的本地歌词；
 2. 按 `platforms` 顺序遍历 `enabled` 中的精确录音；
-3. `wy`、`tx`、`kg` 使用原生官方歌词协议；
-4. `wy` 原生结果为空，或当前录音属于 `kw`、`mg` 时，按安装顺序依次尝试实际已启用的同平台脚本歌词能力；`tx`、`kg` 不进入脚本路径。
+3. 当前平台歌词由同一 `MusicPlatformClient` 请求共同 Node 规范正文；
+4. 既有脚本 lyric 回退由 `MusicLyricApplication`／`Scripting` 适配，不把真实平台失败当作空结果。
 
-每个平台最多读取当前歌曲已有录音中的两条，不能按标题搜索另一首歌，不能跨平台替换录音或调用未启用脚本。读取安装列表不启动脚本，执行歌词时才按需顺序激活；当前安装无歌词或不支持歌词时才继续下一项。关闭的元数据平台不会从缓存、显示快照或脚本结果重新进入本次查询。
+歌词遍历当前仓库已有、符合平台设置的候选，不为缺可选文本补搜其他歌曲。脚本歌词沿现有启用及声明入口顺序执行；原生不保留平台候选数量门禁。
 
 `MusicLyricApplication` 对同一当前请求合并在途操作，并用策略代次、平台代次、歌曲身份和取消令牌围住结果。设置、账号、脚本源集合或歌曲变化会使旧缓存与旧回执失效；关闭等待已准入工作真实结束。
 
@@ -80,27 +80,13 @@ native-local-lyrics
 
 ## 本地歌词区域
 
-`native-local-lyrics` 的唯一当前形态为：
+`native-local-lyrics` 当前 schema 为 1，items 为 `{songId,contentHash,lines}`；songId 是仓库永久 UUID，contentHash 仅绑定导入文本，不是歌曲身份。现有实际资源限制为 64 首、区域 2 MiB、单项 256 KiB；保存通用时间轴，不保存路径、文件能力、凭据或媒体 URL。`music.lyrics.local.get/save/remove` 按永久引用读取／替换／移除，歌词关闭不删除本地内容。
 
-```json
-{
-  "schema": 2,
-  "items": [
-    {
-      "songKey": "<64 位摘要>",
-      "songId": "<当前歌曲 ID>",
-      "contentHash": "<64 位摘要>",
-      "lines": []
-    }
-  ]
-}
-```
+## 共享音乐图片与展示缓存
 
-- 最多 64 首、区域最多 2 MiB、单项最多 256 KiB。
-- `songKey` 唯一并绑定当前歌曲显示身份；`contentHash` 绑定导入文本。
-- 保存的是解析后的纯时间轴，不保存凭据、媒体 URL、请求头或文件能力；逐字仅保存真实时间，当前格式不含 timing 标签。不兼容旧 schema，不迁移或删除原文件。
-- `music.lyrics.local.get` 只读取精确歌曲；`save` 原子替换该歌曲内容；`remove` 只删除该精确关联。
-- 全局歌词关闭时不显示本地或在线歌词，但不会删除本地内容。
+`MusicPresentationCache` 使用 `music.presentation-resources.v1`，图片按完整 URL 保存原网络字节，展示歌词按永久 songId 保存；二者合计按实际序列化文档占用沿原 8 MiB／30 天预算。音乐专用 `ArtworkService` 使用该 byte port，内存 32 MiB／64 项、图片单次 4 MiB，WPF `ArtworkImage` 与播放器共用此实例。`MusicRecordingPresentationCache` 和播放器独占图片持久副本已删除；其他业务图片实例不接音乐磁盘 port。
+
+封面选择写入同一歌曲仓库，`artworkSourceKey/artworkSourceImage/cover_url` 区分平台原图与实际选定 URL。`SongMetadataChanged` 在提交后通知当前搜索、目录、队列和播放投影。具体换图／共享取消／清理语义只在共同资源契约维护；这些接线尚未取得本轮运行验证。
 
 ## 取消、提交和错误
 

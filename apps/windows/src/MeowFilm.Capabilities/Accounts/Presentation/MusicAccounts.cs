@@ -87,6 +87,8 @@ public sealed partial class MusicCapability
         MusicOperationException { Code: "QR_EXPIRED" } => "二维码已过期",
         MusicOperationException { Code: "BUSY" } => "登录请求尚未结束",
         MusicOperationException { Code: "INVALID_CODE" } => "验证码无效或已过期",
+        MusicOperationException { Code: "INVALID_PHONE" } => "验证码发送失败，手机号无效",
+        MusicOperationException { Code: "ACCOUNT_SELECTION_REQUIRED" } => "该手机号关联多个账号，请使用二维码登录",
         MusicOperationException { Code: "RATE_LIMITED" } => "请求过于频繁，请稍后重试",
         MusicOperationException { Code: "SMS_SEND_UNCONFIRMED" } => "短信发送结果未确认",
         MusicOperationException { Code: "UNSUPPORTED" } => "此账号协议尚未支持",
@@ -222,8 +224,6 @@ public sealed partial class MusicCapability
     {
         string? platform = selectedAccount?.Platform;
         if (stopping || platform is null || string.IsNullOrWhiteSpace(cookie)) return Task.CompletedTask;
-        if (cookie.Length > 32768 || cookie.Any(character => character < 32 || character == 127))
-        { accountStatus = "会话格式无效"; AccountBindings(); return Task.CompletedTask; }
         return ChangeAccountAsync(platform, "import", new { platform, cookie });
     }
     public Task ValidateAccountAsync()
@@ -305,7 +305,9 @@ public sealed partial class MusicCapability
             {
                 if (epoch == accountEpoch && error is MusicOperationException { Code: "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" })
                     accountSaveUncertain = true;
-                if (epoch == accountEpoch && operation.StartsWith("qr.", StringComparison.Ordinal)) ClearAccountQr();
+                bool retryablePoll = operation == "qr.poll" &&
+                    error is MusicOperationException { Code: "RATE_LIMITED" or "BUSY" };
+                if (epoch == accountEpoch && operation.StartsWith("qr.", StringComparison.Ordinal) && !retryablePoll) ClearAccountQr();
                 if (epoch == accountEpoch) accountStatus = AccountError(error);
             }
         }); }
@@ -351,7 +353,7 @@ public sealed partial class MusicCapability
                 do
                 {
                     joinedRead = !accountRead.IsCompleted;
-                    result = await StartAccountRead(force: true, allowStopping: true);
+                    result = await StartAccountRead(force: false, allowStopping: true);
                 }
                 while (epoch == accountEpoch && (result.Epoch != epoch ||
                     result.Observation != Volatile.Read(ref accountObservation) ||

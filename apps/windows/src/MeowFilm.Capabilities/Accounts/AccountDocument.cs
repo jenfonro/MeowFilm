@@ -115,16 +115,14 @@ internal sealed class AccountDocument
                 "CORRUPT_STORAGE");
         else
         {
-            AccountRules.Text(cookie, 16384, "CORRUPT_STORAGE");
+            AccountRules.Require(cookie.Length > 0, "CORRUPT_STORAGE");
             var p = raw.GetProperty("profile");
             AccountRules.Fields(p, ["platform", "userId", "displayName", "avatar"], ["platform", "userId", "displayName"], "CORRUPT_STORAGE");
             if (p.TryGetProperty("avatar", out var presentAvatar))
                 AccountRules.Require(presentAvatar.ValueKind == JsonValueKind.String, "CORRUPT_STORAGE");
-            profile = AccountRules.Profile(new(
-                AccountRules.String(p, "platform", 8),
-                AccountRules.String(p, "userId", 256),
-                AccountRules.String(p, "displayName", 200, empty: true),
-                p.TryGetProperty("avatar", out var avatar) ? avatar.GetString() : null), platform);
+            profile = new(p.GetProperty("platform").GetString()!, p.GetProperty("userId").GetString()!,
+                p.GetProperty("displayName").GetString()!, p.TryGetProperty("avatar", out var avatar) ? avatar.GetString() : null);
+            AccountRules.Require(profile.Platform == platform && profile.UserId.Length > 0, "CORRUPT_STORAGE");
             scope = AccountRules.String(raw, "scope", 128);
             AccountRules.Require(scope.Trim() == scope, "CORRUPT_STORAGE");
             validatedAt = AccountRules.Integer(raw.GetProperty("validatedAt"));

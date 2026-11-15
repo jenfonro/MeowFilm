@@ -148,14 +148,16 @@ final class MusicOfficialSourceSettingsTests: XCTestCase {
     }
 
     func testAutomaticDiscoverySkipsDisabledOfficialPlatformsButKeepsEnabledScriptSites() async throws {
-        let seed = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "A", count: 32)))
+        let seed = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "A", count: 32)))
         for withScript in [false, true] {
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: seed)
             let scripts = MusicNativeCandidateDiscoveryScripts()
             await scripts.supported(["tx"])
-            let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeCandidateDiscoveryHTTP()
-            let service = try await NativeMusicFixture.service(store, scripts: withScript ? scripts : nil,
-                accounts: NativeMusicAccountFixture(), qq: qq, http: http)
+            let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeDiscoveryPlatforms()
+            let service = try await NativeMusicFixture.service(store,
+            scripts: withScript ? scripts : nil,
+            accounts: NativeMusicAccountFixture(),
+            platform: NativeMusicFixture.routes(primary: qq, others: http))
             _ = try await service.updateSettings(.init(ifRevision: 0, officialSources: []))
             let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
             let snapshot = try await session.snapshot(discover: true, force: false)
@@ -173,16 +175,17 @@ final class MusicOfficialSourceSettingsTests: XCTestCase {
     }
 
     func testExcludedRecordingNeverReappearsThroughScriptOptionsOrManualInspection() async throws {
-        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
+        let primary = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let row = try XCTUnwrap(peer["sources"].array.first), key = row["sourceKey"].string
         let song = try MusicModel.mergeSources(primary, adding: [row])
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
         let at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
-        for platform in MusicNativeSearchProtocol.platforms {
-            await cache.record(fingerprint: MusicModel.fingerprint(song), duration: 180, platform: platform,
-                               checkedAt: at, sources: [])
+        for platform in MusicModel.sites {
+            await cache.observe(songID: song["songId"].string,
+                observation: .init(startedAt: at, checkedAt: at, platform: platform, query: "Synthetic recording Fixture",
+                    scope: .recording, outcome: .notFound), sourceKeys: [])
         }
         let scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["kw", "tx"])

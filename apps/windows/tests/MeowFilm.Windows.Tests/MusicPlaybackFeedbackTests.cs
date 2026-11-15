@@ -302,7 +302,7 @@ public static partial class MusicPlaybackFeedbackTests
             f.Controller.Select(Selection(context: new { sourcePlatform = "wy", sourceType = "playlist", sourceId = "500" }));
             f.Controller.Started("entry-1", 0, 200); await f.Drain();
             var request = f.Protocol.Starts.Single();
-            Check(request.Source == "list" && request.SourceId == "500" && request.SourceType == "list");
+            Check(request.Source == "list" && request.SourceId == "500");
             f.Controller.Finish(); await f.Drain();
             f.Controller.Select(Selection(context: new { sourcePlatform = "wy", sourceType = "fm", fm = new { automatic = true } }));
             f.Controller.Started("entry-1", 0, 200); await f.Drain();
@@ -333,7 +333,7 @@ public static partial class MusicPlaybackFeedbackTests
                 f.Controller.Select(Recommended(kind, provider, source));
                 f.Controller.Started("entry-1", 0, 200); await f.Drain();
                 var start = f.Protocol.Starts.Single();
-                Check(start.Source == expected && start.SourceId == sourceId && start.SourceType == "track" &&
+                Check(start.Source == expected && start.SourceId == sourceId &&
                     start.Algorithm == "fixture-alg" &&
                     start.IsQueueRecommendation == (provider == "queue-recommendations" && source.Length > 0));
                 Check(start.Mode == (kind == "heartbeat" ? "ai" : "circulation"));
@@ -357,35 +357,51 @@ public static partial class MusicPlaybackFeedbackTests
                 var start = f.Protocol.Starts.Single();
                 Check(start.Source == "unknown" && !start.IsQueueRecommendation && start.Algorithm == "");
             });
-        foreach (string reason in new[] { "end", "error" })
+        foreach (var (reason, expectedReason) in new[] { ("end", "playend"), ("error", "exception") })
             yield return Case("real-native-protocol-consumes-player-" + reason, async () =>
             {
                 var accounts = new Sessions();
                 accounts.Values["wy"] = new("wy", Guid.NewGuid().ToString("D"), 1, "42",
                     "MUSIC_U=synthetic-session; __csrf=synthetic-csrf");
-                var wire = new NativeWire();
-                using var http = MusicPlatformHttp.CreateWithHandler(wire);
-                await using var clients = new MusicClientContextFixture(http);
+                var uploads = new List<JsonElement>();
+                await using var runtime = new MusicPlatformRuntimeFixture();
+                runtime.Client.BindSessions(accounts);
+                runtime.OnRequest = (call, _) =>
+                {
+                    var account = accounts.Values["wy"];
+                    var expected = call.Payload.GetProperty("expectedSession");
+                    Check(call.Platform == "wy" && expected.GetProperty("scope").GetString() == account.Scope &&
+                        expected.GetProperty("generation").GetInt64() == account.Generation);
+                    if (call.Operation == "feedback.upload")
+                    {
+                        uploads.Add(call.Parameters.GetProperty("events")[0].Clone());
+                        return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { status = "confirmed" }));
+                    }
+                    Check(call.Operation == "feedback.qualify");
+                    return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { qualified = true }));
+                };
                 var clock = new Clock();
                 var store = new NativeFeedbackStore();
                 var settings = new MusicFeedbackSettingsOwner(store);
-                var protocol = new NativeMusicFeedbackProtocol(accounts, http, clients.Owner, clock, store, settings);
+                var protocol = new NativeMusicFeedbackProtocol(accounts, runtime.Client, clock, store, settings);
                 await using var controller = new MusicFeedbackController(settings,
                     protocol, accounts, clock);
                 await settings.ReadAsync(); await settings.SaveAsync(0, ["wy"]);
                 controller.Select(Selection());
                 controller.Started("entry-1", 0, 0);
                 await controller.DrainAsync();
-                Check(wire.Paths.Count == 3 && controller.LastError is null);
+                Check(runtime.Requests.Count == 3 && controller.LastError is null);
                 controller.Observe("entry-1", 0, 200, true);
                 await controller.DrainAsync();
-                Check(wire.Paths.Count == 3);
+                Check(runtime.Requests.Count == 3);
                 clock.Advance(200); controller.Observe("entry-1", 200, 200, true);
                 controller.Finish(reason); await controller.DrainAsync();
-                Check(controller.LastError is null && wire.Paths.SequenceEqual(new[] {
-                    "/weapi/w/nuser/account/get", "/weapi/w/nuser/account/get", "/api/clientlog/encrypt/upload",
-                    "/weapi/w/nuser/account/get", "/api/clientlog/encrypt/upload" }));
-                Check(wire.Filenames.Count == 2 && wire.Filenames.Distinct().Count() == 2);
+                Check(controller.LastError is null && runtime.Requests.Select(call => call.Operation).SequenceEqual(new[] {
+                    "feedback.qualify", "feedback.qualify", "feedback.upload", "feedback.qualify", "feedback.upload" }));
+                Check(uploads.Count == 2 && uploads[0].GetProperty("event").GetString() == "start" &&
+                    uploads[1].GetProperty("event").GetString() == "end" &&
+                    uploads[1].GetProperty("reason").GetString() == expectedReason &&
+                    uploads[1].GetProperty("listened").GetDouble() == 200);
             });
     }
 
@@ -405,7 +421,7 @@ public static partial class MusicPlaybackFeedbackTests
         if (platform == "kg")
         {
             native["hash"] = id;
-            native["mixsongid"] = "900";
+            native["albumAudioId"] = "900";
         }
         return MusicSongFixture.Online(platform, id, title, "artist", "", 200,
             native: native)["sources"]![0]!.DeepClone().AsObject();
@@ -482,37 +498,6 @@ public static partial class MusicPlaybackFeedbackTests
             public Task FinishAsync(MusicFeedbackEnd end, CancellationToken token)
             { token.ThrowIfCancellationRequested(); owner.Finished.Enqueue(end); owner.Ends.Enqueue((recording, end)); return Task.CompletedTask; }
             public ValueTask DisposeAsync() { Interlocked.Increment(ref owner.DisposedSessions); return ValueTask.CompletedTask; }
-        }
-    }
-    private sealed class NativeWire : System.Net.Http.HttpMessageHandler
-    {
-        internal readonly ConcurrentQueue<string> Paths = new();
-        internal readonly ConcurrentQueue<string> Filenames = new();
-        protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
-            System.Net.Http.HttpRequestMessage request, CancellationToken token)
-        {
-            token.ThrowIfCancellationRequested();
-            Check(request.Method == System.Net.Http.HttpMethod.Post && request.RequestUri!.Scheme == "https");
-            string path = request.RequestUri!.AbsolutePath;
-            string body = path switch
-            {
-                "/weapi/w/nuser/account/get" => "{\"code\":200,\"profile\":{\"userId\":42,\"nickname\":\"synthetic\"},\"account\":{\"id\":42}}",
-                "/api/clientlog/encrypt/upload" => UploadReply(request),
-                _ => throw new InvalidOperationException("Unexpected synthetic endpoint")
-            };
-            Check(request.RequestUri.Host == (path == "/api/clientlog/encrypt/upload"
-                ? "clientlog3.music.163.com" : "music.163.com"));
-            Paths.Enqueue(path);
-            return Task.FromResult(new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
-                { Content = new System.Net.Http.StringContent(body, Encoding.UTF8, "application/json") });
-        }
-        private string UploadReply(System.Net.Http.HttpRequestMessage request)
-        {
-            Check(request.RequestUri!.ToString() == NeteasePlaybackTransport.UploadUrl);
-            var part = ((System.Net.Http.MultipartFormDataContent)request.Content!).Single();
-            string filename = part.Headers.ContentDisposition!.FileName!.Trim('"');
-            Filenames.Enqueue(filename);
-            return JsonSerializer.Serialize(new { code = 200, data = new { successfiles = new[] { filename } } });
         }
     }
     private sealed class NativeFeedbackStore : IDocumentStore

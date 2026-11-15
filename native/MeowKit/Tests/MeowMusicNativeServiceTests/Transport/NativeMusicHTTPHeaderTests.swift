@@ -1,27 +1,19 @@
 import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 final class NativeMusicHTTPHeaderTests: XCTestCase {
-    func testCRLFSingleGraphemeCRLFAndNULAreRejectedBeforeNetworking() async throws {
-        let transport = URLSessionMusicNativeHTTPTransport()
-        // This also prevents real networking if header validation regresses.
-        transport.close()
-        for url in ["https://interfacepc.music.163.com/eapi/cloudsearch/pc",
-                    "https://gateway.kugou.com/v2/search/song", "https://lyrics.kugou.com/v1/search"] {
-            do {
-                _ = try await transport.send(.init(url: URL(string: url)!, headers: ["X-Synthetic": "safe"]))
-                XCTFail("Closed transport accepted a request")
-            } catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
-            for bad in ["one\r\ntwo", "one\rtwo", "one\ntwo", "one\0two"] {
-                for headers in [["X-Synthetic": bad], [bad: "synthetic"]] {
-                    do {
-                        _ = try await transport.send(.init(url: URL(string: url)!, headers: headers))
-                        XCTFail("Unsafe header reached URLSession")
-                    } catch { XCTAssertEqual(error as? MusicServiceError, .invalidRequest) }
-                }
-            }
-        }
+    func testNativeConsumersSendBusinessParametersWithoutUpstreamHeadersOrCredentialPayloads() async throws {
+        let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([NativeMusicFixture.track()], platform: "tx")])
+        let service = try await NativeMusicFixture.service(platform: peer)
+        _ = try await service.search(platform: "tx", query: "A + B & 中文", page: 1, limit: 30)
+        let calls = await peer.calls(), request = try XCTUnwrap(calls.first)
+        XCTAssertEqual(request.transportOperation, "request")
+        XCTAssertEqual(request.operation, "search")
+        XCTAssertEqual(request.parameters[music: "keyword"].musicText, "A + B & 中文")
+        for field in ["headers", "url", "cookie", "device", "context"] { XCTAssertEqual(request.parameters[music: field], .null) }
+        await service.close()
     }
 }

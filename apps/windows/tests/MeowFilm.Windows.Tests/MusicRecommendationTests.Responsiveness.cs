@@ -13,11 +13,7 @@ public static partial class MusicRecommendationTests
     private static async Task InactiveAdvanceResponsiveness()
     {
         await using var f = new Fixture();
-        int facts = 0, reads = 0;
-        f.Library.PrepareSongFacts = token =>
-        {
-            token.ThrowIfCancellationRequested(); Interlocked.Increment(ref facts); return Task.CompletedTask;
-        };
+        int reads = 0;
         f.Store.AfterRead = () => Interlocked.Increment(ref reads);
         foreach (bool naturalEnd in new[] { false, true })
             Check(!await f.Rec.TryAdvanceAsync("ordinary-entry", naturalEnd, true),
@@ -26,8 +22,8 @@ public static partial class MusicRecommendationTests
         cancelled.Cancel();
         await RecommendationCancelled(f.Rec.TryAdvanceAsync("ordinary-entry", false, true, cancelled.Token), cancelled.Token);
         await RecommendationCancelled(f.Port.ExecuteAsync("music.queue.get", cancellationToken: cancelled.Token), cancelled.Token);
-        Check(facts == 0 && reads == 0 && f.Store.Writes == 0,
-            "inactive and pre-cancelled requests must not prepare facts, load the cold document, or write");
+        Check(reads == 0 && f.Store.Writes == 0,
+            "inactive and pre-cancelled requests must not load the cold document or write");
         Check(f.Catalog.Calls.IsEmpty && f.Selections.IsEmpty, "inactive advance must not request recommendations or media");
 
         var result = await f.Port.ExecuteAsync("music.queue.replace",
@@ -90,14 +86,12 @@ public static partial class MusicRecommendationTests
             !preview.GetProperty("loading").GetBoolean() && preview.GetProperty("candidates").GetArrayLength() == 2);
         var before = await f.Q();
         string seed = Current(before), session = S(preview, "id");
-        int calls = f.Catalog.Calls.Count, writes = f.Store.Writes, facts = 0, uiThread = Environment.CurrentManagedThreadId;
+        int calls = f.Catalog.Calls.Count, writes = f.Store.Writes, observedWrites = 0, uiThread = Environment.CurrentManagedThreadId;
         Check(N(before, "total") == 1 && f.Selections.IsEmpty);
         using var hold = new SynchronousRecommendationHold();
-        f.Library.PrepareSongFacts = token =>
+        f.Store.BeforeWrite = () =>
         {
-            token.ThrowIfCancellationRequested();
-            if (Interlocked.Increment(ref facts) == 1) hold.Wait();
-            return Task.CompletedTask;
+            if (Interlocked.Increment(ref observedWrites) == 1) hold.Wait();
         };
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
@@ -106,14 +100,14 @@ public static partial class MusicRecommendationTests
         try
         {
             await RecommendationCancelled(f.Rec.TryAdvanceAsync(seed, true, true, cancelled.Token), cancelled.Token);
-            Check(facts == 0 && f.Store.Writes == writes && f.Catalog.Calls.Count == calls && f.Selections.IsEmpty);
+            Check(observedWrites == 0 && f.Store.Writes == writes && f.Catalog.Calls.Count == calls && f.Selections.IsEmpty);
             advance = f.Rec.TryAdvanceAsync(seed, true, true);
             bool responsive = await observation;
             bool handled = await advance.WaitAsync(TimeSpan.FromSeconds(10));
-            Check(responsive && hold.WorkerThreadId != uiThread && facts > 0,
-                "active TryAdvance must perform its actual owner read outside Dispatcher even when dependencies complete synchronously");
+            Check(responsive && hold.WorkerThreadId != uiThread && observedWrites > 0,
+                "active TryAdvance must admit its actual owner transaction outside Dispatcher even when dependencies complete synchronously");
             Check(!handled, "preview admission leaves ordinary next selection to the queue owner");
-            f.Library.PrepareSongFacts = null;
+            f.Store.BeforeWrite = null;
             var admitted = await f.Q();
             Check(N(admitted, "total") == 3 && Current(admitted) == seed && f.Store.Writes == writes + 1 &&
                 f.Selections.IsEmpty && f.Catalog.Calls.Count == calls);
@@ -134,7 +128,7 @@ public static partial class MusicRecommendationTests
         {
             hold.Release(); await observation;
             try { await advance.WaitAsync(TimeSpan.FromSeconds(10)); }
-            finally { f.Library.PrepareSongFacts = null; }
+            finally { f.Store.BeforeWrite = null; }
         }
     }
 

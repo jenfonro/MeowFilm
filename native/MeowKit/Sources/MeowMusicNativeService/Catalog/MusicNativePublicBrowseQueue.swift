@@ -4,15 +4,16 @@ import MeowMusicFeature
 /// Per-open-page snapshot buffer, not a service, account, document or queue owner.
 /// Native rows are bounded identically to MusicRemoteQueueSource and released on close.
 actor MusicNativePublicBrowseQueueRead {
-    private var load: (@Sendable () async throws -> [MusicNativeTrackData])?
-    private var loading: (id: UUID, task: Task<[MusicNativeTrackData], Error>)?
-    private var rows: [MusicNativeTrackData]?
+    private var load: (@Sendable (MusicQueueAuthorization) async throws -> [MusicQueueTrackReference])?
+    private var loading: (id: UUID, task: Task<[MusicQueueTrackReference], Error>)?
+    private var rows: [MusicQueueTrackReference]?
     private var closed = false
+    private var closing: Task<Void, Never>?
     private let declaredTotal: Int?
-    init(total: Int? = nil, load: @escaping @Sendable () async throws -> [MusicNativeTrackData]) {
+    init(total: Int? = nil, load: @escaping @Sendable (MusicQueueAuthorization) async throws -> [MusicQueueTrackReference]) {
         declaredTotal = total; self.load = load
     }
-    func page(_ cursor: String?) async throws -> MusicNativeTrackPage {
+    func page(_ cursor: String?, intent: MusicQueueAuthorization) async throws -> MusicQueueReferencePage {
         try musicRequire(!closed, .closed); try Task.checkCancellation()
         let text = cursor ?? "0"
         try musicRequire(text.range(of: "^(0|[1-9][0-9]{0,17})$", options: .regularExpression) != nil)
@@ -20,20 +21,20 @@ actor MusicNativePublicBrowseQueueRead {
         try musicRequire(offset % 30 == 0, .staleResult)
         try musicRequire(rows != nil || offset == 0, .staleResult)
         if rows == nil {
-            let flight: (id: UUID, task: Task<[MusicNativeTrackData], Error>)
+            let flight: (id: UUID, task: Task<[MusicQueueTrackReference], Error>)
             if let loading { flight = loading }
             else {
                 guard let load else { throw MusicServiceError.closed }
                 flight = (UUID(), Task {
                     try Task.checkCancellation()
-                    let value = try await load()
+                    let value = try await load(intent)
                     try Task.checkCancellation()
-                    try musicRequire(value.reduce(0, { $0 + $1.data.count }) <= MusicRemoteQueueSource.maximumBytes, .limit)
+                    try musicRequire(value.reduce(0, { $0 + $1.byteCount }) <= MusicRemoteQueueSource.maximumBytes, .limit)
                     return value
                 })
                 loading = flight
             }
-            let value: [MusicNativeTrackData]
+            let value: [MusicQueueTrackReference]
             do { value = try await flight.task.value }
             catch {
                 // Another waiter may have already started a retry. A late
@@ -49,61 +50,66 @@ actor MusicNativePublicBrowseQueueRead {
         }
         let values = rows ?? []
         try musicRequire(offset <= values.count, .staleResult)
-        try musicRequire(declaredTotal == nil || declaredTotal! >= values.count, .invalidResponse)
         let page = Array(values.dropFirst(offset).prefix(30)), end = offset + page.count
         return .init(items: page, total: declaredTotal ?? values.count, cursor: end < values.count ? String(end) : nil)
     }
-    func close() {
-        closed = true; rows = nil; load = nil
-        loading?.task.cancel(); loading = nil
+    func close() async {
+        if closing == nil {
+            closed = true; rows = nil; load = nil
+            let task = loading?.task; loading = nil
+            task?.cancel()
+            closing = Task { _ = await task?.result }
+        }
+        await closing?.value
     }
 }
 extension NativeMusicService {
     public func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) async throws -> MusicRemoteQueueSource {
         try check()
-        _ = try musicText(request.collection.title, maximum: 600)
-        try musicRequire(request.snapshot.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil)
-        let own = epoch, revision = publicCollectionRevision, until = now().addingTimeInterval(600), id = UUID()
+        let own = epoch, revision = publicCollectionRevision, id = UUID()
         // This entry is reached only by explicit playback/filter actions, not by
         // displaying a detail page. Resolve one complete snapshot before issuing authority
         // so its visibility loss is available to every action consumer.
         let snapshot = try await publicQueueSnapshot(request)
-        try checkPublicQueue(epoch: own, until: until)
+        try check(own)
         try musicRequire(revision == publicCollectionRevision, .staleResult)
-        for (id, entry) in publicQueueSources where !entry.authorization.isActive || entry.expires <= now() {
+        try musicRequire(!snapshot.tracks.isEmpty, .contentUnavailable)
+        for (id, entry) in publicQueueSources where !entry.authorization.isActive {
             entry.authorization.revoke()
             publicQueueSources.removeValue(forKey: id); access.remove(id)
-            Task { await entry.reader.close() }
+            retainSimilarDrain(Task { await entry.reader.close() })
         }
-        let bytes = snapshot.tracks.reduce(0) { $0 + $1.data.count }
+        let bytes = snapshot.tracks.reduce(0) { $0 + $1.byteCount }
         // Bound retained native snapshots across open sources, not merely each
         // source. This is a byte budget, not an estimate of the App's RSS.
         try musicRequire(publicQueueSources.values.reduce(bytes, { $0 + $1.bytes }) <= 12 * 1024 * 1024, .limit)
         let authorization = MusicQueueAuthorization(), fence = access
-        let reader = MusicNativePublicBrowseQueueRead { [weak self] in
+        let reader = MusicNativePublicBrowseQueueRead { [weak self] _ in
             guard let self else { throw MusicServiceError.closed }
-            try await self.checkPublicQueue(epoch: own, until: until)
+            try await self.check(own)
             return snapshot.tracks
         }
         fence.register(id) {
             authorization.revoke()
             Task { await reader.close() }
         }
-        publicQueueSources[id] = (request.collection.id, authorization, reader, bytes, until)
-        return MusicRemoteQueueSource(context: .init(kind: request.collection.kind == .album ? .album : .playlist,
+        publicQueueSources[id] = (request.collection.id, authorization, reader, bytes)
+        let source = MusicRemoteQueueSource(context: .init(kind: request.collection.kind == .album ? .album : .playlist,
             id: request.collection.id, title: snapshot.collection.title, platform: request.collection.platform.rawValue,
-            unavailableCount: (snapshot.collection.count ?? snapshot.tracks.count) - snapshot.tracks.count,
+            unavailableCount: max(0, (snapshot.collection.count ?? snapshot.tracks.count) - snapshot.tracks.count),
             collection: snapshot.collection),
-            authorization: authorization, loadPage: { try await reader.page($0) },
+            authorization: authorization, loadReferences: { try await reader.page($0, intent: $1) },
             validate: { [weak self] in
                 guard let self else { throw MusicServiceError.closed }
-                try await self.checkPublicQueue(epoch: own, until: until)
+                try await self.check(own)
             }, close: { [weak self] in
                 fence.remove(id); await reader.close(); await self?.endPublicQueueSource(id)
             })
+        _ = await bindQueueSource(source)
+        do {
+            try check(own); try authorization.check()
+            return source
+        } catch { await source.close(); throw error }
     }
     func endPublicQueueSource(_ id: UUID) { publicQueueSources.removeValue(forKey: id) }
-    func checkPublicQueue(epoch: UUID, until: Date) throws {
-        try check(epoch); try musicRequire(now() < until, .handleExpired)
-    }
 }

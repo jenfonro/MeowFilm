@@ -6,11 +6,11 @@
 
 `MusicLibrarySyncService` 是网易云、QQ 音乐和酷狗曲库同步的唯一协调器。
 
-- 它借用同一个 `MusicLibraryOwner`、账号会话 owner、[客户端 owner](music-platform-client-context.md)和固定平台 HTTP。
-- 它不拥有第二份曲库或 Node 会话，不保存账号凭据；网易订阅准备显式借用 App 的 `IRuntimeClient`。
-- 同步状态位于 `music.library.v1` 的 `library-sync` area，并与曲库在同一 envelope CAS 中提交。
-- binding map 的唯一方向是 `nativeId -> songId`。
-- 按明确同步需求委托目录补读时，目录验证本次请求所用客户端快照和响应；成功后适配器显式取得已确认的当前快照再继续，不把合法委托更新误判为旧请求失效，也不通过重取代次绕过原请求校验。
+- 它借用同一个 `MusicLibraryOwner`、账号会话 owner 和[平台客户端](music-platform-client-context.md)；`MusicSyncAdapter` 调共同 Node 配方，不执行原生平台 HTTP。
+- 它不拥有第二份曲库或运行器，不保存账号凭据；网易订阅准备在 Node 内借用既有 token owner。
+- 同步状态位于 `music.library.v2` 的 `library-sync` area，并与曲库在同一 envelope CAS 中提交。
+- binding map 的唯一方向是实际成员 key → 永久 `songId`。
+- 普通目录／集合读取只消费共同结果；远端写所需 baseline、preflight、journal 和 readback 由同步 engine 独立负责，不把事务证明施加到普通播放读取。
 - 平台映射与写入仅枚举歌曲实际 `sources`，不把整首歌曲重复当作主来源。本地歌曲的空来源是合法状态：有足够元数据时尝试匹配，否则报告该歌曲未映射，继续同步其它可用歌曲，不使整轮变为 `INVALID_SONG`。
 
 ## 平台与设置
@@ -82,7 +82,7 @@ platform accountId collectionId remoteId operation beforePresent desiredPresent 
 4. `SyncDirectory.Collections` 只含当前账号本人可写的已选集合及其完整成员；`Subscriptions` 只含订阅元信息。适配器不为订阅调用成员或补搜接口。
 5. 本地曲库和同步状态通过 `CommitLibrarySyncAsync` 在同一 envelope CAS 中提交。
 6. 每次远端写入前先耐久写入 pending fence。
-7. HTTP 返回或异常都不直接视为远端写入结果；必须重新完整读取并确认实际状态。
+7. Node 回执区分 `confirmed/notSent/rejected/unknown`。明确未发送／拒绝按真实回执结算 fence，已发送未知不当作回滚；确认目标状态仍由事务 readback 完成。
 8. 未确认结果保留 pending，不自动重放。订阅读回以完整稳定目录核对 presence；只有观测到 `desiredPresent` 才清 fence 和对应意图。仍为 `beforePresent` 不能排除请求迟到，继续保留围栏及意图并返回 `WRITE_UNCONFIRMED`；重复 run、重开及计划轮均不重发，随后读回目标效果才解除围栏。
 9. 设置页明确启用、确认或用户明确同步会立即进入同一协调器；计划轮只接受 `idle`／`synced` 状态，`blocked`、`partial`、确认及 pending 不会形成后台重试环。
 
@@ -114,7 +114,7 @@ music.librarySync.resetAccount
 
 - 每轮具有明确取消 token；不以整轮四分钟截止截断大曲库。各平台操作仍有自身截止时间。
 - 重复 `run` 不并行扩散，返回 `SYNC_BUSY`。
-- 原生 HTTP、账号目录、映射搜索和酷狗云调用按真实分页、完整快照和取消运行，不共享每平台／整轮请求次数额度。
+- Node 平台调用、账号目录和映射搜索按真实分页及取消运行，不共享每平台／整轮请求次数额度；完整状态证据仅服务实际写事务。
 - 集合、目录页、成员页和录音映射不再按累计次数截断，也不设固定歌单歌曲数量。平台返回结束、游标停滞、快照变化及错误必须各自明确处理；持久曲库容量仍按现行数据契约校验。
 - 拉取阶段已经确认且没有本地变化的集合直接复用同轮快照；不会为了证明“无需写入”再次读取整张远端歌单。
 - 唯一 pending fence 每轮只恢复一次；恢复未确认即停止，不存在循环读回。
@@ -124,21 +124,12 @@ music.librarySync.resetAccount
 
 ## 平台订阅请求与实际能力边界
 
-| 平台 | 本端实现 |
+| 平台 | 当前适配 |
 | --- | --- |
-| WY | 订阅／退订准备通过 App runtime 的 `netease.token.get` 取新 token，再走 EAPI `/api/playlist/subscribe` 或 `/api/playlist/unsubscribe`；body 使用真实远端 `id`，token 注入加密 `header["X-antiCheatToken"]`，并沿既有 header 构造 HTTP Cookie。取消仅移除账号订阅关系。 |
-| TX | `music.musicasset.PlaylistFavWrite.FavPlaylist/CancelFavPlaylist`，`uin=encrypt_uin`、`v_playlistId=[真实disstid]`；校验 `result/v_failedPlaylistId` 后仍须目录读回。 |
-| KG | 元信息 `/v3/get_list_info` 的 `data[]` 核对 `global_collection_id/status/list_create_userid/list_create_listid`；type=1 的 `/cloudlist.service/v5/add_list` 只创建订阅关系。取消使用既有云加密 `/v2/delete_list`，携带当前账号订阅的 listId 和 type=1，不使用作者 listId。 |
+| WY | `sync.prepare` 返回短期 preparationId，Node 内部按需取得 token；原生在真实 journal 准入后用 `sync.write` 消费，不持有 token。 |
+| TX/KG | `sync.target/read/write` 保留真实远端定位与 locator，Node 负责平台回执；原生继续 journal、破坏性确认和目标效果读回。 |
 | KW/MG | 无账号同步设置或远端订阅端口；仅使用本地引用命令。 |
 
-只读出处：
+`MusicSyncAdapter` 在调用前后保留 checkpoint／账号 guard；只把真实 `notSent/rejected` 分类为可明确结算的未应用，缺失／坏回执为 unknown。Node preparation 失败不产生远端写；写已派发后的页面取消不抹掉真实回执，不重放未知操作。
 
-- txy QQMusicApi `2698673d9b2e438bca7a0e06385ead7a4cdaeda9`，`qqmusic_api/modules/user.py:335–372`。
-- txy KuGouMusicApi `e19a52a91b9ceb78d9acce768c357b61be9586d5`，`module/playlist_add.js`、`playlist_del.js`、`playlist_detail.js`。2026-11-09 对其 README.md:1908 文档公开歌单进行了单次无账号元信息请求，确认 `data[]` 响应结构；无 SSA、未进行账号写入。这与隔离替身的请求测试不是同一种证据。
-- WY api-enhanced v4.41.1 的 `module/playlist_subscribe.js:5–13` 默认 EAPI `/api/playlist/subscribe|unsubscribe` 并强制 `checkToken=v2`；`util/request.js:219/402` 注入实时 token。上游字符串 `t='1'` 路径 body 仅含 `id`，header 仍取 v2 token；本端不复制旧静态 checkToken。
-
-`MusicNeteaseTokenProvider` 仅在订阅状态确需改变时调用独立 `netease.token.v1` 模块，输入为空对象，不传 Cookie。它校验精确 envelope、固定错误码及非空 RFC6265 cookie-octet token；空白、控制字符、非 ASCII、分号、逗号、双引号和反斜杠均拒绝。token 不缓存、落盘或进入错误；准备失败不建立 pending，保留本地引用与同步意图。取回后重新核验 round、账号、同步授权和 CAS，再持久化围栏并派发；派发之后仍只有完整稳定目录读回目标 presence 才能解除围栏，HTTP 成功不能代替读回。
-
-App 启动、账号操作、脚本列表及普通自管同步不调用 token provider。runtime 的 token HTTP 交换单独使用 60 秒预算，覆盖公共 Node 的 45 秒执行预算，仍响应主动取消；其余交换沿用原 30 秒预算。SDK 获取错误不使原生曲库、账号及播放整体不可用。
-
-新增行为测试位于 `MusicNativeSyncTests.NeteaseToken.cs`、`MusicNativeSyncTests.NetworkPlaylists.cs`、`MusicNativeCatalogTests.NetworkPlaylists.cs` 与 `MusicCatalogTests.NetworkPlaylists.cs`，进入现有 LibrarySync／Catalog runner；`RuntimeHttpClientTests` 覆盖八模块、唯一路由、错误枚举和预算／取消。token 接入的测试及增量 App 构建由主会话集中执行；真实官方订阅写入未验证。
+请求配方与 token 的共同来源见[平台请求](../common/music/platform-client-context.md)、[音乐平台运行器](../runtime/music-platform.md)和[网易 token](../runtime/netease-token.md)，上游 pin／许可归根 `LICENSES/NOTICE.md`。本轮同步、真实官方写入及增量构建均未验证。

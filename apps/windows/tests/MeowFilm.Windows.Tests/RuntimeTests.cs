@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Runtime;
@@ -27,7 +28,7 @@ public static class RuntimeTests
     }
     private const string Identity = "aggregate";
     private static RuntimeModule[] Modules => RuntimeHttpClientTests.Modules;
-    private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
+    private static string[] Namespaces => [MusicLibraryOwner.DocumentNamespace, MusicAccountOwner.DocumentNamespace];
     private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
 
     public static IEnumerable<TestCase> Cases()
@@ -36,7 +37,7 @@ public static class RuntimeTests
         {
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
-            await using var store = new LocalDocumentStore(NewData(), Namespaces, protectedNamespaces: ["music.accounts.v1"]);
+            await using var store = new LocalDocumentStore(NewData(), Namespaces, protectedNamespaces: [MusicAccountOwner.DocumentNamespace]);
             var scriptData = ScriptData();
             int pid;
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, scriptData))
@@ -64,7 +65,7 @@ public static class RuntimeTests
             }
             AssertExited(pid);
         });
-        yield return new("native-runtime: eight-module App keeps provider Film and token routes independent without starting the SDK", async () =>
+        yield return new("native-runtime: nine-module App keeps platform Film and token routes independent without starting the SDK", async () =>
         {
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
@@ -77,7 +78,7 @@ public static class RuntimeTests
             {
                 ("pan.providers", "pan.runtime.v1"), ("tmdb.data.settings.get", "tmdb.data.v1"),
                 ("douban.data.settings.get", "douban.data.v1"), ("film.settings.get", "film.playback.v1"),
-                ("music.script.sources.list", "music.script.v3")
+                ("music.script.sources.list", "music.script.v3"), ("music.platform.describe", "music.platform.v1")
             })
             {
                 var reply = await runtime.CallAsync(method, new { });
@@ -91,8 +92,8 @@ public static class RuntimeTests
             var root = NewData();
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
-            string collectionId;
-            await using (var store = new LocalDocumentStore(root, Namespaces, protectedNamespaces: ["music.accounts.v1"]))
+            string collectionId, songId;
+            await using (var store = new LocalDocumentStore(root, Namespaces, protectedNamespaces: [MusicAccountOwner.DocumentNamespace]))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData()))
             await using (var library = new MusicLibraryOwner(store))
             {
@@ -107,16 +108,21 @@ public static class RuntimeTests
                 BridgeTests.Equal(true, added.GetProperty("ok").GetBoolean());
                 var queue = await library.ExecuteAsync("music.queue.playCollection", new { id = collectionId, ifRevision = 2, index = 0 });
                 BridgeTests.Equal(true, queue.GetProperty("ok").GetBoolean());
+                var current = await library.ExecuteAsync("music.queue.get", new { offset = 0, limit = 1 });
+                songId = current.GetProperty("current").GetProperty("song").GetProperty("songId").GetString()!;
+                BridgeTests.Equal(true, Guid.TryParse(songId, out _));
                 await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync("music.library.list", new { }));
             }
-            await using (var store = new LocalDocumentStore(root, Namespaces, protectedNamespaces: ["music.accounts.v1"]))
+            await using (var store = new LocalDocumentStore(root, Namespaces, protectedNamespaces: [MusicAccountOwner.DocumentNamespace]))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData()))
             await using (var library = new MusicLibraryOwner(store))
             {
                 var detail = await library.ExecuteAsync("music.library.detail", new { id = collectionId, offset = 0, limit = 10 });
                 BridgeTests.Equal("确定性测试", detail.GetProperty("songs")[0].GetProperty("title").GetString());
                 var queue = await library.ExecuteAsync("music.queue.get", new { offset = 0, limit = 1 });
-                BridgeTests.Equal("test:local", queue.GetProperty("current").GetProperty("song").GetProperty("songId").GetString());
+                var song = queue.GetProperty("current").GetProperty("song");
+                BridgeTests.Equal(songId, song.GetProperty("songId").GetString());
+                BridgeTests.Equal("test:local", song.GetProperty("localFileId").GetString());
             }
         });
         yield return new("native-runtime: child crash closes pending generation and reclaims process", async () =>
@@ -313,18 +319,19 @@ public static class RuntimeTests
             BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(extra.Root, Identity, Modules));
             return Task.CompletedTask;
         });
-        foreach (var assembly in new[] { "old five-module", "old seven-module", "reordered eight-module" })
+        foreach (var assembly in new[] { "missing provider modules", "missing token module", "missing music-platform module", "reordered modules" })
             yield return new("native-runtime: verified App bundle rejects " + assembly + " manifest", () =>
             {
                 var fixture = CreateFixture("normal");
                 var path = Path.Combine(fixture.Root, "runtime-manifest.json");
                 var manifest = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
                 var modules = manifest["modules"]!.AsArray();
-                if (assembly == "old five-module")
+                if (assembly == "missing provider modules")
                 {
                     modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
                 }
-                else if (assembly == "old seven-module") modules.RemoveAt(7);
+                else if (assembly == "missing token module") modules.RemoveAt(7);
+                else if (assembly == "missing music-platform module") modules.RemoveAt(8);
                 else
                 {
                     var first = modules[0]!.DeepClone();

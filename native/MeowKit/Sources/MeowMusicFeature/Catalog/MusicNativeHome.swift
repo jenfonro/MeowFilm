@@ -44,20 +44,6 @@ public struct MusicNativeHomeContinuation: Sendable, Equatable {
 
     public init(cursor: String, blockCodeOrderList: String? = nil,
                 loadedPositionCodes: [String] = []) throws {
-        guard !cursor.isEmpty, cursor.utf8.count <= 20,
-              cursor.utf8.allSatisfy({ (48...57).contains($0) }),
-              let number = UInt64(cursor), number <= 9_007_199_254_740_991,
-              (blockCodeOrderList?.utf8.count ?? 0) <= 16_000,
-              loadedPositionCodes.count <= 300,
-              loadedPositionCodes.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 &&
-                  !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }),
-              try JSONEncoder().encode(loadedPositionCodes).count <= 16_000 else {
-            throw MusicServiceError.invalidRequest
-        }
-        if let blockCodeOrderList,
-           blockCodeOrderList.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
-            throw MusicServiceError.invalidRequest
-        }
         self.cursor = cursor
         self.blockCodeOrderList = blockCodeOrderList
         self.loadedPositionCodes = loadedPositionCodes
@@ -67,12 +53,12 @@ public struct MusicNativeHomeContinuation: Sendable, Equatable {
 public enum MusicNativeHomeRequest: Sendable, Equatable {
     case home(continuation: MusicNativeHomeContinuation? = nil)
     case featured(continuation: MusicNativeHomeContinuation? = nil)
-    /// nil is the first request; otherwise an exact 1...18 digit timestamp.
+    /// nil is the first request; otherwise the platform continuation timestamp.
     case artistActivity(before: String? = nil)
-    /// Account-bound VIP recommendations; the owner checks current membership.
+    /// Account-bound VIP recommendations.
     /// A display result is not playback or membership authorization.
     case vipSongs
-    /// 1...100 exact positive decimal IDs, each at most 18 digits.
+    /// Node performs the platform's member-detail batches.
     case songMetadata(ids: [String])
     case playlistMetadata(ids: [String])
     /// Resolve one displayed seed from the current platform account's liked playlist.

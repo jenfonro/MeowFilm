@@ -130,8 +130,8 @@ extension MusicViewModel {
         let first = try await remoteQueuePage(source, cursor: nil)
         try check(epoch)
         guard searchAccessGeneration == account, selectionID == selection else { throw MusicServiceError.cancelled }
-        guard let track = first.items.first else { throw MusicServiceError.notFound }
-        try await prepareRemoteQueue(source, start: .init(index: 0, track: track))
+        guard !first.items.isEmpty else { throw MusicServiceError.notFound }
+        try await prepareRemoteQueue(source, start: .init(index: 0))
         try check(epoch)
         guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
         if fmSource?.id == source.id, source.authorization.isActive { playbackState.activeHomeFM = action }
@@ -185,7 +185,6 @@ extension MusicViewModel {
     /// selection once, commit once, and carry the same page intent into playback.
     public func playSearchBatch(_ batch: MusicSearchBatchRequest) async {
         await playPreparedQueue { service, revision, intent in
-            try batch.validate()
             guard let provider = service as? any MusicSearchBatchPlaying else { throw MusicServiceError.unsupported }
             return try await provider.replaceSearchBatch(batch, expectedRevision: revision, intent: intent)
         }
@@ -279,9 +278,22 @@ extension MusicViewModel {
             let before = try await service.state()
             try check(epoch); try intent.check()
             guard selection == selectionID, request == remoteQueueRequest else { throw MusicServiceError.staleResult }
+            let receipt = source.fmPreferenceScope.map {
+                settingsReceipts.begin(settings: ["fm/" + $0 + "/selection"], operation: "保存漫游设置")
+            }
             let task = Task {
-                try await remoteQueueService.replaceRemoteQueue(source, start: start,
-                    expectedRevision: before.revision, intent: intent)
+                do {
+                    let value = try await remoteQueueService.replaceRemoteQueue(source, start: start,
+                        expectedRevision: before.revision, intent: intent)
+                    if let receipt { settingsReceipts.settle(receipt, failure: nil) }
+                    return value
+                } catch {
+                    if let receipt {
+                        settingsReceipts.settle(receipt,
+                            failure: error as? MusicServiceError ?? MusicServiceError.sanitized(error))
+                    }
+                    throw error
+                }
             }
             remoteQueueTask = task
             let next = try await withTaskCancellationHandler { try await task.value } onCancel: { intent.revoke(); task.cancel() }

@@ -22,6 +22,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
     private readonly CacheDocumentStore cacheStore;
+    private readonly PlaybackCache.MusicPresentationCache presentationCache;
+    internal MeowFilm.Desktop.Artwork.ArtworkService ArtworkLoader { get; }
     private readonly bool ownsCacheStore;
     private readonly CancellationTokenSource lifetime = new();
     internal MusicPresentation Presentation { get; }
@@ -62,15 +64,20 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
-        Presentation = new(this);
-        playbackPresentation = new(this, property => Changed(property));
         this.cacheStore = cacheStore ?? new CacheDocumentStore();
         ownsCacheStore = cacheStore is null;
+        presentationCache = application is MusicNativeApplication native ? native.PresentationCache : new(this.cacheStore);
+        ArtworkLoader = new(byteCache: presentationCache, loadCompleted:
+            application is MusicNativeApplication artworkOwner ? artworkOwner.ArtworkLoadCompletedAsync : null);
+        if (application is MusicNativeApplication repositoryOwner)
+            repositoryOwner.SongMetadataChanged += RepositorySongsChanged;
+        Presentation = new(this);
+        playbackPresentation = new(this, property => Changed(property));
         audioFileCache = playbackCache ?? (playbackCacheRoot is null ? null :
             new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, this.cacheStore));
         persistentChorus = new(this.cacheStore);
         homeSnapshotStore = new(this.cacheStore);
-        files = new(store, "music.files.v1", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
+        files = new(store, "music.files.v2", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Lyrics.CollectionChanged += OnLyricRowsChanged;
         InitializeLibrarySync();
         vipPage = new(application, System.Windows.Threading.Dispatcher.CurrentDispatcher);
@@ -225,6 +232,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     }
     private async Task<JsonElement> Call(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
+        if (SettingLabel(method) is not null)
+            return await CallSettledReceipt(method, parameters, cancellationToken);
         var reply = await application.ExecuteAsync(method, parameters ?? new { }, cancellationToken).WaitAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         return ValidateReply(method, reply);
@@ -244,8 +253,23 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         // Mutating commands must observe a successful commit receipt even
         // when caller cancellation raced with its delivery. Only an explicit
         // cancelled receipt means the command was not admitted.
-        var reply = await application.ExecuteAsync(method, parameters ?? new { }, cancellationToken);
-        try { return ValidateReply(method, reply); }
+        var label = SettingLabel(method);
+        var settings = SettingKeys(method, parameters);
+        long submission = label is null ? 0 : ++settingSubmission;
+        try
+        {
+            var reply = await application.ExecuteAsync(method, parameters ?? new { }, cancellationToken);
+            var result = ValidateReply(method, reply);
+            if (label is not null)
+                foreach (var setting in settings) SettingReceipt(setting, label, submission, confirmed: true);
+            return result;
+        }
+        catch (MusicOperationException error) when (error.Code == "COMMIT_UNKNOWN")
+        {
+            if (label is not null)
+                foreach (var setting in settings) SettingReceipt(setting, label, submission, confirmed: false);
+            throw;
+        }
         catch (MusicOperationException error) when (error.Code == "CANCELLED" &&
             cancellationToken.IsCancellationRequested)
         {
@@ -826,7 +850,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         using var request = BeginOnline(cancellationToken);
         try
         {
-            var media = new ResolvedMusic(await files.ResolveAsync(selected.Id, request.Token), new Dictionary<string, string>());
+            var media = new ResolvedMusic(await files.ResolveAsync(SongJson.Text(selected.Raw, "localFileId"), request.Token), new Dictionary<string, string>());
             request.Token.ThrowIfCancellationRequested();
             if (stopping || epoch != playbackEpoch || selected != current || admission is not null && !admission())
                 throw new OperationCanceledException();
@@ -1100,6 +1124,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
         try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await application.AbortAsync(); } catch (Exception error) { failure ??= error; }
+        if (application is MusicNativeApplication repositoryOwner)
+            repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
+        try { await ArtworkLoader.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         if (ownsCacheStore) await cacheStore.DisposeAsync();
         UnsubscribeSearch();
         UnsubscribeDiscovery();
@@ -1131,6 +1158,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             try { await vipPage.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
             try { await application.DisposeAsync(); }
+            catch (Exception error) { failure ??= error; }
+            if (application is MusicNativeApplication repositoryOwner)
+                repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
+            try { await ArtworkLoader.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
             if (ownsCacheStore) await cacheStore.DisposeAsync();
             // The capability owns its application. Runtime, store and playback remain App-owned.

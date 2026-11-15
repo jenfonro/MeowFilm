@@ -9,7 +9,7 @@ import MeowStorage
 /// and ten seconds of safety before a declared expiry. Unknown expiry stays
 /// unknown in the returned audio; retention is NOT a fabricated media lifetime.
 struct MusicNativeAccountURLCache {
-    static let key = "music.account-url-cache.v1"
+    static let key = "music.platform.audio-values.v1"
     static let maximumBytes = 1_024 * 1_024
     static let retention: TimeInterval = 30 * 86_400
 
@@ -43,25 +43,11 @@ struct MusicNativeAccountURLCache {
 
     init(store: DocumentStore?) { self.store = store }
 
-    /// Preserve the provider's original typed payload (including native media
-    /// metadata), not a projection that loses actual level/file license fields.
-    /// Account material/headers are never eligible for this cache.
+    /// Consume the shared audio fields. Unused fields never participate in
+    /// admission and are not copied into the disposable cache.
     static func audio(_ value: JSONValue) throws -> MusicNativeAudio {
         guard case .object(let fields) = value else { throw MusicServiceError.invalidMediaCandidate }
-        _ = try MusicPlatformJSON.bytes(value, maximum: 32 * 1024)
-        let forbiddenFields: Set<String> = ["headers", "cookie", "cookies", "authorization", "credential",
-            "credentials", "auth", "music_u", "music_a", "musickey", "p_skey", "skey",
-            "access_token", "refresh_token"]
-        func hasCredential(_ value: JSONValue) -> Bool {
-            switch value {
-            case .object(let object):
-                return object.contains { forbiddenFields.contains($0.key.lowercased()) || hasCredential($0.value) }
-            case .array(let array): return array.contains(where: hasCredential)
-            default: return false
-            }
-        }
-        guard !hasCredential(value) else { throw MusicServiceError.invalidMediaCandidate }
-        let audio = try MusicPlatformJSON.nativeAccountAudio(fields)
+        let audio = try MusicAccountFields.nativeAccountAudio(fields)
         guard ["https", "http"].contains(audio.url.scheme?.lowercased() ?? ""),
               let host = audio.url.host, !host.isEmpty,
               audio.url.user == nil, audio.url.password == nil, audio.url.fragment == nil,
@@ -81,11 +67,8 @@ struct MusicNativeAccountURLCache {
     }
 
     private static func valid(_ key: Key) -> Bool {
-        key.scope.count == 64 && key.scope.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } &&
-            MusicAccountPlatform(rawValue: key.platform) != nil &&
-            !key.nativeID.isEmpty && key.nativeID.utf8.count <= 64 &&
-            !key.nativeID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) &&
-            MusicPlatformJSON.officialQualities.contains(key.quality)
+        !key.scope.isEmpty && MusicAccountPlatform(rawValue: key.platform) != nil &&
+            !key.nativeID.isEmpty && !key.quality.isEmpty
     }
 
     private mutating func load(at now: Date) {
@@ -117,8 +100,11 @@ struct MusicNativeAccountURLCache {
     mutating func put(_ value: JSONValue, for key: Key, at now: Date) {
         load(at: now)
         guard Self.valid(key), let audio = try? Self.audio(value),
-              !isRejected(audio.url, for: key, at: now) else { return }
-        let entry = Entry(key: key, value: value, savedAt: now)
+              !isRejected(audio.url, for: key, at: now),
+              case .object(let fields) = value else { return }
+        let names = ["url", "full", "actualQuality", "bitrate", "sampleRate", "duration", "expiresAt", "licenseExpiresAt"]
+        let projected = JSONValue.object(fields.filter { names.contains($0.key) })
+        let entry = Entry(key: key, value: projected, savedAt: now)
         guard entry.usable(at: now) else { return }
         entries.removeAll { $0.key == key }; entries.append(entry)
         trim(at: now); save()

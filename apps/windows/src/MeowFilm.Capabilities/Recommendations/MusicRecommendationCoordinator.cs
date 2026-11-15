@@ -47,7 +47,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         internal HeartbeatContext? Heartbeat;
     }
     private sealed record Song(JsonElement Value, string NativeId, string Algorithm, string FeedbackSource,
-        JsonElement? Context, JsonElement Metadata);
+        JsonElement? Context, JsonElement? Metadata);
     private sealed record HeartbeatContext(string PlaylistId, string StartMusicId, string SongId, bool FromHome, long Count, string AccountId);
     private sealed record Candidate(string Id, Song Song);
     private sealed record CandidateBatch(long Epoch, MusicRecommendationRequest Request,
@@ -90,7 +90,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                 return await StartAsync(Parse(p), cancellationToken).ConfigureAwait(false);
             if (method == "music.recommendations.get")
             {
-                Fields(p, "id");
+                Fields(p);
                 lock (gate)
                 {
                     if (p.TryGetProperty("id", out _))
@@ -108,7 +108,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                 "music.recommendations.choose" => "id candidateId",
                 _ => "id"
             };
-            Fields(p, fields, fields);
+            Fields(p, fields);
             Session target; Task? pending = null;
             lock (gate)
             {
@@ -163,7 +163,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                         Require(target.Config.Kind == "queue", "INVALID_REQUEST");
                         Require(target.Pending is null, "COMMIT_UNKNOWN");
                         Require(!target.Loading, "BUSY");
-                        pending = BeginChooseLocked(target, Text(p, "candidateId", "", 80), cancellationToken);
+                        pending = BeginChooseLocked(target, Text(p, "candidateId"), cancellationToken);
                         break;
                     default: throw new RecommendationException("METHOD_NOT_FOUND");
                 }
@@ -177,7 +177,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
 
     private static Configuration Parse(JsonElement p)
     {
-        Fields(p, "kind platform mode submode ruleId tabTagId sourceIds sourceType entry songId playlistId seedEntryId restore continue play local", "kind platform");
+        Fields(p, "kind platform");
         string kind = Text(p, "kind"), platform = Text(p, "platform");
         Require(kind is "fm" or "similar" or "heartbeat" or "queue");
         Require(platform is "wy" or "tx" or "kw" or "kg" or "mg");
@@ -186,36 +186,39 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         MusicFmRequest? fm = null; MusicHeartbeatRequest? heartbeat = null; string[] ids = [];
         if (kind == "fm")
         {
-            Fields(p, "kind platform mode submode ruleId tabTagId continue play local", "kind platform");
             string mode = Text(p, "mode", "default");
             Require(mode is "default" or "familiar" or "explore" or "puzzle" or "scene");
             var value = mode switch { "familiar" => MusicFmMode.Familiar, "explore" => MusicFmMode.Explore,
                 "puzzle" => MusicFmMode.Puzzle, "scene" => MusicFmMode.Scene, _ => MusicFmMode.Default };
-            fm = new(platform, value, Text(p, "submode", "", 64), false,
-                p.TryGetProperty("ruleId", out _) ? Text(p, "ruleId", "", 64) : null,
-                p.TryGetProperty("tabTagId", out _) ? Text(p, "tabTagId", "", 64) : null);
+            fm = new(platform, value, Text(p, "submode"), false,
+                p.TryGetProperty("ruleId", out _) ? Text(p, "ruleId") : null,
+                p.TryGetProperty("tabTagId", out _) ? Text(p, "tabTagId") : null);
         }
         else if (kind == "similar")
         {
-            Fields(p, "kind platform sourceIds sourceType continue play local", "kind platform sourceIds sourceType");
+            Fields(p, "sourceIds sourceType");
             Require(Text(p, "sourceType") is "song" or "artist");
             Require(p.TryGetProperty("sourceIds", out var source) && source.ValueKind == JsonValueKind.Array &&
-                source.GetArrayLength() is > 0 and <= 20);
-            ids = source.EnumerateArray().Select(v => v.ValueKind == JsonValueKind.String ? v.GetString()! : "").ToArray();
-            Require(ids.All(ValidId) && ids.Distinct(StringComparer.Ordinal).Count() == ids.Length);
+                source.GetArrayLength() > 0);
+            ids = source.EnumerateArray().Select(v =>
+            {
+                Require(v.ValueKind == JsonValueKind.String);
+                string id = v.GetString()!;
+                Require(id.Length > 0);
+                return id;
+            }).ToArray();
         }
         else if (kind == "heartbeat")
         {
-            Fields(p, "kind platform entry songId playlistId seedEntryId play local", "kind platform entry");
+            Fields(p, "entry");
             string entry = Text(p, "entry"), song = Text(p, "songId");
             Require(entry is "favorites" or "current");
-            Require(entry == "favorites" && song.Length == 0 || ValidId(song));
-            Require(!p.TryGetProperty("playlistId", out _) || ValidId(Text(p, "playlistId")));
+            Require(entry == "favorites" || song.Length > 0);
             heartbeat = new(platform, entry == "favorites" ? MusicHeartbeatEntry.Favorites : MusicHeartbeatEntry.CurrentSong,
                 song.Length > 0 ? song : null, p.TryGetProperty("playlistId", out _) ? Text(p, "playlistId") : null);
         }
-        else Fields(p, "kind platform seedEntryId restore continue play local", "kind platform seedEntryId");
-        return new(kind, platform, fm, ids, Text(p, "sourceType", "song"), heartbeat, Text(p, "seedEntryId", "", 80),
+        else Fields(p, "seedEntryId");
+        return new(kind, platform, fm, ids, Text(p, "sourceType", "song"), heartbeat, Text(p, "seedEntryId"),
             kind == "heartbeat" || kind == "queue" && Bool(p, "restore"),
             (kind != "queue" || Bool(p, "restore")) && Bool(p, "continue", true), Bool(p, "play", true));
     }

@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import XCTest
+import Combine
 @testable import MeowMusicFeature
 
 private actor SyncPageGate {
@@ -37,13 +38,62 @@ private actor SyncPageService: MusicLibrarySyncing, MusicAccountsServing {
     func cancelLogin(challengeID: UUID) {}
     func logout(platform: MusicAccountPlatform) {}
 }
+private actor AutomaticSyncPageService: MusicAutomaticLibrarySyncing {
+    private var preferences = MusicAutomaticLibrarySyncPreferences()
+    private var failure: MusicServiceError?
+    private var remoteFailure: MusicServiceError?
+    private var gate: SyncPageGate?
+    private var beforeCommit: SyncPageGate?
+    private var saves = 0
+    private var cancelled = false
+    func configure(failure: MusicServiceError? = nil, remote: MusicServiceError? = nil,
+                   gate: SyncPageGate? = nil, beforeCommit: SyncPageGate? = nil) {
+        self.failure = failure; remoteFailure = remote; self.gate = gate; self.beforeCommit = beforeCommit
+    }
+    func observations() -> (saves: Int, cancelled: Bool) { (saves, cancelled) }
+    func automaticLibrarySyncPreferences() -> MusicAutomaticLibrarySyncPreferences { preferences }
+    func librarySyncState() -> MusicLibrarySyncState { .init(selections: preferences.selections) }
+    func automaticLibrarySyncEvents() -> AsyncStream<MusicAutomaticLibrarySyncEvent> { AsyncStream { $0.finish() } }
+    func synchronizeLibrary(_ request: MusicLibrarySyncRequest) throws -> MusicLibrarySyncState {
+        XCTFail("Automatic settings must not use the manual-only port"); throw MusicServiceError.unsupported
+    }
+    func synchronizeAutomaticLibrary(_ request: MusicAutomaticLibrarySyncRequest) -> MusicLibrarySyncState { .init() }
+    func cancelLibrarySync(id: UUID) {}
+    func saveAutomaticLibrarySync(_ value: MusicAutomaticLibrarySyncPreferences, requestID: UUID,
+                                  authorization: MusicQueueAuthorization) async throws -> MusicAutomaticLibrarySyncSaveResult {
+        saves += 1
+        let failure = failure, remote = remoteFailure, gate = gate, beforeCommit = beforeCommit
+        self.gate = nil; self.beforeCommit = nil
+        if let beforeCommit { await beforeCommit.wait() }
+        if failure == nil || failure == .commitUnconfirmed {
+            preferences = .init(revision: preferences.revision + 1, selections: value.selections)
+        }
+        let saved = preferences
+        if let gate { await gate.wait() }
+        cancelled = Task.isCancelled
+        try authorization.check()
+        if let failure { throw failure }
+        return .init(preferences: saved, synchronization: remote.map { .failure($0) } ??
+            .success(.init(selections: saved.selections, phase: .synced)))
+    }
+}
 @MainActor final class MusicLibrarySyncViewModelTests: XCTestCase {
+    private let receipts = MusicSettingsReceiptOwner()
+    func testSyncSnapshotCarriesOwnedDirectoryIDsWithoutRequiringCollectionMembers() {
+        let existingCall = MusicLibrarySyncSnapshot(accountID: "account", collections: [], revision: "directory")
+        XCTAssertTrue(existingCall.ownedCollectionIDs.isEmpty)
+        let directory = MusicLibrarySyncSnapshot(accountID: "account", collections: [], revision: "directory",
+                                                ownedCollectionIDs: ["favorites", "owned-playlist"])
+        XCTAssertEqual(directory.ownedCollectionIDs, ["favorites", "owned-playlist"])
+        XCTAssertTrue(directory.collections.isEmpty)
+        XCTAssertEqual(directory.revision, "directory")
+    }
     func testLoadNeverWritesDefaultsAreOffAndOnlyExplicitSelectedRequestWrites() async {
-        let service = SyncPageService(), model = MusicLibrarySyncViewModel(service: SyncPageService())
+        let service = SyncPageService(), model = MusicLibrarySyncViewModel(service: SyncPageService(), settingsReceipts: receipts)
         model.activate(available: true, generation: UUID()); await model.load()
         XCTAssertFalse(model.canSync); XCTAssertTrue(model.selections.isEmpty)
         await model.synchronize()
-        let page = MusicLibrarySyncViewModel(service: service, accounts: service)
+        let page = MusicLibrarySyncViewModel(service: service, accounts: service, settingsReceipts: receipts)
         page.activate(available: true, generation: UUID()); await page.load()
         var calls = await service.calls(); XCTAssertTrue(calls.isEmpty)
         page.select(.qq, favorites: true); page.select(.netease, playlists: true)
@@ -58,7 +108,7 @@ private actor SyncPageService: MusicLibrarySyncing, MusicAccountsServing {
             for event in ["leave", "lock", "generation", "cancel"] {
                 let service = SyncPageService(), gate = SyncPageGate()
                 await service.configure(read: operation == "load" ? gate : nil, write: operation == "sync" ? gate : nil)
-                let model = MusicLibrarySyncViewModel(service: service, accounts: service)
+                let model = MusicLibrarySyncViewModel(service: service, accounts: service, settingsReceipts: receipts)
                 let generation = UUID(); model.activate(available: true, generation: generation)
                 model.select(.qq, favorites: true)
                 let task = Task {
@@ -78,7 +128,7 @@ private actor SyncPageService: MusicLibrarySyncing, MusicAccountsServing {
         }
     }
     func testInFlightLoadCannotUndoSelectionAndSyncIsSingleFlight() async {
-        let service = SyncPageService(), gate = SyncPageGate(), model = MusicLibrarySyncViewModel(service: service)
+        let service = SyncPageService(), gate = SyncPageGate(), model = MusicLibrarySyncViewModel(service: service, settingsReceipts: receipts)
         await service.configure(read: gate)
         model.activate(available: true, generation: UUID())
         let load = Task { await model.load() }; await gate.started()
@@ -96,7 +146,7 @@ private actor SyncPageService: MusicLibrarySyncing, MusicAccountsServing {
     }
     func testConfirmationBindsSelectionPageAccessAndForegroundWithoutRemoteWrites() async throws {
         for event in ["selection", "generation", "leave", "background", "reload", "dismiss"] {
-            let service = SyncPageService(), model = MusicLibrarySyncViewModel(service: service)
+            let service = SyncPageService(), model = MusicLibrarySyncViewModel(service: service, settingsReceipts: receipts)
             model.activate(available: true, generation: UUID())
             model.select(.qq, favorites: true); model.prepareConfirmation()
             let ticket = try XCTUnwrap(model.confirmation)
@@ -115,7 +165,7 @@ private actor SyncPageService: MusicLibrarySyncing, MusicAccountsServing {
     }
     func testConfirmedButQueuedTapCannotDispatchAfterPageOrProtectionChanges() async throws {
         for event in ["leave", "generation", "background"] {
-            let service = SyncPageService(), model = MusicLibrarySyncViewModel(service: service)
+            let service = SyncPageService(), model = MusicLibrarySyncViewModel(service: service, settingsReceipts: receipts)
             model.activate(available: true, generation: UUID())
             model.select(.qq, favorites: true); model.prepareConfirmation()
             let ticket = try XCTUnwrap(model.confirmation)
@@ -133,7 +183,7 @@ private actor SyncPageService: MusicLibrarySyncing, MusicAccountsServing {
         }
     }
     func testOldSheetCannotDismissSuccessorAndMatchingConsentDispatchesOnce() async throws {
-        let service = SyncPageService(), model = MusicLibrarySyncViewModel(service: service)
+        let service = SyncPageService(), model = MusicLibrarySyncViewModel(service: service, settingsReceipts: receipts)
         model.activate(available: true, generation: UUID())
         model.select(.qq, favorites: true); model.prepareConfirmation()
         let previous = try XCTUnwrap(model.confirmation)
@@ -151,6 +201,78 @@ private actor SyncPageService: MusicLibrarySyncing, MusicAccountsServing {
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls.first?.selections, [.init(platform: .qq, favorites: true)])
         XCTAssertEqual(model.state.phase, .synced)
+    }
+
+    func testAutomaticSettingUnknownSurvivesDepartureAndOnlySameSettingSuccessClearsIt() async {
+        let service = AutomaticSyncPageService(), gate = SyncPageGate()
+        let model = MusicLibrarySyncViewModel(service: service, settingsReceipts: receipts)
+        let generation = UUID()
+        model.activate(available: true, generation: generation); await model.load()
+        await service.configure(failure: .commitUnconfirmed, gate: gate)
+        model.select(.qq, favorites: true)
+        await gate.started()
+        model.deactivate()
+        await gate.release(); await receipts.flush()
+        XCTAssertTrue(model.selections.isEmpty); XCTAssertNil(model.error); XCTAssertFalse(model.busy)
+        XCTAssertEqual(receipts.unknown.map(\.setting), ["library/automatic/tx/favorites"])
+        var calls = await service.observations()
+        XCTAssertEqual(calls.saves, 1); XCTAssertFalse(calls.cancelled)
+        model.activate(available: true, generation: generation); await model.load()
+        XCTAssertTrue(model.selection(.qq).favorites, "Reopening reads the actual committed preference")
+        XCTAssertEqual(receipts.unknown.count, 1)
+
+        await service.configure()
+        let changedOther = expectation(description: "other automatic preference settled")
+        let other = model.$busy.dropFirst().filter { !$0 }.prefix(1).sink { _ in changedOther.fulfill() }
+        model.select(.qq, playlists: true)
+        await fulfillment(of: [changedOther], timeout: 2); other.cancel()
+        XCTAssertEqual(receipts.unknown.count, 1)
+        let changedSame = expectation(description: "same automatic preference settled")
+        let same = model.$busy.dropFirst().filter { !$0 }.prefix(1).sink { _ in changedSame.fulfill() }
+        model.select(.qq, favorites: false)
+        await fulfillment(of: [changedSame], timeout: 2); same.cancel()
+        XCTAssertTrue(receipts.unknown.isEmpty)
+        calls = await service.observations(); XCTAssertEqual(calls.saves, 3)
+        XCTAssertFalse(model.selection(.qq).favorites); XCTAssertTrue(model.selection(.qq).playlists)
+    }
+
+    func testConfirmedAutomaticPreferenceAndRemoteUnknownAreSeparateReceipts() async {
+        let service = AutomaticSyncPageService()
+        let model = MusicLibrarySyncViewModel(service: service, settingsReceipts: receipts)
+        model.activate(available: true, generation: UUID()); await model.load()
+        receipts.settle(receipts.begin(settings: ["library/automatic/tx/favorites"], operation: "保存同步"),
+                        failure: .commitUnconfirmed)
+        await service.configure(remote: .commitUnconfirmed)
+        let completed = expectation(description: "local preference and remote result settled")
+        let observation = model.$error.compactMap { $0 }.prefix(1).sink { _ in completed.fulfill() }
+        model.select(.qq, favorites: true)
+        await fulfillment(of: [completed], timeout: 2); observation.cancel()
+        XCTAssertEqual(model.automaticRevision, 1); XCTAssertTrue(model.selection(.qq).favorites)
+        XCTAssertTrue(receipts.unknown.isEmpty, "A remote sync unknown is not a local settings unknown")
+        XCTAssertEqual(model.error, MusicServiceError.commitUnconfirmed.localizedDescription)
+        let calls = await service.observations(); XCTAssertEqual(calls.saves, 1)
+    }
+
+    func testReopeningBeforeSubmittedAutomaticSaveSettlesReadsActualFinalPreferencesWithoutRetry() async {
+        let service = AutomaticSyncPageService(), gate = SyncPageGate()
+        let model = MusicLibrarySyncViewModel(service: service, settingsReceipts: receipts)
+        let generation = UUID()
+        model.activate(available: true, generation: generation); await model.load()
+        await service.configure(failure: .commitUnconfirmed, beforeCommit: gate)
+        model.select(.qq, favorites: true); await gate.started()
+        model.deactivate()
+        model.activate(available: true, generation: generation); await model.load()
+        XCTAssertFalse(model.selection(.qq).favorites, "The reopened page reads facts, not the old optimistic selection")
+        let reconciled = expectation(description: "reopened page read final saved preferences")
+        let observation = model.$automaticRevision.filter { $0 == 1 }.prefix(1).sink { _ in reconciled.fulfill() }
+        await gate.release()
+        await fulfillment(of: [reconciled], timeout: 2); observation.cancel()
+        await receipts.flush()
+        XCTAssertTrue(model.selection(.qq).favorites); XCTAssertFalse(model.busy); XCTAssertNil(model.error)
+        XCTAssertEqual(receipts.unknown.map(\.setting), ["library/automatic/tx/favorites"])
+        let calls = await service.observations()
+        XCTAssertEqual(calls.saves, 1); XCTAssertFalse(calls.cancelled)
+        model.deactivate()
     }
 }
 #endif

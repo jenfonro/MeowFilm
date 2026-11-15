@@ -16,6 +16,17 @@ public static partial class RuntimeHttpProtocol
     internal static readonly IReadOnlyDictionary<string, ModuleContract> Modules =
         new Dictionary<string, ModuleContract>(StringComparer.Ordinal)
     {
+        ["music-platform"] = new("0.1.0", "music.platform.v1", "music.platform.",
+            ["request", "session.update", "cache.clear", "describe"],
+            new(StringComparer.Ordinal) {
+                "INVALID_REQUEST", "UNSUPPORTED", "CLOSED", "CANCELLED", "TIMEOUT", "LIMIT",
+                "NETWORK_ERROR", "UPSTREAM_HTTP", "UPSTREAM_ERROR", "INVALID_RESPONSE",
+                "AUTH_REQUIRED", "AUTH_EXPIRED", "INVALID_CREDENTIALS", "FORBIDDEN", "RATE_LIMITED",
+                "VERIFICATION_REQUIRED", "SIGNATURE_REQUIRED", "DEVICE_CONTEXT_REQUIRED", "STALE_SESSION",
+                "NOT_FOUND", "MEDIA_UNAVAILABLE", "TRIAL_ONLY", "STORAGE_ERROR", "CORRUPT_STORAGE",
+                "COMMIT_UNKNOWN", "REMOTE_CHANGED", "CLOUD_RESPONSE_UNCONFIRMED", "QUALITY_UNAVAILABLE",
+                "CREDENTIALS_UNAVAILABLE", "STORAGE_CONFLICT", "REDIRECT_DENIED", "BUSY", "QR_EXPIRED",
+                "SMS_SEND_UNCONFIRMED", "DEVICE_LIMIT", "INVALID_CODE", "INVALID_PHONE", "ACCOUNT_SELECTION_REQUIRED" }),
         ["netease"] = new("0.1.0", "netease.token.v1", "netease.token.",
             ["get"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",

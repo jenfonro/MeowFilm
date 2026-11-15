@@ -12,7 +12,7 @@ public static partial class MusicNativeLibraryTests
     {
         yield return new("Native music online settings missing area stays absent on reads and reconciliation", OnlineSettingsMissingArea);
         yield return new("Native music online settings current reads preserve active library state across reopen", OnlineSettingsCurrentState);
-        yield return new("Native music online settings non-current schema fails every owner entry without writes", OnlineSettingsNonCurrent);
+        yield return new("Native music online settings missing required values fail every owner entry without writes", OnlineSettingsMissingRequired);
         yield return new("Native music online settings reject damaged active neighboring areas", OnlineSettingsInvalidDocument);
         yield return new("Native music online settings current schema rejects extra fields and unknown versions", OnlineSettingsInvalidCurrent);
         yield return new("Native music online settings save before commit failure settles without replay", () => OnlineSettingsUnknownCommit(false));
@@ -26,14 +26,13 @@ public static partial class MusicNativeLibraryTests
     private static JsonObject CurrentOnlineSettings(bool lyrics = false, long revision = 7) =>
         O(new { schema = 3, revision, lyrics });
 
-    private static byte[] OnlineSettingsDocument(JsonObject settings) =>
-        Document(("online-settings", settings),
-            ("library", CurrentLibraryState()), ("queue", CurrentQueue()), ("history", CurrentHistory()),
-            ("native-official-sources", O(new { schema = 1, revision = 4, enabled = new[] { "kg" } })),
-            ("[\"lx-data\",\"test-install-a\",\"wy\"]", O(new
-            {
-                schema = 1, values = new[] { new { key = "keep", value = "private" } }
-            })));
+    private static async Task<byte[]> OnlineSettingsDocument(JsonObject settings)
+    {
+        var current = await CurrentDocuments();
+        return Document(("online-settings", settings),
+            ("library", current.Library), ("queue", current.Queue), ("history", current.History),
+            ("native-official-sources", O(new { schema = 1, revision = 4, enabled = new[] { "kg" } })));
+    }
 
     private static void CheckOnlineSettings(JsonElement settings, long revision, bool lyrics)
     {
@@ -65,7 +64,7 @@ public static partial class MusicNativeLibraryTests
     private static async Task OnlineSettingsMissingArea()
     {
         await using var f = new Fixture();
-        f.Store.Bytes = Document(("library", CurrentLibraryState()));
+        f.Store.Bytes = Document(("library", (await CurrentDocuments()).Library));
         byte[] before = f.Store.Bytes.ToArray();
         var owner = f.Owner();
         CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 0, true);
@@ -86,7 +85,7 @@ public static partial class MusicNativeLibraryTests
         })
         {
             await using var f = new Fixture();
-            f.Store.Bytes = OnlineSettingsDocument(CurrentOnlineSettings(lyrics, revision));
+            f.Store.Bytes = await OnlineSettingsDocument(CurrentOnlineSettings(lyrics, revision));
             byte[] before = f.Store.Bytes.ToArray();
             var owner = f.Owner();
 
@@ -95,7 +94,7 @@ public static partial class MusicNativeLibraryTests
             CheckOtherOnlineSettingsAreas(before, f.Store);
             CheckOnlineSettings(E(f.Store.State("online-settings")), revision, lyrics);
             Check((await Ok(owner, "music.library.detail", new { id = "favorites" }))
-                .GetProperty("songs")[0].GetProperty("songId").GetString() == "library:local:a");
+                .GetProperty("songs")[0].GetProperty("localFileId").GetString() == "library:local:a");
             Check((await Ok(owner, "music.queue.get")).GetProperty("currentId").GetString() == "entry-1");
             Check((await Ok(owner, "music.officialSources.settings.get")).GetProperty("settings")
                 .GetProperty("enabled").EnumerateArray().Select(p => p.GetString()).SequenceEqual(new[] { "kg" }));
@@ -127,21 +126,24 @@ public static partial class MusicNativeLibraryTests
         Check(f.Store.WriteCalls == 0 && bytes.SequenceEqual(f.Store.Bytes!));
     }
 
-    private static async Task OnlineSettingsNonCurrent()
+    private static async Task OnlineSettingsMissingRequired()
     {
-        foreach (JsonNode? target in new JsonNode?[] { null, O(new { installationId = "test-install-a", platform = "wy" }) })
-            await RejectOnlineSettingsDocument(OnlineSettingsDocument(O(new { schema = 2, revision = 7, lyrics = false, target })));
+        foreach (string field in new[] { "schema", "revision", "lyrics" })
+        {
+            var settings = CurrentOnlineSettings(); settings.Remove(field);
+            await RejectOnlineSettingsDocument(await OnlineSettingsDocument(settings));
+        }
     }
 
     private static async Task OnlineSettingsInvalidDocument()
     {
         foreach (var (area, invalid, code) in new (string, JsonObject, string)[]
         {
-            ("library", O(new { schema = 1, scope = "local", revision = 1, library = CurrentLibraryState()["library"] }), "CORRUPT_LIBRARY"),
+            ("library", O(new { schema = 2, scope = "local", revision = 0, library = (await CurrentDocuments()).Library["library"] }), "CORRUPT_LIBRARY"),
             ("native-official-sources", O(new { schema = 2, revision = 4, enabled = new[] { "kg" } }), "CORRUPT_STORAGE")
         })
         {
-            var doc = JsonNode.Parse(OnlineSettingsDocument(CurrentOnlineSettings()))!.AsObject();
+            var doc = JsonNode.Parse(await OnlineSettingsDocument(CurrentOnlineSettings()))!.AsObject();
             doc["entries"]!.AsArray().Single(e => e!["key"]!.GetValue<string>() == AreaKey(area))!["value"] = invalid;
             await RejectOnlineSettingsDocument(JsonSerializer.SerializeToUtf8Bytes(doc, PersistedJson), code);
         }
@@ -159,15 +161,15 @@ public static partial class MusicNativeLibraryTests
         {
             var settings = CurrentOnlineSettings();
             settings[field] = value;
-            await RejectOnlineSettingsDocument(OnlineSettingsDocument(settings));
+            await RejectOnlineSettingsDocument(await OnlineSettingsDocument(settings));
         }
         foreach (string field in new[] { "schema", "revision", "lyrics" })
         {
             var settings = CurrentOnlineSettings();
             settings.Remove(field);
-            await RejectOnlineSettingsDocument(OnlineSettingsDocument(settings));
+            await RejectOnlineSettingsDocument(await OnlineSettingsDocument(settings));
         }
-        byte[] valid = OnlineSettingsDocument(CurrentOnlineSettings());
+        byte[] valid = await OnlineSettingsDocument(CurrentOnlineSettings());
         await RejectOnlineSettingsDocument(Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(valid)
             .Replace("\"lyrics\":false", "\"lyrics\":false,\"lyrics\":false", StringComparison.Ordinal)));
         await RejectOnlineSettingsDocument(Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(valid)
@@ -177,7 +179,7 @@ public static partial class MusicNativeLibraryTests
     private static async Task OnlineSettingsUnknownCommit(bool committed)
     {
         await using var f = new Fixture();
-        f.Store.Bytes = OnlineSettingsDocument(CurrentOnlineSettings());
+        f.Store.Bytes = await OnlineSettingsDocument(CurrentOnlineSettings());
         byte[] before = f.Store.Bytes.ToArray();
         var owner = f.Owner();
         f.Store.Failure = committed ? 2 : 1;
@@ -227,7 +229,7 @@ public static partial class MusicNativeLibraryTests
     private static async Task OnlineSettingsConflict(bool conflictAtCommit)
     {
         await using var f = new Fixture();
-        f.Store.Bytes = OnlineSettingsDocument(CurrentOnlineSettings());
+        f.Store.Bytes = await OnlineSettingsDocument(CurrentOnlineSettings());
         byte[] before = f.Store.Bytes.ToArray();
         var competingDocument = JsonNode.Parse(before)!.AsObject();
         competingDocument["entries"]!.AsArray()
@@ -289,7 +291,7 @@ public static partial class MusicNativeLibraryTests
     private static async Task OnlineSettingsSaveCancelRead()
     {
         await using var f = new Fixture();
-        f.Store.Bytes = OnlineSettingsDocument(CurrentOnlineSettings());
+        f.Store.Bytes = await OnlineSettingsDocument(CurrentOnlineSettings());
         byte[] before = f.Store.Bytes.ToArray();
         using var cancel = new CancellationTokenSource();
         var owner = f.Owner(new OnlineSettingsReadCancellation(f.Store, cancel));

@@ -19,11 +19,9 @@ internal sealed class MusicOfficialCandidates
     private void Select(JsonObject row)
     {
         string key = LJ.S(row["sourceKey"]);
-        if (candidates.Count >= 24 || key.Length == 0 ||
+        if (key.Length == 0 ||
             LJ.S(row["source"]) is not ("wy" or "tx" or "kg") ||
             key != NativeMusicSong.SourceKey(row)) return;
-        if (!candidates.Contains(key) && recordings.Sources.Count(value =>
-            candidates.Contains(LJ.S(value["sourceKey"])) && LJ.S(value["source"]) == LJ.S(row["source"])) >= 8) return;
         if (recordings.TryAddSource(row)) candidates.Add(key);
     }
     internal void Remember(JsonObject info, string platform)

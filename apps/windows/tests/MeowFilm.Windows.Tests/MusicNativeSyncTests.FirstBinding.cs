@@ -1,4 +1,3 @@
-using System.Net.Http;
 using System.Text.Json;
 
 namespace MeowFilm.Windows.Tests;
@@ -14,30 +13,6 @@ public static partial class MusicNativeSyncTests
         {
             string p = platform;
             yield return new($"Music sync first {p} binding wins over the other platform remote deletion", () => FirstBindingRemoteDeletion(p));
-        }
-    }
-
-    // Independent platform stores share only the production library/sync owner.
-    private sealed class FirstBindingTransport : HttpMessageHandler
-    {
-        private readonly Dictionary<string, HttpMessageInvoker> servers;
-        internal FirstBindingTransport(Server first, Server second) =>
-            servers = new[] { first, second }.ToDictionary(server => server.Platform, server => new HttpMessageInvoker(server));
-
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        {
-            string platform = request.RequestUri!.Host switch
-            {
-                "music.163.com" or "interfacepc.music.163.com" => "wy",
-                "u.y.qq.com" => "tx",
-                _ => throw new InvalidOperationException("UNEXPECTED_FIRST_BINDING_HOST")
-            };
-            return servers[platform].SendAsync(request, token);
-        }
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) foreach (var server in servers.Values) server.Dispose();
-            base.Dispose(disposing);
         }
     }
 
@@ -89,7 +64,7 @@ public static partial class MusicNativeSyncTests
 
         await f.Enable(); Ok(await f.Run());
         Check(f.Server.Favorite.Songs.SequenceEqual([1, 2]) &&
-            f.Server.Operations.SequenceEqual(["DelSonglist"]) && newer.Writes == 0,
+            f.Server.Operations.SequenceEqual(["remove"]) && newer.Writes == 0,
             "OLDER_ACCOUNT_RETAINS_RESTORED_SONG_WITHOUT_READDING_IT");
         await ExpectFavorites(f, 1, 2);
 
@@ -119,7 +94,7 @@ public static partial class MusicNativeSyncTests
         Check(newer.Writes == 0 && f.Server.Writes == 1);
         await f.Enable(); Ok(await f.Run());
         Check(f.Server.Favorite.Songs.Order().SequenceEqual([1, 2]) &&
-            f.Server.Operations.SequenceEqual(["DelSonglist", "AddSonglist"]) && newer.Writes == 0,
+            f.Server.Operations.SequenceEqual(["remove", "add"]) && newer.Writes == 0,
             "OLDER_ACCOUNT_MUST_RECOLLECT_THE_NEW_UNION");
     }
 

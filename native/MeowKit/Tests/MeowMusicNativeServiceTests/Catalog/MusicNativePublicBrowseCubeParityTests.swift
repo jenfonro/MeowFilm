@@ -1,160 +1,71 @@
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
+private typealias D = NativeDiscoveryFixture
 final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
     private let channel = MusicPublicBrowseChannel(id: "synthetic", title: "Synthetic", kind: .cube, pageCode: "synthetic_page")
-    private func node(_ text: String) throws -> MJ { try MJ.parse(Data(text.utf8)) }
-    private func response(_ page: MJ) -> MJ {
-        .obj([("code", .n(200)), ("data", .obj([("pageProtocol", .obj([("pages", .array([page]))]))]))])
+    private func tabs(_ groups: [(String, [RuntimeValue])], selected: String) -> RuntimeValue {
+        .object(["id": .string("recommend"), "title": .string("官方栏目"),
+            "items": .array(groups.first { $0.0 == selected }?.1 ?? []), "selectedTab": .string(selected),
+            "tabs": .array(groups.map { .object(["id": .string($0.0), "name": .string($0.0), "items": .array($0.1)]) })])
     }
-    func testRecommendTabsHydrateOnlySelectedChoiceAndKeepFMNumericSelectorAndCoverLabel() async throws {
-        let root = try node(#"""
-        {"componentName":"Root","children":[{"id":"recommend","props":{"tab":"electronic","title":"官方栏目","recommendModule":[
-          {"title":"一","modules":[{"type":"song","id":11},{"type":"playlist","id":41}]},
-          {"title":"二","isDefaultTab":true,"modules":[{"type":"song","id":12},
-            {"type":"fm","tabTagId":17001,"fmLogoTextContent":"规则封面"},
-            {"type":"fm","tabTagId":"","fmLogoTextContent":"继承封面"}]}
-        ]}}]}
-        """#)
-        let http = NativeMusicHTTPFixture([response(root),
-            .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("12")]))]),
-            .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("11")]))]),
-            .obj([("code", .n(200)), ("data", .array([.obj([("id", .n(41)), ("name", .string("水合歌单")),
-                ("coverImgUrl", .string("https://p1.music.126.net/fixture.jpg"))])]))])
-        ])
-        let service = try await NativeMusicFixture.service(http: http)
-        let page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
-        let section = try XCTUnwrap(page.sections.first)
-        XCTAssertEqual(page.sections.count, 1); XCTAssertTrue(page.filters.isEmpty)
-        XCTAssertEqual(section.title, "官方栏目"); XCTAssertEqual(section.tabs.map(\.title), ["一", "二"])
-        XCTAssertEqual(section.selectedTab, "recommend:group:1")
-        XCTAssertEqual(section.items.map(\.id), section.tabs[1].items.map(\.id))
-        XCTAssertTrue(section.tabs[0].items.isEmpty)
-        XCTAssertEqual(section.tabs[1].items.map(\.coverLabel), ["", "规则封面", "继承封面"])
-        if case .action(let action) = section.items[1].content {
-            XCTAssertEqual(action, .ruleFM(ruleID: "", tabTagID: "17001", sourceName: "规则封面"))
-        } else { XCTFail("numeric FM tab must survive component inheritance") }
-        if case .action(let action) = section.items[2].content {
-            XCTAssertEqual(action, .ruleFM(ruleID: "", tabTagID: "electronic", sourceName: "继承封面"))
-        } else { XCTFail("empty FM tab must inherit") }
-        if case .track(let track) = section.tabs[1].items[0].content { XCTAssertEqual(track.sources[0].nativeId, "12") }
-        else { XCTFail("selected song must be available") }
-        let initial = await http.calls(); XCTAssertEqual(initial.count, 2)
-        let load = try XCTUnwrap(section.tabs[0].loadItems)
-        let selected = try await load()
-        XCTAssertEqual(selected.map(\.title), ["Synthetic song", "水合歌单"])
-        if case .track(let track) = selected[0].content { XCTAssertEqual(track.sources[0].nativeId, "11") }
-        else { XCTFail("explicit choice must complete its missing display fields") }
-        let calls = await http.calls(); XCTAssertEqual(calls.count, 4)
-        await service.close()
+    func testCanonicalTabsKeepNumericFMSelectorAndDeclaredCoverLabelsWithoutNativeHydration() async throws {
+        let fm: RuntimeValue = .object(["name": .string("规则封面"), "coverLabel": .string("规则封面"),
+            "action": .object(["type": .string("fm"), "provider": .string("rule"), "ruleId": .string(""), "tabTagId": .string("17001"), "sourceName": .string("规则封面")])])
+        let inherited: RuntimeValue = .object(["name": .string("继承封面"), "coverLabel": .string("继承封面"),
+            "action": .object(["type": .string("fm"), "provider": .string("rule"), "tabTagId": .string("electronic"), "sourceName": .string("继承封面")])])
+        let response = D.page([tabs([("一", [try D.song("11"), D.collection("41", title: "水合歌单")]), ("二", [try D.song("12"), fm, inherited])], selected: "二")])
+        let peer = NativeMusicResultFixture([response]), service = try await NativeMusicFixture.service(platform: peer), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        let section = try XCTUnwrap(page.sections.first); XCTAssertEqual(section.selectedTab, "二"); XCTAssertEqual(section.tabs.map(\.title), ["一", "二"])
+        XCTAssertEqual(section.items.map(\.coverLabel), ["", "规则封面", "继承封面"])
+        guard case .action(let action) = section.items[1].content, case .action(let second) = section.items[2].content else { return XCTFail("FM actions required") }
+        XCTAssertEqual(action, .ruleFM(ruleID: "", tabTagID: "17001", sourceName: "规则封面")); XCTAssertEqual(second, .ruleFM(ruleID: "", tabTagID: "electronic", sourceName: "继承封面"))
+        XCTAssertEqual(section.tabs[0].items.map(\.title), ["Synthetic song", "水合歌单"])
+        let calls = await peer.calls(); XCTAssertEqual(calls.map(\.operation), ["channel"]); await service.close()
     }
-    func testHiddenTabWithOnlyMissingPlaylistCoverReadsSummaryWhenChosen() async throws {
-        let root = try node(#"""
-        {"componentName":"Root","children":[{"id":"recommend","props":{"title":"官方栏目","recommendModule":[
-          {"title":"一","modules":[{"type":"playlist","id":41,"name":"已有名称"}]},
-          {"title":"二","isDefaultTab":true,"modules":[{"type":"playlist","id":42,"name":"无封面"}]}
-        ]}}]}
-        """#)
-        let http = NativeMusicHTTPFixture([response(root),
-            .obj([("code", .n(200)), ("data", .array([.obj([("id", .n(42)), ("name", .string("无封面"))])]))]),
-            .obj([("code", .n(200)), ("data", .array([.obj([("id", .n(41)), ("name", .string("不可替换原名")),
-                ("coverImgUrl", .string("http://p1.music.126.net/hidden.jpg?param=200y200"))])]))])
-        ])
-        let service = try await NativeMusicFixture.service(http: http)
-        let page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
-        let section = try XCTUnwrap(page.sections.first)
-        XCTAssertEqual(section.items.map(\.title), ["无封面"])
-        XCTAssertNil(section.items[0].artwork)
-        XCTAssertNil(section.tabs[1].loadItems, "An enriched selected tab keeps an absent upstream cover")
-        XCTAssertTrue(section.tabs[0].items.isEmpty)
-        let load = try XCTUnwrap(section.tabs[0].loadItems)
-        let initial = await http.calls(); XCTAssertEqual(initial.count, 2)
-        let selected = try await load()
-        XCTAssertEqual(selected.map(\.title), ["已有名称"])
-        XCTAssertEqual(selected[0].artwork?.absoluteString, "https://p1.music.126.net/hidden.jpg?param=200y200")
-        let calls = await http.calls(); XCTAssertEqual(calls.count, 3)
-        for (call, ids) in zip(calls.dropFirst(), ["42", "41"]) {
-            let request = try MusicNativePublicBrowseFixture.decryptEAPI(call)
-            XCTAssertEqual(request.0, "/api/tag/tab/playlists"); XCTAssertEqual(request.1["ids"].string, ids)
-        }
-        await service.close()
+    func testMissingOptionalCoverInUnselectedTabDoesNotTriggerSummaryRequests() async throws {
+        let response = D.page([tabs([("一", [D.collection("41", title: "已有名称")]), ("二", [D.collection("42", title: "无封面")])], selected: "二")])
+        let peer = NativeMusicResultFixture([response]), service = try await NativeMusicFixture.service(platform: peer), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        XCTAssertEqual(page.sections[0].items.map(\.title), ["无封面"]); XCTAssertNil(page.sections[0].items[0].artwork)
+        XCTAssertEqual(page.sections[0].tabs[0].items.map(\.title), ["已有名称"]); XCTAssertNil(page.sections[0].tabs[0].items[0].artwork)
+        let calls = await peer.calls(); XCTAssertEqual(calls.count, 1); await service.close()
     }
-    func testGridAndScrollSplitDirectSongsFromCollectionsWithoutFlatteningLeaves() throws {
-        let root = try node(#"""
-        {"children":[{"componentName":"Title","props":{"mainTitle":"混排"}},
-          {"componentName":"Grid","children":[
-            {"componentName":"Playlist","props":{"id":41,"name":"歌单"}},
-            {"componentName":"Song","props":{"id":11}},
-            {"componentName":"Album","props":{"id":42,"name":"专辑"}}
-          ]},
-          {"componentName":"Scroll","children":[{"componentName":"Playlist","props":{"id":43,"name":"横排"}}]}
-        ]}
-        """#)
-        var parser = MusicNativePublicBrowseCube(); try parser.collect(root); try parser.walk(root)
-        XCTAssertEqual(parser.page.sections.map(\.layout), [.songColumns, .grid, .playlistRail])
-        XCTAssertEqual(parser.page.sections.map(\.title), ["混排", "混排", "混排"])
-        XCTAssertEqual(parser.page.sections.map { $0.items.count }, [1, 2, 1])
+    func testCanonicalGridAndScrollKeepSongCollectionAndAlbumSectionsSeparate() async throws {
+        let response = D.page([D.section("songs", items: [try D.song("11")], type: "songs", title: "混排"),
+            D.section("grid", items: [D.collection("41"), D.collection("42", album: true)], title: "混排", layout: "grid"),
+            D.section("rail", items: [D.collection("43")], title: "混排")])
+        let service = try await NativeMusicFixture.service(platform: NativeMusicResultFixture([response])), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        XCTAssertEqual(page.sections.map(\.layout), [.songColumns, .grid, .playlistRail]); XCTAssertEqual(page.sections.map(\.title), ["混排", "混排", "混排"])
+        XCTAssertEqual(page.sections.map { $0.items.count }, [1, 2, 1]); await service.close()
     }
-    func testFiniteFeedKeepsHeaderSeparateAndNeverInventsNextPageOrAlgorithmRequest() async throws {
-        let root = try node(#"""
-        {"componentName":"InfiniteScrollList","props":{"listTitleStr":""},"children":[
-          {"componentName":"Grid","children":[{"componentName":"Song","props":{"id":11}},
-                                             {"componentName":"Song","props":{"id":12}}]},
-          {"props":{"albumData":{"id":43,"name":"专辑","subTitle":"副标题"}}}
-        ]}
-        """#)
-        let http = NativeMusicHTTPFixture([response(root),
-            .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("11"), MusicNativePublicBrowseFixture.song("12")]))])
-        ])
-        let service = try await NativeMusicFixture.service(http: http)
-        let page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
-        XCTAssertNil(page.cursor); XCTAssertNil(page.notice)
-        XCTAssertEqual(page.sections.count, 2); XCTAssertEqual(page.sections[0].items[0].subtitle, "副标题")
-        let feed = page.sections[1]
-        XCTAssertEqual(feed.layout, .list); XCTAssertEqual(feed.title, "")
-        XCTAssertEqual(feed.items.count, 2); XCTAssertEqual(feed.filters.map(\.title), ["全部歌曲"])
-        let calls = await http.calls(); XCTAssertEqual(calls.count, 2)
-        XCTAssertFalse(calls.contains { $0.url.path.contains("/tag/tab/") })
-        await service.close()
+    func testFiniteFeedKeepsHeaderSeparateAndDoesNotInventContinuationOrAlgorithmRead() async throws {
+        var header = D.collection("43", title: "专辑", album: true)
+        if case .object(var row) = header { row["subtitle"] = .string("副标题"); header = .object(row) }
+        let response = D.page([D.section("header", items: [header]), D.section("feed", items: [try D.song("11"), try D.song("12")], type: "songs", layout: "list")])
+        let peer = NativeMusicResultFixture([response]), service = try await NativeMusicFixture.service(platform: peer), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        XCTAssertNil(page.cursor); XCTAssertNil(page.notice); XCTAssertEqual(page.sections.count, 2); XCTAssertEqual(page.sections[0].items[0].subtitle, "副标题")
+        XCTAssertEqual(page.sections[1].layout, .list); XCTAssertEqual(page.sections[1].items.count, 2)
+        let calls = await peer.calls(); XCTAssertEqual(calls.count, 1); await service.close()
     }
-    func testOldCarouselDefaultUsesOnlyFirstParentsSiblings() async throws {
-        let root = try node(#"""
-        {"children":[
-          {"componentName":"MusicGenreSongList","children":[
-            {"componentName":"MusicGenreSongListItem","id":"a","props":{"title":"A"}},
-            {"componentName":"MusicGenreSongListItem","id":"b","props":{"title":"B"}},
-            {"componentName":"MusicGenreSongListItem","id":"c","props":{"title":"C"}}]},
-          {"componentName":"Tabs","children":[
-            {"componentName":"TabItem","id":"d","props":{"title":"D"}},
-            {"componentName":"TabItem","id":"e","props":{"title":"E"}},
-            {"componentName":"TabItem","id":"f","props":{"title":"F"}}]}
-        ]}
-        """#)
-        let http = NativeMusicHTTPFixture([response(root)]), service = try await NativeMusicFixture.service(http: http)
-        let page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
-        XCTAssertEqual(page.selectedFilter, "b|"); XCTAssertEqual(page.filters.count, 6)
-        await service.close()
+    func testCurrentProviderSelectionIsConsumedWithoutGuessingCarouselParents() async throws {
+        let response: RuntimeValue = .object(["sections": .array([]), "tags": .array(["a", "b", "c", "d", "e", "f"].map { .object(["id": .string($0), "name": .string($0)]) }), "selectedTag": .string("b|")])
+        let service = try await NativeMusicFixture.service(platform: NativeMusicResultFixture([response])), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        XCTAssertEqual(page.selectedFilter, "b|"); XCTAssertEqual(page.filters.count, 6); await service.close()
     }
-    func testAllTabItemsShareGlobalBudgetAndDuplicateGroupIDsAreRejected() async throws {
-        let rows = (1...301).map { MusicNativePublicBrowseItem(id: "\($0)", title: "", content: .unavailable) }
-        let section = MusicNativePublicBrowseSection(id: "s", title: "", items: [],
-            tabs: [.init(id: "a", title: "", items: rows), .init(id: "b", title: "", items: rows)], selectedTab: "a")
-        let port = MusicNativePlatforms(transport: NativeMusicNoNetwork(), qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
-        do { _ = try await port.browseEnrich(.init(sections: [section])); XCTFail("all tab budget") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
-        let duplicate = try node(#"{"children":[{"componentName":"TabItem","id":"same"},{"componentName":"TabItem","id":"same"}]}"#)
-        var parser = MusicNativePublicBrowseCube()
-        XCTAssertThrowsError(try parser.collect(duplicate))
+    func testAllTabItemsBeyondFormerBudgetAndRepeatedIDsRemainConsumable() async throws {
+        let rows = (1...301).map { D.collection(String($0)) }
+        let response = D.page([tabs([("same", rows), ("same", rows)], selected: "same")])
+        let peer = NativeMusicResultFixture([response]), service = try await NativeMusicFixture.service(platform: peer), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        XCTAssertEqual(page.sections[0].tabs.map { $0.items.count }, [301, 301]); XCTAssertEqual(page.sections[0].items.count, 301)
+        let calls = await peer.calls(); XCTAssertEqual(calls.count, 1); await service.close()
     }
-    func testHomeSnapshotRetainsDeclaredCoverLabelButNeverAnFMPreviewBatch() throws {
-        let item = MusicNativePublicBrowseItem(id: "fm", title: "FM", content: .action(.fm(mode: .default, submode: "", entry: nil)),
-                                              coverLabel: "FM")
-        let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: [item])])
-        let data = try MusicNativeHomeSnapshot.encode(page, source: .netease)
-        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease))
-        XCTAssertEqual(restored.sections[0].items[0].coverLabel, "FM")
-        XCTAssertTrue(restored.sections[0].items[0].previewSongs.isEmpty)
-        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("authorization"))
+    func testCurrentHomeSnapshotKeepsCoverLabelWithoutFMPreviewAuthority() throws {
+        let item = MusicNativePublicBrowseItem(id: "fm", title: "FM", content: .action(.fm(mode: .default, submode: "", entry: nil)), coverLabel: "FM")
+        let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: [item])]), data = try MusicNativeHomeSnapshot.encode(page, source: .netease)
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease)); XCTAssertEqual(restored.sections[0].items[0].coverLabel, "FM")
+        XCTAssertTrue(restored.sections[0].items[0].previewSongs.isEmpty); XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("authorization"))
     }
 }

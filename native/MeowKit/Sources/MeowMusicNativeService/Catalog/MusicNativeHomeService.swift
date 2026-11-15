@@ -9,7 +9,6 @@ struct MusicNativeHomeLoad {
     var nextCursor: String?
     var sections: [MusicNativePublicBrowseSection] = []
 }
-
 struct MusicNativeHomeReadResult: Sendable {
     let id: UUID
     let result: Result<MusicPublicBrowsePage, MusicServiceError>
@@ -263,14 +262,23 @@ extension NativeMusicService: MusicHomeBrowsing {
         page.sections = page.sections.compactMap { section in
             var section = section
             section.items.removeAll { $0.content.requiresAccount }
+            section.tabs = section.tabs.compactMap { tab in
+                var tab = tab
+                tab.items.removeAll { $0.content.requiresAccount }
+                return tab.items.isEmpty ? nil : tab
+            }
+            if !section.tabs.contains(where: { $0.id == section.selectedTab }) {
+                section.selectedTab = section.tabs.first?.id ?? ""
+            }
             if let channel = section.channel,
                MusicNativePublicBrowseContent.channel(channel).requiresAccount { section.channel = nil }
-            return section.items.isEmpty ? nil : section
+            return section.items.isEmpty && section.tabs.isEmpty ? nil : section
         }
         let songs = try await publicSongMetadata(page)
+        let sections = try publicSections(page, prefix: source.rawValue + ":home:", songs: songs)
         try checkHomeSource(source, revision: revision, epoch: own)
         return try access.perform {
-            .init(sections: try convertedPublicSections(page, prefix: source.rawValue + ":home:", songs: songs))
+            .init(sections: sections)
         }
     }
     public func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
@@ -278,14 +286,13 @@ extension NativeMusicService: MusicHomeBrowsing {
     }
     func scopedHomePage(_ destination: MusicPublicBrowseDestination, cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
         let own = epoch
-        if case .channel(let channel, _) = destination { try requireHomeSource(channel.platform) }
-        let source = try currentHomeSource(), sourceRevision = homeSourceRevision
+        let selectedSource = try currentHomeSource(), sourceRevision = homeSourceRevision
+        let source: MusicPublicBrowsePlatform
         if case .channel(let channel, _) = destination {
-            // A channel belongs to the directory it was published in.
-            try musicRequire(channel.platform == source, .staleResult)
-        }
+            try requireHomeSource(channel.platform); source = channel.platform
+        } else { source = selectedSource }
         let binding = try await currentHomeBinding(source: source)
-        try checkHomeSource(source, revision: sourceRevision, epoch: own)
+        try checkHomeSource(selectedSource, revision: sourceRevision, epoch: own)
         if destination == .home {
             if cursor == nil {
                 let read = beginHomeFirstRead(source: source, sourceRevision: sourceRevision,
@@ -308,19 +315,16 @@ extension NativeMusicService: MusicHomeBrowsing {
         }
         let name = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination)
         let key = name + ":" + sourceRevision.uuidString + ":" + binding.revision.uuidString
-        let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
-        if source == .netease, case .channel(let channel, let tag) = destination, channel.kind == .vip {
-            try musicRequire(cursor == nil && tag.isEmpty, .invalidRequest)
-        }
+        let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own)
         let value = try await readHomeContent(destination, position: position, source: source, binding: binding)
         try await checkHomeBinding(binding, epoch: own)
-        try checkHomeSource(source, revision: sourceRevision, epoch: own)
+        try checkHomeSource(selectedSource, revision: sourceRevision, epoch: own)
         let songs = try await publicSongMetadata(value)
         try await checkHomeBinding(binding, epoch: own)
-        try checkHomeSource(source, revision: sourceRevision, epoch: own)
+        try checkHomeSource(selectedSource, revision: sourceRevision, epoch: own)
         return try binding.authorization.perform {
             try finishHome(value, destination: destination, position: position, key: key,
-                           source: source, epoch: own, binding: binding, songs: songs)
+                           source: source, epoch: own, songs: songs)
         }
     }
 
@@ -330,7 +334,7 @@ extension NativeMusicService: MusicHomeBrowsing {
         let port = publicPlatforms, account = accounts as? any MusicNativeHomeProviding
         return try await work(label: "musicHome") {
             if source == .netease, case .channel(let channel, _) = destination, channel.kind == .vip {
-                return try await port.browseVIP(account: account, binding: binding)
+                return try await port.browseVIP(binding: binding)
             }
             if source == .netease, let account, binding.loggedIn {
                 return try await port.browseAccountHome(destination, remote: position.remote,
@@ -339,7 +343,7 @@ extension NativeMusicService: MusicHomeBrowsing {
             if source == .netease, case .channel(let channel, _) = destination,
                channel.kind == .artistActivity { return .init() }
             return try await port.browseDiscovery(destination, source: source,
-                remote: position.remote, offset: position.offset)
+                remote: position.remote)
         }
     }
 
@@ -448,7 +452,7 @@ extension NativeMusicService: MusicHomeBrowsing {
         try musicRequire(homeLoad?.id == load.id, .staleResult)
         let key = load.source.rawValue + ":home:" + load.sourceRevision.uuidString + ":" +
             load.binding.revision.uuidString + ":" + load.id.uuidString
-        let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
+        let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own)
         let value: MusicNativePublicBrowseDiscovery
         if let cached { value = cached }
         else { value = try await readHomeContent(.home, position: position, source: load.source, binding: load.binding) }
@@ -463,22 +467,24 @@ extension NativeMusicService: MusicHomeBrowsing {
             // finishHome checks access itself; never nest that check inside
             // the non-recursive access commit lock.
             let page = try finishHome(value, destination: .home, position: position, key: key,
-                                      source: load.source, epoch: own, binding: load.binding, songs: songs)
+                                      source: load.source, epoch: own, songs: songs)
+            current.nextCursor = page.cursor
+            current.sections = cursor == nil ? value.sections : mergeHomeSections(current.sections, value.sections)
+            let repository = try read().library["library"]["songs"]
+            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), songs: repository)
+            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, songs: repository)
             return try access.perform {
                 // Section errors are failed reads, never a new empty snapshot.
                 guard value.sections.allSatisfy({ $0.error == nil }) else { return page }
-                current.nextCursor = page.cursor
-                current.sections = cursor == nil ? value.sections : mergeHomeSections(current.sections, value.sections)
                 homeLoad = current
                 // Reusing the real first-response cache is not a newer
                 // successful network batch; keep the display, but seed only
                 // this new chain's first page for its later continuations.
                 if cached != nil { return page }
-                let display = MusicNativePublicBrowseDiscovery(sections: current.sections)
                 homeDisplay = (load.source, display); homeDisplayPrepared = true
                 if cursor == nil {
                     homeCache = (load.source, load.binding.scope, load.binding.revision,
-                                 now().addingTimeInterval(600), value)
+                                 now().addingTimeInterval(600), cachedDisplay)
                 }
                 if let data = try? MusicNativeHomeSnapshot.encode(display, source: load.source) {
                     // Serialization/storage failure keeps the previous durable
@@ -505,97 +511,14 @@ extension NativeMusicService: MusicHomeBrowsing {
     }
     private func finishHome(_ value: MusicNativePublicBrowseDiscovery, destination: MusicPublicBrowseDestination,
                             position: MusicNativePublicBrowseCursor, key: String, source: MusicPublicBrowsePlatform, epoch own: UUID,
-                            binding: MusicNativeHomeBinding, songs: [Data: MJ]) throws -> MusicPublicBrowsePage {
+                            songs: [Data: MJ]) throws -> MusicPublicBrowsePage {
         try check(own)
-        try musicRequire(value.sections.count <= 60 && value.sections.reduce(0, { $0 + $1.items.count }) <= 600, .limit)
         let prefix = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination) + ":"
-        let sections = try publicSections(value, prefix: prefix, binding: binding, songs: songs)
-        let consumed = value.consumed ?? sections.reduce(0) { $0 + $1.items.count }
+        let sections = try publicSections(value, prefix: prefix, songs: songs)
         let next = try value.next.map { remote in
-            try musicRequire(consumed > 0 && remote != position.remote, .limit)
             return try position.encode(key: key, epoch: own, offset: position.offset + 1, remote: remote)
         }
         return .init(sections: sections, cursor: next, filters: value.filters, selectedFilter: value.selected,
                      notice: value.notice, consumed: value.consumed)
-    }
-}
-
-extension MusicNativePlatforms {
-    func browseAccountHome(_ destination: MusicPublicBrowseDestination, remote: MJ,
-                           account: any MusicNativeHomeProviding, binding: MusicNativeHomeBinding) async throws -> MusicNativePublicBrowseDiscovery {
-        let request: MusicNativeHomeRequest
-        if case .channel(let channel, _) = destination, channel.kind == .artistActivity {
-            request = .artistActivity(before: remote["before"] == .null ? nil : try remote["before"].text(18))
-        } else {
-            let continuation: MusicNativeHomeContinuation?
-            if remote.fields.isEmpty { continuation = nil }
-            else {
-                continuation = try .init(cursor: remote["cursor"].string,
-                    blockCodeOrderList: remote["blockOrder"] == .null ? nil : remote["blockOrder"].text(16_000, empty: true),
-                    loadedPositionCodes: remote["loaded"].strings)
-            }
-            request = destination == .home ? .home(continuation: continuation) : .featured(continuation: continuation)
-        }
-        let root = try MJ.parse(await account.nativeHomePayload(request, binding: binding),
-                                maximum: 2 * 1024 * 1024)
-        var result: MusicNativePublicBrowseDiscovery
-        if case .artistActivity = request { result = try MusicNativePublicBrowseParser.artistActivity(root) }
-        else { result = try MusicNativePublicBrowseParser.blocks(root, previous: remote,
-            isHome: destination == .home, loggedIn: binding.loggedIn) }
-        result = try await hydrateHomeHeartbeat(result, account: account, binding: binding)
-        if case .home(nil) = request, binding.loggedIn,
-           !result.sections.contains(where: { $0.layout == .artistUpdates || $0.channel?.kind == .artistActivity }) {
-            try await account.checkNativeHomeBinding(binding)
-            let activity = try MJ.parse(await account.nativeHomePayload(.artistActivity(), binding: binding),
-                                       maximum: 2 * 1024 * 1024)
-            result.sections += try MusicNativePublicBrowseParser.artistActivity(activity).sections
-        }
-        result = try await browseEnrich(result, metadata: { request in
-            switch request {
-            case .songIDs(let ids): return try await account.nativeHomePayload(.songMetadata(ids: ids), binding: binding)
-            case .playlistIDs(let ids): return try await account.nativeHomePayload(.playlistMetadata(ids: ids), binding: binding)
-            }
-        })
-        try await account.checkNativeHomeBinding(binding)
-        return result
-    }
-
-    func hydrateHomeHeartbeat(_ input: MusicNativePublicBrowseDiscovery,
-                              account: any MusicNativeHomeProviding,
-                              binding: MusicNativeHomeBinding) async throws -> MusicNativePublicBrowseDiscovery {
-        func needsSeed(_ item: MusicNativePublicBrowseItem) -> Bool {
-            if case .action(.heartbeat) = item.content { return true }
-            return false
-        }
-        guard binding.loggedIn, input.sections.contains(where: {
-            $0.items.contains(where: needsSeed) || $0.tabs.contains(where: { $0.items.contains(where: needsSeed) })
-        }) else { return input }
-        let raw = try MJ.parse(await account.nativeHomePayload(.heartbeatSeed, binding: binding),
-                               maximum: 2 * 1024 * 1024)["song"]
-        let id = raw == .null ? nil : try MusicPlatformProtocol.numericID(raw["id"])
-        let track = raw == .null ? MJ.null : try MJ.parse(Self.browseWYSong(raw).data)
-        try await account.checkNativeHomeBinding(binding)
-        func hydrate(_ items: [MusicNativePublicBrowseItem]) -> [MusicNativePublicBrowseItem] {
-            items.map { item in
-                guard needsSeed(item) else { return item }
-                var result = item
-                guard let id else {
-                    result.content = .unavailable
-                    return result
-                }
-                result.content = .action(.heartbeatSong(songID: id))
-                result.subtitle = [track["name"].string, track["singer"].string].filter { !$0.isEmpty }.joined(separator: " · ")
-                result.artwork = MusicNativePublicBrowseSupport.artwork(track["img"])
-                return result
-            }
-        }
-        var result = input
-        for index in result.sections.indices {
-            result.sections[index].items = hydrate(result.sections[index].items)
-            for tab in result.sections[index].tabs.indices {
-                result.sections[index].tabs[tab].items = hydrate(result.sections[index].tabs[tab].items)
-            }
-        }
-        return result
     }
 }

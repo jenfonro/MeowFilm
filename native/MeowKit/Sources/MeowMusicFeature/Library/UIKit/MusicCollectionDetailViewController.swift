@@ -912,7 +912,8 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     private func openDailyStyle() {
         guard canPresentPageAlert, let page = remotePage, canActRemotely(page),
               let source = page.remoteSource, source.dailyStyle != nil else { return }
-        let editor = MusicDailyStyleViewController(page: page, source: source, appearance: appearance)
+        let editor = MusicDailyStyleViewController(page: page, source: source,
+                                                  receipts: model.settingsReceipts, appearance: appearance)
         let wrapper = PageNavigationController(themeProvider: appearance)
         wrapper.setViewControllers([editor], animated: false)
         wrapper.modalPresentationStyle = .pageSheet
@@ -1087,13 +1088,12 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                 if query.isEmpty {
                     await self.model.playRemoteQueue(
                         source,
-                        start: .init(index: index, track: track)
+                        start: .init(index: index)
                     )
                 } else {
                     let filteredIndex = try await page.filteredQueueIndex(
                         source: source,
                         index: index,
-                        track: track,
                         query: query
                     )
                     let filtered = try await self.model.filteredRemoteQueue(source, query: query)
@@ -1101,7 +1101,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                     guard self.remoteFilter == query else { throw MusicServiceError.cancelled }
                     await self.model.playRemoteQueue(
                         filtered,
-                        start: .init(index: filteredIndex, track: track)
+                        start: .init(index: filteredIndex)
                     )
                 }
             }
@@ -1127,12 +1127,11 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             operation: next ? "下一首播放" : "添加到播放队列",
             kind: .queue
         ) { [weak self, weak page] in
-            guard let self, let page else { return }
-            let refreshed = try await page.refreshedActionTrack(track)
+            guard let self, page != nil else { return }
             if next {
-                await self.model.insertNext(refreshed)
+                await self.model.insertNext(track)
             } else {
-                await self.model.append(refreshed)
+                await self.model.append(track)
             }
         }
     }
@@ -1144,8 +1143,8 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     ) {
         performRemote(page: page, operation: "添加到歌单", kind: .library) {
             [weak self, weak page] in
-            guard let self, let page else { return }
-            await self.model.add(try await page.refreshedActionTrack(track), to: collection)
+            guard let self, page != nil else { return }
+            await self.model.add(track, to: collection)
         }
     }
 
@@ -1159,13 +1158,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             model: model,
             tracks: [track],
             appearance: appearance,
-            originIsCurrent: { [weak page] in page?.actionPageID == request },
-            refresh: { [weak page] in
-                guard let page, page.actionPageID == request else {
-                    throw MusicServiceError.staleResult
-                }
-                return try await page.refreshedActionTrack($0)
-            }
+            originIsCurrent: { [weak page] in page?.actionPageID == request }
         )
         let wrapper = PageNavigationController(themeProvider: appearance)
         wrapper.setViewControllers([sources], animated: false)

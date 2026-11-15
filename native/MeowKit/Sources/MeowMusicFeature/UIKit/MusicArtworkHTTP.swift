@@ -37,18 +37,11 @@ final class MusicArtworkHTTP: NSObject, URLSessionDataDelegate, @unchecked Senda
     func read(_ url: URL) async throws -> Data {
         try Task.checkCancellation()
         guard Self.permits(url) else { throw URLError(.badURL) }
-        do { return try await fetch(url) }
-        catch let error as URLError where error.code == .dataLengthExceedsMaximum {
-            // NetEase NOS serves the uploaded original when no processing
-            // query is present; some exceed the byte budget. Ask the same
-            // origin once for an aspect-preserving rendition no larger than
-            // the 1024-pixel decode bound used by MusicArtworkImages.
-            guard let rendition = Self.boundedNeteaseRendition(url) else { throw error }
-            try Task.checkCancellation()
-            return try await fetch(rendition)
-        }
+        return try await fetch(url)
     }
-    private static func boundedNeteaseRendition(_ url: URL) -> URL? {
+    // Only used after the original exceeds its existing byte budget. The
+    // shared loader reads/caches this URL as a distinct real resource.
+    static func boundedNeteaseRendition(_ url: URL) -> URL? {
         guard let host = url.host?.lowercased(), host.hasSuffix(".music.126.net"),
               var parts = URLComponents(url: url, resolvingAgainstBaseURL: false), parts.percentEncodedQuery == nil else { return nil }
         parts.percentEncodedQuery = "imageView&thumbnail=1024x1024"

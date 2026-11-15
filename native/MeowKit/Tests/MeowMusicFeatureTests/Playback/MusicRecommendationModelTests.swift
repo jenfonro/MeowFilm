@@ -167,13 +167,13 @@ final class MusicRecommendationModelTests: XCTestCase {
         XCTAssertNil(model.queueRecommendations)
         XCTAssertNil(model.similarMode)
         let batch = MusicSearchBatchRequest(query: "合成查询", targets: tracks.map {
-            .init(platform: .netease, page: 1, track: $0)
+            .init(track: $0)
         }, startIndex: 0)
         await model.playSearchBatch(batch)
         await model.loadSimilarMode()
         XCTAssertNil(model.queueRecommendations)
         let direct = MusicSearchBatchRequest(query: "合成查询",
-            targets: [.init(platform: .netease, page: 1, track: tracks[1])], startIndex: 0)
+            targets: [.init(track: tracks[1])], startIndex: 0)
         await model.playSearchBatch(direct)
         await model.loadSimilarMode()
         XCTAssertEqual(model.queue.map(\.track.songId), ["42"])
@@ -951,6 +951,7 @@ final class MusicRecommendationModelTests: XCTestCase {
         try await model.playHomeAction(initial.action, title: initial.title)
         let settings = MusicFMSettingsViewModel(owner: model)
         settings.setAccess(available: true, generation: model.searchAccessGeneration)
+        await settings.finishPending()
         let entered = expectation(description: "FM choice waiting")
         let gate = MusicCollectionGate { entered.fulfill() }
         await service.blockFM(gate, fail: true)
@@ -977,6 +978,7 @@ final class MusicRecommendationModelTests: XCTestCase {
         try await model.playHomeAction(initial.action, title: initial.title)
         let settings = MusicFMSettingsViewModel(owner: model)
         settings.setAccess(available: true, generation: model.searchAccessGeneration)
+        await settings.finishPending()
         let entered = expectation(description: "cancelled FM choice waiting")
         let gate = MusicCollectionGate { entered.fulfill() }
         await service.blockFM(gate)
@@ -998,6 +1000,7 @@ final class MusicRecommendationModelTests: XCTestCase {
         try await model.playHomeAction(initial.action, title: initial.title)
         let settings = MusicFMSettingsViewModel(owner: model)
         settings.setAccess(available: true, generation: model.searchAccessGeneration)
+        await settings.finishPending()
         let entered = expectation(description: "successful FM choice waiting")
         let gate = MusicCollectionGate { entered.fulfill() }
         await service.blockFM(gate)
@@ -1020,20 +1023,113 @@ final class MusicRecommendationModelTests: XCTestCase {
         settings.close()
         await model.close()
     }
+
+    func testSubmittedFMUnknownSurvivesClosedPageAndReopenReadsActualScopedSelection() async throws {
+        let service = RecommendationModelService(), player = RecommendationModelPlayer()
+        let model = MusicViewModel(service: service, player: player)
+        await model.load()
+        let initial = MusicFMModeChoice.main[0], next = MusicFMModeChoice.main[2]
+        try await model.playHomeAction(initial.action, title: initial.title)
+        let page = MusicFMSettingsViewModel(owner: model)
+        page.setAccess(available: true, generation: model.searchAccessGeneration); await page.finishPending()
+        let entered = expectation(description: "FM selection committed")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.configureFMReceipt(.commitUnconfirmed, gate: gate)
+        page.select(next); await fulfillment(of: [entered], timeout: 2)
+        let resources = player.resources.count
+        page.close()
+        await gate.release(); await page.finishPending()
+        XCTAssertNil(page.selection); XCTAssertNil(page.error); XCTAssertFalse(page.selectionCompleted)
+        XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), ["fm/account-a/selection"])
+        XCTAssertNotNil(model.error)
+        XCTAssertEqual(player.resources.count, resources, "A closed page cannot admit audio from the late queue receipt")
+        var calls = await service.calls(); XCTAssertEqual(calls.fmWrites, 2)
+        let reopened = MusicFMSettingsViewModel(owner: model)
+        reopened.setAccess(available: true, generation: model.searchAccessGeneration); await reopened.finishPending()
+        XCTAssertEqual(reopened.selection, next.action)
+        XCTAssertEqual(model.settingsReceipts.unknown.count, 1, "An authoritative read does not acknowledge an unknown write")
+        await service.setFMScope("account-b")
+        try await model.playHomeAction(initial.action, title: initial.title, forceReload: true)
+        XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), ["fm/account-a/selection"])
+        await service.setFMScope("account-a")
+        model.notices.error = "另一操作的错误"
+        reopened.close()
+        let sameScope = MusicFMSettingsViewModel(owner: model)
+        sameScope.setAccess(available: true, generation: model.searchAccessGeneration); await sameScope.finishPending()
+        sameScope.select(MusicFMModeChoice.main[1]); await sameScope.finishPending()
+        XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+        XCTAssertEqual(model.notices.error, "另一操作的错误")
+        calls = await service.calls(); XCTAssertEqual(calls.fmWrites, 4)
+        sameScope.close(); await model.close()
+    }
+
+    func testContinuationReceiptsOutliveCancelledConsumersAndReadbackDoesNotClearUnknown() async throws {
+        for kind in ["queue", "similar", "fm"] {
+            let service = RecommendationModelService(), model = MusicViewModel(service: service, player: RecommendationModelPlayer())
+            await model.load()
+            if kind == "similar" { await model.startSongRecommendations(occurrenceID: "original-2", expectedRevision: 3) }
+            if kind == "fm" {
+                try await model.playHomeAction(MusicFMModeChoice.main[0].action, title: "漫游")
+                await model.loadSimilarMode()
+            }
+            let id: UUID
+            switch kind {
+            case "similar": id = try XCTUnwrap(model.similarMode?.id)
+            case "fm": id = try XCTUnwrap(model.fmPlayback?.id)
+            default: id = try XCTUnwrap(model.queueRecommendations?.id)
+            }
+            let entered = expectation(description: "\(kind) continuation committed")
+            let gate = MusicCollectionGate { entered.fulfill() }
+            await service.configureContinuationReceipt(.commitUnconfirmed, gate: gate)
+            let saving = Task {
+                switch kind {
+                case "similar": await model.setSimilarContinue(true, snapshotID: id)
+                case "fm": await model.setFMContinue(true, sessionID: id)
+                default: await model.setQueueRecommendationContinue(true, snapshotID: id)
+                }
+            }
+            await fulfillment(of: [entered], timeout: 2)
+            saving.cancel()
+            await gate.release(); await saving.value; await model.settingsReceipts.flush()
+            let keys: Set<String> = kind == "similar" ?
+                ["playback/mode", "queue/similar/" + id.uuidString + "/continue"] : ["playback/mode"]
+            XCTAssertEqual(Set(model.settingsReceipts.unknown.map(\.setting)), keys)
+            await model.loadSimilarMode()
+            XCTAssertEqual(Set(model.settingsReceipts.unknown.map(\.setting)), keys)
+            switch kind {
+            case "similar": XCTAssertTrue(try XCTUnwrap(model.similarMode).continueEnabled)
+            case "fm": XCTAssertTrue(try XCTUnwrap(model.fmPlayback).continueEnabled)
+            default: XCTAssertTrue(try XCTUnwrap(model.queueRecommendations).continueEnabled)
+            }
+            await model.updateSettings(.init(ifRevision: model.state.settingsRevision, lyricsEnabled: false))
+            XCTAssertEqual(Set(model.settingsReceipts.unknown.map(\.setting)), keys)
+            model.notices.error = "另一操作的错误"
+            switch kind {
+            case "similar": await model.setSimilarContinue(true, snapshotID: id)
+            case "fm": await model.setFMContinue(true, sessionID: id)
+            default: await model.setQueueRecommendationContinue(true, snapshotID: id)
+            }
+            XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+            XCTAssertEqual(model.notices.error, "另一操作的错误")
+            let calls = await service.calls(); XCTAssertEqual(calls.continuationWrites, 2)
+            await model.close()
+        }
+    }
 }
 
 private actor RecommendationModelService: MusicServing, MusicSimilarModeServing, MusicQueueRecommendationServing,
     MusicDisplayedQueuePlaying, MusicSearchBatchPlaying, MusicHomeActionQueueServing, MusicRemoteQueueServing,
-    MusicSourceExclusionServing {
+    MusicSourceExclusionServing, MusicFMPlaybackServing {
     struct Calls: Sendable {
         var previews = 0, queueWrites = 0, enters = 0, exits = 0, retries = 0, displayed = 0, searches = 0, resolutions = 0
         var navigationPauses = 0
+        var fmWrites = 0, continuationWrites = 0
         var choices: [String] = [], queueSwitches: [Bool] = [], starts: [MusicSimilarModeStart] = []
     }
     static let selection = MusicPlaybackSelection(installationId: "official:synthetic", generation: 1,
         siteId: "wy", sourceKey: "wy:101", quality: "128k")
     static func track(_ id: String) -> MusicRemoteTrack {
-        .init(ref: .init(kind: .handle, id: id), songId: id, title: "合成歌曲 " + id,
+        .init(ref: .init(kind: .library, id: id), songId: id, title: "合成歌曲 " + id,
               sources: [.init(sourceKey: "wy:" + id, platform: "wy", nativeId: id)])
     }
     private var entries: [MusicQueueEntry] = ["101", "102"].enumerated().map {
@@ -1053,6 +1149,11 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     private var modeReadGate: MusicCollectionGate?, previewCancellationGate: MusicCollectionGate?, switchFailureGate: MusicCollectionGate?
     private var previewOrder: [String] = []
     private var fmGate: MusicCollectionGate?, fmFailure = false
+    private var fmReceiptGate: MusicCollectionGate?, fmReceiptFailure: MusicServiceError?
+    private var continuationGate: MusicCollectionGate?, continuationFailure: MusicServiceError?
+    private var fmScope = "account-a"
+    private var fmSelections: [String: MusicHomeAction] = [:]
+    private var fmSnapshot: MusicFMPlaybackSnapshot?
     private var startFailure: MusicServiceError?
     private var pauseGate: MusicCollectionGate?
     private var recordGate: MusicCollectionGate?
@@ -1084,6 +1185,20 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     func blockSwitchFailure(_ gate: MusicCollectionGate) { switchFailureGate = gate }
     func previewEvents() -> [String] { previewOrder }
     func blockFM(_ gate: MusicCollectionGate, fail: Bool = false) { fmGate = gate; fmFailure = fail }
+    func configureFMReceipt(_ failure: MusicServiceError?, gate: MusicCollectionGate?) {
+        fmReceiptFailure = failure; fmReceiptGate = gate
+    }
+    func configureContinuationReceipt(_ failure: MusicServiceError?, gate: MusicCollectionGate?) {
+        continuationFailure = failure; continuationGate = gate
+    }
+    func setFMScope(_ scope: String) { fmScope = scope }
+    private func settleContinuation() async throws {
+        counts.continuationWrites += 1
+        let gate = continuationGate, failure = continuationFailure
+        continuationGate = nil; continuationFailure = nil
+        if let gate { await gate.wait() }
+        if let failure { throw failure }
+    }
     func failRecommendations() { status = .error }
     @discardableResult func rotateToken() -> UUID { token = UUID(); return token }
     func state() -> MusicPlaybackState {
@@ -1122,6 +1237,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         guard token == snapshotID else { throw MusicServiceError.targetChanged }
         if enabled, playbackMode != .loop { playbackMode = .loop; settingsRevision += 1 }
         continuation = enabled; counts.queueSwitches.append(enabled)
+        try await settleContinuation()
     }
     func retryQueueRecommendations(snapshotID: UUID) throws -> MusicSimilarModeResult {
         guard token == snapshotID, status == .error else { throw MusicServiceError.targetChanged }
@@ -1172,12 +1288,13 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         return .init(state: state(), action: .keepCurrent)
     }
     func playSimilarCandidate(snapshotID: UUID, candidateID: String) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
-    func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) throws {
+    func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) async throws {
         guard let value = mode, value.id == snapshotID else { throw MusicServiceError.targetChanged }
         if enabled, playbackMode != .loop { playbackMode = .loop; settingsRevision += 1 }
         mode = .init(id: value.id, active: true, status: .ready, seed: value.seed, seedEntryID: value.seedEntryID,
             continueEnabled: enabled, candidates: [], batches: [], sourceIDs: [], fromHome: value.fromHome,
             provider: value.provider, error: nil, canRetry: false)
+        try await settleContinuation()
     }
     func retrySimilarMode(snapshotID: UUID) throws -> MusicSimilarModeResult { throw MusicServiceError.unsupported }
     func cancelSimilarMode() { mode = nil }
@@ -1193,7 +1310,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
     private func replace(_ tracks: [MusicRemoteTrack], index: Int, recommendationEligible: Bool = false) -> MusicPlaybackState {
         entries = tracks.enumerated().map { .init(id: "replacement-\(revision)-\($0.offset)", track: $0.element) }
         current = entries[index].id; revision += 1; counts.queueWrites += 1
-        token = UUID(); continuation = false; mode = nil; candidates = []
+        token = UUID(); continuation = false; mode = nil; candidates = []; fmSnapshot = nil
         self.recommendationEligible = recommendationEligible
         return state()
     }
@@ -1241,7 +1358,7 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         try Task.checkCancellation()
         if fail { throw MusicServiceError.upstreamFailed }
         return .init(context: .init(kind: .fm, id: "synthetic-fm", title: title, platform: "wy"),
-            loadPage: { _ in .init(items: []) }, homeAction: action)
+            loadPage: { _ in .init(items: []) }, homeAction: action, fmPreferenceScope: fmScope)
     }
     func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind,
                           title: String) throws -> MusicRemoteQueueSource { throw MusicServiceError.unsupported }
@@ -1249,11 +1366,29 @@ private actor RecommendationModelService: MusicServing, MusicSimilarModeServing,
         .init(items: [Self.track("501")], cursor: nil)
     }
     func replaceRemoteQueue(_ source: MusicRemoteQueueSource, start: MusicRemoteQueueStart,
-                            expectedRevision: Int, intent: MusicQueueAuthorization) throws -> MusicPlaybackState {
+                            expectedRevision: Int, intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
         try intent.check(); try source.authorization.check()
+        let gate = fmReceiptGate, failure = fmReceiptFailure; fmReceiptGate = nil; fmReceiptFailure = nil
+        if let failure, failure != .commitUnconfirmed { throw failure }
         entries = [.init(id: "fm-\(revision)", track: Self.track("501"), remoteSessionID: source.id)]
         current = entries[0].id; revision += 1
-        return state()
+        if let scope = source.fmPreferenceScope, let action = source.homeAction { fmSelections[scope] = action }
+        if let action = source.homeAction {
+            fmSnapshot = .init(id: source.id, action: action, continueEnabled: false, loading: false, error: nil)
+        }
+        counts.fmWrites += 1
+        let result = state()
+        if let gate { await gate.wait() }
+        if let failure { throw failure }
+        return result
+    }
+    func rememberedFM() -> MusicHomeAction { fmSelections[fmScope] ?? MusicFMModeChoice.main[0].action }
+    func fmPlaybackSnapshot() -> MusicFMPlaybackSnapshot? { fmSnapshot }
+    func setFMContinue(_ enabled: Bool, sessionID: UUID) async throws {
+        guard let value = fmSnapshot, value.id == sessionID else { throw MusicServiceError.targetChanged }
+        if enabled, playbackMode != .loop { playbackMode = .loop; settingsRevision += 1 }
+        fmSnapshot = .init(id: value.id, action: value.action, continueEnabled: enabled, loading: false, error: nil)
+        try await settleContinuation()
     }
     func advanceFM(_ source: MusicRemoteQueueSource, direction: MusicDirection, reason: MusicAdvanceReason,
                    expectedRevision: Int, intent: MusicQueueAuthorization) throws -> MusicAdvanceResult {

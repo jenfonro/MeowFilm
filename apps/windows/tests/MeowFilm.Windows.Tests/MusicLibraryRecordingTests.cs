@@ -9,9 +9,9 @@ public static partial class MusicNativeLibraryTests
     private static IEnumerable<TestCase> RecordingConsumerCases()
     {
         yield return new("Native music library subgroup membership and incoming metadata share recording identity", LibrarySubgroups);
-        yield return new("Native music library separates non-transitive merged snapshots", LibraryRecordingPairs);
-        yield return new("Native music library rejects conflicting secondary native binding without writing", SecondaryNativeConflict);
-        yield return new("Native music history preserves newest context and all conflicting recording groups", HistoryRecordingGroups);
+        yield return new("Native music library matches new sources against the fixed representative baseline", LibraryRecordingPairs);
+        yield return new("Native music library reuses a registered secondary source without rebinding its UUID", SecondaryNativeConflict);
+        yield return new("Native music history keeps one repository reference and the newest occurrence context", HistoryRecordingGroups);
     }
     private static JsonObject RecordingSong(string platform, string id, double duration) =>
         MusicSongFixture.Online(platform, id, "Recording", "Artist", duration: duration);
@@ -32,14 +32,15 @@ public static partial class MusicNativeLibraryTests
         await Ok(owner, "music.library.addSongs", new { id = "favorites", ifRevision = 1, songs = new[] { RecordingSong("tx", "long", 200) } });
         var membership = await Ok(owner, "music.library.membership", new { id = "favorites", song = RecordingSong("kw", "other", 200) });
         Check(membership.GetProperty("present").GetBoolean() && membership.GetProperty("songId").GetString() == longId);
-        var updated = RecordingSong("tx", "long", 201);
+        var updated = RecordingSong("wy", "long", 201);
         updated["album"] = "Corrected album"; MusicSongFixture.Info(updated)["albumName"] = "Corrected album";
+        await owner.AdoptPlatformResultAsync(E(updated), default, shape: MusicLibraryOwner.PlatformSongShape.Song);
         await Ok(owner, "music.library.addSongs", new { id = "favorites", ifRevision = 2, songs = new[] { updated } });
         var rows = (await Ok(owner, "music.library.detail", new { id = "favorites" })).GetProperty("songs");
         Check(rows.GetArrayLength() == 2);
         var longer = rows.EnumerateArray().Single(song => song.GetProperty("songId").GetString() == longId);
         Check(longer.GetProperty("album").GetString() == "Corrected album" && longer.GetProperty("sources").GetArrayLength() == 2);
-        Check(MusicSongFixture.Info(longer).GetProperty("source").GetString() == "tx" &&
+        Check(MusicSongFixture.Info(longer).GetProperty("source").GetString() == "wy" &&
             MusicSongFixture.Info(longer).GetProperty("duration").GetDouble() == 201);
         foreach (var row in rows.EnumerateArray()) _ = SongRow.Read(row);
         await owner.DisposeAsync();
@@ -52,10 +53,11 @@ public static partial class MusicNativeLibraryTests
         var later = RecordingSet(RecordingSong("wy", "later", 103), RecordingSong("tx", "long", 106));
         await Ok(owner, "music.library.addSongs", new { id = "favorites", ifRevision = 0, songs = new[] { first } });
         var membership = await Ok(owner, "music.library.membership", new { id = "favorites", song = later });
-        Check(!membership.GetProperty("present").GetBoolean());
+        Check(membership.GetProperty("present").GetBoolean());
         await Ok(owner, "music.library.addSongs", new { id = "favorites", ifRevision = 1, songs = new[] { later } });
         var rows = (await Ok(owner, "music.library.detail", new { id = "favorites" })).GetProperty("songs");
-        Check(rows.GetArrayLength() == 2);
+        Check(rows.GetArrayLength() == 1 && rows[0].GetProperty("sources").GetArrayLength() == 4);
+        Check(rows[0].GetProperty("baselineDuration").GetDouble() == 103);
         foreach (var row in rows.EnumerateArray()) _ = SongRow.Read(row);
     }
     private static async Task SecondaryNativeConflict()
@@ -64,10 +66,13 @@ public static partial class MusicNativeLibraryTests
         await Ok(owner, "music.library.addSongs", new { id = "favorites", ifRevision = 0,
             songs = new[] { RecordingSong("tx", "bound", 100) } });
         var conflicting = RecordingSet(RecordingSong("wy", "new", 106), RecordingSong("tx", "bound", 106));
-        int writes = f.Store.Writes;
-        await Error(owner, "music.library.addSongs", new { id = "favorites", ifRevision = 1, songs = new[] { conflicting } }, "NATIVE_ID_CONFLICT");
-        Check(f.Store.Writes == writes && (await Ok(owner, "music.library.detail", new { id = "favorites" }))
-            .GetProperty("songs").GetArrayLength() == 1);
+        var before = (await Ok(owner, "music.library.detail", new { id = "favorites" })).GetProperty("songs")[0];
+        string id = before.GetProperty("songId").GetString()!;
+        await Ok(owner, "music.library.addSongs", new { id = "favorites", ifRevision = 1, songs = new[] { conflicting } });
+        var after = (await Ok(owner, "music.library.detail", new { id = "favorites" })).GetProperty("songs");
+        Check(after.GetArrayLength() == 1 && after[0].GetProperty("songId").GetString() == id &&
+            after[0].GetProperty("baselineDuration").GetDouble() == 100 &&
+            after[0].GetProperty("sources").GetArrayLength() == 2);
     }
     private static async Task HistoryRecordingGroups()
     {
@@ -91,13 +96,13 @@ public static partial class MusicNativeLibraryTests
         var days = await Ok(owner, "music.history.get", new { kind = "days" });
         string day = days.GetProperty("items")[0].GetProperty("id").GetString()!;
         var history = (await Ok(owner, "music.history.detail", new { kind = "days", id = day })).GetProperty("items");
-        Check(history.GetArrayLength() == 3 && history.EnumerateArray().Select(row => row.GetProperty("at").GetInt64())
-            .SequenceEqual(new[] { start + 2, start + 1, start }));
+        Check(history.GetArrayLength() == 1 && history[0].GetProperty("at").GetInt64() == start + 2);
         Check(history[0].GetProperty("context").GetProperty("sourceTitle").GetString() == "context-2");
         var songs = history.EnumerateArray().Select(row => row.GetProperty("song")).ToArray();
-        Check(songs.Select(song => song.GetProperty("songId").GetString()).Distinct().Count() == 3);
+        Check(songs.Select(song => song.GetProperty("songId").GetString()).Distinct().Count() == 1);
+        Check(songs[0].GetProperty("sources").GetArrayLength() == 5);
         foreach (var song in songs) _ = SongRow.Read(song);
         await owner.DisposeAsync();
-        Check((await Ok(f.Owner(), "music.history.detail", new { kind = "days", id = day })).GetProperty("items").GetArrayLength() == 3);
+        Check((await Ok(f.Owner(), "music.history.detail", new { kind = "days", id = day })).GetProperty("items").GetArrayLength() == 1);
     }
 }

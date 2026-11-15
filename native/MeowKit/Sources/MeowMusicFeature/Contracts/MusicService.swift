@@ -11,7 +11,7 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
     case storageFailed = "STORAGE_FAILED", storageConflict = "STORAGE_CONFLICT"
     case storagePolicyMismatch = "STORAGE_POLICY_MISMATCH", storagePermissionDenied = "STORAGE_PERMISSION_DENIED"
     case commitUnconfirmed = "COMMIT_UNCONFIRMED", corruptDocument = "CORRUPT_DOCUMENT"
-    case notFound = "NOT_FOUND", handleExpired = "HANDLE_EXPIRED"
+    case notFound = "NOT_FOUND"
     case sourceRequired = "SOURCE_REQUIRED", sourceUnavailable = "SOURCE_UNAVAILABLE", targetChanged = "TARGET_CHANGED"
     case qualityDisabled = "QUALITY_DISABLED", upstreamFailed = "UPSTREAM_FAILED", upstreamInvalid = "UPSTREAM_INVALID"
     case authRequired = "AUTH_REQUIRED", verificationRequired = "VERIFICATION_REQUIRED", rateLimited = "RATE_LIMITED"
@@ -59,7 +59,6 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
         case .corruptDocument: return "音乐数据损坏"
         case .invalidImport: return "曲库文件无效"
         case .favoritesProtected: return "收藏夹不可删除"
-        case .handleExpired: return "内容已过期"
         case .notFound: return "内容不存在"
         case .busy: return "音乐服务忙"
         case .lyricIdentityMismatch, .lyricSessionChanged, .invalidLyricResponse, .lyricFetchFailed: return "歌词获取失败"
@@ -112,15 +111,16 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
 }
 
 public struct MusicReference: Codable, Hashable, Sendable {
-    public enum Kind: String, Codable, Sendable { case handle, library, queue }
+    public enum Kind: String, Codable, Sendable { case library, queue }
     public let kind: Kind
     public let id: String
-    public init(kind: Kind, id: String) { self.kind = kind; self.id = id }
+    public let occurrence: String?
+    public init(kind: Kind, id: String, occurrence: String? = nil) { self.kind = kind; self.id = id; self.occurrence = occurrence }
     public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.kind == rhs.kind && lhs.id.utf8.elementsEqual(rhs.id.utf8)
+        lhs.kind == rhs.kind && lhs.id.utf8.elementsEqual(rhs.id.utf8) && lhs.occurrence == rhs.occurrence
     }
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(kind); hasher.combine(id.utf8.count)
+        hasher.combine(kind); hasher.combine(occurrence); hasher.combine(id.utf8.count)
         for byte in id.utf8 { hasher.combine(byte) }
     }
 }
@@ -144,16 +144,20 @@ public struct MusicRemoteTrack: Codable, Equatable, Sendable, Identifiable {
     public let songId: String
     public let title: String
     public let artist: String
+    public let artistNames: [String]?
     public let album: String
     public let duration: Double
     public let sources: [MusicNativeSource]
     public let artwork: URL?
+    public let sourcePosition: Int?
     public var id: MusicReference { ref }
     public init(ref: MusicReference, songId: String, title: String, artist: String = "", album: String = "",
-                duration: Double = 0, sources: [MusicNativeSource] = [], artwork: URL? = nil) {
+                duration: Double = 0, sources: [MusicNativeSource] = [], artwork: URL? = nil, artistNames: [String]? = nil,
+                sourcePosition: Int? = nil) {
         self.ref = ref; self.songId = songId; self.title = title; self.artist = artist
-        self.album = album; self.duration = duration; self.sources = sources
+        self.album = album; self.duration = duration; self.sources = sources; self.artistNames = artistNames
         self.artwork = artwork
+        self.sourcePosition = sourcePosition
     }
 }
 

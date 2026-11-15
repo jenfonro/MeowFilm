@@ -4,6 +4,8 @@ import MeowAccounts
 import MeowContracts
 import MeowJSON
 import MeowMusicFeature
+import MeowRuntime
+import MeowMusicTestSupport
 @testable import MeowMusicPlatform
 
 private actor TransferProvider: MusicAccountProvider {
@@ -16,26 +18,24 @@ private actor TransferProvider: MusicAccountProvider {
     }
     func count() -> Int { verified }
     func nativeID(_ credential: AccountCredential) throws -> String {
-        let root = try MusicQQWire.decode(credential.dataRepresentation())
-        if root["platform"] as? String == "tx" { return try MusicQQWire.id(MusicQQWire.object(root["auth"])["musicid"]) }
-        return try MusicQQWire.id(root["accountID"])
+        try MusicAccountFixture.userID(credential)
     }
-    func verify(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         verified += 1
         if let gate { await gate.wait() }
         if let failure { throw failure }
         return .init(credential: credential, nickname: "合成账号", nativeID: wrongIdentity ? "99999" : try nativeID(credential))
     }
-    func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified { try await verify(credential) }
+    func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await verify(credential) }
     func createQR(id: UUID) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
-    func pollQR(id: UUID) throws -> MusicQQLoginResult { throw MusicServiceError.unsupported }
+    func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) -> MusicQQRecommendation { .init(rows: [], nextPage: nil) }
-    func collectionRows(credential: AccountCredential) -> [MeowJSON.JSONValue] { [] }
-    func tracks(collectionID: String, credential: AccountCredential) -> [MeowJSON.JSONValue] { [] }
-    func capabilities(mid: String, credential: AccountCredential) -> [String] { [] }
-    func resolve(mid: String, quality: String, credential: AccountCredential) throws -> MeowJSON.JSONValue { throw MusicServiceError.unsupported }
+    func recommendations(kind: String, page: Int) -> MusicAccountRecommendation { .init(rows: [], nextPage: nil) }
+    func collectionRows() -> [MeowJSON.JSONValue] { [] }
+    func tracks(collectionID: String) -> [MeowJSON.JSONValue] { [] }
+    func capabilities(mid: String) -> [String] { [] }
+    func resolve(mid: String, quality: String) throws -> MeowJSON.JSONValue { throw MusicServiceError.unsupported }
 }
 
 private struct TransferFixture {
@@ -99,8 +99,7 @@ final class MusicAccountTransferTests: XCTestCase {
         let qResult = try MusicAccountTransferCodec.entry(qCredential, platform: .qq)
         XCTAssertEqual(qResult.fields["musickey_create_time"], "1700000000")
         XCTAssertNil(qResult.fields["musickeyCreateTime"])
-        let auth = try MusicQQWire.object(MusicQQWire.decode(qCredential.dataRepresentation())["auth"])
-        XCTAssertEqual(auth["key_expires_in"] as? Int, 86400)
+        XCTAssertEqual(qResult.fields["key_expires_in"], "86400")
         var wy = rows[0].fields; wy["MUSIC_A"] = "SYNTHETIC_MUSIC_A"
         let w = MusicAccountTransferEntry(platform: .netease, userID: "9007199254740993", fields: wy)
         XCTAssertEqual(try MusicAccountTransferCodec.entry(MusicAccountTransferCodec.credential(w), platform: .netease).fields, wy)
@@ -108,128 +107,64 @@ final class MusicAccountTransferTests: XCTestCase {
         var kg = rows[2].fields; kg["t1"] = "1700000000"
         let k = MusicAccountTransferEntry(platform: .kugou, userID: rows[2].userID, fields: kg)
         let kCredential = try MusicAccountTransferCodec.credential(k)
-        let kAuth = try MusicQQWire.object(MusicQQWire.decode(kCredential.dataRepresentation())["auth"])
-        XCTAssertEqual(kAuth["t1"] as? Int, 1700000000)
+        XCTAssertEqual(try MusicAccountTransferCodec.entry(kCredential, platform: .kugou).fields["t1"], "1700000000")
         XCTAssertEqual(try MusicAccountTransferCodec.entry(kCredential, platform: .kugou).fields, kg)
     }
 
     func testQQPassiveExportNormalizesOnlyPresentFieldsWithoutInventingOptionalValues() async throws {
-        let clock = MusicAccountTestClock()
-        let http = MusicAccountTestHTTP(clock: clock)
-        let adapter = QQMusicAccountAdapter(transport: http, now: { clock.now() })
-        let credential = try AccountCredential(data: MusicQQWire.json([
-            "version": 1, "platform": "tx",
-            "auth": ["musicid": 42, "musickey": "synthetic-key", "keyExpiresIn": 3600]
-        ]))
-        let exported = try await adapter.fileCredential(credential)
-        let auth = try MusicQQWire.object(MusicQQWire.decode(exported.dataRepresentation())["auth"])
-        XCTAssertEqual(auth["key_expires_in"] as? Int, 3600)
-        XCTAssertNil(auth["keyExpiresIn"])
-        let row = try MusicAccountTransferCodec.entry(exported, platform: .qq)
-        XCTAssertEqual(row.fields, ["musicid": "42", "musickey": "synthetic-key", "key_expires_in": "3600"])
-        let calls = await http.recorded()
-        XCTAssertTrue(calls.isEmpty)
+        let runtime = try MusicPlatformFixture(), adapter = MusicNodeAccountProvider(platform: .qq, client: runtime.makeClient())
+        let row = MusicAccountTransferEntry(platform: .qq, userID: "42",
+            fields: ["musicid": "42", "musickey": "synthetic-key", "keyExpiresIn": "3600"])
+        let exported = try await adapter.fileCredential(MusicAccountTransferCodec.credential(row))
+        let result = try MusicAccountTransferCodec.entry(exported, platform: .qq)
+        XCTAssertEqual(result.fields, ["musicid": "42", "musickey": "synthetic-key", "key_expires_in": "3600"])
+        XCTAssertTrue(runtime.requests().isEmpty, "Passive export cannot prepare or authenticate a device")
     }
 
     func testPassiveNeteaseExportDoesNotGenerateMissingClientDevice() async throws {
-        let document = QQPublicPersistenceMemory(), clock = MusicAccountTestClock()
-        let clients = NativeMusicClientService(documents: [.netease: document])
-        try clients.setAccess(available: true, generation: 1)
-        let http = MusicNeteaseTestHTTP(clock: clock)
-        let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() }, clientContexts: clients)
-        let provider: any MusicAccountProvider = adapter
-        var root = try MusicQQWire.decode(MusicNeteaseFixture.credential().dataRepresentation())
-        root["device"] = [String: String]()
-        let credential = try AccountCredential(data: MusicQQWire.json(root))
-        do { _ = try await adapter.fileCredential(credential); XCTFail("Missing device cannot be invented") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .verificationRequired) }
-        do { _ = try await provider.fileCredential(credential); XCTFail("Owner-facing export cannot invent a device") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .verificationRequired) }
-        XCTAssertNil(document.peek()); XCTAssertEqual(document.counts().commits, 0)
-        // Once another legitimate consumer creates the installation identity,
-        // passive export must reuse it exactly, without generating or rewriting.
-        let existing = try clients.installationDevice(.netease)
-        let saved = document.peek(), commits = document.counts().commits
-        let exported = try await provider.fileCredential(credential)
-        let fields = try MusicAccountTransferCodec.entry(exported, platform: .netease).fields
-        for (key, value) in existing.fields { XCTAssertEqual(fields[key], value) }
-        XCTAssertEqual(document.peek(), saved); XCTAssertEqual(document.counts().commits, commits)
-        let calls = await http.recorded()
-        XCTAssertTrue(calls.isEmpty)
-        clients.close()
+        let runtime = try MusicPlatformFixture(), adapter = MusicNodeAccountProvider(platform: .netease, client: runtime.makeClient())
+        let incomplete = try MusicAccountCredential.make(platform: .netease, userID: "42", cookie: "MUSIC_U=synthetic-session")
+        let passive = try await adapter.fileCredential(incomplete)
+        XCTAssertEqual(passive, incomplete)
+        XCTAssertThrowsError(try MusicAccountTransferCodec.entry(passive, platform: .netease))
+        let row = try sharedEntries()[0], credential = try MusicAccountTransferCodec.credential(row)
+        let complete = try await adapter.fileCredential(credential)
+        XCTAssertEqual(try MusicAccountTransferCodec.entry(complete, platform: .netease).fields, row.fields)
+        XCTAssertTrue(runtime.requests().isEmpty)
     }
 
-    func testNeteaseCandidatePatchesAssociatedDeviceOnlyAfterSuccessfulIdentityValidation() async throws {
+    func testNeteaseCandidateOnlyCommitsReturnedDeviceAfterSuccessfulAuthentication() async throws {
         for succeeds in [false, true] {
-            let credential = try MusicNeteaseFixture.credential()
-            let root = try MusicQQWire.decode(credential.dataRepresentation())
-            let originalDevice = try MusicQQWire.object(root["device"])
-            let document = QQPublicPersistenceMemory(try MusicQQWire.json([
-                "schema": 1, "platform": "wy", "device": originalDevice
-            ]))
-            let baseline = document.peek(), clock = MusicAccountTestClock()
-            let clients = NativeMusicClientService(documents: [.netease: document])
-            try clients.setAccess(available: true, generation: 1)
-            let http = MusicNeteaseTestHTTP(clock: clock)
-            let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() }, clientContexts: clients)
-            await http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response([
-                "code": 200, "profile": ["userId": succeeds ? 42 : 99, "nickname": "合成账号"]
-            ], headers: ["set-cookie": "NMTID=synthetic-validated-new; Path=/; Domain=music.163.com"])])
+            let f = try MusicNativeFixture(platform: .netease); try await f.enable()
+            let original = f.store.peek(f.identity)
             if succeeds {
-                let verified = try await adapter.verifyForImport(credential)
-                let fileCredential = try await adapter.fileCredential(verified.credential)
-                let row = try MusicAccountTransferCodec.entry(fileCredential, platform: .netease)
-                XCTAssertEqual(row.fields["NMTID"], "synthetic-validated-new")
-                XCTAssertEqual(try clients.existingDevice(.netease)?.fields["NMTID"], "synthetic-validated-new")
-                XCTAssertEqual(document.counts().commits, 1)
+                let cookie = try MusicAccountCredential.read(XCTUnwrap(original).credential)[music: "cookie"].musicRequiredText() + "; NMTID=synthetic-validated-new"
+                await f.platform.replies("account.verify", .object(["userId": .string("101"), "cookie": .string(cookie),
+                    "profile": .object([:])]))
+                _ = try await f.service.validate(platform: .netease)
+                let saved = try MusicAccountTransferCodec.entry(XCTUnwrap(f.store.peek(f.identity)).credential, platform: .netease)
+                XCTAssertEqual(saved.fields["NMTID"], "synthetic-validated-new")
             } else {
-                do { _ = try await adapter.verifyForImport(credential); XCTFail("Wrong identity") } catch {}
-                XCTAssertEqual(document.peek(), baseline); XCTAssertEqual(document.counts().commits, 0)
+                await f.platform.fail("account.verify", code: "INVALID_CREDENTIALS")
+                do { _ = try await f.service.validate(platform: .netease); XCTFail("Authentication failed") }
+                catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
+                XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, 1, "No candidate was saved")
             }
-            clients.close()
+            let calls = await f.platform.recorded()
+            XCTAssertEqual(calls.map(\.operation), ["account.verify"])
+            _ = await f.service.close()
         }
     }
 
-    func testKugouCandidateRegistrationDoesNotChangeInstallationOnFailedProfile() async throws {
-        for succeeds in [false, true] {
-            var root = try MusicQQWire.decode(MusicKugouFixture.credential().dataRepresentation())
-            var device = try MusicQQWire.object(root["device"]); device.removeValue(forKey: "dfid")
-            root["device"] = device
-            let document = QQPublicPersistenceMemory(try MusicQQWire.json([
-                "schema": 1, "platform": "kg", "device": device
-            ]))
-            let baseline = document.peek(), clock = MusicAccountTestClock()
-            let clients = NativeMusicClientService(documents: [.kugou: document])
-            try clients.setAccess(available: true, generation: 1)
-            let http = MusicKugouTestHTTP(clock: clock)
-            let adapter = KugouMusicAccountAdapter(transport: http, now: { clock.now() }, clientContexts: clients)
-            if !succeeds {
-                await http.respond("/v3/get_my_info", [try MusicKugouFixture.response([
-                    "status": 1, "data": ["userid": "99", "nickname": "合成错误账号"]
-                ])])
-            }
-            let credential = try AccountCredential(data: MusicQQWire.json(root))
-            if succeeds {
-                let verified = try await adapter.verifyForImport(credential)
-                let fileCredential = try await adapter.fileCredential(verified.credential)
-                let row = try MusicAccountTransferCodec.entry(fileCredential, platform: .kugou)
-                XCTAssertEqual(row.fields["dfid"], "synthetic-dfid")
-                XCTAssertEqual(try clients.existingDevice(.kugou)?.fields["dfid"], "synthetic-dfid")
-                XCTAssertEqual(document.counts().commits, 1)
-                let current = try XCTUnwrap(clients.existingDevice(.kugou))
-                _ = try clients.update(current, fields: ["dfid": "synthetic-owner-latest"])
-                let saved = document.peek(), commits = document.counts().commits
-                let provider: any MusicAccountProvider = adapter
-                let latest = try await provider.fileCredential(verified.credential)
-                XCTAssertEqual(try MusicAccountTransferCodec.entry(latest, platform: .kugou).fields["dfid"],
-                               "synthetic-owner-latest")
-                XCTAssertEqual(document.peek(), saved); XCTAssertEqual(document.counts().commits, commits)
-            } else {
-                do { _ = try await adapter.verifyForImport(credential); XCTFail("Wrong identity") } catch {}
-                XCTAssertEqual(document.peek(), baseline); XCTAssertEqual(document.counts().commits, 0)
-            }
-            clients.close()
-        }
+    func testKugouCandidateFailureCannotPublishOrCommitAnUnverifiedDevice() async throws {
+        let f = try MusicNativeFixture(platform: .kugou); try await f.enable()
+        await f.platform.fail("account.verify", code: "INVALID_RESPONSE")
+        let original = f.store.peek(f.identity)
+        do { _ = try await f.service.validate(platform: .kugou); XCTFail("Invalid candidate") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+        XCTAssertEqual(f.store.peek(f.identity), original)
+        XCTAssertFalse(f.runtime.requests().contains { $0.transportOperation == "session.update" && $0.fields[music: "session"] != .null })
+        _ = await f.service.close()
     }
 
     func testUTF8BOMPreservesSharedFixtureAndDoesNotBypassStrictJSON() throws {
@@ -300,6 +235,162 @@ final class MusicAccountTransferTests: XCTestCase {
         XCTAssertEqual(writes, 3)
         let statuses = try await fixture.owner.statuses()
         XCTAssertTrue(statuses.allSatisfy { $0.phase == .signedIn })
+    }
+
+    @MainActor func testSavedImportSurvivesPublicationFailureAndContinuesRemainingBatch() async throws {
+        let store = MusicAccountTestStore(), accounts = AccountSessionCoordinator(store: store)
+        let scopes = try Dictionary(uniqueKeysWithValues: MusicAccountPlatform.allCases.map {
+            ($0, try MusicAccountFixture.identity($0.rawValue))
+        })
+        let identity = try XCTUnwrap(scopes[.netease]), rows = try sharedEntries()
+        try store.write(CredentialRecord(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
+        let original = try XCTUnwrap(store.peek(identity))
+        let fixture = try MusicPlatformFixture(controlHandler: { request in
+            if request.platform == "wy", request.fields[music: "session"] != .null,
+               store.peek(identity)?.revision != original.revision {
+                return .object(["published": .bool(false)])
+            }
+            return .object(["published": .bool(true)])
+        }) { request in
+            XCTAssertEqual(request.operation, "account.verify")
+            return try MusicAccountFixture.account(request)
+        }
+        let client = fixture.makeClient()
+        let owner = NativeMusicAccountService(accounts: accounts, scopes: scopes, platformClient: client)
+        addTeardownBlock { _ = await owner.close(); await fixture.runtime.close() }
+        _ = try await owner.setAccess(available: true, generation: 1)
+        _ = try await owner.validate(platform: .netease)
+        let oldQueue = try await owner.beginAccountQueue(platform: .netease)
+        let ready = expectation(description: "account record observer ready")
+        let changes = await owner.accountSessionChanges()
+        let notification = MusicAccountQueueOwnerCall("saved record notified after publication failure") {
+            var iterator = changes.makeAsyncIterator()
+            for _ in MusicAccountPlatform.allCases { _ = await iterator.next() }
+            ready.fulfill()
+            while let platform = await iterator.next() {
+                if platform == .netease, store.peek(identity)?.revision != original.revision { return platform }
+            }
+            throw MusicServiceError.closed
+        }
+        defer { notification.cancel() }
+        await fulfillment(of: [ready], timeout: 3)
+        let writes = store.calls().filter { $0 == "write" }.count
+        let plan = try await owner.prepareAccountImport(file(rows))
+        let report = await owner.importAccounts(plan, policy: .overwrite)
+        XCTAssertEqual(report.imported, MusicAccountPlatform.allCases)
+        XCTAssertTrue(report.failed.isEmpty); XCTAssertTrue(report.cancelled.isEmpty); XCTAssertTrue(report.skipped.isEmpty)
+        await fulfillment(of: [notification.finished], timeout: 3)
+        XCTAssertEqual(try notification.value(), .netease)
+        let saved = try XCTUnwrap(store.peek(identity)), fields = try MusicAccountCredential.read(saved.credential)
+        XCTAssertNotEqual(saved.revision, original.revision)
+        XCTAssertEqual(fields[music: "userId"], .string(rows[0].userID))
+        let requests = fixture.requests().filter { $0.transportOperation == "request" }
+        XCTAssertEqual(requests.suffix(3).map(\.platform), ["wy", "tx", "kg"])
+        XCTAssertEqual(requests.count, 4, "One original validation and one verification per imported item")
+        let verification = try XCTUnwrap(requests.first {
+            $0.platform == "wy" && $0.candidate[music: "userId"] == .string(rows[0].userID)
+        })
+        XCTAssertEqual(fields[music: "cookie"], verification.candidate[music: "cookie"])
+        let publications = fixture.requests().filter {
+            $0.transportOperation == "session.update" && $0.fields[music: "session"] != .null
+        }
+        XCTAssertEqual(publications.suffix(3).map(\.platform), ["wy", "tx", "kg"])
+        XCTAssertEqual(publications.count, 4, "A failed publication is not automatically replayed")
+        let statuses = try await owner.statuses()
+        XCTAssertEqual(statuses.first { $0.platform == .netease }?.phase, .requiresValidation)
+        XCTAssertTrue(statuses.filter { $0.platform != .netease }.allSatisfy { $0.phase == .signedIn })
+        do { try await owner.checkAccountQueue(oldQueue); XCTFail("Saved replacement kept the old queue authorization") } catch {}
+        XCTAssertEqual(store.calls().filter { $0 == "write" }.count, writes + 3)
+        XCTAssertEqual(store.calls().filter { $0 == "remove" }.count, 0)
+        let requestCount = fixture.requests().count
+        let repeated = await owner.importAccounts(plan, policy: .overwrite)
+        XCTAssertEqual(repeated, .init()); XCTAssertEqual(fixture.requests().count, requestCount)
+        XCTAssertEqual(store.peek(identity), saved)
+        XCTAssertEqual(store.calls().filter { $0 == "write" }.count, writes + 3)
+    }
+
+    @MainActor func testCancellationAfterSavingKeepsImportedItemAndPhysicallySettlesPublicationBeforeCancellingRemainingBatch() async throws {
+        for holdPublishedSession in [false, true] {
+            let store = MusicAccountTestStore(), accounts = AccountSessionCoordinator(store: store)
+            let scopes = try Dictionary(uniqueKeysWithValues: MusicAccountPlatform.allCases.map {
+                ($0, try MusicAccountFixture.identity($0.rawValue))
+            })
+            let identity = try XCTUnwrap(scopes[.netease]), rows = try sharedEntries()
+            try store.write(CredentialRecord(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
+            let original = try XCTUnwrap(store.peek(identity))
+            let gate = MusicAccountQueueOwnerGate(holdPublishedSession ? "saved session publication" : "saved account retirement")
+            let fixture = try MusicPlatformFixture(controlHandler: { request in
+                if request.platform == "wy", store.peek(identity)?.revision != original.revision,
+                   (request.fields[music: "session"] != .null) == holdPublishedSession {
+                    await gate.wait()
+                }
+                return .object(["published": .bool(true)])
+            }) { request in
+                XCTAssertEqual(request.operation, "account.verify")
+                return try MusicAccountFixture.account(request)
+            }
+            let client = fixture.makeClient()
+            let owner = NativeMusicAccountService(accounts: accounts, scopes: scopes, platformClient: client)
+            addTeardownBlock { await gate.release(); _ = await owner.close(); await fixture.runtime.close() }
+            _ = try await owner.setAccess(available: true, generation: 1)
+            _ = try await owner.validate(platform: .netease)
+            let oldQueue = try await owner.beginAccountQueue(platform: .netease)
+            let ready = expectation(description: "account record observer ready")
+            let changes = await owner.accountSessionChanges()
+            let notification = MusicAccountQueueOwnerCall("saved record notified despite caller cancellation") {
+                var iterator = changes.makeAsyncIterator()
+                for _ in MusicAccountPlatform.allCases { _ = await iterator.next() }
+                ready.fulfill()
+                while let platform = await iterator.next() {
+                    if platform == .netease, store.peek(identity)?.revision != original.revision { return platform }
+                }
+                throw MusicServiceError.closed
+            }
+            defer { notification.cancel() }
+            await fulfillment(of: [ready], timeout: 3)
+            let writes = store.calls().filter { $0 == "write" }.count
+            let plan = try await owner.prepareAccountImport(file(rows))
+            let importing = MusicAccountQueueOwnerCall("saved import physical settlement") {
+                await owner.importAccounts(plan, policy: .overwrite)
+            }
+            defer { importing.cancel() }
+            await fulfillment(of: [gate.entered], timeout: 3)
+            let saved = try XCTUnwrap(store.peek(identity))
+            XCTAssertNotEqual(saved.revision, original.revision)
+            XCTAssertNil(importing.result, "A held physical publication/retirement is not completion")
+            do { try await owner.checkAccountQueue(oldQueue); XCTFail("Saved replacement kept the old queue authorization") } catch {}
+            importing.cancel()
+            XCTAssertNil(importing.result, "Caller cancellation must not complete a held publication")
+            await gate.release()
+            await fulfillment(of: [gate.departed, importing.finished, notification.finished], timeout: 3)
+            let report = try importing.value()
+            XCTAssertEqual(report.imported, [.netease])
+            XCTAssertEqual(report.cancelled, [.qq, .kugou])
+            XCTAssertTrue(report.failed.isEmpty); XCTAssertTrue(report.skipped.isEmpty)
+            XCTAssertEqual(try notification.value(), .netease)
+            XCTAssertEqual(store.peek(identity), saved, "Cancellation cannot roll back or rewrite a confirmed record")
+            let fields = try MusicAccountCredential.read(saved.credential)
+            XCTAssertEqual(fields[music: "userId"], .string(rows[0].userID))
+            let requests = fixture.requests().filter { $0.transportOperation == "request" }
+            XCTAssertEqual(requests.map(\.platform), ["wy", "wy"], "Remaining items never start authentication")
+            let verification = try XCTUnwrap(requests.first {
+                $0.platform == "wy" && $0.candidate[music: "userId"] == .string(rows[0].userID)
+            })
+            XCTAssertEqual(fields[music: "cookie"], verification.candidate[music: "cookie"])
+            let publications = fixture.requests().filter {
+                $0.transportOperation == "session.update" && $0.fields[music: "session"] != .null
+            }
+            XCTAssertEqual(publications.count, holdPublishedSession ? 2 : 1)
+            let statuses = try await owner.statuses()
+            XCTAssertEqual(statuses.first { $0.platform == .netease }?.phase, .requiresValidation)
+            XCTAssertEqual(store.calls().filter { $0 == "write" }.count, writes + 1)
+            XCTAssertEqual(store.calls().filter { $0 == "remove" }.count, 0)
+            XCTAssertNil(store.peek(try XCTUnwrap(scopes[.qq]))); XCTAssertNil(store.peek(try XCTUnwrap(scopes[.kugou])))
+            let requestCount = fixture.requests().count
+            let repeated = await owner.importAccounts(plan, policy: .overwrite)
+            XCTAssertEqual(repeated, .init()); XCTAssertEqual(fixture.requests().count, requestCount)
+            XCTAssertEqual(store.calls().filter { $0 == "write" }.count, writes + 1)
+        }
     }
 
     func testColdSavedUnvalidatedCredentialsExportWithoutRestoreValidationOrWrites() async throws {
@@ -444,93 +535,63 @@ final class MusicAccountTransferTests: XCTestCase {
         _ = await fixture.service.close()
     }
 
-    func testRealNeteaseImportKeepsMusicACommaDeviceAndOriginalOnWrongProfile() async throws {
-        let fixture = try MusicNeteaseNativeFixture(); try await fixture.enable()
-        var fields = try MusicAccountTransferCodec.entry(MusicNeteaseFixture.credential(), platform: .netease).fields
+    func testNeteaseImportKeepsMusicACommaDeviceAndOriginalOnFailedAuthentication() async throws {
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
+        var fields = try MusicAccountTransferCodec.entry(MusicAccountFixture.credential(platform: .netease), platform: .netease).fields
         fields["MUSIC_A"] = "synthetic-account-associated-a"
-        let row = MusicAccountTransferEntry(platform: .netease, userID: "42", fields: fields)
-        let plan = try await fixture.service.prepareAccountImport(file([row]))
-        let report = await fixture.service.importAccounts(plan, policy: .overwrite)
+        let row = MusicAccountTransferEntry(platform: .netease, userID: "101", fields: fields)
+        let plan = try await f.service.prepareAccountImport(file([row]))
+        let report = await f.service.importAccounts(plan, policy: .overwrite)
         XCTAssertEqual(report.imported, [.netease])
-        let exported = try MusicAccountTransferCodec.decode(await fixture.service.exportAccountFile())
+        let exported = try MusicAccountTransferCodec.decode(await f.service.exportAccountFile())
         XCTAssertEqual(exported.first?.fields, fields)
         XCTAssertEqual(exported.first?.fields["_ntes_nnid"], "synthetic-nuid,1800000000000")
-        let before = fixture.store.peek(fixture.identity)
-        await fixture.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(
-            ["code": 200, "profile": ["userId": 99, "nickname": "合成错误账号"]])])
-        let next = try await fixture.service.prepareAccountImport(file([row]))
-        let failed = await fixture.service.importAccounts(next, policy: .overwrite)
-        XCTAssertEqual(failed.failed, [.netease]); XCTAssertEqual(fixture.store.peek(fixture.identity), before)
-        let statuses = try await fixture.service.statuses()
+        let before = f.store.peek(f.identity)
+        await f.platform.fail("account.verify", code: "INVALID_CREDENTIALS")
+        let next = try await f.service.prepareAccountImport(file([row]))
+        let failed = await f.service.importAccounts(next, policy: .overwrite)
+        XCTAssertEqual(failed.failed, [.netease]); XCTAssertEqual(f.store.peek(f.identity), before)
+        let statuses = try await f.service.statuses()
         XCTAssertEqual(statuses.first?.phase, .signedIn)
-        _ = await fixture.service.close()
+        _ = await f.service.close()
     }
 
-    func testQQRemoteStringIdentityMismatchRejectsImportAndKeepsOldSession() async throws {
-        for container in ["root", "userInfo", "data"] {
-            let fixture = try MusicNativeFixture(); try await fixture.enable()
-            _ = try await fixture.service.validate(platform: .qq)
-            let original = fixture.store.peek(fixture.identity)
-            let writes = fixture.store.calls().filter { $0 == "write" }.count
-            let before = await fixture.accounts.snapshot(for: fixture.identity)
-            let row = try MusicAccountTransferCodec.entry(MusicAccountFixture.credential(), platform: .qq)
-            let plan = try await fixture.service.prepareAccountImport(file([row]))
-            let remote: [String: Any] = ["musicid": 101, "str_musicid": "999"]
-            let response: [String: Any] = container == "root" ? remote : [container: remote]
-            await fixture.http.replies("GetLoginUserInfo", try MusicAccountFixture.rpc(response))
-            let report = await fixture.service.importAccounts(plan, policy: .overwrite)
-            XCTAssertEqual(report.failed, [.qq]); XCTAssertTrue(report.imported.isEmpty)
-            XCTAssertEqual(fixture.store.peek(fixture.identity), original)
-            let after = await fixture.accounts.snapshot(for: fixture.identity)
-            XCTAssertEqual(after, before)
-            XCTAssertEqual(fixture.store.calls().filter { $0 == "write" }.count, writes)
-            _ = await fixture.service.close()
-        }
+    func testQQAuthenticationIdentityFailureRejectsImportAndKeepsOldSession() async throws {
+        let f = try MusicNativeFixture(); try await f.enable()
+        _ = try await f.service.validate(platform: .qq)
+        let original = f.store.peek(f.identity), before = await f.accounts.snapshot(for: f.identity)
+        let writes = f.store.calls().filter { $0 == "write" }.count
+        let row = try MusicAccountTransferCodec.entry(MusicAccountFixture.credential(), platform: .qq)
+        let plan = try await f.service.prepareAccountImport(file([row]))
+        await f.platform.fail("account.verify", code: "INVALID_CREDENTIALS")
+        let report = await f.service.importAccounts(plan, policy: .overwrite)
+        XCTAssertEqual(report.failed, [.qq]); XCTAssertTrue(report.imported.isEmpty)
+        XCTAssertEqual(f.store.peek(f.identity), original)
+        let after = await f.accounts.snapshot(for: f.identity)
+        XCTAssertEqual(after, before); XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, writes)
+        _ = await f.service.close()
     }
 
-    func testKugouImportRequiresRemoteIdentityWhileOrdinaryProfileMayOmitIt() async throws {
-        let responses: [[String: Any]] = [
-            ["nickname": "合成资料无身份"],
-            ["userid": NSNull(), "nickname": "合成资料空身份"],
-            ["userid": "99", "nickname": "合成资料错误身份"]
-        ]
-        for response in responses {
-            let identity = try MusicAccountFixture.identity("kg"), store = MusicAccountTestStore()
-            let clock = MusicAccountTestClock(), http = MusicKugouTestHTTP(clock: clock)
-            let accounts = AccountSessionCoordinator(store: store)
-            let service = NativeMusicAccountService(accounts: accounts, scopes: [.kugou: identity],
-                transport: http, clock: { clock.now() })
-            try store.write(CredentialRecord(credential: MusicKugouFixture.credential()), for: identity)
-            _ = try await service.setAccess(available: true, generation: 1)
-            // Missing userid remains valid for an already-owned session's ordinary profile.
-            await http.respond("/v3/get_my_info", [try MusicKugouFixture.response([
-                "status": 1, "data": ["nickname": "合成既有资料"]
-            ])])
-            _ = try await service.validate(platform: .kugou)
-            let original = store.peek(identity), writes = store.calls().filter { $0 == "write" }.count
-            let before = await accounts.snapshot(for: identity)
-            let row = try MusicAccountTransferCodec.entry(MusicKugouFixture.credential(), platform: .kugou)
-            let plan = try await service.prepareAccountImport(file([row]))
-            await http.respond("/v3/get_my_info", [try MusicKugouFixture.response([
-                "status": 1, "data": response
-            ])])
-            let report = await service.importAccounts(plan, policy: .overwrite)
-            XCTAssertEqual(report.failed, [.kugou]); XCTAssertTrue(report.imported.isEmpty)
-            XCTAssertEqual(store.peek(identity), original)
-            let after = await accounts.snapshot(for: identity)
-            XCTAssertEqual(after, before)
-            XCTAssertEqual(store.calls().filter { $0 == "write" }.count, writes)
-            let requests = await http.recorded()
-            XCTAssertEqual(requests.map(\.url.path), ["/v3/get_my_info", "/v3/get_my_info"])
-            _ = await service.close()
-        }
+    func testKugouImportRequiresAuthenticationWhileOrdinaryProfileConsumesOnlyDisplayFields() async throws {
+        let f = try MusicNativeFixture(platform: .kugou); try await f.enable()
+        let profile = try await f.service.refreshProfile(platform: .kugou)
+        XCTAssertEqual(profile.nickname, "合成昵称", "A canonical profile does not require a second remote identity field")
+        let original = f.store.peek(f.identity), before = await f.accounts.snapshot(for: f.identity)
+        let row = try MusicAccountTransferCodec.entry(MusicAccountFixture.credential(platform: .kugou), platform: .kugou)
+        let plan = try await f.service.prepareAccountImport(file([row]))
+        await f.platform.fail("account.verify", code: "INVALID_CREDENTIALS")
+        let report = await f.service.importAccounts(plan, policy: .overwrite)
+        XCTAssertEqual(report.failed, [.kugou]); XCTAssertTrue(report.imported.isEmpty)
+        XCTAssertEqual(f.store.peek(f.identity), original)
+        let after = await f.accounts.snapshot(for: f.identity); XCTAssertEqual(after, before)
+        _ = await f.service.close()
     }
 
     func testInvalidPlatformFieldsFailOnlyThatItemWithoutNetworkAndCannotInventKugouDevice() async throws {
         let fixture = try TransferFixture(); let rows = try sharedEntries()
         try fixture.seed(rows[2]); try await fixture.enable()
         let original = fixture.store.peek(fixture.scopes[.kugou]!)
-        var fields = rows[2].fields; fields["KUGOU_API_MID"] = "1"
+        var fields = rows[2].fields; fields.removeValue(forKey: "KUGOU_API_GUID")
         let invalid = MusicAccountTransferEntry(platform: .kugou, userID: rows[2].userID, fields: fields)
         let plan = try await fixture.owner.prepareAccountImport(file([rows[1], invalid]))
         let report = await fixture.owner.importAccounts(plan, policy: .overwrite)

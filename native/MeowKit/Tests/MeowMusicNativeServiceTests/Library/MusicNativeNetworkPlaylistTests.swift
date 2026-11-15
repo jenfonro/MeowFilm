@@ -179,7 +179,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
             var document = current, rows = document.library["library"]["networkReferences"].array
             switch corruption {
             case 0: rows[0]["members"] = .array([])
-            case 1: rows[0]["remoteID"] = .string("playlist:1")
+            case 1: rows[0]["remoteID"] = .null
             case 2: rows.append(rows[0])
             case 3: rows[0]["relation"] = .obj([("accountId", .string("unbound-account")), ("baseline", .bool(true)), ("relationID", .string("501"))])
             default:
@@ -196,18 +196,18 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
         }
     }
 
-    func testUnsupportedLibraryVersionsAreRejectedWithoutMigrationOrClearingOtherAreas() async throws {
+    func testMalformedCurrentLibraryReferencesFailWithoutClearingOtherAreas() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
         _ = try await MusicAccountQueueFixture.seed(service)
         _ = try await service.saveNetworkPlaylist(.init(platform: .qq, nativeID: "501", title: "Remote"), intent: .init())
         let current = try NativeSyncFixture.document(store)
         await service.close()
-        for version in [1, 3] {
+        for malformed in [MJ.null, .obj(), .string("not an array")] {
             var document = current
-            document.library["schema"] = .n(version); document.library["library"]["version"] = .n(version)
+            document.library["library"]["networkReferences"] = malformed
             let bytes = try document.encode(changed: ["library"]), rejected = NativeMusicMemoryDocument(bytes)
             let reopened = try await NativeMusicFixture.service(rejected)
-            do { _ = try await reopened.collections(); XCTFail("unsupported library version") }
+            do { _ = try await reopened.collections(); XCTFail("malformed current reference array") }
             catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
             XCTAssertEqual(rejected.snapshot().0, bytes); XCTAssertEqual(rejected.snapshot().2, 0)
             await reopened.close()

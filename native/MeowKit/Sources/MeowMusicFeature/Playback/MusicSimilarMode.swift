@@ -3,13 +3,16 @@ import Foundation
 public struct MusicSimilarHeartbeatContext: Sendable, Equatable, Codable {
     public let playlistID: String
     public let seedID: String
-    public init(playlistID: String, seedID: String) { self.playlistID = playlistID; self.seedID = seedID }
+    public let count: Int
+    public init(playlistID: String, seedID: String, count: Int = 0) {
+        self.playlistID = playlistID; self.seedID = seedID; self.count = count
+    }
 }
 
 /// Typed requests, never an arbitrary HTTP/credential bridge. All reads use
 /// the existing exact-account queue lease and must not refresh/rebind it.
 public enum MusicNativeSimilarModeRequest: Sendable, Equatable {
-    /// nil context validates an entrance seed. A continuation keeps context's
+    /// nil context obtains the entrance seed. A continuation keeps context's
     /// playlist/seed and uses lastID only as its current queue position.
     case heartbeat(lastID: String?, fromHome: Bool, context: MusicSimilarHeartbeatContext?)
     case songRoaming(sourceIDs: [String])

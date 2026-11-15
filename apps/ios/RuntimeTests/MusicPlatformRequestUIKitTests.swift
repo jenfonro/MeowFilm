@@ -6,17 +6,11 @@ import ImageIO
 
 final class MusicPlatformRequestUIKitTests: XCTestCase {
     func testNeteaseLoginQRCodeProducesNativePNG() throws {
-        try checkPNG(NeteaseMusicAccountAdapter.qrImage("synthetic-ios-key"))
+        try checkPNG(MusicLoginQRCode.encode("https://music.163.com/login?codekey=synthetic-ios-key"))
     }
 
     func testKugouLoginQRCodeProducesNativePNG() throws {
-        try checkPNG(KugouMusicAccountAdapter.qrImage("synthetic-ios-key"))
-    }
-
-    func testWEAPIEncryptionUsesNativeSecurityOnIOS() throws {
-        let value = try MusicNeteaseCrypto.weapi(Data(#"{"synthetic":true}"#.utf8), secret: "0123456789abcdef")
-        XCTAssertFalse(try XCTUnwrap(value["params"]).isEmpty)
-        XCTAssertEqual(try XCTUnwrap(value["encSecKey"]).count, 256)
+        try checkPNG(MusicLoginQRCode.encode("https://www.kugou.com/login/qr?key=synthetic-ios-key"))
     }
 
     private func checkPNG(_ data: Data) throws {

@@ -1,5 +1,7 @@
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 private final class RecoveryHomeStore: MusicHomeSnapshotStoring, @unchecked Sendable {
@@ -17,17 +19,16 @@ private final class RecoveryHomeStore: MusicHomeSnapshotStoring, @unchecked Send
 }
 
 private func recoveryHome(_ blocks: [(String, [Int])], next: String? = nil) -> Data {
-    var data = MJ.obj([("blocks", .array(blocks.map { id, items in
-        .obj([("positionCode", .string(id)), ("dslData", .obj([
-            ("title", .string(id)), ("items", .array(items.map { number in
-                .obj([("resourceType", .string("playlist")), ("id", .n(number)),
-                      ("title", .string("歌单 \(number)")),
-                      ("coverImg", .string("https://p1.music.126.net/\(number).jpg"))])
-            }))
-        ]))])
-    })), ("hasMore", .bool(next != nil))])
-    if let next { data["cursor"] = .string(next) }
-    return MJ.obj([("code", .n(200)), ("data", data)]).bytes
+    var data = MJ.obj([("sections", .array(blocks.map { id, items in
+        .obj([("id", .string(id)), ("title", .string(id)), ("type", .string("playlists")),
+            ("items", .array(items.map { number in
+                .obj([("key", .string("\(id):playlist:\(number)")), ("id", .string(String(number))), ("name", .string("歌单 \(number)")),
+                      ("cover", .string("https://p1.music.126.net/\(number).jpg")),
+                      ("action", .obj([("type", .string("playlist"))]))])
+            }))])
+    }))])
+    if let next { data["continuation"] = .obj([("cursor", .string(next))]) }
+    return data.bytes
 }
 
 private actor RecoveryHomeAccount: MusicNativeAccountProviding, MusicNativeHomeDisplayProviding {
@@ -113,7 +114,7 @@ private actor RecoveryHomeAccount: MusicNativeAccountProviding, MusicNativeHomeD
             // Deliberately allow late data here: the service must independently
             // check authority and generation before publication/persistence.
             return data
-        case .artistActivity: return Data(#"{"code":200,"data":{"newWorks":[]}}"#.utf8)
+        case .artistActivity: return Data(#"{"sections":[]}"#.utf8)
         case .playlistMetadata, .songMetadata, .vipSongs, .heartbeatSeed: throw MusicServiceError.invalidRequest
         }
     }
@@ -134,25 +135,28 @@ private actor RecoveryHomeAccount: MusicNativeAccountProviding, MusicNativeHomeD
     }
 }
 
-private actor RecoveryHomeHTTP: MusicNativeHTTPTransport {
+private actor RecoveryHomePeer: MusicPlatformFixtureResponding {
     private(set) var calls = 0
     private var gate: NativeMusicGate?
     private var error: MusicServiceError?
     init(gate: NativeMusicGate? = nil, error: MusicServiceError? = nil) { self.gate = gate; self.error = error }
-    func send(_ request: MusicNativeHTTPRequest) async throws -> MusicNativeHTTPResponse {
+    func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
         calls += 1
         if let gate { self.gate = nil; await gate.wait() }
         if let error { throw error }
-        return .init(status: 200, data: recoveryHome([("guest", [90])]))
+        return try RuntimeJSON.decode(recoveryHome([("guest", [90])]))
     }
 }
 
 final class MusicNativeHomeRecoveryTests: XCTestCase {
     private func service(_ account: RecoveryHomeAccount, store: RecoveryHomeStore = .init(),
-                         http: any MusicNativeHTTPTransport = NativeMusicNoNetwork()) async throws -> NativeMusicService {
-        let value = NativeMusicService(document: NativeMusicMemoryDocument(), accounts: account,
-            qq: NativeMusicQQFixture(), enabledPlatforms: [.netease, .kugou], homeSnapshot: store,
-            transport: http, clock: { NativeMusicFixture.date })
+                         http: any MusicPlatformFixtureResponding = NativeMusicResultFixture(failure: .upstreamFailed)) async throws -> NativeMusicService {
+        let value = NativeMusicService(document: NativeMusicMemoryDocument(),
+            accounts: account,
+            platformClient: try http.makeClient(),
+            enabledPlatforms: [.netease, .kugou],
+            homeSnapshot: store,
+            clock: { NativeMusicFixture.date })
         try await value.setAccess(available: true, generation: 1)
         return value
     }
@@ -286,7 +290,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
     }
 
     func testExplicitAuthenticationDenialReplacesDisplayWithOneGuestRead() async throws {
-        let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), http = RecoveryHomeHTTP()
+        let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), http = RecoveryHomePeer()
         let value = try await service(account, store: store, http: http)
         _ = try await value.homePage(cursor: nil, refresh: true)
         await account.denyFirst()
@@ -300,7 +304,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
     func testLateMemberSuccessOrFailureCannotOverwriteGuestDisplayOrRequestCache() async throws {
         for lateFailure in [false, true] {
             let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), gate = NativeMusicGate()
-            let http = RecoveryHomeHTTP(), value = try await service(account, store: store, http: http)
+            let http = RecoveryHomePeer(), value = try await service(account, store: store, http: http)
             if lateFailure { await account.fail(.networkOffline) }
             await account.holdFirst(gate)
             let old = Task { try await value.homePage(cursor: nil, refresh: true) }
@@ -318,7 +322,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
     }
 
     func testOwnerConfirmedInitialValidationDenialUsesGuestWithoutMemberPayload() async throws {
-        let account = RecoveryHomeAccount(), http = RecoveryHomeHTTP()
+        let account = RecoveryHomeAccount(), http = RecoveryHomePeer()
         await account.denyValidation()
         let value = try await service(account, http: http)
         let page = try await value.homePage(cursor: nil, refresh: true)
@@ -329,7 +333,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
 
     func testNonAuthenticationFailuresNeverBecomeGuestOrOverwriteDisplay() async throws {
         for failure in [MusicServiceError.networkOffline, .rateLimited, .verificationRequired, .storageFailed, .permissionDenied] {
-            let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), http = RecoveryHomeHTTP()
+            let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), http = RecoveryHomePeer()
             let value = try await service(account, store: store, http: http)
             _ = try await value.homePage(cursor: nil, refresh: true)
             let saved = store.read()
@@ -342,7 +346,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
     }
 
     func testGuestFailureDoesNotLoopAndManualRefreshCanReadAgain() async throws {
-        let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), http = RecoveryHomeHTTP(error: .authRequired)
+        let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), http = RecoveryHomePeer(error: .authRequired)
         let value = try await service(account, store: store, http: http)
         _ = try await value.homePage(cursor: nil, refresh: true)
         let saved = store.read()
@@ -357,7 +361,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
 
     func testConcurrentFirstPageWaitersShareRecoveryAndCancellationKeepsGuestReadAlive() async throws {
         let account = RecoveryHomeAccount(), memberGate = NativeMusicGate(), guestGate = NativeMusicGate()
-        let http = RecoveryHomeHTTP(gate: guestGate), value = try await service(account, http: http)
+        let http = RecoveryHomePeer(gate: guestGate), value = try await service(account, http: http)
         await account.denyFirst(); await account.holdFirst(memberGate)
         let old = Task { try await value.homePage(cursor: nil, refresh: true) }
         await memberGate.started()
@@ -375,7 +379,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
 
     func testDelayedAccountNotificationAfterGuestSuccessOrFailureDoesNotReadAgain() async throws {
         for guestFailure in [false, true] {
-            let account = RecoveryHomeAccount(), http = RecoveryHomeHTTP(error: guestFailure ? .networkOffline : nil)
+            let account = RecoveryHomeAccount(), http = RecoveryHomePeer(error: guestFailure ? .connectionFailed : nil)
             let value = try await service(account, http: http)
             _ = try await value.homePage(cursor: nil, refresh: true)
             let stream = await value.homeChanges()
@@ -390,7 +394,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
                 let page = try await value.homePage(cursor: nil, refresh: true)
                 XCTAssertFalse(guestFailure); XCTAssertEqual(ids(page), ["90"])
             } catch {
-                XCTAssertTrue(guestFailure); XCTAssertEqual(error as? MusicServiceError, .networkOffline)
+                XCTAssertTrue(guestFailure); XCTAssertEqual(error as? MusicServiceError, .connectionFailed)
             }
             await account.emit(); await account.waitForChangePulls(3)
             // The next upstream pull acknowledges the complete notification
@@ -404,7 +408,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
 
     func testNotificationDuringGuestReadTransfersSameTaskToReplacementWaiter() async throws {
         for observationFailure in [false, true] {
-            let account = RecoveryHomeAccount(), gate = NativeMusicGate(), http = RecoveryHomeHTTP(gate: gate)
+            let account = RecoveryHomeAccount(), gate = NativeMusicGate(), http = RecoveryHomePeer(gate: gate)
             let value = try await service(account, http: http)
             _ = try await value.homePage(cursor: nil, refresh: true)
             let stream = await value.homeChanges()
@@ -428,7 +432,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
 
     func testPrivateAuthenticationFailureNotifiesGuestRefreshWithoutDiscardingDisplay() async throws {
         let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), gate = NativeMusicGate()
-        let http = RecoveryHomeHTTP(gate: gate), value = try await service(account, store: store, http: http)
+        let http = RecoveryHomePeer(gate: gate), value = try await service(account, store: store, http: http)
         _ = try await value.homePage(cursor: nil, refresh: true)
         let stream = await value.homeChanges()
         await account.waitForChangePulls(2)
@@ -449,7 +453,7 @@ final class MusicNativeHomeRecoveryTests: XCTestCase {
     }
 
     func testContinuationAuthenticationFailureCannotReturnGuestAsAnAppendedPage() async throws {
-        let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), http = RecoveryHomeHTTP()
+        let account = RecoveryHomeAccount(), store = RecoveryHomeStore(), http = RecoveryHomePeer()
         let value = try await service(account, store: store, http: http)
         let first = try await value.homePage(cursor: nil, refresh: true)
         await account.denyContinuation()

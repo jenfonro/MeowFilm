@@ -62,7 +62,7 @@ final class MusicSourceLegacyAdmissionTests: XCTestCase {
     }
     private func store() throws -> NativeMusicMemoryDocument {
         try MusicNativeCandidateDiscoveryFixture.store(song:
-            MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101")))
+            NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101")))
     }
 
     func testAvailabilityKeepsOfficialOptionsWhenScriptListingFails() async throws {
@@ -186,11 +186,12 @@ final class MusicSourceLegacyAdmissionTests: XCTestCase {
     private func exclusionDuringScriptResolution(discovery: Bool, exclusion: Exclusion) async throws {
         let store = try self.store()
         var document = try MusicDocument(store.read(), runID: "legacy-admission")
-        let other = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "102", title: "Other recording"))
+        let other = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "102", title: "Other recording"))
+        document.library["library"]["songs"][other["songId"].string] = other
         document.queue["entries"] = .array(document.queue["entries"].array +
-            [.obj([("id", .string("entry-2")), ("song", other)])])
+            [.obj([("id", .string("entry-2")), ("songId", other["songId"])])])
         document.queue["serial"] = .n(2)
-        store.replace(try document.encode(changed: ["queue"]))
+        store.replace(try document.encode(changed: ["library", "queue"]))
         let gate = MusicNativeCandidateDiscoveryBarrier(), scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.configure(barrier: gate)
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
@@ -267,13 +268,14 @@ final class MusicSourceLegacyAdmissionTests: XCTestCase {
         let accounts = LegacyAdmissionAccounts(base: self.accounts(clock), stageGate: gate)
         let store = try self.store()
         var document = try MusicDocument(store.read(), runID: "official-legacy-admission")
-        let other = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "102", title: "Other recording"))
+        let other = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "102", title: "Other recording"))
+        document.library["library"]["songs"][other["songId"].string] = other
         document.queue["entries"] = .array(document.queue["entries"].array +
-            [.obj([("id", .string("entry-2")), ("song", other)])])
+            [.obj([("id", .string("entry-2")), ("songId", other["songId"])])])
         document.queue["serial"] = .n(2)
-        store.replace(try document.encode(changed: ["queue"]))
-        let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
-            audioFileCache: LegacyAdmissionEmptyCache(), transport: NativeMusicNoNetwork(), clock: { clock.now() })
+        store.replace(try document.encode(changed: ["library", "queue"]))
+        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+            audioFileCache: LegacyAdmissionEmptyCache(), clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let session: (any MusicCandidateDiscoverySession)?
         if discovery { session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1) }

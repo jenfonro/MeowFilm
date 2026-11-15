@@ -6,10 +6,20 @@ namespace MeowFilm.Capabilities.Accounts;
 
 public sealed partial class MusicAccountOwner
 {
-    private static MusicAccountSmsInput SmsInput(JsonElement parameters, bool login) => new MusicAccountSmsInput(
-        AccountRules.String(parameters, "platform", 8), AccountRules.String(parameters, "phone", 32),
-        parameters.TryGetProperty("countryCode", out _) ? AccountRules.String(parameters, "countryCode", 16) : "86",
-        login ? AccountRules.String(parameters, "captcha", 16) : null).Normalize(login);
+    private static MusicAccountSmsInput SmsInput(JsonElement parameters, bool login)
+    {
+        try
+        {
+            return new(
+                parameters.GetProperty("platform").GetString() ?? throw new MusicAccountException("INVALID_REQUEST"),
+                parameters.GetProperty("phone").GetString() ?? throw new MusicAccountException("INVALID_REQUEST"),
+                parameters.TryGetProperty("countryCode", out var country)
+                    ? country.GetString() ?? throw new MusicAccountException("INVALID_REQUEST") : "86",
+                login ? parameters.GetProperty("captcha").GetString() ?? throw new MusicAccountException("INVALID_REQUEST") : null);
+        }
+        catch (Exception error) when (error is InvalidOperationException or KeyNotFoundException)
+        { throw new MusicAccountException("INVALID_REQUEST"); }
+    }
 
     private async Task<JsonObject> Sms(MusicAccountSmsInput input, bool login, CancellationToken token)
     {
@@ -23,8 +33,7 @@ public sealed partial class MusicAccountOwner
             if (!login)
             {
                 var sent = await protocol.SendSmsAsync(input, op.Token).ConfigureAwait(false);
-                Guard(op);
-                AccountRules.Require(sent.Platform == input.Platform && sent.Sent && sent.RetryAfterSeconds is >= 1 and <= 600,
+                AccountRules.Require(sent.Sent,
                     "INVALID_RESPONSE");
                 return new() { ["platform"] = input.Platform, ["sent"] = true, ["retryAfter"] = sent.RetryAfterSeconds };
             }

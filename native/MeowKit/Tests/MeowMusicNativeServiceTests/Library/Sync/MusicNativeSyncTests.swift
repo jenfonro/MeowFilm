@@ -4,6 +4,30 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 @MainActor final class MusicNativeSyncTests: XCTestCase {
+    func testCloseWaitsForNonCooperativeManualSyncAndReleasesItsAccountLease() async throws {
+        let store = try NativeSyncFixture.store(), peer = NativeSyncPeer(), gate = NativeMusicGate()
+        await peer.configure(gate: gate)
+        let service = try await NativeMusicFixture.service(store, accounts: peer)
+        let pending = Task { try await service.synchronizeLibrary(NativeSyncFixture.request()) }
+        await gate.started()
+        let beforeClose = store.snapshot()
+        let returned = expectation(description: "close waits for the real sync worker")
+        returned.isInverted = true
+        let closing = Task { await service.close(); returned.fulfill() }
+        await fulfillment(of: [returned], timeout: 0.05)
+        await gate.release()
+        do { _ = try await pending.value; XCTFail("A closing sync cannot publish") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
+        await closing.value
+        XCTAssertEqual(store.snapshot().0, beforeClose.0); XCTAssertEqual(store.snapshot().2, beforeClose.2)
+        await assertMusicFailure(.closed) { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()) }
+        let writes = await peer.calls()
+        XCTAssertTrue(writes.isEmpty)
+        let counts = await peer.counts(); XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
+        // The old lease was ended, not merely cancelled.
+        let next = try await peer.beginLibrarySync(platform: .netease)
+        await peer.endLibrarySync(next)
+    }
     func testFirstNewBindingRestoresOnlyImportedCancellationsAndOldAccountDoesNotRepeatLikes() async throws {
         let s = NativeSyncFixture.member("101"), other = NativeSyncFixture.member("102")
         let a = NativeSyncPeer(rows: [
@@ -26,7 +50,8 @@ import MeowMusicFeature
         XCTAssertEqual(first.phase, .synced)
         let merged = try await service.collections(), restored = try XCTUnwrap(merged.first { $0.id == favorites.id })
         let tracks = try await service.tracks(in: restored)
-        XCTAssertEqual(tracks.map(\.songId), try NativeSyncFixture.refs([s]).map(\.id))
+        let expected = try await NativeSyncFixture.refs([s], service: service).map(\.id)
+        XCTAssertEqual(tracks.map(\.songId), expected)
         let bContents = await b.contents(), bCalls = await b.calls(), aBefore = await a.calls()
         XCTAssertEqual(bContents[0].members.map(\.nativeID), ["101"])
         XCTAssertTrue(bCalls.isEmpty); XCTAssertTrue(aBefore.isEmpty)
@@ -62,7 +87,8 @@ import MeowMusicFeature
             XCTAssertEqual(state.phase, .synced)
             let lists = try await service.collections(), favorites = try XCTUnwrap(lists.first { $0.kind == "favorites" })
             let tracks = try await service.tracks(in: favorites)
-            XCTAssertEqual(tracks.map(\.songId), try NativeSyncFixture.refs([s]).map(\.id))
+            let expected = try await NativeSyncFixture.refs([s], service: service).map(\.id)
+            XCTAssertEqual(tracks.map(\.songId), expected)
             let aContents = await a.contents(), bContents = await b.contents(), aCalls = await a.calls(), bCalls = await b.calls()
             XCTAssertEqual(aContents[0].members.map(\.nativeID), ["101"])
             XCTAssertEqual(bContents[0].members.map(\.nativeID), ["101"])
@@ -133,7 +159,7 @@ import MeowMusicFeature
                 await peer.clearCalls()
             }
             let empty = try await service.collections(), favorites = try XCTUnwrap(empty.first { $0.kind == "favorites" })
-            let added = try await service.editPlaylist(favorites, name: nil, refs: NativeSyncFixture.refs([s], platform: .qq), order: nil)
+            let added = try await service.editPlaylist(favorites, name: nil, refs: try await NativeSyncFixture.refs([s], platform: .qq, service: service), order: nil)
             _ = try await service.editPlaylist(added, name: nil, refs: [], order: nil)
             await peer.replace([NativeSyncFixture.collection("600", name: "Favorites", kind: .favorites, members: [s], revision: "3")])
             let state = try await service.synchronizeLibrary(request)
@@ -158,13 +184,14 @@ import MeowMusicFeature
             ])
             let service = try await NativeMusicFixture.service(store, accounts: peer)
             let collections = try await service.collections(), favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
-            let refs = try NativeSyncFixture.refs([local], platform: platform)
+            let refs = try await NativeSyncFixture.refs([local], platform: platform, service: service)
             _ = try await service.editPlaylist(favorites, name: nil, refs: refs, order: nil)
             let state = try await service.synchronizeLibrary(NativeSyncFixture.request(platform, favorites: true, playlists: false))
             XCTAssertEqual(state.phase, .synced)
             let merged = try await service.collections(), result = try XCTUnwrap(merged.first { $0.id == favorites.id })
             let tracks = try await service.tracks(in: result)
-            XCTAssertEqual(Set(tracks.map(\.songId)), Set(try NativeSyncFixture.refs([local, remote], platform: platform).map(\.id)))
+            let expected = try await NativeSyncFixture.refs([local, remote], platform: platform, service: service).map(\.id)
+            XCTAssertEqual(Set(tracks.map(\.songId)), Set(expected))
             let contents = await peer.contents(), calls = await peer.calls()
             XCTAssertEqual(contents[0].members.map(\.nativeID).sorted(), ["101", "102"])
             XCTAssertTrue(calls.allSatisfy { $0.action == .add || $0.action == .order })
@@ -181,7 +208,7 @@ import MeowMusicFeature
             ])
             let service = try await NativeMusicFixture.service(store, accounts: peer)
             let collections = try await service.collections(), favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
-            let added = try await service.editPlaylist(favorites, name: nil, refs: NativeSyncFixture.refs([a], platform: platform), order: nil)
+            let added = try await service.editPlaylist(favorites, name: nil, refs: try await NativeSyncFixture.refs([a], platform: platform, service: service), order: nil)
             _ = try await service.editPlaylist(added, name: nil, refs: [], order: nil)
             await service.close()
 
@@ -192,7 +219,8 @@ import MeowMusicFeature
             XCTAssertEqual(state.phase, .synced)
             let merged = try await cold.collections(), result = try XCTUnwrap(merged.first { $0.id == favorites.id })
             let tracks = try await cold.tracks(in: result)
-            XCTAssertEqual(Set(tracks.map(\.songId)), Set(try NativeSyncFixture.refs([a, b], platform: platform).map(\.id)))
+            let expected = try await NativeSyncFixture.refs([a, b], platform: platform, service: cold).map(\.id)
+            XCTAssertEqual(Set(tracks.map(\.songId)), Set(expected))
             let contents = await peer.contents(), calls = await peer.calls()
             XCTAssertEqual(contents[0].members.map(\.nativeID), ["101", "102"])
             XCTAssertTrue(calls.isEmpty)
@@ -203,7 +231,7 @@ import MeowMusicFeature
     func testSecondPlatformFirstBindingUnionsFavoritesAndPushesOnlyItsRealIdentities() async throws {
         let local = NativeSyncFixture.member("101", platform: .qq), txOnly = NativeSyncFixture.member("102", platform: .qq),
             wyOnly = NativeSyncFixture.member("103")
-        let txSong = try MusicModel.normalize(.init(platform: "tx", data: local.track))
+        let txSong = try NativeMusicFixture.storedSong(.init(platform: "tx", data: local.track))
         let wySong = try MusicModel.normalize(.init(platform: "wy", data: NativeSyncFixture.member("101").track))
         let mergedSong = try MusicModel.mergeSources(txSong, adding: wySong["sources"].array)
         var document = try MusicDocument(nil, runID: "first-binding")
@@ -226,7 +254,7 @@ import MeowMusicFeature
         XCTAssertTrue(state.issues.contains { $0.code == "unmapped" && $0.platform == .netease })
         let lists = try await service.collections(), result = try XCTUnwrap(lists.first { $0.id == favorites.id })
         let tracks = try await service.tracks(in: result)
-        let txRefs = try NativeSyncFixture.refs([local, txOnly], platform: .qq), wyRefs = try NativeSyncFixture.refs([wyOnly])
+        let txRefs = try await NativeSyncFixture.refs([local, txOnly], platform: .qq, service: service), wyRefs = try await NativeSyncFixture.refs([wyOnly], service: service)
         XCTAssertEqual(Set(tracks.map(\.songId)), Set((txRefs + wyRefs).map(\.id)))
         let contents = await wy.contents(), calls = await wy.calls(), unchanged = await tx.contents()
         XCTAssertEqual(contents[0].members.map(\.nativeID).sorted(), ["101", "103"])
@@ -253,8 +281,8 @@ import MeowMusicFeature
         _ = try await service.saveAutomaticLibrarySync(.init(revision: enabled.revision),
             requestID: UUID(), authorization: .init())
         let collections = try await service.collections(), favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
-        _ = try await service.editPlaylist(favorites, name: nil, refs: NativeSyncFixture.refs([b]), order: nil)
-        let aID = try NativeSyncFixture.refs([a])[0].id
+        _ = try await service.editPlaylist(favorites, name: nil, refs: try await NativeSyncFixture.refs([b], service: service), order: nil)
+        let aID = try await NativeSyncFixture.refs([a], service: service)[0].id
         let intent = try NativeSyncFixture.document(store).library["library"]["collections"].array[0]["intents"][aID]
         XCTAssertEqual(intent["present"], .bool(false)); XCTAssertTrue(intent["pending"].bool)
         await service.close()
@@ -273,7 +301,8 @@ import MeowMusicFeature
         XCTAssertEqual(calls.map(\.action), [.remove]); XCTAssertEqual(calls[0].members.map(\.nativeID), ["101"])
         let lists = try await cold.collections(), result = try XCTUnwrap(lists.first { $0.id == favorites.id })
         let tracks = try await cold.tracks(in: result)
-        XCTAssertEqual(tracks.map(\.songId), try NativeSyncFixture.refs([b]).map(\.id))
+        let expected = try await NativeSyncFixture.refs([b], service: cold).map(\.id)
+        XCTAssertEqual(tracks.map(\.songId), expected)
         _ = try await cold.synchronizeAutomaticLibrary(.init(reason: .interval, authorization: .init()))
         let repeated = await peer.calls(); XCTAssertEqual(repeated.count, 1)
         await cold.close()
@@ -284,7 +313,7 @@ import MeowMusicFeature
         let store = try NativeSyncFixture.store([a, b])
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
         let service = try await NativeMusicFixture.service(store, accounts: peer)
-        let refs = try NativeSyncFixture.refs([a, b])
+        let refs = try await NativeSyncFixture.refs([a, b], service: service)
         let created = try await service.createPlaylist(name: "Local", refs: refs)
         _ = try await service.librarySyncState()
         var calls = await peer.calls(); XCTAssertTrue(calls.isEmpty)
@@ -375,7 +404,7 @@ import MeowMusicFeature
             let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
             let service = try await NativeMusicFixture.service(store, accounts: peer)
             let list = try await service.collections()
-            _ = try await service.editPlaylist(list[0], name: nil, refs: NativeSyncFixture.refs([a]), order: nil)
+            _ = try await service.editPlaylist(list[0], name: nil, refs: try await NativeSyncFixture.refs([a], service: service), order: nil)
             await peer.configure(fault: applied ? .appliedThenThrow : .acknowledgedWithoutChange)
             let result = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
             XCTAssertEqual(result.phase, applied ? .synced : .partial)
@@ -389,7 +418,7 @@ import MeowMusicFeature
     func testCASFailureBeforeDispatchLeavesLocalIntentAndNoRemoteWrite() async throws {
         let a = NativeSyncFixture.member("101"), store = try NativeSyncFixture.store([a]), peer = NativeSyncPeer()
         let service = try await NativeMusicFixture.service(store, accounts: peer)
-        _ = try await service.createPlaylist(name: "Local", refs: NativeSyncFixture.refs([a]))
+        _ = try await service.createPlaylist(name: "Local", refs: try await NativeSyncFixture.refs([a], service: service))
         await peer.configure(failDocument: store)
         do { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()); XCTFail("CAS failure") }
         catch { XCTAssertEqual(error as? MusicServiceError, .storageConflict) }

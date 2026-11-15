@@ -6,8 +6,9 @@ import MeowMusicFeature
 @MainActor final class MusicNativeSubscriptionSyncTests: XCTestCase {
     private func enable(_ service: NativeMusicService, platforms: [MusicAccountPlatform] = [.netease]) async throws -> MusicLibrarySyncState {
         let saved = try await service.automaticLibrarySyncPreferences()
-        return try await service.saveAutomaticLibrarySync(.init(revision: saved.revision,
+        let result = try await service.saveAutomaticLibrarySync(.init(revision: saved.revision,
             selections: platforms.map { .init(platform: $0, playlists: true) }), requestID: UUID(), authorization: .init())
+        return try result.synchronization.get()
     }
     private func run(_ service: NativeMusicService, reason: MusicAutomaticLibrarySyncRequest.Reason = .localMutation) async throws -> MusicLibrarySyncState {
         try await service.synchronizeAutomaticLibrary(.init(reason: reason, authorization: .init()))

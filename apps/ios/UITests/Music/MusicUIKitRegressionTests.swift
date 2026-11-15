@@ -705,6 +705,8 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertFalse(source.isUserInteractionEnabled)
         source.sendActions(for: .touchUpInside)
         XCTAssertNil(fixture.page.presentedViewController)
+        await fixture.service.configurePlaybackSource(fm: .init(id: UUID(),
+            action: MusicFMModeChoice.main[2].action, continueEnabled: true, loading: false, error: nil))
         model.playbackState.isFMActive = true
         model.playbackState.activeHomeFM = MusicFMModeChoice.main[2].action
         await waitForResult { source.configuration?.title == "FM·探索" && mode.menu != nil }
@@ -718,7 +720,10 @@ final class MusicUIKitRegressionTests: XCTestCase {
         attachPlaybackView(fixture.page.view, name: "playback-mode-fm-header")
         source.sendActions(for: .touchUpInside)
         NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
-        await waitForResult { (fixture.page.presentedViewController as? MusicFMSettingsViewController)?.isPageVisible == true }
+        await waitForResult {
+            guard let page = fixture.page.presentedViewController as? MusicFMSettingsViewController else { return false }
+            return page.isPageVisible && page.pageHeader.title == "探索模式"
+        }
         let page = try XCTUnwrap(fixture.page.presentedViewController as? MusicFMSettingsViewController)
         XCTAssertEqual(page.modalPresentationStyle, .custom)
         XCTAssertEqual(page.pageHeader.title, "探索模式")
@@ -741,12 +746,17 @@ final class MusicUIKitRegressionTests: XCTestCase {
         try XCTUnwrap(descendants(page.pageHeader).compactMap { $0 as? PageHeaderButton }
             .first { $0.accessibilityLabel == "关闭" }).sendActions(for: .touchUpInside)
         await waitForResult { fixture.page.presentedViewController == nil && fixture.page.isPageVisible }
+        await fixture.service.configurePlaybackSource(fm: .init(id: UUID(),
+            action: MusicFMModeChoice.scenes[0].action, continueEnabled: true, loading: false, error: nil))
         model.playbackState.activeHomeFM = MusicFMModeChoice.scenes[0].action
         await waitForResult { source.configuration?.title == "FM·伤感" }
         XCTAssertEqual(source.accessibilityLabel, "切换 FM：伤感")
         source.sendActions(for: .touchUpInside)
         NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
-        await waitForResult { (fixture.page.presentedViewController as? MusicFMSettingsViewController)?.isPageVisible == true }
+        await waitForResult {
+            guard let page = fixture.page.presentedViewController as? MusicFMSettingsViewController else { return false }
+            return page.isPageVisible && page.pageHeader.title == "伤感"
+        }
         let second = try XCTUnwrap(fixture.page.presentedViewController as? MusicFMSettingsViewController)
         XCTAssertFalse(second === page)
         XCTAssertEqual(second.pageHeader.title, "伤感")
@@ -1003,7 +1013,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(browse: .init(sections: [
             .init(id: "home", title: "", items: [card("fresh-card", previews: [])], layout: .playlistRail),
         ]), restoredHome: snapshot, detail: .init(collection: destination,
-            members: [], total: 0, cursor: nil, snapshot: "public-detail", consumed: 0))
+            members: [], total: 0, cursor: nil))
         let refreshing = expectation(description: "restored home starts background refresh")
         let detailEntered = expectation(description: "cached card play enters public detail")
         let homeGate = MusicUIKitSearchGate { refreshing.fulfill() }
@@ -1066,7 +1076,11 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let alert = try XCTUnwrap(controller.presentedViewController as? UIAlertController)
         // This fixture has no public queue loader: the assertion proves the play
         // entry completed the correct detail read, not successful queue playback.
-        XCTAssertEqual(alert.message, MusicServiceError.unsupported.localizedDescription)
+        let message = try XCTUnwrap(alert.message)
+        let expected = MusicServiceError.unsupported.message(operation: "播放歌曲")
+        XCTAssertEqual(message.components(separatedBy: "（诊断 ").first, expected)
+        XCTAssertNotNil(message.range(of: "^" + NSRegularExpression.escapedPattern(for: expected) +
+            "（诊断 [A-Fa-f0-9]{8}）$", options: .regularExpression))
         XCTAssertEqual(opened, [destination])
         XCTAssertEqual(collection.numberOfItems(inSection: 0), 1)
         let completed = await service.counts()
@@ -1318,10 +1332,10 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let tracks = [resultTrack("wy", "one"), resultTrack("wy", "two")]
         let service = MusicUIKitRegressionService(detail: .init(collection: collection,
             members: [.init(nativeID: "one", sourcePosition: 0, track: tracks[0])],
-            total: 2, cursor: "next", snapshot: "skeleton", consumed: 1),
+            total: 2, cursor: "next"),
             nextDetail: .init(collection: collection,
                 members: [.init(nativeID: "two", sourcePosition: 1, track: tracks[1])],
-                total: 2, cursor: nil, snapshot: "skeleton", consumed: 1))
+                total: 2, cursor: nil))
         let entered = expectation(description: "remote initial read entered")
         let next = expectation(description: "remote next page entered")
         let gate = MusicUIKitSearchGate { entered.fulfill() }, nextGate = MusicUIKitSearchGate { next.fulfill() }
@@ -1718,7 +1732,8 @@ final class MusicUIKitRegressionTests: XCTestCase {
             context: .init(kind: .recommendation, id: "daily", title: "每日推荐", platform: "wy"),
             loadPage: { _ in .init(items: []) }
         )
-        let daily = MusicDailyStyleViewController(page: browse, source: source, appearance: appearance)
+        let daily = MusicDailyStyleViewController(page: browse, source: source,
+            receipts: owner.settingsReceipts, appearance: appearance)
         let fm = MusicFMSettingsViewController(model: owner, appearance: appearance)
         let sources = MusicSourcesViewController(model: owner, tracks: [], appearance: appearance)
         for page in [daily, fm, sources] as [PageViewController] {
@@ -1986,7 +2001,6 @@ final class MusicUIKitRegressionTests: XCTestCase {
         model.playbackState.phase = .playing
         model.playbackState.canEnterSimilarMode = true
         model.metadataState.lyricState = "loaded"
-        model.metadataState.artworkData = Data([1, 2, 3])
         model.metadataState.artworkURL = first
         model.metadataState.occurrenceID = "fm-song"
         model.playbackState.queue = model.queue
@@ -2056,13 +2070,19 @@ final class MusicUIKitRegressionTests: XCTestCase {
         for index in (1...8).reversed() {
             history.record("较长的搜索历史关键词 \(index)")
         }
+        let discoveryEntered = expectation(description: "partial discovery waits for page presentation")
+        let discoveryGate = MusicUIKitSearchGate { discoveryEntered.fulfill() }
         let detail = searchDetail(chart.collection, positions: [0, 2])
         let service = MusicUIKitRegressionService(discovery: [
             .init(hot: hot, hotCanPlay: true, charts: [],
                   failures: [.init(component: .charts, error: .networkOffline)], validUntil: until),
             .init(hot: [], charts: [chart], validUntil: until),
-        ], details: [chart.id: [detail]])
+        ], details: [chart.id: [detail]], discoveryGate: discoveryGate)
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        addTeardownBlock {
+            await discoveryGate.release()
+            await model.close()
+        }
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
                                                    router: MusicUIKitRegressionRouter(), history: history)
         let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
@@ -2070,6 +2090,9 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let window = mount(navigation)
         defer { release(navigation, window: window) }
         let table = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UITableView }.first)
+        await fulfillment(of: [discoveryEntered], timeout: 2)
+        await waitForResult { controller.canPresentPageAlert }
+        await discoveryGate.release()
         let failure = expectation(for: NSPredicate { _, _ in
             MainActor.assumeIsolated {
                 guard let alert = controller.presentedViewController as? UIAlertController else { return false }
@@ -2408,13 +2431,31 @@ final class MusicUIKitRegressionTests: XCTestCase {
         navigation.setViewControllers([controller], animated: false)
         let window = mount(navigation)
         defer { release(navigation, window: window) }
+        let resultsShown = expectation(description: "initial result navigation completed")
+        navigation.didShowPage = { page in
+            if page !== controller, page is SearchPageViewController { resultsShown.fulfill() }
+        }
+        defer { navigation.didShowPage = nil }
         controller.query = "原关键词"; controller.onSubmit?("原关键词")
         await fulfillment(of: [firstReads], timeout: 2)
+        await fulfillment(of: [resultsShown], timeout: 2)
+        navigation.didShowPage = nil
         await deliverMainRunLoop()
         let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        await waitForResult {
+            navigation.transitionCoordinator == nil && navigation.topViewController === results
+        }
+        XCTAssertNil(navigation.transitionCoordinator)
+        XCTAssertTrue(results.isPageActive)
         let reads = await service.resultReads(), entries = history.entries
-        navigation.popViewController(animated: false)
+        let returned = expectation(description: "removed result navigation completed")
+        navigation.didShowPage = { page in
+            if page === controller { returned.fulfill() }
+        }
+        XCTAssertTrue(navigation.popViewController(animated: false) === results)
         navigation.view.layoutIfNeeded()
+        await fulfillment(of: [returned], timeout: 2)
+        navigation.didShowPage = nil
         await deliverMainRunLoop()
         XCTAssertFalse(results.isPageActive)
         model.accountSessionsChanged()
@@ -2458,7 +2499,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     func testSearchSourceMergeRefreshesVisibleRowMenuAndActions() async throws {
         let service = MusicUIKitRegressionService()
         let primary = resultTrack("wy", "primary", title: "同一录音")
-        let added = resultTrack("tx", "added", title: "同一录音")
+        let added = resultTrack("tx", "added", title: "同一录音", album: "当前资料", songID: primary.songId)
         await service.configureResultPages(songs: [
             "wy": [[primary]], "tx": [[resultTrack("tx", "other")], [added]],
         ])
@@ -2469,15 +2510,20 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 .first { self.descendants($0).compactMap { $0 as? UILabel }.contains { $0.text == primary.title } })
             let more = try self.resultButton(prefix: "music.search.song.more.", in: cell)
             let oldMenu = try XCTUnwrap(more.menu)
+            let initial = await service.repositoryTracks(songIDs: [primary.songId])
+            XCTAssertEqual(initial[primary.songId]?.sources.map(\.platform), ["wy"])
             try self.resultButton(id: "music.search.results.action.0.0", in: results.view)
                 .sendActions(for: .touchUpInside)
-            await self.waitForResult { more.menu !== oldMenu }
+            await self.waitForResult {
+                more.menu !== oldMenu && self.descendants(cell).compactMap { $0 as? UILabel }
+                    .contains { $0.text == "Fixture · 当前资料" }
+            }
             XCTAssertTrue(table.visibleCells.contains { $0 === cell }, "来源补入不能靠滚出复用才生效")
 
             let sourceAction = try XCTUnwrap(more.menu?.children.compactMap { $0 as? UIAction }
                 .first { $0.title == "音源" })
-            let sourceRead = self.expectation(description: "source inspection consumes both origins")
-            await service.observeRecordingReads { sourceRead.fulfill() }
+            let sourceRead = self.expectation(description: "source inspection consumes current repository sources")
+            await service.observeInspections { sourceRead.fulfill() }
             self.invoke(sourceAction)
             await self.waitForResult {
                 (results.presentedViewController as? UINavigationController)?
@@ -2486,9 +2532,13 @@ final class MusicUIKitRegressionTests: XCTestCase {
             NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
             await self.fulfillment(of: [sourceRead], timeout: 3)
             await self.waitForResult { results.presentedViewController?.isBeingPresented == false }
-            await service.observeRecordingReads(nil)
-            let inspected = await service.recordingReads()
-            XCTAssertEqual(inspected.first?.targets.first?.origins.map(\.platform), [.netease, .qq])
+            await service.observeInspections(nil)
+            let inspected = await service.inspectionReads(), beforeRecording = await service.recordingReads()
+            XCTAssertEqual(inspected.count, 1)
+            XCTAssertEqual(inspected.first?.sources.map(\.platform), ["wy", "tx"])
+            XCTAssertEqual(inspected.first?.songId, primary.songId)
+            XCTAssertEqual(inspected.first?.ref, primary.ref)
+            XCTAssertTrue(beforeRecording.isEmpty, "音源检查直接读取永久引用，不额外补读歌曲")
             await withCheckedContinuation { continuation in
                 results.dismiss(animated: false) { continuation.resume() }
             }
@@ -2522,9 +2572,13 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 .sendActions(for: .touchUpInside)
             await self.fulfillment(of: [played], timeout: 3)
             let recordings = await service.recordingReads(), batches = await service.batchPlays()
-            XCTAssertEqual(recordings.count, 3)
-            XCTAssertTrue(recordings.allSatisfy { $0.targets.first?.origins.map(\.platform) == [.netease, .qq] })
-            XCTAssertEqual(batches.first?.targets.first?.origins.map(\.platform), [.netease, .qq])
+            XCTAssertEqual(recordings.count, 2)
+            XCTAssertTrue(recordings.allSatisfy {
+                $0.targets.first?.track.songId == primary.songId
+                    && $0.targets.first?.track.sources.map(\.platform) == ["wy", "tx"]
+            })
+            XCTAssertEqual(batches.first?.targets.first?.track.sources.map(\.platform), ["wy", "tx"])
+            XCTAssertEqual(batches.first?.targets.first?.track.ref, primary.ref)
         }
     }
 
@@ -3123,7 +3177,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertTrue(cover.image === image)
         XCTAssertFalse(descendants(cell).contains { $0.accessibilityLabel == "播放b" })
         first.sendActions(for: .touchUpInside)
-        XCTAssertEqual(played, ["a"]); XCTAssertEqual(oldCalls, 0)
+        XCTAssertEqual(played, [a.songId]); XCTAssertEqual(oldCalls, 0)
     }
 
     func testBrowseCardColorGradientAppearsOnlyWhenTextOverlaysArtwork() throws {
@@ -3948,38 +4002,35 @@ final class MusicUIKitRegressionTests: XCTestCase {
             creator: "用户7883263058",
             count: 3
         )
+        let songIDs = (0..<3).map { _ in UUID().uuidString }
         let tracks = [
-            MusicRemoteTrack(ref: .init(kind: .queue, id: "first"), songId: "first",
+            MusicRemoteTrack(ref: .init(kind: .library, id: songIDs[0]), songId: songIDs[0],
                              title: "Time to Pretend", artist: "Lazer Boomerang",
                              album: "Time to Pretend",
                              sources: [.init(sourceKey: "wy:first", platform: "wy", nativeId: "first")]),
-            MusicRemoteTrack(ref: .init(kind: .queue, id: "second"), songId: "second",
+            MusicRemoteTrack(ref: .init(kind: .library, id: songIDs[1]), songId: songIDs[1],
                              title: "The Best Of Me", artist: "Dion Timmer",
                              album: "Very Extra",
                              sources: [.init(sourceKey: "wy:second", platform: "wy", nativeId: "second")]),
-            MusicRemoteTrack(ref: .init(kind: .queue, id: "third"), songId: "third",
+            MusicRemoteTrack(ref: .init(kind: .library, id: songIDs[2]), songId: songIDs[2],
                              title: "Midnight City", artist: "M83",
                              album: "Hurry Up, We're Dreaming",
                              sources: [.init(sourceKey: "wy:third", platform: "wy", nativeId: "third")]),
         ]
         let members = tracks.enumerated().map {
-            MusicPublicBrowseMember(nativeID: $0.element.songId, sourcePosition: $0.offset, track: $0.element)
+            MusicPublicBrowseMember(nativeID: $0.element.sources[0].nativeId, sourcePosition: $0.offset, track: $0.element)
         }
         let firstPage = MusicPublicBrowseDetail(
             collection: collection,
             members: Array(members.prefix(2)),
             total: tracks.count,
-            cursor: "next",
-            snapshot: "reference-snapshot",
-            consumed: 2
+            cursor: "next"
         )
         let nextPage = MusicPublicBrowseDetail(
             collection: collection,
             members: [members[2]],
             total: tracks.count,
-            cursor: nil,
-            snapshot: "reference-snapshot",
-            consumed: 1
+            cursor: nil
         )
         let service = MusicUIKitRegressionService(detail: firstPage, nextDetail: nextPage)
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
@@ -4060,14 +4111,14 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertEqual(
             Set(buttons.compactMap(\.accessibilityIdentifier)),
             Set([
-                "music.collection.play.first",
-                "music.collection.favorite.first",
-                "music.collection.append.first",
-                "music.collection.more.first",
+                "music.collection.play.\(songIDs[0])",
+                "music.collection.favorite.\(songIDs[0])",
+                "music.collection.append.\(songIDs[0])",
+                "music.collection.more.\(songIDs[0])",
             ])
         )
         let more = try XCTUnwrap(buttons.first {
-            $0.accessibilityIdentifier == "music.collection.more.first"
+            $0.accessibilityIdentifier == "music.collection.more.\(songIDs[0])"
         })
         XCTAssertEqual(
             more.menu?.children.compactMap { ($0 as? UIAction)?.title },
@@ -4106,7 +4157,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             ["下一首播放", "收藏到歌单"]
         )
         let select = try XCTUnwrap(descendants(editorCell).compactMap { $0 as? UIButton }.first {
-            $0.accessibilityIdentifier == "music.collection.editor.select.first"
+            $0.accessibilityIdentifier == "music.collection.editor.select.\(songIDs[0])"
         })
         select.sendActions(for: .touchUpInside)
         XCTAssertTrue(editorCell.isTrackSelected)
@@ -4491,7 +4542,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testQueueConsumesSharedFavoritesWithoutSuspendingThemOnRemoval() async throws {
-        let saved = MusicRemoteTrack(ref: .init(kind: .library, id: "favorite"), songId: "favorite", title: "favorite")
+        let saved = track("favorite")
         let service = MusicUIKitRegressionService(localTracks: [saved], collectionKind: "favorites")
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
         await model.load()
@@ -4516,8 +4567,16 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await model.close()
     }
 
+    private var fixtureSongIDs: [String: String] = [:]
+    private func songID(for key: String) -> String {
+        if let id = fixtureSongIDs[key] { return id }
+        let id = UUID().uuidString
+        fixtureSongIDs[key] = id
+        return id
+    }
     private func track(_ id: String) -> MusicRemoteTrack {
-        .init(ref: .init(kind: .handle, id: id), songId: id, title: id)
+        let permanentID = songID(for: "display/" + id)
+        return .init(ref: .init(kind: .library, id: permanentID), songId: permanentID, title: id)
     }
 
     private func makeModePlayer() async -> (
@@ -4620,16 +4679,16 @@ final class MusicUIKitRegressionTests: XCTestCase {
                               positions: [Int]) -> MusicPublicBrowseDetail {
         let members = positions.map { position -> MusicPublicBrowseMember in
             let nativeID = "id-\(position)"
+            let permanentID = songID(for: "wy/" + nativeID)
             let track = MusicRemoteTrack(
-                ref: .init(kind: .handle, id: "handle-\(collection.nativeID)-\(position)"),
-                songId: "wy:" + nativeID,
+                ref: .init(kind: .library, id: permanentID),
+                songId: permanentID,
                 title: "歌曲 \(position + 1)",
                 sources: [.init(sourceKey: "wy:" + nativeID, platform: "wy", nativeId: nativeID)]
             )
             return .init(nativeID: nativeID, sourcePosition: position, track: track)
         }
-        return .init(collection: collection, members: members, total: 30, cursor: nil,
-                     snapshot: String(repeating: "a", count: 64), consumed: 30)
+        return .init(collection: collection, members: members, total: 30, cursor: nil)
     }
     private func card(_ id: String, previews: [MusicRemoteTrack]) -> MusicPublicBrowseItem {
         .init(id: id, title: id, content: .unavailable, previewSongs: previews)
@@ -4653,9 +4712,11 @@ final class MusicUIKitRegressionTests: XCTestCase {
             RunLoop.main.perform { continuation.resume() }
         }
     }
-    private func resultTrack(_ platform: String, _ id: String, title: String? = nil) -> MusicRemoteTrack {
-        .init(ref: .init(kind: .handle, id: platform + ":" + id), songId: id,
-            title: title ?? id, artist: "Fixture", album: "Album", duration: 180,
+    private func resultTrack(_ platform: String, _ id: String, title: String? = nil,
+                             album: String = "Album", songID: String? = nil) -> MusicRemoteTrack {
+        let permanentID = songID ?? self.songID(for: platform + "/" + id)
+        return .init(ref: .init(kind: .library, id: permanentID), songId: permanentID,
+            title: title ?? id, artist: "Fixture", album: album, duration: 180,
             sources: [.init(sourceKey: platform + ":" + id, platform: platform, nativeId: id)])
     }
     private func resultPlaylist(_ id: String) -> MusicPublicBrowseCollection {
@@ -6150,7 +6211,7 @@ private final class MusicUIKitRegressionRouter: MusicUIRouting {
 private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, MusicPublicBrowsing, MusicPublicPlaylistSearching,
     MusicSearchDiscoveryProviding, MusicSearchHotPlaybackProviding, MusicChorusProviding, MusicHomeBrowsing,
     MusicSearchBatchPlaying, MusicResolvedSourcesServing, MusicFMPreviewServing, MusicSimilarModeServing, MusicHomeActionQueueServing,
-    MusicQueueRecommendationServing, MusicFMPlaybackServing {
+    MusicQueueRecommendationServing, MusicFMPlaybackServing, MusicSongRepositoryReading {
     enum SourceCommand: Equatable, Sendable {
         case similarContinue(UUID, Bool), queueContinue(UUID, Bool), fmContinue(UUID, Bool)
         case retrySimilar(UUID), retryQueue(UUID)
@@ -6198,7 +6259,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var resultPageGates: [MusicSearchSection: [Int: MusicUIKitSearchGate]] = [:]
     private var requestedRecordings: [MusicSearchBatchRequest] = [], playedBatches: [MusicSearchBatchRequest] = []
     private var recordingObserver: (@Sendable () -> Void)?, batchObserver: (@Sendable () -> Void)?
-    private var resolvedResultTracks: [MusicReference: MusicRemoteTrack] = [:]
+    private var requestedInspections: [MusicRemoteTrack] = []
+    private var inspectionObserver: (@Sendable () -> Void)?
+    private var resultRepository: [String: MusicRemoteTrack] = [:]
+    private var songContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
     private var resultFavorites: [MusicRemoteTrack] = []
     private let resultInspection = MusicUIKitResultInspectionSession()
     private let sourceSelection: (entry: MusicQueueEntry, session: MusicUIKitSourceSelectionSession)?
@@ -6398,18 +6462,50 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     }
     func observeRecordingReads(_ observer: (@Sendable () -> Void)?) { recordingObserver = observer }
     func observeBatchPlays(_ observer: (@Sendable () -> Void)?) { batchObserver = observer }
+    func observeInspections(_ observer: (@Sendable () -> Void)?) { inspectionObserver = observer }
     func recordingReads() -> [MusicSearchBatchRequest] { requestedRecordings }
     func batchPlays() -> [MusicSearchBatchRequest] { playedBatches }
+    func inspectionReads() -> [MusicRemoteTrack] { requestedInspections }
     func searchRecording(_ request: MusicSearchBatchRequest) throws -> MusicRemoteTrack {
-        guard songResultPages != nil, let origins = request.targets.first?.origins,
-              let primary = origins.first?.track else { throw MusicServiceError.unsupported }
+        guard songResultPages != nil, let target = request.targets.first?.track,
+              let current = resultRepository[target.songId] else { throw MusicServiceError.unsupported }
         requestedRecordings.append(request)
         recordingObserver?()
-        let track = MusicRemoteTrack(ref: primary.ref, songId: primary.songId, title: primary.title,
-            artist: primary.artist, album: primary.album, duration: primary.duration,
-            sources: origins.flatMap { $0.track.sources })
-        resolvedResultTracks[track.ref] = track
-        return track
+        return current
+    }
+    func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] {
+        resultRepository.filter { songIDs.contains($0.key) }
+    }
+    func songChanges() -> AsyncStream<Void> {
+        let pair = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let id = UUID()
+        songContinuations[id] = pair.continuation
+        pair.continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeSongContinuation(id) }
+        }
+        return pair.stream
+    }
+    private func removeSongContinuation(_ id: UUID) { songContinuations[id] = nil }
+    private func adoptResultTracks(_ tracks: [MusicRemoteTrack]) -> [MusicRemoteTrack] {
+        var changed = false
+        let current = tracks.map { track in
+            // The fixture already supplies permanent IDs; only newly read
+            // source facts join that committed record, never unseen pages.
+            var sources = resultRepository[track.songId]?.sources ?? []
+            for source in track.sources {
+                if let index = sources.firstIndex(where: { $0.sourceKey == source.sourceKey }) {
+                    sources[index] = source
+                } else { sources.append(source) }
+            }
+            let value = MusicRemoteTrack(ref: track.ref, songId: track.songId, title: track.title,
+                artist: track.artist, album: track.album, duration: track.duration, sources: sources,
+                artwork: track.artwork, artistNames: track.artistNames, sourcePosition: track.sourcePosition)
+            if resultRepository[track.songId] != value { changed = true }
+            resultRepository[track.songId] = value
+            return value
+        }
+        if changed { for continuation in songContinuations.values { continuation.yield(()) } }
+        return current
     }
     func replaceSearchBatch(_ request: MusicSearchBatchRequest, expectedRevision: Int,
                             intent: MusicQueueAuthorization) throws -> MusicPlaybackState {
@@ -6421,6 +6517,8 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func inspectSources(for reference: MusicReference) throws -> any MusicSourceInspectionSession {
         if let sourceSelection { return sourceSelection.session }
         guard songResultPages != nil else { throw MusicServiceError.unsupported }
+        guard let current = resultRepository[reference.id] else { throw MusicServiceError.notFound }
+        requestedInspections.append(current); inspectionObserver?()
         return resultInspection
     }
     func inspectionCloseCount() async -> Int { await resultInspection.closeCount }
@@ -6580,10 +6678,11 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
             let values = pages[platform] ?? []
             return .init(platform: platform, query: query, page: page, limit: limit,
                 total: values.reduce(0) { $0 + $1.count }, nextPage: page < values.count ? page + 1 : nil,
-                items: values.indices.contains(page - 1) ? values[page - 1] : [])
+                items: adoptResultTracks(values.indices.contains(page - 1) ? values[page - 1] : []))
         }
         let id = "result-\(platform)-\(requestedResultReads.count)"
-        let track = MusicRemoteTrack(ref: .init(kind: .handle, id: id), songId: id,
+        let songID = UUID().uuidString
+        let track = MusicRemoteTrack(ref: .init(kind: .library, id: songID), songId: songID,
             title: "Synthetic \(id)", artist: "Fixture", duration: 180,
             sources: [.init(sourceKey: id, platform: platform, nativeId: id)])
         observe()
@@ -6605,7 +6704,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) throws -> MusicCollection {
         guard songResultPages != nil else { throw MusicServiceError.unsupported }
-        if let refs { resultFavorites = refs.compactMap { resolvedResultTracks[$0] } }
+        if let refs { resultFavorites = refs.compactMap { resultRepository[$0.id] } }
         return collection
     }
     func removePlaylist(_ collection: MusicCollection) throws { throw MusicServiceError.unsupported }

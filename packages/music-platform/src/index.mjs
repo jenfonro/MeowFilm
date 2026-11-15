@@ -1,0 +1,310 @@
+import { createClientContexts } from './clients.mjs';
+import { createMusicTransport } from './transport.mjs';
+import { fail, errorCode, MusicPlatformError, musicPlatformCodes } from './errors.mjs';
+import { input, object, protocolInteger, publicText, required, rows, scalar } from './model.mjs';
+import { cookieFields, encryptedWyResponse, kgRequest, kgSalt, kgSuccess, md5, wyRequest, wySuccess, txRequest, txSuccess } from './protocols.mjs';
+import { xeapiRequest } from './xeapi.mjs';
+import { wyProvider } from './providers/wy.mjs';
+import { txProvider } from './providers/tx.mjs';
+import { kgProvider } from './providers/kg.mjs';
+import { kwProvider } from './providers/kw.mjs';
+import { mgProvider } from './providers/mg.mjs';
+import { createAccountOperations } from './accounts.mjs';
+import { createMutations } from './mutations.mjs';
+
+export { MusicPlatformError, musicPlatformCodes };
+const providers = { wy: wyProvider, tx: txProvider, kg: kgProvider, kw: kwProvider, mg: mgProvider };
+const writes = new Set(['dailyStyle.save', 'sync.write', 'feedback.send', 'feedback.upload', 'vip.checkIn', 'sms.send']);
+const physicalCancellation = new Set(['audio', 'lyrics', 'chorus', 'account.verify', 'account.refresh', 'account.profile',
+  'qr.create', 'qr.poll', 'sms.login', 'feedback.prepare', 'feedback.qualify', 'sync.prepare']);
+
+/** Shared request/parse owner. Only anonymous client state and recoverable API results live here.
+ * The native account owner publishes an authorized session after its durable save. */
+export function createMusicPlatform({ documents, transport = createMusicTransport(), clock = Date.now,
+  tokenProvider } = {}) {
+  const clients = createClientContexts({ documents, transport, clock }), accounts = createAccountOperations(), mutations = createMutations();
+  const sessions = new Map(), active = new Set(), cache = new Map(), flights = new Map();
+  let cacheBytes = 0, closed = false, closing, xeapiState = {};
+  function erase(key) {
+    const entry = cache.get(key);
+    if (entry) { cacheBytes -= entry.bytes; cache.delete(key); }
+  }
+  function invalidate(platform) {
+    for (const [key, entry] of cache) if (!platform || entry.platform === platform) erase(key);
+    for (const [key, entry] of flights) if (!platform || entry.platform === platform) flights.delete(key);
+  }
+  function guardPlatform(platform) {
+    if (!Object.hasOwn(providers, platform)) fail('UNSUPPORTED');
+  }
+  async function sessionUpdate({ platform, session = null }) {
+    if (closed) fail('CLOSED');
+    guardPlatform(platform);
+    const previous = sessions.get(platform);
+    const next = session === null ? null : { scope: input(session.scope), generation: session.generation,
+      userId: input(session.userId), cookie: input(session.cookie) };
+    if (next && previous?.scope === next.scope && previous?.generation === next.generation &&
+        previous?.cookie === next?.cookie && previous?.userId === next?.userId) return { published: true };
+    if (next) sessions.set(platform, Object.freeze(next)); else sessions.delete(platform);
+    if (platform === 'wy') xeapiState = {};
+    accounts.invalidate(platform);
+    mutations.invalidate(platform);
+    invalidate(platform);
+    const retired = [...active].filter(entry => entry.platform === platform && (!entry.committed || entry.readback));
+    for (const entry of retired) entry.controller.abort(new MusicPlatformError('STALE_SESSION'));
+    // A native invalidation/close acknowledgement must include physical settlement,
+    // not just the HTTP subscribers which may already have relinquished their reads.
+    await Promise.allSettled(retired.map(entry => entry.work));
+    return { published: true };
+  }
+  function context(entry, params) {
+    const { platform, session, controller } = entry, signal = controller.signal, keyState = xeapiState;
+    const assertCurrent = () => {
+      signal.throwIfAborted();
+      if (!entry.candidate && (!entry.committed || entry.readback) && session !== sessions.get(platform)) fail('STALE_SESSION');
+    };
+    const c = {
+      platform, account: entry.account, signal, clock, transport,
+      client: () => { assertCurrent(); return clients.get(platform); }, errorCode,
+      cancel() { controller.abort(new MusicPlatformError('CANCELLED')); },
+      drain() { return entry.work.catch(() => {}); },
+      isCurrent() { return !signal.aborted && (entry.candidate || session === sessions.get(platform)); },
+      async readback(receipt, action) {
+        // The write receipt stays committed; only the optional read resumes
+        // ordinary session/close ownership and physical draining.
+        entry.readback = receipt;
+        assertCurrent();
+        const result = await action();
+        assertCurrent();
+        return result;
+      },
+      accountRequired() { if (!c.account) fail('AUTH_REQUIRED'); return c.account; },
+      verifyTxFeedback: () => accounts.verifyTxFeedback(c),
+      dispatched() { assertCurrent(); entry.committed = true; },
+      invalidateCache() { invalidate(platform); },
+      async read(recipe) { assertCurrent(); const result = await transport({ ...recipe, signal }); assertCurrent(); return result.value; },
+      async response(recipe, options = {}) {
+        assertCurrent();
+        const result = await transport({ ...recipe, signal, dispatched: options.dispatched });
+        assertCurrent(); return result;
+      },
+      async wy(path, data, weapi = false, options = {}) {
+        assertCurrent();
+        const client = clients.get('wy');
+        const recipe = wyRequest(path, data, client, c.account, clock, weapi, options.token, options.vip);
+        assertCurrent();
+        const reply = await transport({ ...recipe,
+          signal, dispatched: options.dispatched, json: !options.vip,
+          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+        assertCurrent();
+        if (options.vip) reply.value = encryptedWyResponse(reply.value, options.maximumBytes);
+        if (!options.raw) try { wySuccess(reply.value); }
+        catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
+        if (!entry.committed) clients.acceptWy(reply.cookies, c.account, new URL(recipe.url).hostname);
+        return options.response ? reply : reply.value;
+      },
+      async tx(module, method, data = {}, prepare = false, options = {}) {
+        assertCurrent();
+        const client = prepare ? await clients.prepare('tx') : clients.get('tx');
+        assertCurrent();
+        const recipe = txRequest(module, method, data, client, c.account, clock, options);
+        const reply = await transport({ ...recipe, signal, dispatched: options.dispatched,
+          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+        assertCurrent();
+        try { return txSuccess(reply.value); }
+        catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
+      },
+      async kg(path, data = {}, router, body, origin, salt, options = {}) {
+        assertCurrent();
+        const request = kgRequest(path, data, clients.get('kg'), c.account, clock, router, body, origin, salt);
+        if (options.headers) Object.assign(request.headers, options.headers);
+        const reply = await transport({ ...request, signal, dispatched: options.dispatched,
+          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+        assertCurrent();
+        if (reply.headers.get('ssa-code')) { options.rejected?.(); fail('VERIFICATION_REQUIRED'); }
+        try { return kgSuccess(reply.value); }
+        catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
+      },
+      async kgRank(body) {
+        assertCurrent();
+        const recipe = kgRequest('/openapi/kmr/v2/rank/audio', {}, clients.get('kg'), c.account, clock, null, body);
+        recipe.headers['kg-tid'] = '369';
+        const reply = await c.response(recipe);
+        if (reply.headers.get('ssa-code')) fail('VERIFICATION_REQUIRED');
+        return kgSuccess(reply.value);
+      },
+      // This exact hash/MixSongID association is consumed only by remote
+      // mutations and CSCC feedback, never by ordinary catalog reads.
+      async kgMixRow(hash, mix) {
+        let mapped;
+        if (!mix || mix === '0') {
+          const client = clients.get('kg'), cookies = cookieFields(c.accountRequired().cookie),
+            time = Math.floor(clock() / 1000);
+          const raw = kgSuccess(await c.read({ url: 'https://gateway.kugou.com/v2/album_audio/audio',
+            method: 'POST', headers: { 'Content-Type': 'application/json;charset=utf-8',
+              'x-router': 'kmr.service.kugou.com', 'Cache-Control': 'no-store',
+              mid: cookies.KUGOU_API_MID ?? client.mid, dfid: cookies.dfid ?? client.dfid ?? '-', clienttime: String(time),
+              'User-Agent': 'Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi',
+              'kg-rc': '1', 'kg-thash': '5d816a0', 'kg-rec': '1', 'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F' }, maximumBytes: 2 * 1024 * 1024,
+            body: JSON.stringify({ appid: 1005, clienttime: time, clientver: 20489, data: [{ hash: hash.toLowerCase() }],
+              dfid: cookies.dfid ?? client.dfid ?? '-', key: md5('1005' + kgSalt + '20489' + time),
+              mid: cookies.KUGOU_API_MID ?? client.mid, show_privilege: 0, show_author_alias: 0,
+              show_rel_album_audio_info: 0, show_remarks: 0 }) }));
+          let values = rows(raw.data);
+          if (values.length === 1 && Array.isArray(values[0])) values = values[0];
+          if (values.length !== 1) fail('REMOTE_CHANGED');
+          mix = required(values[0].album_audio_id);
+          mapped = required(values[0].audio_info?.hash ?? values[0].hash).toUpperCase();
+        }
+        const raw = await c.kg('/kmr/v2/audio', {}, 'openapi.kugou.com',
+          { data: [{ entity_id: protocolInteger(mix) }], fields: 'base,audio_info,album_info,authors.base' },
+          undefined, undefined, { maximumBytes: 2 * 1024 * 1024, headers: { 'KG-TID': '238', 'Cache-Control': 'no-store' } });
+        const values = rows(raw.data), row = values[0], audio = row?.audio_info;
+        if (values.length !== 1 || Number(row?.__status) !== 1 || scalar(row.base?.album_audio_id) !== mix ||
+            !['hash', 'hash_320', 'hash_flac', 'hash_high'].some(key => scalar(audio?.[key]).toUpperCase() === hash) ||
+            mapped && mapped !== scalar(audio?.hash).toUpperCase()) fail('REMOTE_CHANGED');
+        return row;
+      },
+      async xeapi(path, data, options = {}) {
+        assertCurrent();
+        const value = await xeapiRequest(path, data, { transport, client: clients.get('wy'), account: c.account, clock, signal,
+          ...options, keyState: entry.candidate ? {} : keyState,
+          dispatched: options.dispatched ? () => { c.dispatched(); options.dispatched(); } : undefined });
+        assertCurrent();
+        try { return wySuccess(value); }
+        catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
+      },
+      async registerKg(device) { const client = await clients.registerKg(device); assertCurrent(); return client; },
+      acceptKgAccount(before, device) { assertCurrent(); clients.acceptKgAccount(before, device); },
+      acceptWyAccount(before, used, next) { assertCurrent(); clients.acceptWyAccount(before, used, next); },
+      async prepareTx() { const client = await clients.prepare('tx'); assertCurrent(); return client; },
+      async token() {
+        if (!tokenProvider) fail('SIGNATURE_REQUIRED');
+        try { return await tokenProvider.get({ signal }); }
+        catch (error) {
+          if (signal.aborted) throw signal.reason;
+          if (error.code === 'UPSTREAM_FORMAT') fail('INVALID_RESPONSE');
+          if (['CLOSED', 'CANCELLED', 'TIMEOUT', 'NETWORK_ERROR', 'UPSTREAM_HTTP', 'INVALID_RESPONSE'].includes(error.code))
+            fail(error.code);
+          fail('SIGNATURE_REQUIRED');
+        }
+      },
+      async cached(parts, action, ttl = 600000) {
+        const key = JSON.stringify([platform, entry.account?.scope ?? entry.account?.cookie ?? 'anonymous',
+          entry.account?.generation ?? 0, parts]);
+        assertCurrent();
+        const old = cache.get(key);
+        if (!params.refresh && old?.expires > clock()) return structuredClone(old.value);
+        if (old) erase(key);
+        const shared = flights.get(key);
+        if (shared) {
+          const result = await shared.work; assertCurrent(); return structuredClone(result);
+        }
+        const work = Promise.resolve().then(action);
+        const flight = { platform, work }; flights.set(key, flight);
+        try {
+          const result = await work;
+          assertCurrent();
+          // Only public reads and the existing private directory/daily cache are retained.
+          if (!entry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) {
+            const bytes = Buffer.byteLength(JSON.stringify(result));
+            if (bytes <= 2 * 1024 * 1024 && flights.get(key) === flight) {
+              erase(key);
+              while (cache.size >= 64 || cacheBytes + bytes > 2 * 1024 * 1024) erase(cache.keys().next().value);
+              cache.set(key, { platform, bytes, value: structuredClone(result), expires: Math.min(clock() + ttl, result.expiresAt ?? Infinity) });
+              cacheBytes += bytes;
+            }
+          }
+          return result;
+        } finally { if (flights.get(key) === flight) flights.delete(key); }
+      },
+    };
+    return c;
+  }
+  function request({ platform, operation, params = {}, candidate, expectedSession }, { signal } = {}) {
+    if (closed) fail('CLOSED');
+    guardPlatform(platform); object(params, 'INVALID_REQUEST');
+    signal?.throwIfAborted();
+    const action = Object.hasOwn(providers[platform], operation) ? providers[platform][operation] :
+      Object.hasOwn(accounts.operations, operation) ? accounts.operations[operation] :
+      Object.hasOwn(mutations.operations, operation) ? mutations.operations[operation] : undefined;
+    if (typeof action !== 'function') fail('UNSUPPORTED');
+    const controller = new AbortController(), session = sessions.get(platform);
+    if (expectedSession !== undefined && (expectedSession === null ? session !== undefined :
+      expectedSession.scope !== session?.scope || expectedSession.generation !== session?.generation)) fail('STALE_SESSION');
+    const entry = { platform, operation, controller, session, committed: false, readback: null, candidate: candidate !== undefined,
+      account: candidate === undefined ? session : candidate === null ? null :
+        { userId: scalar(candidate.userId), cookie: input(candidate.cookie) } };
+    const timer = setTimeout(() => controller.abort(new MusicPlatformError('TIMEOUT')),
+      platform === 'wy' && operation === 'sync.prepare' ? 60000 : 25000);
+    const abort = () => {
+      if (!entry.committed && (writes.has(operation) || physicalCancellation.has(operation)))
+        controller.abort(new MusicPlatformError('CANCELLED'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    active.add(entry);
+    const work = Promise.resolve().then(async () => {
+      const c = context(entry, params), value = await action(c, params);
+      // Only the already projected public result is inspected for credential
+      // reflection. Unconsumed upstream branches are never walked or validated.
+      if (c.account && !['account.verify', 'account.profile', 'account.refresh', 'sms.login', 'qr.poll'].includes(operation)) {
+        const fields = cookieFields(c.account.cookie), secrets = ['MUSIC_U', 'MUSIC_A', '__csrf', 'musickey', 'token',
+          'refresh_token', 'access_token', 'refresh_key', 'vip_token'].map(key => fields[key]).filter(Boolean);
+        if (fields.t1 && !/^\d+$/.test(fields.t1)) secrets.push(fields.t1);
+        if (secrets.length) {
+          const pending = [value];
+          while (pending.length) {
+            const field = pending.pop();
+            if (typeof field === 'string') publicText(field, secrets);
+            else if (field && typeof field === 'object') for (const child of Object.values(field)) pending.push(child);
+          }
+        }
+      }
+      return value;
+    })
+      .then(value => {
+        if (!entry.committed) controller.signal.throwIfAborted();
+        if (entry.readback && (controller.signal.aborted || !entry.candidate && session !== sessions.get(platform)))
+          return controller.signal.reason?.code === 'TIMEOUT'
+            ? { ...entry.readback, errorCode: entry.readback.errorCode ?? 'TIMEOUT' } : entry.readback;
+        return value;
+      })
+      .catch(error => {
+        const failure = error instanceof MusicPlatformError ? error : new MusicPlatformError(errorCode(error));
+        if (entry.readback) {
+          const code = controller.signal.aborted ? errorCode(controller.signal.reason) : failure.code;
+          return { ...entry.readback, errorCode: entry.readback.errorCode ??
+            ((!entry.candidate && session !== sessions.get(platform)) || ['STALE_SESSION', 'CANCELLED', 'CLOSED'].includes(code)
+              ? null : code) };
+        }
+        if (writes.has(operation) && operation !== 'sms.send')
+          return { status: entry.committed ? 'unknown' : 'notSent', errorCode: failure.code };
+        throw failure;
+      })
+      .finally(() => { clearTimeout(timer); signal?.removeEventListener('abort', abort); active.delete(entry); });
+    entry.work = work;
+    work.catch(() => {});
+    if (!signal || writes.has(operation)) return work;
+    // Catalog caller cancellation relinquishes only this subscriber, not admitted I/O.
+    return new Promise((resolve, reject) => {
+      const unsubscribe = () => reject(new MusicPlatformError('CANCELLED'));
+      signal.addEventListener('abort', unsubscribe, { once: true });
+      if (signal.aborted) unsubscribe();
+      work.then(resolve, reject).finally(() => signal.removeEventListener('abort', unsubscribe)).catch(() => {});
+    });
+  }
+  return {
+    request, sessionUpdate,
+    clear({ platform } = {}) { if (closed) fail('CLOSED'); if (platform) guardPlatform(platform); invalidate(platform); return { cleared: true }; },
+    describe() { return { execution: 'node', contract: 'music.platform.v1', platforms: Object.keys(providers) }; },
+    close() {
+      return closing ??= (async () => {
+        closed = true; invalidate();
+        for (const entry of active) if (!entry.committed || entry.readback) entry.controller.abort(new MusicPlatformError('CLOSED'));
+        const clientDrain = clients.close();
+        await Promise.allSettled([...active].map(entry => entry.work));
+        await clientDrain; accounts.close(); mutations.close();
+        sessions.clear(); xeapiState = {};
+      })();
+    },
+  };
+}

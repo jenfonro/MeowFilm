@@ -19,6 +19,11 @@ private actor ChannelFeedService: MusicPublicBrowsing {
     static let choices: [MusicPublicBrowseFilter] = [
         .init(id: "a|", title: "全部歌曲"), .init(id: "a|4", title: "Four", group: "Style")
     ]
+    static let songIDs = [
+        "A0000000-0000-4000-8000-000000000001",
+        "A0000000-0000-4000-8000-000000000002",
+        "A0000000-0000-4000-8000-000000000003"
+    ]
     var failure: MusicServiceError?
     var sectionFailure: MusicServiceError?
     var gate: FeedGate?
@@ -39,12 +44,16 @@ private actor ChannelFeedService: MusicPublicBrowsing {
         calls.append((tag, cursor))
         if let gate { await gate.wait() }
         if let failure { throw failure }
-        let index = cursor == nil || duplicate ? "1" : cursor!.hasSuffix(":1") ? "2" : "3"
-        let id = tag + index
-        let track = MusicRemoteTrack(ref: .init(kind: .handle, id: id), songId: id, title: id,
-                                    sources: [.init(sourceKey: id, platform: "wy", nativeId: index)])
+        let page = cursor == nil ? 0 : cursor!.hasSuffix(":1") ? 1 : 2
+        let index = duplicate ? 1 : page + 1
+        let title = tag + String(index), songID = Self.songIDs[index - 1]
+        let occurrence = "\(tag):\(cursor ?? "first"):0"
+        let track = MusicRemoteTrack(ref: .init(kind: .library, id: songID, occurrence: occurrence),
+            songId: songID, title: title,
+            sources: [.init(sourceKey: "wy:" + String(index), platform: "wy", nativeId: String(index))],
+            sourcePosition: page)
         let items: [MusicPublicBrowseItem] = sectionFailure == nil ?
-            [.init(id: id, title: id, content: .track(track))] : []
+            [.init(id: occurrence, title: title, content: .track(track))] : []
         let feed = MusicPublicBrowseSection(id: "feed", title: "Feed", items: items,
             filters: Self.choices, selectedFilter: tag, error: sectionFailure)
         let other = MusicPublicBrowseSection(id: "cards", title: "Cards", items: [
@@ -147,17 +156,25 @@ private actor ChannelFeedService: MusicPublicBrowsing {
         XCTAssertEqual(model.selectedFilter, "b|")
         XCTAssertTrue(model.contentIsCurrent); XCTAssertNotNil(model.makeActionIntent())
     }
-    func testAppendKeepsOneFeedAndRejectsDuplicateNonterminalPageWithoutLosingCursor() async throws {
+    func testAppendKeepsOneFeedAndConsumesRepeatedSongsWhenTheProviderCursorAdvances() async throws {
         let service = ChannelFeedService(), model = await loaded(service)
         await model.appendNext()
         XCTAssertEqual(model.sections.map(\.id), ["cards", "feed"]); XCTAssertEqual(model.tracks.count, 2)
         XCTAssertEqual(feed(model)?.filters, ChannelFeedService.choices)
-        let cursor = model.nextCursor
+        let identifiers = try XCTUnwrap(feed(model)?.items).map(\.id)
         await service.configure(duplicate: true); await model.appendNext()
-        XCTAssertEqual(model.error, .invalidResponse); XCTAssertEqual(model.nextCursor, cursor)
-        XCTAssertEqual(model.tracks.count, 2)
-        await service.configure(); await model.retry()
-        XCTAssertNil(model.error); XCTAssertEqual(model.tracks.count, 3)
+        XCTAssertNil(model.error); XCTAssertEqual(model.nextCursor, "a|:3")
+        XCTAssertEqual(model.tracks.map(\.title), ["a|1", "a|2", "a|1"])
+        XCTAssertEqual(model.tracks.map(\.songId),
+                       [ChannelFeedService.songIDs[0], ChannelFeedService.songIDs[1], ChannelFeedService.songIDs[0]])
+        XCTAssertEqual(Set(model.tracks.map(\.ref)).count, 3)
+        XCTAssertTrue(model.tracks.allSatisfy { $0.ref.kind == .library && $0.ref.id == $0.songId })
+        XCTAssertEqual(model.tracks.map(\.sourcePosition), [0, 1, 2])
+        let items = try XCTUnwrap(feed(model)?.items)
+        XCTAssertEqual(Set(items.map(\.id)).count, 3)
+        XCTAssertEqual(Array(items.prefix(2)).map(\.id), identifiers)
+        let calls = await service.calls
+        XCTAssertEqual(calls.map(\.1), [nil, "a|:1", "a|:2"])
         XCTAssertEqual(model.sections.filter { $0.id == "feed" }.count, 1)
     }
     func testRevokedFilterRequestDoesNotRepopulateRetainedRows() async throws {

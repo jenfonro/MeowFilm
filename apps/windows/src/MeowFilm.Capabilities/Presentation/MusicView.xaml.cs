@@ -623,6 +623,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
             IsHitTestVisible = false;
             var image = new ArtworkImage
             {
+                DisplayIdentity = song.Id,
                 Address = song.Cover,
                 Width = 36,
                 Height = 36,

@@ -169,7 +169,7 @@ final class MusicPaletteTransitionTests: XCTestCase {
             let gradient = try self.gradient(in: page.layer)
             XCTAssertNil(gradient.animation(forKey: "page.colorway"), "First page color is immediate")
             let initial = try self.colors(gradient.colors)
-            let song = MusicAppearanceSongIdentity(id: "palette-transition")
+            let song = MusicAppearanceSongIdentity(songID: "palette-transition")
             _ = appearance.primeCover(rgba: [240, 20, 20, 255], for: song)
             appearance.selectSong(song)
             page.setNeedsLayout()

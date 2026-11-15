@@ -1,8 +1,8 @@
 # Windows 音源脚本接入
 
 App 装配后显式启动 `AppRuntimeClient` → 唯一 Node / HTTP 会话 → Windows 薄 entry → 公共 music 模块 → script-host。
-启动不执行用户脚本，不检测；脚本服务失败不阻塞原生目录、曲库、账号和官方播放。
-握手按序校验 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.3.0`／`source.runtime.v2`、`pan@0.1.0`／`pan.runtime.v1`、`tmdb@0.1.0`／`tmdb.data.v1`、`douban@0.1.0`／`douban.data.v1`、`film@0.1.0`／`film.playback.v1`、`netease@0.1.0`／`netease.token.v1` 八模块。`MusicScriptOwner` 仅消费 music 模块；原生订阅协调器按需借用同一 runtime 取网易 token，见[歌单同步](music-library-sync.md)。
+启动不执行用户脚本、不检测；单个脚本失败不阻塞独立平台模块或本地曲库。共同运行器启动失败会使平台联网请求与脚本均不可用，不改写原生曲库或凭据。
+握手按序校验 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.3.0`／`source.runtime.v2`、`pan@0.1.0`／`pan.runtime.v1`、`tmdb@0.1.0`／`tmdb.data.v1`、`douban@0.1.0`／`douban.data.v1`、`film@0.1.0`／`film.playback.v1`、`netease@0.1.0`／`netease.token.v1`、`music-platform@0.1.0`／`music.platform.v1` 九模块。`MusicScriptOwner` 仅消费 music 模块；共同音乐平台借用同一 runtime 的网易 token owner，见[平台运行器](../runtime/music-platform.md)与[歌单同步](music-library-sync.md)。
 
 ## 薄适配
 

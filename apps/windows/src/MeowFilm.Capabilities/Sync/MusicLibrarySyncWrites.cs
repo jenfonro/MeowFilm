@@ -17,6 +17,8 @@ internal sealed partial class MusicLibrarySyncEngine
             adapter.CheckWriteCapability("create");
             await Journal(cid, adapter, null, "create", [], [], fresh.Collections.Select(r => r.Id).ToArray());
             try { await adapter.CreateAsync(S(Collection(cid)["name"])); }
+            catch (MusicSyncWriteException e) when (e.Status is "notSent" or "rejected")
+            { await ClearUnappliedWrite(); throw; }
             catch (Exception e) when (!Fatal(e)) { /* Outcome is established only by a fresh full read, never by HTTP success. */ }
             created = await RecoverPending();
             bindings = Bindings(Collection(cid)).Where(b => S(b["platform"]) == platform && S(b["accountId"]) == adapter.AccountId).ToArray();
@@ -96,13 +98,26 @@ internal sealed partial class MusicLibrarySyncEngine
         await Journal(cid, adapter, remote, operation, ids, desired);
         try
         {
-            await Guard();
             if (operation == "delete") await adapter.DeleteAsync(fresh);
             else if (operation == "order") await adapter.OrderAsync(fresh, desired);
             else await adapter.ChangeAsync(fresh, operation == "add", ids, songs ?? new Dictionary<string, JsonObject>());
         }
+        catch (MusicSyncWriteException e) when (e.Status is "notSent" or "rejected")
+        { await ClearUnappliedWrite(); throw; }
         catch (Exception e) when (!Fatal(e)) { /* Persistent write fence remains until a complete readback confirms the actual result. */ }
         return await RecoverPending();
+    }
+    private async Task ClearUnappliedWrite()
+    {
+        state["pending"] = null;
+        // A definite unsent/rejected receipt settles this exact saved journal even
+        // after cancellation. The owner's snapshot CAS, not a stale account lease,
+        // guards the durable update.
+        snapshot = await owner.CommitLibrarySyncAsync(snapshot, LJ.Element(library), LJ.Element(state),
+            CancellationToken.None).ConfigureAwait(false);
+        library = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject();
+        state = JsonNode.Parse(snapshot.State.GetRawText())!.AsObject();
+        songGroups = null;
     }
     private async Task<SyncRemote?> RecoverPending()
     {
@@ -123,7 +138,7 @@ internal sealed partial class MusicLibrarySyncEngine
             var c = Collection(cid); var r = candidates.Single(); string key = BindingKey(platform, adapter.AccountId, r.Id);
             LJ.Require(!Collections.Any(other => S(other["id"]) != cid && Bindings(other).Any(b => BindingKey(b) == key)), "IDENTITY_MISMATCH");
             if (!Bindings(c).Any(b => BindingKey(b) == key)) LJ.Array(c["bindings"]).Add(NewBinding(adapter, r));
-            UpdateBaseline(cid, key, r);
+            await UpdateBaseline(cid, key, r);
             state["pending"] = null; await Save(); return r;
         }
         var actual = await adapter.ReadCollectionAsync(S(w["remoteId"])); string bindingKey = BindingKey(platform, adapter.AccountId, S(w["remoteId"]));
@@ -138,7 +153,7 @@ internal sealed partial class MusicLibrarySyncEngine
         bool unexpected = operation == "order" ? !actual.Ids.Order().SequenceEqual(before.Order()) :
             before.Except(actual.Ids).Any(id => operation != "remove" || !ids.Contains(id)) || actual.Ids.Except(before).Any(id => operation != "add" || !ids.Contains(id));
         LJ.Require(!unexpected, "REMOTE_CHANGED_DURING_WRITE");
-        UpdateBaseline(cid, bindingKey, actual);
+        await UpdateBaseline(cid, bindingKey, actual);
         var c2 = Collection(cid); var b2 = Binding(cid, bindingKey); var present = actual.Keys.Select(k => S(b2["map"]![k])).ToHashSet();
         foreach (var (id, value) in LJ.Object(c2["intents"]))
         {
@@ -150,8 +165,9 @@ internal sealed partial class MusicLibrarySyncEngine
         if (complete) state["pending"] = null;
         await Save(); LJ.Require(complete, "WRITE_UNCONFIRMED"); return actual;
     }
-    private void UpdateBaseline(string cid, string key, SyncRemote remote)
+    private async Task UpdateBaseline(string cid, string key, SyncRemote remote)
     {
+        await AdoptMembers(remote.Members);
         var b = Binding(cid, key); var map = LJ.Object(b["map"]);
         foreach (var m in remote.Members) map[m.Key] = MergeMember(m);
         b["baseline"] = LJ.Arr(remote.Keys); b["writable"] = remote.Writable; b["name"] = remote.Name;

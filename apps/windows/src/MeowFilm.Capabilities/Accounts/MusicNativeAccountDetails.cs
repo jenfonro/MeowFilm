@@ -47,19 +47,14 @@ public sealed partial class MusicNativeApplication
             var input = parameters is JsonElement element ? element : JsonSerializer.SerializeToElement(parameters);
             if (input.ValueKind != JsonValueKind.Object || method is not ("music.accountDetails.read" or "music.accountDetails.refresh"))
                 return Failed("INVALID_REQUEST");
-            var fields = input.EnumerateObject().ToArray();
-            if (fields.Select(f => f.Name).Distinct(StringComparer.Ordinal).Count() != fields.Length ||
-                fields.Any(f => f.Name is not ("platform" or "expectedGeneration")) ||
-                !input.TryGetProperty("platform", out var platform) || platform.ValueKind != JsonValueKind.String ||
+            if (!input.TryGetProperty("platform", out var platform) || platform.ValueKind != JsonValueKind.String ||
                 platform.GetString() is not ("wy" or "tx" or "kg"))
                 return Failed("INVALID_REQUEST");
             long generation = 0;
             bool refresh = method == "music.accountDetails.refresh";
-            if (refresh
-                ? fields.Length != 2 || !input.TryGetProperty("expectedGeneration", out var version) ||
+            if (refresh && (!input.TryGetProperty("expectedGeneration", out var version) ||
                   version.ValueKind != JsonValueKind.Number || !version.TryGetInt64(out generation) ||
-                  generation is < 1 or > 9_007_199_254_740_991L
-                : fields.Length != 1) return Failed("INVALID_REQUEST");
+                  generation is < 1 or > 9_007_199_254_740_991L)) return Failed("INVALID_REQUEST");
             lock (gate) if (accountReceiptUnknown) return Failed("COMMIT_UNKNOWN");
             var details = refresh
                 ? await accounts.RefreshDetailsAsync(platform.GetString()!, generation, token).ConfigureAwait(false)

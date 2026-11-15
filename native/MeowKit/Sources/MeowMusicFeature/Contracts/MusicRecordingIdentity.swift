@@ -1,94 +1,44 @@
-// SPDX-License-Identifier: GPL-3.0-only
-// Recording evidence adapted from iWebPlus song-identity.js.
 import Foundation
 
-/// The shared recording rule for display fusion, durable sources and renewal.
-/// Native IDs permit metadata enrichment, not contradictory recording evidence.
+/// Search evidence, not a permanent key. A repository compares a new source
+/// with one record's first valid duration; accepted sources never move it.
 public struct MusicRecordingIdentity: Sendable {
-    public let title: String
-    public let artist: String
-    public let version: String
-    public let duration: Double
-    private let sourceKeys: Set<Data>
+    private static let whitespace = CharacterSet(charactersIn:
+        "\u{0009}\u{000A}\u{000B}\u{000C}\u{000D}\u{0020}\u{0085}\u{00A0}\u{1680}" +
+        "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}" +
+        "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}")
+    public let lookupKey: String?
+    public let duration: Double?
 
-    public init(title: String, artist: String, duration: Double, sourceKeys: [String] = []) {
-        var name = Self.normalize(title)
-        let artists = Self.replace(Self.artistSeparators, in: Self.normalize(artist), with: "\u{1f}")
-        self.artist = artists.components(separatedBy: "\u{1f}").filter { !$0.isEmpty }
-            .sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }.joined(separator: " & ")
-        version = Self.versionTags.filter { Self.matches($0.1, name) }.map(\.0).joined(separator: ",")
-        if let match = Self.trailingParentheses.firstMatch(
-            in: name, range: NSRange(name.startIndex..<name.endIndex, in: name)),
-           let range = Range(match.range, in: name),
-           let open = name.firstIndex(where: { $0 == "(" || $0 == "（" }) {
-            let suffix = String(name[range]).trimmingCharacters(in: .whitespaces)
-            if Self.normalize(String(suffix.dropFirst().dropLast())) == Self.normalize(String(name[..<open])) {
-                name = Self.normalize(String(name[..<range.lowerBound]))
-            }
-        }
-        self.title = Self.replace(Self.openParenthesis, in:
-            Self.replace(Self.closeParenthesis, in: name, with: ")"), with: "(")
-            .trimmingCharacters(in: .whitespaces)
-        self.duration = duration.isFinite && duration > 0 ? duration : 0
-        self.sourceKeys = Set(sourceKeys.filter { !$0.isEmpty }.map { Data($0.utf8) })
+    public init(title: String, artist: String, duration: Double, artistNames: [String]? = nil) {
+        let name = Self.normalize(title)
+        let names = (artistNames ?? [artist]).map(Self.normalize)
+        if Self.known(name), !names.isEmpty, names.allSatisfy(Self.known) {
+            let sorted = Set(names).sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }
+            let key: [String: Any] = ["title": name, "artists": sorted]
+            let data = try! JSONSerialization.data(withJSONObject: key, options: [.sortedKeys, .withoutEscapingSlashes])
+            lookupKey = String(decoding: data, as: UTF8.self)
+        } else { lookupKey = nil }
+        self.duration = duration.isFinite && duration > 0 ? duration : nil
     }
     public init(_ track: MusicRemoteTrack) {
-        self.init(title: track.title, artist: track.artist, duration: track.duration,
-                  sourceKeys: track.sources.map(\.sourceKey))
+        self.init(title: track.title, artist: track.artist, duration: track.duration, artistNames: track.artistNames)
     }
-    public var fingerprint: String {
-        guard Self.known(title), Self.known(artist) else { return "" }
-        return Self.json([title, artist, version])
-    }
-    public var descriptorKey: String { Self.json([title, artist, version, String(duration)]) }
-    public func isCompatible(with other: Self, sameNative: Bool? = nil) -> Bool {
-        let timing = !(duration > 0 && other.duration > 0)
-            || abs(duration - other.duration) <= max(3, min(duration, other.duration) * 0.02)
-        if sameNative ?? !sourceKeys.isDisjoint(with: other.sourceKeys) {
-            return (!Self.known(artist) || !Self.known(other.artist) || artist == other.artist)
-                && (!Self.known(title) || !Self.known(other.title) || version == other.version) && timing
-        }
-        return !fingerprint.isEmpty && fingerprint == other.fingerprint
-            && duration > 0 && other.duration > 0 && timing
+    public func matches(_ incoming: Self) -> Bool {
+        guard let key = lookupKey, key == incoming.lookupKey,
+              let baseline = duration, let proposed = incoming.duration else { return false }
+        return abs(baseline - proposed) <= 5
     }
     public static func normalize(_ value: String) -> String {
-        replace(whitespace, in:
-            replace(invisible, in: value.precomposedStringWithCompatibilityMapping.lowercased(), with: ""),
-            with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let compatible = value.precomposedStringWithCompatibilityMapping
+        var lowered = String.UnicodeScalarView()
+        for scalar in compatible.unicodeScalars {
+            lowered.append((65...90).contains(scalar.value) ? UnicodeScalar(scalar.value + 32)! : scalar)
+        }
+        return String(lowered).components(separatedBy: Self.whitespace)
+            .filter { !$0.isEmpty }.joined(separator: " ")
     }
-    public static func hash(_ value: String) -> String {
-        var a: UInt32 = 2166136261, b: UInt32 = 3339675911
-        for unit in value.utf16 { a = (a ^ UInt32(unit)) &* 16777619; b = (b ^ UInt32(unit)) &* 2246822519 }
-        return String(format: "%08x%08x", a, b)
-    }
-    private static func known(_ value: String) -> Bool {
-        !value.isEmpty && !value.hasPrefix("未知") && !value.hasPrefix("unknown")
-    }
-    private static func json(_ values: [String]) -> String {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
-        return String(decoding: try! encoder.encode(values), as: UTF8.self)
-    }
-    private static let artistSeparators = try! NSRegularExpression(
-        pattern: "\\s*(?:、|;|\\s/\\s|\\s&\\s|\\sfeat\\.?\\s|\\sfeaturing\\s)\\s*")
-    private static let versionTags: [(String, NSRegularExpression)] = [
-        ("harmony", "和声伴奏|和聲伴奏"), ("instrumental", "伴奏|instrumental|karaoke"),
-        ("live", "(?<![a-z0-9_])live(?![a-z0-9_])|现场|現場"),
-        ("remix", "remix|(?<![a-z0-9_])dj(?![a-z0-9_])"),
-        ("remaster", "remaster|重制|重製"), ("acoustic", "acoustic|不插电|不插電"),
-        ("cover", "翻唱|(?<![a-z0-9_])cover(?![a-z0-9_])")
-    ].map { ($0.0, try! NSRegularExpression(pattern: $0.1)) }
-    private static let trailingParentheses = try! NSRegularExpression(
-        pattern: "\\s*[（(]([^()（）]+)[)）]\\s*$")
-    private static let openParenthesis = try! NSRegularExpression(pattern: "\\s*\\(\\s*")
-    private static let closeParenthesis = try! NSRegularExpression(pattern: "\\s*\\)\\s*")
-    private static let invisible = try! NSRegularExpression(pattern: "[\\u200b-\\u200d\\ufeff]")
-    private static let whitespace = try! NSRegularExpression(pattern: "\\s+")
-    private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
-        expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
-    }
-    private static func replace(_ expression: NSRegularExpression, in value: String, with template: String) -> String {
-        expression.stringByReplacingMatches(
-            in: value, range: NSRange(value.startIndex..<value.endIndex, in: value), withTemplate: template)
+    private static func known(_ text: String) -> Bool {
+        !text.isEmpty && !["未知歌手", "未知歌曲", "unknown", "unknown artist", "unknown title"].contains(text)
     }
 }

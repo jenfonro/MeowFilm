@@ -7,21 +7,6 @@ internal sealed partial class MusicLibrarySyncEngine
 {
     private IEnumerable<JsonObject> NetworkPlaylists => MusicLibraryOwner.NetworkPlaylists(library).OfType<JsonObject>();
     private JsonObject NetworkPlaylist(string id) => NetworkPlaylists.Single(reference => S(reference["id"]) == id);
-    private static void ValidateSubscriptions(IReadOnlyList<SyncSubscription> subscriptions, MusicSyncAdapter adapter)
-    {
-        var ids = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var subscription in subscriptions)
-        {
-            _ = MusicLibraryOwner.NetworkPlaylistId(adapter.Platform, subscription.Id);
-            LJ.Require(ids.Add(subscription.Id) && LJ.Id(subscription.Name, 200) &&
-                subscription.Count is >= 0 and <= int.MaxValue, "INCOMPLETE_PAGE");
-            LJ.Require(subscription.Cover == NativeMusicSong.PublicUrl(JsonValue.Create(subscription.Cover)), "INVALID_RESPONSE");
-            LJ.Fields(subscription.Locator, adapter.Platform == "kg" ? "listId" : "", adapter.Platform == "kg" ? "listId" : "");
-            if (adapter.Platform == "kg")
-                LJ.Require(System.Text.RegularExpressions.Regex.IsMatch(LJ.Text(subscription.Locator["listId"], 20), "^[1-9][0-9]{0,19}$"),
-                    "IDENTITY_MISMATCH");
-        }
-    }
     private static JsonObject SubscriptionBaseline(MusicSyncAdapter adapter, SyncSubscription? actual) =>
         O(("accountId", adapter.AccountId), ("present", actual is not null), ("locator", actual?.Locator ?? new()));
     private void MergeSubscriptions(Dictionary<string, SyncDirectory> pulls)
@@ -62,10 +47,11 @@ internal sealed partial class MusicLibrarySyncEngine
             }
         }
     }
-    private async Task<IReadOnlyList<SyncSubscription>> ReadSubscriptions(MusicSyncAdapter adapter)
+    private async Task<SyncDirectory> ReadSubscriptions(MusicSyncAdapter adapter)
     {
         var actual = await adapter.ReadSubscriptionsAsync();
-        ValidateSubscriptions(actual, adapter); await Guard(); return actual;
+        LJ.Require(actual.AccountId == adapter.AccountId, "IDENTITY_MISMATCH");
+        await Guard(); return actual;
     }
     private async Task PushSubscriptions(MusicSyncAdapter adapter)
     {
@@ -77,7 +63,9 @@ internal sealed partial class MusicLibrarySyncEngine
                 var reference = NetworkPlaylist(id); var intent = LJ.Object(reference["intent"]);
                 LJ.Require(S(intent["accountId"]) == adapter.AccountId, "ACCOUNT_REBIND_REQUIRED");
                 bool desired = LJ.B(intent["present"]);
-                var actual = (await ReadSubscriptions(adapter)).SingleOrDefault(subscription => subscription.Id == S(reference["remoteId"]));
+                var directory = await ReadSubscriptions(adapter);
+                LJ.Require(!directory.Directory.Any(row => row.Owned && row.Id == S(reference["remoteId"])), "READ_ONLY");
+                var actual = directory.Subscriptions.SingleOrDefault(subscription => subscription.Id == S(reference["remoteId"]));
                 if ((actual is not null) == desired)
                 {
                     reference["subscription"] = SubscriptionBaseline(adapter, actual); reference["intent"] = null;
@@ -90,7 +78,7 @@ internal sealed partial class MusicLibrarySyncEngine
                 var target = desired ? await adapter.SubscriptionTargetAsync(S(reference["remoteId"]), S(reference["name"]),
                     S(reference["cover"]), LJ.I(reference["count"])) : actual!;
                 var dispatch = await adapter.PrepareSubscriptionAsync(target, desired);
-                await Guard(); LJ.Require(target.Id == S(reference["remoteId"]), "IDENTITY_MISMATCH");
+                await Guard();
                 LJ.Require(state["pending"] is null, "PENDING_WRITE");
                 state["pending"] = O(("platform", adapter.Platform), ("accountId", adapter.AccountId), ("collectionId", id),
                     ("remoteId", target.Id), ("operation", operation), ("beforePresent", actual is not null),
@@ -98,9 +86,10 @@ internal sealed partial class MusicLibrarySyncEngine
                 Status("pushing"); await Save();
                 try
                 {
-                    await Guard();
                     await dispatch();
                 }
+                catch (MusicSyncWriteException error) when (error.Status is "notSent" or "rejected")
+                { await ClearUnappliedWrite(); throw; }
                 catch (Exception error) when (!Fatal(error)) { /* Only an authoritative directory can settle this durable fence. */ }
                 await RecoverSubscriptionPending(adapter);
             }
@@ -115,7 +104,9 @@ internal sealed partial class MusicLibrarySyncEngine
     {
         var pending = LJ.Object(state["pending"]); string id = S(pending["collectionId"]);
         LJ.Require(adapter.Platform == S(pending["platform"]) && adapter.AccountId == S(pending["accountId"]), "PENDING_ACCOUNT_CHANGED");
-        var actual = (await ReadSubscriptions(adapter)).SingleOrDefault(subscription => subscription.Id == S(pending["remoteId"]));
+        var directory = await ReadSubscriptions(adapter);
+        LJ.Require(!directory.Directory.Any(row => row.Owned && row.Id == S(pending["remoteId"])), "READ_ONLY");
+        var actual = directory.Subscriptions.SingleOrDefault(subscription => subscription.Id == S(pending["remoteId"]));
         var reference = NetworkPlaylist(id); bool applied = (actual is not null) == LJ.B(pending["desiredPresent"]);
         reference["subscription"] = SubscriptionBaseline(adapter, actual);
         if (applied && reference["intent"] is JsonObject intent && S(intent["accountId"]) == adapter.AccountId &&

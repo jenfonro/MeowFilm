@@ -44,10 +44,12 @@ public final class MusicHomeSourceSettingsModel: ObservableObject {
         let request = UUID()
         self.request = request
         isSaving = true
+        let submitted = model.settingsReceipts.submit(settings: ["home/selectedSource"], operation: "保存数据源") {
+            try await homeBrowser.selectHomeSource(platform, ifRevision: current.revision)
+        }
         work = Task { [weak self] in
-            guard self?.isCurrent(request, access: access) == true else { return }
             do {
-                let value = try await homeBrowser.selectHomeSource(platform, ifRevision: current.revision)
+                let value = try await submitted.value
                 guard let self, isCurrent(request, access: access) else { return }
                 work = nil
                 selection = value
@@ -60,7 +62,9 @@ public final class MusicHomeSourceSettingsModel: ObservableObject {
                 work = nil
                 selection = value
                 isSaving = false
-                report(error, operation: "保存数据源")
+                if (error as? MusicServiceError) != .commitUnconfirmed {
+                    report(error, operation: "保存数据源")
+                }
             }
         }
     }

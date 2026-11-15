@@ -12,15 +12,18 @@ final class MusicDailyStyleViewModel: ObservableObject {
     @Published private(set) var saved = false
     private let page: MusicPublicBrowseViewModel
     private let source: MusicRemoteQueueSource
+    private let receipts: MusicSettingsReceiptOwner
     private var sourceObservation: AnyCancellable?
     private var revocations: Task<Void, Never>?
     private var work: Task<Void, Never>?
+    private var workID: UUID?
     private var requested = false
     private var closed = false
 
-    init(page: MusicPublicBrowseViewModel, source: MusicRemoteQueueSource) {
+    init(page: MusicPublicBrowseViewModel, source: MusicRemoteQueueSource, receipts: MusicSettingsReceiptOwner) {
         self.page = page
         self.source = source
+        self.receipts = receipts
         sourceObservation = page.$remoteSource.map { $0?.id }.removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] id in
@@ -69,6 +72,7 @@ final class MusicDailyStyleViewModel: ObservableObject {
         }
         let id = UUID()
         requestID = id
+        workID = id
         error = nil
         work = Task { [weak self] in
             guard let self else { return }
@@ -77,12 +81,12 @@ final class MusicDailyStyleViewModel: ObservableObject {
             do {
                 try await source.validate()
                 let values = try await editor.categories()
-                try await source.validate()
+                let selection = try await source.page(cursor: nil).dailyStyle
                 guard current(id) else { return }
                 categories = values
-                category = values.first { $0.id == self.page.dailyStyle?.category }?.id ?? values.first?.id ?? ""
-                if let selection = page.dailyStyle {
-                    choices[selection.category] = Set(selection.tags.map(\.id))
+                category = values.first { $0.id == selection?.category }?.id ?? values.first?.id ?? ""
+                if let selection {
+                    choices = [selection.category: Set(selection.tags.map(\.id))]
                 }
             } catch {
                 if current(id) { self.error = MusicServiceError.sanitized(error).localizedDescription }
@@ -115,6 +119,7 @@ final class MusicDailyStyleViewModel: ObservableObject {
         )
         let id = UUID()
         requestID = id
+        workID = id
         error = nil
         work = Task { [weak self] in
             guard let self else { return }
@@ -124,7 +129,7 @@ final class MusicDailyStyleViewModel: ObservableObject {
                 try selection.validate(in: categories)
                 try await source.validate()
                 guard current(id) else { return }
-                let result = try await page.saveDailyStyle(selection)
+                let result = try await page.saveDailyStyle(selection, receipts: receipts)
                 guard current(id) else { return }
                 if let actual = page.dailyStyle {
                     category = actual.category
@@ -136,7 +141,14 @@ final class MusicDailyStyleViewModel: ObservableObject {
                 }
                 saved = true
             } catch {
-                if current(id) { self.error = MusicServiceError.sanitized(error).localizedDescription }
+                if current(id) {
+                    let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
+                    self.error = failure == .commitUnconfirmed ? nil : failure.localizedDescription
+                    if failure == .commitUnconfirmed, let actual = page.dailyStyle {
+                        category = actual.category
+                        choices = [actual.category: Set(actual.tags.map(\.id))]
+                    }
+                }
             }
         }
     }
@@ -146,6 +158,7 @@ final class MusicDailyStyleViewModel: ObservableObject {
     }
 
     func acknowledgeSave() { saved = false }
+    func finishPending() async { while let task = work { await task.value } }
 
     func close() {
         closed = true
@@ -160,15 +173,15 @@ final class MusicDailyStyleViewModel: ObservableObject {
     }
 
     private func finish(_ id: UUID) {
-        guard requestID == id else { return }
+        guard workID == id else { return }
         requestID = nil
         work = nil
+        workID = nil
     }
 
     private func invalidate() {
         requestID = nil
         work?.cancel()
-        work = nil
         categories = []
         category = ""
         choices = [:]

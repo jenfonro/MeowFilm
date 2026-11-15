@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Net;
-using System.Net.Http;
-using System.Text;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
@@ -13,94 +10,39 @@ public static class MusicSyncClientContextTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("Music sync delegated catalog hands confirmed client state back to its adapter", async () =>
-        {
-            var handler = new Handler();
-            using var http = MusicPlatformHttp.CreateWithHandler(handler);
-            await using var clients = new MusicClientContextFixture(http);
-            handler.Clients = clients.Owner;
-            var before = await clients.Owner.AcquireWyAsync();
-            var account = new MusicPlatformSession("wy", "synthetic-sync-client", 1, "42", "MUSIC_U=SYNTHETIC_SYNC_ACCOUNT");
-            var adapter = new Adapter(account, http, clients.Owner, before);
-            var song = MusicSongFixture.Online("tx", "SYNTHETIC_ORIGINAL", "Synthetic track",
-                "Synthetic artist", "Synthetic album", 200);
-            var mapped = await adapter.ResolveAsync(song);
-            Check(mapped is not null && NativeMusicSong.NativeId(mapped) == "42");
-            var current = await clients.Owner.AcquireWyAsync();
-            Check(current.Generation == before.Generation + 1 && current.Nmtid == "SYNTHETIC_SYNC_CLIENT");
-            await adapter.ReadProbeAsync();
-            Check(handler.Calls == 2 && ReferenceEquals(current, await clients.Owner.AcquireWyAsync()));
+        yield return new("Music sync delegated matching and subsequent read borrow the same canonical client", async () => {
+            await using var runtime = new MusicPlatformRuntimeFixture(); var account = new MusicPlatformSession("wy", "synthetic-sync", 1, "42", "MUSIC_U=SYNTHETIC"); runtime.Sessions.Current = account;
+            int guards = 0;
+            runtime.OnRequest = (call, _) => Task.FromResult(call.Operation switch {
+                "search" => MusicPlatformRuntimeFixture.Json(new { items = new[] { Target("wy", "42") }, more = false, continuation = (object?)null }),
+                "sync.read" => MusicPlatformRuntimeFixture.Json(new SyncDirectory("42", [], [], [])), _ => throw new InvalidOperationException(call.Operation) });
+            var adapter = new MusicSyncAdapter(account, runtime.Client, () => Task.CompletedTask, () => { Check(runtime.Sessions.IsCurrent(account)); guards++; }, default);
+            var mapped = await adapter.ResolveAsync(Target("tx", "original")); Check(mapped is not null && NativeMusicSong.NativeId(mapped) == "42");
+            var directory = await adapter.ReadAsync(["playlist"]); Check(directory.AccountId == "42" && guards >= 4 && runtime.Requests.Count == 2);
+            Check(runtime.Requests.All(call => call.Payload.GetProperty("expectedSession").GetProperty("scope").GetString() == account.Scope &&
+                call.Payload.GetProperty("expectedSession").GetProperty("generation").GetInt64() == account.Generation));
         });
-        yield return new("Music sync KG search over 300 is not a unique mapping and stops paging", async () =>
-        {
-            var handler = new KgHandler();
-            using var http = MusicPlatformHttp.CreateWithHandler(handler);
-            await using var clients = new MusicClientContextFixture(http);
-            var kg = await clients.Owner.AcquireKgAsync();
-            var account = new MusicPlatformSession("kg", "synthetic-sync-kg", 1, "42",
-                "userid=42; token=SYNTHETIC_KG_TOKEN; KUGOU_API_MID=" + kg.Mid);
-            var adapter = new Adapter(account, http, clients.Owner, kg);
-            var song = MusicSongFixture.Online("tx", "SYNTHETIC_ORIGINAL", "Synthetic track",
-                "Synthetic artist", "Synthetic album", 200);
-            Check(await adapter.ResolveAsync(song) is null);
-            Check(handler.Calls == 1);
+        foreach (bool ambiguous in new[] { false, true })
+            yield return new("Music sync KG matching reads beyond 300 candidates without an invented quota " + ambiguous, async () => {
+                await using var runtime = new MusicPlatformRuntimeFixture(); var account = new MusicPlatformSession("kg", "synthetic-sync-kg", 1, "42", "userid=42; token=SYNTHETIC"); runtime.Sessions.Current = account;
+                runtime.OnRequest = (call, _) => {
+                    Check(call.Operation == "search"); int page = call.Parameters.GetProperty("page").GetInt32();
+                    var items = Enumerable.Range(0, 30).Select(_ => Target("kg", new string('A', 32))).ToList();
+                    if (ambiguous && page == 11) items.Add(Target("kg", new string('B', 32)));
+                    return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { items, more = page < 11, continuation = page < 11 ? new { page = page + 1 } : null }));
+                };
+                var adapter = new MusicSyncAdapter(account, runtime.Client, () => Task.CompletedTask, () => Check(runtime.Sessions.IsCurrent(account)), default);
+                var mapped = await adapter.ResolveAsync(Target("tx", "original"));
+                Check(runtime.Requests.Count == 11 && (ambiguous ? mapped is null : mapped is not null && NativeMusicSong.NativeId(mapped) == new string('A', 32)));
+            });
+        yield return new("Music sync real continuation stall remains a termination boundary", async () => {
+            await using var runtime = new MusicPlatformRuntimeFixture(); var account = new MusicPlatformSession("kg", "scope", 1, "42", "userid=42; token=SYNTHETIC"); runtime.Sessions.Current = account;
+            runtime.OnRequest = (call, _) => Task.FromResult(MusicPlatformRuntimeFixture.Json(new { items = Array.Empty<object>(), more = true, continuation = new { page = call.Parameters.GetProperty("page").GetInt32() } }));
+            var adapter = new MusicSyncAdapter(account, runtime.Client, () => Task.CompletedTask, () => { }, default);
+            try { await adapter.ResolveAsync(Target("tx", "original")); throw new InvalidOperationException("Expected stall"); } catch (MusicLibraryException error) { Check(error.Code == "PAGINATION_STALLED"); }
+            Check(runtime.Requests.Count == 1);
         });
     }
-    private static void Check(bool condition)
-    { if (!condition) throw new InvalidOperationException("Sync client handoff invariant"); }
-    private sealed class Handler : HttpMessageHandler
-    {
-        internal MusicPlatformClientContextOwner? Clients;
-        internal int Calls;
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        {
-            Calls++;
-            var client = await Clients!.AcquireWyAsync(token);
-            var path = request.RequestUri!.AbsolutePath;
-            string body;
-            if (path == "/eapi/cloudsearch/pc")
-            {
-                Check(Calls == 1 && client.Nmtid is null);
-                body = """{"code":200,"result":{"songCount":1,"songs":[{"id":42,"name":"Synthetic track","ar":[{"name":"Synthetic artist"}],"al":{"name":"Synthetic album"},"dt":200000}]}}""";
-            }
-            else
-            {
-                Check(path == "/eapi/toplist" && Calls == 2 && client.Nmtid == "SYNTHETIC_SYNC_CLIENT" &&
-                    request.Headers.GetValues("Cookie").Single().Contains("NMTID=" + client.Nmtid, StringComparison.Ordinal));
-                body = """{"code":200}""";
-            }
-            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-            if (Calls == 1) response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_SYNC_CLIENT; Domain=.music.163.com");
-            return response;
-        }
-    }
-    private sealed class KgHandler : HttpMessageHandler
-    {
-        internal int Calls;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        {
-            Calls++;
-            Check(request.RequestUri is { Host: "gateway.kugou.com", AbsolutePath: "/v2/search/song" });
-            const string row = """{"FileHash":"ABCDEF0123456789ABCDEF0123456789","FileName":"Synthetic artist - Synthetic track","Duration":200,"SingerName":"Synthetic artist","AlbumName":"Synthetic album","FileSize":1000}""";
-            var body = "{\"status\":1,\"error_code\":0,\"data\":{\"total\":301,\"lists\":[" +
-                string.Join(",", Enumerable.Repeat(row, 30)) + "]}}";
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
-        }
-    }
-    private sealed class Adapter(MusicPlatformSession account, MusicPlatformHttp http,
-        MusicPlatformClientContextOwner clients, MusicPlatformClientContext client)
-        : MusicSyncAdapter(account, http, clients, client, () => Task.CompletedTask, () => { }, default)
-    {
-        internal Task<JsonObject> ReadProbeAsync() => Wy("/api/toplist", new(), weapi: false);
-        internal override Task<SyncDirectory> ReadAsync(string[] kinds) => throw Unused();
-        internal override Task<SyncRemote?> ReadCollectionAsync(string id) => throw Unused();
-        internal override Task<IReadOnlyList<SyncSubscription>> ReadSubscriptionsAsync() => throw Unused();
-        internal override Task SubscribeAsync(SyncSubscription target) => throw Unused();
-        internal override Task UnsubscribeAsync(SyncSubscription subscription) => throw Unused();
-        internal override Task CreateAsync(string name) => throw Unused();
-        internal override Task DeleteAsync(SyncRemote remote) => throw Unused();
-        internal override Task ChangeAsync(SyncRemote remote, bool add, IReadOnlyList<string> ids, IReadOnlyDictionary<string, JsonObject> songs) => throw Unused();
-        internal override Task OrderAsync(SyncRemote remote, IReadOnlyList<string> ids) => throw Unused();
-        private static InvalidOperationException Unused() => new("Unexpected sync operation in delegated-read fixture");
-    }
+    private static JsonObject Target(string platform, string id) => MusicSongFixture.Online(platform, id, "Synthetic track", "Synthetic artist", "Synthetic album", 200);
+    private static void Check(bool condition) { if (!condition) throw new InvalidOperationException("Sync canonical adapter invariant"); }
 }

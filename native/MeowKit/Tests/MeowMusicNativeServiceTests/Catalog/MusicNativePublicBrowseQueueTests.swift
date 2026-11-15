@@ -1,196 +1,157 @@
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
-private actor MusicNativePublicBrowseQQFixture: MusicPublicBrowseQQProviding {
-    let count: Int
-    let pageSize: Int
-    var reads = 0
-    var pageReads: [Int] = []
-    var changed = false
-    var pageError: MusicServiceError?
+private actor QQBrowsePeer: MusicPlatformFixtureResponding {
     let collection = MusicPublicBrowseCollection(platform: .qq, nativeID: "42", title: "Synthetic remote list")
-    init(count: Int, pageSize: Int = 30) {
-        self.count = count; self.pageSize = pageSize
-    }
+    let count: Int, pageSize: Int
+    private var changed = false
+    private var failure: MusicServiceError?
+    private var sent: [MusicPlatformFixture.Request] = []
+    init(count: Int, pageSize: Int = 30) { self.count = count; self.pageSize = pageSize }
     func changeFirst() { changed = true }
-    func failPage(_ error: MusicServiceError?) { pageError = error }
-    private func tracks() -> [MusicNativeTrackData] {
-        (0..<count).map {
-            let track = NativeMusicFixture.track(changed && $0 == 0 ? "ChangedMID" : "MID\($0 % 2)")
-            return track
-        }
-    }
-    func search(query: String, page: Int, limit: Int) -> MusicNativeTrackPage { .init(items: []) }
-    func lyrics(mid: String) -> MusicNativeLyrics { .init(text: "") }
-    func publicBrowsePlaylists(query: String, page: Int, limit: Int) -> MusicPublicBrowseQQSearch {
-        .init(items: [collection], total: 1, nextPage: nil)
-    }
-    func publicBrowsePlaylist(id: String) -> MusicPublicBrowseNativeCollection {
-        reads += 1
-        // Deliberate repeated recordings; occurrences must survive intact.
-        return .init(collection: collection, tracks: tracks(),
-                     snapshot: String(repeating: changed ? "b" : "a", count: 64), headSignature: "synthetic-head")
-    }
-    func publicBrowsePlaylistPage(id: String, offset: Int) throws -> MusicPublicBrowseNativeCollectionPage {
-        pageReads.append(offset)
-        if let pageError { throw pageError }
-        let rows = Array(tracks().dropFirst(offset).prefix(pageSize))
-        return .init(collection: collection, tracks: rows, total: count,
-                     more: offset + rows.count < count, headSignature: "synthetic-head")
-    }
-}
-private actor MusicNativePublicBrowseBlockedHTTP: MusicNativeHTTPTransport {
-    let gate: NativeMusicGate
-    init(gate: NativeMusicGate) { self.gate = gate }
-    func send(_ request: MusicNativeHTTPRequest) async throws -> MusicNativeHTTPResponse {
-        await gate.wait() // Intentionally non-cooperative injected transport.
-        return .init(status: 200, data: Data(#"{"code":200,"result":{"playlistCount":0,"playlists":[]}}"#.utf8))
+    func failPage(_ value: MusicServiceError?) { failure = value }
+    func calls() -> [MusicPlatformFixture.Request] { sent }
+    func respond(_ request: MusicPlatformFixture.Request) throws -> RuntimeValue {
+        sent.append(request)
+        if let failure { throw failure }
+        let complete = request.operation == "playlist.complete"
+        let offset = complete ? 0 : Int(request.parameters[music: "continuation"][music: "offset"].musicNumber ?? 0)
+        let end = complete ? count : min(offset + pageSize, count)
+        let ids = (offset..<end).map { changed && $0 == 0 ? "ChangedMID" : "MID\($0 % 2)" }
+        return try MusicNativePublicBrowseFixture.page(ids, platform: "tx", collectionID: "42", total: count,
+            positions: (offset..<end).map { Optional($0) }, continuation: end < count ? .object([
+                "page": .number(Double(offset / pageSize + 2)), "offset": .number(Double(end))]) : .null)
     }
 }
 final class MusicNativePublicBrowseQueueTests: XCTestCase {
-    @MainActor func testSavedReferenceOpensCurrentRemoteMembersAndReadFailureNeverChangesItsIdentity() async throws {
-        let qq = MusicNativePublicBrowseQQFixture(count: 1), store = NativeMusicMemoryDocument()
-        let service = try await NativeMusicFixture.service(store, qq: qq)
-        let saved = try await service.saveNetworkPlaylist(qq.collection, intent: .init())
-        let beforeReads = await qq.pageReads, completeReads = await qq.reads
-        XCTAssertTrue(beforeReads.isEmpty); XCTAssertEqual(completeReads, 0)
+    func testRepeatedReaderCloseWaitsForTheSameNonCooperativeLoad() async throws {
+        let gate = NativeMusicGate()
+        let reader = MusicNativePublicBrowseQueueRead { _ in
+            await gate.wait()
+            return [.init(songID: "song-1", occurrenceID: "occurrence-1", platform: "wy",
+                          sourceKey: "wy/1", byteCount: NativeMusicFixture.track().data.count)]
+        }
+        let reading = Task { try await reader.page(nil, intent: .init()) }
+        await gate.started()
+        let firstReturned = expectation(description: "first close drains")
+        let secondReturned = expectation(description: "second close drains")
+        firstReturned.isInverted = true; secondReturned.isInverted = true
+        let first = Task { await reader.close(); firstReturned.fulfill() }
+        let second = Task { await reader.close(); secondReturned.fulfill() }
+        await fulfillment(of: [firstReturned, secondReturned], timeout: 0.05)
+        await gate.release()
+        await first.value; await second.value
+        do { _ = try await reading.value; XCTFail("closed reader published late rows") }
+        catch { XCTAssertTrue(error is CancellationError || error as? MusicServiceError == .closed) }
+    }
+    @MainActor func testSavedReferenceOpensCurrentMembersAndReadFailureNeverChangesItsIdentity() async throws {
+        let peer = QQBrowsePeer(count: 1), store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let saved = try await service.saveNetworkPlaylist(peer.collection, intent: .init())
+        let before = await peer.calls(); XCTAssertTrue(before.isEmpty)
         let remote = try XCTUnwrap(saved.remoteCollection)
         let page = MusicPublicBrowseViewModel(service: service, request: .detail(remote))
         page.setAccess(available: true, generation: UUID()); page.appear(); await page.loadIfNeeded()
         XCTAssertEqual(page.tracks.first?.sources.first?.nativeId, "MID0")
-        page.disappear(); await qq.changeFirst()
-        page.appear(); await page.loadIfNeeded()
+        page.disappear(); await peer.changeFirst(); page.appear(); await page.loadIfNeeded()
         XCTAssertEqual(page.tracks.first?.sources.first?.nativeId, "ChangedMID")
-        page.disappear(); await qq.failPage(.upstreamFailed)
+        page.disappear(); await peer.failPage(.upstreamFailed)
         let checkpoint = store.snapshot()
         page.appear(); await page.loadIfNeeded()
         XCTAssertEqual(page.error, .upstreamFailed); XCTAssertEqual(page.request, .detail(remote))
-        let collections = try await service.collections()
-        XCTAssertEqual(collections.first { $0.id == saved.id }, saved)
+        let collections = try await service.collections(); XCTAssertEqual(collections.first { $0.id == saved.id }, saved)
         XCTAssertEqual(store.snapshot().0, checkpoint.0); XCTAssertEqual(store.snapshot().2, checkpoint.2)
-        let library = try NativeSyncFixture.document(store).library["library"], afterReads = await qq.reads
-        XCTAssertTrue(library["songs"].fields.isEmpty); XCTAssertEqual(library["collections"].array.count, 1)
-        XCTAssertEqual(afterReads, 0)
+        let calls = await peer.calls(); XCTAssertFalse(calls.contains { $0.operation == "playlist.complete" })
         page.disappear(); await service.close()
     }
-    @MainActor func testQQFirstPageActionRenewalReusesLiveEvidenceWithoutReadingWholeCollection() async throws {
-        let qq = MusicNativePublicBrowseQQFixture(count: 35)
-        let service = try await NativeMusicFixture.service(qq: qq)
-        let page = MusicPublicBrowseViewModel(service: service, request: .detail(qq.collection))
-        page.setAccess(available: true, generation: UUID()); page.appear()
-        await page.refresh()
+    @MainActor func testQQSelectionUsesVisibleOccurrenceWithoutRenewingContentProof() async throws {
+        let peer = QQBrowsePeer(count: 35), service = try await NativeMusicFixture.service(platform: peer)
+        let page = MusicPublicBrowseViewModel(service: service, request: .detail(peer.collection),
+            queuePage: { try await service.remoteQueuePage($0, cursor: $1) })
+        page.setAccess(available: true, generation: UUID()); page.appear(); await page.refresh()
         let selected = try XCTUnwrap(page.tracks.first)
-        let renewed = try await page.refreshedActionTrack(selected)
-        XCTAssertEqual(renewed.songId, selected.songId)
-        let reads = await qq.reads, offsets = await qq.pageReads
-        XCTAssertEqual(reads, 0); XCTAssertEqual(offsets, [0, 0])
-        await qq.changeFirst()
-        do { _ = try await page.refreshedActionTrack(selected); XCTFail("Changed first page was renewed") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
-        page.disappear(); await service.close()
+        await peer.changeFirst()
+        let (source, index) = try await page.playbackSource(for: selected)
+        XCTAssertEqual(index, 0)
+        _ = try await service.replaceRemoteQueue(source, start: .init(index: index), expectedRevision: 0, intent: .init())
+        let queue = try await service.queue(); XCTAssertEqual(queue.entries.first?.track.sources.first?.nativeId, "ChangedMID")
+        page.disappear(); await source.close(); await service.close()
     }
-    func testQQDisplayReadsOnlyCurrentPagesWithActualOffsetsAndExplicitActionValidatesWholeResource() async throws {
-        let qq = MusicNativePublicBrowseQQFixture(count: 35, pageSize: 27)
-        let service = try await NativeMusicFixture.service(qq: qq)
-        let first = try await service.publicDetail(qq.collection, cursor: nil)
+    func testQQDisplayReadsOnlyCurrentPagesAndExplicitActionLoadsOneCompleteResult() async throws {
+        let peer = QQBrowsePeer(count: 35, pageSize: 27), service = try await NativeMusicFixture.service(platform: peer)
+        let first = try await service.publicDetail(peer.collection, cursor: nil)
         XCTAssertEqual(first.tracks.count, 27); XCTAssertEqual(first.consumed, 27)
-        var completeReads = await qq.reads; XCTAssertEqual(completeReads, 0)
         let second = try await service.publicDetail(first.collection, cursor: XCTUnwrap(first.cursor))
         XCTAssertEqual(second.tracks.count, 8); XCTAssertNil(second.cursor)
-        let pages = await qq.pageReads; XCTAssertEqual(pages, [0, 27])
-        let source = try await service.openPublicQueue(.init(collection: first.collection, snapshot: first.snapshot))
-        let rows = try await source.collectionTracks(intent: .init())
-        XCTAssertEqual(rows.count, 35)
-        completeReads = await qq.reads; XCTAssertEqual(completeReads, 1)
+        let source = try await service.openPublicQueue(.init(collection: first.collection))
+        let rows = try await source.collectionTracks(intent: .init()); XCTAssertEqual(rows.count, 35)
+        let calls = await peer.calls(); XCTAssertEqual(calls.map(\.operation), ["playlist", "playlist", "playlist.complete"])
+        XCTAssertEqual(calls[1].parameters[music: "continuation"][music: "offset"], .number(27))
         await source.close(); await service.close()
     }
-    func testQQWholeActionRejectsChangedObservedMemberEvenWhenTotalAndSummaryStayEqual() async throws {
-        let qq = MusicNativePublicBrowseQQFixture(count: 35), store = NativeMusicMemoryDocument()
-        let service = try await NativeMusicFixture.service(store, qq: qq)
-        let first = try await service.publicDetail(qq.collection, cursor: nil)
-        await qq.changeFirst()
-        do { _ = try await service.openPublicQueue(.init(collection: first.collection, snapshot: first.snapshot)); XCTFail("Changed observed member") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
-        XCTAssertEqual(store.snapshot().2, 0)
-        await service.close()
+    func testQQWholeActionAcceptsCurrentChangedMemberAndDoesNotReplaceQueueUntilCommit() async throws {
+        let peer = QQBrowsePeer(count: 35), service = try await NativeMusicFixture.service(platform: peer)
+        let first = try await service.publicDetail(peer.collection, cursor: nil)
+        await peer.changeFirst()
+        let source = try await service.openPublicQueue(.init(collection: first.collection))
+        let rows = try await source.collectionTracks(intent: .init())
+        XCTAssertEqual(try MusicModel.sources(MusicModel.normalize(rows[0])).first?.nativeId, "ChangedMID")
+        let queue = try await service.queue(); XCTAssertTrue(queue.entries.isEmpty); XCTAssertEqual(queue.revision, 0)
+        await source.close(); await service.close()
     }
-    func testExplicitQueueActionLoadsOneSnapshotWithoutWritingAndKeepsOver600RepeatedOccurrences() async throws {
-        let qq = MusicNativePublicBrowseQQFixture(count: 650), store = NativeMusicMemoryDocument()
-        let service = try await NativeMusicFixture.service(store, qq: qq)
-        let collection = await qq.collection
-        let request = MusicPublicBrowseQueueRequest(collection: collection, snapshot: String(repeating: "a", count: 64))
-        let source = try await service.openPublicQueue(request)
-        let initialReads = await qq.reads
-        XCTAssertEqual(initialReads, 1); XCTAssertEqual(store.snapshot().2, 0)
-        let first = try await service.remoteQueuePage(source, cursor: nil)
-        XCTAssertEqual(first.items.count, 30)
-        let state = try await service.replaceRemoteQueue(source, start: .init(index: 0, track: first.items[0]),
-            expectedRevision: 0, intent: .init())
-        XCTAssertEqual(state.total, 650)
+    func testExplicitQueueActionKeeps650RepeatedOccurrencesWithOneAtomicQueueCommit() async throws {
+        let peer = QQBrowsePeer(count: 650), store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let source = try await service.openPublicQueue(.init(collection: peer.collection))
+        let before = store.snapshot().2, preview = try await service.remoteQueuePage(source, cursor: nil)
+        XCTAssertEqual(preview.items.count, 30)
+        let state = try await service.replaceRemoteQueue(source, start: .init(index: 0), expectedRevision: 0, intent: .init())
         let queue = try await service.queue()
-        XCTAssertEqual(queue.entries.count, 650); XCTAssertEqual(Set(queue.entries.map(\.id)).count, 650)
-        XCTAssertEqual(queue.entries[0].track.songId, queue.entries[2].track.songId)
-        let reads = await qq.reads; XCTAssertEqual(reads, 1)
-        await source.close()
+        XCTAssertEqual(state.total, 650); XCTAssertEqual(Set(queue.entries.map(\.id)).count, 650)
+        XCTAssertEqual(queue.entries[0].track.songId, queue.entries[2].track.songId); XCTAssertEqual(store.snapshot().2, before + 1)
+        let calls = await peer.calls(); XCTAssertEqual(calls.map(\.operation), ["playlist.complete"])
+        await source.close(); await service.close()
     }
-    func testPublicSourceProtectionRevokeIsSynchronousAndDoesNotReplaceExistingQueue() async throws {
-        let qq = MusicNativePublicBrowseQQFixture(count: 3), store = NativeMusicMemoryDocument()
-        let service = try await NativeMusicFixture.service(store, qq: qq)
-        let source = try await service.openPublicQueue(.init(collection: await qq.collection, snapshot: String(repeating: "a", count: 64)))
-        let first = try await service.remoteQueuePage(source, cursor: nil), before = store.snapshot().0
-        service.revokeAccess(generation: 2)
+    func testProtectionRevokesPublicSourceSynchronouslyWithoutQueueCommit() async throws {
+        let peer = QQBrowsePeer(count: 3), store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let source = try await service.openPublicQueue(.init(collection: peer.collection))
+        let before = store.snapshot().0; service.revokeAccess(generation: 2)
         XCTAssertFalse(source.authorization.isActive)
-        do {
-            _ = try await service.replaceRemoteQueue(source, start: .init(index: 0, track: first.items[0]), expectedRevision: 0, intent: .init())
-            XCTFail("revoked source")
-        } catch {}
+        await assertMusicFailure(.staleAccess) { _ = try await service.replaceRemoteQueue(source, start: .init(index: 0), expectedRevision: 0, intent: .init()) }
         XCTAssertEqual(store.snapshot().0, before)
-        await source.close()
+        await source.close(); await service.close()
     }
-    func testMismatchedSnapshotFailsBeforeQueueWriter() async throws {
-        let qq = MusicNativePublicBrowseQQFixture(count: 1), store = NativeMusicMemoryDocument()
-        let service = try await NativeMusicFixture.service(store, qq: qq)
-        do {
-            _ = try await service.openPublicQueue(.init(collection: await qq.collection, snapshot: String(repeating: "b", count: 64)))
-            XCTFail("mismatched snapshot")
-        }
-        catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+    func testCompleteResultFailurePublishesNoSourceAndDoesNotWriteQueue() async throws {
+        let peer = NativeMusicResultFixture(failure: .upstreamFailed), store = NativeMusicMemoryDocument()
+        let service = try await NativeMusicFixture.service(store, platform: peer)
+        await assertMusicFailure(.upstreamFailed) { _ = try await service.openPublicQueue(.init(collection: MusicNativePublicBrowseFixture.collection)) }
         XCTAssertEqual(store.snapshot().2, 0)
-        let retained = await service.publicQueueSources.count
-        XCTAssertEqual(retained, 0, "A failed open must not publish source authority")
+        let retained = await service.publicQueueSources.count; XCTAssertEqual(retained, 0)
         await service.close()
     }
-    func testPublicSourcesReleaseIndependentlyOnCloseRefreshAndExpiry() async throws {
-        let qq = MusicNativePublicBrowseQQFixture(count: 1), clock = NativeMusicFixtureClock()
-        let service = try await NativeMusicFixture.service(qq: qq, clock: { clock.now() })
-        let collection = await qq.collection
-        let request = MusicPublicBrowseQueueRequest(collection: collection, snapshot: String(repeating: "a", count: 64))
+    func testPublicSourcesReleaseIndependentlyAndRefreshRevokesOnlyCollectionLifetime() async throws {
+        let peer = QQBrowsePeer(count: 1), clock = NativeMusicFixtureClock(), service = try await NativeMusicFixture.service(platform: peer, clock: { clock.now() })
         var sources: [MusicRemoteQueueSource] = []
-        for _ in 0..<33 { sources.append(try await service.openPublicQueue(request)) }
+        for _ in 0..<33 { sources.append(try await service.openPublicQueue(.init(collection: peer.collection))) }
         await sources[0].close()
-        sources.append(try await service.openPublicQueue(request))
-        let full = await service.publicQueueSources.count; XCTAssertEqual(full, 33)
+        XCTAssertFalse(sources[0].authorization.isActive); XCTAssertTrue(sources.dropFirst().allSatisfy { $0.authorization.isActive })
         clock.advance(601)
-        let fresh = try await service.openPublicQueue(request)
-        XCTAssertTrue(sources.allSatisfy { !$0.authorization.isActive })
-        let afterExpiry = await service.publicQueueSources.count; XCTAssertEqual(afterExpiry, 1)
-        await service.refreshPublicCollection(collection)
-        XCTAssertFalse(fresh.authorization.isActive)
-        let afterRefresh = await service.publicQueueSources.count; XCTAssertEqual(afterRefresh, 0)
-        for source in sources { await source.close() }
-        await fresh.close(); await service.close()
+        let fresh = try await service.openPublicQueue(.init(collection: peer.collection))
+        XCTAssertTrue(sources.dropFirst().allSatisfy { $0.authorization.isActive }, "ordinary time passage is not a content gate")
+        await service.refreshPublicCollection(peer.collection)
+        XCTAssertFalse(fresh.authorization.isActive); XCTAssertTrue(sources.allSatisfy { !$0.authorization.isActive })
+        let count = await service.publicQueueSources.count; XCTAssertEqual(count, 0)
+        for source in sources { await source.close() }; await fresh.close(); await service.close()
     }
-    func testCancelledNonCooperativeSearchCannotPublishAndKeepsPhysicalBudgetUntilSettled() async throws {
-        let gate = NativeMusicGate()
-        let service = try await NativeMusicFixture.service(http: MusicNativePublicBrowseBlockedHTTP(gate: gate))
+    func testCancelledNonCooperativeSearchCannotPublishAndPhysicalPeerEndsBeforeTeardown() async throws {
+        let gate = NativeMusicGate(), peer = NativeMusicResultFixture([.object(["items": .array([]), "total": .number(0)])], gate: gate)
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
         let task = Task { try await service.publicPlaylists(platform: .netease, query: "synthetic", cursor: nil) }
         await gate.started(); task.cancel()
-        do { _ = try await task.value; XCTFail("late search") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
-        let active = await service.operations.count
-        XCTAssertEqual(active, 1)
-        await gate.release()
-        await service.close()
+        do { _ = try await task.value; XCTFail("late search") } catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
+        await gate.release(); await peer.waitUntilIdle(); await service.close()
+        XCTAssertEqual(store.snapshot().2, 0)
+        let calls = await peer.calls(); XCTAssertEqual(calls.count, 1)
     }
 }

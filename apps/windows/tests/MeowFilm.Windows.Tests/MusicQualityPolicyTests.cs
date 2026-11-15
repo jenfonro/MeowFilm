@@ -88,13 +88,18 @@ public static class MusicQualityPolicyTests
     private static async Task Corrupt()
     {
         var store = new QualityFixture.DocumentStore();
-        var p = MusicQualityPolicy.Default("master"); p["qualityEnabled"] = new JsonArray();
-        p["spatialEnabled"] = new JsonArray(); p["qualityOrder"] = LJ.Arr(MusicQualityPolicy.Categories.Reverse());
-        store.Put("music.library.v1", LJ.Obj(("version", 1), ("entries", new JsonArray(LJ.Obj(
-            ("key", "[\"meowfilm\",\"music\",1,\"local\",\"native-quality-policy\"]"), ("value", p))))));
+        await using (var seed = new QualityFixture(store))
+            await seed.Ok("music.quality.settings.save", await seed.SaveParameters("master"));
+        var document = JsonNode.Parse(store.Data[MusicLibraryOwner.DocumentNamespace])!.AsObject();
+        var policy = document["entries"]!.AsArray().OfType<JsonObject>()
+            .Single(entry => entry["value"] is JsonObject value && value.ContainsKey("qualityEnabled"))["value"]!.AsObject();
+        policy["qualityEnabled"] = new JsonArray();
+        policy["spatialEnabled"] = new JsonArray();
+        store.Put(MusicLibraryOwner.DocumentNamespace, document);
+        int writes = store.Writes;
         await using var f = new QualityFixture(store);
         await f.Error("music.quality.settings.get", null, "CORRUPT_STORAGE");
-        Check(store.Writes == 0, "invalid current data must not be repaired or rewritten");
+        Check(store.Writes == writes, "invalid current data must not be repaired or rewritten");
     }
     private static async Task IndependentOwners()
     {
@@ -111,9 +116,9 @@ public static class MusicQualityPolicyTests
         stale["ifRevision"] = 0;
         await f.Error("music.quality.settings.save", stale, "REVISION_CONFLICT");
         Check(f.Store.Writes == 2);
-        Check(f.Store.WriteNames.SetEquals(["music.library.v1"]), "settings only write the library document");
-        Check(f.Store.Names.SetEquals(["music.library.v1", "music.song-matches.v1"]),
-            "library access also reads the shared song facts owner without writing its document");
+        Check(f.Store.WriteNames.SetEquals([MusicLibraryOwner.DocumentNamespace]), "settings only write the library document");
+        Check(f.Store.Names.SetEquals([MusicLibraryOwner.DocumentNamespace]),
+            "settings read the sole native library document, not supplementary source-discovery state");
     }
     private static async Task Restart()
     {
@@ -132,7 +137,7 @@ public static class MusicQualityPolicyTests
     private static async Task Unknown(bool after)
     {
         await using var f = new QualityFixture();
-        f.Store.FaultNamespace = "music.library.v1"; f.Store.FaultAfter = after; f.Store.Fault = true;
+        f.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace; f.Store.FaultAfter = after; f.Store.Fault = true;
         var p = await f.SaveParameters("auto");
         await f.Error("music.quality.settings.save", p, "COMMIT_UNKNOWN");
         int writes = f.Store.Writes;
@@ -151,7 +156,7 @@ public static class MusicQualityPolicyTests
     private static async Task CancelAdmitted()
     {
         await using var f = new QualityFixture(); var p = await f.SaveParameters("auto");
-        f.Store.HoldNamespace = "music.library.v1";
+        f.Store.HoldNamespace = MusicLibraryOwner.DocumentNamespace;
         using var cts = new CancellationTokenSource();
         var saving = f.App.ExecuteAsync("music.quality.settings.save", p, cts.Token);
         await f.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cts.Cancel();
@@ -307,9 +312,20 @@ public static class MusicQualityPolicyTests
     private static async Task WyCatalogUnknown()
     {
         var store = new QualityFixture.DocumentStore();
-        var wire = new WyCatalogWire();
         await using var runtime = new NativeMusicScriptTestRuntime();
-        await using var app = new MusicNativeApplication(store, runtime, wire);
+        int catalogCalls = 0;
+        bool qualityKnown = false;
+        runtime.Platform.OnRequest = (call, _) =>
+        {
+            Check(call.Platform == "wy" && call.Operation == "search");
+            catalogCalls++;
+            var recording = MusicSongFixture.Online("wy", "11", "合成歌曲", "合成艺人", "合成专辑", 120);
+            MusicSongFixture.Info(recording).Remove("types");
+            MusicSongFixture.Info(recording).Remove("qualityKnown");
+            if (qualityKnown) MusicSongFixture.Info(recording)["qualityKnown"] = true;
+            return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { items = new[] { recording }, more = false }));
+        };
+        await using var app = new MusicNativeApplication(store, runtime);
         async Task<JsonElement> Call(string method, object? parameters = null)
         {
             var result = await app.ExecuteAsync(method, parameters);
@@ -318,8 +334,8 @@ public static class MusicQualityPolicyTests
         }
         var page = await Call("music.catalog.search", new { platform = "wy", keyword = "合成歌曲", limit = 1 });
         var song = page.GetProperty("items")[0].Clone();
-        Check(wire.Calls == 1 && !MusicSongFixture.Info(song).TryGetProperty("types", out _));
-        Check(!runtime.HasStarted, "ordinary native catalog must not start Node");
+        Check(catalogCalls == 1 && !MusicSongFixture.Info(song).TryGetProperty("types", out _));
+        Check(!runtime.HasStarted, "ordinary catalog must not start the authored-script runtime");
         const string source = """
             let calls=0;
             lx.on(lx.EVENT_NAMES.request,async ({info})=>{
@@ -350,31 +366,24 @@ public static class MusicQualityPolicyTests
         QualityFixture.Code(await app.ExecuteAsync("music.online.resolve",
             new { installationId = id, platform = "wy", quality = "auto", song }), "QUALITY_UNAVAILABLE");
         Check(runtime.Calls.Count(method => method == "music.script.resolve") == invokes, "auto must not guess types");
-        var known = QualityFixture.O(song);
-        foreach (var row in known["sources"]!.AsArray()) row!["musicInfo"]!["qualityKnown"] = true;
+        qualityKnown = true;
+        var known = (await Call("music.catalog.search", new { platform = "wy", keyword = "known correction", limit = 1 }))
+            .GetProperty("items")[0];
+        Check(known.GetProperty("songId").GetString() == song.GetProperty("songId").GetString() && catalogCalls == 2);
         QualityFixture.Code(await app.ExecuteAsync("music.online.resolve",
-            new { installationId = id, platform = "wy", quality = "320k", song = known }), "RECORDING_QUALITY_UNAVAILABLE");
+            parameters), "RECORDING_QUALITY_UNAVAILABLE");
         Check(runtime.Calls.Count(method => method == "music.script.resolve") == invokes,
-            "qualityKnown:true must survive native normalization and reject before LX");
+            "the current repository qualityKnown:true must reject before LX even with the earlier projection");
+        qualityKnown = false;
+        var unknown = (await Call("music.catalog.search", new { platform = "wy", keyword = "unknown correction", limit = 1 }))
+            .GetProperty("items")[0];
+        Check(unknown.GetProperty("songId").GetString() == song.GetProperty("songId").GetString() &&
+            !MusicSongFixture.Info(unknown).TryGetProperty("qualityKnown", out _) && catalogCalls == 3);
         QualityFixture.Code(await app.ExecuteAsync("music.online.resolve", parameters), "MEDIA_UNAVAILABLE");
         Check(runtime.Calls.Count(method => method == "music.script.resolve") == invokes + 1,
             "explicit resolver miss must not retry or downgrade");
-        Check(wire.Calls == 1 && runtime.Calls.All(method => method.StartsWith("music.script.", StringComparison.Ordinal)));
-    }
-    private sealed class WyCatalogWire : HttpMessageHandler
-    {
-        internal int Calls;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        {
-            token.ThrowIfCancellationRequested();
-            Check(request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/eapi/cloudsearch/pc");
-            Calls++;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent("""{"code":200,"result":{"songCount":1,"songs":[{"id":11,"name":"合成歌曲","dt":120000,"ar":[{"name":"合成艺人"}],"al":{"id":1,"name":"合成专辑"}}]}}""",
-                    Encoding.UTF8, "application/json")
-            });
-        }
+        Check(catalogCalls == 3 && runtime.Calls.All(method => method.StartsWith("music.script.", StringComparison.Ordinal)),
+            "only the three explicit catalog observations may read metadata; resolves never add a search");
     }
 }
 
@@ -385,7 +394,7 @@ internal sealed class QualityFixture : IAsyncDisposable
     internal MusicNativeApplication App { get; }
     internal QualityFixture(DocumentStore? store = null)
     {
-        Store = store ?? new(); App = new(Store, Runtime, new RejectHttp());
+        Store = store ?? new(); App = new(Store, Runtime);
     }
     internal static void Check(bool value, string message = "quality assertion")
     { if (!value) throw new InvalidOperationException(message); }
@@ -431,11 +440,6 @@ internal sealed class QualityFixture : IAsyncDisposable
         Runtime.Release.TrySetResult(); Store.Release.TrySetResult();
         await App.DisposeAsync();
     }
-    internal sealed class RejectHttp : System.Net.Http.HttpMessageHandler
-    {
-        protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken token)
-            => throw new InvalidOperationException("Real upstream is forbidden in quality fixtures");
-    }
     internal sealed class DocumentStore : IDocumentStore
     {
         private readonly object gate = new();
@@ -478,6 +482,7 @@ internal sealed class QualityFixture : IAsyncDisposable
     }
     internal sealed class ScriptRuntime : IRuntimeClient
     {
+        internal MusicPlatformRuntimeFixture Platform { get; } = new();
         private readonly Dictionary<string, bool> installations = [];
         private object Item(string id) => new { installationId = id, enabled = installations[id],
             name = "Quality fixture", version = "1", contentHash = new string('a', 64), executionHash = new string('a', 64),
@@ -502,6 +507,8 @@ internal sealed class QualityFixture : IAsyncDisposable
         }
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
+            if (method.StartsWith("music.platform.", StringComparison.Ordinal))
+                return await Platform.CallAsync(method, parameters, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested(); Calls.Add(method); var p = O(parameters ?? new { });
             switch (method)
             {

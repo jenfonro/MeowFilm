@@ -24,7 +24,7 @@ public enum MusicPublicBrowsePlatform: String, Codable, CaseIterable, Sendable, 
 }
 
 /// Catalog platforms include public providers without account capabilities.
-public struct MusicPublicBrowseCollection: Sendable, Hashable, Identifiable {
+public struct MusicPublicBrowseCollection: Codable, Sendable, Hashable, Identifiable {
     public enum Kind: String, Sendable, Codable { case playlist, album }
     public let platform: MusicPublicBrowsePlatform
     public let nativeID: String
@@ -41,8 +41,8 @@ public struct MusicPublicBrowseCollection: Sendable, Hashable, Identifiable {
     }
 }
 
-public struct MusicPublicBrowseChannel: Sendable, Hashable, Identifiable {
-    public enum Kind: String, Sendable {
+public struct MusicPublicBrowseChannel: Codable, Sendable, Hashable, Identifiable {
+    public enum Kind: String, Codable, Sendable {
         case featured, playlists, rankings, newSongs, cube, vip, unsupported
         case artistActivity = "artist-activity"
     }
@@ -67,7 +67,7 @@ public enum MusicPublicBrowseDestination: Sendable, Hashable {
     case daily(MusicAccountPlatform)
 }
 
-public struct MusicPublicBrowseFilter: Sendable, Hashable, Identifiable {
+public struct MusicPublicBrowseFilter: Codable, Sendable, Hashable, Identifiable {
     public let id: String
     public let title: String
     public let group: String
@@ -86,8 +86,8 @@ public enum MusicPublicBrowseContent: Sendable {
     case unavailable
 }
 /// Display-only ranking metadata. Neither a preview nor its rank authorizes playback.
-public struct MusicPublicBrowseRanking: Sendable {
-    public struct Entry: Sendable {
+public struct MusicPublicBrowseRanking: Codable, Sendable {
+    public struct Entry: Codable, Sendable {
         public let id: String
         public let title: String
         public let artist: String
@@ -140,7 +140,7 @@ public struct MusicPublicBrowseSectionTab: Sendable, Identifiable {
     }
 }
 public struct MusicPublicBrowseSection: Sendable, Identifiable {
-    public enum Layout: String, Sendable {
+    public enum Layout: String, Codable, Sendable {
         case list, featureRail, playlistRail, songColumns, grid, banner, artistUpdates
         case rankingStack, rankedSongs, rankingSmall
         case vipSongs, vipRankedSongs
@@ -196,9 +196,9 @@ public struct MusicPublicBrowseCollectionPage: Sendable {
 /// source position. Missing members leave gaps; position is not a queue index.
 public struct MusicPublicBrowseMember: Sendable {
     public let nativeID: String
-    public let sourcePosition: Int
+    public let sourcePosition: Int?
     public let track: MusicRemoteTrack
-    public init(nativeID: String, sourcePosition: Int, track: MusicRemoteTrack) {
+    public init(nativeID: String, sourcePosition: Int?, track: MusicRemoteTrack) {
         self.nativeID = nativeID; self.sourcePosition = sourcePosition; self.track = track
     }
 }
@@ -209,15 +209,14 @@ public struct MusicPublicBrowseDetail: Sendable {
     public var tracks: [MusicRemoteTrack] { members.map(\.track) }
     public let total: Int
     public let cursor: String?
-    public let snapshot: String
     public let notice: String?
     /// Number of source positions examined, including unavailable members.
     /// A nonterminal page may contain no visible tracks, but must advance.
     public let consumed: Int
     public init(collection: MusicPublicBrowseCollection, members: [MusicPublicBrowseMember], total: Int,
-                cursor: String?, snapshot: String, notice: String? = nil, consumed: Int? = nil) {
+                cursor: String?, notice: String? = nil, consumed: Int? = nil) {
         self.collection = collection; self.members = members; self.total = total
-        self.cursor = cursor; self.snapshot = snapshot; self.notice = notice
+        self.cursor = cursor; self.notice = notice
         self.consumed = consumed ?? members.count
     }
 }
@@ -246,42 +245,14 @@ public extension MusicPublicBrowsing {
 /// must NOT be converted to thousands of expiring per-page handles.
 public struct MusicPublicBrowseQueueRequest: Sendable {
     public let collection: MusicPublicBrowseCollection
-    public let snapshot: String
-    public init(collection: MusicPublicBrowseCollection, snapshot: String) {
-        self.collection = collection; self.snapshot = snapshot
-    }
+    public init(collection: MusicPublicBrowseCollection) { self.collection = collection }
 }
 public protocol MusicPublicBrowseQueueLoading: Sendable {
     func publicQueueTracks(_ request: MusicPublicBrowseQueueRequest) async throws -> [MusicNativeTrackData]
     func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) async throws -> MusicRemoteQueueSource
 }
 
-/// Optional extension of the already assembled anonymous QQ owner.
-public protocol MusicPublicBrowseQQProviding: MusicPublicQQProviding {
-    func publicBrowsePlaylists(query: String, page: Int, limit: Int) async throws -> MusicPublicBrowseQQSearch
-    func publicBrowsePlaylistPage(id: String, offset: Int) async throws -> MusicPublicBrowseNativeCollectionPage
-    func publicBrowsePlaylist(id: String) async throws -> MusicPublicBrowseNativeCollection
-}
-public extension MusicPublicBrowseQQProviding {
-    func publicBrowsePlaylistPage(id: String, offset: Int) async throws -> MusicPublicBrowseNativeCollectionPage {
-        throw MusicServiceError.unsupported
-    }
-}
-/// One upstream member page. headSignature identifies the returned summary /
-/// revision, not a claim that unseen members form a verified complete snapshot.
-public struct MusicPublicBrowseNativeCollectionPage: Sendable {
-    public let collection: MusicPublicBrowseCollection
-    public let tracks: [MusicNativeTrackData]
-    public let total: Int
-    public let more: Bool
-    public let headSignature: String
-    public init(collection: MusicPublicBrowseCollection, tracks: [MusicNativeTrackData], total: Int,
-                more: Bool, headSignature: String) {
-        self.collection = collection; self.tracks = tracks; self.total = total
-        self.more = more; self.headSignature = headSignature
-    }
-}
-public struct MusicPublicBrowseQQSearch: Sendable {
+public struct MusicPublicBrowseCollectionSearch: Sendable {
     public let items: [MusicPublicBrowseCollection]
     public let total: Int
     public let nextPage: Int?
@@ -292,10 +263,7 @@ public struct MusicPublicBrowseQQSearch: Sendable {
 public struct MusicPublicBrowseNativeCollection: Sendable {
     public let collection: MusicPublicBrowseCollection
     public let tracks: [MusicNativeTrackData]
-    public let snapshot: String
-    public let headSignature: String
-    public init(collection: MusicPublicBrowseCollection, tracks: [MusicNativeTrackData], snapshot: String,
-                headSignature: String = "") {
-        self.collection = collection; self.tracks = tracks; self.snapshot = snapshot; self.headSignature = headSignature
+    public init(collection: MusicPublicBrowseCollection, tracks: [MusicNativeTrackData]) {
+        self.collection = collection; self.tracks = tracks
     }
 }

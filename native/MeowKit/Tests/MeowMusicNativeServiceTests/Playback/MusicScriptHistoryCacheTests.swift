@@ -65,13 +65,14 @@ final class MusicScriptHistoryCacheTests: XCTestCase {
                 .appendingPathComponent("meow-script-history-test-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
             let clock = MusicRecoveryTestClock(), scripts = HistoryScripts()
-            let store = try MusicNativeCandidateDiscoveryFixture.store()
+            let song = try MusicNativeCandidateDiscoveryFixture.song()
+            let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
             func cache() -> NativeMusicAudioFileCache {
                 .init(rootURL: root, clock: { clock.now() }, transport: HistoryBytes(), inspector: HistoryMeasurement())
             }
             let file = cache()
-            let service = NativeMusicService(document: store, scripts: scripts, qq: NativeMusicQQFixture(),
-                audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+            let service = NativeMusicService(document: store, scripts: scripts, platformClient: try NativeMusicFixture.client(),
+                audioFileCache: file, clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)
             clock.advance(1) // Actual play follows the access-transition capture cutoff.
             let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
@@ -79,14 +80,14 @@ final class MusicScriptHistoryCacheTests: XCTestCase {
             XCTAssertNotNil(selected.selection.scriptIdentity)
             XCTAssertEqual(selected.candidate.resolvedSelection, selected.selection)
             try await service.activateSource(attemptID: selected.candidate.attemptId)
-            let before = await file.lookup(scope: "script-history", songID: try MusicNativeCandidateDiscoveryFixture.song()["songId"].string,
+            let before = await file.lookup(scope: "script-history", songID: song["songId"].string,
                 authorization: MusicQueueAuthorization(), accepts: { _ in true })
             XCTAssertNil(before, "Resolve/activate is not actual playback")
             _ = try await service.record(.init(attemptId: selected.candidate.attemptId, occurrenceId: "entry-1",
                 resourceId: selected.candidate.resourceId, kind: .playing, position: 20, duration: 180))
             // Drain the actor's finite capture, not polling filesystem/static logs.
             try await service.stageAudioCacheForTestsToDrain()
-            let captured = await file.lookup(scope: "script-history", songID: try MusicNativeCandidateDiscoveryFixture.song()["songId"].string,
+            let captured = await file.lookup(scope: "script-history", songID: song["songId"].string,
                 authorization: MusicQueueAuthorization(), accepts: { _ in true })
             XCTAssertEqual(captured?.identity.provider, "history-script")
             XCTAssertEqual(captured?.identity.generation, 1)
@@ -97,8 +98,8 @@ final class MusicScriptHistoryCacheTests: XCTestCase {
             let reopenedFile = cache()
             let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "UnusedMID", clock: clock)
             let reopened = NativeMusicService(document: store, scripts: change == "deleted" ? nil : scripts,
-                accounts: accounts, qq: NativeMusicQQFixture(),
-                audioFileCache: reopenedFile, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+                accounts: accounts, platformClient: try NativeMusicFixture.client(),
+                audioFileCache: reopenedFile, clock: { clock.now() })
             try await reopened.setAccess(available: true, generation: 2)
             let state = try await reopened.state()
             let player = HistoryPlaybackPlayer(), model = MusicViewModel(service: reopened, player: player)

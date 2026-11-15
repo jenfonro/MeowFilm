@@ -10,17 +10,16 @@ actor MusicAccountAccessGate {
     nonisolated let service: NativeMusicAccountService
     private var closed = false
 
+    init(service: NativeMusicAccountService) { self.service = service }
+
     /// Credentials stay readable after first unlock, so locked playback can still
     /// renew an account URL. They remain encrypted, device-only and unsynchronized.
     init(bundleIdentifier: String, urlCacheStore: DocumentStore?,
          feedbackOutboxStoreFactory: @escaping @Sendable () throws -> DocumentStore,
          audioCache: (any MusicAudioFileCaching)?,
-         displayCache: (any MusicPlaybackDisplayCaching)?,
-         clientContexts: NativeMusicClientService,
-         qqClient: NativeMusicQQPublicService,
-         neteaseTokenProvider: any MusicNeteaseTokenProviding) throws {
+         platformClient: MusicPlatformClient) throws {
         let store = try KeychainCredentialStore(
-            service: bundleIdentifier + ".music.accounts.v1",
+            service: bundleIdentifier + ".music.platform.accounts.v1",
             accessibility: .afterFirstUnlockThisDeviceOnly
         )
         let coordinator = AccountSessionCoordinator(store: store)
@@ -37,16 +36,15 @@ actor MusicAccountAccessGate {
                 accountID: UUID(uuidString: id)!
             )
         }
-        service = NativeMusicAccountService(accounts: coordinator, scopes: scopes,
+        service = NativeMusicAccountService(accounts: coordinator, scopes: scopes, platformClient: platformClient,
             urlCacheStore: urlCacheStore, feedbackOutboxStoreFactory: feedbackOutboxStoreFactory, cacheLifecycle: { event in
                 switch event {
                 case .accountChanged:
                     await audioCache?.clearOfficial()
-                    await displayCache?.clear()
                 case .accessChanged, .closed:
                     await audioCache?.cancelPending()
                 }
-            }, clientContexts: clientContexts, qqClient: qqClient, neteaseTokenProvider: neteaseTokenProvider)
+            })
     }
 
     /// Product assembly admits the account service once per process.
@@ -57,11 +55,14 @@ actor MusicAccountAccessGate {
             guard reply.ok, reply.available == available, reply.generation == 1 else {
                 await close(); return
             }
+            guard !closed else { return }
+            if available { await service.bindPlatformSessions() }
         } catch { await close() }
     }
 
-    func close() async {
+    @discardableResult
+    func close() async -> MusicAccountCloseReport {
         closed = true
-        _ = await service.close()
+        return await service.close()
     }
 }

@@ -14,37 +14,54 @@ struct MusicNativeFMPreviewEntry {
 
 /// The source caches its first page; only its existing nextFMBatch call asks
 /// this reader again. Consuming a preview can therefore never repeat batch one.
-private actor MusicNativeFMRead {
+actor MusicNativeFMRead {
     var preview: Task<MusicNativeFMResponse?, Never>?
     let load: @Sendable () async throws -> MusicNativeFMResponse
     var closed = false
+    var loading: Task<MusicNativeFMResponse, Error>?
+    var closing: Task<Void, Never>?
     init(preview: Task<MusicNativeFMResponse?, Never>?, load: @escaping @Sendable () async throws -> MusicNativeFMResponse) {
         self.preview = preview; self.load = load
     }
     func page(_ cursor: String?) async throws -> MusicNativeTrackPage {
         try musicRequire(cursor == nil, .invalidRequest)
         try musicRequire(!closed, .closed)
-        let value: MusicNativeFMResponse
-        if let task = preview {
-            preview = nil
-            let result = await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
-            try Task.checkCancellation()
-            guard let result else { throw MusicServiceError.upstreamFailed }
-            value = result
-        } else { value = try await load() }
+        try musicRequire(loading == nil, .busy)
+        let preview = self.preview, load = self.load
+        self.preview = nil
+        let task = Task {
+            if let preview {
+                let result = await withTaskCancellationHandler { await preview.value } onCancel: { preview.cancel() }
+                try Task.checkCancellation()
+                guard let result else { throw MusicServiceError.upstreamFailed }
+                return result
+            }
+            return try await load()
+        }
+        loading = task
+        defer { loading = nil }
+        let value = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
         try Task.checkCancellation(); try musicRequire(!closed, .closed)
         return .init(items: value.tracks, total: value.tracks.count, cursor: nil)
     }
-    func close() { closed = true; preview?.cancel(); preview = nil }
+    func close() async {
+        if closing == nil {
+            closed = true
+            let preview = self.preview, loading = self.loading
+            self.preview = nil
+            preview?.cancel(); loading?.cancel()
+            closing = Task { _ = await preview?.value; _ = await loading?.result }
+        }
+        await closing?.value
+    }
 }
 
 extension NativeMusicService: MusicFMPreviewServing {
     public func fmPreview(_ action: MusicHomeAction) async throws -> MusicFMPreview? {
-        try check(); try requirePlatform("wy"); try action.validate()
+        try check(); try requirePlatform("wy")
         guard let key = action.fmConfiguration else { throw MusicServiceError.invalidRequest }
         let own = epoch, binding = try await currentHomeBinding()
         try check(own)
-        guard accounts is any MusicNativeFMProviding else { throw MusicServiceError.unsupported }
         // Includes failed and in-flight entries. Account changes cannot leak a
         // previous cover or make a previous first batch playable.
         for (candidate, value) in fmPreviews where value.binding != binding || !value.authorization.isActive {
@@ -91,6 +108,7 @@ extension NativeMusicService: MusicFMPreviewServing {
         fmPreviews.removeValue(forKey: key); fmPreviewOrder.removeAll { $0 == key }
         access.remove(entry.id); entry.observer?.cancel()
         entry.authorization.revoke(); entry.task.cancel()
+        retainSimilarDrain(Task { _ = await entry.task.value })
     }
     func clearFMPreviews() {
         for key in Array(fmPreviews.keys) { discardFMPreview(key) }
@@ -98,21 +116,20 @@ extension NativeMusicService: MusicFMPreviewServing {
     private func loadFM(_ action: MusicHomeAction, preview: Bool, binding: MusicNativeHomeBinding,
                         epoch own: UUID) async throws -> MusicNativeFMResponse {
         try await checkHomeBinding(binding, epoch: own)
-        guard let owner = accounts as? any MusicNativeFMProviding else { throw MusicServiceError.unsupported }
-        let value = try await work(label: "musicFM") {
-            try await owner.nativeFM(action, preview: preview, binding: binding)
+        let owner = accounts as? any MusicNativeFMProviding, port = publicPlatforms
+        let value = try await work(label: "musicFM", draining: true) {
+            if let owner { return try await owner.nativeFM(action, preview: preview, binding: binding) }
+            return try await port.homeAction(action, preview: preview)
         }
         try await checkHomeBinding(binding, epoch: own)
-        try musicRequire(value.tracks.count <= 5 && value.tracks.allSatisfy { $0.platform == "wy" }, .invalidResponse)
-        if preview, case .ruleFM = action { try musicRequire(value.tracks.isEmpty, .invalidResponse) }
-        _ = try value.tracks.map(MusicModel.normalize)
         return value
     }
     func openFMQueue(_ action: MusicHomeAction, context: MusicRemoteQueueContext) async throws -> MusicRemoteQueueSource {
         guard let key = action.fmConfiguration else { throw MusicServiceError.invalidRequest }
         let own = epoch, binding = try await currentHomeBinding()
         try await checkHomeBinding(binding, epoch: own)
-        guard accounts is any MusicNativeFMProviding else { throw MusicServiceError.unsupported }
+        let preferenceScope = try await fmPreferenceScope(binding)
+        try await checkHomeBinding(binding, epoch: own)
         for (id, value) in fmQueues where !value.1.isActive { releaseFMQueue(id) }
         let id = UUID(), authorization = MusicQueueAuthorization(parent: binding.authorization)
         var preview: Task<MusicNativeFMResponse?, Never>?
@@ -125,23 +142,31 @@ extension NativeMusicService: MusicFMPreviewServing {
                 access.remove(entry.id); entry.observer?.cancel(); entry.authorization.revoke()
             } else { discardFMPreview(key) }
         }
-        let transferred = preview
-        access.register(id) { authorization.revoke(); transferred?.cancel() }
-        fmQueues[id] = (key, authorization)
         let reader = MusicNativeFMRead(preview: preview) { [weak self] in
             guard let self else { throw MusicServiceError.closed }
             return try await self.loadFM(action, preview: false, binding: binding, epoch: own)
         }
-        return .init(context: context, authorization: authorization,
+        access.register(id) { authorization.revoke(); Task { await reader.close() } }
+        fmQueues[id] = (key, authorization, reader)
+        let source = MusicRemoteQueueSource(context: context, authorization: authorization,
             loadPage: { try await reader.page($0) },
             validate: { [weak self] in
                 guard let self else { throw MusicServiceError.closed }
                 try await self.checkHomeBinding(binding, epoch: own)
             }, close: { [weak self] in
-                transferred?.cancel(); await reader.close(); await self?.releaseFMQueue(id)
-            }, homeAction: action)
+                await reader.close(); await self?.releaseFMQueue(id)
+            }, homeAction: action, fmPreferenceScope: preferenceScope)
+        _ = await bindQueueSource(source)
+        do {
+            try check(own); try authorization.check()
+            return source
+        } catch { await source.close(); throw error }
     }
     private func releaseFMQueue(_ id: UUID) {
-        access.remove(id); fmQueues.removeValue(forKey: id)?.1.revoke()
+        access.remove(id)
+        if let entry = fmQueues.removeValue(forKey: id) {
+            entry.1.revoke()
+            retainSimilarDrain(Task { await entry.2.close() })
+        }
     }
 }

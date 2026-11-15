@@ -33,7 +33,7 @@ public protocol MusicSourcePlaybackServing: MusicResolvedSourcesServing {
 
 public enum MusicSourceExclusionScope: Sendable, Equatable {
     case providerPlatform
-    case recording(fingerprint: String, duration: Double, sourceKey: String)
+    case recording(sourceKey: String)
 }
 
 public struct MusicSourceExclusion: Sendable, Equatable, Identifiable {

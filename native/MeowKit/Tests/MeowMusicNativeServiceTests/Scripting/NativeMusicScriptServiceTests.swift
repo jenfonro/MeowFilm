@@ -1,5 +1,6 @@
 import Foundation
 import MeowMusicFeature
+import MeowMusicTestSupport
 @testable import MeowRuntime
 import XCTest
 @testable import MeowMusicNativeService
@@ -535,11 +536,14 @@ extension NativeMusicScriptServiceTests {
         let clock = MusicRecoveryTestClock()
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         let qq = MusicNativeCandidateDiscoveryQQ(items: [MusicNativeCandidateDiscoveryFixture.track("tx", id: "101")])
-        let http = MusicNativeCandidateDiscoveryHTTP()
-        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
+        let http = MusicNativeDiscoveryPlatforms()
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
         let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
-            scripts: scripts, accounts: accounts, qq: qq, enabledPlatforms: [.qq, .kuwo],
-            transport: http, clock: { clock.now() })
+            scripts: scripts,
+            accounts: accounts,
+            platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),
+            enabledPlatforms: [.qq, .kuwo],
+            clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let context = "\(entry) \(String(describing: fault))"
         var selection: MusicPlaybackSelection?

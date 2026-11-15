@@ -97,11 +97,12 @@ final class NativeMusicCredentialUpdateTests: XCTestCase {
         await f.provider.holdCapabilities(gate)
         let pending = Task { try await f.service.nativeOptions(platform: .qq, nativeID: "SyntheticMID", sourceKey: "tx:SyntheticMID") }
         await gate.started()
-        await f.provider.configure(try MusicUpdateProvider.credential("new"))
+        let next = try MusicUpdateProvider.credential("new")
+        await f.provider.configure(next)
         _ = try await f.service.refresh(platform: .qq)
         await gate.release()
         do { _ = try await pending.value; XCTFail("Old-credential capability became a new grant") } catch {}
-        XCTAssertEqual(f.store.peek(f.identity)?.credential, try MusicUpdateProvider.credential("new"))
+        XCTAssertEqual(f.store.peek(f.identity)?.credential, next)
         _ = await f.service.close()
     }
     func testAnotherPlatformLogoutDoesNotRevokeThisUpdate() async throws {

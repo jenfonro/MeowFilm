@@ -3,6 +3,9 @@ import XCTest
 import MeowAccounts
 import MeowContracts
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowJSON
+import MeowRuntime
 import MeowStorage
 @testable import MeowMusicNativeService
 @testable import MeowMusicPlatform
@@ -14,23 +17,41 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
         let native: NativeMusicService
         let settingsDocument: NativeMusicMemoryDocument
         let outbox: DocumentStore
-        let peer: NativeFeedbackOfflineHTTP
+        let peer: NativeFeedbackOfflinePeer
         let clock: NativeMusicFixtureClock
     }
-    private func fixture() async throws -> Fixture {
+    private func fixture(heldUpload: (gate: NativeMusicGate, started: XCTestExpectation)? = nil) async throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let outbox = try DocumentStore(baseURL: root, namespace: "native-feedback")
         let identity = AccountIdentity(source: try SourceAddress(installationID: UUID(), siteKey: "wy"), accountID: UUID())
-        let bytes = Data(#"{"version":1,"platform":"wy","accountID":"42","cookies":{"MUSIC_U":"synthetic-account","__csrf":"synthetic-csrf"},"device":{}}"#.utf8)
-        let credentials = NativeFeedbackCredentials(try .init(data: bytes)), peer = NativeFeedbackOfflineHTTP()
+        let bytes = Data(#"{"platform":"wy","userId":"42","cookie":"MUSIC_U=synthetic-account; __csrf=synthetic-csrf"}"#.utf8)
+        let credentials = NativeFeedbackCredentials(try .init(data: bytes)), peer = NativeFeedbackOfflinePeer()
         let clock = NativeMusicFixtureClock()
-        let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
-            transport: peer, feedbackOutboxStoreFactory: { outbox }, clock: { clock.now() })
+        let transport = try MusicPlatformFixture { try await peer.respond($0) }
+        let client = transport.makeClient()
+        let owner: NativeMusicAccountService
+        if let heldUpload {
+            let provider = NativeFeedbackHeldUploadProvider(
+                node: MusicNodeAccountProvider(platform: .netease, client: client, clock: { clock.now() }),
+                peer: peer, gate: heldUpload.gate, started: heldUpload.started)
+            owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
+                providers: [.netease: provider], feedbackOutboxStoreFactory: { outbox }, clock: { clock.now() })
+        } else {
+            owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
+                platformClient: client, feedbackOutboxStoreFactory: { outbox }, clock: { clock.now() })
+        }
         _ = try await owner.setAccess(available: true, generation: 1)
         let settingsDocument = NativeMusicMemoryDocument()
-        let native = try await NativeMusicFixture.service(settingsDocument, accounts: owner, clock: { clock.now() })
+        let native = NativeMusicService(document: settingsDocument, accounts: owner, platformClient: client,
+            clock: { clock.now() }, monotonicClock: { clock.now().timeIntervalSince(NativeMusicFixture.date) })
+        addTeardownBlock {
+            if let heldUpload { await heldUpload.gate.release() }
+            await native.close(); _ = await owner.close()
+            try await client.close(); await transport.runtime.close()
+        }
+        try await native.setAccess(available: true, generation: 1)
         _ = try await native.setPlaybackFeedback(platform: .netease, enabled: true, expectedRevision: 0)
         _ = try await owner.validate(platform: .netease)
         await owner.flushPendingPlaybackFeedback()
@@ -86,6 +107,39 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
         let after = await f.peer.uploadCount()
         XCTAssertEqual(after, uploads, "Closing freezes the local pair without starting another network attempt")
     }
+    func testNativeCloseWaitsForIndependentOutboxUploadAfterControllerRegistrationHasFinished() async throws {
+        let gate = NativeMusicGate(), entered = expectation(description: "independent outbox upload dispatched")
+        let f = try await fixture(heldUpload: (gate, entered))
+        let controller = await f.native.playbackFeedback
+        let settings = try await f.native.playbackFeedbackSettings(), own = await f.native.epoch
+        controller.consume(sample(1, at: 0, position: 0, kind: .playing),
+            settings: settings, targets: [.init(platform: .netease, nativeID: "101")], accounts: f.owner) { platform, generation in
+                try await f.native.checkFeedbackAuthorization(epoch: own, platform: platform, generation: generation)
+            }
+        await fulfillment(of: [entered], timeout: 3)
+        // The lease reported registered locally; this flush does not own the
+        // account outbox's independent network worker.
+        await controller.flush()
+        let dispatched = await f.peer.uploadCount(); XCTAssertEqual(dispatched, 1)
+        let nativeBefore = f.settingsDocument.snapshot()
+        let firstReturned = expectation(description: "close waits for independent account upload")
+        let secondReturned = expectation(description: "repeated close shares account drain")
+        firstReturned.isInverted = true; secondReturned.isInverted = true
+        let first = Task { await f.native.close(); firstReturned.fulfill() }
+        let second = Task { await f.native.close(); secondReturned.fulfill() }
+        await fulfillment(of: [firstReturned, secondReturned], timeout: 0.05)
+        let frozen = try f.outbox.read(key: MusicNeteaseFeedbackOutbox.key)
+        await gate.release()
+        await first.value; await second.value
+        await f.owner.flushPendingPlaybackFeedback()
+        let uploads = await f.peer.uploadCount()
+        XCTAssertEqual(uploads, 1, "a cancelled dispatched upload cannot be replayed")
+        XCTAssertEqual(try f.outbox.read(key: MusicNeteaseFeedbackOutbox.key), frozen,
+                       "the late receipt cannot recreate or overwrite the retired outbox")
+        XCTAssertEqual(f.settingsDocument.snapshot().0, nativeBefore.0)
+        XCTAssertEqual(f.settingsDocument.snapshot().2, nativeBefore.2)
+        _ = await f.owner.close()
+    }
     func testFailedSettingsCASAndImmediateAccessFenceClearActualAccountOwnerPendingEvents() async throws {
         for change in ["stale", "storage", "access"] {
             let f = try await fixture()
@@ -117,15 +171,60 @@ private final class NativeFeedbackCredentials: CredentialStore, @unchecked Senda
     func write(_ record: CredentialRecord, for identity: AccountIdentity) { lock.lock(); self.record = record; lock.unlock() }
     func remove(for identity: AccountIdentity) { lock.lock(); record = nil; lock.unlock() }
 }
-private actor NativeFeedbackOfflineHTTP: MusicAccountHTTPTransport {
+private actor NativeFeedbackOfflinePeer: MusicPlatformFixtureResponding {
     private var uploads = 0
     func uploadCount() -> Int { uploads }
-    func send(_ request: MusicAccountHTTPRequest) throws -> MusicAccountHTTPResponse {
-        if request.url == MusicAccountFeedbackNeteaseWire.uploadURL {
-            uploads += 1
-            throw MusicAccountFeedbackNotSent.connectionUnavailable
-        }
-        guard request.url.path == "/weapi/w/nuser/account/get" else { throw MusicServiceError.invalidRequest }
-        return .init(status: 200, data: Data(#"{"code":200,"profile":{"userId":42,"nickname":"Synthetic"},"account":{"id":42}}"#.utf8))
+    func heldUpload(_ gate: NativeMusicGate, started: XCTestExpectation) async -> MusicPlaybackFeedbackReceipt {
+        uploads += 1
+        started.fulfill()
+        await gate.wait() // Deliberately ignores cancellation after dispatch.
+        return .confirmed
     }
+    func respond(_ request: MusicPlatformFixture.Request) throws -> RuntimeValue {
+        switch request.operation {
+        case "feedback.upload":
+            uploads += 1
+            return .object(["status": .string("notSent"), "errorCode": .string("NETWORK_ERROR")])
+        case "account.verify":
+            return .object(["userId": .string("42"),
+                "cookie": .string("MUSIC_U=synthetic-account; __csrf=synthetic-csrf"),
+                "profile": .object(["displayName": .string("Synthetic")])])
+        case "feedback.release": return .object(["released": .bool(true)])
+        default: throw MusicPlatformFixture.Failure.remote("UNSUPPORTED")
+        }
+    }
+}
+
+private struct NativeFeedbackHeldUploadProvider: MusicAccountFeedbackProvider,
+    MusicNeteasePlaybackLogUploading, MusicAccountSessionPublishing {
+    let node: MusicNodeAccountProvider
+    let peer: NativeFeedbackOfflinePeer
+    let gate: NativeMusicGate
+    let started: XCTestExpectation
+    func uploadPlaybackLog(_ events: Data, authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
+        try await authorization.check()
+        return await peer.heldUpload(gate, started: started)
+    }
+    func publish(_ credential: AccountCredential, scope: String, generation: Int, authorization: MusicQueueAuthorization) async throws {
+        try await node.publish(credential, scope: scope, generation: generation, authorization: authorization)
+    }
+    func feedback(_ report: MusicPlaybackFeedbackReport, session: MusicAccountFeedbackNativeSession?,
+                  guard authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicAccountFeedbackNativeResult {
+        try await node.feedback(report, session: session, guard: authorization)
+    }
+    func releaseFeedback(_ session: MusicAccountFeedbackNativeSession) async { await node.releaseFeedback(session) }
+    func createQR(id: UUID) async throws -> MusicLoginChallenge { try await node.createQR(id: id) }
+    func pollQR(id: UUID) async throws -> MusicAccountLoginResult { try await node.pollQR(id: id) }
+    func cancelQR(_ id: UUID) async { await node.cancelQR(id) }
+    func revoke() async { await node.revoke() }
+    func nativeID(_ credential: AccountCredential) async throws -> String { try await node.nativeID(credential) }
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await node.verify(credential) }
+    func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await node.refresh(credential) }
+    func recommendations(kind: String, page: Int) async throws -> MusicAccountRecommendation {
+        try await node.recommendations(kind: kind, page: page)
+    }
+    func collectionRows() async throws -> [JSONValue] { try await node.collectionRows() }
+    func tracks(collectionID: String) async throws -> [JSONValue] { try await node.tracks(collectionID: collectionID) }
+    func capabilities(mid: String) async throws -> [String] { try await node.capabilities(mid: mid) }
+    func resolve(mid: String, quality: String) async throws -> JSONValue { try await node.resolve(mid: mid, quality: quality) }
 }

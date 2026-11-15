@@ -45,7 +45,8 @@ public sealed partial class MusicCapability
                 await EnsureCatalogSourceSettingsAsync(request.Token);
                 if (!homeSnapshotRead)
                 {
-                    homeSnapshot = await homeSnapshotStore.ReadAsync(request.Token);
+                    homeSnapshot = await homeSnapshotStore.ReadAsync(
+                        id => application is MusicNativeApplication owner ? owner.SongSnapshot(id) : null, request.Token);
                     homeSnapshotRead = true;
                 }
             }
@@ -98,7 +99,7 @@ public sealed partial class MusicCapability
             MusicCatalogSection[] sections = [];
             foreach (var page in saved.Pages)
                 sections = MergeCatalogSections(sections, MusicCatalogDto.Read(page, saved.Platform, "home", "发现音乐").ToArray());
-            var state = new CatalogPageState(sections, [], "", "", "发现音乐", "", false, null,
+            var state = new CatalogPageState(sections, [], "", "发现音乐", "", false, null,
                 sections.Sum(section => section.Items.Count));
             homePlatform = saved.Platform;
             homeContentPages.Clear(); homeContentPages.AddRange(saved.Pages);
@@ -237,7 +238,7 @@ public sealed partial class MusicCapability
     }
 
     private static bool IsPrivateCatalogCard(MusicCatalogCard? card) =>
-        card is not null && (card.RequiresAccount || card.Locator is not null || card.Kind is "daily" or "fm" or "similar");
+        card is not null && (card.RequiresAccount || card.Locator is not null);
 
     private void RequireCatalogAccount(MusicCatalogCard? card)
     {

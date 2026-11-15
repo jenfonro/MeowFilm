@@ -17,7 +17,7 @@ internal ValueTask<MusicPlatformSession?> AcquireSettledAsync(
 
 - `RestoreForDiscoveryAsync` 返回当前账号列表投影。
 - `AcquireSettledAsync` 返回当前平台会话或 `null`。
-- 两者复用 `music.accounts.v1`、磁盘 gate、generation、lease table 和同步 `SessionChanged` 通知。
+- 两者复用 `music.accounts.v2`、磁盘 gate、generation、lease table 和同步 `SessionChanged` 通知。
 
 ## 结算语义
 

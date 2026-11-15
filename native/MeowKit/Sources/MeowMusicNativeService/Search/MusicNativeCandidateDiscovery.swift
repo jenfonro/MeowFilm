@@ -24,29 +24,6 @@ final class MusicNativeCandidateDiscoveryLifetime: @unchecked Sendable {
 }
 
 extension NativeMusicService: MusicCandidateDiscoveryServing {
-    /// Current business decisions filter additions, never the owner's existing sources.
-    func filteringRecordingSourceAdditions(_ song: MJ, existing: [MJ], playback: MJ) -> MJ {
-        let descriptor = MusicModel.descriptor(song)
-        let excluded = Set(playback["recordingSourceExclusions"].array.filter {
-            $0["fingerprint"].string == descriptor.fingerprint &&
-                descriptor.isCompatible(with: .init(title: "", artist: "", duration: $0["duration"].number), sameNative: true)
-        }.map { $0["sourceKey"].string })
-        guard !excluded.isEmpty else { return song }
-        let retained = Set(existing.map { $0["sourceKey"].string })
-        var rows = song["sources"].array.filter {
-            retained.contains($0["sourceKey"].string) || !excluded.contains($0["sourceKey"].string)
-        }
-        if let primary = song["sources"].array.first?["sourceKey"],
-           !rows.contains(where: { $0["sourceKey"] == primary }),
-           let original = existing.first?["sourceKey"],
-           let index = rows.firstIndex(where: { $0["sourceKey"] == original }) {
-            rows.insert(rows.remove(at: index), at: 0)
-        }
-        var filtered = song
-        filtered["sources"] = .array(MusicModel.orderedSources(rows))
-        return filtered
-    }
-
     public func beginCandidateDiscovery(occurrenceID: String, expectedQueueRevision: Int) async throws -> any MusicCandidateDiscoverySession {
         try candidateDiscoverySession(occurrenceID: occurrenceID, expectedQueueRevision: expectedQueueRevision)
     }
@@ -72,7 +49,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         try musicRequire(d.queue["currentId"].string == seed.occurrenceID, .targetChanged)
         try musicRequire(d.queue["revision"].int == seed.state.revision &&
             d.playback["revision"].int == seed.state.settingsRevision, .staleRevision)
-        try musicRequire(try song(.init(kind: .queue, id: seed.occurrenceID), d) == seed.song, .targetChanged)
+        try musicRequire(try song(.init(kind: .queue, id: seed.occurrenceID), d)["songId"] == seed.song["songId"], .targetChanged)
         return d
     }
 
@@ -88,9 +65,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
                 try await port.search(platform: platform, query: query, page: 1, limit: 30)
             }
             try candidateCheck(seed)
-            try musicRequire(page.total >= 0 &&
-                page.items.allSatisfy { $0.platform == platform }, .upstreamInvalid)
-            await recordSourceDiscovery(seed.song, platform: platform, page: page,
+            try await recordSourceDiscovery(seed.song, platform: platform, page: page,
                                         observation: finishSourceDiscoveryObservation(request))
             try candidateCheck(seed)
             return page
@@ -98,7 +73,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
             if (try? candidateCheck(seed)) != nil {
                 let failure = MusicServiceError.sanitized(error)
                 if failure != .cancelled {
-                    await recordSourceDiscovery(seed.song, platform: platform, rows: [],
+                    try await recordSourceDiscovery(seed.song, platform: platform, rows: [],
                         observation: finishSourceDiscoveryObservation(request, failure: failure))
                 }
             }
@@ -106,7 +81,11 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         }
     }
 
-    func candidateCancelWork(_ label: String) { cancelWork(label) }
+    func candidateCancelWork(_ label: String) async {
+        let tasks = operationLabels.filter { $0.value == label }.keys.compactMap { operationTasks[$0] }
+        cancelWork(label)
+        for task in tasks { await task.value }
+    }
 
     /// Automatic discovery searches only platforms whose rows can become a
     /// playback candidate now: official accounts that could answer, plus enabled,
@@ -170,10 +149,6 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
         try check()
         try await owner.candidateCheck(seed)
         try check()
-        let cache = try await owner.sourceDiscoveryState(seed.song)
-        let cached = cache.current(window: MusicSourceDiscoveryWindow.playback)
-        staged = await owner.mergeSourceDiscoveryCache(staged, entries: cached)
-        try check(); try await owner.candidateCheck(seed); try check()
         if discover, force || !searched {
             guard !discovering else { throw MusicServiceError.busy }
             discovering = true
@@ -185,8 +160,12 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
                 scope = try await owner.candidateDiscoveryScope(seed: seed, label: label)
                 try check(); try await owner.candidateCheck(seed); try check()
             }
+            let cache = try await owner.sourceDiscoveryState(seed.song)
+            let cached = cache.current(window: MusicSourceDiscoveryWindow.playback)
+            staged = try await owner.currentSongMetadata(staged)
+            try check(); try await owner.candidateCheck(seed); try check()
             let captured = seed, owner = owner, label = label, timing = timing
-            let query = String((seed.song["title"].string + " " + seed.song["artist"].string).prefix(200))
+            let query = staged["title"].string + " " + staged["artist"].string
             let contentFailed = contentFailed, otherFailed = otherFailed
             // A platform whose known sources all received content answers in this
             // session is searched again only when its check is missing or 7+ days old.
@@ -195,7 +174,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
                     (cache.checks[platform].map { cache.at - $0.checkedAt >= MusicSourceDiscoveryWindow.recheck } ?? true)
             }
             let platforms = MusicNativeCandidateDiscoveryMerge.searchable(staged)
-                ? MusicNativeSearchProtocol.platforms.filter {
+                ? MusicModel.sites.filter {
                     owner.platformEnabled($0) && scope?.contains($0) != false &&
                         (MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cached[$0]) &&
                             (force || !cache.hasCurrentCheck($0, window: MusicSourceDiscoveryWindow.playback)) ||
@@ -212,7 +191,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
                         } catch {
                             let failure = MusicServiceError.sanitized(error)
                             if [.cancelled, .closed, .accessUnavailable, .staleAccess, .staleRevision, .targetChanged,
-                                .storageFailed, .corruptDocument].contains(failure) { throw failure }
+                                .storageFailed, .storageConflict, .corruptDocument].contains(failure) { throw failure }
                             return .init(platform: platform, page: nil, failure: failure)
                         }
                     }
@@ -227,15 +206,16 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             // never manufacture empty successes for disabled platforms.
             searchIssues = []; searched = false
             if !results.isEmpty {
-                let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: results, excluded: cache.excluded)
-                staged = merged.song; searchIssues = merged.issues
+                searchIssues = results.compactMap { value in value.failure.map { .init(stage: .search, platform: value.platform, failure: $0) } }
                 searched = results.contains(where: { $0.page != nil })
             }
         }
+        staged = try await owner.currentSongMetadata(staged)
         let song = staged, captured = seed
         let options = try await owner.candidateOptions(song: song, seed: captured, label: label, timing: timing)
+        staged = try await owner.currentSongMetadata(staged)
         try check(); try await owner.candidateCheck(seed); try check()
-        return .init(track: try MusicModel.track(song, .init(kind: .queue, id: seed.occurrenceID)), state: seed.state,
+        return .init(track: try MusicModel.track(staged, .init(kind: .queue, id: seed.occurrenceID)), state: seed.state,
             options: options.rows, issues: (discover ? searchIssues : []) + options.issues,
             scriptState: options.scriptState, searched: discover && searched)
     }
@@ -243,8 +223,8 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
         try check()
         guard !resolving, !discovering else { throw MusicServiceError.busy }
         resolving = true; ownedAttempt = attemptID; resolvingID = attemptID
-        let owner = owner, captured = seed, recording = staged, label = label
-        let task = Task { try await owner.candidateResolve(target, attemptID: attemptID, seed: captured, recording: recording, label: label) }
+        let owner = owner, captured = seed
+        let task = Task { try await owner.candidateResolve(target, attemptID: attemptID, seed: captured) }
         resolutionTask = task
         defer {
             if resolvingID == attemptID { resolving = false; resolvingID = nil; resolutionTask = nil }
@@ -266,7 +246,8 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     }
     func cancel(attemptID: String) async {
         if resolvingID == attemptID {
-            resolutionTask?.cancel(); resolutionTask = nil; resolvingID = nil; resolving = false
+            let task = resolutionTask; task?.cancel(); resolutionTask = nil; resolvingID = nil; resolving = false
+            _ = await task?.result
         }
         if ownedAttempt == attemptID { ownedAttempt = nil }
         await owner.cancelCandidateAttempt(attemptID)
@@ -274,7 +255,8 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     func close(retainingAttemptID: String?) async {
         closed = true
         seed.lifetime.close()
-        resolutionTask?.cancel(); resolutionTask = nil; resolvingID = nil; resolving = false
+        let task = resolutionTask; task?.cancel(); resolutionTask = nil; resolvingID = nil; resolving = false
+        _ = await task?.result
         let cancel = ownedAttempt == retainingAttemptID ? nil : ownedAttempt
         ownedAttempt = nil
         await owner.candidateCancelWork(label)

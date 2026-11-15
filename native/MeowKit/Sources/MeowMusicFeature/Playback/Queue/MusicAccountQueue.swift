@@ -131,14 +131,8 @@ public struct MusicRemoteQueueContext: Sendable, Equatable {
 /// song ID. Repeated songs remain separate entries with stable queue IDs.
 public struct MusicRemoteQueueStart: Sendable {
     public let index: Int
-    public let songID: String
-    public let primarySource: MusicNativeSource?
-    public init(index: Int, songID: String, primarySource: MusicNativeSource) {
-        self.index = index; self.songID = songID; self.primarySource = primarySource
-    }
-    public init(index: Int, track: MusicRemoteTrack) {
-        self.index = index; songID = track.songId; primarySource = track.sources.first
-    }
+    public init(index: Int) { self.index = index }
+
 }
 
 /// Native queue source operations. Preparation and browsing do not change

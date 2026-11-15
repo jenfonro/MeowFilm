@@ -59,11 +59,10 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
                         AccountRules.Require(states[platform].Active is null, "BUSY");
                         epoch = states[platform].Epoch;
                     }
-                    var client = platform is "wy" or "kg" ? await clients.AcquireAsync(platform, token).ConfigureAwait(false) : null;
                     lock (gate)
                     {
                         AccountRules.Require(!closed && states[platform].Epoch == epoch && !states[platform].Revoked, "STALE_SESSION");
-                        entries.Add(MusicAccountTransferCredentials.Export(platform, account, client));
+                        entries.Add(MusicAccountTransferCredentials.Export(platform, account));
                     }
                 }
                 token.ThrowIfCancellationRequested();
@@ -112,11 +111,13 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
                     CheckTransferBaseline(platform, baseline.Epoch);
                     // An isolated protocol execution must neither Fence the account nor replace active login/reads.
                     AccountRules.Require(protocol is IMusicAccountTransferProtocol, "UNSUPPORTED");
-                    var observation = await ((IMusicAccountTransferProtocol)protocol)
+                    var verified = await ((IMusicAccountTransferProtocol)protocol)
                         .ValidateTransferAsync(platform, cookie, cancellation.Token).ConfigureAwait(false);
+                    var observation = verified.Details;
                     AccountRules.Require(observation.Profile.UserId == entry.UserId, "IDENTITY_MISMATCH");
-                    observation = ValidateDetailsObservation(observation, platform, cookie);
-                    await CommitTransfer(platform, baseline.Account, baseline.Epoch, cookie, observation, cancellation.Token).ConfigureAwait(false);
+                    AccountRules.Require(observation.Profile.Platform == platform &&
+                        !string.IsNullOrEmpty(observation.Profile.UserId), "IDENTITY_MISMATCH");
+                    await CommitTransfer(platform, baseline.Account, baseline.Epoch, verified.Cookie, observation, cancellation.Token).ConfigureAwait(false);
                     results.Add(new(platform, "imported"));
                 }
                 catch (Exception error)
@@ -174,7 +175,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
                 state.Uncertain = false;
                 if (!closed && state.Epoch == epoch)
                 {
-                    FenceLocked(platform);
+                    _ = FenceLocked(platform);
                     state.Revoked = false; state.Verified = committed;
                     SaveDetailsCache(platform, new(committed.Generation, committed.Scope!, committed.ValueFingerprint!,
                         observation.Profile.UserId, observation.Profile, observation.ProfileFetchedAt,

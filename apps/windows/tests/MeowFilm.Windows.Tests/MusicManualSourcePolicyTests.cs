@@ -71,8 +71,18 @@ public static class MusicManualSourcePolicyTests
     private static async Task OfficialAdmission()
     {
         await using var store = new QualityFixture.DocumentStore();
-        var transport = new StandardOrigin();
-        await using var app = new MusicNativeApplication(store, new QualityFixture.ScriptRuntime(), transport);
+        var runtime = new QualityFixture.ScriptRuntime();
+        int calls = 0;
+        runtime.Platform.OnRequest = (call, _) =>
+        {
+            Check(call.Platform == "wy" && call.Operation == "audio", "only real audio resolution crosses the platform port");
+            calls++;
+            return Task.FromResult(MusicPlatformRuntimeFixture.Json(new {
+                url = "https://m701.music.126.net/manual-fixture.mp3", requestQuality = "128k",
+                actualQuality = "128k", qualityVerified = true, duration = 100, size = 1600000,
+                expiresAt = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeMilliseconds(), full = true }));
+        };
+        await using var app = new MusicNativeApplication(store, runtime);
         async Task<JsonElement> Ok(string method, object? input = null)
         {
             var value = await app.ExecuteAsync(method, input);
@@ -85,24 +95,25 @@ public static class MusicManualSourcePolicyTests
         saved.Remove("schema"); saved.Remove("revision");
         saved["request"] = "flac"; saved["qualityEnabled"] = new JsonArray("lossless");
         var policy = await Ok("music.quality.settings.save", saved);
-        var song = MusicSongFixture.Online("wy", "1", "Synthetic", "Fixture", duration: 100);
+        var song = await MusicSongFixture.AdoptAsync(app,
+            MusicSongFixture.Online("wy", "1", "Synthetic", "Fixture", duration: 100));
         string signature = policy.GetProperty("signature").GetString()!;
         QualityFixture.Code(await app.ExecuteAsync("music.official.candidates",
             new { song, quality = "128k", qualityPolicySignature = signature }), "QUALITY_DISABLED");
         var candidates = await Ok("music.official.candidates",
             new { song, quality = "128k", qualityPolicySignature = signature, manualSource = true });
-        Check(candidates.GetProperty("candidates").GetArrayLength() == 1 && transport.Calls == 0,
+        Check(candidates.GetProperty("candidates").GetArrayLength() == 1 && calls == 0,
             "enabled official guest standard remains a local candidate without automatic standard enabled");
         var input = new { platform = "wy", song, quality = "128k", qualityPolicySignature = signature, manualSource = true };
         var context = await Ok("music.official.cacheContext", input);
-        Check(transport.Calls == 0, "manual cache context is still local and grants no new URL");
+        Check(calls == 0, "manual cache context is still local and grants no new URL");
         var resolved = await Ok("music.official.resolve", input);
         Check(resolved.GetProperty("quality").GetString() == "128k", "manual guest standard resolves its real quality");
         await Ok("music.official.confirm", input);
-        Check(transport.Calls == 1, "confirmation does not request another media URL");
+        Check(calls == 1, "confirmation does not request another media URL");
         QualityFixture.Code(await app.ExecuteAsync("music.official.resolve",
             new { platform = "wy", song, quality = "master", manualSource = true }), "AUTH_REQUIRED");
-        Check(transport.Calls == 1, "manual higher quality never manufactures login authority");
+        Check(calls == 1, "manual higher quality never manufactures login authority");
         await Ok("music.officialSources.settings.save", new { ifRevision = 0, enabled = Array.Empty<string>() });
         Check(!app.IsOfficialPlaybackCurrent("wy", context.GetProperty("scope").GetString()!,
             context.GetProperty("generation").GetInt64()), "disabling the provider revokes its issued scope");
@@ -110,27 +121,7 @@ public static class MusicManualSourcePolicyTests
             QualityFixture.Code(await app.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
         var disabled = await Ok("music.official.candidates",
             new { song, quality = "128k", qualityPolicySignature = signature, manualSource = true });
-        Check(disabled.GetProperty("candidates").GetArrayLength() == 0 && transport.Calls == 1,
+        Check(disabled.GetProperty("candidates").GetArrayLength() == 0 && calls == 1,
             "manual mode cannot resolve or read through an explicitly disabled official provider");
-    }
-    private sealed class StandardOrigin : HttpMessageHandler
-    {
-        internal int Calls;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        {
-            token.ThrowIfCancellationRequested();
-            Check(request.RequestUri!.AbsolutePath == "/eapi/song/enhance/player/url", "synthetic standard protocol only");
-            Calls++;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(JsonSerializer.Serialize(new
-                {
-                    code = 200,
-                    data = new[] { new { id = 1, code = 200, url = "https://m701.music.126.net/manual-fixture.mp3",
-                        type = "mp3", br = 128000, time = 100000, size = 1600000, expi = 600,
-                        freeTrialPrivilege = new { resConsumable = false, userConsumable = false } } }
-                }), Encoding.UTF8, "application/json")
-            });
-        }
     }
 }

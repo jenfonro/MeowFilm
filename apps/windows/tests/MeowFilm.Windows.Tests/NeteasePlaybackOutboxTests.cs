@@ -1,5 +1,3 @@
-using System.Net;
-using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using MeowFilm.Capabilities.Feedback;
@@ -29,18 +27,18 @@ public static class NeteasePlaybackOutboxTests
                 original with { Position = -1 }, original with { Duration = 10, Position = 11 },
                 original with { Rate = double.PositiveInfinity }, original with { Rate = 0 },
                 original with { PlaybackId = Guid.Empty }, original with { AdmittedAt = default },
-                original with { Recording = new("wy", "042") }, original with { Algorithm = "\ud800" }
+                original with { Recording = new("tx", "MID") }, original with { Algorithm = "\ud800" }
             })
             {
                 try { await f.Protocol.StartAsync(f.Accounts.Value!, invalid); }
                 catch (MusicFeedbackException) { continue; }
                 throw new InvalidOperationException("malformed facts accepted");
             }
-            Check(f.Store.OutboxWrites == 0 && f.Wire.Uploads.Count == 0);
+            Check(f.Store.OutboxWrites == 0 && f.Remote.Uploads.Count == 0);
         });
         yield return Case("attempt duplicate returns same local session and paired end stays single-shot", async () =>
         {
-            await using var f = await Fixture.Create(); f.Wire.Offline = true;
+            await using var f = await Fixture.Create(); f.Remote.Offline = true;
             var input = f.NewStart();
             var first = f.Protocol.StartAsync(f.Accounts.Value!, input);
             var second = f.Protocol.StartAsync(f.Accounts.Value!, input);
@@ -55,11 +53,11 @@ public static class NeteasePlaybackOutboxTests
             await session.FinishAsync(end); await session.FinishAsync(end);
             await Error(() => session.FinishAsync(end with { Listened = 11 }), "INSTANCE_MISMATCH");
             await f.Protocol.DrainAsync();
-            Check(f.Saved().Single().Count == 2 && f.Wire.Uploads.Count == 0);
+            Check(f.Saved().Single().Count == 2 && f.Remote.Uploads.Count == 0);
         });
         yield return Case("WY long unknown-duration high-rate facts use occurrence time not dispatch elapsed", async () =>
         {
-            await using var f = await Fixture.Create(); f.Wire.Offline = true;
+            await using var f = await Fixture.Create(); f.Remote.Offline = true;
             var input = f.NewStart() with { Duration = 90000, Rate = 32,
                 StartedAt = f.Clock.GetUtcNow().AddSeconds(-100), AdmittedAt = f.Clock.GetUtcNow().AddSeconds(-100) };
             await using var session = await f.Protocol.StartAsync(f.Accounts.Value!, input);
@@ -70,7 +68,7 @@ public static class NeteasePlaybackOutboxTests
         });
         yield return Case("retired platform attempt cannot erase a readmitted pair of the same listening occurrence", async () =>
         {
-            await using var f = await Fixture.Create(); f.Wire.Offline = true;
+            await using var f = await Fixture.Create(); f.Remote.Offline = true;
             using var oldLifetime = new CancellationTokenSource();
             var input = f.NewStart();
             await using var old = await f.Protocol.StartAsync(f.Accounts.Value!, input, oldLifetime.Token);
@@ -90,19 +88,19 @@ public static class NeteasePlaybackOutboxTests
         });
         yield return Case("oversized UTF8 event is rejected before writing the outbox", async () =>
         {
-            await using var f = await Fixture.Create(); f.Wire.Offline = true;
+            await using var f = await Fixture.Create(); f.Remote.Offline = true;
             var input = f.NewStart() with { Algorithm = new string('界', 12000) };
             await Error(() => f.Protocol.StartAsync(f.Accounts.Value!, input), "LIMIT");
             await f.Protocol.DrainAsync();
-            Check(f.Store.OutboxWrites == 0 && f.Wire.Uploads.Count == 0 && f.Saved().Length == 0);
+            Check(f.Store.OutboxWrites == 0 && f.Remote.Uploads.Count == 0 && f.Saved().Length == 0);
         });
         yield return Case("local admission is not remote ACK and safe unsent start-end recover in order", async () =>
         {
             await using var f = await Fixture.Create();
-            f.Wire.Offline = true;
+            f.Remote.Offline = true;
             await using var session = await f.Start();
             await f.Protocol.DrainAsync();
-            Check(f.Wire.Uploads.Count == 0 && f.Saved().Single().Start is { Inflight: false });
+            Check(f.Remote.Uploads.Count == 0 && f.Saved().Single().Start is { Inflight: false });
             f.Clock.Advance(10);
             await session.FinishAsync(f.End());
             await f.Protocol.DrainAsync();
@@ -110,16 +108,16 @@ public static class NeteasePlaybackOutboxTests
             string saved = Encoding.UTF8.GetString(f.Store.Get(NeteasePlaybackOutboxDocument.Namespace)!);
             Check(!saved.Contains("MUSIC_U", StringComparison.Ordinal) && !saved.Contains("cookie", StringComparison.OrdinalIgnoreCase) &&
                 !saved.Contains("SYNTHETIC_SECRET", StringComparison.Ordinal));
-            f.Wire.Offline = false;
+            f.Remote.Offline = false;
             await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-            Check(f.Wire.Uploads.Count == 2 && f.Saved().Length == 0);
+            Check(f.Remote.Uploads.Count == 2 && f.Saved().Length == 0);
         });
         yield return Case("cold startup restores only original account and preserved consent", async () =>
         {
             var store = new Store();
             await using (var first = await Fixture.Create(store))
             {
-                first.Wire.Offline = true;
+                first.Remote.Offline = true;
                 await using var session = await first.Start();
                 first.Clock.Advance(10); await session.FinishAsync(first.End());
                 await first.Protocol.DrainAsync();
@@ -127,26 +125,26 @@ public static class NeteasePlaybackOutboxTests
             }
             await using var next = await Fixture.Create(store);
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-            Check(next.Wire.Uploads.Count == 2 && next.Saved().Length == 0);
+            Check(next.Remote.Uploads.Count == 2 && next.Saved().Length == 0);
         });
         yield return Case("account-ready before preferences load cannot mistake unknown consent for disabled", async () =>
         {
             var store = new Store();
             await using (var first = await Fixture.Create(store))
             {
-                first.Wire.Offline = true;
+                first.Remote.Offline = true;
                 await using var session = await first.Start(); first.Clock.Advance(10);
                 await session.FinishAsync(first.End()); await first.Protocol.DrainAsync();
             }
             await using var next = Fixture.BeforePreferences(store);
             next.Controller.AccountChanged("wy");
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-            Check(next.Wire.Uploads.Count == 2 && next.Saved().Length == 0);
+            Check(next.Remote.Uploads.Count == 2 && next.Saved().Length == 0);
         });
         yield return Case("unrelated platform consent update preserves the admitted WY pair", async () =>
         {
             await using var f = await Fixture.Create();
-            f.Wire.Offline = true;
+            f.Remote.Offline = true;
             await using var session = await f.Start(); await f.Protocol.DrainAsync();
             var old = await f.Controller.ReadSettingsAsync();
             await f.Controller.SaveSettingsAsync(old.Revision, ["wy", "tx"]);
@@ -154,13 +152,13 @@ public static class NeteasePlaybackOutboxTests
             f.Clock.Advance(10); await session.FinishAsync(f.End());
             await f.Protocol.DrainAsync();
             Check(f.Saved().Single().ConsentRevision == old.Revision + 1);
-            f.Wire.Offline = false;
+            f.Remote.Offline = false;
             await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-            Check(f.Wire.Uploads.Count == 2 && f.Saved().Length == 0);
+            Check(f.Remote.Uploads.Count == 2 && f.Saved().Length == 0);
         });
         yield return Case("real end during unrelated consent CAS is durable before the settings receipt", async () =>
         {
-            await using var f = await Fixture.Create(); f.Wire.Offline = true;
+            await using var f = await Fixture.Create(); f.Remote.Offline = true;
             await using var session = await f.Start(); await f.Protocol.DrainAsync();
             var old = await f.Controller.ReadSettingsAsync();
             f.Store.HoldSettings = true;
@@ -174,13 +172,13 @@ public static class NeteasePlaybackOutboxTests
             finally { f.Store.SettingsRelease.TrySetResult(); }
             await save; await f.Protocol.DrainAsync();
             Check(f.Saved().Single().ConsentRevision == old.Revision + 1);
-            f.Wire.Offline = false;
+            f.Remote.Offline = false;
             await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-            Check(f.Wire.Uploads.Count == 2 && f.Saved().Length == 0);
+            Check(f.Remote.Uploads.Count == 2 && f.Saved().Length == 0);
         });
         yield return Case("already qualified local start can settle during unrelated consent CAS", async () =>
         {
-            await using var f = await Fixture.Create(); f.Wire.Offline = true;
+            await using var f = await Fixture.Create(); f.Remote.Offline = true;
             var old = await f.Controller.ReadSettingsAsync();
             f.Store.HoldSettings = true;
             var save = f.Controller.SaveSettingsAsync(old.Revision, ["wy", "tx"]);
@@ -190,31 +188,31 @@ public static class NeteasePlaybackOutboxTests
                 await f.Store.SettingsEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 session = await f.Start();
                 f.Clock.Advance(10); await session.FinishAsync(f.End());
-                Check(!save.IsCompleted && f.Saved().Single().Count == 2 && f.Wire.Uploads.Count == 0);
+                Check(!save.IsCompleted && f.Saved().Single().Count == 2 && f.Remote.Uploads.Count == 0);
             }
             finally { f.Store.SettingsRelease.TrySetResult(); }
             await save; await f.Protocol.DrainAsync();
             Check(f.Saved().Single().ConsentRevision == old.Revision + 1);
             if (session is not null) await session.DisposeAsync();
-            f.Wire.Offline = false;
+            f.Remote.Offline = false;
             await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-            Check(f.Wire.Uploads.Count == 2 && f.Saved().Length == 0);
+            Check(f.Remote.Uploads.Count == 2 && f.Saved().Length == 0);
         });
         yield return Case("unready startup account defers safely until an account-ready event", async () =>
         {
             var store = new Store();
             await using (var first = await Fixture.Create(store))
             {
-                first.Wire.Offline = true;
+                first.Remote.Offline = true;
                 await using var session = await first.Start(); first.Clock.Advance(10); await session.FinishAsync(first.End());
                 await first.Protocol.DrainAsync();
             }
             await using var next = await Fixture.Create(store, accountReady: false);
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-            Check(next.Saved().Length == 1 && next.Wire.Uploads.Count == 0);
+            Check(next.Saved().Length == 1 && next.Remote.Uploads.Count == 0);
             next.Accounts.Value = MakeAccount(Account()); next.Controller.AccountChanged("wy");
             await next.Protocol.DrainAsync();
-            Check(next.Saved().Length == 0 && next.Wire.Uploads.Count == 2);
+            Check(next.Saved().Length == 0 && next.Remote.Uploads.Count == 2);
         });
         yield return Case("pairing survives a confirmed start and a later safe-unsent end", async () =>
         {
@@ -222,14 +220,14 @@ public static class NeteasePlaybackOutboxTests
             await using (var first = await Fixture.Create(store))
             {
                 await using var session = await first.Start(); await first.Protocol.DrainAsync();
-                Check(first.Wire.Uploads.Count == 1 && first.Saved().Length == 0);
-                first.Wire.Offline = true; first.Clock.Advance(10);
+                Check(first.Remote.Uploads.Count == 1 && first.Saved().Length == 0);
+                first.Remote.Offline = true; first.Clock.Advance(10);
                 await session.FinishAsync(first.End()); await first.Protocol.DrainAsync();
                 Check(first.Saved().Single() is { StartConfirmed: true, Start: null, End: { Inflight: false } });
             }
             await using var next = await Fixture.Create(store);
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-            Check(next.Wire.Uploads.Count == 1 && next.Saved().Length == 0);
+            Check(next.Remote.Uploads.Count == 1 && next.Saved().Length == 0);
         });
         yield return Case("malformed local outbox is not overwritten or silently treated as empty", async () =>
         {
@@ -239,7 +237,7 @@ public static class NeteasePlaybackOutboxTests
             await using var f = await Fixture.Create(store);
             f.ExpectedStorageFailure = true;
             await Error(() => f.Protocol.InitializeAsync(), "FEEDBACK_STORAGE_FAILED");
-            Check(store.Get(NeteasePlaybackOutboxDocument.Namespace)!.SequenceEqual(invalid) && f.Wire.Uploads.Count == 0);
+            Check(store.Get(NeteasePlaybackOutboxDocument.Namespace)!.SequenceEqual(invalid) && f.Remote.Uploads.Count == 0);
             await Error(async () => { _ = await f.Start(); }, "FEEDBACK_STORAGE_FAILED");
             Check(store.Get(NeteasePlaybackOutboxDocument.Namespace)!.SequenceEqual(invalid));
         });
@@ -249,7 +247,7 @@ public static class NeteasePlaybackOutboxTests
                 var store = new Store();
                 await using (var first = await Fixture.Create(store))
                 {
-                    first.Wire.Offline = true;
+                    first.Remote.Offline = true;
                     await using var session = await first.Start();
                     first.Clock.Advance(10); await session.FinishAsync(first.End());
                     await first.Protocol.DrainAsync();
@@ -263,13 +261,13 @@ public static class NeteasePlaybackOutboxTests
                 }
                 await using var next = await Fixture.Create(store, account);
                 await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-                Check(next.Wire.Uploads.Count == 0 && next.Saved().Length == 0);
+                Check(next.Remote.Uploads.Count == 0 && next.Saved().Length == 0);
             });
         foreach (string change in new[] { "disable", "logout", "account-change" })
             yield return Case("live " + change + " cancels and clears pending without transfer", async () =>
             {
                 await using var f = await Fixture.Create();
-                f.Wire.Offline = true;
+                f.Remote.Offline = true;
                 await using var session = await f.Start();
                 await f.Protocol.DrainAsync();
                 if (change == "disable")
@@ -283,29 +281,29 @@ public static class NeteasePlaybackOutboxTests
                     f.Controller.AccountChanged("wy");
                 }
                 await f.Protocol.DrainAsync();
-                Check(f.Saved().Length == 0 && f.Wire.Uploads.Count == 0);
+                Check(f.Saved().Length == 0 && f.Remote.Uploads.Count == 0);
             });
-        yield return Case("revocation during noncooperative upload drains physical work and rejects late ACK", async () =>
+        yield return Case("revocation during noncooperative upload drains physical work and settles late ACK", async () =>
         {
             await using var f = await Fixture.Create();
-            f.Wire.Hold = true;
+            f.Remote.Hold = true;
             await using var session = await f.Start();
-            await f.Wire.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await f.Remote.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(f.Saved().Single().Start is { Inflight: true });
             var old = await f.Controller.ReadSettingsAsync();
             await f.Controller.SaveSettingsAsync(old.Revision, []);
-            await f.Wire.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!f.Remote.Cancelled.Task.IsCompleted, "Dispatched upload must settle its real receipt");
             var drain = f.Protocol.DrainAsync();
             Check(!drain.IsCompleted);
-            f.Wire.Release.TrySetResult(); await drain;
-            Check(f.Saved().Length == 0 && f.Wire.Uploads.Count == 1);
+            f.Remote.Release.TrySetResult(); await drain;
+            Check(f.Saved().Length == 0 && f.Remote.Uploads.Count == 1);
         });
         yield return Case("normal exit freezes local end without revocation and startup can recover safe unsent", async () =>
         {
             var store = new Store();
             await using (var f = await Fixture.Create(store))
             {
-                f.Wire.OfflineAfterQualification = true;
+                f.Remote.OfflineAfterQualification = true;
                 f.Controller.Select(new("entry", MusicSongFixture.Element(MusicSongFixture.Online("wy", "42", "song", "artist", "", 200))));
                 f.Controller.Started("entry", 0, 0); await f.Controller.DrainAsync(); await f.Protocol.DrainAsync();
                 f.Clock.Advance(9); f.Controller.Observe("entry", 9, 0, true);
@@ -314,32 +312,32 @@ public static class NeteasePlaybackOutboxTests
             }
             await using var next = await Fixture.Create(store);
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-            Check(next.Wire.Uploads.Count == 2 && next.Saved().Length == 0);
+            Check(next.Remote.Uploads.Count == 2 && next.Saved().Length == 0);
         });
         yield return Case("controller close persists no-replay outcome without waiting for upload ACK", async () =>
         {
-            await using var f = await Fixture.Create(); f.Wire.Hold = true;
+            await using var f = await Fixture.Create(); f.Remote.Hold = true;
             f.Controller.Select(new("entry", MusicSongFixture.Element(
                 MusicSongFixture.Online("wy", "42", "song", "artist", "", 200))));
             f.Controller.Started("entry", 0, 0);
             try
             {
-                await f.Wire.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await f.Remote.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 f.Clock.Advance(9); f.Controller.Observe("entry", 9, 0, true);
                 await f.Controller.PrepareShutdownAsync().WaitAsync(TimeSpan.FromSeconds(5));
-                Check(f.Wire.Cancelled.Task.IsCompleted && f.Saved().Length == 0);
+                Check(!f.Remote.Cancelled.Task.IsCompleted && f.Saved().Length == 0);
                 Check(!f.Protocol.DrainAsync().IsCompleted);
             }
-            finally { f.Wire.Release.TrySetResult(); }
+            finally { f.Remote.Release.TrySetResult(); }
             await f.Protocol.DrainAsync();
-            Check(f.Wire.Uploads.Count == 1 && f.Saved().Length == 0);
+            Check(f.Remote.Uploads.Count == 1 && f.Saved().Length == 0);
         });
         yield return Case("inflight from crash is dropped with paired end and never replayed", async () =>
         {
             var store = new Store();
             await using (var f = await Fixture.Create(store))
             {
-                f.Wire.Offline = true;
+                f.Remote.Offline = true;
                 await using var session = await f.Start(); f.Clock.Advance(10); await session.FinishAsync(f.End());
                 await f.Protocol.DrainAsync();
                 var value = f.Saved().Single();
@@ -348,49 +346,49 @@ public static class NeteasePlaybackOutboxTests
             }
             await using var next = await Fixture.Create(store);
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-            Check(next.Wire.Uploads.Count == 0 && next.Saved().Length == 0);
+            Check(next.Remote.Uploads.Count == 0 && next.Saved().Length == 0);
         });
-        foreach (string result in new[] { "network", "timeout", "malformed", "wrong-file", "string-code", "http-error", "redirect" })
-            yield return Case("unknown upload " + result + " is not replayed nor followed by orphan end", async () =>
+        foreach (string code in new[] { "NETWORK_ERROR", "TIMEOUT", "UPSTREAM_UNCONFIRMED", "UPSTREAM_ERROR", "REDIRECT_DENIED" })
+            yield return Case("unknown upload " + code + " is not replayed nor followed by orphan end", async () =>
             {
                 var store = new Store();
                 await using (var f = await Fixture.Create(store))
                 {
-                    f.Wire.UploadResult = result;
+                    f.Remote.UploadErrorCode = code;
                     await using var session = await f.Start(); await f.Protocol.DrainAsync();
-                    Check(f.Wire.Uploads.Count == 1 && f.Saved().Length == 0);
+                    Check(f.Remote.Uploads.Count == 1 && f.Saved().Length == 0);
                     await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-                    Check(f.Wire.Uploads.Count == 1);
+                    Check(f.Remote.Uploads.Count == 1);
                     f.Clock.Advance(10);
                     await Error(() => session.FinishAsync(f.End()), "START_UNCONFIRMED");
                 }
                 await using var next = await Fixture.Create(store);
                 await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-                Check(next.Wire.Uploads.Count == 0);
+                Check(next.Remote.Uploads.Count == 0);
             });
-        foreach (string result in new[] { "network", "timeout", "malformed", "wrong-file", "string-code", "http-error", "redirect" })
-            yield return Case("start ACK followed by unknown end " + result + " never replays on cold startup", async () =>
+        foreach (string code in new[] { "NETWORK_ERROR", "TIMEOUT", "UPSTREAM_UNCONFIRMED", "UPSTREAM_ERROR", "REDIRECT_DENIED" })
+            yield return Case("start ACK followed by unknown end " + code + " never replays on cold startup", async () =>
             {
                 var store = new Store();
                 await using (var f = await Fixture.Create(store))
                 {
                     await using var session = await f.Start(); await f.Protocol.DrainAsync();
-                    Check(f.Wire.Uploads.Count == 1 && f.Saved().Length == 0);
-                    f.Wire.UploadResult = result; f.Clock.Advance(10);
+                    Check(f.Remote.Uploads.Count == 1 && f.Saved().Length == 0);
+                    f.Remote.UploadErrorCode = code; f.Clock.Advance(10);
                     await session.FinishAsync(f.End()); await f.Protocol.DrainAsync();
-                    Check(f.Wire.Uploads.Count == 2 && f.Saved().Length == 0);
+                    Check(f.Remote.Uploads.Count == 2 && f.Saved().Length == 0);
                     await session.FinishAsync(f.End());
                     await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-                    Check(f.Wire.Uploads.Count == 2);
+                    Check(f.Remote.Uploads.Count == 2);
                 }
                 await using var next = await Fixture.Create(store);
                 await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-                Check(next.Wire.Uploads.Count == 0 && next.Saved().Length == 0);
+                Check(next.Remote.Uploads.Count == 0 && next.Saved().Length == 0);
             });
         yield return Case("retention and capacity evict complete pairs not listening thresholds", async () =>
         {
             await using var f = await Fixture.Create();
-            f.Wire.Offline = true;
+            f.Remote.Offline = true;
             for (int i = 0; i < 130; i++)
             {
                 await using var session = await f.Start();
@@ -399,9 +397,9 @@ public static class NeteasePlaybackOutboxTests
             }
             var saved = f.Saved();
             Check(saved.Sum(e => e.Count) == 256 && saved.All(e => e.Start is not null && e.End is not null));
-            f.Clock.Advance(8 * 24 * 60 * 60); f.Wire.Offline = false;
+            f.Clock.Advance(8 * 24 * 60 * 60); f.Remote.Offline = false;
             await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
-            Check(f.Saved().Length == 0 && f.Wire.Uploads.Count == 0);
+            Check(f.Saved().Length == 0 && f.Remote.Uploads.Count == 0);
         });
         foreach (int stage in new[] { 1, 2, 3 })
             yield return Case("durable write failure at stage " + stage + " never guesses a receipt or retries", async () =>
@@ -413,12 +411,12 @@ public static class NeteasePlaybackOutboxTests
                 else
                 {
                     await using var session = await f.Start(); await f.Protocol.DrainAsync();
-                    Check(f.Wire.Uploads.Count == (stage == 2 ? 0 : 1));
+                    Check(f.Remote.Uploads.Count == (stage == 2 ? 0 : 1));
                 }
                 await Error(() => f.Controller.PrepareShutdownAsync(), "FEEDBACK_STORAGE_FAILED");
-                int calls = f.Wire.Uploads.Count;
+                int calls = f.Remote.Uploads.Count;
                 await Error(() => f.Protocol.InitializeAsync(), "FEEDBACK_STORAGE_FAILED"); await f.Protocol.DrainAsync();
-                Check(f.Wire.Uploads.Count == calls);
+                Check(f.Remote.Uploads.Count == calls);
             });
         yield return Case("lost inflight write receipt never sends and cold restart does not replay it", async () =>
         {
@@ -427,18 +425,18 @@ public static class NeteasePlaybackOutboxTests
             {
                 store.LoseAtOutboxWrite = 2; f.ExpectedStorageFailure = true;
                 await using var session = await f.Start(); await f.Protocol.DrainAsync();
-                Check(f.Wire.Uploads.Count == 0 && f.Saved().Single().Start is { Inflight: true });
+                Check(f.Remote.Uploads.Count == 0 && f.Saved().Single().Start is { Inflight: true });
             }
             await using var next = await Fixture.Create(store);
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-            Check(next.Wire.Uploads.Count == 0 && next.Saved().Length == 0);
+            Check(next.Remote.Uploads.Count == 0 && next.Saved().Length == 0);
         });
         yield return Case("disabled then enabled cannot recover old consent after a failed cleanup", async () =>
         {
             var store = new Store();
             await using (var f = await Fixture.Create(store))
             {
-                f.Wire.Offline = true;
+                f.Remote.Offline = true;
                 await using var session = await f.Start(); await f.Protocol.DrainAsync();
                 store.FailAtOutboxWrite = store.OutboxWrites + 1; f.ExpectedStorageFailure = true;
                 var old = await f.Controller.ReadSettingsAsync();
@@ -451,12 +449,13 @@ public static class NeteasePlaybackOutboxTests
             }
             await using var next = await Fixture.Create(store);
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
-            Check(next.Wire.Uploads.Count == 0 && next.Saved().Length == 0);
+            Check(next.Remote.Uploads.Count == 0 && next.Saved().Length == 0);
         });
     }
 
     private static TestCase Case(string name, Func<Task> run) => new("netease-outbox: " + name, run);
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("outbox assertion"); }
+    private static void Check(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
     private static async Task Error(Func<Task> action, string expected)
     {
         try { await action(); }
@@ -518,55 +517,38 @@ public static class NeteasePlaybackOutboxTests
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
-    private sealed class Wire : HttpMessageHandler
+    private sealed class Peer
     {
         internal bool Offline, Hold, OfflineAfterQualification;
-        internal string UploadResult = "";
-        internal readonly List<string> Uploads = [];
+        internal string? UploadErrorCode;
+        internal readonly List<JsonElement> Uploads = [];
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Cancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        internal async Task<JsonElement> Respond(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
-            if (request.RequestUri!.AbsolutePath == "/weapi/w/nuser/account/get")
+            if (call.Operation == "feedback.qualify")
             {
-                if (Offline) throw new HttpRequestException("synthetic offline before upload");
+                if (Offline) throw new MusicPlatformException("NETWORK_ERROR");
                 Offline = OfflineAfterQualification;
-                return Reply("{\"code\":200,\"profile\":{\"userId\":123,\"nickname\":\"synthetic\"}}");
+                return MusicPlatformRuntimeFixture.Json(new { qualified = true });
             }
-            Check(request.RequestUri.ToString() == "https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true");
-            Check(request.Content is MultipartFormDataContent);
-            var part = ((MultipartFormDataContent)request.Content!).Single();
-            string filename = part.Headers.ContentDisposition!.FileName!.Trim('"');
-            byte[] encoded = await part.ReadAsByteArrayAsync(token);
-            Check(encoded.AsSpan(0, 4).SequenceEqual("NCBL"u8));
-            Uploads.Add(filename); Entered.TrySetResult();
+            Check(call.Operation == "feedback.upload");
+            var facts = call.Parameters.GetProperty("events"); Check(facts.GetArrayLength() == 1);
+            Uploads.Add(facts[0].Clone()); Entered.TrySetResult();
             using var cancellation = token.Register(() => Cancelled.TrySetResult());
-            if (Hold) await Release.Task; // Trusted handler deliberately returns after cancellation.
-            if (UploadResult == "network") throw new HttpRequestException("synthetic unknown after upload");
-            if (UploadResult == "timeout") throw new OperationCanceledException();
-            if (UploadResult == "malformed") return Reply("not-json");
-            if (UploadResult == "redirect") return new(HttpStatusCode.TemporaryRedirect) { Content = new StringContent("{}") };
-            var response = Reply(JsonSerializer.Serialize(new
-            {
-                code = UploadResult == "string-code" ? (object)"200" : 200,
-                data = new { successfiles = new[] { UploadResult == "wrong-file" ? "other-file" : filename } }
-            }));
-            if (UploadResult == "http-error") response.StatusCode = HttpStatusCode.BadGateway;
-            return response;
+            if (Hold) await Release.Task;
+            return MusicPlatformRuntimeFixture.Json(new { status = UploadErrorCode is null ? "confirmed" : "unknown", errorCode = UploadErrorCode });
         }
-        private static HttpResponseMessage Reply(string body) =>
-            new(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
     }
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly Store Store;
         internal readonly Clock Clock = new();
-        internal readonly Wire Wire = new();
+        internal readonly Peer Remote = new();
         internal readonly Accounts Accounts;
         internal readonly MusicFeedbackSettingsOwner Settings;
-        internal readonly MusicPlatformHttp Http;
-        internal readonly MusicClientContextFixture Clients;
+        internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly NativeMusicFeedbackProtocol Protocol;
         internal readonly MusicFeedbackController Controller;
         private MusicFeedbackStart last = null!;
@@ -574,8 +556,8 @@ public static class NeteasePlaybackOutboxTests
         private Fixture(Store store, AccountFacts account)
         {
             Store = store; Accounts = new(MakeAccount(account)); Settings = new(store);
-            Http = MusicPlatformHttp.CreateWithHandler(Wire); Clients = new(Http, clock: Clock);
-            Protocol = new(Accounts, Http, Clients.Owner, Clock, store, Settings);
+            Runtime.OnRequest = Remote.Respond; Runtime.Client.BindSessions(Accounts);
+            Protocol = new(Accounts, Runtime.Client, Clock, store, Settings);
             Controller = new(Settings, Protocol, Accounts, Clock);
         }
         internal static async Task<Fixture> Create(Store? store = null, AccountFacts? account = null, bool accountReady = true)
@@ -603,11 +585,11 @@ public static class NeteasePlaybackOutboxTests
             Store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace).GetAwaiter().GetResult());
         public async ValueTask DisposeAsync()
         {
-            Wire.Release.TrySetResult();
+            Remote.Release.TrySetResult();
             Store.SettingsRelease.TrySetResult();
             try { await Controller.DisposeAsync(); }
             catch (MusicFeedbackException error) when (ExpectedStorageFailure && error.Code == "FEEDBACK_STORAGE_FAILED") { }
-            finally { await Clients.DisposeAsync(); Http.Dispose(); }
+            finally { await Runtime.DisposeAsync(); }
         }
     }
 }

@@ -1,33 +1,33 @@
 # 音乐账号存储与生命周期契约
 
-状态归属与受控更新遵循[共同平台上下文](../common/music/platform-client-context.md)。本文件只说明账号文档；独立客户端文档见[Windows 客户端上下文](music-platform-client-context.md)。
+状态归属与受控更新遵循[共同平台上下文](../common/music/platform-client-context.md)。本文件只说明账号文档；当前 Windows 平台客户端的装配与关闭见[音乐平台接入](music-platform-client-context.md)。
 
 ## 唯一 owner 与数据身份
 
-- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一原生 writer；底层使用当前 App 数据身份下的 `IDocumentStore`。
-- App 将该敏感命名空间配置为 DPAPI 加密，保留原命名空间、存储路径和密文格式；通用 API 中性命名不改变账号保护范围。
+- `MusicAccountOwner` 是 `music.accounts.v2` 的唯一原生 writer；底层使用当前 App 数据身份下的 `IDocumentStore`。
+- App 将当前敏感账号命名空间配置为 DPAPI；新内部格式不读取、迁移或兼容旧文档。
 - 凭据由账号 owner 严格事务管理；账号详情是独立可选展示缓存，不能由页面、平台 HTTP 或脚本直接写入。
-- 账号文档只接受账号条目；平台设备状态仅属于独立客户端文档。
+- 当前账号文档保存原生安全凭据；匿名设备／prepare 状态由 Node 保存，不由原生账号文档代管。
 - 缺失文档创建当前空结构。非当前 schema、未知键、未知字段、重复字段、非规范整数、错误指纹或损坏值使整份文档以 `CORRUPT_STORAGE` 失败。
 - 未知 entry 使读取失败，原始字节保持不变。
 
 ## 当前文档成员
 
-文档最多允许网易云、QQ、酷狗三个账号 entry。账号展示快照归独立 `music.account-details.v1` 缓存，不参与凭据文档编码、解码或事务。
+文档最多允许网易云、QQ、酷狗三个账号 entry。账号展示快照归独立 `music.account-details.v2` 缓存，不参与凭据文档编码、解码或事务。
 
 账号 Cookie、设备密钥及协议材料只存在于受保护文档和有界内存会话中，不进入日志、错误、普通 DTO 或脚本存储。
 
 ## 命令与会话
 
-- 账号命令包括列表、显式凭据导入／验证、退出、取消、二维码开始／轮询以及网易云短信发送／登录。
+- 账号命令包括列表、显式导入／验证、退出、取消、三平台二维码及网易云／酷狗验证码，真实协议由共同 Node 执行。
 - `AcquireAsync`／`AcquireSettledAsync` 返回带平台、用户身份和 generation 的借用会话；消费者必须用同一 owner 的 `IsCurrent` 核对。
 - 登录、退出、账号替换、观察到账号变化和关闭会推进或撤销相应授权资格；同值重读和无关匿名客户端变化不制造账号代次变化。
-- 无账号的标准公开能力只能使用明确的 guest 准入；不能伪造登录、会员或离线权限。
+- 无账号时经共同 Node 使用当前匿名上下文，官方标准音频按真实配方资源事实消费。
 
 ## 写入与冲突
 
-- 写入在同一 owner 的磁盘串行边界内读取当前文档、核对预期账号、生成唯一当前字节并执行 CAS；KG 授权交接另核对客户端 owner 的实际快照。
-- 登录身份与权益获取完成后，通过账号 CAS 保存凭据；成功后将绑定其 generation、scope、userId、value fingerprint 的详情发布到缓存内存。缓存持久化不进入登录成功回执等待链，失败不改变凭据提交结果。
+- 写入在同一 owner 的磁盘串行边界内读取当前文档、核对预期账号并 CAS；安全保存确认后才向共同 Node 发布当前授权。
+- 真实候选认证成功后由账号 CAS 保存凭据并发布会话；资料／权益为独立展示观察，不作为普通平台请求或登录的额外证明。
 - 冲突返回 `STORAGE_CONFLICT`；提交回执不可信时返回 `COMMIT_UNKNOWN`。两者都不自动重试、不重放登录或覆盖另一 writer。
 - 重新观察持久状态必须创建或使用新的明确读取操作；失败 owner 不通过“丢弃 pending”恢复为可写状态。
 - 用户取消只取消尚未进入原子提交点的工作；已确认提交不能由取消推断回滚。
@@ -49,6 +49,6 @@
 
 ## 用户账号文件
 
-文件格式和冲突策略见[共同账号文件契约](../common/music/account-transfer.md)。明文文件不是账号存储格式，也不改变 `music.accounts.v1` 的 DPAPI 保护；传输不复制本地 scope、generation 或详情缓存。
+文件格式和冲突策略见[共同账号文件契约](../common/music/account-transfer.md)。明文文件不是账号存储格式，也不改变 `music.accounts.v2` 的 DPAPI 保护；传输不复制本地 scope、generation 或详情缓存。
 
 文件导入的 owner 计划保存准备时账号值 fingerprint 与授权 epoch。隔离候选验证失败不会推进 epoch、写入账号或撤销现有 lease。提交在原磁盘队列中重新读取文档，以完整账号基线和整文档 CAS 防止同 generation 内容变更或另一 writer 被覆盖。成功读回后才发布原有通知；失败已知冲突保留旧授权，未知写入回执保留 Uncertain 并要求明确读取核对。取消／关闭会排空已准入写入，不以取消推断回滚，不建立跨平台事务或重放机制。

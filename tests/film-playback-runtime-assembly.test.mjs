@@ -31,7 +31,7 @@ test('E49/E50: the common embedding factory retains its default three-module con
 });
 
 for (const platform of ['ios', 'windows']) {
-  test(`E42/E48/E49/E50: the ${platform} App entry assembles eight real owners and connects provider invalidation`, t => {
+  test(`E42/E48/E49/E50: the ${platform} App entry assembles nine real owners and connects provider invalidation`, t => {
     const base = area(t), actual = join(base, 'private', 'var'), alias = join(base, 'var');
     mkdirSync(actual, { recursive: true });
     symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
@@ -112,6 +112,7 @@ for (const platform of ['ios', 'windows']) {
           ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
           ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
           ['netease', '0.1.0', 'netease.token.v1'],
+          ['music-platform', '0.1.0', 'music.platform.v1'],
         ]);
         for (const module of description.value.modules)
           assert.deepEqual(module.methods, contracts[module.id].operations.map(name => contracts[module.id].prefix + name).sort());

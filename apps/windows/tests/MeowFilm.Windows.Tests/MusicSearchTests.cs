@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Search;
 
@@ -23,7 +24,7 @@ public static partial class MusicSearchTests
         yield return new("Search first round is published as platforms return", FirstRoundLive);
         yield return new("Search later rounds appear only after every platform settles", RoundBarrier);
         yield return new("Search later rounds append and only merge recordings into shown rows", RoundAppend);
-        yield return new("Search platform priority picks representative metadata and breaks ties", Priority);
+        yield return new("Search platform priority breaks ties without replacing repository metadata", Priority);
         yield return new("Search later rounds never show a conflicting recording twice", RoundConflict);
         yield return new("Search pages are cached per kind and expire after the configured time", Cache);
         yield return new("Search stopping keeps dispatched page for cache but never dispatches remaining pages", RetiredPageCache);
@@ -69,7 +70,7 @@ public static partial class MusicSearchTests
         yield return new("Search dispose fences concurrent resume and borrows catalog", DisposeDuringResume);
         yield return new("Search observers cannot corrupt snapshots or break publication", Observers);
         yield return new("Search malformed page does not commit a partial page", MalformedPage);
-        yield return new("Search foreign platform page is rejected independently", ForeignPage);
+        yield return new("Search consumes actual returned platform identity without a second gate", ForeignPage);
         yield return new("Search long native ids retain exact identity", LongId);
         yield return new("Search empty selection is explicit and makes no catalog calls", EmptySelection);
         yield return new("Search rejects malformed and cancelled admission without IO", InvalidInput);
@@ -157,6 +158,7 @@ public static partial class MusicSearchTests
         private static Task<JsonElement> Unused() => throw new InvalidOperationException("UNEXPECTED_NON_SEARCH_CALL");
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Unused();
+        public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default) => Unused();
@@ -171,10 +173,22 @@ public static partial class MusicSearchTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly Catalog Catalog = new();
+        internal readonly MusicOfficialAudioTests.MemoryStore Store = new();
+        internal readonly MusicLibraryOwner Library;
         internal readonly MusicSearchCoordinator Search;
         internal Fixture(TimeProvider? clock = null,
             Func<Catalog, MusicSearchRequest, CancellationToken, Task<JsonElement>>? searchAsync = null)
-            => Search = new(Catalog, clock, searchAsync is null ? null : (r, t) => searchAsync(Catalog, r, t));
+        {
+            Library = new(Store);
+            Search = new(Catalog, clock, async (request, token) =>
+            {
+                long observation = Library.BeginSongObservation();
+                var page = await (searchAsync is null
+                    ? Catalog.SearchAsync(request, token) : searchAsync(Catalog, request, token));
+                token.ThrowIfCancellationRequested();
+                return await Library.AdoptPlatformResultAsync(page, token, observation: observation);
+            }) { SongFactsProjection = value => Library.ProjectRepository(value, MusicLibraryOwner.PlatformSongShape.Page) };
+        }
         internal Task<JsonElement> Start(string[] platforms, string kind = "songs", string word = "needle", CancellationToken token = default,
             int pages = 1, int concurrency = 1, int cacheMinutes = 60, bool refresh = false) =>
             Search.ExecuteAsync("music.search.start", new { keyword = word, kind, platforms, pages, concurrency, cacheMinutes, refresh }, token);
@@ -193,7 +207,8 @@ public static partial class MusicSearchTests
             }
             finally { Search.Changed -= Updated; }
         }
-        public ValueTask DisposeAsync() => Search.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        { await Search.DisposeAsync(); await Library.DisposeAsync(); await Store.DisposeAsync(); }
     }
 
     private static async Task FivePlatforms()
@@ -395,14 +410,16 @@ public static partial class MusicSearchTests
     private static async Task Priority()
     {
         await using var f = new Fixture();
+        var original = await f.Library.AdoptSongAsync(Song("wy", "shared", "Shared"), default);
         f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, [
             Song(r.Platform, "shared", "Shared"),
             Song(r.Platform, "own", r.Platform + " own")
         ]));
         var result = await f.Idle(S(await f.Start(["tx", "wy"]), "id"));
         var rows = result.GetProperty("items").EnumerateArray().ToArray();
-        Check(S(rows[0], "title") == "Shared" && S(rows[0].GetProperty("sources")[0], "source") == "tx",
-            "the highest-priority platform supplies the primary recording");
+        Check(S(rows[0], "title") == "Shared" && S(rows[0], "songId") == LJ.S(original["songId"]) &&
+            S(rows[0].GetProperty("sources")[0], "source") == "wy",
+            "search priority cannot replace an existing repository representative or UUID");
         Check(S(rows[1], "title") == "tx own" && S(rows[2], "title") == "wy own", "equal scores follow platform priority");
     }
     private static async Task Cache()
@@ -462,15 +479,15 @@ public static partial class MusicSearchTests
     }
     private static async Task Deterministic()
     {
+        await using var f = new Fixture();
         async Task<string> Run(string late)
         {
-            await using var f = new Fixture();
             f.Catalog.Handler = async (r, _) =>
             {
                 if (r.Platform == late) await Task.Delay(50);
                 return Page(r, [Song(r.Platform, "shared"), Song(r.Platform, "unique", r.Platform + " unique")]);
             };
-            return (await f.Idle(S(await f.Start(["wy", "tx", "kg"]), "id"))).GetProperty("items").GetRawText();
+            return (await f.Idle(S(await f.Start(["wy", "tx", "kg"], refresh: true), "id"))).GetProperty("items").GetRawText();
         }
         Check(await Run("wy") == await Run("kg"), "representatives and RRF ties must not depend on arrival order");
     }
@@ -483,6 +500,7 @@ public static partial class MusicSearchTests
     private static async Task DurationChain()
     {
         await using var f = new Fixture();
+        await f.Library.AdoptSongAsync(Song("wy", "id", duration: 100), default);
         f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, [Song(r.Platform, "id", duration: r.Platform == "wy" ? 100 : r.Platform == "tx" ? 103 : 106)]));
         Check((await f.Idle(S(await f.Start(["wy", "tx", "kg"]), "id"))).GetProperty("items").GetArrayLength() == 2);
     }
@@ -870,7 +888,9 @@ public static partial class MusicSearchTests
         await using var f = new Fixture();
         f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, [Song("tx", "foreign")]));
         var result = await f.Idle(S(await f.Start(["wy"]), "id"));
-        Check(S(State(result, "wy"), "error") == "IDENTITY_MISMATCH" && result.GetProperty("items").GetArrayLength() == 0);
+        Check(S(State(result, "wy"), "error") == "" && result.GetProperty("items").GetArrayLength() == 1 &&
+            S(result.GetProperty("items")[0].GetProperty("sources")[0], "source") == "tx" &&
+            NativeId(result.GetProperty("items")[0]) == "foreign");
     }
     private static async Task LongId()
     {

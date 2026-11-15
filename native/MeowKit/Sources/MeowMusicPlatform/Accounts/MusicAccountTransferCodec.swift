@@ -2,6 +2,7 @@ import Foundation
 import CoreFoundation
 import MeowAccounts
 import MeowMusicFeature
+import MeowRuntime
 
 /// File-only representation; never used by account presentation or diagnostics.
 struct MusicAccountTransferEntry: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -57,107 +58,91 @@ enum MusicAccountTransferCodec {
         } catch { throw MusicAccountTransferError.invalidFile }
     }
 
-    private static let qqNumbers = ["expired_at", "musickey_create_time", "key_expires_in", "login_type"]
-    private static let qqStrings: Set<String> = ["musicid", "str_musicid", "musickey", "openid", "refresh_token", "access_token", "unionid", "refresh_key", "encrypt_uin"]
-    private static let aliases = ["musickeyCreateTime": "musickey_create_time", "keyExpiresIn": "key_expires_in", "loginType": "login_type", "encryptUin": "encrypt_uin"]
-    static func normalizedQQ(_ input: [String: String]) throws -> [String: String] {
-        var fields = input
-        for (alias, key) in aliases {
-            if let value = fields.removeValue(forKey: alias) {
-                guard fields[key] == nil || fields[key] == value else { throw MusicServiceError.invalidResponse }
-                fields[key] = value
+    private static let allowed: [MusicAccountPlatform: Set<String>] = [
+        .netease: ["MUSIC_U", "MUSIC_A", "__csrf", "JSESSIONID", "NMTID", "deviceId", "_ntes_nuid", "_ntes_nnid", "WNMCID"],
+        .qq: ["musicid", "str_musicid", "musickey", "openid", "refresh_token", "access_token", "unionid", "refresh_key",
+              "encrypt_uin", "expired_at", "musickey_create_time", "key_expires_in", "login_type"],
+        .kugou: ["userid", "token", "t1", "vip_type", "vip_token", "KUGOU_API_GUID", "KUGOU_API_MID", "KUGOU_API_DEV",
+                 "KUGOU_API_MAC", "dfid"]
+    ]
+    private static let qqNumbers: Set<String> = ["expired_at", "musickey_create_time", "key_expires_in", "login_type"]
+    private static let qqAliases = ["musickeyCreateTime": "musickey_create_time", "keyExpiresIn": "key_expires_in",
+        "loginType": "login_type", "encryptUin": "encrypt_uin"]
+    private static func canonical(_ fields: [String: String], platform: MusicAccountPlatform) throws -> [String: String] {
+        var result = fields
+        if platform == .qq {
+            for (alias, key) in qqAliases {
+                if let value = result.removeValue(forKey: alias) {
+                    guard result[key] == nil || result[key] == value else { throw MusicAccountTransferError.invalidFile }
+                    result[key] = value
+                }
+            }
+            for key in qqNumbers {
+                if let value = result[key] {
+                    guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }),
+                          value == "0" || !value.hasPrefix("0"),
+                          let number = UInt64(value), number <= 9_007_199_254_740_991 else {
+                        throw MusicAccountTransferError.invalidFile
+                    }
+                }
             }
         }
-        guard Set(fields.keys).isSubset(of: qqStrings.union(qqNumbers)) else { throw MusicServiceError.invalidResponse }
-        return fields
-    }
-    private static func number(_ value: String) throws -> Int {
-        guard value.range(of: "^(0|[1-9][0-9]{0,15})$", options: .regularExpression) != nil,
-              let result = Int(value), result <= MusicPlatformJSON.maximumInteger else { throw MusicServiceError.invalidResponse }
+        if platform == .kugou, let value = result["vip_type"] {
+            guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }),
+                  value == "0" || !value.hasPrefix("0"),
+                  let number = UInt64(value), number <= 9_007_199_254_740_991 else {
+                throw MusicAccountTransferError.invalidFile
+            }
+        }
         return result
     }
     static func credential(_ row: MusicAccountTransferEntry) throws -> AccountCredential {
-        let id: String
-        switch row.platform {
-        case .netease: id = try MusicNeteaseWire.id(row.userID)
-        case .qq: id = try MusicQQWire.id(row.userID)
-        case .kugou: id = try MusicKugouWire.id(row.userID)
-        }
-        let fields = row.fields
-        let root: [String: Any]
+        let fields = try canonical(row.fields, platform: row.platform)
+        guard !row.userID.isEmpty, row.userID.utf8.count <= 20, !row.userID.hasPrefix("0"),
+              row.userID.utf8.allSatisfy({ (48...57).contains($0) }),
+              Set(fields.keys).isSubset(of: allowed[row.platform]!),
+              fields.allSatisfy({ key, value in
+                  value.utf8.allSatisfy { $0 >= 33 && $0 <= 126 && ![34, 59, 92].contains($0) &&
+                      ($0 != 44 || key == "_ntes_nnid") }
+              }) else { throw MusicAccountTransferError.invalidFile }
         switch row.platform {
         case .netease:
-            guard Set(fields.keys).isSubset(of: MusicNeteaseWire.credentialKeys.union(MusicNeteaseWire.deviceKeys)),
-                  fields["MUSIC_U"]?.isEmpty == false else { throw MusicServiceError.invalidResponse }
-            let cookies = try fields.filter { MusicNeteaseWire.credentialKeys.contains($0.key) }
-                .mapValues { try MusicNeteaseWire.cookieValue($0, empty: true) }
-            let device = try fields.filter { MusicNeteaseWire.deviceKeys.contains($0.key) }
-                .mapValues { try MusicNeteaseWire.cookieValue($0, empty: true) }
-            guard ["deviceId", "_ntes_nuid", "_ntes_nnid", "WNMCID"].allSatisfy({ device[$0]?.isEmpty == false }) else {
-                throw MusicServiceError.invalidResponse
-            }
-            root = ["version": 1, "platform": "wy", "accountID": id, "cookies": cookies, "device": device]
+            guard ["MUSIC_U", "deviceId", "_ntes_nuid", "_ntes_nnid", "WNMCID"].allSatisfy({
+                fields[$0]?.isEmpty == false
+            }) else { throw MusicAccountTransferError.invalidFile }
         case .qq:
-            let canonical = try normalizedQQ(fields)
-            guard try MusicQQWire.id(canonical["musicid"] ?? canonical["str_musicid"]) == id,
-                  canonical["str_musicid"] == nil || canonical["str_musicid"] == id,
-                  canonical["musicid"] == nil || canonical["musicid"] == id else { throw MusicServiceError.targetChanged }
-            var auth: [String: Any] = canonical
-            for key in qqNumbers { if let value = canonical[key] { auth[key] = try number(value) } }
-            root = ["version": 1, "platform": "tx", "auth": auth]
+            guard (fields["musicid"] ?? fields["str_musicid"]) == row.userID,
+                  fields["musicid"] == nil || fields["musicid"] == row.userID,
+                  fields["str_musicid"] == nil || fields["str_musicid"] == row.userID,
+                  fields["musickey"]?.isEmpty == false else { throw MusicAccountTransferError.invalidFile }
         case .kugou:
-            let authKeys: Set<String> = ["userid", "token", "t1", "vip_type", "vip_token"]
-            let deviceKeys: Set<String> = ["KUGOU_API_GUID", "KUGOU_API_MID", "KUGOU_API_DEV", "KUGOU_API_MAC", "dfid"]
-            guard Set(fields.keys).isSubset(of: authKeys.union(deviceKeys)), fields["userid"] == id,
-                  let seed = fields["KUGOU_API_GUID"], seed.count == 32,
-                  ["KUGOU_API_MID", "KUGOU_API_DEV", "KUGOU_API_MAC"].allSatisfy({ fields[$0] != nil }) else {
-                throw MusicServiceError.invalidResponse
+            guard fields["userid"] == row.userID,
+                  ["token", "KUGOU_API_GUID", "KUGOU_API_MID", "KUGOU_API_DEV", "KUGOU_API_MAC"].allSatisfy({
+                      fields[$0]?.isEmpty == false
+                  }), let seed = fields["KUGOU_API_GUID"], seed.utf8.count == 32,
+                  seed.utf8.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }),
+                  let mid = fields["KUGOU_API_MID"], mid.utf8.count <= 39,
+                  mid.utf8.allSatisfy({ (48...57).contains($0) }) else {
+                throw MusicAccountTransferError.invalidFile
             }
-            var auth: [String: Any] = fields.filter { authKeys.contains($0.key) }
-            if let value = fields["vip_type"] { auth["vip_type"] = try number(value) }
-            if let value = fields["t1"], let integer = try? number(value) { auth["t1"] = integer }
-            var device: [String: Any] = fields.filter { deviceKeys.contains($0.key) }; device["seed"] = seed
-            _ = try MusicKugouAuth(auth, strict: true); _ = try MusicKugouDevice(saved: device)
-            root = ["version": 1, "platform": "kg", "accountID": id, "auth": auth, "device": device]
         }
-        let data = try MusicQQWire.json(root)
-        if row.platform != .qq, data.count > 32_768 { throw MusicServiceError.limit }
-        return try AccountCredential(data: data)
+        let cookie = fields.keys.sorted().map { $0 + "=" + fields[$0]! }.joined(separator: "; ")
+        return try MusicAccountCredential.make(platform: row.platform, userID: row.userID, cookie: cookie)
     }
-
     static func entry(_ credential: AccountCredential, platform: MusicAccountPlatform) throws -> MusicAccountTransferEntry {
-        let root = try MusicQQWire.decode(credential.dataRepresentation())
-        guard root["platform"] as? String == platform.rawValue else { throw MusicServiceError.invalidResponse }
+        let value = try MusicAccountCredential.read(credential)
+        guard value[music: "platform"] == .string(platform.rawValue) else { throw MusicServiceError.invalidResponse }
+        let cookie = try value[music: "cookie"].musicRequiredText()
         var fields: [String: String] = [:]
-        let id: String
-        func strings(_ raw: Any?) throws -> [String: String] {
-            try MusicQQWire.object(raw).mapValues { value in
-                if let text = value as? String { return text }
-                return String(try MusicQQWire.integer(value))
+        for item in cookie.split(separator: ";") {
+            guard let at = item.firstIndex(of: "=") else { throw MusicServiceError.invalidResponse }
+            let name = item[..<at].trimmingCharacters(in: .whitespaces)
+            if allowed[platform]!.contains(name) || platform == .qq && qqAliases[name] != nil {
+                fields[name] = item[item.index(after: at)...].trimmingCharacters(in: .whitespaces)
             }
         }
-        switch platform {
-        case .netease:
-            id = try MusicNeteaseWire.id(root["accountID"])
-            fields = try strings(root["cookies"])
-            let device = try strings(root["device"])
-            fields.merge(device) { _, device in device }
-        case .qq:
-            fields = try normalizedQQ(strings(root["auth"]))
-            id = try MusicQQWire.id(fields["musicid"] ?? fields["str_musicid"])
-        case .kugou:
-            id = try MusicKugouWire.id(root["accountID"])
-            fields = try strings(root["auth"])
-            let device = try MusicQQWire.object(root["device"])
-            guard let seed = device["seed"] as? String, seed.count == 32,
-                  ["KUGOU_API_MID", "KUGOU_API_DEV", "KUGOU_API_MAC"].allSatisfy({ device[$0] != nil }) else {
-                throw MusicServiceError.verificationRequired
-            }
-            let bound = try MusicKugouDevice(saved: device)
-            fields.merge(try strings(bound.fields)) { _, device in device }
-            fields.removeValue(forKey: "seed")
-        }
-        let result = MusicAccountTransferEntry(platform: platform, userID: id, fields: fields)
+        let result = MusicAccountTransferEntry(platform: platform, userID: try value[music: "userId"].musicRequiredText(),
+                                              fields: try canonical(fields, platform: platform))
         _ = try self.credential(result)
         return result
     }

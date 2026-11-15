@@ -6,7 +6,7 @@ import XCTest
     private func track(_ platform: String, id: String, shared: Bool = false) -> MusicRemoteTrack {
         var sources = [MusicNativeSource(sourceKey: platform + ":" + id, platform: platform, nativeId: id)]
         if shared { sources.append(.init(sourceKey: "wy:known", platform: "wy", nativeId: "known")) }
-        return .init(ref: .init(kind: .handle, id: platform + ":" + id), songId: "song:recording",
+        return .init(ref: .init(kind: .library, id: "song:recording", occurrence: platform + ":" + id), songId: "song:recording",
                      title: "Recording", artist: "Artist", duration: 180, sources: sources)
     }
 
@@ -52,7 +52,7 @@ import XCTest
         XCTAssertEqual(second.songs.count, 1)
     }
 
-    func testSharedMappingsDoNotManufactureBatchPageOrigins() async throws {
+    func testBatchCarriesThePermanentRecordingAndItsKnownMappings() async throws {
         let value = track("tx", id: "actual", shared: true)
         let model = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
             .init(platform: platform.rawValue, query: query, page: page, limit: limit,
@@ -65,7 +65,8 @@ import XCTest
         await model.finishPendingReads()
         let request = try model.makeBatchRequest()
         XCTAssertEqual(request.targets.count, 1)
-        XCTAssertEqual(request.targets[0].origins.map(\.platform), [.qq])
+        XCTAssertEqual(request.targets[0].track.ref, value.ref)
+        XCTAssertEqual(request.targets[0].track.songId, value.songId)
         XCTAssertTrue(request.targets[0].track.sources.contains { $0.platform == "wy" })
     }
 

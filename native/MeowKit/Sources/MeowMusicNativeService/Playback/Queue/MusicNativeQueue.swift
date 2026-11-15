@@ -56,7 +56,7 @@ extension NativeMusicService {
     public func state() async throws -> MusicPlaybackState { stateDTO(try read()) }
     public func queue() async throws -> MusicQueueSnapshot {
         let d = try read(), rows = d.queue["entries"].array
-        let projected = try await sharedSongMetadata(rows.map { $0["song"] })
+        let projected = try rows.map { try entrySong($0, d) }
         var tracks: [Data: (song: MJ, track: MusicRemoteTrack)] = [:]
         return .init(revision: d.queue["revision"].int, currentId: d.queue["currentId"] == .null ? nil : d.queue["currentId"].string,
             entries: try zip(rows, projected).map { entry, song in
@@ -69,7 +69,7 @@ extension NativeMusicService {
                 if !key.isEmpty, let cached = tracks[key], cached.song == song {
                     track = .init(ref: ref, songId: cached.track.songId, title: cached.track.title,
                         artist: cached.track.artist, album: cached.track.album, duration: cached.track.duration,
-                        sources: cached.track.sources, artwork: cached.track.artwork)
+                        sources: cached.track.sources, artwork: cached.track.artwork, artistNames: cached.track.artistNames)
                 } else {
                     track = try MusicModel.track(song, ref)
                     if !key.isEmpty { tracks[key] = (song, track) }
@@ -79,7 +79,7 @@ extension NativeMusicService {
                     sourceTitle: title.isEmpty ? nil : title,
                     remoteSessionID: UUID(uuidString: entry["context"]["remoteSession"].string),
                     displayIdentity: MusicNativeQueueDisplayIdentity.make(
-                        song: entry["song"], occurrence: id, context: entry["context"]))
+                        song: song, occurrence: id, context: entry["context"]))
             })
     }
     func archive(_ queue: MJ, into d: inout MusicDocument) {
@@ -99,26 +99,19 @@ extension NativeMusicService {
         }
         queue["currentId"] = .string(id); queue["priority"] = .strings(queue["priority"].strings.filter { $0 != id })
     }
-    func makeEntries(_ songs: [MJ], queue: inout MJ, context: MJ = .obj()) throws -> [MJ] {
-        var serial = queue["serial"].int
-        let maximumSerial = 9_007_199_254_740_991
-        try musicRequire((0...maximumSerial).contains(serial) && songs.count <= maximumSerial - serial, .limit)
-        var cleaned: [Data: MJ] = [:]
-        let rows = try songs.map { raw -> MJ in
-            let songID = raw["songId"].string
-            let song: MJ
-            if !songID.isEmpty, let value = cleaned[Data(songID.utf8)],
-               value["title"] == raw["title"], value["artist"] == raw["artist"],
-               value["album"] == raw["album"], value["duration"] == raw["duration"],
-               value["cover_url"] == raw["cover_url"], value["sources"] == raw["sources"] { song = value }
-            else {
-                song = try MusicModel.cleanSong(raw)
-                if !songID.isEmpty { cleaned[Data(songID.utf8)] = song }
-            }
+    func makeEntries(_ songs: [MJ], document: inout MusicDocument, context: MJ = .obj(),
+                     authoritative: Bool = false) throws -> [MJ] {
+        var library = document.library["library"]
+        let ids = try registerSongs(songs, library: &library, authoritative: authoritative, playback: document.playback)
+        document.library["library"] = library
+        var serial = document.queue["serial"].int
+        try musicRequire(ids.count <= 9_007_199_254_740_991 - serial, .limit)
+        let rows = ids.map { id -> MJ in
             serial += 1
-            return .obj([("id", .string("entry-\(serial)")), ("key", song["songId"]), ("song", song), ("context", context)])
+            return .obj([("id", .string("entry-\(serial)")), ("songId", .string(id)), ("context", context)])
         }
-        queue["serial"] = .n(serial); return rows
+        document.queue["serial"] = .n(serial)
+        return rows
     }
     public func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) async throws -> MusicPlaybackState {
         var changesCurrent = false
@@ -144,7 +137,7 @@ extension NativeMusicService {
             case .replace(let refs, let index):
                 try musicRequire(!refs.isEmpty && refs.indices.contains(index))
                 let songs = try refs.map(resolved)
-                let rows = try makeEntries(songs, queue: &d.queue, context: .obj([
+                let rows = try makeEntries(songs, document: &d, context: .obj([
                     ("sourceTitle", .string("歌曲")), ("sourceType", .string("song"))
                 ]))
                 changesCurrent = true
@@ -157,14 +150,14 @@ extension NativeMusicService {
                 try musicRequire(c["revision"].int == revision, .staleRevision)
                 let ids = c["order"].strings
                 try musicRequire(ids.indices.contains(index))
-                let rows = try makeEntries(ids.map { d.library["library"]["songs"][$0] }, queue: &d.queue,
+                let rows = try makeEntries(ids.map { d.library["library"]["songs"][$0] }, document: &d,
                     context: .obj([("collectionId", .string(id)), ("sourceTitle", c["name"])]))
                 archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
                 for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }
                 d.queue["source"] = .obj([("id", .string(id)), ("title", c["name"])])
             case .append(let refs, let next):
                 let songs = try refs.map(resolved)
-                let added = try makeEntries(songs, queue: &d.queue)
+                let added = try makeEntries(songs, document: &d)
                 var rows = d.queue["entries"].array
                 let currentIndex = rows.firstIndex { $0["id"] == d.queue["currentId"] }
                 let index = next ? currentIndex.map { $0 + 1 } ?? rows.count : rows.count
@@ -299,9 +292,9 @@ extension NativeMusicService {
         let d = try read()
         return try d.history["days"].array.flatMap { day in
             try day["songs"].array.map {
-                let song = $0["song"]
+                let song = try repositorySong($0["songId"].string, d)
                 let context = $0["context"].isObject ? MusicModel.durable($0["context"]) : .obj()
-                return .init(date: day["date"].string, at: $0["at"].number, track: try remember(song),
+                return .init(date: day["date"].string, at: $0["at"].number, track: try repositoryTrack(song),
                     displayIdentity: MusicNativeQueueDisplayIdentity.make(
                         song: song, occurrence: "", context: context))
             }

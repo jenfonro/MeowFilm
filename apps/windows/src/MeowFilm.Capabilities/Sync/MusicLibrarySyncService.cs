@@ -1,9 +1,7 @@
-using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
-using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities.Sync;
 
@@ -14,10 +12,7 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
     public static readonly TimeSpan Interval = TimeSpan.FromMinutes(5);
     private readonly MusicLibraryOwner library;
     private readonly IMusicPlatformSessionSource sessions;
-    private readonly MusicPlatformHttp http;
-    private readonly MusicPlatformClientContextOwner clients;
-    private readonly MusicNeteaseTokenProvider neteaseTokens;
-    private readonly Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud;
+    private readonly MusicPlatformClient client;
     private readonly TimeProvider time;
     private readonly object gate = new();
     private readonly SemaphoreSlim controls = new(1, 1);
@@ -28,17 +23,11 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
     private bool closed, stopping, started;
     public event Action? StateChanged;
 
-    internal MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions, MusicPlatformHttp http,
-        MusicPlatformClientContextOwner clients, IRuntimeClient tokenRuntime)
-        : this(library, sessions, http, clients, tokenRuntime, null) { }
-    internal MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions, MusicPlatformHttp http,
-        MusicPlatformClientContextOwner clients, IRuntimeClient tokenRuntime,
-        Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? kugouCloudTransport, TimeProvider? timeProvider = null)
+    internal MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions,
+        MusicPlatformClient client, TimeProvider? timeProvider = null)
     {
-        ArgumentNullException.ThrowIfNull(library); ArgumentNullException.ThrowIfNull(sessions); ArgumentNullException.ThrowIfNull(http);
-        this.library = library; this.sessions = sessions; this.http = http;
-        this.clients = clients ?? throw new ArgumentNullException(nameof(clients)); cloud = kugouCloudTransport; time = timeProvider ?? TimeProvider.System;
-        neteaseTokens = new(tokenRuntime ?? throw new ArgumentNullException(nameof(tokenRuntime)));
+        this.library = library; this.sessions = sessions; this.client = client;
+        time = timeProvider ?? TimeProvider.System;
         library.SynchronizeNetworkPlaylists = RunNetworkPlaylists;
     }
     private static JsonElement Failed(string code) => LJ.Element(LJ.Obj(("ok", false), ("code", code)));
@@ -120,7 +109,7 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
                 try
                 {
                     void Check() { lock (gate) LJ.Require(!closed && !stopping && generation == epoch, "STALE_SESSION"); }
-                    return await new MusicLibrarySyncEngine(library, sessions, http, clients, neteaseTokens, cloud, Check, source.Token)
+                    return await new MusicLibrarySyncEngine(library, sessions, client, Check, source.Token)
                         .RunAsync(networkPlatform).ConfigureAwait(false);
                 }
                 catch (Exception e) { return Failed(MusicLibrarySyncEngine.Error(e)); }

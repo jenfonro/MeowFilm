@@ -4,6 +4,7 @@ using MeowFilm.AppHost;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -15,7 +16,8 @@ public static class MusicHomeSnapshotTests
         yield return new("Music home optional cache reopens ordered pages without account or runtime authority", Roundtrip);
         yield return new("Music home cache reopens through its independent local cache namespace and root", LocalReopen);
         yield return new("Music home bad cached content misses and fresh pages repair it", Damaged);
-        yield return new("Music home foreign platform pages and songs miss without replacing accepted snapshots", PlatformMismatch);
+        yield return new("Music home foreign root pages miss without replacing accepted snapshots", PlatformMismatch);
+        yield return new("Music home song cards and previews resolve current cross-platform repository references", SongReferences);
         yield return new("Music home display cache keeps empty results and has no arbitrary page cap", EmptyAndMany);
         yield return new("Music home cache write does not wait for initial read or persistent receipt", SlowDisk);
         yield return new("Music home cache storage failures cannot negate successful pages", StorageFailures);
@@ -32,10 +34,10 @@ public static class MusicHomeSnapshotTests
         await owner.SaveAsync(Snapshot("wy", Page("wy", "first"), Page("wy", "second")));
         await store.DrainAsync();
         await using var reopened = new CacheDocumentStore(backing);
-        var restored = (await new MusicHomeSnapshotStore(reopened).ReadAsync())!;
+        var restored = (await new MusicHomeSnapshotStore(reopened).ReadAsync(_ => null))!;
         Check(restored.Platform == "wy" && restored.Pages.Select(PageId).SequenceEqual(new[] { "first", "second" }));
         restored.Pages[0] = default;
-        Check(PageId((await owner.ReadAsync())!.Pages[0]) == "first");
+        Check(PageId((await owner.ReadAsync(_ => null))!.Pages[0]) == "first");
         foreach (var (account, content) in new[]
         {
             ("synthetic-account-A", "first-content"), ("synthetic-account-B", "second-content")
@@ -56,7 +58,7 @@ public static class MusicHomeSnapshotTests
             await owner.SaveAsync(Snapshot("wy", page));
             await store.DrainAsync();
             await using var accountReopened = new CacheDocumentStore(backing);
-            var accountSnapshot = (await new MusicHomeSnapshotStore(accountReopened).ReadAsync())!;
+            var accountSnapshot = (await new MusicHomeSnapshotStore(accountReopened).ReadAsync(_ => null))!;
             Check(accountSnapshot.Platform == "wy" && accountSnapshot.Pages.Length == 1 &&
                 PageId(accountSnapshot.Pages[0]) == content);
             Check(accountSnapshot.Pages[0].EnumerateObject().Select(property => property.Name)
@@ -69,15 +71,16 @@ public static class MusicHomeSnapshotTests
             Check(backing.Data.Keys.SequenceEqual(new[] { MusicHomeSnapshotStore.Namespace }));
         }
         await owner.SaveAsync(Snapshot("kg", Page("kg", "replacement")));
-        var replacement = (await owner.ReadAsync())!;
+        var replacement = (await owner.ReadAsync(_ => null))!;
         Check(replacement is { Platform: "kg", Pages.Length: 1 } && PageId(replacement.Pages[0]) == "replacement");
     }
     private static async Task LocalReopen()
     {
         string root = TestWorkspace.DataPath("music-home-cache-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(Path.Combine(root, "songs"));
         try
         {
+            await using var songs = new LocalDocumentStore(Path.Combine(root, "songs"), [MusicLibraryOwner.DocumentNamespace]);
             var first = Page("wy", "disk-first");
             first["entries"] = new JsonArray(new JsonObject
             {
@@ -109,18 +112,27 @@ public static class MusicHomeSnapshotTests
                 protectedNamespaces: AppIdentity.CacheProtectedNamespaces))
             await using (var store = new CacheDocumentStore(backing))
             {
+                await using var library = new MusicLibraryOwner(songs);
+                first = JsonNode.Parse((await library.AdoptPlatformResultAsync(
+                    JsonSerializer.SerializeToElement(first), default,
+                    shape: MusicLibraryOwner.PlatformSongShape.Catalog)).GetRawText())!.AsObject();
                 var owner = new MusicHomeSnapshotStore(store);
-                Check(await owner.ReadAsync() is null);
+                Check(await owner.ReadAsync(_ => null) is null);
                 await owner.SaveAsync(Snapshot("wy", first, Page("wy", "disk-second")));
+                await library.AdoptPlatformResultAsync(JsonSerializer.SerializeToElement(
+                    MusicSongFixture.Online("wy", "101", "Current title", "Artist",
+                        cover: "https://image.invalid/current.jpg")), default, shape: MusicLibraryOwner.PlatformSongShape.Song);
                 await store.DrainAsync();
             }
             await using (var backing = new LocalDocumentStore(root, AppIdentity.CacheNamespaces,
                 protectedNamespaces: AppIdentity.CacheProtectedNamespaces))
             await using (var store = new CacheDocumentStore(backing))
             {
-                var saved = (await new MusicHomeSnapshotStore(store).ReadAsync())!;
+                await using var library = new MusicLibraryOwner(songs);
+                Check((await library.ExecuteAsync("music.library.list")).GetProperty("ok").GetBoolean());
+                var saved = (await new MusicHomeSnapshotStore(store).ReadAsync(library.SongSnapshot))!;
                 Check(saved.Platform == "wy" && saved.Pages.Select(PageId).SequenceEqual(new[] { "disk-first", "disk-second" }));
-                foreach (string field in new[] { "entries", "sections", "items" })
+                foreach (string field in new[] { "entries", "items" })
                     Check(JsonNode.DeepEquals(first[field], JsonNode.Parse(saved.Pages[0].GetProperty(field).GetRawText())));
                 var sections = MusicCatalogDto.Read(saved.Pages[0], "wy", "home", "");
                 var daily = sections[0].Items.Single();
@@ -129,15 +141,18 @@ public static class MusicHomeSnapshotTests
                     daily.DayOfMonth == 7 && daily.PreviewSongs.Single().Movement == "↑");
                 Check(sections[1].Action is { ActionId: "feature", PageCode: "HOME_DISCOVERY_PAGE" });
                 var song = sections[1].Items.Single(card => card.Song is not null);
-                Check(song.ActionId == "101" && song.Song!.Title == "Song" &&
+                Check(song.ActionId == "101" && song.Song!.Title == "Current title" &&
+                    song.Song.Cover == "https://image.invalid/current.jpg" &&
                     song.PlaybackSource!.Value.GetProperty("id").GetString() == "202");
                 Check(sections[2].Items.Single().ActionId == "303");
                 var document = await store.ReadAsync(MusicHomeSnapshotStore.Namespace);
                 using var json = JsonDocument.Parse(document.Data!);
+                Check(!Encoding.UTF8.GetString(document.Data!).Contains("\"sources\"") &&
+                    !Encoding.UTF8.GetString(document.Data!).Contains("https://image.invalid/song.jpg"));
                 Check(json.RootElement.EnumerateObject().Select(property => property.Name)
                     .SequenceEqual(new[] { "platform", "pages" }));
                 saved.Pages[0] = default;
-                Check(PageId((await new MusicHomeSnapshotStore(store).ReadAsync())!.Pages[0]) == "disk-first");
+                Check(PageId((await new MusicHomeSnapshotStore(store).ReadAsync(library.SongSnapshot))!.Pages[0]) == "disk-first");
             }
         }
         finally
@@ -154,9 +169,9 @@ public static class MusicHomeSnapshotTests
             backing.Data[MusicHomeSnapshotStore.Namespace] = data;
             await using var store = new CacheDocumentStore(backing);
             var owner = new MusicHomeSnapshotStore(store);
-            Check(await owner.ReadAsync() is null);
+            Check(await owner.ReadAsync(_ => null) is null);
             await owner.SaveAsync(Snapshot("wy", Page("wy", "repaired")));
-            Check(PageId((await owner.ReadAsync())!.Pages.Single()) == "repaired");
+            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "repaired");
         }
     }
     private static async Task EmptyAndMany()
@@ -164,22 +179,19 @@ public static class MusicHomeSnapshotTests
         await using var store = new CacheDocumentStore();
         var owner = new MusicHomeSnapshotStore(store);
         await owner.SaveAsync(Snapshot("wy", new JsonObject { ["platform"] = "wy", ["entries"] = new JsonArray() }));
-        Check(MusicCatalogDto.Read((await owner.ReadAsync())!.Pages.Single(), "wy", "home", "").Count == 0);
+        Check(MusicCatalogDto.Read((await owner.ReadAsync(_ => null))!.Pages.Single(), "wy", "home", "").Count == 0);
         var pages = Enumerable.Range(0, 1025).Select(i => Page("wy", i.ToString())).ToArray();
         await owner.SaveAsync(Snapshot("wy", pages));
-        Check((await owner.ReadAsync())!.Pages.Select(PageId).SequenceEqual(Enumerable.Range(0, 1025).Select(i => i.ToString())));
+        Check((await owner.ReadAsync(_ => null))!.Pages.Select(PageId).SequenceEqual(Enumerable.Range(0, 1025).Select(i => i.ToString())));
         await owner.SaveAsync(new("wy", []));
-        Check((await owner.ReadAsync())!.Pages.Length == 1025);
+        Check((await owner.ReadAsync(_ => null))!.Pages.Length == 1025);
     }
     private static async Task PlatformMismatch()
     {
-        var foreignSong = Page("wy", "foreign-song");
-        foreignSong["items"] = new JsonArray(MusicSongFixture.Online("kg", "101"));
         foreach (var invalid in new[]
         {
             Snapshot("wy", Page("kg", "mismatch")),
-            Snapshot("wy", Page("wy", "first"), Page("kg", "mixed")),
-            Snapshot("wy", foreignSong)
+            Snapshot("wy", Page("wy", "first"), Page("kg", "mixed"))
         })
         {
             await using var backing = new MusicOfficialAudioTests.MemoryStore();
@@ -189,33 +201,75 @@ public static class MusicHomeSnapshotTests
             await store.DrainAsync();
             byte[] safe = backing.Data[MusicHomeSnapshotStore.Namespace].ToArray();
             await owner.SaveAsync(invalid);
-            var retained = (await owner.ReadAsync())!;
+            var retained = (await owner.ReadAsync(_ => null))!;
             Check(retained.Platform == "wy" && PageId(retained.Pages.Single()) == "safe");
             await store.DrainAsync();
             Check(backing.Data[MusicHomeSnapshotStore.Namespace].SequenceEqual(safe));
             await using (var reopened = new CacheDocumentStore(backing))
             {
-                var restored = (await new MusicHomeSnapshotStore(reopened).ReadAsync())!;
+                var restored = (await new MusicHomeSnapshotStore(reopened).ReadAsync(_ => null))!;
                 Check(restored.Platform == "wy" && PageId(restored.Pages.Single()) == "safe");
             }
 
             backing.Data[MusicHomeSnapshotStore.Namespace] =
                 JsonSerializer.SerializeToUtf8Bytes(new { platform = invalid.Platform, pages = invalid.Pages });
             await using var damaged = new CacheDocumentStore(backing);
-            Check(await new MusicHomeSnapshotStore(damaged).ReadAsync() is null);
+            Check(await new MusicHomeSnapshotStore(damaged).ReadAsync(_ => null) is null);
         }
+    }
+    private static async Task SongReferences()
+    {
+        await using var backing = new MusicOfficialAudioTests.MemoryStore();
+        await using var library = new MusicLibraryOwner(backing);
+        var song = await library.AdoptSongAsync(MusicSongFixture.Online("kg", "canonical-other-platform",
+            "Initial title", "Artist", duration: 180, cover: "https://images.invalid/initial.png"), default);
+        var page = Page("wy", "current");
+        page["sections"]![0]!["items"] = new JsonArray(song.DeepClone());
+        page["entries"] = new JsonArray(new JsonObject
+        {
+            ["id"] = "chart", ["name"] = "Current chart", ["presentation"] = "preview",
+            ["action"] = new JsonObject { ["type"] = "playlist", ["id"] = "chart" },
+            ["preview"] = new JsonArray(new JsonObject
+            {
+                ["title"] = "Stale preview title", ["artist"] = "Stale preview artist",
+                ["cover"] = "https://images.invalid/stale-preview.png", ["rank"] = 1,
+                ["song"] = song.DeepClone()
+            })
+        });
+        await using (var cache = new CacheDocumentStore(backing))
+        {
+            await new MusicHomeSnapshotStore(cache).SaveAsync(Snapshot("wy", page));
+            await cache.DrainAsync();
+        }
+        string saved = Encoding.UTF8.GetString(backing.Data[MusicHomeSnapshotStore.Namespace]);
+        Check(saved.Contains(LJ.S(song["songId"]), StringComparison.Ordinal) &&
+            !saved.Contains("sources", StringComparison.Ordinal) &&
+            !saved.Contains("Initial title", StringComparison.Ordinal) &&
+            !saved.Contains("Stale preview", StringComparison.Ordinal) &&
+            !saved.Contains("initial.png", StringComparison.Ordinal));
+        await library.AdoptPlatformResultAsync(JsonSerializer.SerializeToElement(MusicSongFixture.Online(
+            "kg", "canonical-other-platform", "Corrected title", "Artist", duration: 180,
+            cover: "https://images.invalid/corrected.png")), default, shape: MusicLibraryOwner.PlatformSongShape.Song);
+        await using var cold = new CacheDocumentStore(backing);
+        var restored = (await new MusicHomeSnapshotStore(cold).ReadAsync(library.SongSnapshot))!;
+        var cards = MusicCatalogDto.Read(restored.Pages.Single(), "wy", "home", "").SelectMany(section => section.Items).ToArray();
+        var current = cards.Single(card => card.Song is not null);
+        var preview = cards.Single(card => card.Id == "chart").PreviewSongs.Single();
+        Check(current.Title == "Corrected title" && current.Platform == "kg" &&
+            current.Song!.Id == LJ.S(song["songId"]) && preview.Title == current.Title &&
+            preview.Cover == "https://images.invalid/corrected.png" && preview.Song!.Id == current.Song.Id);
     }
     private static async Task SlowDisk()
     {
         var backing = new HeldStore();
         await using var store = new CacheDocumentStore(backing);
         var owner = new MusicHomeSnapshotStore(store);
-        var reading = owner.ReadAsync();
+        var reading = owner.ReadAsync(_ => null);
         await backing.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         try
         {
             await owner.SaveAsync(Snapshot("wy", Page("wy", "saved"))).WaitAsync(TimeSpan.FromSeconds(2));
-            Check(PageId((await owner.ReadAsync())!.Pages.Single()) == "saved");
+            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "saved");
         }
         finally { backing.Release.TrySetResult(); }
         Check(PageId((await reading)!.Pages.Single()) == "saved");
@@ -228,9 +282,9 @@ public static class MusicHomeSnapshotTests
             await using var backing = new MusicOfficialAudioTests.MemoryStore { Failure = error };
             await using var store = new CacheDocumentStore(backing);
             var owner = new MusicHomeSnapshotStore(store);
-            Check(await owner.ReadAsync() is null);
+            Check(await owner.ReadAsync(_ => null) is null);
             await owner.SaveAsync(Snapshot("wy", Page("wy", "saved")));
-            Check(PageId((await owner.ReadAsync())!.Pages.Single()) == "saved");
+            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "saved");
             await store.DrainAsync();
         }
     }
@@ -251,7 +305,7 @@ public static class MusicHomeSnapshotTests
             Check(MusicCatalogDto.Read(JsonSerializer.SerializeToElement(page), "wy", "home", "")
                 .Single().Items.Single().CanOpen);
             await owner.SaveAsync(Snapshot("wy", page));
-            Check(PageId((await owner.ReadAsync())!.Pages.Single()) == "safe");
+            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "safe");
             await store.DrainAsync();
             Check(backing.Data[MusicHomeSnapshotStore.Namespace].SequenceEqual(safe));
 
@@ -260,12 +314,12 @@ public static class MusicHomeSnapshotTests
                 JsonSerializer.SerializeToUtf8Bytes(new { platform = "wy", pages = new[] { page } });
             await using var maliciousCache = new CacheDocumentStore(backing);
             var restoredOwner = new MusicHomeSnapshotStore(maliciousCache);
-            Check(await restoredOwner.ReadAsync() is null);
+            Check(await restoredOwner.ReadAsync(_ => null) is null);
             await restoredOwner.SaveAsync(Snapshot("wy", Page("wy", "repaired")));
-            Check(PageId((await restoredOwner.ReadAsync())!.Pages.Single()) == "repaired");
+            Check(PageId((await restoredOwner.ReadAsync(_ => null))!.Pages.Single()) == "repaired");
             await maliciousCache.DrainAsync();
             await using var repairedCache = new CacheDocumentStore(backing);
-            Check(PageId((await new MusicHomeSnapshotStore(repairedCache).ReadAsync())!.Pages.Single()) == "repaired");
+            Check(PageId((await new MusicHomeSnapshotStore(repairedCache).ReadAsync(_ => null))!.Pages.Single()) == "repaired");
         }
     }
     private static async Task SizeBoundary()
@@ -280,7 +334,7 @@ public static class MusicHomeSnapshotTests
         Check(store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length == LocalDocumentStore.MaximumDocumentBytes);
         page["sections"]![0]!["items"]![0]!["subtitle"] = new string('y', LocalDocumentStore.MaximumDocumentBytes - overhead + 1);
         await owner.SaveAsync(Snapshot("wy", page));
-        var restored = (await owner.ReadAsync())!.Pages.Single();
+        var restored = (await owner.ReadAsync(_ => null))!.Pages.Single();
         Check(restored.GetProperty("sections")[0].GetProperty("items")[0].GetProperty("subtitle").GetString()![0] == 'x');
     }
     private static async Task Cancellation()
@@ -290,8 +344,8 @@ public static class MusicHomeSnapshotTests
         await owner.SaveAsync(Snapshot("wy", Page("wy", "safe")));
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         await Cancelled(() => owner.SaveAsync(Snapshot("kg", Page("kg", "cancelled")), cancelled.Token));
-        await Cancelled(() => owner.ReadAsync(cancelled.Token));
-        Check(PageId((await owner.ReadAsync())!.Pages.Single()) == "safe");
+        await Cancelled(() => owner.ReadAsync(_ => null, cancelled.Token));
+        Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "safe");
     }
     private static async Task CancelledRead()
     {
@@ -300,8 +354,8 @@ public static class MusicHomeSnapshotTests
         await using var store = new CacheDocumentStore(backing);
         var owner = new MusicHomeSnapshotStore(store);
         using var cancellation = new CancellationTokenSource();
-        var cancelledRead = owner.ReadAsync(cancellation.Token);
-        var stableRead = owner.ReadAsync();
+        var cancelledRead = owner.ReadAsync(_ => null, cancellation.Token);
+        var stableRead = owner.ReadAsync(_ => null);
         try
         {
             await backing.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -314,7 +368,7 @@ public static class MusicHomeSnapshotTests
             Check(PageId((await stableRead.WaitAsync(TimeSpan.FromSeconds(5)))!.Pages.Single()) == "stored");
             await draining.WaitAsync(TimeSpan.FromSeconds(5));
             await owner.SaveAsync(Snapshot("wy", Page("wy", "after-cancellation")));
-            Check(PageId((await owner.ReadAsync())!.Pages.Single()) == "after-cancellation");
+            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "after-cancellation");
             await store.DrainAsync().WaitAsync(TimeSpan.FromSeconds(5));
         }
         finally { backing.Release.TrySetResult(); }

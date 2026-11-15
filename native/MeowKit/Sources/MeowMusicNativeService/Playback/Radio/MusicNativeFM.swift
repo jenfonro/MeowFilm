@@ -1,18 +1,13 @@
 import Foundation
 import MeowMusicFeature
 
-struct MusicNativeFMTrack {
-    let song: MJ
-    let recommendation: MJ?
-}
-
 final class MusicNativeFMSession {
     let source: MusicRemoteQueueSource
     let action: MusicHomeAction
     var continueEnabled: Bool
     var attempted = Set<String>()
     var pending: Task<Void, Never>?
-    var buffered: [MusicNativeFMTrack] = []
+    var buffered: [MusicQueueTrackReference] = []
     var exhausted = false
     var error: MusicServiceError?
     var errorID: UUID?
@@ -53,9 +48,11 @@ extension NativeMusicService: MusicFMPlaybackServing {
         if enabled { try fmBoundary() }
     }
     func fmPreferenceScope(_ binding: MusicNativeHomeBinding) async throws -> String {
-        guard let owner = accounts as? any MusicNativeFMProviding else { throw MusicServiceError.unsupported }
+        guard let owner = accounts as? any MusicNativeFMProviding else {
+            return binding.loggedIn ? "wy-fm:" + binding.scope : "wy-fm:guest"
+        }
         let scope = try await owner.nativeFMPreferenceScope(binding)
-        try musicRequire(!scope.isEmpty && scope.utf8.count <= 512, .invalidResponse)
+        try musicRequire(!scope.isEmpty, .invalidResponse)
         return scope
     }
     func clearFMPlayback() {
@@ -85,36 +82,30 @@ extension NativeMusicService: MusicFMPlaybackServing {
         defer { session.pending = nil; if fmPlayback === session { emitSimilar() } }
         let own = epoch, source = session.source
         do {
-            let batch = try await work(label: "fmBatch", draining: true) { try await source.nextFMBatch(intent: source.authorization) }
-            try musicRequire(batch.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
-            let songs = try batch.map(MusicModel.normalize)
-            let recommendations = try batch.map(MusicNativeSimilarData.recommendation)
-            let tracks = songs.indices.map { MusicNativeFMTrack(song: songs[$0], recommendation: recommendations[$0]) }
+            let batch = try await work(label: "fmBatch", draining: true) { try await source.nextFMReferences(intent: source.authorization) }
             try await source.validate()
             try check(own); try source.authorization.check()
             guard fmPlayback === session, !Task.isCancelled else { return }
-            try await retainSongMetadata(songs)
-            try check(own); try source.authorization.check()
-            guard fmPlayback === session, !Task.isCancelled else { return }
-            session.exhausted = songs.isEmpty
-            if session.continueEnabled { try appendFMBatch(session, tracks: tracks) }
-            else { session.buffered = tracks }
+            session.exhausted = batch.isEmpty
+            if session.continueEnabled { try appendFMBatch(session, tracks: batch) }
+            else { session.buffered = batch }
         } catch {
             guard fmPlayback === session, epoch == own, source.authorization.isActive else { return }
             let failure = MusicServiceError.sanitized(error)
             if failure != .cancelled { session.error = failure; session.errorID = UUID() }
         }
     }
-    func appendFMBatch(_ session: MusicNativeFMSession, tracks: [MusicNativeFMTrack]) throws {
+    func appendFMBatch(_ session: MusicNativeFMSession, tracks: [MusicQueueTrackReference]) throws {
         guard !tracks.isEmpty else { return }
         let context = try remoteContext(session.source)
         var live: [String: MJ] = [:]
         try session.source.authorization.perform {
             try similarQueueTransaction(["queue"]) { d in
                 try musicRequire(d.queue["source"]["remoteSession"].string == session.source.id.uuidString.lowercased(), .targetChanged)
-                let rows = try makeEntries(tracks.map(\.song), queue: &d.queue, context: context)
+                let songs = try tracks.map { try repositorySong($0.songID, d) }
+                let rows = try makeEntries(songs, document: &d, context: context)
                 for i in rows.indices {
-                    if let value = tracks[i].recommendation { live[rows[i]["id"].string] = value }
+                    if let value = tracks[i].recommendation { live[rows[i]["id"].string] = try MJ.parse(value) }
                 }
                 d.queue["entries"] = .array(d.queue["entries"].array + rows)
                 d.queue["revision"] = .n(d.queue["revision"].int + 1)
@@ -125,6 +116,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
     public func advanceFM(_ source: MusicRemoteQueueSource, direction: MusicDirection, reason: MusicAdvanceReason,
                           expectedRevision: Int, intent: MusicQueueAuthorization) async throws -> MusicAdvanceResult {
         try intent.check(); try source.authorization.check(); try check()
+        try requirePlatform(source.context.platform)
         try musicRequire(try read().queue["source"]["remoteSession"].string == source.id.uuidString.lowercased(), .targetChanged)
         return try await advance(direction, reason: reason, expectedRevision: expectedRevision)
     }

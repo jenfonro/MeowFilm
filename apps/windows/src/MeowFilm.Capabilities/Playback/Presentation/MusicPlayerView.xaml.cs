@@ -8,6 +8,7 @@ using System.ComponentModel;
 using System.Windows.Automation;
 using System.Windows.Threading;
 using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
 
@@ -36,11 +37,11 @@ public partial class MusicPlayerView : UserControl
         if (showArtwork)
         {
             var record = new MusicRecordView { Width = 60, Height = 60 };
-            module.AttachPlaybackArtwork(record);
+            ArtworkScope.SetLoader(record, module.ArtworkLoader);
             record.SetBinding(MusicRecordView.AddressProperty, new Binding(nameof(MusicCapability.CurrentArtwork)));
+            record.SetBinding(MusicRecordView.ArtworkIdentityProperty, new Binding(nameof(MusicCapability.CurrentArtworkIdentity)));
             record.SetBinding(MusicRecordView.TrackIdentityProperty, new Binding(nameof(MusicCapability.CurrentTrackIdentity)));
             record.SetBinding(MusicRecordView.PlayingProperty, new Binding(nameof(MusicCapability.IsPlaying)));
-            record.ArtworkLoadCompleted += (_, e) => module.ArtworkLoadCompleted(e.Address, e.Succeeded);
             ArtworkButton.Content = record;
         }
         else MetadataPanel.Children.Remove(ArtworkButton);

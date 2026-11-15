@@ -10,10 +10,11 @@ public sealed partial class MusicCapability
     private async Task<ResolvedMusic> ResolveMusicQualityTarget(SongRow song, MusicOnlineTarget target,
         CancellationToken token, bool initial = false)
     {
+        var recordingSong = KnownOfficialSong(song, target.RecordingSong);
         var parameters = new Dictionary<string, object>
         {
             ["installationId"] = target.Installation ?? throw new MusicOperationException("TARGET_REQUIRED"), ["platform"] = target.Platform,
-            ["song"] = target.RecordingSong ?? song.Raw, ["quality"] = target.Quality
+            ["song"] = recordingSong, ["quality"] = target.Quality
         };
         if (target.ManualSource) parameters["manualSource"] = true;
         if (target.SourceKey is not null) parameters["sourceKey"] = target.SourceKey;
@@ -23,7 +24,6 @@ public sealed partial class MusicCapability
             MusicDto.Require(target.QualityPolicySignature is not null && target.QualityCacheSignature is not null);
         var response = await QualityCall("music.online.resolve", parameters, token);
         token.ThrowIfCancellationRequested();
-        var recordingSong = target.RecordingSong;
         var generation = MusicDto.Integer(response, "generation");
         var sourceKey = MusicDto.Text(response, "sourceKey");
         string actualRequest = MusicDto.Text(response, "quality");
@@ -61,7 +61,7 @@ public sealed partial class MusicCapability
         return new(uri, headers, target with
         {
             Generation = generation, SourceKey = sourceKey, Quality = actualRequest,
-            QualityPolicySignature = policy, QualityCacheSignature = cache, RecordingSong = recordingSong
+            QualityPolicySignature = policy, QualityCacheSignature = cache, RecordingSong = KnownOfficialSong(song, recordingSong)
         }, expires);
     }
 }

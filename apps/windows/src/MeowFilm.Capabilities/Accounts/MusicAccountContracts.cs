@@ -10,18 +10,32 @@ namespace MeowFilm.Capabilities.Accounts;
 /// partial/older protocol implementations are not accepted at runtime.
 /// </summary>
 internal interface IMusicAccountProtocol : IAsyncDisposable, IMusicAccountSmsProtocol,
-    IMusicAccountDetailsProtocol, IMusicQqFeedbackAccountProtocol
+    IMusicAccountDetailsProtocol
 {
-    Task<MusicAccountDetailsObservation> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default);
+    Task<MusicAccountVerifiedCredential> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default);
     Task<MusicAccountChallenge> BeginAsync(string platform, CancellationToken cancellationToken = default);
     Task<MusicAccountPoll> PollAsync(string platform, string challengeId,
         MusicAccountSessionHandoff acceptSession, CancellationToken cancellationToken = default);
-    void Cancel(string platform);
+    Task CancelAsync(string platform);
 }
 
 // Only safe profile metadata is a DTO. Neither requests nor handoffs are records.
 public sealed record MusicAccountProfile(string Platform, string UserId, string DisplayName, string? Avatar = null);
 public sealed record MusicAccountPoll(string Platform, string ChallengeId, string Status);
+
+/// <summary>The credential actually authenticated by Node, kept off ordinary profile DTOs.</summary>
+[DebuggerDisplay("MusicAccountVerifiedCredential (redacted)")]
+internal sealed class MusicAccountVerifiedCredential
+{
+    internal MusicAccountVerifiedCredential(string cookie, MusicAccountDetailsObservation details)
+    {
+        AccountRules.Require(!string.IsNullOrEmpty(cookie), "INVALID_RESPONSE");
+        Cookie = cookie; Details = details;
+    }
+    [JsonIgnore, DebuggerBrowsable(DebuggerBrowsableState.Never)] internal string Cookie { get; }
+    [JsonIgnore] internal MusicAccountDetailsObservation Details { get; }
+    public override string ToString() => "MusicAccountVerifiedCredential (redacted)";
+}
 
 /// <summary>The URL is transient QR display content, not a log or persistence field.</summary>
 [DebuggerDisplay("MusicAccountChallenge (transient)")]
@@ -34,7 +48,6 @@ public sealed class MusicAccountChallenge(string platform, string challengeId, s
     [JsonIgnore, DebuggerBrowsable(DebuggerBrowsableState.Never)] public string? ImageBase64 { get; } = imageBase64;
     public string DisplayKind => ImageBase64 is null ? "url" : "png";
     public long ExpiresAt { get; } = expiresAt;
-    [JsonIgnore] internal MusicKgClientContext? KgClient { get; init; }
     public override string ToString() => "MusicAccountChallenge (transient)";
 }
 

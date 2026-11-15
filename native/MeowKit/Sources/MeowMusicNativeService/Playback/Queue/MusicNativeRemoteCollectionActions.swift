@@ -9,7 +9,7 @@ extension NativeMusicService: MusicRemoteCollectionServing {
         try check(); try intent.check(); try source.authorization.check()
         try requirePlatform(source.context.platform)
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        _ = try musicText(name, maximum: 600)
+        try musicRequire(!name.isEmpty, .invalidResponse)
         _ = try remoteContext(source)
         guard source.context.kind == .playlist, let collection = source.context.collection, collection.kind == .playlist,
               collection.platform.rawValue == source.context.platform else { throw MusicServiceError.unsupported }
@@ -28,31 +28,23 @@ extension NativeMusicService: MusicRemoteCollectionServing {
                                     intent: MusicQueueAuthorization) async throws -> MusicRemoteQueueSource {
         try check(); try intent.check(); try source.authorization.check()
         try requirePlatform(source.context.platform)
-        try musicRequire(query.utf8.count <= 4096, .limit)
         _ = try remoteContext(source)
         let own = epoch
-        let raw = try await work { try await source.completeTracks(intent: intent) }
+        _ = await bindQueueSource(source)
+        try check(own); try intent.check(); try source.authorization.check()
+        let references = try await work { try await source.completeReferences(intent: intent) }
         try check(own); try intent.check()
-        try musicRequire(raw.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
-        var filtered: [MusicNativeTrackData] = []
-        var songs: [MJ] = []
-        for row in raw {
-            try intent.check()
-            // Validate every row, even one the query would otherwise exclude.
-            // Do not use identity normalization (NFKC/diacritic folding) for a
-            // literal UI search, or merge repeated queue occurrences.
-            let song = try MusicModel.normalize(row)
-            songs.append(song)
-            if MusicRemoteCollectionFilter.matches(title: song["title"].string, artist: song["artist"].string,
-                                                    album: song["album"].string, query: query) { filtered.append(row) }
-        }
         try await work { try await source.validate() }
         try check(own); try intent.check(); try source.authorization.check()
-        try await retainSongMetadata(songs)
-        try check(own); try intent.check()
+        let state = try read()
+        let filtered = try references.filter { reference in
+            let song = try repositorySong(reference.songID, state)
+            return MusicRemoteCollectionFilter.matches(title: song["title"].string, artist: song["artist"].string,
+                album: song["album"].string, query: query)
+        }
         try musicRequire(!filtered.isEmpty, .notFound)
-        return try source.authorization.perform {
+        let child = try source.authorization.perform {
             try intent.perform {
                 try check(own)
                 let reader = MusicNativeFilteredCollectionRows(rows: filtered, access: access,
@@ -64,7 +56,7 @@ extension NativeMusicService: MusicRemoteCollectionServing {
                 let context = MusicRemoteQueueContext(kind: parent.kind == .fm ? .recommendation : parent.kind,
                     id: parent.id, title: parent.title, platform: parent.platform, collection: parent.collection)
                 return MusicRemoteQueueSource(context: context, authorization: reader.authorization,
-                    loadPage: { try reader.page($0) },
+                    loadReferences: { cursor, _ in try reader.page(cursor) },
                     validate: { [weak self] in
                         guard let self else { throw MusicServiceError.closed }
                         try await self.check(own)
@@ -74,6 +66,11 @@ extension NativeMusicService: MusicRemoteCollectionServing {
                     }, close: { reader.close() })
             }
         }
+        _ = await bindQueueSource(child)
+        do {
+            try check(own); try intent.check(); try child.authorization.check()
+            return child
+        } catch { await child.close(); throw error }
     }
 }
 
@@ -87,15 +84,15 @@ private final class MusicNativeFilteredCollectionRows: @unchecked Sendable {
     private let lock = NSLock()
     private let access: MusicNativeAccess
     private let registration = UUID()
-    private var rows: [MusicNativeTrackData]?
+    private var rows: [MusicQueueTrackReference]?
 
-    init(rows: [MusicNativeTrackData], access: MusicNativeAccess, authorization: MusicQueueAuthorization) {
+    init(rows: [MusicQueueTrackReference], access: MusicNativeAccess, authorization: MusicQueueAuthorization) {
         self.rows = rows; self.access = access; self.authorization = authorization
     }
     func observeAccess() {
         access.register(registration) { [weak self] in self?.close() }
     }
-    func page(_ cursor: String?) throws -> MusicNativeTrackPage {
+    func page(_ cursor: String?) throws -> MusicQueueReferencePage {
         try Task.checkCancellation(); try authorization.check()
         lock.lock(); defer { lock.unlock() }
         guard let rows else { throw MusicServiceError.closed }

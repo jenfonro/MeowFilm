@@ -10,7 +10,6 @@ public struct MusicAudioFileCacheIdentity: Codable, Equatable, Sendable {
     public let platform: String
     public let nativeID: String
     public let requestedQuality: String
-    public let playbackSignature: String
     public let provider: String
     public let generation: Int
     public var isOfficial: Bool { provider.hasPrefix("official:") }
@@ -18,10 +17,10 @@ public struct MusicAudioFileCacheIdentity: Codable, Equatable, Sendable {
         .init(installationId: provider, generation: generation, siteId: platform, sourceKey: sourceKey, quality: requestedQuality)
     }
     public init(scope: String, songID: String, sourceKey: String, platform: String,
-                nativeID: String, requestedQuality: String, playbackSignature: String, provider: String, generation: Int = 1) {
+                nativeID: String, requestedQuality: String, provider: String, generation: Int = 1) {
         self.scope = scope; self.songID = songID; self.sourceKey = sourceKey
         self.platform = platform; self.nativeID = nativeID
-        self.requestedQuality = requestedQuality; self.playbackSignature = playbackSignature
+        self.requestedQuality = requestedQuality
         self.provider = provider; self.generation = generation
     }
 }

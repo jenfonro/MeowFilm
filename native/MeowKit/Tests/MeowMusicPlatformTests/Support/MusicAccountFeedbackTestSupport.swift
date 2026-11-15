@@ -1,7 +1,5 @@
 import Foundation
 import XCTest
-import CryptoKit
-import zlib
 import MeowAccounts
 import MeowMusicFeature
 import MeowJSON
@@ -17,7 +15,13 @@ final class MusicAccountFeedbackGate: @unchecked Sendable {
     func release() async { await gate.release() }
 }
 
-actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider, MusicNeteasePlaybackLogUploading {
+actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider, MusicNeteasePlaybackLogUploading, MusicAccountSessionPublishing {
+    private var publishedCredential: AccountCredential?
+    func publish(_ credential: AccountCredential, scope: String, generation: Int,
+                 authorization: MusicQueueAuthorization) throws {
+        try authorization.check(); publishedCredential = credential
+    }
+
     enum UploadOutcome: Sendable { case confirmed, notSent, unknown, badACK }
     struct Counts: Equatable, Sendable {
         var verifies = 0, refreshes = 0, logins = 0, polls = 0
@@ -26,6 +30,9 @@ actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider, MusicNe
     private var reports: [MusicPlaybackFeedbackReport] = []
     private var inputs: [AccountCredential] = []
     private var feedbackGate: MusicAccountFeedbackGate?
+    private var releaseGate: MusicAccountFeedbackGate?
+    private var nativeSession: MusicAccountFeedbackNativeSession?
+    private var released: [String] = []
     private var transition: (String, MusicAccountFeedbackGate)?
     private var failure: MusicPlaybackFeedbackReport.Event?
     private var ambiguous: MusicPlaybackFeedbackReport.Event?
@@ -35,7 +42,7 @@ actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider, MusicNe
     func setQRPlatform(_ platform: MusicAccountPlatform) { qrPlatform = platform }
     func uploads() -> [Data] { uploadRecords }
     func setUploadOutcome(_ value: UploadOutcome) { uploadOutcome = value }
-    func uploadPlaybackLog(_ records: Data, credential: AccountCredential,
+    func uploadPlaybackLog(_ records: Data,
                            authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
         try await authorization.check()
         uploadRecords.append(records)
@@ -52,32 +59,41 @@ actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider, MusicNe
     func received() -> [MusicPlaybackFeedbackReport] { reports }
     func credentials() -> [AccountCredential] { inputs }
     func holdFeedback(_ gate: MusicAccountFeedbackGate) { feedbackGate = gate }
+    func holdRelease(_ gate: MusicAccountFeedbackGate) { releaseGate = gate }
+    func setSession(_ id: String) { nativeSession = .init(id: id) }
+    func releasedSessions() -> [String] { released }
     func holdTransition(_ name: String, _ gate: MusicAccountFeedbackGate) { transition = (name, gate) }
     func fail(_ event: MusicPlaybackFeedbackReport.Event) { failure = event }
     func unconfirmed(_ event: MusicPlaybackFeedbackReport.Event) { ambiguous = event }
     private func wait(_ name: String) async {
         if let value = transition, value.0 == name { transition = nil; await value.1.wait() }
     }
-    func feedback(_ report: MusicPlaybackFeedbackReport, credential: AccountCredential,
+    func feedback(_ report: MusicPlaybackFeedbackReport,
                   session: MusicAccountFeedbackNativeSession?,
                   guard authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicAccountFeedbackNativeResult {
         try await authorization.check()
-        reports.append(report); inputs.append(credential)
+        guard let publishedCredential else { throw MusicServiceError.authRequired }
+        reports.append(report); inputs.append(publishedCredential)
         if let gate = feedbackGate { feedbackGate = nil; await gate.wait() }
-        // Deliberately returns even after cancellation: the real channel/owner
-        // must reject the late acknowledgement, not trust a cooperative fixture.
+        // Deliberately settles even after cancellation. A dispatched receipt is
+        // retained, while the revoked owner must reject every new dispatch.
         if failure == report.event { throw MusicServiceError.timeout }
         if ambiguous == report.event { return .init(receipt: .unconfirmed) }
-        return .init(receipt: report.event == .start && report.target.platform == .qq ? .registered : .confirmed)
+        return .init(receipt: report.event == .start && report.target.platform == .qq ? .registered : .confirmed,
+            session: report.event == .start ? nativeSession : nil)
+    }
+    func releaseFeedback(_ session: MusicAccountFeedbackNativeSession) async {
+        released.append(session.id)
+        if let gate = releaseGate { releaseGate = nil; await gate.wait() }
     }
     func nativeID(_ credential: AccountCredential) throws -> String {
-        try MusicQQWire.string(MusicQQWire.decode(credential.dataRepresentation())["uid"])
+        try MusicAccountFixture.userID(credential)
     }
-    func verify(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         countsValue.verifies += 1; await wait("validate")
         return .init(credential: credential, nickname: "Synthetic", nativeID: try nativeID(credential))
     }
-    func refresh(_ credential: AccountCredential) throws -> MusicQQVerified {
+    func refresh(_ credential: AccountCredential) throws -> MusicAccountVerified {
         countsValue.refreshes += 1
         return .init(credential: credential, nickname: "Synthetic", nativeID: try nativeID(credential))
     }
@@ -85,18 +101,18 @@ actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider, MusicNe
         countsValue.logins += 1; await wait("login")
         return .init(id: id, platform: qrPlatform, image: Data([0]), expiresAt: .distantFuture)
     }
-    func pollQR(id: UUID) -> MusicQQLoginResult {
+    func pollQR(id: UUID) -> MusicAccountLoginResult {
         countsValue.polls += 1; return .init(progress: .waiting, verified: nil)
     }
     func cancelQR(_ id: UUID) {}
     func revoke() async { await wait("revoke") }
-    func recommendations(kind: String, page: Int, credential: AccountCredential) throws -> MusicQQRecommendation {
+    func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation {
         throw MusicServiceError.unsupported
     }
-    func collectionRows(credential: AccountCredential) -> [JSONValue] { [] }
-    func tracks(collectionID: String, credential: AccountCredential) -> [JSONValue] { [] }
-    func capabilities(mid: String, credential: AccountCredential) -> [String] { [] }
-    func resolve(mid: String, quality: String, credential: AccountCredential) throws -> JSONValue {
+    func collectionRows() -> [JSONValue] { [] }
+    func tracks(collectionID: String) -> [JSONValue] { [] }
+    func capabilities(mid: String) -> [String] { [] }
+    func resolve(mid: String, quality: String) throws -> JSONValue {
         throw MusicServiceError.unsupported
     }
 }
@@ -120,17 +136,11 @@ struct MusicAccountFeedbackOwnerFixture {
 }
 
 enum MusicAccountFeedbackFixture {
-    static func uploadFilename(_ request: MusicAccountHTTPRequest) throws -> String {
-        let body = String(decoding: request.body ?? Data(), as: UTF8.self)
-        guard let range = body.range(of: "filename=\""),
-              let end = body[range.upperBound...].firstIndex(of: "\"") else { throw MusicServiceError.invalidRequest }
-        return String(body[range.upperBound..<end])
-    }
     static func target(_ platform: MusicAccountPlatform) -> MusicPlaybackFeedbackTarget {
         switch platform {
         case .qq: return .init(platform: .qq, nativeID: MusicAccountFixture.mid)
         case .netease: return .init(platform: .netease, nativeID: "101", source: "list", sourceID: "501", algorithm: "synthetic-alg")
-        case .kugou: return .init(platform: .kugou, nativeID: MusicKugouFixture.baseHash, mixsongID: "22")
+        case .kugou: return .init(platform: .kugou, nativeID: String(repeating: "A", count: 32), mixsongID: "22")
         }
     }
     static func report(_ event: MusicPlaybackFeedbackReport.Event, platform: MusicAccountPlatform = .qq,
@@ -143,65 +153,5 @@ enum MusicAccountFeedbackFixture {
     static func scope(_ identity: AccountIdentity) -> String {
         identity.source.installationID.uuidString.lowercased() + ":" + identity.source.siteKey + ":" +
             identity.accountID.uuidString.lowercased()
-    }
-    static func md5(_ data: Data) -> String {
-        Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-    // Fixed independently generated zlib vectors, not production compress().
-    static let codeZero = Data(base64Encoded: "eJyrVkrOT0lVsjKoBQASjwNC")!
-    static let qqAck = Data(repeating: 0, count: 5) + codeZero
-
-    // Decode producer bytes independently, with explicit zlib/gzip window mode.
-    static func inflate(_ bytes: Data, gzip: Bool = false) throws -> Data {
-        var stream = z_stream()
-        guard inflateInit2_(&stream, gzip ? 31 : 15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
-            throw MusicServiceError.invalidResponse
-        }
-        defer { inflateEnd(&stream) }
-        return try bytes.withUnsafeBytes { input in
-            stream.next_in = UnsafeMutablePointer<Bytef>(mutating: input.bindMemory(to: Bytef.self).baseAddress)
-            stream.avail_in = uInt(bytes.count)
-            var output = [UInt8](repeating: 0, count: 128 * 1024)
-            let result = output.withUnsafeMutableBufferPointer { buffer -> Int32 in
-                stream.next_out = buffer.baseAddress; stream.avail_out = uInt(buffer.count)
-                return zlib.inflate(&stream, Z_FINISH)
-            }
-            guard result == Z_STREAM_END, stream.avail_in == 0 else { throw MusicServiceError.invalidResponse }
-            return Data(output.prefix(Int(stream.total_out)))
-        }
-    }
-}
-
-// Only the exact M3 metadata lookup and three fixed CSCC routes. In particular,
-// no generic fallback to a real transport or relaxed old-account fixture.
-actor MusicAccountFeedbackKugouPeer: MusicAccountHTTPTransport {
-    private var requests: [MusicAccountHTTPRequest] = []
-    func recorded() -> [MusicAccountHTTPRequest] { requests }
-    func send(_ request: MusicAccountHTTPRequest) throws -> MusicAccountHTTPResponse {
-        requests.append(request)
-        if request.url.absoluteString.hasPrefix("https://gateway.kugou.com/kmr/v2/audio?") {
-            guard request.method == "POST", request.headers["x-router"] == "openapi.kugou.com" else {
-                throw MusicServiceError.invalidRequest
-            }
-            try MusicKugouFixture.validateSignature(request)
-            return try MusicKugouFixture.response(["status": 1, "data": [[
-                "__status": 1, "base": ["album_audio_id": 22],
-                "audio_info": ["hash": MusicKugouFixture.baseHash, "timelength": 180000]
-            ]]])
-        }
-        guard request.url.scheme == "http", request.url.host == "d.kugou.com",
-              request.headers.keys.allSatisfy({ !["cookie", "authorization", "x-router"].contains($0.lowercased()) })
-        else { throw MusicServiceError.invalidRequest }
-        switch (request.method, request.url.path) {
-        case ("POST", "/v3/qrydid"):
-            return try MusicKugouFixture.response(["status": 1, "data": ["deviceid": "synthetic-cscc-device"]])
-        case ("GET", "/v2/gen"):
-            // Cannot decrypt the fixed upstream RSA key; never fake a successful
-            // handshake. Valid base64 with an invalid AES block is intentional.
-            return try MusicKugouFixture.response(["status": 1, "data": "AA=="])
-        case ("POST", "/v2/post"):
-            return try MusicKugouFixture.response(["status": 1, "errcode": 0])
-        default: throw MusicServiceError.invalidRequest
-        }
     }
 }

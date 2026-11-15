@@ -11,7 +11,7 @@ namespace MeowFilm.Desktop;
 /// <summary>Per-window, bounded native notifications. No global bus or navigation dependency.</summary>
 public sealed class NoticeStack : StackPanel
 {
-    private sealed record Item(object Source, string Message, Border Card, TextBlock Text, DispatcherTimer Timer);
+    private sealed record Item(object Source, string Message, Border Card, TextBlock Text, DispatcherTimer Timer, bool Persistent);
     private readonly List<Item> items = [];
     public NoticeStack()
     {
@@ -20,18 +20,20 @@ public sealed class NoticeStack : StackPanel
         VerticalAlignment = VerticalAlignment.Top;
         Unloaded += (_, _) => Clear();
     }
-    public void Show(object source, string message)
+    public void Show(object source, string message, bool persistent = false)
     {
         if (items.Any(x => ReferenceEquals(x.Source, source) && x.Message == message)) return;
-        foreach (var old in items.Where(x => ReferenceEquals(x.Source, source) || x.Message == message).ToArray()) Remove(old);
+        foreach (var old in items.Where(x => ReferenceEquals(x.Source, source) ||
+            !persistent && !x.Persistent && x.Message == message).ToArray()) Remove(old);
         if (string.IsNullOrWhiteSpace(message)) return;
-        while (items.Count >= 3) Remove(items[0]);
+        while (!persistent && items.Count(item => !item.Persistent) >= 3) Remove(items.First(item => !item.Persistent));
         var text = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 0, 12, 0) };
         text.SetResourceReference(TextBlock.ForegroundProperty, "MeowFilm.Brush.Text");
         AutomationProperties.SetLiveSetting(text, AutomationLiveSetting.Polite);
         var close = new Button { Content = "\uE711", Width = 30, Height = 30 };
         close.SetResourceReference(StyleProperty, "MeowFilm.IconButton");
         AutomationProperties.SetName(close, "关闭通知");
+        if (persistent) close.Visibility = Visibility.Collapsed;
         DockPanel.SetDock(close, Dock.Right);
         var layout = new DockPanel(); layout.Children.Add(close); layout.Children.Add(text);
         var card = new Border
@@ -43,10 +45,10 @@ public sealed class NoticeStack : StackPanel
         card.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface");
         card.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.Border");
         var timer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromSeconds(8) };
-        var item = new Item(source, message, card, text, timer);
+        var item = new Item(source, message, card, text, timer, persistent);
         timer.Tick += (_, _) => { if (!card.IsMouseOver && !card.IsKeyboardFocusWithin) Remove(item); };
         close.Click += (_, _) => Remove(item);
-        items.Add(item); Children.Add(card); timer.Start();
+        items.Add(item); Children.Add(card); if (!persistent) timer.Start();
         ApplyContrast(item);
         if (AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
             UIElementAutomationPeer.CreatePeerForElement(text)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);

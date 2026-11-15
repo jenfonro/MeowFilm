@@ -13,8 +13,8 @@ private final class RecordPreviewRandom: @unchecked Sendable {
 final class MusicNativeRecordPreviewTests: XCTestCase {
     func testPreviewUsesOccurrenceOrderAndDoesNotMutateStorageOrDrawShuffle() async throws {
         let random = RecordPreviewRandom(), store = NativeMusicMemoryDocument()
-        let service = NativeMusicService(document: store, qq: NativeMusicQQFixture(),
-            transport: NativeMusicNoNetwork(), random: { random.draw() })
+        let service = NativeMusicService(document: store, platformClient: try NativeMusicFixture.client(),
+            random: { random.draw() })
         try await service.setAccess(available: true, generation: 1)
         var refs: [MusicReference] = []
         for query in ["First", "Second", "Third"] {

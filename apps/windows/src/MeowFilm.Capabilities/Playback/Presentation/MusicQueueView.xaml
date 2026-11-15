@@ -82,7 +82,7 @@
       <Grid>
        <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
        <Grid Width="42" Height="42" HorizontalAlignment="Left" local:CardClip.Radius="4">
-        <art:ArtworkImage Address="{Binding Cover}"/>
+        <art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id}"/>
         <Border Background="#60000000">
          <Path Data="M0,0 L0,18 L14,9 Z" Fill="White" Width="14" Height="18"
                HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -158,7 +158,7 @@
              HorizontalContentAlignment="Stretch" Margin="0" Padding="0,8" AutomationProperties.Name="{Binding Title}">
       <Grid>
        <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
-       <art:ArtworkImage Address="{Binding Cover}" Width="40" Height="40" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
+       <art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id}" Width="40" Height="40" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
        <StackPanel Grid.Column="1" Margin="8,0" VerticalAlignment="Center">
         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Body}"/>
         <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,3,0,0"

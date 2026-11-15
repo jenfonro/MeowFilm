@@ -16,9 +16,6 @@ import Foundation
         let generation = searchAccessGeneration
         let result = try await provider.search(platform: platform, query: query, page: page, limit: limit)
         try checkSearchAccess(generation)
-        guard result.platform == platform, result.query == query, result.page == page, result.limit == limit else {
-            throw MusicServiceError.invalidResponse
-        }
         return result
     }
 
@@ -49,8 +46,6 @@ import Foundation
         let result = try await provider.searchPublicPlaylists(
             platform: platform, query: query, page: page, limit: limit)
         try checkSearchAccess(generation)
-        guard result.platform == platform, result.query == query, result.page == page,
-              result.limit == limit else { throw MusicServiceError.invalidResponse }
         return result
     }
 

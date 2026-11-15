@@ -280,7 +280,7 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new NativeMusicScriptTestRuntime();
-            var app = new MusicNativeApplication(store, runtime, new NoUpstream());
+            var app = new MusicNativeApplication(store, runtime);
             await using var module = new MusicCapability(app, store, new PlaybackProbe(), new Dialogs());
             await module.InitializeAsync(default);
             await module.NavigateAsync("favorites", default);

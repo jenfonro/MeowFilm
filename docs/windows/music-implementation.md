@@ -15,7 +15,7 @@ Windows 当前交付一个原生 meowfilm App，并接入音乐相关能力。
 | --- | --- |
 | `Composition` | 唯一音乐装配、导航、生命周期和公开 seam |
 | `Accounts` | 三平台授权、登录交接和账号详情 |
-| `Platforms` | 固定官方平台 HTTP、协议和歌曲 DTO；`ClientContexts` 独立拥有客户端身份、匿名登记和受控更新 |
+| `Platforms` | 借用共同 Node 模块的 `MusicPlatformClient`、规范 DTO 和目录／音频等原生适配 |
 | `Catalog` | 平台目录、个人内容和歌单读取／提交 |
 | `Search` | 歌曲／歌单搜索、策略和请求代次 |
 | `Recommendations` | 每日推荐、持续推荐和唯一 queue lane |
@@ -23,7 +23,7 @@ Windows 当前交付一个原生 meowfilm App，并接入音乐相关能力。
 | `Sync` | 网易云／QQ／酷狗收藏和歌单同步 |
 | `Playback` | 统一音源候选、录音选择、授权、取链、恢复和播放状态 |
 | `PlaybackCache` | 可淘汰播放候选、高潮和完整音频文件缓存 |
-| `Lyrics` | 原生歌词查询、解析、选择和展示快照 |
+| `Lyrics` | 消费共同歌词结果、原生选择和展示；平台私有解密在 Node |
 | `Scripting` | 原始 LX 音源脚本管理和必要 Node 调用 |
 | `Feedback` | 播放上报及其唯一设置 owner |
 | `Settings` / `Presentation` | 原生即时设置投影和 WPF 视图 |
@@ -55,20 +55,7 @@ Windows App
 
 ## 原生与 Node
 
-官方网易云、QQ、酷狗链全部由原生 owner 承担：
-
-```text
-账号
-搜索
-推荐
-目录
-同步
-官方取链
-歌词
-缓存
-播放反馈
-持久设置
-```
+`MusicNativeApplication` 装配唯一 `MusicPlatformClient`。网易云、QQ、酷狗及既有酷我／咪咕请求的固定配方、私有字段转换、签名／加密、匿名状态和 API 缓存由共同 `packages/music-platform` 执行。原生 owner 保留账号安全提交、歌曲仓库、队列／历史、同步和反馈事务、设置、共享展示缓存及播放生命周期。共同规则见[平台请求](../common/music/platform-client-context.md)。
 
 Node 通过平台中性的共用 script-host／LX／QuickJS 核心执行原始 JavaScript；Windows 负责私密启动、HTTP 接入与打包，原生脚本入口为：
 
@@ -79,7 +66,7 @@ music.online.resolve
 music.online.lyrics
 ```
 
-公共宿主随 App 启动；官方业务不依赖脚本服务可用。guest 没有通用文档访问、任意文件、进程、账号凭据或 App 内部状态能力。
+公共运行器随 App 启动，官方请求和脚本使用不同模块；官方请求不执行用户脚本，但依赖共同运行器。脚本 guest 没有通用文档访问、任意文件、进程、账号凭据或 App 内部状态能力。
 
 ## 脚本源生命周期
 
@@ -102,7 +89,7 @@ music.online.lyrics
 
 - `MusicLibraryOwner` 是曲库、队列、历史和设置的唯一 writer。
 - `MusicRecommendationQueuePort` 串行所有最终 queue mutation。
-- 队列只持久歌曲身份、公开元数据、occurrence 和上下文，不持久短期媒体 URL 或账号凭据。
+- `music.library.v2` 中 `songs` 为唯一永久资料仓库；队列、收藏和历史保存 songId 引用及独立 occurrence，不持久歌曲副本、短期媒体 URL 或账号凭据。匹配与来源归属见[共同歌曲仓库](../common/music/smart-playback.md)。
 - 内置源与网络源是类型区别，已启用源均可按需参与统一选择。关闭内置平台只关闭该平台的官方音频能力，不限制已启用脚本提供同平台录音；禁用脚本不参与。
 - 按设置从首选档向后，逐档缓存优先并穷尽所有可参与来源；候选耗尽才一次补搜缺失映射。已有低档缓存不抢过高档来源。详见[统一选源](music-official-selection.md)。
 - 官方取链须完成当前账号、质量和媒体授权；LX 每次取链必须指定 installation、platform、generation、song/sourceKey 和 quality。统一选择由能力层协调，脚本按声明交集并发最多三个尝试；已分类的候选不可用可继续到另一类型，取消、存储损坏、未知提交与策略变化必须终止旧操作。
@@ -129,6 +116,7 @@ music.online.lyrics
 - 音质、外观、歌词／封面平台顺序和播放设备设置分别由其 owner 保存。
 - 音源页直接管理导入、独立启停、更新、回退和删除；管理条目选择不保存全局播放目标，内置／网络可同时启用。
 - CAS 失败时 UI 读取当前权威结果用于恢复显示，不重放用户操作。
+- `MusicCapability` 的稳定设置回执 owner 结算已提交工作并管理同项未知提示；页面关闭不取消真实提交，详见[设置呈现](music-settings-presentation.md)与[共同回执](../common/music/settings-receipts.md)。
 
 ## 请求生命周期
 
@@ -160,9 +148,9 @@ generation
 
 数据与协议的持久化行为：
 
-- 保持现有 App 数据身份和命名空间。
+- App 产品身份保持 `aggregate`；本次音乐 owner 使用各自唯一当前 namespace，不复用旧内部数据路径。
 - 当前格式变化时同时修改 producer、consumer、契约和全部夹具。
-- 不兼容数据保持原样并明确失败；未经用户授权不删除、清空、覆盖或改写。
+- 仅从空数据建立和重载当前格式，不识别、迁移或兼容旧数据；未经授权不扫描、删除、清空或改写历史用户数据。
 
 ### 风格偏好装配
 

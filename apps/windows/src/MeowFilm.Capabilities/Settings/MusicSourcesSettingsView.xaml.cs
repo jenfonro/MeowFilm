@@ -39,6 +39,7 @@ public partial class MusicSourcesSettingsView : UserControl
     private void View_Loaded(object sender, RoutedEventArgs e) => UpdateActivation();
     private void View_Unloaded(object sender, RoutedEventArgs e)
     {
+        activeOwner?.RetireSourceManagement();
         activeOwner = null;
         CloseEdit();
     }
@@ -49,6 +50,7 @@ public partial class MusicSourcesSettingsView : UserControl
         if (!initialized) return;
         var owner = Active ? Module : null;
         if (ReferenceEquals(owner, activeOwner)) return;
+        activeOwner?.RetireSourceManagement();
         CloseEdit();
         activeOwner = owner;
         if (owner is not null) _ = owner.RefreshSourceManagementAsync();

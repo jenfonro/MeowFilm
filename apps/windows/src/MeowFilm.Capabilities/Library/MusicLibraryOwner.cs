@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
+using MeowFilm.Capabilities.PlaybackCache;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -8,10 +9,11 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner : IAsyncDisposable
 {
     public const string ContractVersion = "0.7.0";
-    public const string DocumentNamespace = "music.library.v1";
+    public const string DocumentNamespace = "music.library.v2";
     private readonly IDocumentStore store;
     private readonly string scope;
     private readonly CacheDocumentStore displayCache;
+    internal MusicPresentationCache PresentationCache { get; }
     private readonly bool ownsDisplayCache;
     private readonly SemaphoreSlim gate = new(1, 1);
     private JsonObject? document;
@@ -38,6 +40,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         SearchHistory,
         SearchPolicy,
         SourceExclusions,
+        SongMetadata,
         Sync
     }
     private sealed record Pending(JsonObject Candidate, DocumentFingerprint Before, DocumentFingerprint After, string Code,
@@ -49,6 +52,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope;
         ownsDisplayCache = cacheStore is not CacheDocumentStore;
         displayCache = cacheStore as CacheDocumentStore ?? (cacheStore is null ? new() : new(cacheStore));
+        PresentationCache = new(displayCache);
     }
 
     public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
@@ -88,10 +92,13 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             if (saved.Data is null) { LJ.Require(saved.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE"); candidate = LJ.Obj(("version", 1), ("entries", new JsonArray())); }
             else candidate = LJ.PersistedDocument(saved.Data);
             ValidateDocument(candidate);
-            if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
-            else if (force) RestoreRuntime(Queue(candidate), false);
+            if (document is null)
+            {
+                if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
+            }
+            else if (!JsonNode.DeepEquals(Queue(document), Queue(candidate)))
+                RestoreRuntime(Queue(candidate), false);
             document = candidate; fingerprint = saved.Fingerprint;
-            ObserveStoredSongs(candidate);
             if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
         }
     }
@@ -148,13 +155,14 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         byte[] bytes = LJ.Bytes(candidate);
         LJ.Require(bytes.Length <= 8 * 1024 * 1024, "LIMIT");
         var expected = DocumentFingerprint.FromBytes(bytes);
+        bool songsChanged = document is null || !JsonNode.DeepEquals(Repository(document), Repository(candidate));
+        bool artworkPolicyChanged = document is not null && !JsonNode.DeepEquals(MetadataPolicy(document), MetadataPolicy(candidate));
         try
         {
             // CAS admission is final. Cancellation cannot mean the write was rolled back.
             var result = await store.WriteAsync(DocumentNamespace, bytes, fingerprint, CancellationToken.None).ConfigureAwait(false);
             LJ.Require(result == expected, "COMMIT_UNKNOWN");
             document = candidate; fingerprint = result;
-            if (owner == PendingOwner.Sync) ObserveStoredSongs(candidate);
             if (owner == PendingOwner.OfficialSources) RefreshOfficialSources(candidate);
         }
         catch (Exception error)
@@ -165,6 +173,8 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             InvalidateOfficialSources();
             throw new MusicLibraryException(code);
         }
+        if (artworkPolicyChanged) failedArtwork.Clear();
+        if (songsChanged) NotifySongMetadataChanged();
     }
     private async Task ReconcileLockedAsync(CancellationToken token)
     {
@@ -187,6 +197,10 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             InvalidateOfficialSources();
             throw;
         }
+        if (previous is not null && !JsonNode.DeepEquals(MetadataPolicy(previous), MetadataPolicy(document!)))
+            failedArtwork.Clear();
+        if (previous is null || !JsonNode.DeepEquals(Repository(previous), Repository(document!)))
+            NotifySongMetadataChanged();
     }
     public async Task ReconcileAsync(CancellationToken cancellationToken = default)
     {
@@ -207,7 +221,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             { throw new MusicLibraryException("INVALID_REQUEST"); }
             // Load shared facts before entering the library gate: persistence acquires them
             // in the other direction while reading local membership.
-            if (PrepareSongFacts is { } prepareFacts) await prepareFacts(token).ConfigureAwait(false);
             await EnterAsync(token).ConfigureAwait(false); entered = true;
             recommendationStage = null;
             LJ.Require(!closed && !preparing, "CLOSED");
@@ -222,7 +235,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             captured = true; previousVersion = queueVersion; previousHistory = shuffleHistory.ToList(); previousFailures = failedEntries.ToArray();
             var candidate = (JsonObject)document!.DeepClone();
             var outcome = await DispatchAsync(method, p, candidate, token, full).ConfigureAwait(false);
-            var response = LJ.Merge(LJ.Obj(("ok", true)), SongFactsProjection?.Invoke(outcome.Result) ?? outcome.Result);
+            var response = LJ.Merge(LJ.Obj(("ok", true)), outcome.Result);
             LJ.Require(LJ.Bytes(response).Length <= 512 * 1024, "LIMIT");
             if (outcome.Mutate) await CommitAsync(candidate, CommandOwner(method), token).ConfigureAwait(false);
             if (outcome.Mutate && recommendationStage is { } recommendation)

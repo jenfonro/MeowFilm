@@ -1,13 +1,15 @@
 import XCTest
 import UIKit
+import SwiftUI
 import Combine
 import MeowContracts
 @testable import MeowPlayback
 @testable import MeowMusicFeature
-import MeowMusicNativeService
+@testable import MeowMusicNativeService
 import MeowFilmFeature
 import MeowStorage
-import MeowRuntime
+@testable import MeowRuntime
+import MeowMusicPlatform
 import MeowUI
 @testable import Meowfilm
 
@@ -43,8 +45,8 @@ final class MeowfilmRuntimeTestBundle: NSObject {
                 if let app = UIApplication.shared.delegate as? MeowfilmAppDelegate, let assembly = app.assembly {
                     assembly.shutdown()
                     await assembly.waitForShutdown()
-                    if let error = assembly.shutdownError {
-                        message = "MEOWFILM_RUNTIME_BUNDLE_SHUTDOWN_FAILED \(error)"
+                    if assembly.shutdownError != nil {
+                        message = "MEOWFILM_RUNTIME_BUNDLE_SHUTDOWN_FAILED"
                     } else {
                         message = "MEOWFILM_RUNTIME_BUNDLE_SHUTDOWN_COMPLETE"
                     }
@@ -93,7 +95,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["assemblyProfile"] as? String, "common-native")
         XCTAssertEqual(manifest["transport"] as? String, "runtime.http.v1")
-        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"])
+        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"])
         let files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
         XCTAssertFalse(files.contains { ($0["path"] as? String)?.lowercased().hasSuffix(".wasm") == true })
         let frameworks = try XCTUnwrap(Bundle.main.privateFrameworksURL)
@@ -119,6 +121,10 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let resources = try await hostResources()
         let connection = try await resources.scriptSession.connection()
         try await connection.validateAppModules()
+        let platform = try await connection.call(module: .musicPlatform, operation: "describe")
+        XCTAssertEqual(platform[music: "execution"], .string("node"))
+        XCTAssertEqual(platform[music: "contract"], .string("music.platform.v1"))
+        XCTAssertEqual(platform[music: "platforms"], .array(["wy", "tx", "kg", "kw", "mg"].map(RuntimeValue.string)))
         _ = try await resources.musicScripts.scriptSources()
         _ = try await resources.filmMetadata.settings()
         guard case .object(let settings) = try await connection.call(module: .film, operation: "settings.get"),
@@ -147,7 +153,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         XCTAssertEqual(modules.compactMap { value -> String? in
             guard case .object(let module) = value, case .string(let id)? = module["id"] else { return nil }
             return id
-        }, ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"])
+        }, ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"])
         XCTAssertTrue(modules.contains {
             guard case .object(let module) = $0 else { return false }
             return module["id"] == .string("music") && module["version"] == .string("0.8.0")
@@ -505,6 +511,13 @@ final class MeowfilmScriptShutdownHostTests: XCTestCase {
         await assembly.waitForShutdown()
         XCTAssertNil(assembly.shutdownError)
         XCTAssertTrue(connection.isClosed)
+        let report = await resources.musicAccountGate?.close()
+        XCTAssertEqual(report?.cleanupComplete, true)
+        XCTAssertEqual(report?.inFlight, 0)
+        do {
+            _ = try await resources.musicPlatform.request(platform: "wy", operation: "account.verify", candidate: .null)
+            XCTFail("A closed App cannot admit a candidate through its platform borrower")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
         do {
             _ = try await resources.scriptSession.connection()
             XCTFail("App shutdown must close the shared session")
@@ -536,7 +549,7 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
         XCTAssertNil(fixture.assembly.music)
         XCTAssertFalse(fixture.assembly.startupFailed)
         XCTAssertEqual(fixture.modelsCreated, 0)
-        XCTAssertEqual(fixture.document.reads, 0)
+        XCTAssertEqual(fixture.document.reads, 1, "Feedback settings are prepared locally before account readiness")
         XCTAssertEqual(fixture.home.reads, 0)
         XCTAssertEqual(publications, 0)
 
@@ -557,19 +570,20 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
         XCTAssertTrue(fixture.assembly.startupFailed)
         XCTAssertNil(fixture.assembly.music)
         XCTAssertEqual(fixture.modelsCreated, 0)
-        XCTAssertEqual(fixture.document.reads, 0)
+        XCTAssertEqual(fixture.document.reads, 1, "Only the local feedback settings read precedes account failure")
         XCTAssertEqual(fixture.home.reads, 0)
         let networkCalls = await fixture.network.calls
         XCTAssertEqual(networkCalls, 0)
     }
 
     func testPreparedHomeSnapshotIsAvailableToThePublishedModelWithoutAnotherDiskRead() async throws {
-        let snapshot = Data(#"""
-        {"schema":3,"source":"wy","sections":[{"id":"saved","title":"最近首页","layout":"list","items":[
-          {"id":"playlist:42","title":"合成歌单","subtitle":"","artwork":null,"kind":"collection",
-           "collection":{"id":"42","kind":"playlist","title":"合成歌单","creator":"","artwork":null,"count":2}}
-        ]}]}
-        """#.utf8)
+        let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "42", kind: .playlist,
+            title: "合成歌单", count: 2)
+        let snapshot = try MusicNativeHomeSnapshot.encode(.init(sections: [
+            .init(id: "saved", title: "最近首页", items: [
+                .init(id: "playlist:42", title: "合成歌单", content: .collection(collection))
+            ])
+        ]), source: .netease)
         let fixture = MusicStartupFixture(homeData: snapshot)
         addTeardownBlock { await fixture.close() }
         let observation = fixture.assembly.$music.sink { model in
@@ -590,15 +604,18 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
     }
 
     func testSourceReadFailureDoesNotPublishADefaultHome() async {
-        let fixture = MusicStartupFixture(documentFailure: .storageFailed)
+        let fixture = MusicStartupFixture()
         addTeardownBlock { await fixture.close() }
         var accountsPrepared = false
-        await fixture.prepare { accountsPrepared = true }
+        await fixture.prepare {
+            accountsPrepared = true
+            fixture.document.failReads(.storageFailed)
+        }
         XCTAssertTrue(accountsPrepared)
         XCTAssertTrue(fixture.assembly.startupFailed)
         XCTAssertNil(fixture.assembly.music)
         XCTAssertEqual(fixture.modelsCreated, 0)
-        XCTAssertEqual(fixture.document.reads, 1)
+        XCTAssertEqual(fixture.document.reads, 2, "Feedback preparation succeeds before the source read fails")
         XCTAssertEqual(fixture.home.reads, 0)
         let networkCalls = await fixture.network.calls
         XCTAssertEqual(networkCalls, 0)
@@ -711,6 +728,158 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
         withExtendedLifetime(coordinator) {}
     }
 
+    func testClosedSettingsPageShowsUnknownAndSameSettingSuccessOnlyWithdrawsItsOwnNotice() async throws {
+        let fixture = MusicStartupFixture()
+        let qualityReceipt = MusicSettingsHostCommitReceipt()
+        let translationReceipt = MusicSettingsHostCommitReceipt()
+        addTeardownBlock {
+            qualityReceipt.release(); translationReceipt.release()
+            await fixture.close()
+        }
+        await waitForStartupUI {
+            UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first { $0.activationState == .foregroundActive })
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        let coordinator = MeowfilmCoordinator(window: window, assembly: fixture.assembly, resetUserData: {})
+        coordinator.start()
+        defer {
+            qualityReceipt.release(); translationReceipt.release()
+            if let root = window.rootViewController { PageViewController.invalidatePages(in: root) }
+            window.isHidden = true; window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        let root = try XCTUnwrap(window.rootViewController as? MeowfilmRootContainerViewController)
+        await waitForStartupUI {
+            (root.navigation.topViewController as? PageViewController)?.canPresentPageAlert == true
+        }
+        // Keep the real settings branch visible while the Assembly publishes
+        // its model, so this test does not start an unrelated home refresh.
+        coordinator.showSettings()
+        await waitForStartupUI {
+            (root.navigation.topViewController as? MeowfilmSettingsViewController)?.canPresentPageAlert == true
+        }
+        await fixture.prepare {}
+        let model = try XCTUnwrap(fixture.assembly.music)
+        await waitForStartupUI {
+            model.hasLoadedLibrary &&
+                (root.navigation.topViewController as? MeowfilmSettingsViewController)?.canPresentPageAlert == true
+        }
+        let settings = try XCTUnwrap(root.navigation.topViewController as? MeowfilmSettingsViewController)
+        let table = try XCTUnwrap(startupDescendants(settings.view).compactMap { $0 as? UITableView }.first)
+        settings.tableView(table, didSelectRowAt: IndexPath(row: 0, section: 0))
+        await waitForStartupUI {
+            (root.navigation.topViewController as? MusicSettingsViewController)?.canPresentPageAlert == true
+        }
+        let musicSettings = try XCTUnwrap(root.navigation.topViewController as? MusicSettingsViewController)
+        let musicContent = try XCTUnwrap(musicSettings.children
+            .compactMap { $0 as? UIHostingController<MusicSettingsContent> }.first)
+        musicContent.rootView.open(.playback)
+        await waitForStartupUI {
+            (root.navigation.topViewController as? MusicPlaybackSettingsViewController)?.canPresentPageAlert == true
+        }
+        let playbackSettings = try XCTUnwrap(root.navigation.topViewController as? MusicPlaybackSettingsViewController)
+        let playbackContent = try XCTUnwrap(playbackSettings.children
+            .compactMap { $0 as? UIHostingController<MusicPlaybackSettingsContent> }.first)
+        playbackContent.rootView.open(false)
+        await waitForStartupUI {
+            (root.navigation.topViewController as? MusicQualitySettingsViewController)?.canPresentPageAlert == true
+        }
+        let qualitySettings = try XCTUnwrap(root.navigation.topViewController as? MusicQualitySettingsViewController)
+        let qualityContent = try XCTUnwrap(qualitySettings.children
+            .compactMap { $0 as? UIHostingController<MusicQualitySettingsContent> }.first)
+        let pageState = qualityContent.rootView.state
+        await waitForStartupUI { pageState.available && !pageState.busy }
+        let closedPageValue = pageState.value
+        let writesBeforeSave = fixture.document.writes
+        XCTAssertNil(model.notices.error)
+        XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+
+        // Invoke the rendered page's existing binding endpoint, not a second
+        // settings state or a synthetic call to the Coordinator's alert handler.
+        fixture.document.holdNextCommit(qualityReceipt)
+        pageState.setRequestQuality("320k")
+        await fulfillment(of: [qualityReceipt.entered], timeout: 5)
+        XCTAssertEqual(fixture.document.writes, writesBeforeSave + 1)
+        XCTAssertTrue(pageState.busy)
+        XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+        XCTAssertTrue(root.navigation.popViewController(animated: false) === qualitySettings)
+        await waitForStartupUI {
+            root.navigation.topViewController === playbackSettings &&
+                playbackSettings.canPresentPageAlert && !pageState.available
+        }
+        qualityReceipt.release()
+        await pageState.flush()
+        await model.settingsReceipts.flush()
+        await waitForStartupUI {
+            root.presentedViewController is UIAlertController &&
+                root.presentedViewController?.isBeingPresented == false
+        }
+        let firstNotice = try XCTUnwrap(model.settingsReceipts.unknown.first)
+        let firstAlert = try XCTUnwrap(root.presentedViewController as? UIAlertController)
+        XCTAssertEqual(firstNotice.setting, "playback/requestQuality")
+        XCTAssertEqual(firstAlert.message, firstNotice.message)
+        XCTAssertEqual(firstAlert.actions.map(\.title), ["确定"])
+        XCTAssertTrue(firstAlert.viewIfLoaded?.window === window)
+        XCTAssertFalse(root.navigation.viewControllers.contains { $0 === qualitySettings })
+        XCTAssertEqual(pageState.value, closedPageValue, "A closed page must not receive the late saved value")
+        XCTAssertFalse(pageState.available)
+        let savedQuality = try await fixture.service.state()
+        XCTAssertEqual(savedQuality.requestQuality, "320k")
+        XCTAssertEqual(savedQuality.settingsRevision, 1)
+        XCTAssertEqual(fixture.document.writes, writesBeforeSave + 1,
+                       "An unknown receipt must not replay the committed save")
+        attachStartupWindow(window, name: "music-settings-closed-page-unknown")
+
+        // A different real settings commit can become unknown while the first
+        // notice is displayed. Both receipts still belong to the Assembly model.
+        fixture.document.holdNextCommit(translationReceipt)
+        let translation = Task {
+            await model.updateSettings(.init(ifRevision: savedQuality.settingsRevision,
+                                             showTranslation: !savedQuality.showTranslation))
+        }
+        await fulfillment(of: [translationReceipt.entered], timeout: 5)
+        translationReceipt.release()
+        await translation.value
+        await model.settingsReceipts.flush()
+        let otherNotice = try XCTUnwrap(model.settingsReceipts.unknown
+            .first { $0.setting == "playback/showTranslation" })
+        XCTAssertEqual(otherNotice.message, firstNotice.message,
+                       "Equal display text cannot merge notices for different settings")
+        XCTAssertEqual(Set(model.settingsReceipts.unknown.map(\.id)), [firstNotice.id, otherNotice.id])
+        XCTAssertTrue(root.presentedViewController === firstAlert)
+        let savedTranslation = try await fixture.service.state()
+        XCTAssertEqual(savedTranslation.showTranslation, !savedQuality.showTranslation)
+        XCTAssertEqual(savedTranslation.settingsRevision, 2)
+
+        // Obtain a genuine ordinary error through the same public command. It
+        // must not be acknowledged by the unrelated successful quality save.
+        await model.updateSettings(.init(ifRevision: -1, requestQuality: "128k"))
+        let ordinaryError = try XCTUnwrap(model.notices.error)
+        XCTAssertFalse(ordinaryError.isEmpty)
+        XCTAssertEqual(fixture.document.writes, writesBeforeSave + 2,
+                       "A stale write cannot reach the document CAS")
+        await model.updateSettings(.init(ifRevision: savedTranslation.settingsRevision, requestQuality: "128k"))
+        await model.settingsReceipts.flush()
+        await waitForStartupUI {
+            firstAlert.presentingViewController == nil && firstAlert.viewIfLoaded?.window == nil
+        }
+        XCTAssertFalse(root.presentedViewController === firstAlert)
+        XCTAssertEqual(model.settingsReceipts.unknown, [otherNotice])
+        XCTAssertEqual(model.notices.error, ordinaryError)
+        XCTAssertEqual(pageState.value, closedPageValue)
+        let confirmed = try await fixture.service.state()
+        XCTAssertEqual(confirmed.requestQuality, "128k")
+        XCTAssertEqual(confirmed.showTranslation, savedTranslation.showTranslation)
+        XCTAssertEqual(confirmed.settingsRevision, 3)
+        XCTAssertEqual(fixture.document.writes, writesBeforeSave + 3)
+        withExtendedLifetime(coordinator) {}
+    }
+
     private func attachStartupWindow(_ window: UIWindow, name: String) {
         XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
         window.layoutIfNeeded()
@@ -752,7 +921,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
             .first { $0.activationState == .foregroundActive })
         let network = MusicStartupNoNetwork()
         let service = NativeMusicService(document: MusicStartupDocument(failure: nil),
-                                        qq: network, transport: network)
+                                        platformClient: network.client())
         let playback = PlaybackController()
         let model = MusicViewModel(service: service, playback: playback)
         model.nativeAttempt = .init(id: UUID(), resourceID: "music:dock")
@@ -871,9 +1040,19 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         await fulfillment(of: [foreground], timeout: 5)
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive })
-        let network = MusicStartupNoNetwork()
+        let catalog = MusicCapsuleHostCatalog()
+        let runtime = try MusicHostPlatformRuntime { fields in
+            guard fields[music: "operation"] == .string("search") else { throw RuntimeHTTPError.remote("UNSUPPORTED") }
+            return try MusicHostPlatformRuntime.page(await catalog.search(query: "Fixture", page: 1, limit: 3))
+        }
+        let platform = runtime.client()
         let service = NativeMusicService(document: MusicStartupDocument(failure: nil),
-                                        qq: MusicCapsuleHostCatalog(), transport: network)
+                                        platformClient: platform)
+        addTeardownBlock {
+            await service.close()
+            try? await platform.close()
+            await runtime.runtime.close()
+        }
         try await service.setAccess(available: true, generation: 1)
         let page = try await service.search(platform: "tx", query: "Fixture", page: 1, limit: 3)
         _ = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
@@ -885,7 +1064,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         let content = MusicPlayerContentModel(model: model, playback: playback,
             appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
             presentation: MusicMiniPlayerPresentation())
-        addTeardownBlock { await model.close(); await service.close() }
+        addTeardownBlock { await model.close() }
         let surface = MusicPlayerSurface(content: content)
         let root = PageViewController(themeProvider: content.appearance)
         let previousWindow = scene.windows.first { $0.isKeyWindow }
@@ -1002,7 +1181,7 @@ private final class MusicCapsuleHostPan: UIPanGestureRecognizer {
     override func translation(in view: UIView?) -> CGPoint { sampleTranslation }
 }
 
-private actor MusicCapsuleHostCatalog: MusicPublicQQProviding {
+private actor MusicCapsuleHostCatalog {
     func search(query: String, page: Int, limit: Int) throws -> MusicNativeTrackPage {
         let items = try ["First light", "Evening breeze", "Quiet morning"].enumerated().map { index, title in
             MusicNativeTrackData(platform: "tx", data: try JSONSerialization.data(withJSONObject: [
@@ -1010,9 +1189,8 @@ private actor MusicCapsuleHostCatalog: MusicPublicQQProviding {
                 "duration": 180, "types": [["type": "128k"]]
             ]))
         }
-        return .init(items: items)
+        return .init(items: items, total: items.count)
     }
-    func lyrics(mid: String) -> MusicNativeLyrics { .init(text: "") }
 }
 
 /// Exercises the real Assembly shutdown entry with only synthetic local media
@@ -1022,7 +1200,7 @@ final class MeowfilmMusicShutdownHostTests: XCTestCase {
     func testAssemblyReleaseClosesPublishedModelWithoutExplicitShutdown() async throws {
         let document = MusicStartupDocument(failure: nil)
         let accounts = MusicShutdownAccounts(), player = MusicShutdownPlayer(), network = MusicStartupNoNetwork()
-        let service = NativeMusicService(document: document, accounts: accounts, qq: accounts, transport: network)
+        let service = NativeMusicService(document: document, accounts: accounts, platformClient: network.client())
         var assembly: MeowfilmAssembly? = MeowfilmAssembly()
         await assembly?.prepareMusic(service, prepareAccounts: {}, makeModel: {
             MusicViewModel(service: service, player: player)
@@ -1039,15 +1217,25 @@ final class MeowfilmMusicShutdownHostTests: XCTestCase {
         let calls = await network.calls; XCTAssertEqual(calls, 0)
     }
 
-    func testShutdownStopsAndDrainsNativeFactsBeforeRevokingAccessWithoutWaitingForACK() async throws {
+    func testShutdownRetiresProductAccessBeforeACKAndWaitsForPhysicalFeedbackDrain() async throws {
         let assembly = MeowfilmAssembly(), document = MusicStartupDocument(failure: nil)
-        let accounts = MusicShutdownAccounts(), player = MusicShutdownPlayer(), network = MusicStartupNoNetwork()
-        let service = NativeMusicService(document: document, accounts: accounts, qq: accounts,
-            transport: network, monotonicClock: { 0 })
+        let accounts = MusicShutdownAccounts(), player = MusicShutdownPlayer()
+        let runtime = try MusicHostPlatformRuntime { fields in
+            guard fields[music: "operation"] == .string("search") else {
+                XCTFail("Shutdown must not dispatch another platform request")
+                throw RuntimeHTTPError.remote("UNSUPPORTED")
+            }
+            return try MusicHostPlatformRuntime.page(await accounts.search(query: "SyntheticMID", page: 1, limit: 30))
+        }
+        let platform = runtime.client()
+        let service = NativeMusicService(document: document, accounts: accounts,
+            platformClient: platform, monotonicClock: { 0 })
         addTeardownBlock {
             await accounts.releaseStart()
             await MainActor.run { assembly.shutdown() }
             await assembly.waitForShutdown()
+            try? await platform.close()
+            await runtime.runtime.close()
         }
         await assembly.prepareMusic(service, prepareAccounts: {}, makeModel: {
             MusicViewModel(service: service, player: player)
@@ -1077,9 +1265,14 @@ final class MeowfilmMusicShutdownHostTests: XCTestCase {
         XCTAssertFalse(model.canNavigate)
         assembly.shutdown()
         XCTAssertEqual(player.stops, 1)
-        let ended = expectation(description: "Actual Assembly shutdown completes while feedback ACK is held")
-        let closing = Task { await assembly.waitForShutdown(); ended.fulfill() }
-        await fulfillment(of: [ended], timeout: 3)
+        let ended = expectation(description: "Actual Assembly shutdown completes after feedback physically settles")
+        var shutdownComplete = false
+        let closing = Task { await assembly.waitForShutdown(); shutdownComplete = true; ended.fulfill() }
+        let retired = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { model.isClosed }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [retired, accounts.closePrepared], timeout: 3)
+        XCTAssertFalse(shutdownComplete, "Local retirement does not acknowledge a held remote receipt")
         let settledBeforeACK = model.isClosed
         let drained = await accounts.stateAtClose()
         XCTAssertEqual(drained?.currentId, occurrence)
@@ -1087,21 +1280,22 @@ final class MeowfilmMusicShutdownHostTests: XCTestCase {
         let data = try XCTUnwrap(document.read())
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let records = try XCTUnwrap(root["records"] as? [String: Any])
-        let playback = try XCTUnwrap(records["[\"meowfilm\",\"music\",1,\"device\",\"playback\"]"] as? [String: Any])
+        let playback = try XCTUnwrap(records[MusicModel.key("playback")] as? [String: Any])
         let position = try XCTUnwrap(playback["position"] as? [String: Any])
         XCTAssertEqual(position["occurrenceId"] as? String, occurrence)
         XCTAssertEqual(position["seconds"] as? Double, 0, "The existing queue contract does not restore elapsed media time")
         XCTAssertTrue(settledBeforeACK)
         let revoked = await accounts.activeCount(); XCTAssertEqual(revoked, 0)
+        await accounts.releaseStart()
+        await fulfillment(of: [ended], timeout: 3)
+        await closing.value
         do { _ = try await service.state(); XCTFail("Product access must close after the local drain") }
         catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
-        await accounts.releaseStart(); await closing.value
         let reports = await accounts.recorded()
         XCTAssertEqual(reports.map(\.event), [.start], "A receipt arriving after access revocation cannot send an end")
         XCTAssertNil(assembly.shutdownError)
         await model.close()
         XCTAssertEqual(player.stops, 1)
-        let calls = await network.calls; XCTAssertEqual(calls, 0)
     }
 }
 
@@ -1136,8 +1330,9 @@ private final class MusicShutdownPlayer: MusicPlaybackHandoffDriving {
 }
 
 private actor MusicShutdownAccounts: MusicNativeAccountProviding, MusicNativeFeedbackProviding,
-    MusicNativeFeedbackLifecycleProviding, MusicPublicQQProviding {
+    MusicNativeFeedbackLifecycleProviding {
     nonisolated let startDispatched = XCTestExpectation(description: "Synthetic feedback start reached its peer")
+    nonisolated let closePrepared = XCTestExpectation(description: "Local facts reached account close preparation")
     private var receipt: CheckedContinuation<Void, Never>?
     private var leases: [MusicPlaybackFeedbackLease] = []
     private var reports: [MusicPlaybackFeedbackReport] = []
@@ -1154,6 +1349,10 @@ private actor MusicShutdownAccounts: MusicNativeAccountProviding, MusicNativeFee
     func preparePlaybackFeedbackForClose() async {
         let observation = closeObservation; closeObservation = nil
         if let observation { closedState = await observation() }
+        closePrepared.fulfill()
+    }
+    func flushPendingPlaybackFeedback() async {
+        for lease in leases { await lease.drain() }
     }
     func beginPlaybackFeedback(platform: MusicAccountPlatform,
                                authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackLease {
@@ -1175,15 +1374,13 @@ private actor MusicShutdownAccounts: MusicNativeAccountProviding, MusicNativeFee
                 receipt = $0; startDispatched.fulfill()
             }
         }
-        try await authorization.check()
         return .confirmed
     }
     private func page() -> MusicNativeTrackPage {
         let data = Data(#"{"songmid":"SyntheticMID","name":"Synthetic shutdown","singer":"Fixture","albumName":"Synthetic","duration":180,"types":[{"type":"128k"}]}"#.utf8)
-        return .init(items: [.init(platform: "tx", data: data)])
+        return .init(items: [.init(platform: "tx", data: data)], total: 1)
     }
     func search(query: String, page: Int, limit: Int) -> MusicNativeTrackPage { self.page() }
-    func lyrics(mid: String) -> MusicNativeLyrics { .init(text: "") }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) -> MusicNativeTrackPage { page() }
     func nativeCollections(platform: MusicAccountPlatform, cursor: String?) -> MusicAccountCollectionPage { .init(items: [], cursor: nil) }
     func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) -> MusicNativeTrackPage { page() }
@@ -1206,10 +1403,10 @@ private final class MusicStartupFixture {
     let service: NativeMusicService
     private(set) var modelsCreated = 0
 
-    init(documentFailure: MusicServiceError? = nil, homeData: Data? = nil) {
-        document = MusicStartupDocument(failure: documentFailure)
+    init(homeData: Data? = nil) {
+        document = MusicStartupDocument(failure: nil)
         home = MusicStartupHomeSnapshot(data: homeData)
-        service = NativeMusicService(document: document, qq: network, homeSnapshot: home, transport: network)
+        service = NativeMusicService(document: document, platformClient: network.client(), homeSnapshot: home)
     }
 
     func prepare(accounts: () async throws -> Void) async {
@@ -1241,13 +1438,24 @@ private final class MusicStartupPreparation {
     }
 }
 
-private final class MusicStartupDocument: MusicNativeDocumentStoring, @unchecked Sendable {
+final class MusicStartupDocument: MusicNativeDocumentStoring, @unchecked Sendable {
     private let lock = NSLock()
-    private let failure: MusicServiceError?
+    private var failure: MusicServiceError?
     private var value: Data?
     private var count = 0
+    private var writeCount = 0
+    private var nextCommitReceipt: MusicSettingsHostCommitReceipt?
     init(failure: MusicServiceError?) { self.failure = failure }
     var reads: Int { lock.lock(); defer { lock.unlock() }; return count }
+    var writes: Int { lock.lock(); defer { lock.unlock() }; return writeCount }
+    fileprivate func failReads(_ failure: MusicServiceError) {
+        lock.lock(); defer { lock.unlock() }
+        self.failure = failure
+    }
+    fileprivate func holdNextCommit(_ receipt: MusicSettingsHostCommitReceipt) {
+        lock.lock(); defer { lock.unlock() }
+        nextCommitReceipt = receipt
+    }
     func read() throws -> Data? {
         lock.lock(); defer { lock.unlock() }
         count += 1
@@ -1255,9 +1463,25 @@ private final class MusicStartupDocument: MusicNativeDocumentStoring, @unchecked
         return value
     }
     func compareAndSwap(expected: Data?, replacement: Data) throws {
-        lock.lock(); defer { lock.unlock() }
-        guard value == expected else { throw MusicServiceError.storageConflict }
+        lock.lock()
+        guard value == expected else { lock.unlock(); throw MusicServiceError.storageConflict }
         value = replacement
+        writeCount += 1
+        let receipt = nextCommitReceipt
+        nextCommitReceipt = nil
+        lock.unlock()
+        try receipt?.deliver()
+    }
+}
+
+private final class MusicSettingsHostCommitReceipt: @unchecked Sendable {
+    let entered = XCTestExpectation(description: "Settings document saved before its unknown receipt")
+    private let delivery = DispatchSemaphore(value: 0)
+    func release() { delivery.signal() }
+    func deliver() throws {
+        entered.fulfill()
+        delivery.wait()
+        throw MusicServiceError.commitUnconfirmed
     }
 }
 
@@ -1272,15 +1496,109 @@ private final class MusicStartupHomeSnapshot: MusicHomeSnapshotStoring, @uncheck
     func clear() { XCTFail("Local startup must not erase the last successful home") }
 }
 
-private actor MusicStartupNoNetwork: MusicNativeHTTPTransport, MusicPublicQQProviding {
+private actor MusicStartupNoNetwork {
     private(set) var calls = 0
-    func send(_ request: MusicNativeHTTPRequest) throws -> MusicNativeHTTPResponse {
+    nonisolated func client() -> MusicPlatformClient {
+        MusicPlatformClient(connection: { try await self.connection() })
+    }
+    private func connection() throws -> RuntimeHTTPClient {
         calls += 1; throw MusicServiceError.unavailable
     }
-    func search(query: String, page: Int, limit: Int) throws -> MusicNativeTrackPage {
-        calls += 1; throw MusicServiceError.unavailable
+}
+
+/// A host-test peer for canonical results, not another platform HTTP adapter.
+/// Startup tests above use a connector which fails if opened at all.
+final class MusicHostPlatformRuntime: @unchecked Sendable {
+    typealias Handler = @Sendable (RuntimeValue) async throws -> RuntimeValue
+    let runtime: RuntimeHTTPClient
+    private let host: String
+    init(control: Handler? = nil, _ handler: @escaping Handler) throws {
+        host = UUID().uuidString.lowercased() + ".music-host.invalid"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MusicHostPlatformProtocol.self]
+        runtime = try RuntimeHTTPClient(baseURL: URL(string: "http://" + host)!, configuration: configuration)
+        MusicHostPlatformProtocol.register(host, control: control, handler: handler)
     }
-    func lyrics(mid: String) throws -> MusicNativeLyrics {
-        calls += 1; throw MusicServiceError.unavailable
+    deinit { MusicHostPlatformProtocol.remove(host) }
+    func client() -> MusicPlatformClient { .init(connection: { [self] in runtime }) }
+    static func page(_ page: MusicNativeTrackPage) throws -> RuntimeValue {
+        let songs = try page.items.map { track -> RuntimeValue in
+            let info = try RuntimeJSON.decode(track.data), id = info[music: "songmid"]
+            let key = String(decoding: try RuntimeJSON.encode(.array([.string(track.platform), id, .string("")])), as: UTF8.self)
+            return .object(["sources": .array([.object([
+                "source": .string(track.platform), "sourceKey": .string(key), "musicInfo": info
+            ])])])
+        }
+        return .object(["items": .array(songs), "total": .number(Double(page.total)), "continuation": .null])
+    }
+}
+
+private final class MusicHostPlatformProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    private static var handlers: [String: (control: MusicHostPlatformRuntime.Handler?, request: MusicHostPlatformRuntime.Handler)] = [:]
+    private let delivery = NSRecursiveLock()
+    private var stopped = false
+    private var work: Task<Void, Never>?
+    static func register(_ host: String, control: MusicHostPlatformRuntime.Handler?, handler: @escaping MusicHostPlatformRuntime.Handler) {
+        lock.lock(); handlers[host] = (control, handler); lock.unlock()
+    }
+    static func remove(_ host: String) { lock.lock(); handlers[host] = nil; lock.unlock() }
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host?.hasSuffix(".music-host.invalid") == true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.lock(); let handler = Self.handlers[request.url!.host!]; Self.lock.unlock()
+        let body: Data
+        if let bytes = request.httpBody { body = bytes }
+        else if let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var bytes = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                bytes.append(contentsOf: buffer.prefix(count))
+            }
+            body = bytes
+        } else { body = Data("{}".utf8) }
+        delivery.lock(); defer { delivery.unlock() }
+        guard !stopped else { return }
+        work = Task { [self] in
+            let reply: RuntimeValue
+            do {
+                let fields = try RuntimeJSON.decode(body), value: RuntimeValue
+                guard let handler else { throw RuntimeHTTPError.remote("UNSUPPORTED") }
+                switch request.url!.lastPathComponent {
+                case "session.update":
+                    if let control = handler.control { value = try await control(fields) }
+                    else { value = .object(["published": .bool(true)]) }
+                case "request": value = try await handler.request(fields)
+                default: throw RuntimeHTTPError.remote("UNSUPPORTED")
+                }
+                reply = .object(["ok": .bool(true), "contract": .string("music.platform.v1"), "value": value])
+            } catch {
+                let code: String
+                if case RuntimeHTTPError.remote(let remote) = error { code = remote }
+                else if error is CancellationError { code = "CANCELLED" }
+                else { code = "INVALID_RESPONSE" }
+                reply = .object(["ok": .bool(false), "contract": .string("music.platform.v1"), "code": .string(code)])
+            }
+            deliver(reply)
+        }
+    }
+    private func deliver(_ reply: RuntimeValue) {
+        delivery.lock(); defer { delivery.unlock() }
+        work = nil
+        guard !stopped else { return }
+        do {
+            let bytes = try RuntimeJSON.encode(reply)
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json",
+                    "X-Meow-Request-Id": request.value(forHTTPHeaderField: "X-Meow-Request-Id")!])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: bytes); client?.urlProtocolDidFinishLoading(self)
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    override func stopLoading() {
+        delivery.lock(); stopped = true; let retired = work; work = nil; delivery.unlock()
+        retired?.cancel()
     }
 }

@@ -1,6 +1,8 @@
 import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 /// Deterministic native boundary checks only: no JS runtime, account, or network.
@@ -11,11 +13,16 @@ final class MusicNativePlatformScopeTests: XCTestCase {
                          enabled: Set<MusicPublicBrowsePlatform> = [.netease, .qq, .kugou],
                          scripts: (any MusicScriptResolving)? = nil,
                          accounts: (any MusicNativeAccountProviding)? = nil,
-                         qq: any MusicPublicQQProviding = NativeMusicQQFixture(),
-                         http: any MusicNativeHTTPTransport = NativeMusicNoNetwork()) async throws -> NativeMusicService {
+                         qq: any MusicPlatformFixtureResponding = NativeMusicPlatformFixture(),
+                         http: any MusicPlatformFixtureResponding = NativeMusicPlatformFixture()) async throws -> NativeMusicService {
         // Explicit three-platform scope; scripts are omitted by default.
-        let value = NativeMusicService(document: store, scripts: scripts, accounts: accounts, qq: qq,
-            enabledPlatforms: enabled, transport: http, clock: { NativeMusicFixture.date }, random: { 0 })
+        let value = NativeMusicService(document: store,
+            scripts: scripts,
+            accounts: accounts,
+            platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),
+            enabledPlatforms: enabled,
+            clock: { NativeMusicFixture.date },
+            random: { 0 })
         try await value.setAccess(available: true, generation: 1)
         return value
     }
@@ -36,9 +43,9 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         return try MusicModel.cleanSong(song)
     }
 
-    func testDefaultInventoryIsBackwardCompatibleAndConfiguredOrderIsStable() async throws {
-        let unconfigured = NativeMusicService(document: NativeMusicMemoryDocument(), qq: NativeMusicQQFixture(),
-            transport: NativeMusicNoNetwork())
+    func testCurrentDefaultInventoryAndConfiguredOrderAreStable() async throws {
+        let unconfigured = NativeMusicService(document: NativeMusicMemoryDocument(),
+            platformClient: try NativeMusicPlatformFixture().makeClient())
         try await unconfigured.setAccess(available: true, generation: 1)
         let original = try await unconfigured.platforms()
         XCTAssertEqual(original.map(\.id), ["wy", "tx", "kg", "kw", "mg"])
@@ -58,11 +65,11 @@ final class MusicNativePlatformScopeTests: XCTestCase {
     }
 
     func testDisabledSearchPlaylistsDetailAndWholeQueueNeverReachTransport() async throws {
-        let http = NativeMusicHTTPFixture([]), store = NativeMusicMemoryDocument()
+        let http = NativeMusicResultFixture(), store = NativeMusicMemoryDocument()
         let owner = try await service(store, http: http)
         for platform in [MusicPublicBrowsePlatform.kuwo, .migu] {
             let collection = MusicPublicBrowseCollection(platform: platform, nativeID: "9007199254740993", title: "Saved")
-            let request = MusicPublicBrowseQueueRequest(collection: collection, snapshot: String(repeating: "a", count: 64))
+            let request = MusicPublicBrowseQueueRequest(collection: collection)
             await rejected { try await owner.search(platform: platform.rawValue, query: "Synthetic", page: 1, limit: 30) }
             await rejected { try await owner.publicPlaylists(platform: platform, query: "Synthetic", cursor: nil) }
             await rejected { try await owner.publicDetail(collection, cursor: nil) }
@@ -78,7 +85,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
             await rejected { try await owner.remoteQueuePage(source, cursor: nil) }
             await rejected {
                 try await owner.replaceRemoteQueue(source,
-                    start: .init(index: 0, songID: "saved", primarySource: .init(sourceKey: "disabled", platform: platform.rawValue, nativeId: "saved")),
+                    start: .init(index: 0),
                     expectedRevision: 0, intent: .init())
             }
             await source.close()
@@ -91,7 +98,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
     }
 
     func testAllDiscoveryRoutesCheckTheirRealProviderBeforeIO() async throws {
-        let http = NativeMusicHTTPFixture([]), accounts = MusicPlatformScopeAccounts()
+        let http = NativeMusicResultFixture(), accounts = MusicPlatformScopeAccounts()
         let owner = try await service(enabled: [.qq], accounts: accounts, http: http)
         let kinds: [MusicPublicBrowseChannel.Kind] = [.featured, .playlists, .rankings, .newSongs, .cube, .unsupported]
         let routes: [MusicPublicBrowseDestination] = [.home, .featured, .channels] + kinds.map {
@@ -113,13 +120,17 @@ final class MusicNativePlatformScopeTests: XCTestCase {
     }
 
     func testExplicitThreePlatformScopeStillUsesAllThreeNativeAdapters() async throws {
-        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
+        let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
         let owner = try await service(qq: qq, http: http)
+        var songIDs = Set<String>()
         for platform in ["wy", "tx", "kg"] {
             let page = try await owner.search(platform: platform, query: "Synthetic recording", page: 1, limit: 30)
             XCTAssertEqual(page.items.count, 1)
-            XCTAssertEqual(page.items.first?.sources.first?.platform, platform)
+            let track = try XCTUnwrap(page.items.first)
+            XCTAssertTrue(track.sources.contains { $0.platform == platform })
+            songIDs.insert(track.songId)
         }
+        XCTAssertEqual(songIDs.count, 1, "The same recording retains one permanent repository identity")
         let network = await http.calls(), qqCalls = await qq.calls()
         XCTAssertEqual(network, ["wy", "kg"]); XCTAssertEqual(qqCalls.count, 1)
         await owner.close()
@@ -127,10 +138,10 @@ final class MusicNativePlatformScopeTests: XCTestCase {
 
     func testAutomaticDiscoverySearchesOnlyEnabledPlatformsAndRetainsOldSources() async throws {
         let song = try mixedSong(), store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
-        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
+        let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
         let accounts = MusicPlatformScopeAccounts()
         let owner = try await service(store, accounts: accounts, qq: qq, http: http)
-        let before = store.snapshot().0
+        let before = try await owner.read()
         let session = try await owner.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let snapshot = try await session.snapshot(discover: true, force: true)
         XCTAssertTrue(snapshot.searched); XCTAssertEqual(snapshot.scriptState, .notConfigured)
@@ -140,9 +151,11 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         XCTAssertEqual(Set(network), Set(["wy", "kg"])); XCTAssertEqual(network.count, 2)
         XCTAssertEqual(qqCalls.count, 1)
         XCTAssertEqual(Set(accountCalls), Set(["options:wy", "options:tx", "options:kg"]))
-        XCTAssertEqual(store.snapshot().0, before, "discovery is staged")
-        let saved = try MusicDocument(store.snapshot().0, runID: "inspection")
-        let current = saved.queue["entries"].array[0]["song"]
+        let saved = try await owner.read()
+        XCTAssertEqual(saved.queue, before.queue)
+        XCTAssertEqual(saved.history, before.history)
+        XCTAssertEqual(saved.playback, before.playback)
+        let current = saved.library["library"]["songs"][song["songId"].string]
         XCTAssertEqual(current["songId"], song["songId"])
         for platform in ["kw", "mg"] {
             XCTAssertEqual(current["sources"].array.filter { $0["source"].string == platform },
@@ -210,7 +223,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         // platforms even though five platforms are enabled.
         let settings = try await owner.playbackFeedbackSettings()
         XCTAssertEqual(Set(settings.platforms.keys.map(\.rawValue)), Set(["wy", "tx", "kg"]))
-        let stored = try MusicDocument(store.snapshot().0, runID: "fixture").queue["entries"].array[0]["song"]
+        let stored = try MusicDocument(store.snapshot().0, runID: "fixture").library["library"]["songs"][song["songId"].string]
         let targets = try MusicNativeFeedbackMapping.targets(song: stored, context: .obj())
         XCTAssertEqual(Set(targets.map(\.platform)), Set(MusicAccountPlatform.allCases))
 
@@ -238,7 +251,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
 
     func testDisabledPinnedResolveAndLyricsFailBeforeNativeOrScriptCalls() async throws {
         let song = try mixedSong(), store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
-        let scripts = MusicPlatformScopeScripts(), accounts = MusicPlatformScopeAccounts(), http = NativeMusicHTTPFixture([])
+        let scripts = MusicPlatformScopeScripts(), accounts = MusicPlatformScopeAccounts(), http = NativeMusicResultFixture()
         // Excluding QQ also checks a genuine official-account path, not just KW/MG.
         let owner = try await service(store, enabled: [.netease, .kugou], scripts: scripts, accounts: accounts, http: http)
         let before = store.snapshot().0
@@ -292,7 +305,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
 
     func testEmptyScopeDoesNotProbeOrCommitPhantomDiscovery() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: mixedSong())
-        let scripts = MusicPlatformScopeScripts(), accounts = MusicPlatformScopeAccounts(), http = NativeMusicHTTPFixture([])
+        let scripts = MusicPlatformScopeScripts(), accounts = MusicPlatformScopeAccounts(), http = NativeMusicResultFixture()
         let qq = MusicNativeCandidateDiscoveryQQ()
         let owner = try await service(store, enabled: [], scripts: scripts, accounts: accounts, qq: qq, http: http)
         let before = store.snapshot().0
@@ -319,7 +332,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         favorites["order"] = .strings([id])
         document.library["library"]["collections"] = .array([favorites])
         document.history["days"] = .array([.obj([("date", .string("2026-10-23")), ("songs", .array([
-            .obj([("song", song), ("context", .obj()), ("at", .number(NativeMusicFixture.date.timeIntervalSince1970 * 1000))])
+            .obj([("songId", song["songId"]), ("context", .obj()), ("at", .number(NativeMusicFixture.date.timeIntervalSince1970 * 1000))])
         ]))])])
         try document.validate()
         let bytes = try document.encode(changed: ["library", "queue", "playback", "history"])
@@ -358,9 +371,9 @@ final class MusicNativePlatformScopeTests: XCTestCase {
             let before = store.snapshot()
             await rejected { try await owner.openAccountQueue(platform: platform, kind: .collection(id: "favorites"), title: "Saved") }
             await rejected { try await owner.remoteQueuePage(source, cursor: nil) }
-            let queue = try await owner.queue(), track = try XCTUnwrap(queue.entries.first?.track)
+            let queue = try await owner.queue()
             await rejected {
-                try await owner.replaceRemoteQueue(source, start: .init(index: 0, track: track),
+                try await owner.replaceRemoteQueue(source, start: .init(index: 0),
                                                    expectedRevision: queue.revision, intent: .init())
             }
             await rejected {
@@ -379,25 +392,45 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         for platform in MusicAccountPlatform.allCases {
             let accounts = MusicPlatformScopeAccounts(), owner = try await service(accounts: accounts)
             let source = try await owner.openAccountQueue(platform: platform,
-                kind: .recommendation(kind: platform == .qq ? "guess" : "fm"), title: "Synthetic")
+                kind: .collection(id: "favorites"), title: "Synthetic")
             let page = try await owner.remoteQueuePage(source, cursor: nil)
             let track = try XCTUnwrap(page.items.first)
             XCTAssertEqual(track.sources.first?.platform, platform.rawValue)
-            let state = try await owner.replaceRemoteQueue(source, start: .init(index: 0, track: track),
+            let state = try await owner.replaceRemoteQueue(source, start: .init(index: 0),
                                                           expectedRevision: 0, intent: .init())
-            if platform != .qq {
-                let next = try await owner.advanceFM(source, direction: .next, reason: .manual,
-                                                    expectedRevision: state.revision, intent: .init())
-                let queue = try await owner.queue()
-                XCTAssertEqual(queue.entries.count, 2)
-                XCTAssertEqual(queue.entries.first?.id, state.currentId)
-                XCTAssertEqual(next.selectedId, queue.entries.last?.id)
-            }
+            XCTAssertEqual(state.total, 1)
             let calls = await accounts.events()
             XCTAssertEqual(calls.filter { $0 == "queue-begin:" + platform.rawValue }.count, 1)
-            XCTAssertEqual(calls.filter { $0 == "queue-page:" + platform.rawValue }.count, platform == .qq ? 1 : 2)
+            XCTAssertEqual(calls.filter { $0 == "queue-page:" + platform.rawValue }.count, 1)
             await source.close(); await owner.close()
         }
+        let fm = MusicPlatformScopeFM(), accounts = MusicPlatformScopeAccounts()
+        let owner = try await service(accounts: accounts, http: fm)
+        let source = try await owner.openAccountQueue(platform: .netease,
+            kind: .recommendation(kind: "fm"), title: "Synthetic FM")
+        _ = try await owner.remoteQueuePage(source, cursor: nil)
+        let state = try await owner.replaceRemoteQueue(source, start: .init(index: 0),
+                                                       expectedRevision: 0, intent: .init())
+        let occurrence = try XCTUnwrap(state.currentId)
+        let options = try await owner.sourceAvailability(for: .init(kind: .queue, id: occurrence))
+        let audio = try await owner.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: occurrence,
+            selection: XCTUnwrap(options.options.first).selection(quality: "128k"))
+        let accepted = try await owner.recordSimilarPlaybackFact(.init(attemptId: audio.attemptId,
+            occurrenceId: audio.occurrenceId, resourceId: audio.resourceId, kind: .playing, position: 1, duration: 180))
+        XCTAssertTrue(accepted)
+        let pending = await owner.fmPlayback?.pending
+        await pending?.value
+        let ready = try await owner.state()
+        let next = try await owner.advanceFM(source, direction: .next, reason: .manual,
+                                            expectedRevision: ready.revision, intent: .init())
+        let queue = try await owner.queue(), requests = await fm.count(), accountCalls = await accounts.events()
+        XCTAssertEqual(queue.entries.count, 2)
+        XCTAssertEqual(queue.entries.first?.id, state.currentId)
+        XCTAssertEqual(next.selectedId, queue.entries.last?.id)
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(accountCalls, ["options:wy", "resolve:wy"],
+                       "Public FM has no fabricated account lease; only the selected native audio uses the account adapter")
+        await source.close(); await owner.close()
     }
 
     func testSyncRejectsEntireMixedSelectionBeforeCheckpointAndRetainsOldSelection() async throws {
@@ -470,6 +503,20 @@ final class MusicNativePlatformScopeTests: XCTestCase {
             XCTAssertEqual(store.snapshot().0, before.0); XCTAssertEqual(store.snapshot().2, before.2)
             await owner.close()
         }
+    }
+}
+
+private actor MusicPlatformScopeFM: MusicPlatformFixtureResponding {
+    private var requests = 0
+    func count() -> Int { requests }
+    func respond(_ request: MusicPlatformFixture.Request) throws -> RuntimeValue {
+        XCTAssertEqual(request.platform, "wy")
+        XCTAssertEqual(request.operation, "fm")
+        requests += 1
+        return try MusicPlatformFixture.page([
+            MusicNativeCandidateDiscoveryFixture.track("wy", id: String(700 + requests),
+                                                       title: "Scoped FM \(requests)")
+        ], platform: "wy")
     }
 }
 

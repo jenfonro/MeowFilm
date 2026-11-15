@@ -3,7 +3,9 @@ import Combine
 import MeowAccounts
 import MeowContracts
 import MeowMusicFeature
+import MeowMusicTestSupport
 import MeowMusicPlatform
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 private final class HomeObservationStore: MusicHomeSnapshotStoring, @unchecked Sendable {
@@ -21,13 +23,6 @@ private struct GuestHomeCredentialStore: CredentialStore {
         throw CredentialStoreError.backendFailure
     }
     func remove(for identity: AccountIdentity) { XCTFail("Guest admission must not remove credentials") }
-}
-
-private struct GuestHomeAccountHTTP: MusicAccountHTTPTransport {
-    func send(_ request: MusicAccountHTTPRequest) async throws -> MusicAccountHTTPResponse {
-        XCTFail("Guest admission must not send account requests")
-        throw MusicServiceError.unavailable
-    }
 }
 
 private struct ObservedGuestHome: MusicHomeBrowsing {
@@ -108,10 +103,12 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
             if let gate = homeGate { homeGate = nil; await gate.wait() }
             try checkNativeHomeBinding(binding)
             if let failure { throw failure }
-            return Data(#"{"code":200,"data":{"blocks":[{"positionCode":"songs","dslData":{"items":[{"resourceType":"song","id":"41"}]}}]}}"#.utf8)
-        case .artistActivity: return Data(#"{"code":200,"data":{"newWorks":[]}}"#.utf8)
+            let section = MJ.obj([("id", .string("songs")), ("type", .string("songs")),
+                ("items", .array([MusicNativePublicBrowseFixture.song("41")]))])
+            return MJ.obj([("sections", .array([section]))]).bytes
+        case .artistActivity: return Data(#"{"sections":[]}"#.utf8)
         case .songMetadata(let ids):
-            return MJ.obj([("code", .n(200)), ("songs", .array(ids.map(MusicNativePublicBrowseFixture.song)))]).bytes
+            return MJ.obj([("items", .array(ids.map(MusicNativePublicBrowseFixture.song)))]).bytes
         case .playlistMetadata, .vipSongs, .heartbeatSeed: throw MusicServiceError.invalidRequest
         }
     }
@@ -127,14 +124,18 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         let identity = AccountIdentity(source: try SourceAddress(
             installationID: UUID(), siteKey: "wy"), accountID: UUID())
         let accounts = AccountSessionCoordinator(store: GuestHomeCredentialStore())
+        let peer = NativeMusicResultFixture([.object(["sections": .array([.object([
+            "id": .string("songs"), "type": .string("songs"),
+            "items": .array([try MusicPlatformFixture.song(MusicNativePublicBrowseFixture.track("41"))])
+        ])])])])
+        let client = try peer.makeClient()
         let owner = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],
-            transport: GuestHomeAccountHTTP(), clock: { NativeMusicFixture.date })
+            platformClient: client, clock: { NativeMusicFixture.date })
         _ = try await owner.setAccess(available: true, generation: 1)
-        let http = NativeMusicHTTPFixture([try MJ.parse(Data(
-            #"{"code":200,"data":{"blocks":[{"positionCode":"songs","dslData":{"items":[{"resourceType":"song","id":"41"}]}}]}}"#.utf8)),
-            .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("41")]))])])
-        let value = NativeMusicService(document: NativeMusicMemoryDocument(), accounts: owner,
-            qq: NativeMusicQQFixture(), transport: http, clock: { NativeMusicFixture.date })
+        let value = NativeMusicService(document: NativeMusicMemoryDocument(),
+            accounts: owner,
+            platformClient: client,
+            clock: { NativeMusicFixture.date })
         try await value.setAccess(available: true, generation: 1)
         let subscribed = expectation(description: "home observation subscribed")
         let browser = ObservedGuestHome(service: value, subscribed: subscribed)
@@ -146,8 +147,8 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         XCTAssertFalse(tracks.isEmpty)
         let snapshot = await accounts.snapshot(for: identity)
         let display = try await owner.nativeHomeDisplayScope(), live = try await owner.nativeHomeBinding()
-        let before = await http.calls()
-        XCTAssertFalse(before.isEmpty)
+        let before = await peer.calls()
+        XCTAssertEqual(before.map(\.operation), ["home"], "Guest home must not verify an absent account")
         let changed = expectation(description: "guest admission must not republish home content")
         changed.isInverted = true
         var publications = 0
@@ -167,25 +168,28 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         await fulfillment(of: [changed], timeout: 0.1)
         XCTAssertEqual(publications, 0); XCTAssertTrue(page.loaded); XCTAssertNil(page.error)
         XCTAssertEqual(page.sections.map(\.id), sections); XCTAssertEqual(page.tracks, tracks)
-        let after = await http.calls()
+        let after = await peer.calls()
         XCTAssertEqual(after.count, before.count, "Denied business admission must not refetch the home")
         content.cancel(); observation.cancel(); await observation.value
         page.disappear(); await value.close(); _ = await owner.close()
     }
 
-    private func service(_ account: HomeObservationAccount, _ store: HomeObservationStore) async throws -> NativeMusicService {
-        let service = NativeMusicService(document: NativeMusicMemoryDocument(), accounts: account,
-            qq: NativeMusicQQFixture(), homeSnapshot: store, transport: NativeMusicNoNetwork(),
+    private func service(_ account: HomeObservationAccount, _ store: HomeObservationStore,
+                         document: NativeMusicMemoryDocument = .init()) async throws -> NativeMusicService {
+        let service = NativeMusicService(document: document,
+            accounts: account,
+            platformClient: try NativeMusicPlatformFixture().makeClient(),
+            homeSnapshot: store,
             clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         return service
     }
     func testInitialReplayPreservesRestoredPageThroughOfflineRefresh() async throws {
-        let account = HomeObservationAccount(), store = HomeObservationStore()
-        let first = try await service(account, store)
+        let account = HomeObservationAccount(), store = HomeObservationStore(), document = NativeMusicMemoryDocument()
+        let first = try await service(account, store, document: document)
         _ = try await first.homePage(cursor: nil, refresh: true)
         let saved = try XCTUnwrap(store.read())
-        let value = try await service(account, store)
+        let value = try await service(account, store, document: document)
         let model = MusicPublicBrowseViewModel(service: value, request: .discovery(.home))
         model.setAccess(available: true, generation: UUID()); model.appear()
         await model.restoreHomeIfNeeded()

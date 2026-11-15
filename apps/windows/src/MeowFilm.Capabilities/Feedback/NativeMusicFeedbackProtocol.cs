@@ -5,19 +5,19 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Feedback;
 
 /// <summary>
-/// Native dispatch: WY owns durable local admission and file receipts; QQ/KG
-/// retain their independent protocols. All ports and the document store are borrowed.
+/// Native attempt and outbox ownership; shared Node protocols execute the remote work.
+/// Windows KG feedback remains unsupported. All ports and the document store are borrowed.
 /// </summary>
-internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource accounts, MusicPlatformHttp http,
-    MusicPlatformClientContextOwner clients, TimeProvider? clock = null,
-    IDocumentStore? store = null, MusicFeedbackSettingsOwner? settings = null) : IMusicFeedbackProtocol, IMusicFeedbackPendingProtocol
+internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource accounts, MusicPlatformClient client, TimeProvider? clock = null,
+    IDocumentStore? store = null, MusicFeedbackSettingsOwner? settings = null,
+    Action<MusicPlatformSession>? authenticationRejected = null) : IMusicFeedbackProtocol, IMusicFeedbackPendingProtocol
 {
     private readonly IMusicPlatformSessionSource accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
-    private readonly MusicPlatformHttp http = http ?? throw new ArgumentNullException(nameof(http));
+    private readonly MusicPlatformClient client = client;
     private readonly TimeProvider clock = clock ?? TimeProvider.System;
     private readonly MusicFeedbackSettingsOwner? settings = settings;
     private readonly NeteasePlaybackOutbox? wyOutbox = store is not null && settings is not null
-        ? new(store, settings, accounts, new(accounts, http, clients), clock ?? TimeProvider.System) : null;
+        ? new(store, settings, accounts, new(accounts, client), clock ?? TimeProvider.System) : null;
     private NeteasePlaybackFeedback? wy;
     private readonly object gate = new();
     private readonly CancellationTokenSource lifetime = new();
@@ -44,7 +44,7 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         internal readonly TaskCompletionSource<IMusicFeedbackSession> Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource? Finished;
         internal MusicFeedbackEnd? End;
-        internal NativeMusicFeedbackQq? Qq;
+        internal string? NodeSession;
         internal Task? Disposal;
         internal Task? Release;
         internal bool Closed, Accepted;
@@ -107,7 +107,6 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     {
         var result = await task.WaitAsync(token).ConfigureAwait(false);
         Guard(session, token);
-        session.Qq?.Guard(token);
         return result;
     }
     private void GuardAccount(MusicPlatformSession account)
@@ -131,29 +130,22 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         try
         {
             Guard(session, session.Token);
-            var cookies = FeedbackProtocolRules.Cookies(session.Account);
-            switch (session.Account.Platform)
+            if (session.Account.Platform == "kg") throw new MusicFeedbackException("UNVERIFIED_TLS_PROTOCOL");
+            if (session.Account.Platform != "tx") throw new MusicFeedbackException("UNSUPPORTED");
+            var result = await client.RequestAsync("tx", "feedback.prepare", new
             {
-                case "tx":
-                    session.Qq = await NativeMusicFeedbackQq.Start(accounts, session.Account, session.Input, http,
-                        clock, token => Guard(session, token), session.Token).ConfigureAwait(false);
-                    break;
-                case "kg":
-                    FeedbackProtocolRules.Require(cookies.GetValueOrDefault("KUGOU_API_MID", "").Length > 0 &&
-                        cookies.GetValueOrDefault("KUGOU_API_GUID", "").Length > 0 &&
-                        cookies.GetValueOrDefault("KUGOU_API_DEV", "").Length > 0, "DEVICE_CONTEXT_REQUIRED");
-                    // Only http://d.kugou.com is evidenced by the fixed CSCC source.
-                    throw new MusicFeedbackException("UNVERIFIED_TLS_PROTOCOL");
-                default: throw new MusicFeedbackException("UNSUPPORTED");
-            }
+                @event = "start", recording = session.Input.Recording, duration = session.Input.Duration,
+                target = new { automatic = session.Input.Automatic }
+            }, session.Account, session.Token, () => Guard(session, session.Token)).ConfigureAwait(false);
+            session.NodeSession = result.GetProperty("sessionId").GetString();
             Guard(session, session.Token);
-            session.Qq?.Guard(session.Token);
         }
         catch (Exception error) { failure = Sanitize(error); }
+        RejectAuthentication(session, failure);
         lock (gate)
         {
             if (failure is null)
-                try { Guard(session, session.Token); session.Qq?.Guard(session.Token); }
+                try { Guard(session, session.Token); }
                 catch (Exception error) { failure = Sanitize(error); }
             if (failure is null)
             {
@@ -186,7 +178,6 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
                 return session.Finished.Task.WaitAsync(token);
             }
             Guard(session, token);
-            session.Qq?.Guard(token);
             FeedbackProtocolRules.Require(session.Accepted, "START_UNCONFIRMED");
             session.End = end;
             session.Finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -204,18 +195,17 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         {
             Guard(session, linked.Token);
             FeedbackProtocolRules.End(session.Input, end, clock.GetElapsedTime(session.At));
-            FeedbackProtocolRules.Require(session.Qq is not null, "UNSUPPORTED");
-            await session.Qq.Finish(end, linked.Token).ConfigureAwait(false);
-            Guard(session, linked.Token);
-            session.Qq?.Guard(linked.Token);
+            var receipt = await client.RequestAsync(session.Account.Platform, "feedback.send", new
+            {
+                @event = "end", sessionId = session.NodeSession, listened = end.Listened, mediaListened = end.MediaListened,
+                duration = end.Duration, position = end.Position, rate = end.Rate, reason = end.Reason,
+                target = new { automatic = session.Input.Automatic }
+            }, session.Account, linked.Token, () => Guard(session, linked.Token)).ConfigureAwait(false);
+            string status = receipt.GetProperty("status").GetString()!;
+            if (status != "confirmed") throw new MusicFeedbackException(receipt.GetProperty("errorCode").GetString() ?? "UPSTREAM_UNCONFIRMED", status);
         }
         catch (Exception error) { failure = Sanitize(error); }
-        lock (gate)
-        {
-            if (failure is null)
-                try { Guard(session, linked.Token); session.Qq?.Guard(linked.Token); }
-                catch (Exception error) { failure = Sanitize(error); }
-        }
+        RejectAuthentication(session, failure);
         linked.Dispose();
         try { await ReleaseResources(session).ConfigureAwait(false); }
         catch (Exception error) { failure = Sanitize(error); }
@@ -231,6 +221,12 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     }
     private static Exception Sanitize(Exception error) => error is MusicFeedbackException or OperationCanceledException
         ? error : new MusicFeedbackException(FeedbackProtocolRules.SafeError(error));
+    private void RejectAuthentication(Session session, Exception? error)
+    {
+        if (error is MusicFeedbackException { Code: "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS",
+            WriteStatus: null or "notSent" or "rejected" })
+            authenticationRejected?.Invoke(session.Account);
+    }
     private void Retire(Session session, string reason)
     {
         lock (session.Input.Attempt.Gate)
@@ -247,8 +243,14 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         async Task Release()
         {
             await Task.Yield();
-            try { if (session.Qq is not null) await session.Qq.DisposeAsync().ConfigureAwait(false); }
-            finally { session.Qq = null; session.Stop.Dispose(); }
+            try
+            {
+                if (session.NodeSession is not null && accounts.IsCurrent(session.Account))
+                    _ = await client.RequestAsync(session.Account.Platform, "feedback.release", new { sessionId = session.NodeSession },
+                        session.Account, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (MusicPlatformException error) when (error.Code is "STALE_SESSION" or "CLOSED") { }
+            finally { session.NodeSession = null; session.Stop.Dispose(); }
         }
     }
     private Task DisposeSession(Session session)

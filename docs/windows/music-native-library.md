@@ -4,9 +4,9 @@
 
 ## 责任
 
-`MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史、相关设置和脚本源元数据的唯一原生文档写入者。
+`MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生文档写入者；脚本安装与私有数据归公共音乐模块。
 
-- 文档命名空间固定为 `music.library.v1`。
+- 文档命名空间固定为 `music.library.v2`。
 - 默认 scope 为 `local`。
 - 普通业务不经 Node 读写该文档。
 - 同一 App 内不得再装配第二个文档 writer。
@@ -51,7 +51,7 @@ ValueTask DisposeAsync();
 
 `AppendQueueAsync` 是完整歌单的进程内 next 入口，返回 `{ok:true,currentId,version,mode}`，不返回全量 entryIds。它在唯一串行边界核对 `expectedVersion`，创建独立 occurrence 并将整段按输入顺序插在当前曲之后，一次 CAS、一次版本递增；当前曲、模式及旧优先队列保留，新段优先于旧 priority。空队列选中首曲且 priority 为空，不调用媒体播放。失败不分批落盘；CAS 准入前取消不写入，准入后报告真实结果，未知写入使用既有 reconcile 机制，不重放。
 
-普通 `music.queue.append` 仍仅接受 `songs/context/next`，保持 `entryIds` 回执、最多 1000 首与 512KiB 输入边界，不接受 `expectedVersion`。完整入口取消歌曲数量上限，继续使用现有 16MiB 完整输入、8MiB 文档资源边界；空输入不允许。此队列入口不改变队列 schema；曲库格式见下节。
+普通 `music.queue.append` 接受 `songs/context/next`，保持 `entryIds` 回执与 512KiB 输入字节边界，不接受 `expectedVersion`。完整入口沿现有 16MiB 完整输入、8MiB 文档资源边界；两者不以歌曲条数截断，空输入不允许。队列当前 schema 为 1，entry 只存 `id/songId/context`，读取时由唯一歌曲仓库投影资料。
 
 ## 唯一当前文档
 
@@ -69,7 +69,7 @@ ValueTask DisposeAsync();
 要求：
 
 - UTF-8 字节必须等于当前 canonical JSON 编码；重复属性、非规范持久整数、额外根字段和未知 entry 均拒绝。
-- entry key 必须属于当前 owner 的明确 area，或属于当前已安装脚本实例的精确私有 storage key。
+- entry key 必须属于当前 owner 的明确 area；脚本实例私有存储不在此文档。
 - 缺少可选 area 表示该 area 尚未创建；entry 已存在但值为 `null`、错误类型或错误 schema 时不是空状态。
 - 按各 area 当前字段、schema 及引用约束校验；不符合契约的文档保持原字节不变并明确失败，读取不执行格式转换或回退。
 
@@ -95,10 +95,10 @@ native-desktop-lyrics
 playback-settings
 ```
 
-多曲歌词／封面展示按稳定歌曲身份存于 `music.recording-presentation.v2` 可选缓存，不属于业务 area，也不参与整库校验或提交；手工歌词仍属于 `native-local-lyrics`。
+共享图片和歌词展示字节存于 `MusicPresentationCache` 的 `music.presentation-resources.v1`，不属于业务 area，不参与整库提交；手工歌词仍属于 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
-旧 `lx-installations` 与 `lx-data` 条目不读取、验证、迁移或改写；原文档随无关设置保存原样保留。
+本 owner 只从空数据建立并读取当前 namespace，不检查或承接历史脚本条目。
 `native-source-exclusions` 保存 schema 1、revision、items，每项包含 songId/provider/platform/providerName/title/artist/at。
 同身份幂等添加，只显式 remove 解除，不随缓存清理删除。沿用根文档的字节资源边界，不另设条数上限。
 
@@ -179,16 +179,17 @@ version ownerId revision nextId collections songs accounts networkPlaylists
 
 约束：
 
-- `version` 为 `2`，`ownerId` 精确等于当前 scope。已存在的旧 wrapper/library 版本拒绝，不转换或覆盖。
+- `version` 为 `2`，`ownerId` 精确等于当前 scope；只解码当前 wrapper/library 格式，不提供版本识别或转换。
 - `nextId` 大于所有现存 `playlist:<正整数>` 的编号。
 - 只有一个收藏集合：`id=favorites`、`kind=favorites`；它没有 `deleted` 或 `locallyCreated` 字段。
 - 普通歌单 ID 必须为 canonical `playlist:<正整数>`。
 - `deleted`、`locallyCreated` 若存在只能为 `true`。
 - `order` 无重复，并且每项都引用当前 `songs`。
-- `accounts` 只允许 `wy`、`tx`、`kg`，账号 ID 最长 64 字符。
-- binding 只允许相同三个平台且 `writable=true`；`map` 方向固定为 `nativeId -> songId`。
+- `accounts` 只允许 `wy`、`tx`、`kg`，账号 ID 使用当前安全账号发布的非空字符串，不猜测长度或数字格式。
+- binding 只允许相同三个平台且 `writable=true`；账号、远端集合和成员定位均保留共同结果的完整非空字符串，`map` 方向为实际成员 key 到永久 songId。账号精确关联、成员 occurrence、当前仓库引用及写事务 CAS/pending 仍由原生同步 owner 保证。
 - intent 的 `acknowledged` 只包含该集合中现存 binding 的 canonical binding key。
-- 歌曲必须等于 `NativeMusicSong.Normalize` 的当前规范结果；临时媒体 URL、凭据和签名资源字段不得进入持久歌曲。
+- `songs` 以永久 UUID 为键，记录自身 songId 与键一致；来源不能跨记录重绑。临时媒体 URL、凭据和签名资源字段不得进入持久歌曲。
+- 集合 order、队列 entry 和历史只持久 songId 引用；展示时读取仓库当前资料。队列 occurrence 与歌曲 ID 分离，资料补全不推进 queue version。
 
 ### 网络引用字段与回执
 
@@ -198,9 +199,9 @@ version ownerId revision nextId collections songs accounts networkPlaylists
 id platform remoteId name cover count revision present subscription intent
 ```
 
-- `id` 固定为 `network:<platform>:<remoteId>`；`platform` 允许 `wy/tx/kg/kw/mg`。`remoteId` 按对应公开歌单 ID 格式校验，不接受酷狗 LX 的 `id_*`。
+- `id` 固定为 `network:<platform>:<remoteId>`；`platform` 允许 `wy/tx/kg/kw/mg`。`remoteId` 使用共同平台结果中的非空定位字符串，原生不猜测数字格式、长度、字符集或前缀。
 - `cover` 是清理后的公开 URL；`count` 是非负展示整数，不表示本地成员数量。该类型没有 `songs/order/bindings`。
-- `present` 是本地引用可见性。`subscription` 为 `null` 或 `{accountId,present,locator}`；账号必须对应 `library.accounts[platform]`。WY/TX 的 locator 为空对象，KG 已订阅基线保存当前账号的 `{listId}`。
+- `present` 是本地引用可见性。`subscription` 为 `null` 或 `{accountId,present,locator}`；账号必须对应 `library.accounts[platform]`。`locator` 保存共同平台返回的当前不透明定位对象，不保存凭据；字段转换与实际写入配方归 Node，原生不按平台字段白名单再次解析。
 - `intent` 为 `null` 或 `{accountId,present}`，记录已绑定账号的明确本地操作。即使当时开关关闭也保留意图，但不发请求；重新开启时交给原同步协调器先拉取。未绑定的纯本地引用没有账号意图。
 - 取消后仍需基线、意图或耐久 fence 的记录以 `present=false` 保留；公开列表不显示它。无这些关系的纯本地记录可直接移除。
 
@@ -221,13 +222,13 @@ Catalog 的 `music.catalog.playlist.save` 只转交上述元信息命令，不�
 
 ## 统一歌曲与录音分组
 
-- `NativeMusicSong` 是 Windows 精简歌曲模型的唯一 owner。显示字段为 `songId / title / artist / album / duration / cover_url`；`sources` 中每项保存 `sourceKey / source / musicInfo`，录音自身的精确秒数保存在 `musicInfo.duration`。
-- `RecordingIdentity` 解析规范标题、歌手、版本、来源键和时长。精确来源键匹配允许补全未知信息；跨来源匹配要求已知且相同的标题/歌手/版本指纹，以及双方有效时长。容差为 `max(3 秒, 较短时长 × 2%)`，不能通过中间录音传递兼容。
-- `Recordings` 管理一个操作内的代表歌曲与录音集合。代表及全部来源必须两两兼容；来源键唯一，输出时主录音第一，其余按 `sourceKey` 排序。规范化、搜索、曲库、播放历史、官方候选与同步复用此实现。
-- `NativeMusicSongGroups` 是搜索、曲库 upsert 和播放历史共用的操作内索引：依次检查兼容的精确来源组、既有歌曲 ID、同指纹子组；无匹配才建组。原 ID 冲突时，根据新候选的完整规范录音证据生成确定性后缀，不因代表相同就覆盖不同录音集合。
-- 导入已显示或已持久化的分组不重新合并、不改变 ID。曲库更新优先采用新显示信息、主来源及同键录音，保留既有逻辑 ID；播放历史则由最新 occurrence 保留时间、context、代表和同键录音。本地歌曲只按本地 `songId` 参与分组，不能凭同名元信息隐式并入另一文件或在线结果；同步显式绑定仍需通过完整录音兼容检查。
-- 同步复用同一曲库快照内的分组索引，不在逐条 upsert 时重复解析整库；检查点提交重读后丢弃旧索引，再按新快照建立，不能保留跨检查点的旧 JsonNode。
-- `membership` 与 upsert 使用相同的完整录音匹配，能够找到带冲突后缀的子组。曲库专属的“每个原生来源只属于一首歌曲”仍由 Library owner 校验，冲突返回 `NATIVE_ID_CONFLICT`，不能隐式重绑集合。
+共同匹配、固定基准、永久身份、资料不足与多候选规则以[歌曲仓库契约](../common/music/smart-playback.md#歌曲身份与唯一仓库)为唯一来源。
+
+- `NativeMusicSong` 是原生投影，保留 title、artist／artists、album、duration、cover_url 与 `sources`；来源项保留 `sourceKey/source/musicInfo`。
+- `NativeMusicSongGroups` 索引仓库已有记录及来源归属，新记录只在实际采用时分配 UUID；`MusicSongRepository` 在 library owner 的 CAS 边界采用平台资料。
+- `localFileId` 是本地文件授权定位，不从永久 songId 反解文件。已登记本地 locator 复用其歌曲记录。
+- 选定封面及来源字段保存在仓库；采用、明确设置重选及实际加载结果由同一 owner 更新。成功提交后发布 `SongMetadataChanged`，页面／搜索／当前播放只重投影资料，不重建队列或联网证明内容。
+- `MusicSongMatchStore` 的 `music.source-discovery.v1` 只保存 source discovery 状态和排除，不复制完整 Song 或重新生成身份。同步检查点重新读取当前仓库后重建操作内索引。
 
 ## 当前命令
 
@@ -271,7 +272,7 @@ music.history.restorePlaylist
 music.history.recordPlayed
 ```
 
-原生持续推荐在同一 owner 内使用私有 `music.queue.recommendation.*` 事务，application 普通调用不可用。`enter` 通过 `capture` 明确是否捕获原队列 checkpoint，并可保留实际当前 seed occurrence；心动首批完整入队。`append` 核对 `expectedVersion` 并复用现有队列尾部追加算法，私有回执包含全部新增 `entryIds`，不改变完整目录 next 入口的公开响应。它可携带新批次内的 `selectIndex`，在同一次 envelope CAS 中追加整批并选择指定 occurrence；不携带时保留当前选择、已有 next priority 和队列 source，不把候选入队冒充进入推荐。随后实际选择活会话推荐 occurrence 时，由协调器的只读 provenance 查询提供 source，唯一队列 writer 在选择 CAS 中提交；无活会话时不会从旧 context 复活来源。原列表来源仍保存在 checkpoint 或原 occurrence context。私有完整批次不受普通外部 append 的条数门槛裁剪，仍服从既有请求／响应字节和持久 envelope 资源校验。
+原生持续推荐在同一 owner 内使用私有 `music.queue.recommendation.*` 事务，application 普通调用不可用。`enter` 通过 `capture` 明确是否捕获原队列 checkpoint，并可保留实际当前 seed occurrence；心动首批完整入队。`append` 核对 `expectedVersion` 并复用现有队列尾部追加算法，私有回执包含全部新增 `entryIds`，不改变完整目录 next 入口的公开响应。它可携带新批次内的 `selectIndex`，在同一次 envelope CAS 中追加整批并选择指定 occurrence；不携带时保留当前选择、已有 next priority 和队列 source，不把候选入队冒充进入推荐。随后实际选择活会话推荐 occurrence 时，由协调器的只读 provenance 查询提供 source，唯一队列 writer 在选择 CAS 中提交；无活会话时不会从旧 context 复活来源。原列表来源仍保存在 checkpoint 或原 occurrence context。完整批次保留全部 occurrence，仍服从既有请求／响应字节和持久 envelope 资源校验。
 
 私有 `restore` 接受 `nonce/expectedVersion/checkpoint`，心动与主动单曲推荐传 `retainCurrent=true`。owner 从实际队列取当前 occurrence，在 checkpoint 原 currentId 之后插入并选中；同 occurrence 已存在时不重复，空 checkpoint 保留当前曲，同录音不同 occurrence 不合并。原条目 context、队列 source 及导航状态来自 checkpoint；选中的 occurrence 从 next priority 移除。恢复与合并共用一次 envelope CAS，不另行 append 或分次落盘。相似、FM 和搜索自动推荐不捕获恢复 checkpoint。`playback-settings.mode` 只有 1／2／3，独立于 checkpoint，不在进入或恢复时改写。
 
@@ -298,7 +299,7 @@ music.online.song
 
 ## Windows 外观值
 
-`native-appearance` 保持 schema 1、revision CAS 及原字段：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受既有预设键或严格不透明 `#RRGGBB`（UI提交统一大写）。读取旧预设不会重写数据，自定义颜色沿原外观保存/权威重读路径消费。本次不保证旧客户端能读取新的自定义值，不增加迁移或双写。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
+`native-appearance` 使用 schema 1、revision CAS：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受当前预设键或严格不透明 `#RRGGBB`（UI 提交统一大写），沿同一外观保存／权威重读路径消费。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
 
 `native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未知字段拒绝，无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
 

@@ -5,8 +5,16 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-public sealed record MusicQueueSurfaceRow(SongRow Song, bool IsCurrent)
+public sealed record MusicQueueSurfaceRow(SongRow Song, bool IsCurrent) : System.ComponentModel.INotifyPropertyChanged
 {
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    internal void RefreshSong(JsonElement? value)
+    {
+        if (value is null) return;
+        Song.ApplyRepository(value);
+        foreach (var name in new[] { nameof(Title), nameof(Artist), nameof(Cover), nameof(Duration) })
+            PropertyChanged?.Invoke(this, new(name));
+    }
     public string EntryId => Song.EntryId ?? "";
     public string Title => Song.Title;
     public string Artist => Song.Artist;

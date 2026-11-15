@@ -29,16 +29,25 @@ public sealed class MusicMetadataPlatformRow(string platform, bool enabled) : IN
 
 public sealed partial class MusicCapability
 {
-    private long metadataRevision;
+    private long metadataRevision, metadataGeneration;
     private bool metadataLoaded, metadataBusy;
+    private Task metadataWork = Task.CompletedTask;
     public ObservableCollection<MusicMetadataPlatformRow> MetadataPlatforms { get; } = [];
     public bool CanEditMetadata => CanEdit && metadataLoaded && !metadataBusy;
 
     private async Task ReadMetadataSettings(CancellationToken token)
     {
-        var settings = (await Call("music.metadata.settings.get", cancellationToken: token))
+        long generation = metadataGeneration;
+        var settings = (await CallSettled("music.metadata.settings.get", cancellationToken: token))
             .GetProperty("settings");
+        if (generation != metadataGeneration || stopping || disposed) return;
         PublishMetadataSettings(settings);
+    }
+    private void RetireMetadataSettings()
+    {
+        metadataGeneration++;
+        metadataLoaded = false;
+        Changed(nameof(CanEditMetadata));
     }
 
     private void PublishMetadataSettings(JsonElement settings)
@@ -48,8 +57,6 @@ public sealed partial class MusicCapability
             .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         var platforms = settings.GetProperty("platforms").EnumerateArray()
             .Select(value => value.GetString()!).ToArray();
-        bool artworkPolicyChanged = savedArtworkPlatforms.Length > 0 &&
-            (!savedArtworkPlatforms.SequenceEqual(platforms) || !savedArtworkEnabled.SetEquals(enabled));
         var existing = MetadataPlatforms.ToDictionary(row => row.Platform, StringComparer.Ordinal);
         for (var index = 0; index < platforms.Length; index++)
         {
@@ -64,12 +71,8 @@ public sealed partial class MusicCapability
         }
         while (MetadataPlatforms.Count > platforms.Length)
             MetadataPlatforms.RemoveAt(MetadataPlatforms.Count - 1);
-        savedArtworkPlatforms = MetadataPlatforms.Select(row => row.Platform).ToArray();
-        savedArtworkEnabled = MetadataPlatforms.Where(row => row.Enabled)
-            .Select(row => row.Platform).ToHashSet(StringComparer.Ordinal);
-        artworkPolicyKnown = true;
         metadataLoaded = true;
-        RefreshCurrentArtwork(force: artworkPolicyChanged);
+        RefreshCurrentArtwork();
         Changed(nameof(CurrentArtwork));
         Changed(nameof(CanEditMetadata));
     }
@@ -108,28 +111,31 @@ public sealed partial class MusicCapability
     {
         if (!CanEditMetadata) return Task.CompletedTask;
         long revision = metadataRevision;
+        long generation = metadataGeneration;
         metadataBusy = true;
-        artworkPolicyKnown = false;
         Changed(nameof(CanEditMetadata));
-        Changed(nameof(CurrentArtwork));
         RetireLyrics();
-        return RunAsync(async () =>
+        return metadataWork = RunAsync(async () =>
         {
             try
             {
                 var result = await Call("music.metadata.settings.save",
                     new { ifRevision = revision, platforms, enabled }, lifetime.Token);
+                if (generation != metadataGeneration || stopping || disposed) return;
                 PublishMetadataSettings(result.GetProperty("settings"));
             }
             catch
             {
+                if (generation != metadataGeneration || stopping || disposed) return;
                 try
                 {
                     await ReadMetadataSettings(lifetime.Token);
+                    if (generation != metadataGeneration || stopping || disposed) return;
                     if (MetadataSettingsMatch(platforms, enabled)) return;
                 }
                 catch
                 {
+                    if (generation != metadataGeneration || stopping || disposed) return;
                     metadataLoaded = false;
                     throw;
                 }
@@ -138,8 +144,9 @@ public sealed partial class MusicCapability
             finally
             {
                 metadataBusy = false;
-                Changed(nameof(CanEditMetadata));
-                if (NeedsLyrics && current is not null)
+                if (generation == metadataGeneration && !stopping && !disposed)
+                    Changed(nameof(CanEditMetadata));
+                if (generation == metadataGeneration && !stopping && !disposed && NeedsLyrics && current is not null)
                     await RestoreLyricsAsync();
             }
         });

@@ -37,7 +37,6 @@ struct MusicNowPlayingArtworkRequest: Hashable {
     private var sampled = false
     private var deliveredImage = false
     private var hasAdmittedArtworkImage = false
-    private var capturedDisplay = false
     private var replacedImage = false
     private var request: MusicNowPlayingArtworkRequest?
     private weak var appearance: MusicAppearancePreferencesStore?
@@ -50,7 +49,7 @@ struct MusicNowPlayingArtworkRequest: Hashable {
         guard !active || self.request != request || self.appearance !== appearance else { return false }
         active = true; self.rendering = rendering; self.request = request; self.appearance = appearance
         deliveredImage = false; hasAdmittedArtworkImage = false
-        capturedDisplay = false; replacedImage = false
+        replacedImage = false
         sampled = false; ticket = nil; samplingRevision = UUID(); artworkRevision = UUID()
         appearance?.selectSong(request.identity) // Same identity is a store-level no-op.
         refreshTicket()
@@ -71,7 +70,7 @@ struct MusicNowPlayingArtworkRequest: Hashable {
         let needsArtwork = displayTicket.map {
             appearance?.acceptsDisplayedArtwork($0) == true && appearance?.displayedArtwork?.ticket != $0
         } ?? false
-        guard suspended || !sampled || !capturedDisplay || needsArtwork else { return }
+        guard suspended || !sampled || needsArtwork else { return }
         // ImageRenderer may have returned nil while the scene was backgrounded.
         // Retry only its retained successful Image, never its network request.
         samplingRevision = UUID()
@@ -87,7 +86,7 @@ struct MusicNowPlayingArtworkRequest: Hashable {
     func imageChanged() {
         guard active else { return }
         replacedImage = replacedImage || deliveredImage || hasAdmittedArtworkImage
-        deliveredImage = false; sampled = false; capturedDisplay = false
+        deliveredImage = false; sampled = false
         samplingRevision = UUID(); artworkRevision = UUID()
     }
     func artworkContextChanged() {
@@ -113,9 +112,6 @@ struct MusicNowPlayingArtworkRequest: Hashable {
         deliver()
         return true
     }
-    func needsDisplay(revision: UUID) -> Bool {
-        active && rendering && isReady && revision == samplingRevision && !capturedDisplay
-    }
     func needsArtwork(revision: UUID) -> Bool {
         guard active, isReady, revision == artworkRevision, let appearance, let displayTicket,
               appearance.acceptsDisplayedArtwork(displayTicket) else { return false }
@@ -124,11 +120,6 @@ struct MusicNowPlayingArtworkRequest: Hashable {
     func needsPalette(revision: UUID) -> Bool {
         guard active, rendering, isReady, !sampled, revision == samplingRevision, let appearance, let ticket else { return false }
         return appearance.accepts(ticket)
-    }
-    @discardableResult func captureDisplay(revision: UUID, encode: () -> Data?, deliver: (Data) -> Void) -> Bool {
-        guard active, rendering, isReady, revision == samplingRevision, !capturedDisplay,
-              let data = encode(), !data.isEmpty, data.count <= 8 * 1024 * 1024 else { return false }
-        capturedDisplay = true; deliver(data); return true
     }
 
     @discardableResult func sample(revision: UUID, pixels: () -> [UInt8]?) -> Bool {

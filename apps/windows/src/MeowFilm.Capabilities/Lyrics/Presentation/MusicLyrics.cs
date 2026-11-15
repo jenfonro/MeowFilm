@@ -353,7 +353,6 @@ public sealed partial class MusicCapability
                 if (CurrentRequest())
                     lyricStatus = error.Code switch {
                         "CAPABILITY_UNAVAILABLE" => "当前音源不提供歌词",
-                        "LYRIC_IDENTITY_MISMATCH" => "歌词录音不匹配",
                         "CANCELLED" => "已取消", _ => ErrorText(error)
                     };
             }

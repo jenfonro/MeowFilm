@@ -22,6 +22,9 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private weak var player: MusicPlayerViewController?
     private var accessGeneration: UUID?
     private var presentedError: String?
+    private var shownSettingsNotices = Set<UUID>()
+    private var settingsAlertNotice: UUID?
+    private weak var settingsAlert: UIAlertController?
     private var startupErrorAcknowledged = false
     private var filmNavigation: Task<Void, Never>?
     private weak var filmPlayer: FilmPlayerViewController?
@@ -446,6 +449,12 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     private func showPendingError() {
+        let retained = Set(assembly.music?.settingsReceipts.unknown.map(\.id) ?? [])
+        shownSettingsNotices.formIntersection(retained)
+        if let id = settingsAlertNotice, !retained.contains(id) {
+            settingsAlert?.dismiss(animated: false)
+            settingsAlert = nil; settingsAlertNotice = nil
+        }
         guard UIApplication.shared.applicationState == .active else { return }
         let top = presenter()
         let page = (top as? UINavigationController)?.topViewController ?? top
@@ -456,9 +465,21 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             })
             return
         }
-        guard let model = assembly.music, let error = model.error, presentedError != error else { return }
+        guard let model = assembly.music else { return }
+        if let notice = model.settingsReceipts.unknown.first(where: { !shownSettingsNotices.contains($0.id) }) {
+            if page.showError(notice.message, acknowledged: { [weak self] in
+                self?.settingsAlert = nil; self?.settingsAlertNotice = nil
+                self?.showPendingError()
+            }) {
+                shownSettingsNotices.insert(notice.id)
+                settingsAlertNotice = notice.id
+                settingsAlert = page.presentedViewController as? UIAlertController
+            }
+            return
+        }
+        guard let error = model.notices.error, presentedError != error else { return }
         if page.showError(error, acknowledged: { [weak self, weak model] in
-               if model?.error == error { model?.error = nil }
+               if model?.notices.error == error { model?.notices.error = nil }
                self?.presentedError = nil
            }) {
             presentedError = error

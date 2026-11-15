@@ -7,6 +7,8 @@ using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Desktop;
+using MeowFilm.Media;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -19,6 +21,7 @@ public static class MusicQualityConsumerTests
         yield return Case("native settings resolve unknown CAS internally without a reload action", Unknown);
         yield return Case("native admitted immediate save physically drains before close", Close);
         yield return Case("authored original LX request receives master and 192k without official spatial mapping", RealLx);
+        yield return Case("long lived source choices and refresh send current repository material to authored LX", CurrentRecording);
     }
     private static TestCase Case(string name, Func<Task> run) => new("quality consumer " + name, () => Sta(run));
     private static void Check(bool value, string message = "quality consumer assertion") => QualityFixture.Check(value, message);
@@ -83,7 +86,7 @@ public static class MusicQualityConsumerTests
     {
         await using var f = new Scene(); await f.Module.InitializeAsync(default); await f.Module.ActivateQualitySettingsAsync();
         await Editable(f.Module);
-        f.Fixture.Store.FaultNamespace = "music.library.v1"; f.Fixture.Store.Fault = true; f.Fixture.Store.FaultAfter = true;
+        f.Fixture.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace; f.Fixture.Store.Fault = true; f.Fixture.Store.FaultAfter = true;
         await f.Module.SetPlaybackQualityRequestAsync("master"); await Editable(f.Module);
         Check(f.Module.CanEditQuality && f.Module.PlaybackQualityRequest == "master" &&
             f.Module.QualityStatus.Length == 0);
@@ -100,22 +103,27 @@ public static class MusicQualityConsumerTests
     {
         await using var f = new Scene(); await f.Module.InitializeAsync(default); await f.Module.ActivateQualitySettingsAsync();
         await Editable(f.Module);
-        f.Fixture.Store.HoldNamespace = "music.library.v1";
+        string before = f.Module.PlaybackQualityRequest;
+        int writes = f.Fixture.Store.Writes;
+        f.Fixture.Store.HoldNamespace = MeowFilm.Capabilities.Library.MusicLibraryOwner.DocumentNamespace;
         var save = f.Module.SetPlaybackQualityRequestAsync("auto");
         await f.Fixture.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var close = f.Module.PrepareShutdownAsync(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         Check(!save.IsCompleted && !close.IsCompleted, "physical durable write must still own input");
         f.Fixture.Store.Release.TrySetResult(); await Task.WhenAll(save, close);
-        Check(f.Module.QualityStatus.Length == 0 && f.Module.PlaybackQualityRequest == "auto",
-            "known committed receipt remains authoritative");
+        Check(f.Module.QualityStatus.Length == 0 && f.Module.PlaybackQualityRequest == before &&
+            f.Fixture.Store.Writes == writes + 1,
+            "the admitted save commits while its retired page keeps its prior projection");
         await f.Module.CancelShutdownPreparationAsync();
-        Check(f.Module.PlaybackQualityRequest == "auto");
+        await f.Module.ActivateQualitySettingsAsync();
+        Check(f.Module.PlaybackQualityRequest == "auto" && f.Fixture.Store.Writes == writes + 1,
+            "a fresh read adopts the committed policy without replaying the save");
     }
     private static async Task RealLx()
     {
         var store = new QualityFixture.DocumentStore();
         await using var runtime = new NativeMusicScriptTestRuntime();
-        await using var app = new MusicNativeApplication(store, runtime, new QualityFixture.RejectHttp());
+        await using var app = new MusicNativeApplication(store, runtime);
         async Task<JsonElement> Call(string method, object? p = null)
         {
             var r = await app.ExecuteAsync(method, p); Check(r.GetProperty("ok").GetBoolean(), method + r.GetRawText()); return r;
@@ -154,6 +162,155 @@ public static class MusicQualityConsumerTests
             await Task.Delay(1, timeout.Token);
         } while (true);
     }
+    private static async Task CurrentRecording()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var runtime = new NativeMusicScriptTestRuntime();
+        await using var app = new MusicNativeApplication(store, runtime);
+        var output = new SwitchingOutput();
+        await using var module = new MusicCapability(app, store, output, new Dialogs());
+        async Task<JsonElement> Call(string method, object? p = null)
+        {
+            var result = await app.ExecuteAsync(method, p);
+            Check(result.GetProperty("ok").GetBoolean(), method + ":" + result.GetRawText());
+            return result;
+        }
+        JsonObject Track(string title, double duration, long size, params string[] types) =>
+            MusicSongFixture.Online("wy", "current-recording", title, "Current artist", duration: duration,
+                native: new JsonObject { ["size"] = size,
+                    ["types"] = new JsonArray(types.Select(type => (JsonNode)new JsonObject { ["type"] = type }).ToArray()) });
+        var observation = Track("Original recording", 120, 1024, "320k");
+        runtime.Platform.OnRequest = (call, _) =>
+        {
+            Check(call.Platform == "wy", "only the selected WY recording may read the platform");
+            if (call.Operation == "chorus")
+            {
+                Check(call.Parameters.GetProperty("id").GetString() == "current-recording",
+                    "initial chorus belongs to the selected recording");
+                return Task.FromResult(JsonSerializer.SerializeToElement(new { platform = "wy", id = "current-recording",
+                    point = new { start = 30, end = 45 } }));
+            }
+            Check(call.Operation == "search" &&
+                call.Parameters.GetProperty("keyword").GetString() is "original" or "corrected" or "refreshed",
+                "only explicit catalog observations and the selected recording's chorus may read the platform");
+            return Task.FromResult(JsonSerializer.SerializeToElement(new { items = new[] { observation }, more = false }));
+        };
+        var original = (await Call("music.catalog.search", new { platform = "wy", keyword = "original", limit = 1 })).GetProperty("items")[0];
+        string songId = original.GetProperty("songId").GetString()!;
+        string key = original.GetProperty("sources")[0].GetProperty("sourceKey").GetString()!;
+        const string source = """
+            lx.on(lx.EVENT_NAMES.request,async ({info})=>{
+              if(!info.musicInfo.types.some(t=>t.type===info.type)) throw new Error('type mismatch');
+              return {url:'https://media.invalid/'+info.musicInfo.songmid+'/'+info.type,expiresAt:Date.now()+29000};
+            });
+            lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{
+              wy:{name:'current recording',type:'music',actions:['musicUrl'],qualitys:['320k','flac']}
+            }});
+            """;
+        var installed = await app.ImportSourceAsync(Encoding.UTF8.GetBytes(source), "current-recording.js");
+        Check(installed.GetProperty("ok").GetBoolean(), installed.GetRawText());
+        string installation = installed.GetProperty("item").GetProperty("installationId").GetString()!;
+        await Call("music.sources.enable", new { installationId = installation });
+        await Call("music.officialSources.settings.save", new { ifRevision = 0, enabled = Array.Empty<string>() });
+        await Call("music.settings.save", new { ifRevision = 0, lyrics = false });
+        await Call("music.queue.replace", new { songs = new[] { original, original }, index = 0 });
+        await module.InitializeAsync(default);
+        await module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+        await module.PlayQueueSurfaceItemAsync(module.QueueSurfaceRows.First());
+        Check(output.HasMedia && output.Opens == 1 && module.CanSwitchSource, "initial 320k playback:" + module.Status);
+        var chorusReady = QualityFixture.Gate();
+        void ChorusReady(object? sender, PropertyChangedEventArgs args)
+        {
+            if (args.PropertyName == nameof(MusicCapability.HasChorus) && module.HasChorus) chorusReady.TrySetResult();
+        }
+        module.PropertyChanged += ChorusReady;
+        try
+        {
+            output.Start();
+            if (module.HasChorus) chorusReady.TrySetResult();
+            await chorusReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally { module.PropertyChanged -= ChorusReady; }
+        Check(module.HasChorus && module.ChorusPositionSeconds == 30,
+            "the initial native playback must adopt its real official chorus before measuring metadata corrections");
+        await output.SeekAsync(29);
+        var initialQueue = await Call("music.queue.get");
+        var entries = initialQueue.GetProperty("entries");
+        Check(entries.GetArrayLength() == 2 && entries[0].GetProperty("id").GetString() != entries[1].GetProperty("id").GetString() &&
+            entries.EnumerateArray().All(entry => entry.GetProperty("song").GetProperty("songId").GetString() == songId));
+        Check((await Call("music.history.get", new { kind = "days" })).GetProperty("items").GetArrayLength() == 1,
+            "the initial real Started event must already own the one playback record");
+        async Task<string> Control()
+        {
+            var queue = JsonNode.Parse((await Call("music.queue.get")).GetRawText())!.AsObject();
+            foreach (var entry in queue["entries"]!.AsArray().OfType<JsonObject>()
+                .Append(queue["current"]!.AsObject()))
+                entry["song"] = new JsonObject { ["songId"] = entry["song"]!["songId"]!.DeepClone() };
+            var history = store.Root(MusicLibraryOwner.DocumentNamespace)["entries"]!.AsArray().Single(entry =>
+                entry!["key"]!.GetValue<string>() == new JsonArray("meowfilm", "music", 1, "local", "history").ToJsonString())!["value"]!;
+            return queue.ToJsonString() + history.ToJsonString();
+        }
+        string control = await Control();
+        var initialPlatformRequests = runtime.Platform.Requests.ToArray();
+        Check(initialPlatformRequests.Select(request => request.Platform + "/" + request.Operation)
+            .SequenceEqual(["wy/search", "wy/chorus"]),
+            "initial playback may only read its explicit catalog observation and selected recording's chorus");
+        module.OpenSourceChoices();
+        foreach (var _ in MusicQualityPolicy.SourceTiers) await module.LoadMoreSourcesAsync();
+        Check(!module.CanLoadMoreSources, "the old recording's browser has exhausted every declared group");
+        observation = Track("Corrected recording", 124, 4096, "320k", "flac");
+        var corrected = (await Call("music.catalog.search", new { platform = "wy", keyword = "corrected", limit = 1 })).GetProperty("items")[0];
+        Check(corrected.GetProperty("songId").GetString() == songId && corrected.GetProperty("baselineDuration").GetDouble() == 120 &&
+            module.CanLoadMoreSources, "new recording types become available to the same long lived session");
+        int resolves = runtime.Requests.Count(request => request.Method == "music.script.resolve");
+        await module.SwitchQualityAsync("lossless");
+        var dispatched = runtime.Requests.Where(request => request.Method == "music.script.resolve").ToArray();
+        Check(dispatched.Length == resolves + 1 && output.Commits == 1 && output.PositionSeconds == 29,
+            "a newly available flac quality hands off once without moving playback:" + module.Status);
+        void Material(JsonElement parameters, string name, double duration, long size)
+        {
+            var info = parameters.GetProperty("musicInfo");
+            Check(parameters.GetProperty("installationId").GetString() == installation &&
+                parameters.GetProperty("platform").GetString() == "wy" && parameters.GetProperty("quality").GetString() == "flac" &&
+                info.GetProperty("songmid").GetString() == "current-recording" &&
+                info.GetProperty("name").GetString() == name && info.GetProperty("duration").GetDouble() == duration &&
+                info.GetProperty("size").GetInt64() == size &&
+                info.GetProperty("types").EnumerateArray().Select(type => type.GetProperty("type").GetString()).SequenceEqual(["320k", "flac"]),
+                "the actual authored script request must use the current selected recording");
+        }
+        Material(dispatched.Last().Parameters, "Corrected recording", 124, 4096);
+        module.OpenSourceChoices();
+        var choice = module.SourceChoices.Single(row => row.Level == "flac" && row.Selectable);
+        observation = Track("Refreshed recording", 123, 8192, "320k", "flac");
+        var refreshed = (await Call("music.catalog.search", new { platform = "wy", keyword = "refreshed", limit = 1 })).GetProperty("items")[0];
+        resolves = dispatched.Length;
+        await module.SelectSourceChoiceAsync(choice);
+        dispatched = runtime.Requests.Where(request => request.Method == "music.script.resolve").ToArray();
+        Check(dispatched.Length == resolves + 1, "refresh asks only the selected installation and quality once");
+        Material(dispatched.Last().Parameters, "Refreshed recording", 123, 8192);
+        Check(module.Status == module.OperationErrorText(new MusicOperationException("QUALITY_CACHE_CHANGED")) &&
+            output.Commits == 1 && output.HasMedia && output.PositionSeconds == 29,
+            "changed recording material must not relax the accepted cache signature or replace the current output");
+        bool sameSongId = refreshed.GetProperty("songId").GetString() == songId;
+        bool sameBasis = refreshed.GetProperty("baselineDuration").GetDouble() == 120;
+        bool sameSourceKey = refreshed.GetProperty("sources")[0].GetProperty("sourceKey").GetString() == key;
+        bool sameControl = await Control() == control;
+        var platformRequests = runtime.Platform.Requests.ToArray();
+        var routes = platformRequests.Select(request => request.Platform + "/" + request.Operation).ToArray();
+        var searches = platformRequests.Where(request => request.Operation == "search")
+            .Select(request => request.Parameters.GetProperty("keyword").GetString()).ToArray();
+        string unchanged = $"songId={sameSongId}; baseline={sameBasis}; sourceKey={sameSourceKey}; " +
+            $"control={sameControl}; platformRequests={platformRequests.Length}; initialRequests={initialPlatformRequests.Length}; " +
+            $"routes={string.Join(",", routes)}";
+        Check(sameSongId, "metadata refresh must retain its permanent songId; " + unchanged);
+        Check(sameBasis, "metadata refresh must retain its first valid 120-second basis; " + unchanged);
+        Check(sameSourceKey, "metadata refresh must retain its selected sourceKey; " + unchanged);
+        Check(sameControl, "queue and complete persisted history must remain unchanged; " + unchanged);
+        Check(searches.SequenceEqual(["original", "corrected", "refreshed"]),
+            "all catalog reads must be the three explicit metadata observations, without any rediscovery; " + unchanged);
+        Check(routes.Skip(initialPlatformRequests.Length).SequenceEqual(["wy/search", "wy/search"]),
+            "after initial playback settles, metadata corrections and source selection must add only the two explicit catalog reads; " + unchanged);
+    }
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly QualityFixture Fixture = new();
@@ -184,33 +341,61 @@ public static class MusicQualityConsumerTests
         public bool Confirm(string message, string title) => true;
         public string[]? SelectAudioFiles() => null;
     }
-    private sealed class PlaybackOutput : IMusicPlayback
+    private class PlaybackOutput : IMusicPlayback
     {
         private CancellationTokenRegistration access;
         public string? OwnerId { get; private set; }
         public string? Identity { get; private set; }
         public bool HasMedia { get; private set; }
         public bool IsPlaying => false;
-        public double PositionSeconds => 0;
+        public double PositionSeconds { get; private set; }
         public double DurationSeconds => 120;
         public int Volume { get; set; } = 50;
         internal int Opens, Revocations;
-        public event PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
-        public event EventHandler? Started { add { } remove { } }
+        public event PropertyChangedEventHandler? PropertyChanged;
+        public event EventHandler? Started;
         public event EventHandler? Ended { add { } remove { } }
         public event EventHandler? Failed { add { } remove { } }
         public Task OpenAsync(string owner, string identity, Uri uri, string title, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
-            access.Dispose();
-            OwnerId = owner; Identity = identity; HasMedia = true; Opens++;
-            access = token.Register(() => { HasMedia = false; Revocations++; });
+            OwnerId = owner; Identity = identity; Opens++;
+            Adopt(token);
             return Task.CompletedTask;
+        }
+        protected void Adopt(CancellationToken token)
+        {
+            access.Dispose(); HasMedia = true;
+            access = token.Register(() => { HasMedia = false; Revocations++; });
+        }
+        internal void Start()
+        {
+            PropertyChanged?.Invoke(this, new(nameof(HasMedia)));
+            Started?.Invoke(this, EventArgs.Empty);
         }
         public Task PauseAsync() => Task.CompletedTask;
         public Task ResumeAsync() => Task.CompletedTask;
         public Task StopAsync() { access.Dispose(); HasMedia = false; return Task.CompletedTask; }
-        public Task SeekAsync(double seconds) => Task.CompletedTask;
+        public Task SeekAsync(double seconds) { PositionSeconds = seconds; return Task.CompletedTask; }
+    }
+    private sealed class SwitchingOutput : PlaybackOutput, INativePlaybackHandoff
+    {
+        private CancellationToken? prepared;
+        internal int Commits;
+        public double PreparedHandoffDurationSeconds => 120;
+        public Task StopOutputForHandoffAsync() => StopAsync();
+        public Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token)
+        { token.ThrowIfCancellationRequested(); prepared = token; return Task.CompletedTask; }
+        public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) =>
+            throw new InvalidOperationException("This current-recording case has no media file cache");
+        public Task CommitHandoffAsync(Action committed, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            (prepared ?? throw new InvalidOperationException("No prepared input")).ThrowIfCancellationRequested();
+            Adopt(prepared.Value); prepared = null; Commits++; committed();
+            return Task.CompletedTask;
+        }
+        public Task DiscardHandoffAsync() { prepared = null; return Task.CompletedTask; }
     }
     internal static async Task Sta(Func<Task> body)
     {

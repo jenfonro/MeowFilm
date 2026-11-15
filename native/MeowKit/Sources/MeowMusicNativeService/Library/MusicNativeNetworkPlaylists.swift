@@ -6,21 +6,9 @@ enum MusicNativeNetworkPlaylists {
     static func id(platform: String, remoteID: String) -> String {
         "network:" + MJ.strings([platform, remoteID]).json
     }
-    static func validateIdentity(platform: String, remoteID: String) throws {
-        guard let platform = MusicPublicBrowsePlatform(rawValue: platform) else { throw MusicServiceError.invalidRequest }
-        if [.netease, .qq, .kuwo].contains(platform) {
-            do { _ = try MusicPlatformProtocol.numericID(.string(remoteID)) }
-            catch { throw MusicServiceError.invalidRequest }
-        } else {
-            try musicRequire(remoteID.range(of: "^[A-Za-z0-9_-]{1,200}$", options: .regularExpression) != nil &&
-                (platform != .kugou || !remoteID.hasPrefix("id_")), .invalidRequest)
-        }
-    }
     static func row(_ collection: MusicPublicBrowseCollection) throws -> MJ {
         try musicRequire(collection.kind == .playlist, .unsupported)
-        try validateIdentity(platform: collection.platform.rawValue, remoteID: collection.nativeID)
-        _ = try musicText(collection.title, maximum: 600)
-        _ = try MJ.string(collection.creator).text(600, empty: true)
+        try musicRequire(!collection.nativeID.isEmpty)
         try musicRequire(collection.count == nil || collection.count! >= 0, .invalidRequest)
         return .obj([
             ("id", .string(id(platform: collection.platform.rawValue, remoteID: collection.nativeID))),
@@ -38,14 +26,12 @@ enum MusicNativeNetworkPlaylists {
             let fields = ["id", "platform", "remoteID", "name", "creator", "artwork", "count",
                           "revision", "present", "pending", "relation"]
             try row.requireFields(fields, required: fields)
-            do { try validateIdentity(platform: row["platform"].string, remoteID: row["remoteID"].string) }
-            catch { throw MusicServiceError.corruptDocument }
+            try musicRequire(MusicPublicBrowsePlatform(rawValue: row["platform"].string) != nil &&
+                row["remoteID"].isString && !row["remoteID"].string.isEmpty, .corruptDocument)
             try musicRequire(row["id"].string == id(platform: row["platform"].string, remoteID: row["remoteID"].string) &&
                 ids.insert(row["id"].string).inserted && row["revision"].isInteger && row["revision"].int > 0 &&
                 row["present"].isBool && row["pending"].isBool && row["name"].isString &&
-                !row["name"].string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-                row["name"].string.utf8.count <= 600 &&
-                row["creator"].isString && row["creator"].string.utf8.count <= 600 &&
+                row["creator"].isString &&
                 row["artwork"].isString && row["artwork"] == MusicModel.publicURL(row["artwork"]) &&
                 (row["count"] == .null || row["count"].isInteger && row["count"].int >= 0), .corruptDocument)
             let relation = row["relation"]
@@ -57,12 +43,7 @@ enum MusicNativeNetworkPlaylists {
                 try musicRequire(relation["accountId"].isString && !relation["accountId"].string.isEmpty &&
                     relation["accountId"] == library["accounts"][row["platform"].string] &&
                     relation["baseline"].isBool && relation["relationID"].isString &&
-                    relation["relationID"].string.utf8.count <= 256 &&
                     (!relation["baseline"].bool || !relation["relationID"].string.isEmpty), .corruptDocument)
-                if relation["baseline"].bool && row["platform"].string == "kg" {
-                    try musicRequire(relation["relationID"].string.range(of: "^1:[1-9][0-9]*$", options: .regularExpression) != nil,
-                                     .corruptDocument)
-                }
             }
         }
     }
@@ -97,7 +78,6 @@ extension NativeMusicService: MusicNetworkPlaylistServing {
                     existing["revision"] = .n(existing["revision"].int + 1)
                     references[index] = existing
                 } else {
-                    try musicRequire(library["collections"].array.count + references.count < 2000, .limit)
                     var added = row
                     // A removed unbound reference must not make an old handle current again.
                     added["revision"] = .n(library["revision"].int + 1)

@@ -156,7 +156,7 @@ public static partial class MusicCatalogPersonalTests
         var invalidated = new List<string>();
         f.App.AccountDetailsInvalidated += invalidated.Add;
         var held = f.App.HoldNext("music.catalog.playlist");
-        var expected = Enumerable.Range(0, 100).Select(i => S(Song("wy", i), "songId")).ToArray();
+        var expected = Enumerable.Range(0, 100).Select(i => Id("wy", i)).ToArray();
         Task reading = Task.CompletedTask;
         try
         {
@@ -172,7 +172,7 @@ public static partial class MusicCatalogPersonalTests
             Check(!reading.IsCompleted && f.Module.Songs.Count == 0, "the native read remains held without publishing its receipt");
             held.Release();
             await reading.WaitAsync(HomeGuard);
-            Check(f.Module.Songs.Select(song => song.Id).SequenceEqual(expected), "the fresh public playlist publishes its own first page");
+            Check(f.Module.Songs.Select(song => MusicSongFixture.NativeId(song.Raw)).SequenceEqual(expected), "the fresh public playlist publishes its own first page");
             Equal(1, Calls(f, "music.catalog.playlist"));
             Equal("wy", S(f.App.Last("music.catalog.playlist"), "platform"));
             Equal("801", S(f.App.Last("music.catalog.playlist"), "id"));
@@ -240,10 +240,10 @@ public static partial class MusicCatalogPersonalTests
             Equal(N(queue, "version"), N(tail, "version"));
             Equal((long)f.Platform.Total, N(queue, "total"));
             var entries = queue.GetProperty("entries").EnumerateArray().Concat(tail.GetProperty("entries").EnumerateArray());
-            Check(entries.Select(entry => S(entry.GetProperty("song"), "songId"))
-                .SequenceEqual(Enumerable.Range(0, f.Platform.Total).Select(i => S(Song("wy", i), "songId"))),
+            Check(entries.Select(entry => MusicSongFixture.NativeId(entry.GetProperty("song")))
+                .SequenceEqual(Enumerable.Range(0, f.Platform.Total).Select(i => Id("wy", i))),
                 "the committed queue contains every ordered playlist member, not only the first visible page");
-            Equal(S(Song("wy", 0), "songId"), S(queue.GetProperty("current").GetProperty("song"), "songId"));
+            Equal(Id("wy", 0), MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")));
             Equal(1, f.Output.Opens);
             Check(f.Output.HasMedia && !card.IsPreparing, "the completed native commit opens media and releases its card intent");
             Check(f.Module.IsCatalogHome, "direct public playback keeps the home route");
@@ -285,7 +285,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(1, Calls(f, "music.catalog.playlist.prepare"));
         Equal(1, Calls(f, "music.catalog.playlist.commit"));
         Equal(0, Calls(f, "music.queue.replace"));
-        Equal(0, f.Store.LibraryWrites);
+        Equal(1, f.Store.LibraryWrites);
         Equal(0, f.Output.Opens);
     }
 
@@ -450,7 +450,7 @@ public static partial class MusicCatalogPersonalTests
             Equal("", f.Module.Status);
             Equal(0, f.Store.LibraryWrites);
             Check(f.App.Authenticated, "optional cache failure cannot revoke the account");
-            var snapshot = await new MusicHomeSnapshotStore(f.Cache).ReadAsync();
+            var snapshot = await new MusicHomeSnapshotStore(f.Cache).ReadAsync(f.App.Library.SongSnapshot);
             Check(snapshot is not null && snapshot.Pages.Length == 1,
                 "successful upstream content remains available in cache memory");
             if (failure == "slow-write")
@@ -815,7 +815,7 @@ public static partial class MusicCatalogPersonalTests
     {
         await fixture.Cache.DrainAsync();
         await using var restored = new CacheDocumentStore(fixture.Store.CacheBacking);
-        var snapshot = await new MusicHomeSnapshotStore(restored).ReadAsync();
+        var snapshot = await new MusicHomeSnapshotStore(restored).ReadAsync(fixture.App.Library.SongSnapshot);
         Check(snapshot is not null && snapshot.Platform == "wy", "successful display is persisted with its platform");
         return string.Join(',', snapshot!.Pages.SelectMany(page => page.GetProperty("items").EnumerateArray())
             .Select(item => S(item, "name")));
@@ -827,7 +827,7 @@ public static partial class MusicCatalogPersonalTests
     {
         Equal(0, Calls(f, "music.catalog.playlist.commit"));
         Equal(0, Calls(f, "music.queue.replace"));
-        Equal(0, f.Store.LibraryWrites);
+        Equal(0, f.Store.QueueWrites);
         Equal(0, f.Output.Opens);
     }
     private static async Task CancelledHomeWait(Task work, CancellationToken token)

@@ -29,18 +29,14 @@ extension NativeMusicService: MusicRemoteQueueServing {
             return try await openHomeActionQueue(action, title: title)
         }
         guard let owner = accounts as? any MusicNativeAccountQueueProviding else { throw MusicServiceError.unavailable }
-        _ = try musicText(title, maximum: 600)
         let context: MusicRemoteQueueContext
         switch kind {
         case .collection(let id):
-            _ = try musicText(id, maximum: 64)
             context = .init(kind: id == "favorites" ? .favorites : .playlist, id: id, title: title, platform: platform.rawValue)
         case .recommendation(let kind):
-            let allowed = platform == .qq ? ["guess", "radar"] : ["daily", "fm"]
-            try musicRequire(allowed.contains(kind))
             context = .init(kind: kind == "fm" ? .fm : .recommendation, id: kind, title: title, platform: platform.rawValue)
         }
-        let opening = MusicAccountQueueOpening()
+        let opening = MusicAccountQueueOpening(), own = epoch
         do {
             let lease = try await work {
                 let value = try await owner.beginAccountQueue(platform: platform)
@@ -56,12 +52,13 @@ extension NativeMusicService: MusicRemoteQueueServing {
                 try lease.authorization.check()
                 let page = try await owner.accountQueuePage(lease, kind: kind, cursor: cursor)
                 try lease.authorization.check()
-                guard page.items.allSatisfy({ $0.platform == platform.rawValue }) else { throw MusicServiceError.invalidResponse }
                 return page
             }, validate: {
                 try lease.authorization.check(); try await owner.checkAccountQueue(lease); try lease.authorization.check()
             }, close: { await owner.endAccountQueue(lease) },
                 homeAction: platform == .netease && kind == .recommendation(kind: "daily") ? .daily(branch: .default) : nil)
+            _ = await bindQueueSource(source)
+            try check(own); try lease.authorization.check()
             _ = opening.finish()
             return source
         } catch {
@@ -72,21 +69,16 @@ extension NativeMusicService: MusicRemoteQueueServing {
     public func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
         try check(); try requirePlatform(source.context.platform)
         let own = epoch
-        let page = try await work { try await source.page(cursor: cursor) }
-        try source.authorization.check()
-        let songs = try page.items.map(MusicModel.normalize)
-        try await retainSongMetadata(songs)
+        _ = await bindQueueSource(source)
         try check(own); try source.authorization.check()
-        // Display handles remain short-lived; full queue collection below uses
-        // the source snapshot, not the 600-handle cache or just visible rows.
-        // The start pins the original member, not presentation-only additions.
-        return .init(items: try songs.map { try remember($0) },
-                     cursor: page.cursor, dailyStyle: page.dailyStyle)
+        let page = try await work { try await source.referencePage(cursor: cursor) }
+        try source.authorization.check()
+        let result = try metadataReferencePage(page)
+        try check(own); try source.authorization.check()
+        return result
     }
     func remoteContext(_ source: MusicRemoteQueueSource) throws -> MJ {
         let c = source.context
-        _ = try musicText(c.title, maximum: 600); _ = try musicText(c.id, maximum: 256)
-        _ = try musicText(c.platform, maximum: 32)
         // Account queues use "daily"; home actions use daily-<branch>:<SHA256>.
         // Only the exact NetEase recommendation descriptors carry this branch.
         let dailyBranch: MusicHomeAction.DailyBranch?
@@ -119,26 +111,16 @@ extension NativeMusicService: MusicRemoteQueueServing {
         let action = source.homeAction
         if source.context.kind == .fm { try musicRequire(action?.isPersonalFM == true, .invalidRequest) }
         let preference: (scope: String, value: MJ)?
-        if source.context.kind == .fm, accounts is any MusicNativeFMProviding {
-            let binding = try await currentHomeBinding()
-            let scope = try await fmPreferenceScope(binding)
-            try await checkHomeBinding(binding, epoch: own)
+        if source.context.kind == .fm, let scope = source.fmPreferenceScope {
             preference = (scope, try MJ.parse(JSONEncoder().encode(action!.fmConfiguration!)))
         } else { preference = nil }
-        let raw = try await work { try await source.completeTracks(intent: intent) }
-        try musicRequire(raw.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
-        let songs = try raw.map(MusicModel.normalize)
-        let recommendations = try raw.map(MusicNativeSimilarData.recommendation)
-        try musicRequire(songs.indices.contains(start.index) && !songs.isEmpty, .notFound)
-        let selected = songs[start.index]
-        let primary = try MusicModel.sources(selected).first
-        try musicRequire(musicSame(selected["songId"].string, start.songID) &&
-            primary != nil && primary == start.primarySource, .targetChanged)
+        _ = await bindQueueSource(source)
+        try check(own); try intent.check(); try source.authorization.check()
+        let references = try await work { try await source.completeReferences(intent: intent) }
+        try musicRequire(references.indices.contains(start.index) && !references.isEmpty, .notFound)
         try await work { try await source.validate() }
         try check(own); try intent.check(); try source.authorization.check()
         try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
-        try await retainSongMetadata(songs)
-        try check(own)
         var live: [String: MJ] = [:]
         let result = try source.authorization.perform {
             try intent.perform {
@@ -148,9 +130,10 @@ extension NativeMusicService: MusicRemoteQueueServing {
                         try musicRequire(similarMode.modeSelection == modeSelection, .targetChanged)
                     }
                     let old = d.queue
-                    let rows = try makeEntries(songs, queue: &d.queue, context: context)
+                    let songs = try references.map { try repositorySong($0.songID, d) }
+                    let rows = try makeEntries(songs, document: &d, context: context)
                     for i in rows.indices {
-                        if let value = recommendations[i] { live[rows[i]["id"].string] = value }
+                        if let value = references[i].recommendation { live[rows[i]["id"].string] = try MJ.parse(value) }
                     }
                     if !changingFM { archive(old, into: &d) }
                     d.queue["entries"] = .array((changingFM ? old["entries"].array : []) + rows); d.queue["currentId"] = rows[start.index]["id"]

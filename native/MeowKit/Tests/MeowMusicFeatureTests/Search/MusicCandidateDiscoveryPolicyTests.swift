@@ -17,15 +17,20 @@ final class MusicCandidateDiscoveryPolicyTests: XCTestCase {
     }
     func testAllKnownEditionsRotatePlatformsAndKeepExactScriptInstances() throws {
         var options: [MusicCandidateDiscoveryOption] = []
-        for n in 0..<14 { options.append(MusicCandidateDiscoveryFixture.option("script-\(n)", source: "tx-\(n)", qualities: ["flac"])) }
+        for n in 0..<24 { options.append(MusicCandidateDiscoveryFixture.option("script-\(n)", source: "tx-\(n)", qualities: ["flac"])) }
         options.append(MusicCandidateDiscoveryFixture.option("script-a", platform: "wy", source: "wy-1", qualities: ["flac"]))
         options.append(MusicCandidateDiscoveryFixture.option("script-b", platform: "wy", source: "wy-1", qualities: ["flac"]))
         let plan = try MusicCandidateDiscoveryPolicy().plan(MusicCandidateDiscoveryFixture.snapshot(options))
-        XCTAssertEqual(Set(plan.map(\.selection.sourceKey)).count, 15)
-        XCTAssertEqual(plan.count, 16)
+        XCTAssertEqual(Set(plan.map(\.selection.sourceKey)).count, 25)
+        XCTAssertEqual(plan.count, 26)
         XCTAssertTrue(plan.contains { $0.selection.siteId == "wy" && $0.selection.installationId == "script-a" })
         XCTAssertTrue(plan.contains { $0.selection.siteId == "wy" && $0.selection.installationId == "script-b" })
         XCTAssertEqual(Set(plan.prefix(2).map(\.selection.siteId)), ["tx", "wy"])
+    }
+    func testAdditionalUnselectedQualityDeclarationsDoNotRejectAnAvailableKnownQuality() throws {
+        let option = MusicCandidateDiscoveryFixture.option(qualities: (0..<20).map { "provider-quality-\($0)" } + ["128k"])
+        let plan = try MusicCandidateDiscoveryPolicy().plan(MusicCandidateDiscoveryFixture.snapshot([option]))
+        XCTAssertEqual(plan.map(\.quality), ["128k"])
     }
     func testPreferredMustMatchVersionRevisionAndQualityNotOnlyScriptName() throws {
         let one = MusicCandidateDiscoveryFixture.option("a", qualities: ["flac"])

@@ -1,6 +1,4 @@
 using System.Collections.Concurrent;
-using System.Net;
-using System.Net.Http;
 using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.Platform.Storage;
@@ -77,7 +75,8 @@ public static partial class MusicUiTests
         private string? songQueryId;
         private PublicSearchScene()
         {
-            App = new(store, Runtime, Http);
+            Runtime.Platform.OnRequest = Http.Read;
+            App = new(store, Runtime);
             App.SearchChanged += snapshot =>
             {
                 if (snapshot.GetProperty("kind").GetString() == "songs")
@@ -122,56 +121,35 @@ public static partial class MusicUiTests
             finally { await Runtime.DisposeAsync(); await store.DisposeAsync(); }
         }
     }
-    private sealed class PublicSearchHttp : HttpMessageHandler
+    private sealed class PublicSearchHttp
     {
         internal readonly ConcurrentQueue<int> MgPages = new();
         internal int KwRequests;
         internal bool FailKw;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        internal Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
-            True(!request.Headers.Contains("Cookie") && !request.Headers.Contains("Authorization"), "anonymous public read");
-            var uri = request.RequestUri!;
+            True(call.Operation == "search", "canonical platform search");
             object result;
-            if (uri.Host == "search.kuwo.cn" && uri.AbsolutePath == "/r.s")
+            if (call.Platform == "kw")
             {
                 Interlocked.Increment(ref KwRequests);
-                if (FailKw)
-                {
-                    FailKw = false;
-                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{}") });
-                }
-                result = new
-                {
-                    TOTAL = "1", SHOW = "1", abslist = new[]
-                    {
-                        new { id = "9001", name = "酷我合成歌曲", artist = "合成歌手", album = "合成专辑", albumid = "2",
-                            duration = 180, N_MINFO = "level:p,bitrate:128,format:mp3,size:3.2Mb" }
-                    }
-                };
+                if (FailKw) { FailKw = false; throw new MeowFilm.Capabilities.Platforms.MusicPlatformException("UPSTREAM_ERROR"); }
+                result = new { platform = "kw", kind = "songs", items = new[] { MusicSongFixture.Online("kw", "9001", "酷我合成歌曲", "合成歌手", "合成专辑") },
+                    more = false, continuation = (object?)null };
             }
             else
             {
-                True(uri.Host == "jadeite.migu.cn" && uri.AbsolutePath == "/music_search/v3/search/searchAll", "exact MG search");
-                var query = uri.Query.TrimStart('?').Split('&').Select(p => p.Split('=', 2))
-                    .ToDictionary(p => Uri.UnescapeDataString(p[0]), p => Uri.UnescapeDataString(p[1]));
-                Equal("30", query["pageSize"]);
-                int page = int.Parse(query["pageNo"]); True(page is 1 or 2, "native page, not expanded-item offset");
-                MgPages.Enqueue(page);
-                var groups = page == 1 ? Enumerable.Range(1, 30)
-                    .Select(i => i == 1 ? new[] { Track(i), Track(1001) } : new[] { Track(i) }).ToArray()
-                    : new[] { new[] { Track(31), Track(1002) } };
-                result = new { code = "000000", songResultData = new { totalCount = 31, resultList = groups } };
+                Equal("mg", call.Platform); int page = call.Parameters.GetProperty("page").GetInt32();
+                True(page is 1 or 2, "native page, not expanded-item offset"); MgPages.Enqueue(page);
+                int[] ids = page == 1 ? Enumerable.Range(1, 30).SelectMany(i => i == 1 ? new[] { 1, 1001 } : new[] { i }).ToArray() : [31, 1002];
+                result = new { platform = "mg", kind = "songs", items = ids.Select(Track).ToArray(), more = page == 1,
+                    continuation = page == 1 ? new { page = 2 } : null };
             }
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            { Content = new StringContent(JsonSerializer.Serialize(result), System.Text.Encoding.UTF8, "application/json") });
+            return Task.FromResult(MusicPlatformRuntimeFixture.Json(result));
         }
-        private static object Track(int i) => new
-        {
-            songId = "S" + i, copyrightId = "C" + i, songName = "咪咕版本 " + i, album = "咪咕合成专辑",
-            singerList = new[] { new { name = "咪咕合成歌手" } }, albumId = "A1", duration = 180, contentId = "CONTENT" + i,
-            audioFormats = new[] { new { formatType = "HQ", asize = 1048576, hash = "synthetic-only",
-                url = "https://media.invalid/audio?token=DO_NOT_PERSIST" } }
-        };
+        private static System.Text.Json.Nodes.JsonObject Track(int i) => MusicSongFixture.Online("mg", "S" + i,
+            "咪咕版本 " + i, "咪咕合成歌手", "咪咕合成专辑", native: new() {
+                ["songId"] = "S" + i, ["copyrightId"] = "C" + i, ["contentId"] = "CONTENT" + i, ["albumId"] = "A1" });
     }
 }

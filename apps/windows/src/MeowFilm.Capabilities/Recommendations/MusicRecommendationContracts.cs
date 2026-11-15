@@ -74,21 +74,17 @@ internal static class RecommendationJson
     internal static JsonElement Json(object? value) => value is JsonElement e ? e.Clone() : JsonSerializer.SerializeToElement(value);
     internal static void Require(bool condition, string code = "INVALID_REQUEST")
     { if (!condition) throw new RecommendationException(code); }
-    internal static void Fields(JsonElement p, string allowed, string required = "")
+    internal static void Fields(JsonElement p, string required = "")
     {
         Require(p.ValueKind == JsonValueKind.Object);
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var property in p.EnumerateObject())
-            Require(names.Add(property.Name) && allowed.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains(property.Name));
-        foreach (string field in required.Split(' ', StringSplitOptions.RemoveEmptyEntries)) Require(names.Contains(field));
+        foreach (string field in required.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            Require(p.TryGetProperty(field, out _));
     }
-    internal static string Text(JsonElement p, string key, string fallback = "", int max = 512)
+    internal static string Text(JsonElement p, string key, string fallback = "")
     {
         if (!p.TryGetProperty(key, out var v)) return fallback;
         Require(v.ValueKind == JsonValueKind.String);
-        string value = v.GetString()!;
-        Require(value.Length <= max && !value.Any(char.IsControl));
-        return value;
+        return v.GetString()!;
     }
     internal static bool Bool(JsonElement p, string key, bool fallback = false)
     {
@@ -106,10 +102,15 @@ internal static class RecommendationJson
         Require(value.ValueKind == JsonValueKind.Object, "INVALID_RESPONSE");
         Require(value.TryGetProperty("ok", out var ok) &&
             ok.ValueKind is JsonValueKind.True or JsonValueKind.False, "INVALID_RESPONSE");
-        if (!ok.GetBoolean()) throw new RecommendationException(Text(value, "code", "INVALID_RESPONSE", 128));
+        if (!ok.GetBoolean()) throw new RecommendationException(Text(value, "code", "INVALID_RESPONSE"));
         return value;
     }
-    internal static string NativeId(JsonElement song) => Feedback.MusicFeedbackIdentity.Resolve(song, "wy")?.Id ?? "";
-    internal static bool ValidId(string id) => id.Length is > 0 and <= 16 && id[0] != '0' &&
-        id.All(char.IsAsciiDigit) && long.TryParse(id, out var n) && n is > 0 and <= 9007199254740991;
+    internal static string NativeId(JsonElement song)
+    {
+        if (!song.TryGetProperty("sources", out var sources)) return "";
+        foreach (var source in sources.EnumerateArray())
+            if (source.TryGetProperty("source", out var platform) && platform.GetString() == "wy")
+                return Library.NativeMusicSong.NativeId(System.Text.Json.Nodes.JsonNode.Parse(source.GetRawText())!.AsObject());
+        return "";
+    }
 }

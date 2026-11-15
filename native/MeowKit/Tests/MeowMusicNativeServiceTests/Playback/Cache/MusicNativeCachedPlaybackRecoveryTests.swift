@@ -4,6 +4,81 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeCachedPlaybackRecoveryTests: XCTestCase {
+    func testFinalScopeHandoffUsesCurrentMetadataWithoutRepeatingResolveOrHistory() async throws {
+        for metadata in [101, 130] {
+            let f = try await MusicRecoveryTestFixture.make(cached: true, duration: 100)
+            _ = try await f.service.record(.init(attemptId: f.original.attemptId, occurrenceId: f.original.occurrenceId,
+                resourceId: f.original.resourceId, kind: .playing, position: 24, duration: 100))
+            let history = try f.historyDocument(), before = try await f.service.read()
+            let gate = MusicNativeCandidateDiscoveryBarrier()
+            await f.accounts.setDuration(100)
+            await f.accounts.holdScopeCheckAfterResolve(gate)
+            let task = Task { try await f.service.recoverCachedPlayback(previousAttemptID: f.original.attemptId,
+                selection: f.selection, position: 29) }
+            await gate.started(1)
+            let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                "tx", id: "101", title: "Final handoff title", duration: metadata))
+            _ = try await f.service.adoptSongs([corrected], authoritative: true)
+            await gate.release()
+            var expectedPlayback = before.playback
+            if metadata == 101 {
+                let result = try await task.value
+                XCTAssertEqual(result.candidate.title, "Final handoff title")
+                XCTAssertEqual(result.candidate.startPosition, 29)
+                XCTAssertEqual(result.selection, f.selection)
+                let prepared = try await f.service.read()
+                XCTAssertEqual(prepared.queue, before.queue)
+                XCTAssertEqual(prepared.playback, before.playback)
+                XCTAssertEqual(try f.historyDocument(), history)
+                _ = try await f.service.record(.init(attemptId: result.candidate.attemptId,
+                    occurrenceId: result.candidate.occurrenceId, resourceId: result.candidate.resourceId,
+                    kind: .playing, position: 29, duration: 100))
+                expectedPlayback["position"]["seconds"] = .number(29)
+            } else {
+                do { _ = try await task.value; XCTFail("Final authorization cannot admit outdated media") }
+                catch { XCTAssertEqual(MusicServiceError.sanitized(error), .invalidMediaCandidate) }
+            }
+            let after = try await f.service.read(), counts = await f.accounts.counts()
+            XCTAssertEqual(after.queue, before.queue)
+            XCTAssertEqual(after.playback, expectedPlayback)
+            XCTAssertEqual(try f.historyDocument(), history)
+            XCTAssertEqual(counts.resolves, 1)
+            XCTAssertEqual(counts.refreshes, 0)
+            await f.service.close()
+        }
+    }
+
+    func testNormalDurationCorrectionKeepsCompleteFileRecoveryAndAcceptedStartedFact() async throws {
+        for manual in [false, true] {
+            let f = try await MusicRecoveryTestFixture.make(cached: true, duration: 100)
+            _ = try await f.service.record(.init(attemptId: f.original.attemptId, occurrenceId: f.original.occurrenceId,
+                resourceId: f.original.resourceId, kind: .playing, position: 24, duration: 100))
+            let history = try f.historyDocument()
+            let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                "tx", id: "101", title: "Current complete-file title", duration: 101))
+            _ = try await f.service.adoptSongs([corrected], authoritative: true)
+            await f.accounts.setDuration(101)
+            let before = try await f.service.read()
+            let result = try await f.service.recoverCachedPlayback(previousAttemptID: f.original.attemptId,
+                selection: manual ? f.selection : nil, position: 29)
+            XCTAssertFalse(result.candidate.isCachedAudio)
+            XCTAssertEqual(result.candidate.title, "Current complete-file title")
+            XCTAssertEqual(result.candidate.occurrenceId, f.original.occurrenceId)
+            XCTAssertEqual(result.candidate.startPosition, 29)
+            XCTAssertEqual(result.selection, f.selection)
+            let after = try await f.service.read(), counts = await f.accounts.counts()
+            XCTAssertEqual(after.queue, before.queue)
+            XCTAssertEqual(after.playback, before.playback)
+            XCTAssertEqual(try f.historyDocument(), history)
+            XCTAssertEqual(counts.resolves, 1)
+            XCTAssertEqual(counts.refreshes, 0)
+            _ = try await f.service.record(.init(attemptId: result.candidate.attemptId, occurrenceId: result.candidate.occurrenceId,
+                resourceId: result.candidate.resourceId, kind: .playing, position: 29, duration: 101))
+            XCTAssertEqual(try f.historyDocument(), history, "The accepted playing fact does not create a second history item")
+            await f.service.close()
+        }
+    }
+
     func testUnpinnedCompleteCacheKeepsItsExistingCachedSelectionWithoutAnAccountResolve() async throws {
         let f = try await MusicRecoveryTestFixture.make(cached: true)
         let hit = try await f.service.cachedPlayback(attemptID: UUID().uuidString.lowercased(),

@@ -6,7 +6,7 @@ final class MusicNativeLibraryTests: XCTestCase {
     func testUnboundMemberCancellationKeepsOnlyRetainedFavoritesAcrossColdOpen() async throws {
         let a = NativeSyncFixture.member("101"), b = NativeSyncFixture.member("102")
         let store = try NativeSyncFixture.store([a, b]), service = try await NativeMusicFixture.service(store)
-        let refs = try NativeSyncFixture.refs([a, b])
+        let refs = try await NativeSyncFixture.refs([a, b], service: service)
         let initial = try await service.collections()
         let favorites = try XCTUnwrap(initial.first { $0.kind == "favorites" })
         let added = try await service.editPlaylist(favorites, name: nil, refs: refs, order: nil)

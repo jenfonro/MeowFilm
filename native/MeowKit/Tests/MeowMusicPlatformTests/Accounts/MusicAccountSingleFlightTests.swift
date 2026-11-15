@@ -17,6 +17,38 @@ private final class SingleFlightTestJoins: @unchecked Sendable {
 }
 
 final class MusicAccountSingleFlightTests: XCTestCase {
+    @MainActor func testRetiredPhysicalFlightRemainsPendingWithoutFinishingItsReplacement() async throws {
+        let pool = MusicAccountSingleFlight<String, Int>()
+        let oldGate = MusicAccountQueueOwnerGate("retired physical read")
+        let newGate = MusicAccountQueueOwnerGate("replacement physical read")
+        let old = MusicAccountQueueOwnerCall("cancelled waiter") {
+            try await pool.value(for: "same") { await oldGate.wait(); return 1 }
+        }
+        defer { old.cancel(); Task { await oldGate.release(); await newGate.release() } }
+        await fulfillment(of: [oldGate.entered], timeout: 3)
+        old.cancel()
+        await fulfillment(of: [old.finished], timeout: 3)
+        XCTAssertThrowsError(try old.value()) { XCTAssertEqual(MusicServiceError.sanitized($0), .cancelled) }
+        XCTAssertEqual(pool.waiterCount, 0)
+        XCTAssertEqual(pool.inFlight, 1, "Cancelling the final waiter is not physical completion")
+        let current = MusicAccountQueueOwnerCall("current read") {
+            try await pool.value(for: "same") { await newGate.wait(); return 2 }
+        }
+        defer { current.cancel() }
+        await fulfillment(of: [newGate.entered], timeout: 3)
+        XCTAssertEqual(pool.inFlight, 2)
+        await oldGate.release()
+        let oldDrained = expectation(for: NSPredicate { _, _ in pool.inFlight == 1 }, evaluatedWith: nil)
+        await fulfillment(of: [oldDrained, oldGate.departed], timeout: 3)
+        XCTAssertEqual(pool.waiterCount, 1)
+        XCTAssertNil(current.result, "An old result cannot complete a replacement registration")
+        await newGate.release()
+        await fulfillment(of: [current.finished, newGate.departed], timeout: 3)
+        XCTAssertEqual(try current.value(), 2)
+        XCTAssertEqual(pool.inFlight, 0)
+        XCTAssertEqual(pool.waiterCount, 0)
+    }
+
     func testAuthenticationRevocationDoesNotSelfCancelBeforeCleanupAndSharesPreciseFailure() async throws {
         let joined = expectation(description: "three waiters"); joined.expectedFulfillmentCount = 3
         let freshJoined = expectation(description: "new request after failed flight retired")
@@ -130,8 +162,7 @@ final class MusicAccountSingleFlightTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1000)
         let url = try XCTUnwrap(URL(string: "https://m801.music.126.net/rejected.mp3"))
         cache.reject(url, for: key, at: now)
-        cache.put(.object(["url": .string(url.absoluteString), "expiresAt": .null,
-                           "qualityVerified": .bool(false)]), for: key, at: now)
+        cache.put(.object(["url": .string(url.absoluteString), "expiresAt": .null]), for: key, at: now)
         XCTAssertNil(cache.value(for: key, at: now))
         XCTAssertTrue(cache.isRejected(url, for: key, at: now))
         XCTAssertFalse(cache.isRejected(url, for: key, at: now.addingTimeInterval(121)))

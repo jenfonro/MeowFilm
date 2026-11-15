@@ -6,7 +6,13 @@ import MeowJSON
 @testable import MeowMusicPlatform
 
 // Only synthetic stores/providers. No URLSession, real accounts or playback.
-private actor RecoveryAccountProvider: MusicAccountProvider {
+private actor RecoveryAccountProvider: MusicAccountProvider, MusicAccountSessionPublishing {
+    private var publishedCredential: AccountCredential?
+    func publish(_ credential: AccountCredential, scope: String, generation: Int,
+                 authorization: MusicQueueAuthorization) throws {
+        try authorization.check(); publishedCredential = credential
+    }
+
     let platform: MusicAccountPlatform
     var calls: [String] = []
     var qualities = ["128k", "320k"]
@@ -22,14 +28,14 @@ private actor RecoveryAccountProvider: MusicAccountProvider {
     func holdVerify(_ value: MusicAccountTestGate) { verifyGate = value }
     func failCapabilities(_ value: MusicServiceError) { capabilityError = value }
     func nativeID(_ credential: AccountCredential) throws -> String {
-        try MusicQQWire.string(MusicQQWire.decode(credential.dataRepresentation())["uid"])
+        try MusicAccountFixture.userID(credential)
     }
-    func verify(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         calls.append("verify")
         if let gate = verifyGate { verifyGate = nil; await gate.wait() }
         return .init(credential: credential, nickname: "合成账号", nativeID: try nativeID(credential))
     }
-    func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         calls.append("refresh")
         return .init(credential: credential, nickname: "合成账号", nativeID: try nativeID(credential))
     }
@@ -37,26 +43,27 @@ private actor RecoveryAccountProvider: MusicAccountProvider {
         calls.append("qr")
         return .init(id: id, platform: platform, image: Data([1]), expiresAt: .distantFuture)
     }
-    func pollQR(id: UUID) -> MusicQQLoginResult { .init(progress: .waiting, verified: nil) }
+    func pollQR(id: UUID) -> MusicAccountLoginResult { .init(progress: .waiting, verified: nil) }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) throws -> MusicQQRecommendation {
+    func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation {
         throw MusicServiceError.unsupported
     }
-    func collectionRows(credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String, credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func capabilities(mid: String, credential: AccountCredential) async throws -> [String] {
-        calls.append("capabilities:\(mid):\(try nativeID(credential))")
+    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func capabilities(mid: String) async throws -> [String] {
+        calls.append("capabilities:\(mid):\(try nativeID(publishedCredential!))")
         let result = qualities, failure = capabilityError
         if let gate = capabilityGate { capabilityGate = nil; await gate.wait() }
         if let failure { throw failure }
         return result
     }
-    func resolve(mid: String, quality: String, credential: AccountCredential) async throws -> JSONValue {
-        calls.append("resolve:\(mid):\(quality):\(try nativeID(credential))")
+    func resolve(mid: String, quality: String) async throws -> JSONValue {
+        calls.append("resolve:\(mid):\(quality):\(try nativeID(publishedCredential!))")
         if let gate = resolveGate { resolveGate = nil; await gate.wait() }
         return .object(["url": .string("https://media.example.invalid/recovered.mp3"),
-                        "qualityVerified": .bool(false), "expiresAt": .null])
+                        "requestQuality": .string(quality), "actualQuality": .string(quality),
+                        "full": .bool(true), "expiresAt": .null])
     }
 }
 
@@ -70,7 +77,7 @@ private struct RecoveryAccountFixture {
     let service: NativeMusicAccountService
     init() throws {
         let accounts = AccountSessionCoordinator(store: store)
-        store.seed(try MusicUpdateProvider.credential(), for: identity)
+        store.seed(try MusicAccountFixture.credential(42, platform: .netease), for: identity)
         store.seed(try MusicUpdateProvider.credential("other", uid: "99"), for: otherIdentity)
         service = .init(accounts: accounts, scopes: [.netease: identity, .qq: otherIdentity],
                         providers: [.netease: provider, .qq: otherProvider], clock: { [clock] in clock.now() })
@@ -224,7 +231,7 @@ private struct RecoveryAccountFixture {
         XCTAssertEqual(f.store.counts().reads, reads)
         captured = await f.provider.captured(); XCTAssertEqual(captured, calls)
 
-        f.store.seed(try MusicUpdateProvider.credential("new-account", uid: "99"), for: f.identity)
+        f.store.seed(try MusicAccountFixture.credential(99, platform: .netease), for: f.identity)
         _ = try await f.service.validate(platform: .netease)
         _ = try await f.selection()
         reads = f.store.counts().reads; calls = await f.provider.captured()
@@ -261,6 +268,8 @@ private struct RecoveryAccountFixture {
         let others = await f.otherProvider.captured(); XCTAssertTrue(others.isEmpty)
         let audio = try await f.service.nativeRefreshAudio(platform: .netease, nativeID: "101", selection: selected, rejectedURL: rejected)
         XCTAssertNotEqual(audio.url, rejected)
+        XCTAssertEqual(audio.delivery?.quality, "320k")
+        XCTAssertTrue(audio.fileCachePolicy.allowed)
         f.clock.advance(121)
         let reads = f.store.counts().reads, resolved = await f.provider.captured()
         do {
@@ -320,11 +329,11 @@ private struct RecoveryAccountFixture {
             let f = try RecoveryAccountFixture(); try await f.enable()
             let selected = try await f.selection(), gate = MusicAccountTestGate()
             if during { await f.provider.holdCapabilities(gate) }
-            if !during { f.store.seed(try MusicUpdateProvider.credential("external"), for: f.identity) }
+            if !during { f.store.seed(try MusicAccountFixture.credential(42, platform: .netease), for: f.identity) }
             let pending = Task { try await f.service.nativeRecoveryOptions(platform: .netease, nativeID: "101", selection: selected) }
             if during {
                 await gate.started()
-                f.store.seed(try MusicUpdateProvider.credential("external"), for: f.identity)
+                f.store.seed(try MusicAccountFixture.credential(42, platform: .netease), for: f.identity)
                 await gate.release()
             }
             do { _ = try await pending.value; XCTFail("Replaced credential authorized recovery") } catch {}

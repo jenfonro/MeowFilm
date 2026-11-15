@@ -1,219 +1,149 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 final class MusicNativeArtistActivityTests: XCTestCase {
-    private func parse(_ json: String) throws -> MusicNativePublicBrowseDiscovery {
-        try MusicNativePublicBrowseParser.artistActivity(MJ.parse(Data(json.utf8)))
+    private let channel = MusicPublicBrowseChannel(id: "artist-activity", title: "艺人新作", kind: .artistActivity)
+    private func album(_ id: String = "42", count: Int? = 8, title: String = "新专辑",
+                       label: String = "新专辑", cover: String = "https://p1.music.126.net/album.jpg") -> RuntimeValue {
+        .object(["key": .string("wy:album:" + id), "id": .string(id), "name": .string(title),
+            "creator": .string("艺人"), "cover": .string(cover), "coverLabel": .string(label),
+            "count": count.map { .number(Double($0)) } ?? .null,
+            "action": .object(["type": .string("album")])])
     }
-
-    private func album(_ item: MusicNativePublicBrowseItem,
-                       file: StaticString = #filePath, line: UInt = #line) throws -> MusicPublicBrowseCollection {
-        guard case .collection(let collection) = item.content else {
-            XCTFail("An actual album must open the shared collection detail", file: file, line: line)
-            throw MusicServiceError.invalidResponse
-        }
-        XCTAssertEqual(collection.kind, .album, file: file, line: line)
-        XCTAssertEqual(collection.platform, .netease, file: file, line: line)
-        return collection
+    private func page(_ items: [RuntimeValue], before: String? = nil) -> RuntimeValue {
+        .object(["sections": .array([.object(["id": .string("artists"), "title": .string("艺人新作"),
+            "layout": .string("artist-updates"), "items": .array(items),
+            "avatars": .array([.string("https://p1.music.126.net/avatar.jpg")]),
+            "action": .object(["type": .string("channel"), "channel": .object([
+                "id": .string("artist-activity"), "name": .string("艺人新作"), "channelKind": .string("artist-activity")])])])]),
+            "continuation": before.map { .object(["before": .string($0)]) } ?? .null])
     }
-
-    func testMultiSongAlbumKeepsSummaryAndReportedCountInsteadOfPreviewLength() throws {
-        let page = try parse(#"""
-        {"data":{"title":"艺人新作","newWorks":[{"publishTime":1234,"info":{
-          "blockType":"album","albumId":42,"albumSongCount":8,
-          "blockTitle":{"resourceName":"新专辑","artistName":"艺人",
-            "resourcePicUrl":"https://p1.music.126.net/album.jpg","imgUrl":"https://p1.music.126.net/avatar.jpg"},
-          "songLists":[{"id":41,"name":"预览曲","al":{"id":42,"name":"曲目附带专辑"}}]
-        }}]}}
-        """#)
-        let section = try XCTUnwrap(page.sections.first)
-        XCTAssertEqual(page.sections.count, 1)
-        XCTAssertEqual(section.title, "艺人新作")
-        XCTAssertEqual(section.layout, .artistUpdates)
-        XCTAssertEqual(section.channel?.kind, .artistActivity)
-        XCTAssertEqual(section.items.count, 1)
-        let item = try XCTUnwrap(section.items.first), collection = try album(item)
-        XCTAssertEqual(item.id, "wy:album:42")
-        XCTAssertEqual(collection.nativeID, "42")
-        XCTAssertEqual(collection.count, 8)
-        XCTAssertEqual(collection.title, "新专辑")
-        XCTAssertEqual(collection.creator, "艺人")
-        XCTAssertEqual(collection.artwork?.absoluteString, "https://p1.music.126.net/album.jpg")
-        XCTAssertEqual(item.title, collection.title)
-        XCTAssertEqual(item.subtitle, collection.creator)
-        XCTAssertEqual(item.artwork, collection.artwork)
-        XCTAssertEqual(item.coverLabel, "新专辑")
+    private func collection(_ item: MusicPublicBrowseItem) throws -> MusicPublicBrowseCollection {
+        guard case .collection(let value) = item.content else { throw MusicServiceError.invalidResponse }
+        XCTAssertEqual(value.kind, .album); XCTAssertEqual(value.platform, .netease)
+        return value
+    }
+    private func load(_ value: RuntimeValue) async throws -> (NativeMusicService, ArtistActivityAccount, MusicPublicBrowsePage) {
+        let account = ArtistActivityAccount([value]), service = try await NativeMusicFixture.service(accounts: account)
+        return (service, account, try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil))
+    }
+    func testMultiSongAlbumKeepsSummaryAndReportedCountInsteadOfPreviewLength() async throws {
+        let (service, account, result) = try await load(page([album()]))
+        let section = try XCTUnwrap(result.sections.first), item = try XCTUnwrap(section.items.first)
+        let value = try collection(item)
+        XCTAssertEqual(value.count, 8); XCTAssertEqual(value.nativeID, "42"); XCTAssertEqual(value.title, "新专辑")
+        XCTAssertEqual(value.creator, "艺人"); XCTAssertEqual(value.artwork, item.artwork)
+        XCTAssertEqual(section.layout, .artistUpdates); XCTAssertEqual(section.channel?.kind, .artistActivity)
         XCTAssertEqual(section.avatars.map(\.absoluteString), ["https://p1.music.126.net/avatar.jpg"])
+        XCTAssertEqual(item.id, "wy:album:42"); XCTAssertEqual(item.coverLabel, "新专辑")
+        let calls = await account.requests; XCTAssertEqual(calls, [.artistActivity()])
+        await service.close()
     }
-
-    func testOneSongAlbumKeepsAlbumIdentityAndSingleBadgeEvenInSongBlock() throws {
-        for kind in ["song", "album"] {
-            let page = try parse("""
-            {"newWorks":[{"info":{"blockType":"\(kind)","albumId":"42","albumSongCount":1,
-              "blockTitle":{"resourceName":"单曲专辑","artistName":"艺人"},
-              "songLists":[{"id":41,"name":"单曲","al":{"id":42,"name":"单曲专辑"}}]
-            }}]}
-            """)
-            let item = try XCTUnwrap(page.sections.first?.items.first), collection = try album(item)
-            XCTAssertEqual(collection.nativeID, "42")
-            XCTAssertEqual(collection.title, "单曲专辑")
-            XCTAssertEqual(collection.count, 1)
-            XCTAssertEqual(item.coverLabel, "新单曲")
+    func testOneSongAlbumKeepsAlbumIdentityAndCanonicalSingleBadge() async throws {
+        let (service, _, result) = try await load(page([album(count: 1, title: "单曲专辑", label: "新单曲")]))
+        let item = try XCTUnwrap(result.sections.first?.items.first), value = try collection(item)
+        XCTAssertEqual(value.nativeID, "42"); XCTAssertEqual(value.count, 1); XCTAssertEqual(item.coverLabel, "新单曲")
+        await service.close()
+    }
+    func testAbsentOptionalCountAndCoverDoNotBlockAlbum() async throws {
+        let (service, _, result) = try await load(page([album(count: nil, label: "", cover: "")]))
+        let item = try XCTUnwrap(result.sections.first?.items.first), value = try collection(item)
+        XCTAssertNil(value.count); XCTAssertNil(value.artwork); XCTAssertEqual(item.coverLabel, "")
+        await service.close()
+    }
+    func testAlbumCountsAboveFormerThresholdSurviveCurrentSnapshotRoundTrip() async throws {
+        for count in [1_000_000, 1_000_001] {
+            let native = try MusicNativePlatformResult.discovery(page([album(count: count)]), platform: .netease)
+            let data = try MusicNativeHomeSnapshot.encode(native, source: .netease)
+            let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease))
+            guard case .collection(let value) = restored.sections[0].items[0].content else { return XCTFail("album required") }
+            XCTAssertEqual(value.count, count)
+            let (service, _, result) = try await load(page([album(count: count)]))
+            XCTAssertEqual(try collection(result.sections[0].items[0]).count, count)
+            await service.close()
         }
     }
-
-    func testAlbumWithoutReliableCountKeepsIdentityWithoutInventingCountOrBadge() throws {
-        for count in ["", #","albumSongCount":null"#, #","albumSongCount":0"#,
-                      #","albumSongCount":-1"#, #","albumSongCount":1.5"#] {
-            let page = try parse("""
-            {"newWorks":[{"info":{"blockType":"album","albumId":42\(count),
-              "blockTitle":{"resourceName":"未知曲数专辑"},"songLists":[{"id":41}]}}]}
-            """)
-            let item = try XCTUnwrap(page.sections.first?.items.first), collection = try album(item)
-            XCTAssertEqual(collection.nativeID, "42")
-            XCTAssertNil(collection.count)
-            XCTAssertEqual(item.coverLabel, "")
+    func testAlbumSummaryNeedsNoPreviewOrSongMetadataRead() async throws {
+        let store = NativeMusicMemoryDocument(), account = ArtistActivityAccount([page([album()])])
+        let service = try await NativeMusicFixture.service(store, accounts: account)
+        let result = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        XCTAssertTrue(result.sections[0].items[0].previewSongs.isEmpty); XCTAssertEqual(store.snapshot().2, 0)
+        let calls = await account.requests; XCTAssertEqual(calls, [.artistActivity()])
+        await service.close()
+    }
+    func testSongWithoutAlbumKeepsSongContentAndRepositoryReference() async throws {
+        let song = try NativeDiscoveryFixture.song("41", cover: "https://p1.music.126.net/song.jpg", title: "独立歌曲")
+        let (service, _, result) = try await load(page([song]))
+        let item = try XCTUnwrap(result.sections.first?.items.first)
+        guard case .track(let track) = item.content else { return XCTFail("song required") }
+        XCTAssertEqual(track.sources.first?.nativeId, "41"); XCTAssertEqual(track.title, "独立歌曲")
+        XCTAssertNotNil(UUID(uuidString: track.songId))
+        let document = try await service.read()
+        XCTAssertEqual(document.library["library"]["songs"][track.songId]["songId"].string, track.songId)
+        await service.close()
+    }
+    func testCanonicalAlbumIdentityAndDeclaredSummaryAreNotRecomputedFromPreview() async throws {
+        var value = album("42", count: 3)
+        if case .object(var row) = value {
+            row["previewSongs"] = .array([try NativeDiscoveryFixture.song("43", title: "别的专辑预览")]); value = .object(row)
         }
+        let (service, _, result) = try await load(page([value]))
+        let item = result.sections[0].items[0]
+        XCTAssertEqual(try collection(item).nativeID, "42"); XCTAssertEqual(try collection(item).count, 3)
+        XCTAssertEqual(item.previewSongs.first?.sources.first?.nativeId, "43")
+        await service.close()
     }
-
-    func testAlbumCountFitsSnapshotContractAndRejectsOverflowWithoutClamping() throws {
-        let page = try parse(#"""
-        {"newWorks":[{"info":{"blockType":"album","albumId":42,"albumSongCount":1000000,
-          "blockTitle":{"resourceName":"专辑"}}}]}
-        """#)
-        let item = try XCTUnwrap(page.sections.first?.items.first)
-        XCTAssertEqual(try album(item).count, 1_000_000)
-        let data = try MusicNativeHomeSnapshot.encode(page, source: .netease)
-        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease))
-        let restoredItem = try XCTUnwrap(restored.sections.first?.items.first)
-        XCTAssertEqual(try album(restoredItem).count, 1_000_000)
-
-        XCTAssertThrowsError(try parse(#"""
-        {"newWorks":[{"info":{"blockType":"album","albumId":42,"albumSongCount":1000001,
-          "blockTitle":{"resourceName":"专辑"}}}]}
-        """#)) { error in
-            XCTAssertEqual(error as? MusicServiceError, .invalidResponse)
-        }
+    func testActualOrderedAlbumsAvatarsAndContinuationAreConsumedWithoutRevalidation() async throws {
+        let account = ArtistActivityAccount([page([album("42"), album("42"), album("43")], before: "opaque-before"),
+                                            page([album("44")])])
+        let service = try await NativeMusicFixture.service(accounts: account)
+        let first = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
+        XCTAssertEqual(try first.sections[0].items.map { try collection($0).nativeID }, ["42", "42", "43"])
+        let second = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: XCTUnwrap(first.cursor))
+        XCTAssertEqual(try second.sections[0].items.map { try collection($0).nativeID }, ["44"]); XCTAssertNil(second.cursor)
+        let calls = await account.requests; XCTAssertEqual(calls, [.artistActivity(), .artistActivity(before: "opaque-before")])
+        await service.close()
     }
-
-    func testAlbumSummaryDoesNotNeedAnyPreviewSong() throws {
-        for songs in ["", #","songLists":[]"#] {
-            let page = try parse("""
-            {"newWorks":[{"info":{"blockType":"album","albumId":42,"albumSongCount":2,
-              "blockTitle":{"resourceName":"摘要专辑","artistName":"摘要艺人",
-                "resourcePicUrl":"https://p1.music.126.net/summary.jpg"}\(songs)}}]}
-            """)
-            let item = try XCTUnwrap(page.sections.first?.items.first), collection = try album(item)
-            XCTAssertEqual(collection.nativeID, "42")
-            XCTAssertEqual(collection.title, "摘要专辑")
-            XCTAssertEqual(collection.creator, "摘要艺人")
-            XCTAssertEqual(collection.count, 2)
-            XCTAssertEqual(item.artwork?.absoluteString, "https://p1.music.126.net/summary.jpg")
-            XCTAssertEqual(item.subtitle, "摘要艺人")
-            XCTAssertEqual(item.coverLabel, "新专辑")
-        }
+    func testNoCanonicalContinuationDoesNotInventAnotherPage() async throws {
+        let (service, _, result) = try await load(page([album()]))
+        XCTAssertNil(result.cursor); await service.close()
     }
+}
 
-    func testSongAlbumProvidesRealIdentityAndDisplayFallbackWithoutAssumingCount() throws {
-        for id in ["", #","albumId":0"#, #","albumId":"invalid""#] {
-            let page = try parse("""
-            {"newWorks":[{"info":{"blockType":"song"\(id),"songLists":[
-              {"id":41,"name":"曲名","ar":[{"name":"歌手甲"},{"name":"歌手乙"}],
-               "al":{"id":43,"name":"真实专辑","picUrl":"https://p1.music.126.net/fallback.jpg"}}
-            ]}}]}
-            """)
-            let item = try XCTUnwrap(page.sections.first?.items.first), collection = try album(item)
-            XCTAssertEqual(collection.nativeID, "43")
-            XCTAssertEqual(collection.title, "真实专辑")
-            XCTAssertEqual(collection.creator, "歌手甲、歌手乙")
-            XCTAssertEqual(item.subtitle, collection.creator)
-            XCTAssertEqual(item.artwork?.absoluteString, "https://p1.music.126.net/fallback.jpg")
-            XCTAssertNil(collection.count)
-            XCTAssertEqual(item.coverLabel, "")
-        }
+private actor ArtistActivityAccount: MusicNativeAccountProviding, MusicNativeHomeProviding {
+    let binding = MusicNativeHomeBinding(scope: "synthetic-artists", revision: UUID(), loggedIn: true)
+    let replies: [RuntimeValue]
+    var requests: [MusicNativeHomeRequest] = []
+    init(_ replies: [RuntimeValue]) { self.replies = replies }
+    func nativeHomeBinding() -> MusicNativeHomeBinding { binding }
+    func checkNativeHomeBinding(_ value: MusicNativeHomeBinding) throws {
+        try value.authorization.check()
+        guard value == binding else { throw MusicServiceError.staleResult }
     }
-
-    func testDeclaredAlbumIdentityTakesPrecedenceOverSongAlbum() throws {
-        let page = try parse(#"""
-        {"newWorks":[{"info":{"blockType":"album","albumId":42,"albumSongCount":3,
-          "blockTitle":{"resourceName":"主专辑","artistName":"艺人"},
-          "songLists":[{"id":41,"al":{"id":43,"name":"其他专辑"}}]
-        }}]}
-        """#)
-        let item = try XCTUnwrap(page.sections.first?.items.first), collection = try album(item)
-        XCTAssertEqual(collection.nativeID, "42")
-        XCTAssertEqual(collection.title, "主专辑")
-        XCTAssertEqual(collection.count, 3)
+    func nativeHomePayload(_ request: MusicNativeHomeRequest, binding: MusicNativeHomeBinding) throws -> Data {
+        try checkNativeHomeBinding(binding)
+        let index = requests.count; requests.append(request)
+        guard replies.indices.contains(index) else { throw MusicServiceError.invalidResponse }
+        return try RuntimeJSON.encode(replies[index])
     }
-
-    func testSongWithoutValidAlbumKeepsSongContentAndNeverUsesSongIDAsAlbumID() throws {
-        for id in ["", #","id":null"#, #","id":0"#, #","id":"0""#] {
-            let page = try parse("""
-            {"newWorks":[{"info":{"blockType":"song","albumId":0,"albumSongCount":1,
-              "blockTitle":{"artistName":"艺人"},"songLists":[
-                {"id":41,"name":"独立歌曲","ar":[{"name":"艺人"}],"dt":180000,
-                 "al":{"name":"歌曲附带名称","picUrl":"https://p1.music.126.net/song.jpg"\(id)}}
-              ]}}]}
-            """)
-            let item = try XCTUnwrap(page.sections.first?.items.first)
-            switch item.content {
-            case .song(let track):
-                let data = try MJ.parse(track.data)
-                XCTAssertEqual(data["songmid"].id, "41")
-                XCTAssertEqual(data["albumId"].string, "")
-            default: XCTFail("A song without an actual album must retain its song behavior")
-            }
-            XCTAssertEqual(item.id, "song:41")
-            XCTAssertEqual(item.title, "独立歌曲")
-            XCTAssertEqual(item.subtitle, "艺人")
-            XCTAssertEqual(item.artwork?.absoluteString, "https://p1.music.126.net/song.jpg")
-            XCTAssertEqual(item.coverLabel, "新单曲")
-        }
+    func nativeHomeChanges() -> AsyncStream<Void> { AsyncStream { $0.finish() } }
+    func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {
+        throw MusicServiceError.unsupported
     }
-
-    func testFilteringDeduplicationAvatarsAndContinuationUseOriginalWorks() throws {
-        let page = try parse(#"""
-        {"data":{"hasMore":true,"newWorks":[
-          {"publishTime":100,"info":{"blockType":"mv","albumId":90,"albumSongCount":1,
-            "blockTitle":{"resourceName":"视频","imgUrl":"https://p1.music.126.net/mv.jpg"}}},
-          {"publishTime":101,"info":{"blockType":"album","albumId":42,"albumSongCount":1,
-            "blockTitle":{"resourceName":"首条","imgUrl":"https://p1.music.126.net/a.jpg"}}},
-          {"publishTime":102,"info":{"blockType":"song","albumId":42,"albumSongCount":1,
-            "blockTitle":{"resourceName":"重复","imgUrl":"https://p1.music.126.net/duplicate.jpg"}}},
-          {"publishTime":103,"info":{"blockType":"album","albumId":43,"albumSongCount":2,
-            "blockTitle":{"resourceName":"第二条","imgUrl":"https://p1.music.126.net/a.jpg"}}},
-          {"publishTime":104,"info":{"blockType":"album","albumId":44,"albumSongCount":3,
-            "blockTitle":{"resourceName":"第三条","imgUrl":"https://p1.music.126.net/b.jpg"}}},
-          {"publishTime":105,"info":{"blockType":"album","albumId":45,"albumSongCount":4,
-            "blockTitle":{"resourceName":"第四条","imgUrl":"https://p1.music.126.net/c.jpg"}}},
-          {"publishTime":106,"info":{"blockType":"album","albumId":46,"albumSongCount":5,
-            "blockTitle":{"resourceName":"第五条","imgUrl":"https://p1.music.126.net/d.jpg"}}},
-          {"publishTime":107,"info":{"blockType":"podcast","albumId":91,
-            "blockTitle":{"resourceName":"播客","imgUrl":"https://p1.music.126.net/podcast.jpg"}}}
-        ]}}
-        """#)
-        let section = try XCTUnwrap(page.sections.first)
-        XCTAssertEqual(section.items.map(\.title), ["首条", "第二条", "第三条", "第四条", "第五条"])
-        XCTAssertEqual(section.items.map(\.id), ["wy:album:42", "wy:album:43", "wy:album:44",
-                                                "wy:album:45", "wy:album:46"])
-        XCTAssertEqual(section.avatars.map(\.absoluteString), ["https://p1.music.126.net/a.jpg",
-                       "https://p1.music.126.net/b.jpg", "https://p1.music.126.net/c.jpg"])
-        XCTAssertEqual(page.consumed, 8)
-        XCTAssertEqual(page.next?["before"].string, "107")
+    func nativeCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage {
+        throw MusicServiceError.unsupported
     }
-
-    func testContinuationRequiresHasMoreAndARealTimestamp() throws {
-        for suffix in [#""hasMore":false,"newWorks":[{"publishTime":1234"#,
-                       #""hasMore":true,"newWorks":[{"publishTime":0"#,
-                       #""hasMore":true,"newWorks":[{"publishTime":"invalid""#] {
-            let page = try parse("""
-            {\(suffix),"info":{"blockType":"album","albumId":42,
-              "blockTitle":{"resourceName":"专辑"}}}]}
-            """)
-            XCTAssertEqual(page.sections.first?.items.count, 1)
-            XCTAssertNil(page.next)
-        }
+    func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicNativeTrackPage {
+        throw MusicServiceError.unsupported
+    }
+    func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) throws -> [MusicPlaybackOption] {
+        throw MusicServiceError.unsupported
+    }
+    func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) throws -> MusicNativeAudio {
+        throw MusicServiceError.unsupported
     }
 }

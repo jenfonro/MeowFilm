@@ -26,19 +26,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
     private int pending;
     private bool closed;
     private Task? disposal;
-    internal Action<IEnumerable<JsonObject>>? SongsObserved { get; set; }
-    internal Func<JsonElement, JsonElement>? SongFactsProjection { get; set; }
-    internal Func<JsonElement, JsonElement>? KnownSongFactsProjection { get; set; }
-    internal Func<CancellationToken, Task>? PrepareSongFacts { get; set; }
     internal Func<MusicSearchRequest, CancellationToken, Task<JsonElement>>? SearchSongs { get; set; }
-    private sealed record Stage(string Platform, string Id, string Name, string Snapshot,
-        JsonElement[] Songs, string[] Members, long Bytes, DateTimeOffset Expires, long Epoch, string HeartbeatAccount);
-    private static string NativeId(JsonElement song)
-    {
-        var id = SongJson.NativeId(song);
-        Check(id.Length > 0, "IDENTITY_MISMATCH");
-        return id;
-    }
+    private sealed record Stage(string Platform, string Id, string Name,
+        JsonElement[] Songs, long Bytes, DateTimeOffset Expires, long Epoch, string HeartbeatAccount);
 
     public MusicNativeCatalogOwner(IMusicPlatformCatalog catalog, MusicLibraryOwner library, TimeProvider? clock = null)
         => (this.catalog, this.library, this.clock) = (catalog ?? throw new ArgumentNullException(nameof(catalog)),
@@ -49,9 +39,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
 
     public Task<MusicDailyStyleSaveResult> SaveDailyStyleAsync(MusicDailyStyleEditor editor,
         MusicDailyStyleSelection selection, CancellationToken cancellationToken = default) =>
-        DailyStyleOperation((port, token) => port.SaveDailyStyleAsync(editor, selection, token), cancellationToken);
+        DailyStyleOperation((port, token) => port.SaveDailyStyleAsync(editor, selection, token), cancellationToken, write: true);
 
-    private async Task<T> DailyStyleOperation<T>(Func<IMusicDailyStylePreferences, CancellationToken, Task<T>> action, CancellationToken token)
+    private async Task<T> DailyStyleOperation<T>(Func<IMusicDailyStylePreferences, CancellationToken, Task<T>> action, CancellationToken token, bool write = false)
     {
         long captured;
         CancellationTokenSource request;
@@ -67,7 +57,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
             Guard(request.Token, captured);
             if (catalog is not IMusicDailyStylePreferences preferences) throw new MusicPlatformException("UNSUPPORTED");
             var result = await action(preferences, request.Token).ConfigureAwait(false);
-            Guard(CancellationToken.None, captured);
+            if (!write) Guard(CancellationToken.None, captured);
             return result;
         }
         catch (CatalogFailure error) { throw new MusicPlatformException(error.Code); }
@@ -102,52 +92,44 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
             }
             var signal = operation.Token;
             Guard(signal, captured);
-            if (PrepareSongFacts is { } prepareFacts) await prepareFacts(signal).ConfigureAwait(false);
+            long observation = library.BeginSongObservation();
             JsonElement result;
             switch (method)
             {
                 case "music.catalog.describe":
-                    Fields(input, []); result = JsonSerializer.SerializeToElement(new { descriptor = catalog.Describe() }); break;
+                    result = catalog.Describe(); break;
                 case "music.catalog.search":
-                    Fields(input, ["platform", "keyword", "kind", "page", "limit", "refresh"], ["platform", "keyword"]);
                     var kind = Text(input, "kind", "songs");
                     Check(kind is "songs" or "playlists", "INVALID_REQUEST");
-                    var search = new MusicSearchRequest(Platform(input, publicCatalog: true), Text(input, "keyword"),
+                    var search = new MusicSearchRequest(Platform(input), Text(input, "keyword"),
                         kind == "songs" ? MusicSearchKind.Songs : MusicSearchKind.Playlists,
                         Number(input, "page", 1), Number(input, "limit", 30), Flag(input, "refresh"));
                     result = await (SearchSongs?.Invoke(search, signal) ?? catalog.SearchAsync(search, signal)).ConfigureAwait(false);
                     break;
                 case "music.catalog.chorus":
-                    Fields(input, ["platform", "id"], ["platform", "id"]);
                     if (catalog is not IMusicChorusCatalog chorus) throw new CatalogFailure("UNSUPPORTED");
                     result = await chorus.ChorusAsync(Platform(input), Text(input, "id"), signal).ConfigureAwait(false); break;
                 case "music.catalog.song":
-                    Fields(input, ["platform", "id", "refresh"], ["platform", "id"]);
-                    var song = await catalog.SongAsync(new(Platform(input, publicCatalog: true), Text(input, "id"), Flag(input, "refresh")), signal).ConfigureAwait(false);
+                    var song = await catalog.SongAsync(new(Platform(input), Text(input, "id"), Flag(input, "refresh")), signal).ConfigureAwait(false);
                     result = JsonSerializer.SerializeToElement(new { song }); break;
                 case "music.catalog.playlist":
-                    Fields(input, ["platform", "id", "page", "limit", "snapshot", "refresh", "personal"], ["platform", "id"]);
-                    var playlistPlatform = Platform(input, publicCatalog: true);
-                    var personal = Personal(input, playlistPlatform, Text(input, "id"));
-                    var pageSize = personal?.Kind == MusicPersonalPlaylistKind.KugouOwned ? 30 : 100;
+                    var playlistPlatform = Platform(input);
+                    var personal = Optional(input, "personal");
+                    var pageSize = 100;
                     result = await catalog.PlaylistAsync(new(playlistPlatform, Text(input, "id"),
                         Number(input, "page", 1), Number(input, "limit", pageSize),
-                        OptionalText(input, "snapshot"), Flag(input, "refresh"), personal), signal).ConfigureAwait(false);
+                        Flag(input, "refresh"), personal, Optional(input, "continuation")), signal).ConfigureAwait(false);
                     break;
                 case "music.catalog.home":
-                    Fields(input, ["platform", "continuation", "refresh"], ["platform"]);
                     result = await catalog.HomeAsync(new(Platform(input), Optional(input, "continuation"),
                         Flag(input, "refresh")), signal).ConfigureAwait(false); break;
                 case "music.catalog.channels":
-                    Fields(input, ["platform", "refresh"], ["platform"]);
                     result = await catalog.ChannelsAsync(new(Platform(input), Flag(input, "refresh")), signal).ConfigureAwait(false); break;
                 case "music.catalog.channel":
-                    Fields(input, ["platform", "id", "pageCode", "continuation", "tag", "refresh"], ["platform", "id"]);
                     result = await catalog.ChannelAsync(new(Platform(input), Text(input, "id"),
                         OptionalText(input, "pageCode"), Optional(input, "continuation"), OptionalText(input, "tag", allowEmpty: true),
                         Flag(input, "refresh")), signal).ConfigureAwait(false); break;
                 case "music.catalog.personalPlaylists":
-                    Fields(input, ["platform", "kind", "page", "limit", "continuation", "refresh"], ["platform"]);
                     var personalKind = Text(input, "kind", "all") switch
                     {
                         "all" => MusicPersonalListKind.All, "created" => MusicPersonalListKind.Created,
@@ -157,7 +139,6 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                         Number(input, "page", 1), Number(input, "limit", 30),
                         Optional(input, "continuation"), Flag(input, "refresh")), signal).ConfigureAwait(false); break;
                 case "music.catalog.daily":
-                    Fields(input, ["platform", "branch", "refresh"], ["platform"]);
                     var branch = Text(input, "branch", "default") switch
                     {
                         "default" => MusicDailyBranch.Default, "style" => MusicDailyBranch.Style,
@@ -165,7 +146,6 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                     };
                     result = await catalog.DailyAsync(new(Platform(input), branch, Flag(input, "refresh")), signal).ConfigureAwait(false); break;
                 case "music.catalog.fm":
-                    Fields(input, ["platform", "mode", "submode", "preview", "ruleId", "tabTagId"], ["platform"]);
                     var fmMode = Text(input, "mode", "default") switch
                     {
                         "default" => MusicFmMode.Default, "familiar" => MusicFmMode.Familiar,
@@ -176,12 +156,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                         OptionalText(input, "submode", allowEmpty: true) ?? "", Flag(input, "preview"),
                         OptionalText(input, "ruleId"), OptionalText(input, "tabTagId")), signal).ConfigureAwait(false); break;
                 case "music.catalog.similar":
-                    Fields(input, ["platform", "sourceIds", "sourceType"], ["platform", "sourceIds", "sourceType"]);
                     var sourceIds = Strings(input, "sourceIds");
-                    Check(sourceIds.Length <= 20, "INVALID_REQUEST");
                     result = await catalog.SimilarAsync(new(Platform(input), sourceIds, Text(input, "sourceType")), signal).ConfigureAwait(false); break;
                 case "music.catalog.heartbeat":
-                    Fields(input, ["platform", "entry", "songId", "playlistId"], ["platform", "entry"]);
                     var entry = Text(input, "entry") switch
                     {
                         "favorites" => MusicHeartbeatEntry.Favorites, "current" => MusicHeartbeatEntry.CurrentSong,
@@ -191,20 +168,16 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                     Check(entry != MusicHeartbeatEntry.CurrentSong || heartbeatSongId is not null && OptionalText(input, "playlistId") is not null, "INVALID_REQUEST");
                     result = await catalog.HeartbeatAsync(new(Platform(input), entry, heartbeatSongId, OptionalText(input, "playlistId")), signal).ConfigureAwait(false); break;
                 case "music.catalog.queueRecommendations":
-                    Fields(input, ["platform", "seedSongId", "offset"], ["platform", "seedSongId"]);
                     result = await catalog.QueueRecommendationsAsync(new(Platform(input), Text(input, "seedSongId"), Number(input, "offset", 0)), signal).ConfigureAwait(false); break;
                 case "music.catalog.album":
-                    Fields(input, ["platform", "id", "refresh"], ["platform", "id"]);
                     result = await catalog.AlbumAsync(new(Platform(input), Text(input, "id"),
                         Flag(input, "refresh")), signal).ConfigureAwait(false); break;
                 case "music.catalog.chart":
-                    Fields(input, ["platform", "kind", "period", "year", "refresh"], ["platform", "kind"]);
                     if (catalog is not IMusicChartCatalog charts) throw new CatalogFailure("UNSUPPORTED");
                     result = await charts.ChartAsync(new(Platform(input), Text(input, "kind"),
                         Text(input, "period", "daily"), input.TryGetProperty("year", out _) ? Number(input, "year") : null,
                         Flag(input, "refresh")), signal).ConfigureAwait(false); break;
                 case "music.catalog.artist":
-                    Fields(input, ["platform", "id", "refresh"], ["platform", "id"]);
                     if (catalog is not IMusicArtistCatalog artists) throw new CatalogFailure("UNSUPPORTED");
                     result = await artists.ArtistAsync(new(Platform(input), Text(input, "id"),
                         Flag(input, "refresh")), signal).ConfigureAwait(false); break;
@@ -212,10 +185,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                     result = await PrepareAsync(input, signal, captured).ConfigureAwait(false);
                     preparedToken = Text(result, "token"); break;
                 case "music.catalog.playlist.save":
-                    Fields(input, ["platform", "id", "name", "cover", "count"], ["platform", "id", "name"]);
                     var reference = new Dictionary<string, object?>
                     {
-                        ["platform"] = Platform(input, publicCatalog: true), ["id"] = Text(input, "id"),
+                        ["platform"] = Platform(input), ["id"] = Text(input, "id"),
                         ["name"] = Text(input, "name")
                     };
                     if (input.TryGetProperty("cover", out var cover)) reference["cover"] = cover.Clone();
@@ -231,16 +203,24 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                     // told this committed mutation was rolled back.
                     return Okay(result);
                 case "music.catalog.playlist.discard":
-                    Fields(input, ["token"]);
                     bool removed;
                     lock (gate) removed = Remove(Text(input, "token"));
                     result = JsonSerializer.SerializeToElement(new { discarded = removed }); break;
                 default: throw new CatalogFailure("METHOD_UNAVAILABLE");
             }
             Guard(signal, captured);
-            var projection = method == "music.catalog.search" && SearchSongs is not null
-                ? KnownSongFactsProjection : SongFactsProjection;
-            if (projection is { } project) result = project(result);
+            var songShape = method switch
+            {
+                "music.catalog.describe" or "music.catalog.chorus" or "music.catalog.channels" => MusicLibraryOwner.PlatformSongShape.None,
+                "music.catalog.song" => MusicLibraryOwner.PlatformSongShape.SongDetail,
+                "music.catalog.search" => Text(input, "kind", "songs") == "songs"
+                    ? MusicLibraryOwner.PlatformSongShape.Page : MusicLibraryOwner.PlatformSongShape.None,
+                _ => MusicLibraryOwner.PlatformSongShape.Catalog
+            };
+            result = await library.AdoptPlatformResultAsync(result, signal,
+                authoritative: method != "music.catalog.search" || SearchSongs is null, observation: observation,
+                shape: songShape).ConfigureAwait(false);
+            Guard(signal, captured);
             var response = Okay(result);
             returned = true;
             return response;
@@ -273,114 +253,42 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
 
     private async Task<JsonElement> PrepareAsync(JsonElement input, CancellationToken signal, long captured)
     {
-        Fields(input, ["platform", "id", "refresh", "personal"], ["platform", "id"]);
-        var platform = Platform(input, publicCatalog: true); var id = Text(input, "id"); var refresh = Flag(input, "refresh");
-        var personal = Personal(input, platform, id);
-        int pageSize = personal?.Kind == MusicPersonalPlaylistKind.KugouOwned ? 30 : 100;
+        var platform = Platform(input); var id = Text(input, "id");
+        long observation = library.BeginSongObservation();
+        var result = await catalog.CompletePlaylistAsync(new(platform, id,
+            Refresh: Flag(input, "refresh"), Personal: Optional(input, "personal")), signal).ConfigureAwait(false);
+        Guard(signal, captured);
+        Check(result.GetProperty("items").EnumerateArray().Sum(song =>
+            (long)Encoding.UTF8.GetByteCount(song.GetRawText()) + 1) + 2 <= MaximumStageBytes, "LIMIT");
+        result = await library.AdoptPlatformResultAsync(result, signal, observation: observation).ConfigureAwait(false);
+        Guard(signal, captured);
+        var songs = result.GetProperty("items").EnumerateArray().Select(song => song.Clone()).ToArray();
+        long bytes = 2 + songs.Sum(song => (long)Encoding.UTF8.GetByteCount(song.GetRawText()) + 1);
+        var name = OptionalText(result, "name", allowEmpty: true) ?? "";
+        var actualId = Text(result, "id");
+        var heartbeatAccount = OptionalText(result, "heartbeatAccountId") ?? "";
+        var token = Guid.NewGuid().ToString("D");
         lock (gate)
         {
-            Prune();
+            Check(!closed && captured == epoch, "STALE_SESSION"); Prune();
+            Check(bytes <= MaximumStageBytes && reservedBytes + bytes <= MaximumStageBytes * 2, "LIMIT");
+            reservedBytes += bytes;
+            stages.Add(token, new(platform, actualId, name, songs, bytes,
+                clock.GetUtcNow().AddMinutes(1), captured, heartbeatAccount));
         }
-        long size = 2;
-        bool reservationTransferred = false;
-        try
-        {
-            var songs = new List<JsonElement>(); var members = new List<string>(); var sorts = new List<long?>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            string? snapshot = null, name = null, strength = null; int? total = null;
-            bool? memberIds = null;
-            string heartbeatAccount = "";
-            for (int page = 1; ; page = checked(page + 1))
-            {
-                Guard(signal, captured);
-                var result = await catalog.PlaylistAsync(new(platform, id, page, pageSize, snapshot, refresh, personal), signal).ConfigureAwait(false);
-                Guard(signal, captured);
-                var identities = ValidatePage(result, platform, id, page, pageSize, snapshot, total,
-                    memberIds, personal?.Kind == MusicPersonalPlaylistKind.KugouOwned);
-                SongsObserved?.Invoke(result.GetProperty("items").EnumerateArray()
-                    .Select(song => NativeMusicSong.Normalize(JsonNode.Parse(song.GetRawText()))));
-                snapshot ??= Text(result, "snapshot"); name ??= Text(result, "name"); total ??= Number(result, "total");
-                if (page == 1) { strength = OptionalText(result, "snapshotStrength"); memberIds = result.TryGetProperty("memberIds", out _);
-                    heartbeatAccount = OptionalText(result, "heartbeatAccountId") ?? ""; }
-                Check(Text(result, "name") == name, "SNAPSHOT_CHANGED");
-                Check(OptionalText(result, "snapshotStrength") == strength, "SNAPSHOT_CHANGED");
-                int memberIndex = 0;
-                foreach (var song in result.GetProperty("items").EnumerateArray())
-                {
-                    var member = identities[memberIndex++];
-                    Check(seen.Add(member.Id), "PAGINATION_STALLED");
-                    long bytes = Encoding.UTF8.GetByteCount(song.GetRawText()) + (songs.Count == 0 ? 0 : 1);
-                    lock (gate)
-                    {
-                        Check(size + bytes <= MaximumStageBytes && reservedBytes + bytes <= MaximumStageBytes * 2, "LIMIT");
-                        reservedBytes += bytes; size += bytes;
-                    }
-                    songs.Add(song.Clone()); members.Add(member.Id); sorts.Add(member.Sort);
-                }
-                if (!Flag(result, "more")) break;
-            }
-            Check(songs.Count == total, "INCOMPLETE_PLAYLIST");
-            // These platforms may only expose a metadata/count snapshot. Verify
-            // the complete ordered identity list with fresh pages, not just page 1.
-            if (platform != "wy")
-                for (int page = 1; page <= Math.Max(1, (int)(((long)songs.Count + pageSize - 1) / pageSize)); page++)
-                {
-                    Guard(signal, captured);
-                    var result = await catalog.PlaylistAsync(new(platform, id, page, pageSize, snapshot, true, personal), signal).ConfigureAwait(false);
-                    Guard(signal, captured);
-                    var identities = ValidatePage(result, platform, id, page, pageSize, snapshot, total,
-                        memberIds, personal?.Kind == MusicPersonalPlaylistKind.KugouOwned);
-                    Check(Text(result, "name") == name && OptionalText(result, "snapshotStrength") == strength, "SNAPSHOT_CHANGED");
-                    int index = (page - 1) * pageSize, offset = 0;
-                    foreach (var song in result.GetProperty("items").EnumerateArray())
-                    {
-                        var member = identities[offset++];
-                        Check(member.Id == members[index] && member.Sort == sorts[index] &&
-                            NativeId(song) == NativeId(songs[index]), "SNAPSHOT_CHANGED");
-                        index++;
-                    }
-                }
-            if (personal?.Kind == MusicPersonalPlaylistKind.KugouOwned)
-            {
-                // Source order is the stable tie-breaker. Sort only AFTER the
-                // complete second scan, never independently inside a page.
-                var order = Enumerable.Range(0, songs.Count).OrderBy(i => sorts[i] is null)
-                    .ThenBy(i => sorts[i]).ThenBy(i => i).ToArray();
-                songs = order.Select(i => songs[i]).ToList();
-                members = order.Select(i => members[i]).ToList();
-            }
-            Guard(signal, captured);
-            var token = Guid.NewGuid().ToString("D");
-            lock (gate)
-            {
-                Check(!closed && captured == epoch, "STALE_SESSION"); Prune();
-                // Account for array delimiters, including a valid empty playlist.
-                Check(reservedBytes + 2 <= MaximumStageBytes * 2, "LIMIT"); reservedBytes += 2;
-                stages.Add(token, new(platform, id, name!, snapshot!, songs.ToArray(), members.ToArray(), size,
-                    clock.GetUtcNow().AddMinutes(1), captured, heartbeatAccount));
-                reservationTransferred = true;
-            }
-            return JsonSerializer.SerializeToElement(new { token, platform, id, name, count = total, snapshot });
-        }
-        finally
-        {
-            lock (gate)
-            {
-                if (!reservationTransferred) reservedBytes -= size - 2;
-            }
-        }
+        return JsonSerializer.SerializeToElement(new { token, platform, id = actualId, name, count = songs.Length });
     }
 
     private async Task<JsonElement> CommitAsync(JsonElement input, CancellationToken signal, long captured)
     {
-        Fields(input, ["token", "action", "index", "memberId", "expectedVersion", "expectedSongId"], ["token", "action"]);
         var token = Text(input, "token"); var action = Text(input, "action");
         Check(action is "play" or "next", "INVALID_REQUEST");
         var memberId = OptionalText(input, "memberId");
+        var songId = OptionalText(input, "songId");
+        var occurrence = Number(input, "memberOccurrence", 0);
         int index = 0; long version = 0;
         if (action == "next")
         {
-            Fields(input, ["token", "action", "expectedVersion"], ["token", "action", "expectedVersion"]);
             version = Long(input, "expectedVersion");
             Check(version >= 0, "INVALID_REQUEST");
         }
@@ -388,7 +296,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
         {
             index = Number(input, "index", 0); version = Long(input, "expectedVersion");
             Check(index >= 0 && version >= 0 &&
-                (memberId is null || !input.TryGetProperty("index", out _)), "INVALID_REQUEST");
+                occurrence >= 0, "INVALID_REQUEST");
         }
         Stage item;
         Guard(signal, captured);
@@ -399,13 +307,15 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
             if (action == "next") Check(item.Songs.Length > 0, "INVALID_REQUEST");
             if (action == "play")
             {
-                if (memberId is not null) index = Array.IndexOf(item.Members, memberId);
-                else if (!input.TryGetProperty("index", out _) && input.TryGetProperty("expectedSongId", out _))
-                    index = Array.FindIndex(item.Songs, song => Text(song, "songId") == Text(input, "expectedSongId"));
+                if (memberId is not null || songId is not null)
+                {
+                    int seen = 0;
+                    index = Array.FindIndex(item.Songs, song =>
+                        (memberId is not null ? SongJson.NativeId(song) == memberId : Text(song, "songId") == songId) &&
+                        seen++ == occurrence);
+                }
                 Check(index >= 0 && index < item.Songs.Length,
-                    memberId is null && !input.TryGetProperty("expectedSongId", out _) ? "INVALID_REQUEST" : "SNAPSHOT_CHANGED");
-                Check(!input.TryGetProperty("expectedSongId", out _) ||
-                    Text(input, "expectedSongId") == Text(item.Songs[index], "songId"), "SNAPSHOT_CHANGED");
+                    "NOT_FOUND");
             }
             stages.Remove(token);
             // Keep bytes reserved throughout an admitted storage transaction.
@@ -496,50 +406,6 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
         if (!stages.Remove(token, out var item)) return false;
         reservedBytes -= item.Bytes; return true;
     }
-    private sealed record Member(string Id, long? Sort);
-    private static Member[] ValidatePage(JsonElement value, string platform, string id, int page, int pageSize,
-        string? snapshot, int? total, bool? expectedMembers, bool requireMembers)
-    {
-        Check(Text(value, "platform") == platform && Text(value, "id") == id, "IDENTITY_MISMATCH");
-        Check(Number(value, "page") == page && Number(value, "limit") == pageSize, "INVALID_RESPONSE");
-        int count = Number(value, "total"); Check(count >= 0, "INVALID_RESPONSE");
-        string current = Text(value, "snapshot");
-        Check(current.Length == 64 && current.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'), "INVALID_RESPONSE");
-        Check((snapshot is null || snapshot == current) && (total is null || total == count), "SNAPSHOT_CHANGED");
-        var items = value.GetProperty("items");
-        Check(items.ValueKind == JsonValueKind.Array &&
-            items.GetArrayLength() == Math.Min(pageSize, Math.Max(0L, count - (page - 1L) * pageSize)),
-            "INCOMPLETE_PLAYLIST");
-        bool more = Flag(value, "more");
-        Check(value.TryGetProperty("more", out _) && more == (page * (long)pageSize < count), "INCOMPLETE_PLAYLIST");
-        if (more) Check(Number(value.GetProperty("continuation"), "page") == checked(page + 1), "PAGINATION_STALLED");
-        else Check(!value.TryGetProperty("continuation", out var next) || next.ValueKind == JsonValueKind.Null, "PAGINATION_STALLED");
-        bool hasMembers = value.TryGetProperty("memberIds", out var declaredMembers);
-        Check((!requireMembers || hasMembers) && (expectedMembers is null || expectedMembers == hasMembers), "IDENTITY_MISMATCH");
-        if (hasMembers) Check(declaredMembers.ValueKind == JsonValueKind.Array &&
-            declaredMembers.GetArrayLength() == items.GetArrayLength(), "IDENTITY_MISMATCH");
-        bool hasSorts = value.TryGetProperty("memberSorts", out var declaredSorts);
-        Check(!requireMembers || hasSorts, "IDENTITY_MISMATCH");
-        if (hasSorts) Check(hasMembers && declaredSorts.ValueKind == JsonValueKind.Array &&
-            declaredSorts.GetArrayLength() == items.GetArrayLength(), "IDENTITY_MISMATCH");
-        var identities = new List<Member>();
-        foreach (var song in items.EnumerateArray())
-        {
-            _ = Text(song, "songId");
-            var nativeId = NativeId(song);
-            Check(SongJson.Platform(song) == platform, "IDENTITY_MISMATCH");
-            string member = hasMembers ? StringValue(declaredMembers[identities.Count], 256) : nativeId;
-            long? sort = null;
-            if (hasSorts && declaredSorts[identities.Count].ValueKind != JsonValueKind.Null)
-            {
-                var s = declaredSorts[identities.Count];
-                Check(s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out _), "INVALID_RESPONSE");
-                sort = s.GetInt64();
-            }
-            identities.Add(new(member, sort));
-        }
-        return identities.ToArray();
-    }
     private static TaskCompletionSource Completed() { var task = new TaskCompletionSource(); task.SetResult(); return task; }
     private static JsonElement Failed(string code) => JsonSerializer.SerializeToElement(new
     {
@@ -554,68 +420,25 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
         var result = JsonNode.Parse(value.GetRawText())!.AsObject(); result["ok"] = true;
         return JsonSerializer.SerializeToElement(result);
     }
-    private static MusicPersonalPlaylistLocator? Personal(JsonElement input, string platform, string id)
-    {
-        if (!input.TryGetProperty("personal", out var value) || value.ValueKind == JsonValueKind.Null) return null;
-        Fields(value, ["scope", "kind", "listId", "total", "version", "name", "pageSize",
-            "playlistId", "dirId", "listType", "globalCollectionId", "source", "listVersion"],
-            ["scope", "kind", "listId"]);
-        string scope = Text(value, "scope"), listId = Text(value, "listId");
-        Check(scope.Length == 64 && scope.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'), "INVALID_REQUEST");
-        var kind = Text(value, "kind") switch
-        {
-            "qq-favorites" => MusicPersonalPlaylistKind.QqFavorites,
-            "kugou-owned" => MusicPersonalPlaylistKind.KugouOwned,
-            _ => throw new CatalogFailure("INVALID_REQUEST")
-        };
-        Check(listId.All(c => c is >= '0' and <= '9') && listId.Length <= 64 &&
-            (kind == MusicPersonalPlaylistKind.QqFavorites ? platform == "tx" && id == "favorites" && listId == "201"
-                : platform == "kg" && id == "0:" + listId), "IDENTITY_MISMATCH");
-        if (value.TryGetProperty("pageSize", out _))
-            Check(Number(value, "pageSize") == (kind == MusicPersonalPlaylistKind.KugouOwned ? 30 : 100), "INVALID_REQUEST");
-        if (kind == MusicPersonalPlaylistKind.QqFavorites)
-        {
-            Check(!value.TryGetProperty("playlistId", out _) || Text(value, "playlistId") == id, "IDENTITY_MISMATCH");
-            Check(!value.TryGetProperty("dirId", out _) || Text(value, "dirId") == listId, "IDENTITY_MISMATCH");
-            Check(!new[] { "listType", "globalCollectionId", "source", "listVersion" }.Any(k => value.TryGetProperty(k, out _)), "INVALID_REQUEST");
-        }
-        else
-        {
-            Check(!value.TryGetProperty("playlistId", out _) && !value.TryGetProperty("dirId", out _), "INVALID_REQUEST");
-            Check(!value.TryGetProperty("listType", out _) || Number(value, "listType") == 0, "IDENTITY_MISMATCH");
-            _ = OptionalText(value, "globalCollectionId");
-            if (value.TryGetProperty("source", out _)) _ = Number(value, "source");
-            if (value.TryGetProperty("listVersion", out var raw) && raw.ValueKind != JsonValueKind.Null)
-                Check(raw.ValueKind == JsonValueKind.String && raw.GetString()!.Length <= 2048 ||
-                    raw.ValueKind == JsonValueKind.Number && raw.TryGetInt64(out _), "INVALID_REQUEST");
-        }
-        long? total = value.TryGetProperty("total", out var count) && count.ValueKind != JsonValueKind.Null ? Long(value, "total") : null;
-        Check(total is null or >= 0, "INVALID_REQUEST");
-        return new(scope, kind, listId, total, OptionalText(value, "version"), OptionalText(value, "name"));
-    }
     private static string[] Strings(JsonElement value, string name)
     {
         Check(value.TryGetProperty(name, out var array) && array.ValueKind == JsonValueKind.Array &&
             array.GetArrayLength() > 0, "INVALID_REQUEST");
-        return array.EnumerateArray().Select(item => StringValue(item, 2048)).ToArray();
+        return array.EnumerateArray().Select(item => StringValue(item)).ToArray();
     }
-    private static string StringValue(JsonElement value, int max)
+    private static string StringValue(JsonElement value)
     {
-        Check(value.ValueKind == JsonValueKind.String, "INVALID_REQUEST");
-        var text = value.GetString()!;
-        Check(!string.IsNullOrWhiteSpace(text) && text.Length <= max && !text.Any(char.IsControl), "INVALID_REQUEST");
-        return text;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString()!, JsonValueKind.Number => value.GetRawText(),
+            _ => throw new CatalogFailure("INVALID_REQUEST")
+        };
     }
-    private static string Platform(JsonElement value, bool publicCatalog = false)
-    {
-        var platform = Text(value, "platform");
-        Check(platform is "wy" or "tx" or "kg" || publicCatalog && platform is "kw" or "mg", "INVALID_REQUEST");
-        return platform;
-    }
+    private static string Platform(JsonElement value) => Text(value, "platform");
     private static string Text(JsonElement value, string name, string? fallback = null)
     {
         if (!value.TryGetProperty(name, out var field)) return fallback ?? throw new CatalogFailure("INVALID_REQUEST");
-        return StringValue(field, 2048);
+        return StringValue(field);
     }
     private static string? OptionalText(JsonElement value, string name, bool allowEmpty = false)
     {
@@ -639,12 +462,6 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
     {
         if (!value.TryGetProperty(name, out var field)) return false;
         Check(field.ValueKind is JsonValueKind.True or JsonValueKind.False, "INVALID_REQUEST"); return field.GetBoolean();
-    }
-    private static void Fields(JsonElement input, string[] allowed, string[]? required = null)
-    {
-        Check(input.ValueKind == JsonValueKind.Object && input.EnumerateObject().All(property => allowed.Contains(property.Name)) &&
-            input.EnumerateObject().Select(property => property.Name).Distinct(StringComparer.Ordinal).Count() == input.EnumerateObject().Count() &&
-            (required ?? allowed).All(name => input.TryGetProperty(name, out _)), "INVALID_REQUEST");
     }
     private static void Check(bool condition, string code) { if (!condition) throw new CatalogFailure(code); }
     private sealed class CatalogFailure(string code) : Exception(code) { internal string Code { get; } = code; }

@@ -99,7 +99,7 @@ final class MusicSearchResultsCellsTests: XCTestCase {
 
     func testSongCellUsesTextAndThreeActionsWithoutArtworkOrSequence() throws {
         let track = MusicRemoteTrack(
-            ref: .init(kind: .handle, id: "handle"),
+            ref: .init(kind: .library, id: "native-song"),
             songId: "native-song",
             title: "搜索歌曲",
             artist: "歌手",

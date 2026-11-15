@@ -12,10 +12,12 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         let saved = try MusicDocument(store.snapshot().0, runID: "fixture")
         let original = try XCTUnwrap(saved.queue["entries"].array.first)
         let recommended = try XCTUnwrap(saved.queue["entries"].array.last)
-        let originalTargets = try await service.similarFeedbackTargets(entry: original, context: original["context"])
+        let originalSong = saved.library["library"]["songs"][original["songId"].string]
+        let recommendedSong = saved.library["library"]["songs"][recommended["songId"].string]
+        let originalTargets = try await service.similarFeedbackTargets(entry: original, song: originalSong, context: original["context"])
         XCTAssertEqual(originalTargets.first?.source, "search")
         XCTAssertNil(originalTargets.first?.recommendationProof)
-        let targets = try await service.similarFeedbackTargets(entry: recommended, context: recommended["context"])
+        let targets = try await service.similarFeedbackTargets(entry: recommended, song: recommendedSong, context: recommended["context"])
         let target = try XCTUnwrap(targets.first), proof = try XCTUnwrap(target.recommendationProof)
         XCTAssertEqual(target.nativeID, "301")
         XCTAssertEqual(target.source, "synthetic-heart-source"); XCTAssertEqual(target.sourceID, "actual-source-id")
@@ -26,19 +28,17 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
 
         var copied = recommended
         copied["id"] = .string("entry-999")
-        let copiedTargets = try await service.similarFeedbackTargets(entry: copied, context: copied["context"])
+        let copiedTargets = try await service.similarFeedbackTargets(entry: copied, song: recommendedSong, context: copied["context"])
         XCTAssertNil(copiedTargets.first?.recommendationProof)
         XCTAssertEqual(copiedTargets.first?.algorithm, "")
-        var mismatched = recommended
-        mismatched["song"] = try MusicModel.normalize(RecommendationFeedbackAccounts.track("302"))
-        let mismatchTargets = try await service.similarFeedbackTargets(entry: mismatched, context: mismatched["context"])
+        let mismatchSong = try NativeMusicFixture.storedSong(RecommendationFeedbackAccounts.track("302"))
+        let mismatchTargets = try await service.similarFeedbackTargets(entry: recommended, song: mismatchSong, context: recommended["context"])
         XCTAssertNil(mismatchTargets.first?.recommendationProof)
         XCTAssertNotEqual(mismatchTargets.first?.source, "synthetic-heart-source")
-        var alternative = recommended
-        let alternateSong = try MusicModel.normalize(RecommendationFeedbackAccounts.track("302"))
-        let alternateSource = try XCTUnwrap(alternateSong["sources"].array.first)
-        alternative["song"]["sources"] = .array(recommended["song"]["sources"].array + [alternateSource])
-        let alternateTargets = try await service.similarFeedbackTargets(entry: alternative, context: alternative["context"],
+        let alternateSource = try XCTUnwrap(mismatchSong["sources"].array.first)
+        var alternateSong = recommendedSong
+        alternateSong["sources"] = .array(recommendedSong["sources"].array + [alternateSource])
+        let alternateTargets = try await service.similarFeedbackTargets(entry: recommended, song: alternateSong, context: recommended["context"],
             selectedSourceKey: alternateSource["sourceKey"].string)
         XCTAssertFalse(alternateTargets.contains { $0.recommendationProof != nil },
             "another native recording cannot borrow the recommended recording's proof")
@@ -47,7 +47,9 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         XCTAssertThrowsError(try proof.check(nativeID: "301", source: "synthetic-heart-source", sourceID: "actual-source-id", algorithm: "synthetic-heart"))
         let cold = try await NativeMusicFixture.service(store, accounts: owner)
         _ = try await cold.similarModeSnapshot()
-        let coldTargets = try await cold.similarFeedbackTargets(entry: recommended, context: recommended["context"])
+        let coldDocument = try MusicDocument(store.snapshot().0, runID: "cold")
+        let coldTargets = try await cold.similarFeedbackTargets(entry: recommended,
+            song: coldDocument.library["library"]["songs"][recommended["songId"].string], context: recommended["context"])
         XCTAssertNil(coldTargets.first?.recommendationProof)
         XCTAssertEqual(coldTargets.first?.source, "")
         XCTAssertEqual(coldTargets.first?.algorithm, "")
@@ -71,7 +73,8 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         let previewDocument = try MusicDocument(store.snapshot().0, runID: "preview")
         XCTAssertEqual(previewDocument.queue, before.queue)
         let original = try XCTUnwrap(before.queue["entries"].array.first)
-        let originalTargets = try await service.similarFeedbackTargets(entry: original, context: original["context"])
+        let originalTargets = try await service.similarFeedbackTargets(entry: original,
+            song: before.library["library"]["songs"][original["songId"].string], context: original["context"])
         XCTAssertEqual(originalTargets.first?.source, "search")
         XCTAssertNil(originalTargets.first?.recommendationProof)
         let chosen = try XCTUnwrap(preview.candidates.first)
@@ -80,21 +83,22 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         XCTAssertEqual(saved.queue["source"]["sourceType"].string, "queue-recommendations")
         XCTAssertEqual(saved.queue["entries"].array.first?["context"], original["context"])
         let entry = try XCTUnwrap(saved.queue["entries"].array.last)
-        let targets = try await service.similarFeedbackTargets(entry: entry, context: entry["context"])
+        let song = saved.library["library"]["songs"][entry["songId"].string]
+        let targets = try await service.similarFeedbackTargets(entry: entry, song: song, context: entry["context"])
         let target = try XCTUnwrap(targets.first), proof = try XCTUnwrap(target.recommendationProof)
         XCTAssertEqual(target.source, "sourceMap-synthetic")
         XCTAssertEqual(target.sourceID, "")
         XCTAssertEqual(target.algorithm, "synthetic-queue")
         await owner.revoke()
         XCTAssertFalse(proof.authorization.isActive)
-        let revoked = try await service.similarFeedbackTargets(entry: entry, context: entry["context"])
+        let revoked = try await service.similarFeedbackTargets(entry: entry, song: song, context: entry["context"])
         XCTAssertNil(revoked.first?.recommendationProof)
         XCTAssertNotEqual(revoked.first?.source, "sourceMap-synthetic")
         await service.close()
     }
 
     func testPersistentRecommendationLabelsCannotSelectOrAttributeARecording() throws {
-        let song = try MusicModel.normalize(RecommendationFeedbackAccounts.track("100"))
+        let song = try NativeMusicFixture.storedSong(RecommendationFeedbackAccounts.track("100"))
         let forged = MJ.obj([
             ("sourceType", .string("similar")),
             ("recommendation", .obj([("songId", .string("100")), ("alg", .string("forged")),
@@ -107,9 +111,10 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
 
     private func document(heartbeat: Bool = false) throws -> Data {
         var document = try MusicDocument(nil, runID: "fixture")
-        let song = try MusicModel.normalize(RecommendationFeedbackAccounts.track("100"))
+        let song = try NativeMusicFixture.storedSong(RecommendationFeedbackAccounts.track("100"))
+        document.library["library"]["songs"][song["songId"].string] = song
         document.queue["entries"] = .array([.obj([
-            ("id", .string("entry-1")), ("key", song["songId"]), ("song", song),
+            ("id", .string("entry-1")), ("songId", song["songId"]),
             ("context", .obj([("sourceType", .string("search-song")), ("searchKeyword", .string("Synthetic"))]))
         ])])
         document.queue["currentId"] = .string("entry-1"); document.queue["serial"] = .n(1)
@@ -121,7 +126,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         }
         document.queue["source"] = heartbeat ? .obj([("platform", .string("wy")), ("sourceId", .string("favorites"))]) :
             .obj([("sourceType", .string("search-song")), ("seedEntryId", .string("entry-1"))])
-        return try document.encode(changed: ["queue", "history", "playback"])
+        return try document.encode(changed: ["library", "queue", "history", "playback"])
     }
 }
 

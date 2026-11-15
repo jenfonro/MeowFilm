@@ -16,15 +16,18 @@ public sealed partial class MusicLibraryOwner
     private JsonObject History(JsonObject doc) => Value(doc, "history") as JsonObject ?? LJ.Obj(("schema", 1), ("playlists", new JsonArray()), ("days", new JsonArray()));
     private int Mode(JsonObject doc) => Value(doc, "playback-settings") is JsonObject m ? (int)LJ.I(m["mode"], 1, 3) : 1;
     private JsonObject Position(JsonObject q, JsonObject doc) => LJ.Obj(("currentId", q["currentId"]), ("version", queueVersion), ("mode", Mode(doc)));
+    private static string QueueText(JsonNode? value) =>
+        value is JsonValue scalar && scalar.TryGetValue<string>(out var text)
+            ? text : throw new MusicLibraryException("INVALID_REQUEST");
     private static JsonObject Context(JsonNode? value)
     {
         var p = value is null ? new JsonObject() : LJ.Object(value);
         LJ.Fields(p, "playlistId sourceTitle playlist queueSource sourcePlatform sourceType sourceId searchKeyword dailyBranch heartbeatPlaylistId heartbeatAccountId"); var output = new JsonObject();
-        foreach (string k in new[] { "playlistId", "sourceTitle", "playlist" }) if (p[k] is not null) output[k] = LJ.Text(p[k]);
+        foreach (string k in new[] { "playlistId", "sourceTitle", "playlist" }) if (p[k] is not null) output[k] = QueueText(p[k]);
         if (p["queueSource"] is not null)
         {
             var source = LJ.Object(p["queueSource"]); LJ.Fields(source, "id title kind platform", "id title");
-            output["queueSource"] = new JsonObject(source.Select(s => KeyValuePair.Create(s.Key, (JsonNode?)JsonValue.Create(LJ.Text(s.Value)))));
+            output["queueSource"] = new JsonObject(source.Select(s => KeyValuePair.Create(s.Key, (JsonNode?)JsonValue.Create(QueueText(s.Value)))));
         }
         CopyFeedbackContext(p, output);
         return output;
@@ -34,9 +37,7 @@ public sealed partial class MusicLibraryOwner
         foreach (string field in new[] { "sourcePlatform", "sourceType", "sourceId", "searchKeyword", "dailyBranch", "heartbeatPlaylistId", "heartbeatAccountId" })
             if (input[field] is not null)
             {
-                string text = LJ.Text(input[field], field == "searchKeyword" ? 512 : 128);
-                LJ.Require(!text.Any(char.IsControl));
-                output[field] = text;
+                output[field] = QueueText(input[field]);
             }
     }
     private static JsonObject ContextView(JsonNode? value)
@@ -61,14 +62,14 @@ public sealed partial class MusicLibraryOwner
         if (value is null) return;
         var source = LJ.Object(value, "CORRUPT_QUEUE");
         LJ.Fields(source, "id title kind platform", "id title");
-        foreach (var field in source) _ = LJ.Text(field.Value);
+        foreach (var field in source) _ = QueueText(field.Value);
     }
-    private static JsonObject EntryView(JsonNode? n)
+    private JsonObject EntryView(JsonNode? n, JsonObject doc)
     {
         var e = LJ.Object(n);
-        return LJ.Obj(("id", e["id"]), ("key", e["key"]), ("song", NativeMusicSong.Normalize(e["song"])), ("context", ContextView(e["context"])));
+        return LJ.Obj(("id", e["id"]), ("key", e["songId"]), ("song", EntrySong(doc, e)), ("context", ContextView(e["context"])));
     }
-    private static void ValidateQueue(JsonObject q, bool schema)
+    private static void ValidateQueue(JsonObject q, bool schema, JsonObject repository)
     {
         try
         {
@@ -85,19 +86,17 @@ public sealed partial class MusicLibraryOwner
                 LJ.Require(Guid.TryParseExact(archiveId, "D", out var parsed) &&
                     archiveId == parsed.ToString("D"), "CORRUPT_QUEUE");
                 _ = LJ.I(q["at"], 1);
-                _ = LJ.Text(q["title"], 2048);
+                _ = QueueText(q["title"]);
             }
             var entries = LJ.Array(q["entries"]);
             var ids = new HashSet<string>();
             foreach (var n in entries)
             {
-                var entry = LJ.Object(n); LJ.Fields(entry, "id key song context", "id key song context");
+                var entry = LJ.Object(n); LJ.Fields(entry, "id songId context", "id songId context");
                 string id = LJ.S(entry["id"]);
                 LJ.Require(Regex.IsMatch(id, "^entry-[1-9][0-9]*$", RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout) &&
                     long.TryParse(id[6..], out long serial) && serial <= LJ.MaxInteger && ids.Add(id), "CORRUPT_QUEUE");
-                var song = LJ.Object(entry["song"], "CORRUPT_QUEUE");
-                LJ.Require(JsonNode.DeepEquals(song, NativeMusicSong.Normalize(song)) &&
-                    LJ.S(entry["key"]) == LJ.S(song["songId"]), "CORRUPT_QUEUE");
+                LJ.Require(repository.ContainsKey(LJ.S(entry["songId"])), "CORRUPT_QUEUE");
                 ValidateContext(LJ.Object(entry["context"], "CORRUPT_QUEUE"));
             }
             string current = LJ.S(q["currentId"]);
@@ -121,7 +120,7 @@ public sealed partial class MusicLibraryOwner
         }
         catch (MusicLibraryException e) when (e.Code != "LIMIT") { throw new MusicLibraryException("CORRUPT_QUEUE"); }
     }
-    private static void ValidateHistory(JsonObject history)
+    private static void ValidateHistory(JsonObject history, JsonObject repository)
     {
         try
         {
@@ -132,7 +131,7 @@ public sealed partial class MusicLibraryOwner
             var ids = new HashSet<string>();
             foreach (var a in playlists.OfType<JsonObject>())
             {
-                ValidateQueue(a, false);
+                ValidateQueue(a, false, repository);
                 LJ.Require(ids.Add(LJ.S(a["id"])), "CORRUPT_HISTORY");
             }
             LJ.Require(playlists.All(p => p is JsonObject), "CORRUPT_HISTORY"); ids.Clear();
@@ -145,9 +144,8 @@ public sealed partial class MusicLibraryOwner
                 long previous = long.MaxValue;
                 foreach (var row in songs.OfType<JsonObject>())
                 {
-                    LJ.Fields(row, "song context at", "song context at");
-                    var song = LJ.Object(row["song"], "CORRUPT_HISTORY");
-                    LJ.Require(JsonNode.DeepEquals(song, NativeMusicSong.Normalize(song)), "CORRUPT_HISTORY");
+                    LJ.Fields(row, "songId context at", "songId context at");
+                    LJ.Require(repository.ContainsKey(LJ.S(row["songId"])), "CORRUPT_HISTORY");
                     ValidateContext(LJ.Object(row["context"], "CORRUPT_HISTORY"));
                     long at = LJ.I(row["at"], 1);
                     LJ.Require(at <= previous, "CORRUPT_HISTORY");
@@ -168,7 +166,7 @@ public sealed partial class MusicLibraryOwner
     private JsonObject MakeEntry(JsonObject song, JsonObject context)
     {
         LJ.Require(serial < LJ.MaxInteger, "LIMIT"); var c = (JsonObject)context.DeepClone(); c.Remove("queueSource");
-        return LJ.Obj(("id", "entry-" + ++serial), ("key", LJ.S(song["songId"])), ("song", song), ("context", c));
+        return LJ.Obj(("id", "entry-" + ++serial), ("songId", LJ.S(song["songId"])), ("context", c));
     }
     private void Archive(JsonObject previous, JsonObject doc)
     {
@@ -193,8 +191,8 @@ public sealed partial class MusicLibraryOwner
         if (method == "music.queue.get")
         {
             LJ.Fields(p, "offset limit");
-            return (LJ.Merge(LJ.Page(entries.Select(EntryView), p, "entries"),
-                LJ.Merge(Position(q, doc), LJ.Obj(("current", entries.FirstOrDefault(e => LJ.S(e?["id"]) == current) is { } e ? EntryView(e) : null),
+            return (LJ.Merge(LJ.Page(entries.Select(e => EntryView(e, doc)), p, "entries"),
+                LJ.Merge(Position(q, doc), LJ.Obj(("current", entries.FirstOrDefault(e => LJ.S(e?["id"]) == current) is { } e ? EntryView(e, doc) : null),
                     ("source", SourceView(q["source"])), ("hasPriority", LJ.Array(q["priority"]).Count > 0),
                     ("persistence", LJ.Obj(("state", "saved")))))), false);
         }
@@ -226,7 +224,7 @@ public sealed partial class MusicLibraryOwner
             }
             preloadNext = next is null ? null : (queueVersion, current, mode, next);
             return (LJ.Merge(Position(q, doc), LJ.Obj(("next", next is null ? null :
-                EntryView(entries.Single(e => LJ.S(e?["id"]) == next))))), false);
+                EntryView(entries.Single(e => LJ.S(e?["id"]) == next), doc)))), false);
         }
         LJ.Require(pending is null, "PENDING_WRITE"); JsonObject? result = null;
         switch (method)
@@ -249,8 +247,9 @@ public sealed partial class MusicLibraryOwner
                 {
                     LJ.Fields(p, full ? "songs index context expectedVersion" : "songs index context", "songs index");
                     if (full) LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
-                    songs = Songs(p, false, full); context = Context(p["context"]); index = (int)LJ.I(p["index"], 0, songs.Length - 1);
+                    songs = Songs(p, false); context = Context(p["context"]); index = (int)LJ.I(p["index"], 0, songs.Length - 1);
                 }
+                songs = RegisterSongs(doc, songs);
                 Archive(q, doc);
                 q["entries"] = LJ.Arr(songs.Select(s => MakeEntry(s, context))); q["currentId"] = q["entries"]![index]!["id"]!.DeepClone();
                 q["priority"] = new JsonArray(); q["source"] = context["queueSource"]?.DeepClone();
@@ -260,7 +259,7 @@ public sealed partial class MusicLibraryOwner
             {
                 LJ.Fields(p, full ? "songs context next expectedVersion" : "songs context next", "songs");
                 if (full) LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
-                LJ.Require(p["next"] is null || LJ.IsBool(p["next"])); var songs = Songs(p, false, full); var context = Context(p["context"]);
+                LJ.Require(p["next"] is null || LJ.IsBool(p["next"])); var songs = RegisterSongs(doc, Songs(p, false)); var context = Context(p["context"]);
                 var added = songs.Select(s => MakeEntry(s, context)).ToArray();
                 int index = LJ.B(p["next"]) && current.Length > 0 ? entries.Select(e => LJ.S(e?["id"])).ToList().IndexOf(current) + 1 : entries.Count;
                 q["entries"] = LJ.Arr(entries.Take(index).Concat(added).Concat(entries.Skip(index)));
@@ -355,8 +354,8 @@ public sealed partial class MusicLibraryOwner
             string id = LJ.Text(p["id"]); var item = list.OfType<JsonObject>().FirstOrDefault(i => LJ.S(i[kind == "playlists" ? "id" : "date"]) == id)
                 ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
             return kind == "days" ? (LJ.Merge(LJ.Page(LJ.Array(item["songs"]).OfType<JsonObject>().Select(v =>
-                LJ.Obj(("song", NativeMusicSong.Normalize(v["song"])), ("context", ContextView(v["context"])), ("at", v["at"]))), p), LJ.Obj(("id", id), ("date", id))), false) :
-                (LJ.Merge(LJ.Page(LJ.Array(item["entries"]).Select(EntryView), p, "entries"), LJ.Obj(("id", id), ("title", item["title"]), ("at", item["at"]), ("currentId", item["currentId"]), ("source", SourceView(item["source"])))), false);
+                LJ.Obj(("song", SongReference(doc, v["songId"])), ("context", ContextView(v["context"])), ("at", v["at"]))), p), LJ.Obj(("id", id), ("date", id))), false) :
+                (LJ.Merge(LJ.Page(LJ.Array(item["entries"]).Select(e => EntryView(e, doc)), p, "entries"), LJ.Obj(("id", id), ("title", item["title"]), ("at", item["at"]), ("currentId", item["currentId"]), ("source", SourceView(item["source"])))), false);
         }
         LJ.Require(pending is null, "PENDING_WRITE");
         switch (method)
@@ -381,17 +380,13 @@ public sealed partial class MusicLibraryOwner
                 string date = DateTimeOffset.FromUnixTimeMilliseconds(at).ToLocalTime().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
                 var days = LJ.Array(h["days"]); var day = days.OfType<JsonObject>().FirstOrDefault(d => LJ.S(d["date"]) == date);
                 if (day is null) { day = LJ.Obj(("date", date), ("songs", new JsonArray())); days.Add(day); }
-                var played = LJ.Obj(("song", current["song"]), ("context", current["context"]), ("at", at));
-                var groups = new NativeMusicSongGroups();
-                var merged = new Dictionary<string, (JsonObject Row, NativeMusicSong.Recordings Song)>(StringComparer.Ordinal);
+                var played = LJ.Obj(("songId", current["songId"]), ("context", current["context"]), ("at", at));
+                var merged = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
                 foreach (var row in new[] { played }.Concat(LJ.Array(day["songs"]).OfType<JsonObject>()).OrderByDescending(r => LJ.I(r["at"])))
                 {
-                    var group = groups.Add(new(LJ.Object(row["song"])));
-                    // Newest occurrence owns the timestamp, context, display and equal-key recordings.
-                    merged.TryAdd(group.Id, (row, group));
+                    merged.TryAdd(LJ.S(row["songId"]), row);
                 }
-                day["songs"] = LJ.Arr(merged.Values.Select(item =>
-                    LJ.Obj(("song", item.Song.ToSong()), ("context", item.Row["context"]), ("at", item.Row["at"]))));
+                day["songs"] = LJ.Arr(merged.Values);
                 h["days"] = LJ.Arr(days.OfType<JsonObject>().OrderByDescending(d => LJ.S(d["date"]), StringComparer.Ordinal).Take(7)); break;
             }
             default: throw new MusicLibraryException("INVALID_REQUEST");

@@ -1,5 +1,3 @@
-using System.Net;
-using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using System.Text.Json;
@@ -34,11 +32,11 @@ public static class AppCompositionTests
         yield return new("App components native startup explicit script UI", () => Sta(Components));
         yield return new("App native durable library and accounts without Node", Durable);
         yield return new("App uses its single current storage identity without product selection", Identity);
-        yield return new("App shell cold startup and current queue history reopen without Node", () => Sta(CurrentShellStartup));
-        yield return new("App shell non-current queue fails once without rewriting data", () => Sta(() =>
-            RejectedShellStartup("queue", """{"schema":1,"entries":[],"currentId":null,"priority":[],"source":null,"similar":[]}""",
+        yield return new("App shell canonical startup and current queue history reopen", () => Sta(CurrentShellStartup));
+        yield return new("App shell corrupt current queue fails once without rewriting data", () => Sta(() =>
+            RejectedShellStartup("queue", """{"schema":1,"entries":[],"currentId":"entry-1","priority":[],"source":null}""",
                 "播放队列数据无效或格式不兼容")));
-        yield return new("App shell non-current history fails once without rewriting data", () => Sta(() =>
+        yield return new("App shell corrupt current history fails once without rewriting data", () => Sta(() =>
             RejectedShellStartup("history", """{"schema":1,"playlists":[],"days":[],"extra":true}""",
                 "播放历史数据无效或格式不兼容")));
     }
@@ -57,20 +55,20 @@ public static class AppCompositionTests
             ("tmdb", "0.1.0"),
             ("douban", "0.1.0"),
             ("film", "0.1.0"),
-            ("netease", "0.1.0")
+            ("netease", "0.1.0"),
+            ("music-platform", "0.1.0")
         }));
         Check(AppIdentity.NativeCollections.Count == 0, "music sources are stored by the shared runtime module");
-        Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
-        Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
-        Check(AppIdentity.NativeNamespaces.Contains("music.fm-selection.v1"));
+        Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v2"));
+        Check(AppIdentity.NativeNamespaces.Contains("music.fm-selection.v2"));
         Check(AppIdentity.NativeNamespaces.Contains("film.library.v1"));
         Check(AppIdentity.NativeNamespaces.Contains("novel.library.v1"));
-        Check(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { "music.accounts.v1", "music.platform-context.v1" }));
+        Check(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { "music.accounts.v2" }));
         Check(AppDataPaths.Current.Caches != AppDataPaths.Current.Documents &&
             !AppDataPaths.Current.Caches.StartsWith(AppDataPaths.Current.Documents + Path.DirectorySeparatorChar,
                 StringComparison.OrdinalIgnoreCase));
         Check(!AppIdentity.NativeNamespaces.Intersect(AppIdentity.CacheNamespaces, StringComparer.Ordinal).Any());
-        Check(AppIdentity.CacheProtectedNamespaces.Contains("music.account-details.v1"));
+        Check(AppIdentity.CacheProtectedNamespaces.Contains("music.account-details.v2"));
         return Task.CompletedTask;
     }
     private static async Task Components()
@@ -139,11 +137,9 @@ public static class AppCompositionTests
         for (int pass = 0; pass < 2; pass++)
         {
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-            await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
-            runtime.Start();
+            await using var runtime = StartupRuntime();
             await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            var transport = new StartupTransport();
-            var application = new MusicNativeApplication(store, runtime, transport);
+            var application = new MusicNativeApplication(store, runtime);
             await using var music = new MusicCapability(application, store, playback);
             var lifecycle = new AppShutdown([music], []);
             var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);
@@ -171,8 +167,8 @@ public static class AppCompositionTests
                 RenderComponent((FrameworkElement)shell.Content, 1244, 848);
                 shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
                 await Dispatcher.Yield(DispatcherPriority.Background);
-                Check(transport.Calls == 1 && !playback.HasMedia,
-                    "startup must load one visible page without automatic playback, even when Node fails");
+                Check(runtime.Requests.Count == 1 && runtime.Requests[0].Operation == "home" && !playback.HasMedia,
+                    "startup consumes one canonical page without automatic playback");
                 if (pass == 0)
                 {
                     Check(!music.HasCurrent, "fresh storage must not manufacture a current song");
@@ -218,11 +214,9 @@ public static class AppCompositionTests
             ("key", LJ.Stringify(new JsonArray("meowfilm", "music", 1, "local", area))),
             ("value", JsonNode.Parse(value))))));
         var fingerprint = await store.WriteAsync(MusicLibraryOwner.DocumentNamespace, LJ.Bytes(document), DocumentFingerprint.Missing);
-        await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
-        runtime.Start();
+        await using var runtime = StartupRuntime();
         await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-        var transport = new StartupTransport();
-        var application = new MusicNativeApplication(store, runtime, transport);
+        var application = new MusicNativeApplication(store, runtime);
         await using var music = new MusicCapability(application, store, playback);
         var messages = new List<string>();
         music.PropertyChanged += (_, args) =>
@@ -245,10 +239,10 @@ public static class AppCompositionTests
             Check(messages.Count == 0 && music.Status.Length == 0 &&
                 ((NoticeStack)shell.FindName("Notices")).Children.Count == 0,
                 "Shell-owned failure must not publish a second module notification");
-            Check(transport.Calls == 0 && !playback.HasMedia,
+            Check(runtime.Requests.Count == 0 && !playback.HasMedia,
                 "rejected startup must not start unrelated work");
             var saved = await store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
-            try { Check(saved.Fingerprint == fingerprint, "non-current user data must remain unchanged"); }
+            try { Check(saved.Fingerprint == fingerprint, "corrupt current data must remain unchanged"); }
             finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
         }
         finally
@@ -278,23 +272,25 @@ public static class AppCompositionTests
             await Dispatcher.Yield(DispatcherPriority.Background);
         }
     }
-    private sealed class StartupTransport : HttpMessageHandler
+    private static MusicPlatformRuntimeFixture StartupRuntime() => new()
     {
-        public int Calls { get; private set; }
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        OnRequest = (request, token) =>
         {
             token.ThrowIfCancellationRequested();
-            Check(request.RequestUri!.AbsolutePath.EndsWith("/link/page/rcmd/resource/show", StringComparison.Ordinal),
-                "startup may request only its visible recommendation page");
-            Calls++;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            Check(request.Platform == "wy" && request.Operation == "home",
+                "startup may request only its visible canonical recommendation page");
+            return Task.FromResult(MusicPlatformRuntimeFixture.Json(new
             {
-                Content = new StringContent("""
-                    {"code":200,"data":{"cursor":"1","hasMore":false,"blocks":[{"positionCode":"PLAYLIST","dslData":{"blockResource":{"header":{"title":"推荐"},"items":[{"resourceType":"playlist","resourceId":"500","name":"合成推荐歌单"}]}}}]}}
-                    """)
-            });
+                platform = "wy", more = false, sections = new[]
+                {
+                    new { id = "PLAYLIST", title = "推荐", type = "playlists", layout = "list", items = new[]
+                    {
+                        new { id = "500", name = "合成推荐歌单", kind = "playlist", action = new { type = "playlist", id = "500" } }
+                    } }
+                }
+            }));
         }
-    }
+    };
     private static void RenderComponent(FrameworkElement view, int width, int height)
     {
         view.Measure(new Size(width, height)); view.Arrange(new Rect(0, 0, width, height)); view.UpdateLayout();

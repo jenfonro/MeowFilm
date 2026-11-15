@@ -24,15 +24,10 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
         }
     }
 
-    // Includes keys left by the former encrypted ordinary-document stores.
+    // Only the current sensitive account store belongs to this reset.
     // Never enumerate/delete arbitrary services in the signed app's access group.
     static let keychainServices = [
-        "music.accounts.v1",
-        NativeMusicClientService.namespace(.netease),
-        NativeMusicClientService.namespace(.kugou),
-        MusicQQPublicPersistenceDocument.namespace,
-        "music.library.v1", "music.playback-display.v1",
-        "music.source-discovery.v1", "music.account-url-cache.v1"
+        "music.platform.accounts.v1"
     ].map { MeowfilmIdentity.bundleIdentifier + "." + $0 }
 
     private let support: URL
@@ -90,7 +85,7 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
         directories = [
             support.appendingPathComponent("meowfilm", isDirectory: true),
             caches.appendingPathComponent("meowfilm", isDirectory: true),
-            caches.appendingPathComponent("meowfilm.music.audio-cache.v1", isDirectory: true),
+            caches.appendingPathComponent("meowfilm.music.audio-resources.v1", isDirectory: true),
             temporary.appendingPathComponent("meowfilm", isDirectory: true)
         ]
         self.defaults = defaults; self.defaultsDomain = defaultsDomain

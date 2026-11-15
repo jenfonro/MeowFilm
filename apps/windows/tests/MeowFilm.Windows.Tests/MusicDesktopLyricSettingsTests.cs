@@ -15,33 +15,33 @@ public static class MusicDesktopLyricSettingsTests
 
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("missing area defaults remain read only and legacy areas survive a cold reopen", async () =>
+        yield return Case("missing area defaults remain read only and other current areas survive a cold reopen", async () =>
         {
             await using var f = new QualityFixture();
             var defaults = (await f.Ok(Get)).GetProperty("settings");
             Settings(defaults, 0, "single", Normal, Highlight);
-            Check(!defaults.TryGetProperty("geometry", out _), "the original settings shape remains readable without geometry");
+            Check(!defaults.TryGetProperty("geometry", out _), "unset geometry is absent from current settings");
             await f.Ok(Save, Draft());
             Check(f.Store.Writes == 0 && f.Runtime.Calls.Count == 0);
             await f.Ok("music.appearance.save", new { ifRevision = 0, playlistView = "list",
                 playerTheme = "starlight", colorMode = "fixed", colorPalette = "mint" });
             await f.Ok("music.library.create", new { name = "Keep" });
-            var legacy = Document(f.Store);
-            await using (var legacyOwner = new MusicLibraryOwner(f.Store))
-                Settings((await legacyOwner.ExecuteAsync(Get)).GetProperty("settings"), 0, "single", Normal, Highlight);
+            var before = Document(f.Store);
+            await using (var reader = new MusicLibraryOwner(f.Store))
+                Settings((await reader.ExecuteAsync(Get)).GetProperty("settings"), 0, "single", Normal, Highlight);
             int writes = f.Store.Writes;
-            Check(JsonNode.DeepEquals(legacy, Document(f.Store)), "reading a missing area never migrates legacy state");
+            Check(JsonNode.DeepEquals(before, Document(f.Store)), "reading a missing area never writes current state");
             await f.Ok(Save, Draft(layout: "double", normal: "#12abef", highlight: "#000000"));
             Check(f.Store.Writes == writes + 1);
             var current = Document(f.Store);
-            foreach (var entry in legacy["entries"]!.AsArray().OfType<JsonObject>())
+            foreach (var entry in before["entries"]!.AsArray().OfType<JsonObject>())
                 Check(current["entries"]!.AsArray().OfType<JsonObject>().Any(saved => JsonNode.DeepEquals(saved, entry)),
-                    "saving desktop lyrics preserves each legacy area");
+                    "saving desktop lyrics preserves each independent current area");
             Check(StoredSettings(current).Count == 5, "only schema, revision, layout and two colors are persisted");
             await using var reopened = new MusicLibraryOwner(f.Store);
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Settings(reopenedSettings, 1, "double", "#12ABEF", "#000000");
-            Check(!reopenedSettings.TryGetProperty("geometry", out _), "legacy settings do not acquire a placeholder geometry");
+            Check(!reopenedSettings.TryGetProperty("geometry", out _), "unset geometry does not acquire a placeholder");
             Check((await reopened.ExecuteAsync("music.appearance.get")).GetProperty("settings")
                 .GetProperty("colorPalette").GetString() == "mint" && f.Runtime.Calls.Count == 0);
         });
@@ -96,7 +96,7 @@ public static class MusicDesktopLyricSettingsTests
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Check(JsonNode.DeepEquals(JsonNode.Parse(reopenedSettings.GetProperty("geometry").GetRawText()), geometry));
         });
-        yield return Case("persisted desktop fields remain strict without weakening the old appearance schema", async () =>
+        yield return Case("persisted desktop fields and independent current appearance fields remain strict", async () =>
         {
             await using var f = new QualityFixture();
             await f.Ok(Save, Draft(layout: "double"));
@@ -119,11 +119,11 @@ public static class MusicDesktopLyricSettingsTests
                     await using var invalid = new MusicLibraryOwner(f.Store);
                     Code(await invalid.ExecuteAsync(Get), "CORRUPT_STORAGE");
                 }
-                var legacy = (JsonObject)original.DeepClone();
-                Entry(legacy, "native-appearance")["value"]!["desktopLyrics"] = new JsonObject();
-                f.Store.Data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(legacy);
-                await using var strictLegacy = new MusicLibraryOwner(f.Store);
-                Code(await strictLegacy.ExecuteAsync(Get), "CORRUPT_STORAGE");
+                var damaged = (JsonObject)original.DeepClone();
+                Entry(damaged, "native-appearance")["value"]!["desktopLyrics"] = new JsonObject();
+                f.Store.Data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(damaged);
+                await using var strict = new MusicLibraryOwner(f.Store);
+                Code(await strict.ExecuteAsync(Get), "CORRUPT_STORAGE");
             }
             finally { f.Store.Data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(original); }
         });
@@ -144,6 +144,7 @@ public static class MusicDesktopLyricSettingsTests
         yield return UiCase("failed reads are retryable and concurrent callers share the physical read", ReadRecovery);
         yield return UiCase("consumer unknown commits accept only the authority and report an uncommitted draft", UnknownConsumer);
         yield return UiCase("window geometry reconciles unknown commits without replaying an unconfirmed write", GeometryUnknownConsumer);
+        yield return UiCase("desktop lyric saves acknowledge only fields actually present in their submitted document", GeometryNoticeIsolation);
         yield return UiCase("consumer revision conflicts adopt newer authority without replaying the draft", RevisionConflict);
         yield return UiCase("an unavailable authority after an unknown write keeps edits disabled until a real retry", UnknownReadFailure);
         yield return UiCase("a real document CAS conflict never publishes the rejected settings", StorageConflict);
@@ -251,6 +252,28 @@ public static class MusicDesktopLyricSettingsTests
             scene.Module.Status == "桌面歌词位置和大小保存失败" &&
             scene.Store.Writes == 2 && scene.App.Saves == 2,
             "an uncommitted geometry draft is not published when the authority retains the prior value");
+    }
+
+    private static async Task GeometryNoticeIsolation()
+    {
+        await using var scene = new Scene();
+        await scene.Module.EnsureDesktopLyricSettingsAsync();
+        var geometry = new MusicDesktopLyricsGeometry(@"\\.\DISPLAY1", 23, 48, 880, 144);
+        scene.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
+        scene.Store.Fault = true; scene.Store.FaultAfter = false;
+        await scene.Module.SaveDesktopLyricGeometryAsync(geometry);
+        Check(scene.Module.DesktopLyricGeometry is null && scene.Module.OwnedNotices.Count == 1);
+        object owner = scene.Module.OwnedNotices.Single().Owner;
+        await scene.Module.SetDesktopLyricLayoutAsync("double");
+        Check(scene.Module.DesktopLyricLayout == "double" &&
+            scene.Module.OwnedNotices.Count == 1 && ReferenceEquals(owner, scene.Module.OwnedNotices.Single().Owner),
+            "a layout/color save without geometry cannot acknowledge its earlier unknown geometry field");
+        await scene.Module.EnsureDesktopLyricSettingsAsync();
+        Check(scene.Module.OwnedNotices.Count == 1, "a read is not a save receipt");
+        await scene.Module.SaveDesktopLyricGeometryAsync(geometry);
+        Check(scene.Module.DesktopLyricGeometry == geometry && scene.Module.OwnedNotices.Count == 0 &&
+            scene.App.Saves == 3 && scene.Store.Writes == 3,
+            "a later confirmed document containing geometry clears its own earlier unknown without replay");
     }
 
     private static async Task RevisionConflict()
@@ -396,7 +419,7 @@ public static class MusicDesktopLyricSettingsTests
         internal Scene(DocumentStore? store = null)
         {
             Store = store ?? new();
-            Native = new(Store, Runtime, new RejectHttp());
+            Native = new(Store, Runtime);
             App = new(Native);
             Module = new(App, Store, new Output());
         }

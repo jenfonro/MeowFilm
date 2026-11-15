@@ -52,7 +52,6 @@ internal sealed class NeteasePlaybackFeedback(NeteasePlaybackOutbox outbox, Musi
     {
         token.ThrowIfCancellationRequested();
         FeedbackProtocolRules.Start(account, input);
-        _ = FeedbackProtocolRules.Cookies(account);
         string fingerprint = FeedbackProtocolRules.Fingerprint(account, input);
         lock (gate)
         lock (input.Attempt.Gate)

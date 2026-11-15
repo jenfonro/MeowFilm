@@ -25,9 +25,8 @@ extension NativeMusicService {
         else { try musicRequire(item.enterAfter, .targetChanged) }
         let before = try read()
         try musicRequire(similarEntranceIsCurrent(item, before), .targetChanged)
-        var seed = item.fromHome ? nil : before.queue["entries"].array.first { $0["id"].string == item.entryID }
+        let seed = item.fromHome ? nil : before.queue["entries"].array.first { $0["id"].string == item.entryID }
         try musicRequire(item.fromHome || seed != nil, .targetChanged)
-        if seed != nil { seed?["song"] = item.seed }
         let seedNativeID = seed == nil ? nil : MusicNativeSimilarData.nativeID(item.seed)
         let seedIndex = seedNativeID.flatMap { id in item.songs.firstIndex { MusicNativeSimilarData.nativeID($0) == id } }
         let restores = item.provider == .heartbeat || item.provider == .queueRecommendations
@@ -47,11 +46,11 @@ extension NativeMusicService {
                 if session.continueEnabled { selectContinuationMode(&d) }
                 let old = d.queue
                 let title = item.fromHome && item.provider == .heartbeat ? "心动模式" :
-                    "根据 \(MusicNativeSimilarData.display(item.seed).title) 推荐"
+                    "根据 \(try MusicNativeSimilarData.display(item.seed, songs: d.library["library"]["songs"]).title) 推荐"
                 let songs = item.songs.enumerated().filter { $0.offset != seedIndex }.map(\.element)
-                var rows = try makeEntries(songs, queue: &d.queue, context: .obj([
+                var rows = try makeEntries(songs, document: &d, context: .obj([
                     ("sourceType", .string(item.provider.rawValue)), ("sourceTitle", .string(title)),
-                    ("similar", .obj([("batchId", .string(batchID)), ("basedOn", MusicModel.durable(item.seed)),
+                    ("similar", .obj([("batchId", .string(batchID)), ("basedOnSongId", item.seed["songId"]),
                                       ("provider", .string(item.provider.rawValue))]))
                 ]))
                 if let seed { rows.insert(seed, at: 0) }
@@ -60,7 +59,7 @@ extension NativeMusicService {
                         rows[i]["context"]["platform"] = .string("wy")
                         rows[i]["context"]["sourceId"] = .string("favorites")
                     }
-                    if let nativeID = MusicNativeSimilarData.nativeID(rows[i]["song"]),
+                    if let nativeID = MusicNativeSimilarData.nativeID(d.library["library"]["songs"][rows[i]["songId"].string]),
                        let value = item.recommendations[nativeID] {
                         rows[i]["context"]["recommendation"] = value
                     }
@@ -70,7 +69,7 @@ extension NativeMusicService {
                 let selected: MJ
                 if let candidateIndex {
                     let nativeID = MusicNativeSimilarData.nativeID(item.songs[candidateIndex])
-                    selected = rows.first { MusicNativeSimilarData.nativeID($0["song"]) == nativeID }!["id"]
+                    selected = rows.first { MusicNativeSimilarData.nativeID(d.library["library"]["songs"][$0["songId"].string]) == nativeID }!["id"]
                 } else { selected = seed?["id"] ?? rows[0]["id"] }
                 d.queue["currentId"] = selected
                 for key in ["priority", "history", "failed"] { d.queue[key] = .array([]) }
@@ -78,7 +77,7 @@ extension NativeMusicService {
                     ("platform", .string("wy")), ("sourceId", item.provider == .heartbeat ? .string("favorites") : .null)])
                 session.batches = [MusicNativeSimilarData.batch(batchID, basedOn: item.seed, provider: item.provider, rows: rows)]
                 for row in rows {
-                    if let id = MusicNativeSimilarData.nativeID(row["song"]), let value = item.recommendations[id] {
+                    if let id = MusicNativeSimilarData.nativeID(d.library["library"]["songs"][row["songId"].string]), let value = item.recommendations[id] {
                         live[row["id"].string] = value
                     }
                 }
@@ -121,7 +120,7 @@ extension NativeMusicService {
         let (state, keep) = try session.lease.authorization.perform {
             try similarQueueTransaction(["queue", "playback", "history"]) { d in
                 let old = d.queue
-                try restoreSimilarQueue(session.returnQueue, into: &d.queue)
+                try restoreSimilarQueue(session.returnQueue, into: &d)
                 if let current = old["entries"].array.first(where: { $0["id"] == old["currentId"] }) {
                     var rows = d.queue["entries"].array
                     if !rows.contains(where: { $0["id"] == current["id"] }) {
@@ -146,24 +145,10 @@ extension NativeMusicService {
         return .init(state: state, action: keep ? .keepCurrent : .restoreOnly)
     }
 
-    func restoreSimilarQueue(_ snapshot: MJ, into queue: inout MJ) throws {
-        try MusicNativeSimilarData.validateQueue(snapshot)
-        let original = snapshot["entries"].array
-        var rows = try makeEntries(original.map { $0["song"] }, queue: &queue)
-        for i in rows.indices {
-            rows[i]["id"] = original[i]["id"]
-            rows[i]["context"] = MusicModel.durable(original[i]["context"])
-        }
-        let ids = Set(rows.map { $0["id"].string })
-        let current = ids.contains(snapshot["currentId"].string) ? snapshot["currentId"] : rows.first?["id"] ?? .null
-        var seen = Set<String>()
-        queue["entries"] = .array(rows); queue["currentId"] = current
-        queue["priority"] = .strings(snapshot["priority"].strings.filter {
-            ids.contains($0) && $0 != current.string && seen.insert($0).inserted
-        })
-        queue["history"] = .strings(snapshot["history"].strings.filter { ids.contains($0) })
-        queue["failed"] = .array([])
-        queue["source"] = rows.isEmpty ? .null : MusicModel.durable(snapshot["source"])
+    func restoreSimilarQueue(_ snapshot: MJ, into document: inout MusicDocument) throws {
+        try MusicNativeSimilarData.validateQueue(snapshot, songs: document.library["library"]["songs"])
+        for key in ["entries", "currentId", "priority", "history", "source"] { document.queue[key] = snapshot[key] }
+        document.queue["failed"] = .array([])
     }
 
     func hasCurrentPlayback(_ d: MusicDocument) -> Bool {
@@ -192,7 +177,7 @@ extension NativeMusicService {
         case .heartbeat:
             guard let context = session.context,
                   let tail = d.queue["entries"].array.last,
-                  let lastID = MusicNativeSimilarData.nativeID(tail["song"]) else {
+                  let lastID = MusicNativeSimilarData.nativeID(d.library["library"]["songs"][tail["songId"].string]) else {
                 throw MusicServiceError.sourceUnavailable
             }
             request = .heartbeat(lastID: lastID, fromHome: session.fromHome, context: context)
@@ -220,43 +205,47 @@ extension NativeMusicService {
         }
         let own = epoch
         do {
-            let owner = try similarOwner(), lease = session.lease
-            let response: MusicNativeSimilarModeBatch
-            if let buffered = session.buffered { response = buffered }
-            else {
-                response = try await similarWork(requestID) {
-                    try await owner.checkAccountQueue(lease)
-                    return try await owner.similarModeBatch(lease, request: request)
+            let lease = session.lease
+            let references: MusicNativeSimilarBatchReferences
+            if let buffered = session.buffered {
+                try await checkSimilarLease(lease)
+                references = buffered
+            } else {
+                let response = try await similarWork(requestID) {
+                    try await self.similarBatch(lease, request: request)
                 }
+                try await checkSimilarLease(lease)
+                try check(own); try lease.authorization.check()
+                guard similarMode.active === session, session.pendingID == requestID else { return }
+                if session.provider == .heartbeat {
+                    guard response.heartbeatContext != nil else { throw MusicServiceError.invalidResponse }
+                }
+                let incoming = try adoptSongs(MusicNativeSimilarData.songs(response), authoritative: true)
+                let offset: Int
+                if session.provider == .queueRecommendations {
+                    guard let next = response.offset, response.hasMore != nil else { throw MusicServiceError.invalidResponse }
+                    offset = next
+                } else { offset = session.offset + 1 }
+                references = .init(songIDs: incoming.map { $0["songId"].string },
+                    recommendations: try MusicNativeSimilarData.recommendations(response.items),
+                    heartbeatContext: response.heartbeatContext, hasMore: response.hasMore, offset: offset)
             }
-            try await owner.checkAccountQueue(lease)
             try check(own); try lease.authorization.check()
             guard similarMode.active === session, session.pendingID == requestID else { return }
-            if session.provider == .heartbeat {
-                try musicRequire(response.heartbeatContext == session.context, .targetChanged)
-            }
-            let incoming = try MusicNativeSimilarData.songs(response)
-            let offset: Int
-            if session.provider == .queueRecommendations {
-                guard let next = response.offset, response.hasMore != nil else { throw MusicServiceError.invalidResponse }
-                offset = next
-            } else { offset = session.offset + 1 }
-            let recommendations = try MusicNativeSimilarData.recommendations(response.items)
-            try await retainSongMetadata(incoming)
-            try check(own); try lease.authorization.check()
-            guard similarMode.active === session, session.pendingID == requestID else { return }
-            guard session.continueEnabled else { session.buffered = response; return }
-            let songs = MusicNativeSimilarData.unique(incoming, excluding: try read().queue["entries"].array.map { $0["song"] })
-            let exhausted = response.hasMore == false || songs.isEmpty
+            guard session.continueEnabled else { session.buffered = references; return }
+            let current = try read()
+            let incoming = try references.songIDs.map { try repositorySong($0, current) }
+            let songs = MusicNativeSimilarData.unique(incoming, excluding: current.queue["entries"].array.map { current.library["library"]["songs"][$0["songId"].string] })
+            let exhausted = references.hasMore == false || songs.isEmpty
             var batch: MJ?, live: [String: MJ] = [:]
             try lease.authorization.perform {
                 try similarQueueTransaction(["queue"]) { draft in
                     if !songs.isEmpty {
                         let batchID = UUID().uuidString.lowercased()
-                        var rows = try makeEntries(songs, queue: &draft.queue, context: .obj([
+                        var rows = try makeEntries(songs, document: &draft, context: .obj([
                             ("sourceType", .string(session.provider.rawValue)),
                             ("sourceTitle", draft.queue["source"]["sourceTitle"]),
-                            ("similar", .obj([("batchId", .string(batchID)), ("basedOn", MusicModel.durable(session.seed)),
+                            ("similar", .obj([("batchId", .string(batchID)), ("basedOnSongId", session.seed["songId"]),
                                               ("provider", .string(session.provider.rawValue))]))
                         ]))
                         for i in rows.indices {
@@ -264,7 +253,7 @@ extension NativeMusicService {
                                 rows[i]["context"]["platform"] = .string("wy")
                                 rows[i]["context"]["sourceId"] = .string("favorites")
                             }
-                            if let id = MusicNativeSimilarData.nativeID(rows[i]["song"]), let value = recommendations[id] {
+                            if let id = MusicNativeSimilarData.nativeID(draft.library["library"]["songs"][rows[i]["songId"].string]), let value = references.recommendations[id] {
                                 rows[i]["context"]["recommendation"] = value; live[rows[i]["id"].string] = value
                             }
                         }
@@ -273,7 +262,13 @@ extension NativeMusicService {
                         batch = MusicNativeSimilarData.batch(batchID, basedOn: session.seed, provider: session.provider, rows: rows)
                     }
                     var saved = session.saved
-                    saved["offset"] = .n(offset)
+                    if let context = references.heartbeatContext {
+                        saved["providerContext"] = .obj([
+                            ("pid", .string(context.playlistID)), ("sid", .string(context.seedID)),
+                            ("count", .n(context.count))
+                        ])
+                    }
+                    saved["offset"] = .n(references.offset)
                     saved["exhausted"] = .bool(exhausted)
                     if let batch { saved["batches"] = .array(session.batches + [batch]) }
                     saved["status"] = .string("ready")
@@ -282,7 +277,8 @@ extension NativeMusicService {
             }
             if let batch { session.batches.append(batch) }
             session.buffered = nil
-            session.offset = offset
+            if session.provider == .heartbeat { session.context = references.heartbeatContext }
+            session.offset = references.offset
             retainQueueFeedbackOrigins(live, authorization: session.lease.authorization,
                 action: session.context.map { .heartbeatSong(songID: $0.seedID) },
                 seedIDs: session.context.map { [$0.seedID] } ?? session.sourceIDs)

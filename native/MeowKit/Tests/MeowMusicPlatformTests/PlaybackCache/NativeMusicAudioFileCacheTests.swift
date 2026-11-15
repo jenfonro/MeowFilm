@@ -213,7 +213,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         let before = await f.hit(cache)
         XCTAssertEqual(before?.expiresAt, initial.addingTimeInterval(30 * 86_400))
         let version = try XCTUnwrap(before).version
-        let mismatch = f.request(signature: "different").identity
+        let mismatch = f.request(generation: 2).identity
         await cache.touch(mismatch, version: version, confirmedAt: f.clock.now(), authorization: request.authorization)
         await cache.touch(request.identity, version: version, confirmedAt: f.clock.now().addingTimeInterval(1), authorization: request.authorization)
         let untouched = await f.hit(cache)
@@ -237,11 +237,11 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
         let cache = f.cache()
-        let old = f.request(signature: "recording-v1")
+        let old = f.request()
         let storedOld = await cache.storeAfterPlayback(old)
         let oldVersion = try XCTUnwrap(storedOld)
         f.clock.advance(60)
-        let replacement = f.request(signature: "recording-v2")
+        let replacement = f.request(generation: 2)
         let storedReplacement = await cache.storeAfterPlayback(replacement)
         let replacementVersion = try XCTUnwrap(storedReplacement)
         XCTAssertNotEqual(oldVersion, replacementVersion)
@@ -670,14 +670,14 @@ struct AudioCacheTestFixture: Sendable {
         NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() },
                                   transport: transport, inspector: inspector, capacity: capacity, timing: timing)
     }
-    func request(song: String = "one", quality: String = "flac", platform: String = "tx", signature: String = "recording-v1",
+    func request(song: String = "one", quality: String = "flac", platform: String = "tx", generation: Int = 1,
                  duration: Double = 60, confirmedAt: Date? = nil,
                  url: URL = URL(string: "https://isure.stream.qqmusic.qq.com/file")!, urlExpiry: Date? = nil,
                  policy: MusicAudioFileCachePolicy = .init(allowed: true),
                  authorization: MusicQueueAuthorization = MusicQueueAuthorization(),
                  playbackAuthorization: MusicQueueAuthorization = MusicQueueAuthorization()) -> MusicAudioFileCacheRequest {
         .init(identity: .init(scope: "test-account-scope", songID: song, sourceKey: "official:" + platform,
-                              platform: platform, nativeID: song, requestedQuality: quality, playbackSignature: signature, provider: "official:" + platform),
+                              platform: platform, nativeID: song, requestedQuality: quality, provider: "official:" + platform, generation: generation),
               audio: .init(url: url, headers: ["Cookie": "synthetic-cookie", "Authorization": "synthetic-bearer"],
                            expiresAt: urlExpiry, fileCachePolicy: policy),
               expectedDuration: duration, confirmedAt: confirmedAt ?? clock.now(), authorization: authorization,

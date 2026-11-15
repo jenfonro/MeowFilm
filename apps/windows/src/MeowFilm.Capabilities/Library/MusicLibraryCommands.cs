@@ -16,7 +16,7 @@ public sealed partial class MusicLibraryOwner
         if (method.StartsWith("music.library.network.", StringComparison.Ordinal))
             return NetworkPlaylistCommand(method, parameters, document);
         if (method.StartsWith("music.library.", StringComparison.Ordinal))
-            return CollectionCommand(method, parameters, document, full);
+            return CollectionCommand(method, parameters, document);
         if (method.StartsWith("music.queue.", StringComparison.Ordinal))
             return QueueCommand(method, parameters, document, full);
         if (method.StartsWith("music.history.", StringComparison.Ordinal))
@@ -44,17 +44,6 @@ public sealed partial class MusicLibraryOwner
             return SearchCommand(method, parameters, document);
         if (method.StartsWith("music.lyrics.local.", StringComparison.Ordinal))
             return LocalLyricsCommand(method, parameters, document);
-        if (method == "music.online.song")
-        {
-            LJ.Fields(parameters, "platform musicInfo title artist album duration", "platform musicInfo title");
-            string platform = LJ.Text(parameters["platform"]);
-            LJ.Require(NativeMusicSong.Platforms.Contains(platform));
-            var info = (JsonObject)LJ.Object(parameters["musicInfo"]).DeepClone();
-            var song = NativeMusicSong.CreateOnline(platform, info,
-                LJ.Text(parameters["title"], 512), LJ.S(parameters["artist"]),
-                LJ.S(parameters["album"]), LJ.N(parameters["duration"]));
-            return (LJ.Obj(("song", NativeMusicSong.Normalize(song))), false);
-        }
         throw new MusicLibraryException("CAPABILITY_UNAVAILABLE");
     }
 }

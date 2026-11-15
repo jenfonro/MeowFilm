@@ -142,29 +142,42 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
             // Once the remote mutation is admitted, route/caller cancellation cannot
             // recall it. The transport still owns its fixed deadline and App disposal
             // waits this operation, so an accepted sign is never retried after a lost ACK.
-            await protocol.SignAsync(session, CancellationToken.None, () => GuardAccount(session)).ConfigureAwait(false);
+            var receipt = await protocol.SignAsync(session, CancellationToken.None, () => GuardAccount(session)).ConfigureAwait(false);
+            var status = receipt.GetProperty("status").GetString();
+            if (status != "confirmed")
+            {
+                if (status is "notSent" or "rejected")
+                {
+                    lock (gate) if (signAttemptedGeneration == expectedGeneration) signAttemptedGeneration = 0;
+                    admitted = false;
+                    var code = receipt.GetProperty("errorCode").GetString() ?? "UPSTREAM_ERROR";
+                    if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
+                        accounts.Revoke(session);
+                    throw new MusicOperationException(code);
+                }
+                throw new MusicOperationException("COMMIT_UNKNOWN");
+            }
             acknowledged = true;
             if (!ConfirmSign(operation, session, expectedGeneration))
-                throw StateError();
+                return new(expectedGeneration, null); // A retired page cannot erase the confirmed remote receipt.
 
             MusicVipSignCardData? sign;
             if (operation.Token.IsCancellationRequested)
                 sign = null;
             else try { sign = await protocol.ReadSignAsync(session, operation.Token, () => GuardAccount(session)).ConfigureAwait(false); }
-            catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
+            catch (Exception error)
             {
-                sign = null;
-            }
-            catch (MusicPlatformException error) when (error.Code is not
-                ("AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN"))
-            {
+                if (Code(error) is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
+                    accounts.Revoke(session);
+                // A failed readback cannot replace an acknowledged sign with
+                // failure/unknown, including after exact-account revocation.
                 sign = null;
             }
             PublishRefreshedSign(operation, session, sign);
             return new(expectedGeneration, sign);
         }
         catch (MusicPlatformException error) when (error.Code is
-            "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN")
+            "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
         {
             if (session is not null && session.Generation == expectedGeneration)
                 accounts.Revoke(session);
@@ -182,11 +195,12 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
     {
         lock (gate)
         {
-            if (!ReferenceEquals(active, operation) || operation.Epoch != epoch ||
+            if (!ReferenceEquals(active, operation) ||
                 currentGeneration != expectedGeneration || !accounts.IsCurrent(session))
                 return false;
             signedGeneration = signAttemptedGeneration = expectedGeneration;
-            return true;
+            // Page retirement fences optional readback, not the confirmed account receipt.
+            return operation.Epoch == epoch;
         }
     }
 
@@ -200,12 +214,6 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
                 currentGeneration == session.Generation && accounts.IsCurrent(session))
                 currentSign = sign;
         }
-    }
-
-    private MusicOperationException StateError()
-    {
-        lock (gate)
-            return new(closed || stopping ? "CLOSED" : "STALE_SESSION");
     }
 
     private async Task<Branch<MusicVipAccountSummary>> ReadAccountAsync(CancellationToken token)
@@ -239,8 +247,8 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
         if (!accounts.IsCurrent(session)) throw new MusicOperationException("STALE_SESSION");
         var signResult = await sign.ConfigureAwait(false);
         var bannerResult = await banner.ConfigureAwait(false);
-        if (signResult.Error is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" ||
-            bannerResult.Error is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN")
+        if (signResult.Error is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH" ||
+            bannerResult.Error is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
         {
             accounts.Revoke(session);
             throw new MusicOperationException("STALE_SESSION");
@@ -264,9 +272,9 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
     private static MusicVipAccountSummary? Account(MusicAccountDetails details)
     {
         if (details.State is not ("saved" or "verified") ||
-            details.Profile is not { DisplayName.Length: > 0 } profile)
+            details.Profile is not { } profile)
             return null;
-        var avatar = Https(profile.Avatar);
+        var avatar = ImageAddress(profile.Avatar);
         var membership = "";
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         if (details.MembershipFreshness == MusicAccountDetailsFreshness.Fresh &&
@@ -285,12 +293,10 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
         return new(details.Generation, profile.DisplayName, avatar, membership);
     }
 
-    private static string Https(string? value)
+    private static string ImageAddress(string? value)
     {
-        if (value is not { Length: > 0 and <= 4096 } ||
-            !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
-            uri.Scheme != "https" || !uri.IsDefaultPort ||
-            uri.UserInfo.Length != 0 || uri.Fragment.Length != 0)
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+            uri.Scheme is not ("https" or "http") || uri.UserInfo.Length != 0)
             return "";
         return uri.AbsoluteUri;
     }

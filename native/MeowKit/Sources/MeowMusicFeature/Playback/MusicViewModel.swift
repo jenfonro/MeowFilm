@@ -80,6 +80,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public let libraryState = MusicLibraryState()
     public let playbackState = MusicPlaybackFeatureState()
     public let metadataState = MusicMetadataState()
+    public let settingsReceipts = MusicSettingsReceiptOwner()
     public var query = ""
     public let notices = MusicNoticeState()
     private var favoritesStorage: MusicMiniPlayerFavorites?
@@ -225,6 +226,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var lyricTask: Task<MusicLyricsSnapshot, Error>?
     let playbackMetadata = MusicPlaybackMetadata()
     var metadataPreferencesRefreshTask: Task<Void, Never>?
+    var songRepositoryObservation: Task<Void, Never>?
+    var songRepositoryProjectionID = UUID()
     var metadataPreferencesRefreshRequested = false
     var cachedAudioLookup: Task<MusicCachedPlayback?, Error>?
     var cachedAudioObservation: Task<Void, Never>?
@@ -304,6 +307,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
         observeAccountSessions()
+        observeSongRepository()
     }
     public init(service: any MusicServing, player: any MusicPlaybackDriving,
                 accounts: (any MusicAccountsServing)? = nil,
@@ -313,6 +317,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
         observeAccountSessions()
+        observeSongRepository()
     }
     public func attachPlayback(_ playback: PlaybackController) {
         if player == nil { player = SharedMusicPlaybackDriver(playback) }
@@ -321,8 +326,10 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public var displayTrack: MusicRemoteTrack? {
         guard let track = current?.track else { return nil }
         guard metadataOccurrenceID == current?.id else { return track }
-        return .init(ref: track.ref, songId: track.songId, title: track.title, artist: track.artist,
-            album: track.album, duration: track.duration, sources: track.sources, artwork: metadataArtworkURL)
+        let current = metadataState.track ?? track
+        return .init(ref: track.ref, songId: current.songId, title: current.title, artist: current.artist,
+            album: current.album, duration: current.duration, sources: current.sources, artwork: metadataArtworkURL,
+            artistNames: current.artistNames, sourcePosition: current.sourcePosition)
     }
     public var canNavigate: Bool {
         isAvailable && !isClosed && !isClosing && service != nil && player != nil && current != nil &&
@@ -448,6 +455,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         libraryState.isLoaded = false; libraryState.isLoading = false
         position = 0; duration = nil; error = nil
         notifyCollectionPages(.access)
+        observeSongRepository()
     }
 
     public func load() async {
@@ -470,6 +478,10 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                 if collectionCatalogueID == catalogueID { publishCollections(nextCollections) }
                 libraryState.platforms = nextPlatforms
                 libraryState.isLoaded = true
+                if let repository = service as? any MusicSongRepositoryReading {
+                    await refreshRepositoryProjections(repository, access: epoch)
+                }
+                try check(epoch); guard loadID == token else { return }
                 // Persistence never means playback. No prepare, resolve, play,
                 // resume, audio-session activation or synthetic played event.
                 if candidate == nil { position = nextState.position; playbackState.phase = .paused }
@@ -481,13 +493,19 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
 
     public func updateSettings(_ change: MusicSettingsChange) async {
+        guard !Task.isCancelled else { return }
         let epoch: UUID
         do { epoch = try enter() } catch { return }
         // A settings action supersedes an in-flight selection, not an already
         // playing resource. Do this before the first await, even if the write fails.
         if isResolving { invalidateSelection(stopMedia: candidate == nil) }
+        let service: any MusicServing
+        do { service = try requireService() } catch { return }
+        let submitted = settingsReceipts.submit(settings: change.receiptSettings, operation: "保存播放设置") {
+            try await service.updateSettings(change)
+        }
         do {
-            _ = try await requireService().updateSettings(change)
+            _ = try await submitted.value
             try await reconcilePlaybackFeedbackSettings(accessGeneration: epoch)
             try check(epoch)
             if change.mode != nil { await loadRecommendationState() }
@@ -507,7 +525,9 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                     return
                 }
             }
-            if !Task.isCancelled { report(error, epoch: epoch, operation: "保存播放设置", kind: .settings) }
+            if failure != .commitUnconfirmed, !Task.isCancelled {
+                report(error, epoch: epoch, operation: "保存播放设置", kind: .settings)
+            }
         }
     }
     public func setMode(_ mode: MusicPlaybackMode) async {
@@ -538,16 +558,18 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         await feedbackConsumer.flush()
         await eventTail?.value
         await feedbackConsumer.finish(reason: .interrupt)
+        await settingsReceipts.flush()
         favoritesObservation?.cancel(); favoritesObservation = nil
         favoritesStorage?.suspend()
         accountObservation?.cancel(); accountObservation = nil
+        songRepositoryObservation?.cancel(); songRepositoryObservation = nil
         notifyCollectionPages(.revoking)
         cancelRemoteQueuePreparation(); cancelFMNavigation(); stopFM()
         stopSimilarObservation()
         accessState.isClosed = true; lifecycle = UUID(); navigationTask?.cancel(); eventTail?.cancel()
         metadataPreferencesRefreshRequested = false
         metadataPreferencesRefreshTask?.cancel()
-        playbackMetadata.close()
+        await playbackMetadata.close()
         notifyCollectionPages(.access)
         navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false
         invalidateSelection(stopMedia: true)
@@ -565,6 +587,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             favoritesObservation?.cancel()
             favoritesStorage?.suspend()
             accountObservation?.cancel()
+            songRepositoryObservation?.cancel()
             remoteQueueIntent?.revoke(); remoteQueueTask?.cancel()
             fmAdvanceIntent?.revoke(); fmRevocationTask?.cancel(); fmSource?.revoke()
             sourceSwitchTask?.cancel(); sourceMediaTask?.cancel()

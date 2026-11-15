@@ -38,8 +38,9 @@ final class MusicSearchDiscoveryModel: ObservableObject {
     private var visibleCharts: Set<String> = []
     private var discoveryTask: Task<Void, Never>?
     private var memberTask: Task<Void, Never>?
-    private var chartPlaybackTask: Task<MusicPublicBrowseDetail, Error>?
     private var hotPlaybackTask: Task<[MusicRemoteTrack], Error>?
+    private var songObservation: Task<Void, Never>?
+    private var songProjectionID = UUID()
 
     init(provider: any MusicSearchDiscoveryProviding, browser: any MusicPublicBrowsing,
          hotPlayback: (any MusicSearchHotPlaybackProviding)? = nil) {
@@ -71,18 +72,21 @@ final class MusicSearchDiscoveryModel: ObservableObject {
         guard !closed, self.available != available || self.generation != generation else { return }
         self.available = available; self.generation = generation
         invalidate()
+        observeSongs()
         if visible { loadMissingDiscovery() }
     }
 
     func appear() {
         guard !closed else { return }
         visible = true
+        observeSongs()
         loadMissingDiscovery()
         loadVisibleMembers()
     }
 
     func disappear() {
         visible = false; visibleCharts = []
+        songObservation?.cancel(); songObservation = nil
         cancelPlaybackAction()
         isPreparingPlayback = false
         // Already admitted display reads remain valid while this retained page
@@ -105,7 +109,39 @@ final class MusicSearchDiscoveryModel: ObservableObject {
 
     func members(of chartID: String) -> [MusicPublicBrowseMember] {
         guard case .loaded(let detail) = chartContent[chartID] else { return [] }
-        return detail.members.filter { $0.sourcePosition < 20 }
+        return Array(detail.members.prefix(20))
+    }
+    private func observeSongs() {
+        songObservation?.cancel(); songObservation = nil
+        guard available, visible, !closed, let repository = browser as? any MusicSongRepositoryReading else { return }
+        let access = generation
+        songObservation = Task { [weak self] in
+            let changes = await repository.songChanges()
+            await self?.refreshSongProjections(repository, access: access)
+            for await _ in changes {
+                guard !Task.isCancelled else { return }
+                await self?.refreshSongProjections(repository, access: access)
+            }
+        }
+    }
+    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID) async {
+        guard !Task.isCancelled, available, visible, !closed, generation == access else { return }
+        let own = request, projection = UUID()
+        songProjectionID = projection
+        let ids = Set(chartContent.values.flatMap { value -> [String] in
+            guard case .loaded(let detail) = value else { return [] }
+            return detail.members.map { $0.track.songId }
+        })
+        do {
+            let songs = try await repository.repositoryTracks(songIDs: ids)
+            guard admits(own, access: access), visible, songProjectionID == projection else { return }
+            for key in Array(chartContent.keys) {
+                guard case .loaded(let detail) = chartContent[key] else { continue }
+                chartContent[key] = .loaded(.init(collection: detail.collection, members: detail.members.map {
+                    .init(nativeID: $0.nativeID, sourcePosition: $0.sourcePosition, track: $0.track.projected(songs))
+                }, total: detail.total, cursor: detail.cursor, notice: detail.notice, consumed: detail.consumed))
+            }
+        } catch {}
     }
 
     func retry(_ targets: Set<Target>) {
@@ -120,59 +156,23 @@ final class MusicSearchDiscoveryModel: ObservableObject {
         loadVisibleMembers()
     }
 
-    /// Reconsume only the bounded member page on an explicit action. This
-    /// reissues local handles from valid native data, never trusts an old DTO
-    /// as a song, and never opens the complete collection queue.
+    /// Existing chart members already reference the permanent repository.
     func preparePlayback(chartID: String, nativeID: String?) async throws -> Playback {
         try Task.checkCancellation()
         guard available, visible, !closed else { throw MusicServiceError.staleAccess }
-        guard !isPreparingPlayback, case .loaded(let displayed) = chartContent[chartID] else {
-            throw MusicServiceError.busy
-        }
-        let expected = members(of: chartID)
-        guard !expected.isEmpty else { throw MusicServiceError.contentUnavailable }
+        let rows = members(of: chartID)
+        guard !rows.isEmpty else { throw MusicServiceError.contentUnavailable }
         let index: Int
         if let nativeID {
-            guard let selected = expected.firstIndex(where: { $0.nativeID == nativeID }) else {
-                throw MusicServiceError.targetChanged
-            }
+            guard let selected = rows.firstIndex(where: { $0.nativeID == nativeID }) else { throw MusicServiceError.notFound }
             index = selected
         } else { index = 0 }
-        let own = UUID(), page = request, access = generation, browser = browser
-        action = own; isPreparingPlayback = true
-        let trace = MusicRequestTrace(.playback, platform: .netease)
-        let task = Task {
-            try await MusicRequestTrace.$current.withValue(trace) {
-                try await browser.publicDetail(displayed.collection, cursor: nil)
-            }
-        }
-        chartPlaybackTask = task
-        defer {
-            if action == own { chartPlaybackTask = nil; isPreparingPlayback = false }
-        }
-        let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-        try Task.checkCancellation()
-        guard available, visible, !closed, request == page, generation == access, action == own else {
-            throw MusicServiceError.cancelled
-        }
-        guard result.collection.id == chartID, result.snapshot == displayed.snapshot else {
-            throw MusicServiceError.staleResult
-        }
-        try validate(result, collection: displayed.collection)
-        let current = result.members.filter { $0.sourcePosition < 20 }
-        guard current.count == expected.count else { throw MusicServiceError.targetChanged }
-        for (old, fresh) in zip(expected, current) {
-            guard old.sourcePosition == fresh.sourcePosition, old.nativeID == fresh.nativeID,
-                  MusicSearchFusion.sameSearchTarget(old.track, fresh.track, platform: .netease) else {
-                throw MusicServiceError.targetChanged
-            }
-        }
-        return .init(tracks: current.map(\.track), index: index)
+        return .init(tracks: rows.map(\.track), index: index)
     }
 
     /// Resolve the currently displayed ordered keywords with the provider's
-    /// dedicated one-shot batch endpoint. The result must stay positionally
-    /// aligned; a short or reordered-looking response is never compacted.
+    /// dedicated one-shot batch endpoint. Consume the provider's actual ordered
+    /// result without comparing its count with the requested keywords.
     func prepareHotPlayback() async throws -> Playback {
         try Task.checkCancellation()
         guard available, visible, !closed, hotCanPlay, let hotPlayback else {
@@ -180,10 +180,9 @@ final class MusicSearchDiscoveryModel: ObservableObject {
         }
         guard !isPreparingPlayback else { throw MusicServiceError.busy }
         let keywords = hot.map(\.keyword)
-        guard !keywords.isEmpty, keywords.count <= 20 else {
+        guard !keywords.isEmpty else {
             throw MusicServiceError.contentUnavailable
         }
-        let signature = keywords.map { Data($0.utf8) }
         let own = UUID(), page = request, access = generation
         action = own; isPreparingPlayback = true
         let trace = MusicRequestTrace(.playback, platform: .netease)
@@ -201,15 +200,6 @@ final class MusicSearchDiscoveryModel: ObservableObject {
         guard available, visible, !closed, request == page, generation == access, action == own else {
             throw MusicServiceError.cancelled
         }
-        guard hotCanPlay, hot.map({ Data($0.keyword.utf8) }) == signature,
-              tracks.count == keywords.count,
-              tracks.allSatisfy({ track in
-                  track.ref.kind == .handle && !track.songId.isEmpty && !track.title.isEmpty &&
-                      track.sources.contains {
-                          $0.platform == MusicPublicBrowsePlatform.netease.rawValue &&
-                              !$0.nativeId.isEmpty && !$0.sourceKey.isEmpty
-                      }
-              }) else { throw MusicServiceError.upstreamInvalid }
         return .init(tracks: tracks, index: 0)
     }
 
@@ -233,18 +223,6 @@ final class MusicSearchDiscoveryModel: ObservableObject {
             do {
                 let result = try await provider.searchDiscovery(components: components)
                 guard let self, self.admits(own, access: access) else { return }
-                guard result.hot.count <= 20, result.charts.count <= 3,
-                      (!result.hotCanPlay || !result.hot.isEmpty),
-                      Set(result.charts.map(\.id)).count == result.charts.count,
-                      result.hot.allSatisfy({ (1...20).contains($0.rank) && !$0.keyword.isEmpty }),
-                      Set(result.hot.map { Data($0.keyword.utf8) }).count == result.hot.count,
-                      Set(result.hot.map(\.rank)).count == result.hot.count,
-                      result.hot.map(\.rank) == result.hot.map(\.rank).sorted(),
-                      result.charts.allSatisfy({ $0.collection.platform == .netease && $0.collection.kind == .playlist }),
-                      result.failures.allSatisfy({ components.contains($0.component) }),
-                      Set(result.failures.map(\.component)).count == result.failures.count else {
-                    throw MusicServiceError.upstreamInvalid
-                }
                 let failed = Set(result.failures.map(\.component))
                 for failure in result.failures { self.componentFailures[failure.component] = failure.error }
                 if components.contains(.hot), !failed.contains(.hot) {
@@ -291,8 +269,10 @@ final class MusicSearchDiscoveryModel: ObservableObject {
                     try await browser.publicDetail(chart.collection, cursor: nil)
                 }
                 guard let self, self.admits(own, access: access) else { return }
-                try self.validate(result, collection: chart.collection)
                 self.chartContent[chart.id] = .loaded(result)
+                if let repository = browser as? any MusicSongRepositoryReading {
+                    await self.refreshSongProjections(repository, access: access)
+                }
             } catch {
                 guard let self, self.admits(own, access: access) else { return }
                 self.chartContent[chart.id] = .failed(MusicServiceError.sanitized(error))
@@ -300,32 +280,15 @@ final class MusicSearchDiscoveryModel: ObservableObject {
         }
     }
 
-    private func validate(_ detail: MusicPublicBrowseDetail, collection: MusicPublicBrowseCollection) throws {
-        let members = detail.members
-        guard detail.collection.id == collection.id, members.count <= 30,
-              (members.count...30).contains(detail.consumed), detail.total >= detail.consumed,
-              detail.snapshot.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
-              Set(members.map(\.sourcePosition)).count == members.count,
-              members.map(\.sourcePosition) == members.map(\.sourcePosition).sorted(),
-              Set(members.map(\.nativeID)).count == members.count,
-              members.allSatisfy({ member in
-                  (0..<detail.consumed).contains(member.sourcePosition) && !member.nativeID.isEmpty &&
-                      member.track.ref.kind == .handle &&
-                      member.track.sources.contains {
-                          $0.platform == collection.platform.rawValue && $0.nativeId == member.nativeID
-                      }
-              }) else { throw MusicServiceError.upstreamInvalid }
-    }
-
     private func admits(_ own: UUID, access: UUID) -> Bool {
         !Task.isCancelled && !closed && available && request == own && generation == access
     }
 
     private func invalidate() {
+        songObservation?.cancel(); songObservation = nil
         request = UUID(); action = UUID()
         discoveryTask?.cancel(); discoveryTask = nil
         memberTask?.cancel(); memberTask = nil
-        chartPlaybackTask?.cancel(); chartPlaybackTask = nil
         hotPlaybackTask?.cancel(); hotPlaybackTask = nil
         hot = []; charts = []; chartContent = [:]; visibleCharts = []
         loadedComponents = []; componentFailures = [:]; loadingComponents = []
@@ -334,13 +297,13 @@ final class MusicSearchDiscoveryModel: ObservableObject {
 
     private func cancelPlaybackAction() {
         action = UUID()
-        chartPlaybackTask?.cancel(); chartPlaybackTask = nil
         hotPlaybackTask?.cancel(); hotPlaybackTask = nil
     }
 
     deinit {
         discoveryTask?.cancel(); memberTask?.cancel()
-        chartPlaybackTask?.cancel(); hotPlaybackTask?.cancel()
+        hotPlaybackTask?.cancel()
+        songObservation?.cancel()
     }
 }
 #endif

@@ -28,6 +28,11 @@ public static partial class MusicOfficialPlaybackScopeTests
                     await f.SeedFile(first, "wy");
                     await f.SeedFile(second, "wy");
                 }
+                else
+                {
+                    await f.App.Receipt(first, "wy");
+                    await f.App.Receipt(second, "wy");
+                }
                 await f.Play(first, second);
                 await Until(() => player.IsPlaying);
                 Check(player.HasMedia && player.Identity == f.Module.QueueSurfaceRows[0].EntryId,

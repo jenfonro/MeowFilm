@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Combine
 @testable import MeowMusicFeature
 
 private actor MusicPublicBrowseGate {
@@ -13,11 +14,13 @@ private actor MusicPublicBrowseGate {
     func didStart() async { if !started { await withCheckedContinuation { startWaiters.append($0) } } }
     func release() { released = true; endWaiters.forEach { $0.resume() }; endWaiters.removeAll() }
 }
-private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading, MusicPublicBrowseRefreshing, MusicHomeActionQueueServing {
+private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading, MusicPublicBrowseRefreshing, MusicHomeActionQueueServing, MusicSongRepositoryReading {
     static let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "41", title: "Synthetic playlist")
-    static func track(_ id: String) -> MusicRemoteTrack {
-        .init(ref: .init(kind: .handle, id: id), songId: "song:" + id, title: id,
-              sources: [.init(sourceKey: "wy:" + id, platform: "wy", nativeId: id)])
+    static let emptyDetailSongID = "B0000000-0000-4000-8000-000000000031"
+    static func track(_ id: String, sourcePosition: Int? = nil) -> MusicRemoteTrack {
+        .init(ref: .init(kind: .library, id: "song:" + id,
+                        occurrence: sourcePosition.map { "member:\($0)" }), songId: "song:" + id, title: id,
+              sources: [.init(sourceKey: "wy:" + id, platform: "wy", nativeId: id)], sourcePosition: sourcePosition)
     }
     var gate: MusicPublicBrowseGate?
     var error: MusicServiceError?
@@ -33,6 +36,22 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     var queries: [String] = []
     var cursors: [String?] = []
     var platforms: [MusicPublicBrowsePlatform] = []
+    private var songs: [String: MusicRemoteTrack] = [:]
+    private var queueProjectionFailure: MusicServiceError?
+    func failQueueProjection(_ failure: MusicServiceError) { queueProjectionFailure = failure }
+    private var songObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] { songs.filter { songIDs.contains($0.key) } }
+    func songChanges() -> AsyncStream<Void> {
+        let id = UUID(), pair = AsyncStream<Void>.makeStream()
+        songObservers[id] = pair.continuation
+        pair.continuation.onTermination = { [weak self] _ in Task { await self?.removeSongObserver(id) } }
+        return pair.stream
+    }
+    private func removeSongObserver(_ id: UUID) { songObservers[id] = nil }
+    func publishSong(_ track: MusicRemoteTrack) {
+        songs[track.songId] = track
+        songObservers.values.forEach { $0.yield(()) }
+    }
     func suspend(_ gate: MusicPublicBrowseGate) { self.gate = gate }
     func fail(_ error: MusicServiceError?) { self.error = error }
     func loopCursor() { duplicateCursor = true }
@@ -59,20 +78,22 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         if let error { throw error }
         if emptyDetailFirst {
             let members: [MusicPublicBrowseMember] = cursor == nil ? [] :
-                [.init(nativeID: "31", sourcePosition: 30, track: Self.track("31"))]
+                [.init(nativeID: "31", sourcePosition: 30, track: .init(
+                    ref: .init(kind: .library, id: Self.emptyDetailSongID, occurrence: "member:30"),
+                    songId: Self.emptyDetailSongID, title: "31",
+                    sources: [.init(sourceKey: "wy:31", platform: "wy", nativeId: "31")], sourcePosition: 30))]
             return .init(collection: collection, members: members, total: 31,
-                         cursor: cursor == nil ? "raw30" : nil, snapshot: String(repeating: "a", count: 64),
+                         cursor: cursor == nil ? "raw30" : nil,
                          notice: cursor == nil ? "部分歌曲当前不可见或不可用" : nil, consumed: cursor == nil ? 30 : 1)
         }
         if detailCount > 1 {
             let start = cursor.flatMap(Int.init) ?? 0, end = min(start + detailPageSize, detailCount)
             return .init(collection: collection, members: (start..<end).map {
-                .init(nativeID: String($0 + 1), sourcePosition: $0, track: Self.track(String($0 + 1)))
-            }, total: detailCount, cursor: end < detailCount ? String(end) : nil,
-               snapshot: String(repeating: "a", count: 64))
+                .init(nativeID: String($0 + 1), sourcePosition: $0, track: Self.track(String($0 + 1), sourcePosition: $0))
+            }, total: detailCount, cursor: end < detailCount ? String(end) : nil)
         }
-        return .init(collection: collection, members: [.init(nativeID: detailTrackID, sourcePosition: 0, track: Self.track(detailTrackID))],
-                     total: 1, cursor: nil, snapshot: String(repeating: "a", count: 64))
+        return .init(collection: collection, members: [.init(nativeID: detailTrackID, sourcePosition: 0, track: Self.track(detailTrackID, sourcePosition: 0))],
+                     total: 1, cursor: nil)
     }
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) async throws -> MusicPublicBrowsePage {
         if let gate { await gate.wait() }
@@ -87,6 +108,11 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     var styleWrites: [MusicDailyStyleSelection] = []
     var styleFailure: MusicServiceError?
     var changedStyle = false
+    private let styleScope: String
+    private var currentStyle = MusicPublicBrowseFeatureService.initialStyle
+    private var styleReceiptGate: MusicPublicBrowseGate?
+    private var styleReceiptFailure: MusicServiceError?
+    init(styleScope: String = "account-a") { self.styleScope = styleScope }
     static let styleTags = [MusicDailyStyleTag(id: "7", name: "标签甲"), .init(id: "8", name: "标签乙")] +
         (9...14).map { MusicDailyStyleTag(id: String($0), name: "服务标签\($0)") }
     static let styleCategories = [MusicDailyStyleCategory(id: "1000", name: "服务分类甲", tags: styleTags),
@@ -94,6 +120,12 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     static let initialStyle = MusicDailyStyleSelection(category: "1000", tags: [styleTags[0]])
     func setStyleFailure(_ failure: MusicServiceError?) { styleFailure = failure }
     func changeStyleReadback() { changedStyle = true }
+    func suspendStyleReceipt(_ gate: MusicPublicBrowseGate, failure: MusicServiceError) {
+        styleReceiptGate = gate; styleReceiptFailure = failure
+    }
+    private func readDailyPage(style: Bool) throws -> MusicNativeTrackPage {
+        try Self.dailyPage(style ? currentStyle : nil)
+    }
     private static func dailyPage(_ selection: MusicDailyStyleSelection?) throws -> MusicNativeTrackPage {
         .init(items: [.init(platform: "wy", data: try JSONEncoder().encode(track(selection == nil ? "default" : "style")))],
               total: 1, dailyStyle: selection)
@@ -103,32 +135,96 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         dailyActions.append(action)
         // Deliberately ignores cancellation until the old open returns.
         if branch == .default, let defaultDailyGate { await defaultDailyGate.wait() }
-        return MusicRemoteQueueSource(
+        let source = MusicRemoteQueueSource(
             context: .init(kind: .recommendation, id: branch.rawValue, title: title, platform: "wy"),
-            loadPage: { _ in try Self.dailyPage(branch == .style ? Self.initialStyle : nil) },
-            dailyStyle: branch == .style ? .init(categories: { Self.styleCategories }, save: { selection in
+            loadPage: { _ in try await self.readDailyPage(style: branch == .style) },
+            dailyStyle: branch == .style ? .init(scope: styleScope, categories: { Self.styleCategories }, save: { selection in
                 try await self.saveStyle(selection)
             }) : nil,
             homeAction: action)
+        await bindQueueRepository(source)
+        return source
     }
-    private func saveStyle(_ selection: MusicDailyStyleSelection) throws -> MusicDailyStyleSave {
+    private func saveStyle(_ selection: MusicDailyStyleSelection) async throws -> MusicDailyStyleSave {
         styleWrites.append(selection)
         if let styleFailure { throw styleFailure }
         let actual = changedStyle ? Self.initialStyle : selection
+        currentStyle = actual
+        let gate = styleReceiptGate, failure = styleReceiptFailure
+        styleReceiptGate = nil; styleReceiptFailure = nil
+        if let gate { await gate.wait() }
+        if let failure { throw failure }
         return .init(page: try Self.dailyPage(actual), saveConfirmed: true, selectionChanged: changedStyle)
     }
     func publicQueueTracks(_ request: MusicPublicBrowseQueueRequest) -> [MusicNativeTrackData] { [] }
-    func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) -> MusicRemoteQueueSource {
+    func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) async -> MusicRemoteQueueSource {
         openedQueues += 1
         queueRequests.append(request)
-        return .init(context: .init(kind: request.collection.kind == .album ? .album : .playlist,
+        let source = MusicRemoteQueueSource(context: .init(kind: request.collection.kind == .album ? .album : .playlist,
               id: request.collection.id, title: "Synthetic", platform: request.collection.platform.rawValue,
               collection: request.collection),
               loadPage: { _ in .init(items: []) })
+        await bindQueueRepository(source)
+        return source
+    }
+    private func bindQueueRepository(_ source: MusicRemoteQueueSource) async {
+        await source.bindSongRepository(adopt: { try await self.adoptQueueTracks($0, intent: $1) },
+            project: { try await self.projectQueueTracks($0) })
+    }
+    private func adoptQueueTracks(_ rows: [MusicNativeTrackData], intent: MusicQueueAuthorization) throws -> [MusicQueueTrackReference] {
+        try intent.check()
+        return try rows.map { row in
+            let track = try JSONDecoder().decode(MusicRemoteTrack.self, from: row.data)
+            songs[track.songId] = track
+            return .init(songID: track.songId, occurrenceID: UUID().uuidString, platform: row.platform,
+                sourceKey: track.sources.first?.sourceKey ?? track.songId,
+                sourcePosition: row.sourcePosition, byteCount: row.data.count)
+        }
+    }
+    private func projectQueueTracks(_ rows: [MusicQueueTrackReference]) throws -> [MusicNativeTrackData] {
+        if let queueProjectionFailure { throw queueProjectionFailure }
+        return try rows.map { row in
+            guard let track = songs[row.songID] else { throw MusicServiceError.notFound }
+            return .init(platform: row.platform, data: try JSONEncoder().encode(track), sourcePosition: row.sourcePosition)
+        }
     }
 }
 
 @MainActor final class MusicPublicBrowseViewModelTests: XCTestCase {
+    func testHomeAndDetailProjectCurrentRepositoryWithoutRereadingContentOrChangingOccurrence() async throws {
+        let service = MusicPublicBrowseFeatureService()
+        let home = model(service, request: .discovery(.home))
+        let detail = model(service, request: .detail(MusicPublicBrowseFeatureService.collection))
+        await home.loadIfNeeded(); await detail.loadIfNeeded()
+        let before = try XCTUnwrap(detail.tracks.first)
+        let cursors = await service.cursors, queries = await service.queries
+        let collection = detail.collection
+        let current = MusicRemoteTrack(ref: .init(kind: .library, id: before.songId), songId: before.songId,
+            title: "Current title", artist: "Current artist", album: "Current album", duration: 245,
+            sources: before.sources, artwork: URL(string: "https://artwork.invalid/current-song"))
+        let homeChanged = expectation(description: "home song updated")
+        let detailChanged = expectation(description: "detail member updated")
+        let observations = [
+            home.$sections.filter { sections in
+                sections.flatMap(\.items).contains { if case .track(let track) = $0.content { return track.title == current.title }; return false }
+            }.prefix(1).sink { _ in homeChanged.fulfill() },
+            detail.$sections.filter { sections in
+                sections.flatMap(\.items).contains { if case .track(let track) = $0.content { return track.title == current.title }; return false }
+            }.prefix(1).sink { _ in detailChanged.fulfill() }
+        ]
+        await service.publishSong(current)
+        await fulfillment(of: [homeChanged, detailChanged], timeout: 2)
+        observations.forEach { $0.cancel() }
+        XCTAssertEqual(detail.tracks.first?.ref, before.ref)
+        XCTAssertEqual(detail.tracks.first?.sourcePosition, before.sourcePosition)
+        XCTAssertEqual(detail.tracks.first?.songId, before.songId)
+        XCTAssertEqual(detail.collection, collection, "A song's artwork is not the collection artwork")
+        XCTAssertEqual(home.tracks.first?.artwork, current.artwork)
+        let afterCursors = await service.cursors, afterQueries = await service.queries
+        XCTAssertEqual(afterCursors, cursors); XCTAssertEqual(afterQueries, queries)
+        home.disappear(); detail.disappear()
+    }
+
     private func model(_ service: MusicPublicBrowseFeatureService,
                        request: MusicPublicBrowseRequest = .playlists(.netease, query: "Synthetic")) -> MusicPublicBrowseViewModel {
         let model = MusicPublicBrowseViewModel(service: service, request: request)
@@ -197,6 +293,24 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     }
 
     #if os(iOS) || os(macOS)
+    func testConfirmedDailyStyleReceiptIsNotReversedByOptionalProjectionFailure() async throws {
+        let service = MusicPublicBrowseFeatureService(), page = dailyModel(service)
+        let receipts = MusicSettingsReceiptOwner()
+        await page.loadIfNeeded(); await page.selectDailyBranch(.style)
+        receipts.settle(receipts.begin(settings: ["daily-style/account-a/selection"], operation: "保存推荐风格"),
+                        failure: .commitUnconfirmed)
+        await service.failQueueProjection(.storageFailed)
+        let result = try await page.saveDailyStyle(
+            .init(category: "2000", tags: [MusicPublicBrowseFeatureService.styleTags[1]]), receipts: receipts)
+        XCTAssertTrue(result.saveConfirmed); XCTAssertFalse(result.selectionChanged)
+        XCTAssertEqual(result.page.dailyStyle?.category, "2000")
+        XCTAssertTrue(receipts.unknown.isEmpty, "A confirmed write settles its own earlier unknown")
+        XCTAssertEqual(page.error, .storageFailed, "The optional projection retains its real read failure")
+        let writes = await service.styleWrites
+        XCTAssertEqual(writes.count, 1, "A failed projection cannot replay the write")
+        page.disappear()
+    }
+
     private func waitForStyle(_ condition: @escaping @MainActor () -> Bool) async {
         let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { condition() } }, evaluatedWith: nil)
         await fulfillment(of: [ready], timeout: 2)
@@ -204,9 +318,10 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
 
     func testDailyStyleDraftCancelAndSaveReadbackAreSeparateFromBrowsing() async throws {
         let service = MusicPublicBrowseFeatureService(), page = dailyModel(service)
+        let receipts = MusicSettingsReceiptOwner()
         await page.loadIfNeeded(); await page.selectDailyBranch(.style)
         let source = try XCTUnwrap(page.remoteSource)
-        let cancelled = MusicDailyStyleViewModel(page: page, source: source)
+        let cancelled = MusicDailyStyleViewModel(page: page, source: source, receipts: receipts)
         cancelled.loadIfNeeded()
         await waitForStyle { !cancelled.categories.isEmpty && !cancelled.working }
         XCTAssertEqual(cancelled.categories.map(\.name), ["服务分类甲", "服务分类乙"])
@@ -222,7 +337,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         XCTAssertTrue(cancelledWrites.isEmpty)
         XCTAssertEqual(page.dailyStyle, MusicPublicBrowseFeatureService.initialStyle)
 
-        let editor = MusicDailyStyleViewModel(page: page, source: source)
+        let editor = MusicDailyStyleViewModel(page: page, source: source, receipts: receipts)
         editor.loadIfNeeded()
         await waitForStyle { !editor.categories.isEmpty && !editor.working }
         editor.selectCategory("2000"); editor.selectTag("8")
@@ -239,7 +354,8 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     func testDailyStyleFailedSaveCanRetryAndAccountChangeClearsDraft() async throws {
         let service = MusicPublicBrowseFeatureService(), page = dailyModel(service)
         await page.loadIfNeeded(); await page.selectDailyBranch(.style)
-        let editor = MusicDailyStyleViewModel(page: page, source: try XCTUnwrap(page.remoteSource))
+        let editor = MusicDailyStyleViewModel(page: page, source: try XCTUnwrap(page.remoteSource),
+                                             receipts: MusicSettingsReceiptOwner())
         editor.loadIfNeeded()
         await waitForStyle { !editor.categories.isEmpty && !editor.working }
         editor.selectCategory("2000"); editor.selectTag("8")
@@ -260,7 +376,8 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     func testDailyStyleDifferentReadbackRemainsVisibleWithoutPretendingSaveSucceeded() async throws {
         let service = MusicPublicBrowseFeatureService(), page = dailyModel(service)
         await page.loadIfNeeded(); await page.selectDailyBranch(.style)
-        let editor = MusicDailyStyleViewModel(page: page, source: try XCTUnwrap(page.remoteSource))
+        let editor = MusicDailyStyleViewModel(page: page, source: try XCTUnwrap(page.remoteSource),
+                                             receipts: MusicSettingsReceiptOwner())
         editor.loadIfNeeded()
         await waitForStyle { !editor.categories.isEmpty && !editor.working }
         editor.selectCategory("2000"); editor.selectTag("8")
@@ -270,6 +387,81 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         XCTAssertFalse(editor.saved)
         XCTAssertEqual(page.dailyStyle, MusicPublicBrowseFeatureService.initialStyle)
         XCTAssertEqual(editor.category, "1000"); XCTAssertEqual(editor.selected, ["7"])
+        let writes = await service.styleWrites
+        XCTAssertEqual(writes.count, 1)
+        editor.close(); page.disappear()
+    }
+
+    func testSubmittedDailyStyleUnknownOutlivesClosedSheetAndParentAndReopensFromActualAccountState() async throws {
+        for closeParent in [false, true] {
+            let service = MusicPublicBrowseFeatureService(), page = dailyModel(service)
+            let receipts = MusicSettingsReceiptOwner(), gate = MusicPublicBrowseGate()
+            await page.loadIfNeeded(); await page.selectDailyBranch(.style)
+            let editor = MusicDailyStyleViewModel(page: page, source: try XCTUnwrap(page.remoteSource), receipts: receipts)
+            editor.loadIfNeeded(); await editor.finishPending()
+            editor.selectCategory("2000"); editor.selectTag("8")
+            await service.suspendStyleReceipt(gate, failure: .commitUnconfirmed)
+            editor.save(); await gate.didStart()
+            editor.close()
+            if closeParent { page.disappear() }
+            await gate.release(); await editor.finishPending(); await receipts.flush()
+            XCTAssertTrue(editor.categories.isEmpty); XCTAssertTrue(editor.choices.isEmpty)
+            XCTAssertNil(editor.error); XCTAssertFalse(editor.saved)
+            XCTAssertNil(page.error)
+            XCTAssertEqual(page.dailyStyle, closeParent ? nil : MusicPublicBrowseFeatureService.initialStyle)
+            XCTAssertEqual(receipts.unknown.map(\.setting), ["daily-style/account-a/selection"])
+            let notice = receipts.unknown.first
+
+            let reopenedPage = closeParent ? dailyModel(service) : page
+            if closeParent { await reopenedPage.loadIfNeeded(); await reopenedPage.selectDailyBranch(.style) }
+            let reopened = MusicDailyStyleViewModel(page: reopenedPage, source: try XCTUnwrap(reopenedPage.remoteSource),
+                                                   receipts: receipts)
+            reopened.loadIfNeeded(); await reopened.finishPending()
+            XCTAssertEqual(reopened.category, "2000"); XCTAssertEqual(reopened.selected, ["8"])
+            XCTAssertEqual(receipts.unknown.first, notice, "Reading the actual selection is not a successful write")
+            var writes = await service.styleWrites
+            XCTAssertEqual(writes.count, 1, "Unknown must not replay the submitted selection")
+
+            let otherService = MusicPublicBrowseFeatureService(styleScope: "account-b"), otherPage = dailyModel(otherService)
+            await otherPage.loadIfNeeded(); await otherPage.selectDailyBranch(.style)
+            let other = MusicDailyStyleViewModel(page: otherPage, source: try XCTUnwrap(otherPage.remoteSource), receipts: receipts)
+            other.loadIfNeeded(); await other.finishPending()
+            other.selectCategory("2000"); other.selectTag("8")
+            other.save(); await other.finishPending()
+            XCTAssertTrue(other.saved); XCTAssertEqual(receipts.unknown.first, notice)
+            other.close(); otherPage.disappear()
+
+            await service.setStyleFailure(.storageFailed)
+            reopened.save(); await reopened.finishPending()
+            XCTAssertNotNil(reopened.error); XCTAssertFalse(reopened.saved)
+            XCTAssertEqual(receipts.unknown.first, notice, "A known failure cannot acknowledge the old unknown")
+            receipts.settle(receipts.begin(settings: ["home/selectedSource"], operation: "保存首页"), failure: .commitUnconfirmed)
+            let independent = try XCTUnwrap(receipts.unknown.last)
+            await service.setStyleFailure(nil)
+            reopened.save(); await reopened.finishPending(); await receipts.flush()
+            XCTAssertTrue(reopened.saved)
+            XCTAssertEqual(receipts.unknown, [independent])
+            writes = await service.styleWrites
+            XCTAssertEqual(writes.count, 3)
+            let otherWrites = await otherService.styleWrites
+            XCTAssertEqual(otherWrites.count, 1)
+            reopened.close(); reopenedPage.disappear()
+        }
+    }
+
+    func testLiveDailyStyleUnknownReadsBackWithoutPretendingConfirmationOrRetryingWrite() async throws {
+        let service = MusicPublicBrowseFeatureService(), page = dailyModel(service)
+        let receipts = MusicSettingsReceiptOwner(), gate = MusicPublicBrowseGate()
+        await page.loadIfNeeded(); await page.selectDailyBranch(.style)
+        let editor = MusicDailyStyleViewModel(page: page, source: try XCTUnwrap(page.remoteSource), receipts: receipts)
+        editor.loadIfNeeded(); await editor.finishPending()
+        editor.selectCategory("2000"); editor.selectTag("8")
+        await service.suspendStyleReceipt(gate, failure: .commitUnconfirmed)
+        editor.save(); await gate.didStart(); await gate.release()
+        await editor.finishPending(); await receipts.flush()
+        XCTAssertNil(editor.error); XCTAssertNil(page.error); XCTAssertFalse(editor.saved)
+        XCTAssertEqual(page.dailyStyle?.category, "2000"); XCTAssertEqual(editor.selected, ["8"])
+        XCTAssertEqual(receipts.unknown.map(\.setting), ["daily-style/account-a/selection"])
         let writes = await service.styleWrites
         XCTAssertEqual(writes.count, 1)
         editor.close(); page.disappear()
@@ -397,7 +589,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
             queuePage: { _, cursor in
                 queueCursors.append(cursor)
                 let index = cursor.flatMap(Int.init) ?? 0
-                return .init(items: [MusicPublicBrowseFeatureService.track(String(index + 1))],
+                return .init(items: [MusicPublicBrowseFeatureService.track(String(index + 1), sourcePosition: index)],
                              cursor: index < 2 ? String(index + 1) : nil)
             })
         page.setAccess(available: true, generation: UUID()); page.appear()
@@ -414,13 +606,12 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         XCTAssertEqual(queueCursors, [nil, "1"])
         let requests = await service.queueRequests
         XCTAssertEqual(requests.count, 1); XCTAssertEqual(requests.first?.collection, album)
-        XCTAssertEqual(requests.first?.snapshot, String(repeating: "a", count: 64))
         XCTAssertTrue(page.canPlayRemoteQueue); XCTAssertFalse(page.canSaveCollection)
         page.disappear()
         XCTAssertFalse(page.canPlayRemoteQueue); XCTAssertFalse(source.authorization.isActive)
         await source.close()
     }
-    func testEmptyVisiblePageRequiresExplicitContinuationAndKeepsExactRenewalCursor() async throws {
+    func testEmptyVisiblePageRequiresExplicitContinuationAndDoesNotRenewAnActionReference() async throws {
         let service = MusicPublicBrowseFeatureService()
         await service.omitFirstDetailPage()
         let model = model(service, request: .detail(MusicPublicBrowseFeatureService.collection))
@@ -430,10 +621,24 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         var cursors = await service.cursors; XCTAssertEqual(cursors.count, 1)
         await model.appendNext()
         XCTAssertNil(model.error); XCTAssertEqual(model.tracks.map(\.title), ["31"]); XCTAssertFalse(model.requiresExplicitNext)
-        XCTAssertEqual(model.sections[0].items.map(\.id), ["30:song:31"])
-        XCTAssertEqual(model.queueIndex(of: model.tracks[0]), 30)
-        _ = try await model.refreshedActionTrack(model.tracks[0])
-        cursors = await service.cursors; XCTAssertEqual(cursors, [nil, "raw30", "raw30"])
+        let identifiers = model.sections[0].items.map(\.id)
+        XCTAssertEqual(Set(identifiers).count, 1)
+        let selected = try XCTUnwrap(model.tracks.first)
+        XCTAssertEqual(selected.ref, .init(kind: .library, id: MusicPublicBrowseFeatureService.emptyDetailSongID, occurrence: "member:30"))
+        XCTAssertEqual(selected.songId, MusicPublicBrowseFeatureService.emptyDetailSongID)
+        XCTAssertNotNil(UUID(uuidString: selected.songId))
+        XCTAssertEqual(selected.sourcePosition, 30)
+        XCTAssertNotEqual(identifiers.first, selected.ref.id)
+        await model.previous(); XCTAssertTrue(model.tracks.isEmpty)
+        XCTAssertTrue(model.requiresExplicitNext); XCTAssertEqual(model.nextCursor, "raw30")
+        await model.next()
+        XCTAssertEqual(model.sections[0].items.map(\.id), identifiers)
+        XCTAssertEqual(model.tracks.first?.ref, selected.ref); XCTAssertEqual(model.tracks.first?.sourcePosition, 30)
+        let intent = try XCTUnwrap(model.makeActionIntent())
+        var reference: MusicReference?
+        await model.perform(intent: intent) { reference = selected.ref }
+        XCTAssertEqual(reference, selected.ref)
+        cursors = await service.cursors; XCTAssertEqual(cursors, [nil, "raw30"])
         let opens = await service.openedQueues; XCTAssertEqual(opens, 0)
     }
     func testConcreteActionFailureCarriesSafeDiagnosticAndCancellationDoesNotAlert() async throws {
@@ -505,8 +710,11 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
             let service = MusicPublicBrowseFeatureService(), model = model(service, request: .playlists(platform, query: "Synthetic"))
             await service.loopMultiplePages(); await model.refresh(); await model.next()
             XCTAssertEqual(model.pageNumber, 2)
+            let items = model.sections[0].items.map(\.id), next = model.nextCursor
             await model.next()
             XCTAssertEqual(model.error, .invalidResponse); XCTAssertEqual(model.pageNumber, 2)
+            XCTAssertEqual(model.sections[0].items.map(\.id), items); XCTAssertEqual(model.nextCursor, next)
+            let cursors = await service.cursors; XCTAssertEqual(cursors, [nil, "a", "b"])
             XCTAssertEqual(model.request, .playlists(platform, query: "Synthetic"))
             model.disappear()
         }
@@ -538,10 +746,9 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         XCTAssertNil(model.error); XCTAssertFalse(model.usesPageNavigation)
         XCTAssertEqual(model.tracks.count, count); XCTAssertEqual(model.total, count)
         let track = try XCTUnwrap(model.tracks.last)
-        XCTAssertEqual(model.queueIndex(of: track), 2000)
         let (source, index) = try await model.playbackSource(for: track)
         XCTAssertEqual(index, 2000)
-        let filtered = try await model.filteredQueueIndex(source: source, index: index, track: track, query: "2001")
+        let filtered = try await model.filteredQueueIndex(source: source, index: index, query: "2001")
         XCTAssertEqual(filtered, 0)
         model.disappear(); await source.close()
     }
@@ -574,8 +781,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         } catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         let source = try XCTUnwrap(model.remoteSource)
         do {
-            _ = try await model.filteredQueueIndex(source: source, index: 2001,
-                track: MusicPublicBrowseFeatureService.track("missing"), query: "")
+            _ = try await model.filteredQueueIndex(source: source, index: 2001, query: "")
             XCTFail("filtered cursor cycle")
         } catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         model.disappear(); await source.close()

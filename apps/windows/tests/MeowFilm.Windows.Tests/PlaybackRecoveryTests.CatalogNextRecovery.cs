@@ -10,8 +10,7 @@ public static partial class PlaybackRecoveryTests
     {
         yield return Test("playlist next recovers authoritative playback gates after lost durable receipt", async () =>
         {
-            await using var f = await ControlledMusicFixture.Create(playbackCache: true, scripts: [],
-                catalogHttp: new PlaylistNextHttp());
+            await using var f = await ControlledMusicFixture.Create(playbackCache: true, scripts: []);
             await f.Module.NavigateAsync("catalog-home", default);
             await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(section => section.Items)
@@ -20,8 +19,9 @@ public static partial class PlaybackRecoveryTests
             f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
             await f.Module.ChangeModeAsync(2);
             await Until(() => f.App.HistoryWrites == 1 && f.App.ConfirmWrites == 1, "lost receipt current media");
-            Check(f.Runtime.Calls == 0 && f.Module.CanPlay && f.Module.CanTogglePlayback && f.Module.CanSeek,
-                "current official media and all controls are active without Node");
+            Check(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)) &&
+                f.Module.CanPlay && f.Module.CanTogglePlayback && f.Module.CanSeek,
+                "current official media and all controls are active without script execution");
             var queueBefore = await f.App.ExecuteAsync("music.queue.get", new { limit = 100 });
             Check(queueBefore.GetProperty("ok").GetBoolean(), "native queue baseline");
             var before = (f.Output.Identity, f.Output.NetworkOpens, f.Output.ReadOpens, f.Output.Reopens,
@@ -80,11 +80,12 @@ public static partial class PlaybackRecoveryTests
                 entries[0].GetProperty("id").GetString() == oldEntries[0].GetProperty("id").GetString() &&
                 entries[3].GetProperty("id").GetString() == oldEntries[1].GetProperty("id").GetString(),
                 "old queue occurrences are not replaced by recovery");
-            Check(f.Runtime.Calls == 0 && f.Module.CanPlay && f.Module.CanTogglePlayback && f.Module.CanSeek &&
+            Check(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)) &&
+                f.Module.CanPlay && f.Module.CanTogglePlayback && f.Module.CanSeek &&
                 f.Output.HasMedia && f.Output.IsPlaying &&
                 before == (f.Output.Identity, f.Output.NetworkOpens, f.Output.ReadOpens, f.Output.Reopens,
                     f.Output.Commits, f.Output.CandidateStarts, f.App.HistoryWrites, f.App.ConfirmWrites),
-                "saved authority restores controls without Node or reopening the existing media");
+                "saved authority restores controls without scripts or reopening the existing media");
         });
     }
 }

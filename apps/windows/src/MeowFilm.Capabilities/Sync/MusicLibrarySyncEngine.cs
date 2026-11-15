@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Native implementation derived from the fixed iWebPlus b900c259 collection behavior.
-using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -8,8 +7,7 @@ using MeowFilm.Capabilities.Platforms;
 namespace MeowFilm.Capabilities.Sync;
 
 internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IMusicPlatformSessionSource sessions,
-    MusicPlatformHttp http, MusicPlatformClientContextOwner clients, MusicNeteaseTokenProvider neteaseTokens,
-    Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud, Action generationGuard, CancellationToken token)
+    MusicPlatformClient client, Action generationGuard, CancellationToken token)
 {
     private MusicLibrarySyncSnapshot snapshot = null!;
     private JsonObject library = null!, state = null!;
@@ -47,6 +45,18 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         songGroups = null;
         // Callers never retain JsonNode references across a checkpoint; reacquire by stable ID.
     }
+    private async Task AdoptMembers(IEnumerable<SyncMember> members)
+    {
+        var songs = members.Select(member => (member.Song, member.HasMetadata)).ToArray();
+        if (songs.Length == 0) return;
+        await Guard().ConfigureAwait(false);
+        snapshot = await owner.AdoptLibrarySyncSongsAsync(snapshot, songs, token).ConfigureAwait(false);
+        GuardLeases();
+        // Preserve unsaved membership/journal edits, but take source ownership only
+        // from the current repository before building member maps.
+        library["songs"] = JsonNode.Parse(snapshot.Library.GetRawText())!["songs"]!.DeepClone();
+        songGroups = null;
+    }
     private JsonObject Collection(string id) => Collections.Single(c => S(c["id"]) == id);
     private JsonObject Binding(string cid, string key) => Bindings(Collection(cid)).Single(b => BindingKey(b) == key);
     private void Status(string phase, string code = "") => state["status"] = O(("phase", phase), ("code", code),
@@ -57,7 +67,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
             issues.Add(O(("platform", platform), ("collectionId", cid), ("code", code)));
     }
     internal static string Error(Exception error) => error switch
-    { MusicLibraryException e => e.Code, MusicPlatformException e => e.Code, OperationCanceledException => "CANCELLED", _ => "SYNC_FAILED" };
+    { MusicLibraryException e => e.Code, MusicPlatformException e => e.Code, MusicSyncWriteException e => e.Code, OperationCanceledException => "CANCELLED", _ => "SYNC_FAILED" };
     private static bool Fatal(Exception e) => Error(e) is "CANCELLED" or "STALE_SESSION" or "CLOSED" or "SYNC_SUPERSEDED" or
         "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "AUTH_REQUIRED" or "FORBIDDEN";
 
@@ -77,15 +87,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 LJ.Require(S(state["platforms"]![platform]!["accountId"]) == lease.UserId, "ACCOUNT_REPLACED");
                 string previous = S(library["accounts"]![platform]); LJ.Require(previous.Length == 0 || previous == lease.UserId, "ACCOUNT_REBIND_REQUIRED");
                 leases[platform] = lease;
-                var client = platform is "wy" or "kg"
-                    ? await clients.AcquireAsync(platform, token).ConfigureAwait(false) : null;
-                adapters[platform] = platform switch
-                {
-                    "wy" => new MusicSyncWy(lease, http, clients, client, Guard, GuardLeases, token, neteaseTokens),
-                    "tx" => new MusicSyncTx(lease, http, clients, client, Guard, GuardLeases, token),
-                    "kg" => new MusicSyncKg(lease, http, clients, client, Guard, GuardLeases, token, cloud),
-                    _ => throw new MusicLibraryException("INVALID_PLATFORM")
-                };
+                adapters[platform] = new(lease, client, Guard, GuardLeases, token);
             }
             if (adapters.Count == 0) return networkPlatform is null ? View(snapshot) :
                 LJ.Element(O(("ok", true), ("state", "local-only")));
@@ -101,13 +103,18 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
             foreach (var (platform, adapter) in adapters)
             {
                 var pull = networkPlatform is null ? await adapter.ReadAsync(Kinds(platform)) :
-                    new SyncDirectory(adapter.AccountId, [], await adapter.ReadSubscriptionsAsync());
+                    await ReadSubscriptions(adapter);
                 if (networkPlatform is null) Validate(pull, adapter);
-                else ValidateSubscriptions(pull.Subscriptions, adapter);
                 pulls[platform] = pull;
             }
             await Guard();
-            if (networkPlatform is null) { await ProtectPull(pulls); Merge(pulls); await ResolveMappings(); }
+            if (networkPlatform is null)
+            {
+                await ProtectPull(pulls);
+                await AdoptMembers(pulls.Values.SelectMany(pull => pull.Collections).SelectMany(remote => remote.Members));
+                Merge(pulls);
+                await ResolveMappings();
+            }
             MergeSubscriptions(pulls); Status("pushing"); await Save();
             // Stable IDs survive checkpoints; never reuse detached JsonObject references after CAS.
             foreach (string cid in networkPlatform is null ? Collections.Select(c => S(c["id"])).ToArray() : [])
@@ -160,12 +167,11 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         var ids = new HashSet<string>();
         foreach (var r in directory.Collections)
         {
-            LJ.Require(LJ.Id(r.Id, 240) && ids.Add(r.Id) && Kinds(adapter.Platform).Contains(r.Kind) && LJ.Id(r.Name, 200) &&
+            LJ.Require(ids.Add(r.Id) && Kinds(adapter.Platform).Contains(r.Kind) &&
                 r.Writable && r.Owner == adapter.AccountId, "INCOMPLETE_PAGE");
-            LJ.Require(r.Keys.Distinct().Count() == r.Keys.Length && r.Members.All(m => LJ.Id(m.Key) && m.Id == adapter.NativeId(m.Song)), "IDENTITY_MISMATCH");
+            LJ.Require(r.Keys.Distinct().Count() == r.Keys.Length, "INVALID_RESPONSE");
         }
         LJ.Require(!Kinds(adapter.Platform).Contains("favorites") || directory.Collections.Count(r => r.Kind == "favorites") == 1, "FAVORITES_UNCONFIRMED");
-        ValidateSubscriptions(directory.Subscriptions, adapter);
     }
     private async Task Confirm(string code, int count, JsonNode evidence)
     {
@@ -203,18 +209,9 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
     }
     private string MergeMember(SyncMember member)
     {
-        if (!member.HasMetadata)
-        {
-            // A failed detail lookup proves membership only. Match the exact native source, including a
-            // secondary source of a canonical recording; never replace known metadata with a placeholder.
-            // Using the same path for pulls AND write readback also protects pending recovery after reopen.
-            string native = NativeMusicSong.SourceKey(member.Song);
-            LJ.Require(native.Length > 0, "IDENTITY_MISMATCH");
-            if (SongGroups.NativeOwner(native) is { } known) return known.Id;
-        }
-        // A first-seen missing recording still needs a native identity and occurrence. Real details
-        // later flow through the normal owner merge and enrich that same stable songId.
-        return MusicLibraryOwner.AddLibrarySyncSongs(library, [member.Song], SongGroups)[0];
+        // Pull and readback register every real member source before mapping it.
+        // File occurrence keys cannot substitute for this source ownership.
+        return SongGroups.NativeOwner(NativeMusicSong.SourceKey(member.Song))!.Id;
     }
     private void Merge(Dictionary<string, SyncDirectory> pulls)
     {

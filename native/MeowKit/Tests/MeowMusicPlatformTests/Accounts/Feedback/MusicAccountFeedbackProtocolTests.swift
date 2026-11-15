@@ -3,75 +3,227 @@ import XCTest
 import MeowAccounts
 import MeowMusicFeature
 import MeowStorage
+import MeowRuntime
 @testable import MeowMusicPlatform
 
-// QQ retains its existing wire fixture; NetEase uses the confirmed NCBLv3 file channel.
-// Synthetic peers only; no upstream connection or real account is involved.
+// Provider wire/crypto/ACK vectors run through the shared Node public entry.
+// These tests exercise the actual native owner, canonical client and outbox.
 @MainActor final class MusicAccountFeedbackProtocolTests: XCTestCase {
-    func testQQVIPTrackStillUsesExactVkeyAndOneGzippedDurationReport() async throws {
+    func testQQRegisteredStartAndConfirmedEndUseCanonicalSessionWithoutEntitlementOrCredentialWrites() async throws {
         let f = try MusicNativeFixture()
         try await f.enable()
         _ = try await f.service.validate(platform: .qq)
-        let baseline = await f.http.recorded(), stored = f.store.peek(f.identity)
+        let baseline = await f.platform.recorded(), stored = f.store.peek(f.identity)
         let writes = f.store.calls().filter { $0 == "write" }.count
         let before = await f.accounts.snapshot(for: f.identity)
-        var track = MusicAccountFixture.song()
-        track["pay"] = ["pay_play": 1, "pay_down": 1]
-        track["singer"] = [["id": 77, "name": "Synthetic"]]
-        let filename = "M500" + MusicAccountFixture.mid + MusicAccountFixture.mid + ".mp3"
-        await f.http.replies("CgiGetTrackInfo", try MusicAccountFixture.rpc(["tracks": [track]]))
-        await f.http.replies("UrlGetVkey", try MusicAccountFixture.rpc(["midurlinfo": [[
-            "songmid": MusicAccountFixture.mid, "filename": filename, "result": 0,
-            "vkey": "synthetic-<&\"'>"
-        ]]]))
-        // A feedback implementation that adds a membership gate will fail here.
-        await f.http.replies("vip_login_base", .init(status: 403, data: Data()))
-        await f.http.replies("/android/fcgi-bin/imusic_tj", .init(status: 200, data: MusicAccountFeedbackFixture.qqAck))
         let lease = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init()), instance = UUID()
         let start = try await lease.report(MusicAccountFeedbackFixture.report(.start, instance: instance))
         XCTAssertEqual(start, .registered)
-        let afterStart = await f.http.recorded(); XCTAssertEqual(afterStart.count, baseline.count)
         let end = MusicAccountFeedbackFixture.report(.end, instance: instance)
         let receipt = try await lease.report(end), duplicate = try await lease.report(end)
         XCTAssertEqual(receipt, .confirmed); XCTAssertEqual(duplicate, .confirmed)
-        let requests = Array((await f.http.recorded()).dropFirst(baseline.count))
-        XCTAssertEqual(try requests.map(MusicAccountTestHTTP.method), ["CgiGetTrackInfo", "UrlGetVkey", "/android/fcgi-bin/imusic_tj"])
-        let vkeyRequest = try XCTUnwrap(requests.first { (try? MusicAccountTestHTTP.method($0)) == "UrlGetVkey" })
-        let rpc = try XCTUnwrap(MusicAccountTestHTTP.fields(vkeyRequest)["req_0"] as? [String: Any])
-        let params = try XCTUnwrap(rpc["param"] as? [String: Any])
-        XCTAssertEqual(rpc["module"] as? String, "music.vkey.GetVkey")
-        XCTAssertEqual(params["filename"] as? [String], [filename])
-        XCTAssertEqual(params["songmid"] as? [String], [MusicAccountFixture.mid])
-        XCTAssertEqual(params["songtype"] as? [Int], [0]); XCTAssertEqual(params["uin"] as? String, "101")
-        let request = try XCTUnwrap(requests.last)
-        XCTAssertEqual(request.url.absoluteString, "https://stat6.y.qq.com/android/fcgi-bin/imusic_tj")
-        XCTAssertEqual(request.method, "POST"); XCTAssertEqual(request.maximumBytes, 65536)
-        XCTAssertEqual(request.headers["Content-Encoding"], "gzip")
-        XCTAssertEqual(request.headers["Content-Type"], "application/octet-stream")
-        XCTAssertEqual(request.headers["Cookie"], "uin=101; qqmusic_uin=101; qm_keyst=synthetic-account-key; qqmusic_key=synthetic-account-key")
-        let bytes = try XCTUnwrap(request.body)
-        XCTAssertEqual(Array(bytes.prefix(3)), [0x1f, 0x8b, 0x08])
-        let xml = String(decoding: try MusicAccountFeedbackFixture.inflate(bytes, gzip: true), as: UTF8.self)
-        let time = String(Int(f.clock.now().timeIntervalSince1970))
-        let timekey = MusicAccountFeedbackFixture.md5(Data((time + "1" + "101" + "gk2$Lh-&l4#!4iow").utf8)).uppercased()
-        for expected in ["<cid>228</cid>", "cmd=\"1\"", "QQ=\"101\"", "optime=\"\(time)\"",
-                         "time=\"1\"", "play_duration_mi=\"1000\"", "audiotime=\"180000\"",
-                         "songid=\"101\"", "singerid=\"77\"", "timekey=\"\(timekey)\"",
-                         "vkey=\"synthetic-&lt;&amp;&quot;&apos;&gt;\""] {
-            XCTAssertTrue(xml.contains(expected), expected)
-        }
-        XCTAssertFalse(xml.contains("https://")) // No media URL or audio download in this protocol.
-        XCTAssertEqual(f.store.peek(f.identity)?.revision, stored?.revision)
+        let requests = Array((await f.platform.recorded()).dropFirst(baseline.count))
+        XCTAssertEqual(requests.map(\.operation), ["feedback.send", "feedback.send"])
+        XCTAssertEqual(requests.map { $0.parameters[music: "event"] }, [.string("start"), .string("end")])
+        XCTAssertEqual(requests.last?.parameters[music: "target"][music: "nativeId"], .string(MusicAccountFixture.mid))
+        XCTAssertFalse(try XCTUnwrap(requests.last).parameters[music: "sessionId"].musicText.isEmpty)
+        XCTAssertEqual(f.store.peek(f.identity), stored)
         XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, writes)
-        let after = await f.accounts.snapshot(for: f.identity); XCTAssertEqual(after.generation, before.generation)
+        let after = await f.accounts.snapshot(for: f.identity); XCTAssertEqual(after, before)
+        lease.revoke(); await lease.drain()
         _ = await f.service.close()
     }
 
-    private func neteaseFeedbackFixture() async throws -> MusicNeteaseNativeFixture {
+    func testCanonicalNoSendRejectionAndUnknownRemainDistinctWithoutAutomaticReplayOrCredentialMutation() async throws {
+        for status in ["notSent", "rejected", "unknown"] {
+            let f = try MusicNativeFixture()
+            try await f.enable()
+            _ = try await f.service.validate(platform: .qq)
+            let baseline = await f.platform.recorded(), stored = f.store.peek(f.identity)
+            let writes = f.store.calls().filter { $0 == "write" }.count
+            let before = await f.accounts.snapshot(for: f.identity)
+            await f.platform.replies("feedback.send", .object(["status": .string(status),
+                "errorCode": .string(status == "rejected" ? "RATE_LIMITED" : "NETWORK_ERROR"),
+                "cookie": .string("synthetic-unconsumed-replacement")]))
+            let lease = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init())
+            let report = MusicAccountFeedbackFixture.report(.start, instance: UUID())
+            if status == "unknown" {
+                let receipt = try await lease.report(report)
+                XCTAssertEqual(receipt, .unconfirmed)
+            } else {
+                do { _ = try await lease.report(report); XCTFail("An unconfirmed send cannot become success") }
+                catch { XCTAssertEqual(error as? MusicServiceError, status == "rejected" ? .rateLimited : .connectionFailed) }
+            }
+            let duplicate = try await lease.report(report)
+            XCTAssertEqual(duplicate, .unconfirmed)
+            let calls = Array((await f.platform.recorded()).dropFirst(baseline.count))
+            XCTAssertEqual(calls.map(\.operation), ["feedback.send"])
+            XCTAssertEqual(f.store.peek(f.identity), stored)
+            XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, writes)
+            let after = await f.accounts.snapshot(for: f.identity)
+            XCTAssertEqual(after, before)
+            lease.revoke(); await lease.drain()
+            _ = await f.service.close()
+        }
+    }
+
+    func testCanonicalAuthenticationRejectionInvalidatesOnlyTheInitiatingAccountSession() async throws {
+        for (code, expected) in [("AUTH_REQUIRED", MusicServiceError.authRequired),
+                                 ("INVALID_CREDENTIALS", .authRequired), ("AUTH_EXPIRED", .sessionExpired)] {
+            let f = try MusicNativeFixture(), other = try MusicAccountFixture.identity("kg")
+            let otherRecord = try CredentialRecord(credential: MusicAccountFixture.credential(202, platform: .kugou))
+            try f.store.write(otherRecord, for: other)
+            try await f.enable()
+            _ = try await f.service.validate(platform: .qq)
+            let before = await f.accounts.snapshot(for: f.identity), otherBefore = await f.accounts.snapshot(for: other)
+            let baseline = await f.platform.recorded(), runtimeBaseline = f.runtime.requests().count
+            let writes = f.store.calls().filter { $0 == "write" }.count
+            let removes = f.store.calls().filter { $0 == "remove" }.count
+            await f.platform.replies("feedback.send", .object(["status": .string("rejected"), "errorCode": .string(code)]))
+            let lease = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init())
+            XCTAssertEqual(lease.generation, before.generation)
+            do { _ = try await lease.report(MusicAccountFeedbackFixture.report(.start, instance: UUID())); XCTFail("Explicit authentication denial") }
+            catch { XCTAssertEqual(error as? MusicServiceError, expected, code) }
+            let after = await f.accounts.snapshot(for: f.identity), otherAfter = await f.accounts.snapshot(for: other)
+            XCTAssertEqual(after.phase, .invalidated); XCTAssertEqual(after.failure, .invalidated(.expired))
+            XCTAssertNotEqual(after.generation, before.generation)
+            XCTAssertFalse(lease.authorization.isActive)
+            XCTAssertNil(f.store.peek(f.identity)); XCTAssertEqual(f.store.peek(other), otherRecord)
+            XCTAssertEqual(otherAfter, otherBefore)
+            XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, writes)
+            XCTAssertEqual(f.store.calls().filter { $0 == "remove" }.count, removes + 1)
+            let publication = try XCTUnwrap(f.runtime.requests().dropFirst(runtimeBaseline)
+                .last { $0.transportOperation == "session.update" })
+            XCTAssertEqual(publication.fields[music: "platform"], .string("tx"))
+            XCTAssertEqual(publication.fields[music: "session"], .null)
+            do { _ = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init()); XCTFail("Rejected session remains admitted") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
+            let requests = Array((await f.platform.recorded()).dropFirst(baseline.count))
+            XCTAssertEqual(requests.map(\.operation), ["feedback.send"], "Authentication denial cannot start restore, refresh or replay")
+            await lease.drain()
+            _ = await f.service.close()
+        }
+    }
+
+    func testCanonicalIDOrFieldRejectionAndUnknownAuthenticationCodeDoNotLogOut() async throws {
+        let cases: [(status: String, code: String, error: MusicServiceError?)] = [
+            ("rejected", "NOT_FOUND", .notFound), ("rejected", "INVALID_REQUEST", .invalidRequest),
+            ("rejected", "INVALID_RESPONSE", .upstreamInvalid), ("unknown", "AUTH_EXPIRED", nil)
+        ]
+        for scenario in cases {
+            let f = try MusicNativeFixture()
+            try await f.enable()
+            _ = try await f.service.validate(platform: .qq)
+            let before = await f.accounts.snapshot(for: f.identity), stored = f.store.peek(f.identity)
+            let baseline = await f.platform.recorded(), runtimeBaseline = f.runtime.requests().count
+            let writes = f.store.calls().filter { $0 == "write" }.count
+            let removes = f.store.calls().filter { $0 == "remove" }.count
+            await f.platform.replies("feedback.send", .object(["status": .string(scenario.status), "errorCode": .string(scenario.code)]))
+            let lease = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init())
+            let report = MusicAccountFeedbackFixture.report(.start, instance: UUID())
+            if let expected = scenario.error {
+                do { _ = try await lease.report(report); XCTFail("Rejected request became success") }
+                catch { XCTAssertEqual(error as? MusicServiceError, expected, scenario.code) }
+            } else {
+                let receipt = try await lease.report(report)
+                XCTAssertEqual(receipt, .unconfirmed)
+            }
+            let duplicate = try await lease.report(report)
+            XCTAssertEqual(duplicate, .unconfirmed)
+            XCTAssertTrue(lease.authorization.isActive)
+            await f.platform.clearReply("feedback.send")
+            let next = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init())
+            let receipt = try await next.report(MusicAccountFeedbackFixture.report(.start, instance: UUID()))
+            XCTAssertEqual(receipt, .registered, "The same verified session remains usable without another login")
+            let after = await f.accounts.snapshot(for: f.identity), statuses = try await f.service.statuses()
+            XCTAssertEqual(after, before); XCTAssertEqual(statuses.first?.phase, .signedIn)
+            XCTAssertEqual(f.store.peek(f.identity), stored)
+            XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, writes)
+            XCTAssertEqual(f.store.calls().filter { $0 == "remove" }.count, removes)
+            let requests = Array((await f.platform.recorded()).dropFirst(baseline.count))
+            XCTAssertEqual(requests.map(\.operation), ["feedback.send", "feedback.send"])
+            XCTAssertFalse(f.runtime.requests().dropFirst(runtimeBaseline).contains { $0.transportOperation == "session.update" })
+            lease.revoke(); next.revoke(); await lease.drain(); await next.drain()
+            _ = await f.service.close()
+        }
+    }
+
+    func testLateCanonicalAuthenticationRejectionCannotInvalidateSameUserReplacement() async throws {
+        for replacement in ["refresh", "login"] {
+            let f = try MusicNativeFixture()
+            try await f.enable()
+            _ = try await f.service.validate(platform: .qq)
+            let before = await f.accounts.snapshot(for: f.identity), stored = try XCTUnwrap(f.store.peek(f.identity))
+            let publication = try XCTUnwrap(f.runtime.requests().last { $0.transportOperation == "session.update" })
+            let baseline = await f.platform.recorded()
+            let entered = expectation(description: "old feedback dispatched before " + replacement)
+            let gate = MusicAccountTestGate { entered.fulfill() }
+            defer { Task { await gate.release() } }
+            await f.platform.hold("feedback.send", gate)
+            await f.platform.replies("feedback.send", .object(["status": .string("rejected"), "errorCode": .string("AUTH_EXPIRED")]))
+            let old = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init())
+            let pending = MusicAccountQueueOwnerCall("old authentication rejection settles after " + replacement) {
+                try await old.report(MusicAccountFeedbackFixture.report(.start, instance: UUID()))
+            }
+            await fulfillment(of: [entered], timeout: 3)
+            let admitted = await f.platform.recorded()
+            let dispatched = try XCTUnwrap(admitted.last { $0.operation == "feedback.send" })
+            XCTAssertEqual(dispatched.fields[music: "expectedSession"][music: "scope"], publication.fields[music: "session"][music: "scope"])
+            XCTAssertEqual(dispatched.fields[music: "expectedSession"][music: "generation"], publication.fields[music: "session"][music: "generation"])
+            let cookie = try MusicAccountCredential.read(stored.credential)[music: "cookie"].musicRequiredText() + "; replacement=synthetic"
+            let account = RuntimeValue.object(["userId": .string("101"), "cookie": .string(cookie), "profile": .object([:])])
+            if replacement == "refresh" {
+                await f.platform.replies("account.refresh", account)
+                _ = try await f.service.refresh(platform: .qq)
+            } else {
+                await f.platform.replies("qr.poll", .object(["status": .string("authenticated"), "account": account]))
+                let challenge = try await f.service.beginLogin(platform: .qq)
+                let progress = try await f.service.checkLogin(challengeID: challenge.id)
+                XCTAssertEqual(progress, .confirmed)
+            }
+            let current = await f.accounts.snapshot(for: f.identity), saved = try XCTUnwrap(f.store.peek(f.identity))
+            XCTAssertEqual(current.phase, .signedIn)
+            XCTAssertEqual(try MusicAccountFixture.userID(saved.credential), "101")
+            XCTAssertNotEqual(saved.revision, stored.revision)
+            XCTAssertEqual(try MusicAccountCredential.read(saved.credential)[music: "cookie"], .string(cookie))
+            if replacement == "refresh" { XCTAssertEqual(current.generation, before.generation) }
+            else { XCTAssertNotEqual(current.generation, before.generation) }
+            let replacementPublication = try XCTUnwrap(f.runtime.requests().last { $0.transportOperation == "session.update" })
+            XCTAssertEqual(replacementPublication.fields[music: "session"][music: "cookie"], .string(cookie))
+            XCTAssertNotEqual(replacementPublication.fields[music: "session"][music: "scope"], publication.fields[music: "session"][music: "scope"])
+            let writes = f.store.calls().filter { $0 == "write" }.count
+            let removes = f.store.calls().filter { $0 == "remove" }.count
+            let runtimeBaseline = f.runtime.requests().count
+            await gate.release()
+            await fulfillment(of: [pending.finished], timeout: 3)
+            do { _ = try pending.value(); XCTFail("Old explicit rejection became success") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
+            let after = await f.accounts.snapshot(for: f.identity)
+            XCTAssertEqual(after, current); XCTAssertEqual(f.store.peek(f.identity), saved)
+            XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, writes)
+            XCTAssertEqual(f.store.calls().filter { $0 == "remove" }.count, removes)
+            XCTAssertFalse(f.runtime.requests().dropFirst(runtimeBaseline).contains { $0.transportOperation == "session.update" })
+            await f.platform.clearReply("feedback.send")
+            let next = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init())
+            let receipt = try await next.report(MusicAccountFeedbackFixture.report(.start, instance: UUID()))
+            XCTAssertEqual(receipt, .registered)
+            let requests = Array((await f.platform.recorded()).dropFirst(baseline.count))
+            XCTAssertEqual(requests.map(\.operation), replacement == "refresh"
+                ? ["feedback.send", "account.refresh", "feedback.send"]
+                : ["feedback.send", "qr.create", "qr.poll", "feedback.send"])
+            let sent = try XCTUnwrap(requests.last)
+            XCTAssertEqual(sent.fields[music: "expectedSession"][music: "scope"], replacementPublication.fields[music: "session"][music: "scope"])
+            XCTAssertEqual(sent.fields[music: "expectedSession"][music: "generation"], replacementPublication.fields[music: "session"][music: "generation"])
+            old.revoke(); next.revoke(); await old.drain(); await next.drain()
+            _ = await f.service.close()
+        }
+    }
+
+    private func neteaseFeedbackFixture() async throws -> MusicNativeFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let f = try MusicNeteaseNativeFixture(feedbackOutboxStoreFactory: {
+        let f = try MusicNativeFixture(platform: .netease, feedbackOutboxStoreFactory: {
             try DocumentStore(baseURL: root, namespace: "feedback-protocol")
         })
         try await f.enable()
@@ -82,11 +234,12 @@ import MeowStorage
         return f
     }
 
-    func testNeteaseUsesSingleMultipartPerPhaseAndNeverImportsFeedbackCookiesOrReplaysBadAck() async throws {
+    func testNeteaseRegistersEachPhaseDurablyAndNeverImportsCanonicalExtraFieldsOrReplaysUnknown() async throws {
         let f = try await neteaseFeedbackFixture()
-        let baseline = await f.http.recorded(), stored = f.store.peek(f.identity)
+        let baseline = await f.platform.recorded(), stored = f.store.peek(f.identity)
         let writes = f.store.calls().filter { $0 == "write" }.count
-        let path = "/api/clientlog/encrypt/upload"
+        await f.platform.replies("feedback.upload", .object(["status": .string("confirmed"),
+            "cookie": .string("synthetic-feedback-replacement")]))
         let lease = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init()), instance = UUID()
         let start = MusicAccountFeedbackFixture.report(.start, platform: .netease, instance: instance)
         let end = MusicAccountFeedbackFixture.report(.end, platform: .netease, instance: instance)
@@ -96,118 +249,33 @@ import MeowStorage
         let duplicate = try await lease.report(end)
         XCTAssertEqual(started, .registered); XCTAssertEqual(finished, .registered); XCTAssertEqual(duplicate, .registered)
         await f.service.flushPendingPlaybackFeedback()
-        let records = Array((await f.http.recorded()).dropFirst(baseline.count))
-        XCTAssertEqual(records.count, 2)
-        for record in records {
-            XCTAssertEqual(record.request.url.absoluteString,
-                "https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true")
-            XCTAssertEqual(record.request.method, "POST"); XCTAssertEqual(record.request.maximumBytes, 65536)
-            XCTAssertEqual(record.request.headers["Cache-Control"], "no-store")
-            XCTAssertTrue(record.request.headers["Cookie"]?.contains("MUSIC_U=synthetic-user-42") == true)
-            XCTAssertFalse(record.request.headers["Cookie"]?.contains("synthetic-feedback-replacement") == true)
-            XCTAssertEqual(record.request.headers["User-Agent"], "Meowfilm")
-            let bytes = try XCTUnwrap(record.request.body), header = try XCTUnwrap(bytes.range(of: Data("\r\n\r\n".utf8)))
-            XCTAssertEqual(Data(bytes[header.upperBound..<(header.upperBound + 4)]), Data("NCBL".utf8))
-        }
-        XCTAssertNotEqual(try MusicAccountFeedbackFixture.uploadFilename(records[0].request),
-                          try MusicAccountFeedbackFixture.uploadFilename(records[1].request))
-        await f.http.replies(path, [try MusicNeteaseFixture.response(["code": false])])
+        let records = Array((await f.platform.recorded()).dropFirst(baseline.count))
+        XCTAssertEqual(records.map(\.operation), ["feedback.upload", "feedback.upload"])
+        let events = records.flatMap { $0.parameters[music: "events"].musicArray }
+        XCTAssertEqual(events.map { $0[music: "event"] }, [.string("start"), .string("end")])
+        XCTAssertEqual(events.map { $0[music: "occurredAt"] }, [.number(start.occurredAt), .number(end.occurredAt)])
+        XCTAssertTrue(events.allSatisfy { $0[music: "target"][music: "nativeId"] == .string("101") })
+        await f.platform.replies("feedback.upload", .object(["status": .string("unknown")]))
         let bad = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init()), badID = UUID()
         let badStart = MusicAccountFeedbackFixture.report(.start, platform: .netease, instance: badID)
         let admitted = try await bad.report(badStart)
-        XCTAssertEqual(admitted, .registered, "Local storage admission does not claim a remote ACK")
+        XCTAssertEqual(admitted, .registered, "Local admission is not remote confirmation")
         await f.service.flushPendingPlaybackFeedback()
         let repeated = try await bad.report(badStart)
         let absentEnd = try await bad.report(MusicAccountFeedbackFixture.report(.end, platform: .netease, instance: badID))
         XCTAssertEqual(repeated, .registered); XCTAssertEqual(absentEnd, .unconfirmed)
         await f.service.flushPendingPlaybackFeedback()
-        let after = Array((await f.http.recorded()).dropFirst(baseline.count))
-        XCTAssertEqual(after.map { $0.request.url.path }, [path, path, path])
-        XCTAssertEqual(f.store.peek(f.identity)?.revision, stored?.revision)
-        XCTAssertEqual(f.store.peek(f.identity)?.credential, stored?.credential)
+        let after = Array((await f.platform.recorded()).dropFirst(baseline.count))
+        XCTAssertEqual(after.map(\.operation), Array(repeating: "feedback.upload", count: 3))
+        XCTAssertEqual(f.store.peek(f.identity), stored)
         XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, writes)
+        lease.revoke(); bad.revoke(); await lease.drain(); await bad.drain()
         _ = await f.service.close()
     }
 
-    func testFeedbackRoutesAdmitOnlyExactMethodsHostsPathsAndNoPlatformHeadersOverHTTP() throws {
-        let accepted = [
-            ("http://d.kugou.com/v3/qrydid", "POST"), ("http://d.kugou.com/v2/gen", "GET"),
-            ("http://d.kugou.com/v2/post", "POST"), ("http://d.kugou.com:80/v2/post", "POST"),
-            ("https://stat6.y.qq.com/android/fcgi-bin/imusic_tj", "POST"),
-            ("https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true", "POST")
-        ]
-        for (url, method) in accepted {
-            let request = MusicAccountHTTPRequest(url: try XCTUnwrap(URL(string: url)), method: method)
-            XCTAssertTrue(MusicAccountFeedbackRoute.permits(request), url)
-            XCTAssertEqual(MusicAccountFeedbackRoute.permitsCleartext(request), url.hasPrefix("http://"))
-        }
-        let rejected = [
-            ("https://d.kugou.com/v2/post", "POST"), ("http://d.kugou.com/v2/post", "GET"),
-            ("http://d.kugou.com/v2/gen", "POST"), ("http://d.kugou.com/v3/qrydid", "GET"),
-            ("http://d.kugou.com/v2/post/extra", "POST"), ("http://d.kugou.com/v2/grade", "POST"),
-            ("http://d.kugou.com.invalid/v2/post", "POST"), ("http://d.kugou.com:443/v2/post", "POST"),
-            ("http://synthetic@d.kugou.com/v2/post", "POST"), ("http://d.kugou.com/v2/post#fragment", "POST"),
-            ("http://stat6.y.qq.com/android/fcgi-bin/imusic_tj", "POST"),
-            ("https://stat6.y.qq.com/android/fcgi-bin/imusic_tj", "GET"),
-            ("https://music.163.com/eapi/feedback/weblog", "POST"),
-            ("https://clientlog.music.163.com/api/feedback/weblog", "POST"),
-            ("https://clientlog.music.163.com/eapi/feedback/weblog", "POST")
-        ]
-        for (url, method) in rejected {
-            let request = MusicAccountHTTPRequest(url: try XCTUnwrap(URL(string: url)), method: method)
-            XCTAssertFalse(MusicAccountFeedbackRoute.permits(request), url)
-        }
-        for path in ["/v3/qrydid", "/v2/gen", "/v2/post"] {
-            for header in ["Cookie", "cOoKiE", "Authorization", "authorization", "X-Router"] {
-                let request = MusicAccountHTTPRequest(url: try XCTUnwrap(URL(string: "http://d.kugou.com" + path)),
-                    method: path == "/v2/gen" ? "GET" : "POST", headers: [header: "synthetic-not-permitted"])
-                XCTAssertFalse(MusicAccountFeedbackRoute.permitsCleartext(request))
-                XCTAssertFalse(MusicAccountFeedbackRoute.permits(request))
-            }
-        }
-    }
-
-    func testCompressionAndAcknowledgementsRejectMalformedTrailingOversizedAndNonintegerSuccess() throws {
-        let valid = MusicAccountFeedbackFixture.codeZero
-        XCTAssertEqual(try MusicAccountFeedbackCompression.inflateZlib(valid), Data("{\"code\":0}".utf8))
-        XCTAssertTrue(MusicAccountFeedbackQQWire.confirmed(MusicAccountFeedbackFixture.qqAck))
-        for gzip in [false, true] {
-            let plain = Data("synthetic feedback 中文".utf8)
-            let encoded = try MusicAccountFeedbackCompression.compress(plain, gzip: gzip)
-            XCTAssertEqual(try MusicAccountFeedbackFixture.inflate(encoded, gzip: gzip), plain)
-        }
-        var corrupted = valid; corrupted[corrupted.count - 1] ^= 1
-        let bomb = try XCTUnwrap(Data(base64Encoded: "eJztwYEAAAAAgCC2/aUWqQoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACqASKYBBE="))
-        let invalidStreams = [Data(), Data([0x78, 0x9c]), Data(valid.dropLast()), corrupted,
-                              valid + Data([0]), valid + valid, bomb, Data(repeating: 0, count: 65537),
-                              try MusicAccountFeedbackCompression.compress(Data("{}".utf8), gzip: true)]
-        for bytes in invalidStreams {
-            XCTAssertThrowsError(try MusicAccountFeedbackCompression.inflateZlib(bytes))
-            XCTAssertFalse(MusicAccountFeedbackQQWire.confirmed(Data(repeating: 0, count: 5) + bytes))
-        }
-        XCTAssertThrowsError(try MusicAccountFeedbackCompression.inflateZlib(valid, limit: 9))
-        XCTAssertThrowsError(try MusicAccountFeedbackCompression.compress(Data(repeating: 0, count: 128 * 1024 + 1)))
-        for base64 in ["eJyrVkrOT0lVskpLzClOrQUAJJ8FHQ==", "eJyrVkrOT0lVslIyUKoFABi1A4Y=", "eJyrrgUAAXUA+Q==", "eJyrVkrOT0lVsjKsBQASkQND"] {
-            XCTAssertFalse(MusicAccountFeedbackQQWire.confirmed(Data(repeating: 0, count: 5) + (try XCTUnwrap(Data(base64Encoded: base64)))))
-        }
-        XCTAssertFalse(MusicAccountFeedbackQQWire.confirmed(Data([1, 0, 0, 0, 0]) + valid))
-        XCTAssertFalse(MusicAccountFeedbackQQWire.confirmed(valid))
-        _ = try MusicAccountFeedbackKugouWire.ack(MusicKugouFixture.response(["status": 1, "errcode": 0]))
-        let badAcknowledgements: [[String: Any]] = [
-            [:], ["status": true], ["status": "1"], ["status": 0], ["status": 1, "errcode": 7],
-            ["status": 1, "error_code": 1], ["status": 1, "data": ["grade_synced": false]]
-        ]
-        for bad in badAcknowledgements {
-            XCTAssertThrowsError(try MusicAccountFeedbackKugouWire.ack(MusicKugouFixture.response(bad)))
-        }
-        XCTAssertThrowsError(try MusicAccountFeedbackKugouWire.ack(.init(status: 200, data: Data("not-json".utf8))))
-        XCTAssertThrowsError(try MusicAccountFeedbackKugouWire.ack(MusicKugouFixture.response(["status": 1], status: 201)))
-    }
-
-    func testNeteaseRecommendationWireRequiresProofAtAdmissionAndPreservesFrozenSourceAfterRetirement() async throws {
+    func testRecommendationAdmissionChecksActualProofAndKeepsFrozenAttributionAfterSourceRetirement() async throws {
         let f = try await neteaseFeedbackFixture()
-        let baseline = await f.http.recorded()
-        let path = "/api/clientlog/encrypt/upload"
+        let baseline = await f.platform.recorded()
         for source in ["synthetic-heart-source", "moreRcmd", "sourceMap-synthetic"] {
             let authorization = MusicQueueAuthorization()
             let sourceID = source == "synthetic-heart-source" ? "actual-source-id" : ""
@@ -215,8 +283,7 @@ import MeowStorage
                 source: source, sourceID: sourceID, algorithm: "synthetic-alg", authorization: authorization)
             let target = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
                 source: source, sourceID: sourceID, algorithm: "synthetic-alg", recommendationProof: proof)
-            let instance = UUID()
-            let report = MusicPlaybackFeedbackReport(instanceID: instance, target: target, event: .start,
+            let report = MusicPlaybackFeedbackReport(instanceID: UUID(), target: target, event: .start,
                 duration: 0, listened: 0, mediaListened: 0, position: 0, rate: 1,
                 startedAt: 1_800_000_000, occurredAt: 1_800_000_000)
             let lease = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init())
@@ -224,33 +291,27 @@ import MeowStorage
             XCTAssertEqual(receipt, .registered)
             await f.service.flushPendingPlaybackFeedback()
             authorization.revoke()
-            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(report), "Retired proof cannot admit a new listen")
-            let end = MusicPlaybackFeedbackReport(instanceID: instance, target: target, event: .end,
+            XCTAssertThrowsError(try MusicAccountFeedbackFacts.consume(report), "A retired proof cannot admit another listen")
+            let end = MusicPlaybackFeedbackReport(instanceID: report.instanceID, target: target, event: .end,
                 duration: 0, listened: 4, mediaListened: 8, position: 8, rate: 2, reason: .interrupt,
                 startedAt: report.startedAt, occurredAt: 1_800_000_004)
             f.clock.advance(4)
             let finished = try await lease.report(end)
             XCTAssertEqual(finished, .registered)
             await f.service.flushPendingPlaybackFeedback()
-            for value in [report, end] {
-                let line = String(decoding: try MusicAccountFeedbackNeteaseWire.records(value), as: UTF8.self)
-                let json = try XCTUnwrap(line.split(separator: "\u{1}").last)
-                let fields = try MusicQQWire.decode(Data(json.utf8))
-                XCTAssertEqual(fields["id"] as? Int, 101)
-                XCTAssertEqual(fields["source"] as? String, source)
-                XCTAssertEqual(fields["sourceId"] as? String, sourceID.isEmpty ? nil : sourceID)
-                XCTAssertEqual(fields["alg"] as? String, "synthetic-alg")
-                XCTAssertEqual(fields["_logTime"] as? Int64, value.event == .start ? 1_800_000_000_000 : 1_800_000_004_000)
+            let requests = await f.platform.recorded()
+            let pair = Array(requests.filter { $0.operation == "feedback.upload" }.suffix(2))
+                .flatMap { $0.parameters[music: "events"].musicArray }
+            XCTAssertEqual(pair.count, 2)
+            for value in pair {
+                XCTAssertEqual(value[music: "target"][music: "source"], .string(source))
+                XCTAssertEqual(value[music: "target"][music: "sourceId"], .string(sourceID))
+                XCTAssertEqual(value[music: "target"][music: "algorithm"], .string("synthetic-alg"))
             }
-            lease.revoke()
-            let forged = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
-                source: source, sourceID: sourceID, algorithm: "synthetic-alg")
-            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(.init(instanceID: UUID(),
-                target: forged, event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1,
-                startedAt: 1_800_000_000, occurredAt: 1_800_000_000)))
+            lease.revoke(); await lease.drain()
         }
-        let records = Array((await f.http.recorded()).dropFirst(baseline.count))
-        XCTAssertEqual(records.map { $0.request.url.path }, Array(repeating: path, count: 6))
+        let records = Array((await f.platform.recorded()).dropFirst(baseline.count))
+        XCTAssertEqual(records.map(\.operation), Array(repeating: "feedback.upload", count: 6))
         _ = await f.service.close()
     }
 
@@ -266,9 +327,14 @@ import MeowStorage
             .init(platform: .netease, nativeID: "101", source: proof.source,
                 algorithm: "changed", recommendationProof: proof)
         ] {
-            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(.init(instanceID: UUID(), target: target,
+            XCTAssertThrowsError(try MusicAccountFeedbackFacts.consume(.init(instanceID: UUID(), target: target,
                 event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1,
                 startedAt: 1_800_000_000, occurredAt: 1_800_000_000)))
         }
+        let actualSource = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
+            source: "current-upstream-source", sourceID: "actual-source-id", algorithm: "actual-alg")
+        XCTAssertNoThrow(try MusicAccountFeedbackFacts.consume(.init(instanceID: UUID(), target: actualSource,
+            event: .start, duration: 180, listened: 0, mediaListened: 0, position: 0, rate: 1,
+            startedAt: 1_800_000_000, occurredAt: 1_800_000_000)), "Do not guess a platform source whitelist")
     }
 }

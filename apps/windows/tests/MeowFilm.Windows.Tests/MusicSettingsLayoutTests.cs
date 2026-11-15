@@ -286,7 +286,7 @@ public static partial class MusicUiTests
             Equal(identity, f.Playback.Identity); Equal(opens, f.Playback.Opens.Count);
             True(f.Playback.HasMedia && !f.Runtime.HasStarted, "source selection neither replaces media nor starts scripts");
         });
-        yield return Case("general source hiding and shutdown drain an admitted save before accepting its receipt", async () =>
+        yield return Case("general source hiding drains an admitted save without publishing to the closed page", async () =>
         {
             await using var f = await Fixture.Create();
             var view = (MusicHomeSourceSettingsView)f.Module.HomeSourceSettingsView;
@@ -299,10 +299,14 @@ public static partial class MusicUiTests
             var shutdown = f.Module.PrepareShutdownAsync(); await Drain();
             True(!shutdown.IsCompleted, "App close waits for the same source owner outside music settings");
             held.Release(); await shutdown;
-            Equal("kg", f.Module.CatalogSourcePlatform);
+            Equal("wy", f.Module.CatalogSourcePlatform);
             Equal(1, f.Calls.Count("music.catalogSource.settings.save"));
-            var settings = await f.Store.ReadAsync("music.library.v1");
+            var settings = await f.Store.ReadAsync(MeowFilm.Capabilities.Library.MusicLibraryOwner.DocumentNamespace);
             True(settings.Data is not null, "the confirmed source receipt is durable");
+            await f.Module.CancelShutdownPreparationAsync();
+            view.Visibility = Visibility.Visible;
+            await Until(() => f.Module.CanEditCatalogSource && f.Module.CatalogSourcePlatform == "kg");
+            Equal(1, f.Calls.Count("music.catalogSource.settings.save"));
         });
         yield return Case("replica catalog source rejected and unknown saves use notices rollback and authoritative readback", async () =>
         {
@@ -324,8 +328,11 @@ public static partial class MusicUiTests
             picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg");
             await Until(() => f.Module.CanEditCatalogSource && f.Module.CatalogSourcePlatform == "kg" && Equals(picker.SelectedValue, "kg"));
             Equal(reads + 1, f.Calls.Count("music.catalogSource.settings.get"));
-            True(!f.Module.HasCatalogSourceError, "unknown receipt is successful only after a matching authoritative read");
+            True(!f.Module.HasCatalogSourceError && f.Module.OwnedNotices.Count == 1,
+                "matching readback restores the value but cannot acknowledge the unknown save");
             Equal(2, f.Calls.Count("music.catalogSource.settings.save"));
+            await f.Module.SetCatalogSourceAsync("wy");
+            Equal(0, f.Module.OwnedNotices.Count);
         });
         yield return Case("replica catalog source failed reads expose retry and remain inside narrow general layout", async () =>
         {
@@ -946,7 +953,8 @@ public static partial class MusicUiTests
                     CaptureSettings(view, "replica-" + target.Item2 + "-" + width + ".png");
                 }
             }
-            Equal(0, f.Http.Requests); Equal(0, f.Runtime.Calls.Count);
+            Equal(0, f.Peer.Requests);
+            True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
         });
     }
     private static RadioButton[] ReplicaAnchors(MusicSettingsView view) => ((Panel)view.FindName("SettingsNavigation")).Children.OfType<RadioButton>().ToArray();

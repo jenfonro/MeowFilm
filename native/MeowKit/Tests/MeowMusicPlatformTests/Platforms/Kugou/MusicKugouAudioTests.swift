@@ -1,164 +1,102 @@
 import XCTest
 import Foundation
-import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicPlatform
 
-final class MusicKugouAudioTests: XCTestCase {
-    func testExplicitOfficialQualitiesSelectTheirOwnHashSizeAndTrackerKey() async throws {
-        let s = MusicKugouTestSystem(), credential = try MusicKugouFixture.credential()
-        let capabilities = try await s.provider.capabilities(mid: MusicKugouFixture.baseHash, credential: credential)
-        XCTAssertEqual(capabilities, ["128k", "320k", "flac", "flac24bit"])
-        let cases = [
-            ("128k", "128", MusicKugouFixture.baseHash), ("320k", "320", MusicKugouFixture.hqHash),
-            ("flac", "flac", MusicKugouFixture.flacHash), ("flac24bit", "high", MusicKugouFixture.highHash)
-        ]
-        for (quality, _, _) in cases {
-            let value = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: quality, credential: credential)
-            let row = try MusicKugouFixture.object(value)
-            XCTAssertEqual(Set(row.keys), ["url", "expiresAt", "qualityVerified", "cacheAllowed", "licenseExpiresAt"])
-            XCTAssertEqual(row["cacheAllowed"], .bool(true))
-            XCTAssertEqual(row["licenseExpiresAt"], .null, "Membership is not an audio grant")
-            XCTAssertEqual(row["expiresAt"], .null); XCTAssertEqual(row["qualityVerified"], .bool(false))
-            XCTAssertNil(row["headers"])
-            let text = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
-            XCTAssertFalse(text.contains(MusicKugouFixture.token)); XCTAssertFalse(text.contains("synthetic-private-vip"))
-        }
-        let requests = await s.http.recorded()
-        let tracker = requests.filter { $0.url.path == "/v5/url" }
-        XCTAssertEqual(tracker.count, 4)
-        for (request, entry) in zip(tracker, cases) {
-            let q = try MusicKugouFixture.fields(request)
-            XCTAssertEqual(request.headers["x-router"], "trackercdn.kugou.com")
-            XCTAssertEqual(q["quality"], entry.1); XCTAssertEqual(q["hash"], entry.2.lowercased())
-            XCTAssertEqual(q["behavior"], "play"); XCTAssertEqual(q["IsFreePart"], "0")
-            XCTAssertEqual(q["album_id"], "11"); XCTAssertEqual(q["album_audio_id"], "22")
-            XCTAssertEqual(q["clientver"], "11430"); XCTAssertEqual(q["version"], "11430")
-            let expected = MusicQQWire.md5(entry.2.lowercased() + "57ae12eb6890223e355ccfcb74edf70d1005" +
-                "176905054734845483393488264506404844848" + "42")
-            XCTAssertEqual(q["key"], expected)
-        }
-    }
-    func testUnsupportedQualityAndMissingExactResourceNeverFallBack() async throws {
-        let s = MusicKugouTestSystem()
-        do { _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "master", credential: MusicKugouFixture.credential()); XCTFail("Invented quality") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .qualityDisabled) }
-        let initial = await s.http.recorded()
-        XCTAssertTrue(initial.isEmpty)
-        var song = MusicKugouFixture.song(); song.removeValue(forKey: "hash_flac")
-        await s.http.respond("/v1/audio/audio", [try MusicKugouFixture.response(["status": 1, "data": [song]])])
-        do { _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential()); XCTFail("Downgraded missing resource") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .qualityDisabled) }
-        let requests = await s.http.recorded()
-        XCTAssertFalse(requests.contains { $0.url.path == "/v5/url" })
-    }
-    func testUnknownExpiredAndNonVIPMembershipDoesNotPreventUpstreamResolution() async throws {
-        for data in [
-            [:] as [String: Any],
-            ["userid": 42, "is_vip": 0],
-            ["userid": 42, "is_vip": 1, "vip_end_time": 1_799_999_999],
-            ["userid": 42, "is_vip": 1, "vip_end_time": "not-a-date"],
-            ["userid": 42, "busi_vip": [["product_type": "future-product", "is_vip": 1]]]
-        ] {
-            let s = MusicKugouTestSystem()
-            await s.http.respond("/v1/get_union_vip", [try MusicKugouFixture.response(["status": 1, "data": data])])
-            let capabilities = try await s.provider.capabilities(mid: MusicKugouFixture.baseHash, credential: MusicKugouFixture.credential())
-            XCTAssertTrue(capabilities.contains("flac"))
-            _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential())
-            let requests = await s.http.recorded()
-            XCTAssertTrue(requests.contains { $0.url.path == "/v5/url" })
-            XCTAssertFalse(requests.contains { $0.url.path == "/v1/get_union_vip" })
-        }
-    }
-    func testMembershipAndMetadataIdentityCannotCrossAccountsOrHashes() async throws {
-        let s = MusicKugouTestSystem()
-        await s.http.respond("/v1/get_union_vip", [try MusicKugouFixture.response(["status": 1, "data": ["userid": 99, "is_vip": 1]])])
-        let capabilities = try await s.provider.capabilities(mid: MusicKugouFixture.baseHash, credential: MusicKugouFixture.credential())
-        XCTAssertTrue(capabilities.contains("flac"), "Unrequested membership data is not playback authority")
-        await s.http.respond("/v1/get_union_vip", [])
-        var song = MusicKugouFixture.song(); song["hash"] = MusicKugouFixture.hqHash
-        await s.http.respond("/v1/audio/audio", [try MusicKugouFixture.response(["errcode": 0, "data": [song]])])
-        do { _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential()); XCTFail("Other hash metadata") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
-    }
-    func testTrackerRejectsTrialsUnknownPermissionHashAlbumSizeAndMissingFullEvidence() async throws {
-        let s = MusicKugouTestSystem()
-        let mutations: [(String, Any?)] = [
-            ("hash", MusicKugouFixture.baseHash), ("fileSize", 299), ("IsFreePart", 1), ("IsFreePart", "unknown"),
-            ("album_id", 999), ("album_audio_id", 999), ("privilege", 1), ("pay_type", 1), ("fail_process", 1),
-            ("priv_status", 0), ("freeTrialInfo", NSNull()), ("freePart", [:] as [String: Any]),
-            ("IsFreePart", nil), ("fileSize", nil), ("hash", nil), ("fileHash", MusicKugouFixture.baseHash)
-        ]
-        for (key, value) in mutations {
-            var root = MusicKugouFixture.audio()
-            root[key] = value
-            await s.http.respond("/v5/url", [try MusicKugouFixture.response(root)])
-            do {
-                _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential())
-                XCTFail("Unconfirmed candidate \(key) accepted")
-            } catch {
-                XCTAssertTrue([MusicServiceError.invalidMediaCandidate, .targetChanged, .upstreamInvalid].contains(error as? MusicServiceError ?? .unavailable))
+@MainActor final class MusicKugouAudioTests: XCTestCase {
+    func testCanonicalOptionsAndAudioKeepRequestedAndActualQualitySeparate() async throws {
+        let fixture = try MusicPlatformFixture { request in
+            switch request.operation {
+            case "audio.options": return .object(["qualities": .array([.string("128k"), .string("flac"), .string("flac24bit")])])
+            case "audio":
+                XCTAssertEqual(request.parameters[music: "id"], .string("canonical-hash"))
+                return .object(["url": .string("https://media.invalid/current.flac?vkey=synthetic"),
+                    "full": .bool(true), "actualQuality": .string("flac"), "duration": .number(180.25),
+                    "bitrate": .number(900_000), "sampleRate": .number(44_100)])
+            default: throw MusicPlatformFixture.Failure.remote("UNSUPPORTED")
             }
         }
+        let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .kugou, client: client)
+        let options = try await provider.capabilities(mid: "canonical-hash")
+        XCTAssertEqual(options, ["128k", "flac", "flac24bit"])
+        let raw = try await provider.resolve(mid: "canonical-hash", quality: "flac24bit")
+        let result = try MusicNativeAccountURLCache.audio(raw)
+        XCTAssertEqual(result.delivery?.quality, "flac"); XCTAssertEqual(result.delivery?.evidence, .officialResponse)
+        XCTAssertEqual(result.delivery?.bitrate, 900_000); XCTAssertEqual(result.delivery?.sampleRate, 44_100)
+        XCTAssertEqual(result.duration, 180.25); XCTAssertNil(result.expiresAt)
+        XCTAssertTrue(result.fileCachePolicy.allowed); XCTAssertNil(result.fileCachePolicy.licenseExpiresAt)
+        XCTAssertTrue(result.headers.isEmpty)
+        XCTAssertEqual(fixture.requests().map(\.operation), ["audio.options", "audio"])
+        XCTAssertEqual(fixture.requests().last?.parameters[music: "quality"], .string("flac24bit"))
+        try await client.close(); await fixture.runtime.close()
     }
-    func testNestedTrackerTrialAndConflictingURLsAreNotHiddenByTopLevelSuccess() async throws {
-        let s = MusicKugouTestSystem()
-        let cases: [[String: Any]] = [
-            ["status": 1, "data": MusicKugouFixture.audio(), "trans_param": ["free_part": 1]],
-            ["status": 1, "data": MusicKugouFixture.audio(), "url": "https://fs.kugou.com/second.flac"],
-            ["status": 1, "data": MusicKugouFixture.audio(), "trans_param": ["code": 403]],
-            ["status": 1, "data": MusicKugouFixture.audio(), "hash": MusicKugouFixture.baseHash]
+
+    func testMissingMembershipAndOptionalDeliveryFactsDoNotPreventCanonicalResolution() async throws {
+        let f = try MusicNativeFixture(platform: .kugou); try await f.enable()
+        await f.platform.replies("audio", .object(["url": .string("https://media.invalid/current.flac"), "full": .bool(true)]))
+        let options = try await f.service.nativeOptions(platform: .kugou, nativeID: "canonical-hash", sourceKey: "kg:canonical-hash")
+        let result = try await f.service.nativeResolve(platform: .kugou, nativeID: "canonical-hash",
+            selection: try XCTUnwrap(options.first).selection(quality: "flac"))
+        XCTAssertNil(result.delivery); XCTAssertNil(result.expiresAt); XCTAssertNil(result.duration)
+        XCTAssertNil(result.fileCachePolicy.licenseExpiresAt); XCTAssertTrue(result.fileCachePolicy.allowed)
+        let calls = await f.platform.recorded()
+        XCTAssertEqual(calls.map(\.operation), ["account.verify", "audio.options", "audio"])
+        XCTAssertFalse(calls.contains { $0.operation == "account.profile" })
+        _ = await f.service.close()
+    }
+
+    func testActualCanonicalFailuresNeverFallBackOrBecomeMembershipGuesses() async throws {
+        let failures: [(String, MusicServiceError)] = [
+            ("QUALITY_UNAVAILABLE", .qualityDisabled), ("MEDIA_UNAVAILABLE", .audioUnavailable),
+            ("TRIAL_ONLY", .previewOnly), ("FORBIDDEN", .permissionDenied),
+            ("INVALID_RESPONSE", .upstreamInvalid), ("NETWORK_ERROR", .connectionFailed)
         ]
-        for root in cases {
-            await s.http.respond("/v5/url", [try MusicKugouFixture.response(root)])
-            do { _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential()); XCTFail("Contradictory tracker accepted") } catch {}
+        for (code, expected) in failures {
+            let fixture = try MusicPlatformFixture { _ in throw MusicPlatformFixture.Failure.remote(code) }
+            let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .kugou, client: client)
+            do { _ = try await provider.resolve(mid: "current", quality: "flac"); XCTFail("Failed audio became a playable candidate") }
+            catch { XCTAssertEqual(error as? MusicServiceError, expected) }
+            XCTAssertEqual(fixture.requests().map(\.operation), ["audio"])
+            XCTAssertEqual(fixture.requests().first?.parameters[music: "quality"], .string("flac"))
+            try await client.close(); await fixture.runtime.close()
         }
     }
-    func testMediaURLsCannotExportAccountTokensOrBecomeArbitraryHTTP() async throws {
-        let s = MusicKugouTestSystem()
-        for url in [
-            "http://fs.kugou.com/synthetic.flac", "https://127.0.0.1/a", "https://localhost/a",
-            "https://fs.kugou.com.evil.invalid/a", "https://user@fs.kugou.com/a", "https://fs.kugou.com:8443/a",
-            "https://fs.kugou.com/a#fragment", "https://fs.kugou.com./a",
-            "https://fs.kugou.com/a?key=synthetic-kg-token", "https://fs.kugou.com/a?key=synthetic%2Dkg%2Dtoken",
-            "https://fs.kugou.com/a?key=synthetic-private-vip"
-        ] {
-            var root = MusicKugouFixture.audio(); root["url"] = [url]
-            await s.http.respond("/v5/url", [try MusicKugouFixture.response(root)])
-            do { _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential()); XCTFail("Unsafe URL \(url)") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .invalidMediaCandidate) }
-        }
-        var root = MusicKugouFixture.audio()
-        root["url"] = ["https://fs.kugou.com/synthetic.flac", "https://127.0.0.1/backup"]
-        await s.http.respond("/v5/url", [try MusicKugouFixture.response(root)])
-        do { _ = try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential()); XCTFail("Unsafe backup ignored") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .invalidMediaCandidate) }
-    }
-    func testMembershipExpiryDoesNotRejectUpstreamAudioButRevokeStillRejectsLateCandidate() async throws {
-        for expire in [true, false] {
-            let s = MusicKugouTestSystem(), gate = MusicAccountTestGate()
-            await s.http.hold("/v5/url", gate)
-            let task = Task { try await s.provider.resolve(mid: MusicKugouFixture.baseHash, quality: "flac", credential: MusicKugouFixture.credential()) }
-            await gate.started()
-            if expire { s.clock.advance(601) } else { await s.provider.revoke() }
-            await gate.release()
-            if expire {
-                let audio = try await task.value, value = try MusicKugouFixture.object(audio)
-                XCTAssertEqual(value["licenseExpiresAt"], .null)
-                XCTAssertNotNil(value["url"])
-            } else {
-                do { _ = try await task.value; XCTFail("Revoked media grant") }
-                catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+
+    func testActualMediaUseRejectsCredentialExportAndUnusableURLFormsWithoutRestoringHostAllowlist() async throws {
+        for url in ["file:///tmp/audio", "https://user@media.invalid/a", "https://media.invalid/a#fragment",
+                    "https://media.invalid/a?MUSIC_U=synthetic", "https://media.invalid/a?access_token=synthetic"] {
+            let fixture = try MusicPlatformFixture { _ in .object(["url": .string(url), "full": .bool(true)]) }
+            let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .kugou, client: client)
+            let value = try await provider.resolve(mid: "current", quality: "flac")
+            XCTAssertThrowsError(try MusicNativeAccountURLCache.audio(value)) {
+                XCTAssertEqual($0 as? MusicServiceError, .invalidMediaCandidate)
             }
+            XCTAssertEqual(fixture.requests().count, 1)
+            try await client.close(); await fixture.runtime.close()
         }
+        let fixture = try MusicPlatformFixture { _ in .object(["url": .string("http://other-cdn.invalid/current.flac?vkey=capability"),
+            "full": .bool(true), "headers": .object(["Cookie": .string("not-forwarded")])]) }
+        let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .kugou, client: client)
+        let result = try MusicNativeAccountURLCache.audio(await provider.resolve(mid: "current", quality: "flac"))
+        XCTAssertEqual(result.url.host, "other-cdn.invalid"); XCTAssertTrue(result.headers.isEmpty)
+        try await client.close(); await fixture.runtime.close()
     }
-    func testLicenseDatesHaveShanghaiSemanticsNotURLTTL() throws {
-        let seconds = try XCTUnwrap(KugouMusicAccountAdapter.expiry("1800000000"))
-        XCTAssertEqual(try KugouMusicAccountAdapter.expiry(1_800_000_000_000), seconds)
-        XCTAssertEqual(try KugouMusicAccountAdapter.expiry("2026-10-23 00:00:00"),
-                       try KugouMusicAccountAdapter.expiry("2026-10-22T16:00:00Z"))
-        XCTAssertNil(try KugouMusicAccountAdapter.expiry(0))
-        XCTAssertThrowsError(try KugouMusicAccountAdapter.expiry("tomorrow"))
+
+    func testLogoutRevokesIssuedAuthorizationAndRejectsAnOldSelectionWithoutAnotherRequest() async throws {
+        let f = try MusicNativeFixture(platform: .kugou); try await f.enable()
+        await f.platform.replies("audio", .object(["url": .string("https://media.invalid/current.flac"), "full": .bool(true)]))
+        let options = try await f.service.nativeOptions(platform: .kugou, nativeID: "current", sourceKey: "kg:current")
+        let selection = try XCTUnwrap(options.first).selection(quality: "flac")
+        let result = try await f.service.nativeResolve(platform: .kugou, nativeID: "current", selection: selection)
+        XCTAssertEqual(result.playbackAuthorization?.isActive, true)
+        try await f.service.logout(platform: .kugou)
+        XCTAssertEqual(result.playbackAuthorization?.isActive, false)
+        let before = await f.platform.recorded()
+        do { _ = try await f.service.nativeResolve(platform: .kugou, nativeID: "current", selection: selection); XCTFail("Old selection restored an account") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+        let after = await f.platform.recorded(); XCTAssertEqual(after.count, before.count)
+        _ = await f.service.close()
     }
 }

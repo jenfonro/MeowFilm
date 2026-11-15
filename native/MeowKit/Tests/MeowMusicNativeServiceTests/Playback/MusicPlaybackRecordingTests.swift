@@ -30,8 +30,8 @@ final class MusicPlaybackRecordingTests: XCTestCase {
             let store = try MusicNativeCandidateDiscoveryFixture.store()
             let bytes = RecordingFailingBytes()
             let service = NativeMusicService(document: store, scripts: NativeMusicScriptFixture(),
-                qq: NativeMusicQQFixture(), enabledPlatforms: [.qq], audioFileCache: bytes,
-                transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+                platformClient: try NativeMusicFixture.client(), enabledPlatforms: [.qq], audioFileCache: bytes,
+                clock: { NativeMusicFixture.date })
             try await service.setAccess(available: true, generation: 1)
             if enrich {
                 let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "PeerMID"))
@@ -56,12 +56,13 @@ final class MusicPlaybackRecordingTests: XCTestCase {
             XCTAssertEqual(store.snapshot().2, before.2)
             let document = try MusicDocument(store.read(), runID: "audit")
             XCTAssertEqual(document.queue["entries"].array.count, 1)
-            XCTAssertEqual(document.queue["entries"].array[0]["song"]["sources"].array.count, 1)
+            let songID = document.queue["entries"].array[0]["songId"].string
+            XCTAssertEqual(document.library["library"]["songs"][songID]["sources"].array.count, enrich ? 2 : 1)
             await session.close(); await service.close()
         }
     }
 
-    func testRemoteQueueAcceptsExpandedDisplayMemberButRejectsDifferentPrimary() async throws {
+    func testRemoteQueueAcceptsIndexAfterRepositorySourcesExpandWithoutContentComparison() async throws {
         let native = MusicNativeCandidateDiscoveryFixture.track()
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store())
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "PeerMID"))
@@ -73,16 +74,10 @@ final class MusicPlaybackRecordingTests: XCTestCase {
         XCTAssertEqual(visible.songId, raw.songId)
         XCTAssertEqual(visible.sources.first, raw.sources.first)
         XCTAssertEqual(visible.sources.count, 2)
-        XCTAssertEqual(raw.sources.count, 1)
-        let wrong = MusicRemoteQueueStart(index: 0, songID: visible.songId,
-            primarySource: visible.sources[1])
-        do {
-            _ = try await service.replaceRemoteQueue(source, start: wrong, expectedRevision: 1, intent: .init())
-            XCTFail("A different primary recording must not be accepted")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
+        XCTAssertEqual(raw.sources.count, 2, "remote projections read the same current repository")
         let before = try await service.state()
         XCTAssertEqual(before.revision, 1)
-        let accepted = try await service.replaceRemoteQueue(source, start: .init(index: 0, track: visible),
+        let accepted = try await service.replaceRemoteQueue(source, start: .init(index: 0),
             expectedRevision: 1, intent: MusicQueueAuthorization())
         XCTAssertEqual(accepted.revision, 2)
         XCTAssertEqual(accepted.total, 1)
@@ -91,12 +86,12 @@ final class MusicPlaybackRecordingTests: XCTestCase {
 
     func testExpandedRecordingServesLyricsHistoryMetadataAndExactRenewalWithoutQueueWrite() async throws {
         for route in ["session", "discovery", "direct"] {
-            let original = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
+            let original = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
             let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: original)
             let clock = MusicRecoveryTestClock(), accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
-            let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
-                enabledPlatforms: [.qq], transport: NativeMusicNoNetwork(), clock: { clock.now() })
+            let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+                enabledPlatforms: [.qq], clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)
             try await service.retainSongMetadata([peer])
             let before = try await service.read()
@@ -127,7 +122,8 @@ final class MusicPlaybackRecordingTests: XCTestCase {
             XCTAssertTrue(accepted, route)
             let playing = try await service.read()
             XCTAssertEqual(playing.queue, before.queue, route)
-            XCTAssertEqual(playing.history["days"].array.first?["songs"].array.first?["song"]["sources"].array.count, 2)
+            let played = try XCTUnwrap(playing.history["days"].array.first?["songs"].array.first)
+            XCTAssertEqual(playing.library["library"]["songs"][played["songId"].string]["sources"].array.count, 2)
             let metadata = try await service.metadataCandidates(occurrenceID: "entry-1")
             XCTAssertTrue(metadata.candidates.contains { $0.source == peerSource(peer) }, route)
             let lyrics = try await service.lyrics(occurrenceId: "entry-1", sourceKey: option.sourceKey)
@@ -143,7 +139,7 @@ final class MusicPlaybackRecordingTests: XCTestCase {
     }
 
     func testFeedbackUsesAcceptedPeerWhileQueueKeepsOriginalMember() async throws {
-        let original = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
+        let original = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "PeerMID"))
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: original)
         let accounts = NativeFeedbackAccounts()

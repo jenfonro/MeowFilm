@@ -38,14 +38,17 @@ public struct MusicDailyStyleSave: Sendable {
 /// An explicit account mutation, not a preference written by browsing.
 /// Both operations are bound to the already-opened recommendation lease.
 public protocol MusicNativeDailyStyleProviding: MusicNativeAccountQueueProviding {
+    /// Stable account preference scope, never the lease or credential revision.
+    func dailyStyleScope(_ lease: MusicAccountQueueLease) async throws -> String
     func dailyStyleCategories(_ lease: MusicAccountQueueLease) async throws -> [MusicDailyStyleCategory]
     func saveDailyStyle(_ lease: MusicAccountQueueLease, selection: MusicDailyStyleSelection) async throws -> MusicDailyStyleSave
 }
 public struct MusicDailyStyleEditing: Sendable {
+    public let scope: String
     public let categories: @Sendable () async throws -> [MusicDailyStyleCategory]
     public let save: @Sendable (MusicDailyStyleSelection) async throws -> MusicDailyStyleSave
-    public init(categories: @escaping @Sendable () async throws -> [MusicDailyStyleCategory],
+    public init(scope: String, categories: @escaping @Sendable () async throws -> [MusicDailyStyleCategory],
                 save: @escaping @Sendable (MusicDailyStyleSelection) async throws -> MusicDailyStyleSave) {
-        self.categories = categories; self.save = save
+        self.scope = scope; self.categories = categories; self.save = save
     }
 }

@@ -2,307 +2,263 @@ import Foundation
 import XCTest
 import MeowAccounts
 import MeowMusicFeature
+import MeowRuntime
 @testable import MeowMusicPlatform
 
-/// Synthetic injected HTTP only. These tests must never use URLSession,
-/// Keychain, live accounts or an actual SMS destination.
+/// Canonical runtime results only. SMS protocol/cooldown and membership wire
+/// conversion run once in Node; native tests cover consent, commit and scope.
 final class MusicAccountSMSProfileTests: XCTestCase {
-    private let phone = "10000000000" // Deliberately synthetic, never sent.
-
-    private func smsReplies(_ f: MusicNeteaseNativeFixture) async throws {
-        await f.http.replies("/weapi/sms/captcha/sent", [try MusicNeteaseFixture.response(["code": 200])])
-        await f.http.replies("/weapi/w/login/cellphone", [
-            try MusicNeteaseFixture.response(["code": 200, "profile": ["userId": 42], "account": ["id": 42]],
-                headers: ["set-cookie": "MUSIC_U=synthetic-user-42; Path=/; HttpOnly"])
-        ])
-    }
-
-    func testNeteaseSMSExplicitSendCooldownSubmitVerifiedCredentialAndProfile() async throws {
-        let f = try MusicNeteaseNativeFixture(restored: false), id = UUID()
-        try await smsReplies(f); try await f.enable()
-        _ = try await f.service.statuses()
-        var records = await f.http.recorded()
-        XCTAssertTrue(records.isEmpty, "Reading status must not send SMS or login")
-        let sent = try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: phone, attemptID: id)
-        XCTAssertEqual(sent.retryAt, f.clock.now().addingTimeInterval(60))
-        XCTAssertNil(f.store.peek(f.identity), "Sending is not authentication")
-        do {
-            _ = try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: phone, attemptID: id)
-            XCTFail("Cooldown bypass")
-        } catch { XCTAssertEqual((error as? MusicSMSFailure)?.reason, .rateLimited) }
-        let result = try await f.service.submitSMS(platform: .netease, countryCode: "86", phone: phone, code: "000000", attemptID: id)
-        XCTAssertEqual(result.phase, .signedIn)
-        let record = try XCTUnwrap(f.store.peek(f.identity))
-        let serialized = String(decoding: record.credential.dataRepresentation(), as: UTF8.self)
-        XCTAssertFalse(serialized.contains(phone))
-        XCTAssertFalse(serialized.contains("captcha"))
-        records = await f.http.recorded()
-        XCTAssertEqual(records.map(\.request.url.path), ["/weapi/sms/captcha/sent", "/weapi/w/login/cellphone", "/weapi/w/nuser/account/get"])
-        XCTAssertTrue(records.allSatisfy { $0.request.url.scheme == "https" })
-        XCTAssertTrue(records.prefix(2).allSatisfy { !($0.request.headers["Cookie"] ?? "").contains("MUSIC_U") })
-        let displayed = try await f.service.refreshProfile(platform: .netease)
-        XCTAssertEqual(displayed.profile?.membership.vip, true)
-        XCTAssertEqual(displayed.profile?.membership.tier, "svip")
-        XCTAssertEqual(displayed.profile?.membership.expiresAt, f.clock.now().addingTimeInterval(300))
-        _ = await f.service.close()
-    }
-
-    func testInvalidSMSFieldsQQAndBackgroundReadsNeverReachHTTP() async throws {
-        let f = try MusicNeteaseNativeFixture(restored: false)
-        try await f.enable()
-        for (country, number) in [("0", phone), ("86", "00000"), ("12345", phone), ("1", "1234"), ("86", phone + "\n")] {
-            do {
-                _ = try await f.service.sendSMS(platform: .netease, countryCode: country, phone: number, attemptID: UUID())
-                XCTFail("Invalid fields accepted")
-            } catch { XCTAssertEqual(error as? MusicServiceError, .invalidRequest) }
+    private let phone = "10000000000"
+    @MainActor func testNodeSMSSendSurvivesCancellationAndCloseUntilItsActualReceiptSettles() async throws {
+        let phone = phone
+        for outcome in ["confirmed", "rejected", "unknown"] {
+            let f = try MusicNativeFixture(platform: .netease, restored: false), id = UUID()
+            try await f.enable()
+            let entered = expectation(description: "SMS dispatched " + outcome)
+            let gate = MusicAccountTestGate { entered.fulfill() }
+            await f.platform.hold("sms.send", gate)
+            if outcome != "confirmed" {
+                await f.platform.fail("sms.send", code: outcome == "unknown" ? "SMS_SEND_UNCONFIRMED" : "RATE_LIMITED")
+            }
+            let pending = MusicAccountQueueOwnerCall("SMS settled " + outcome) {
+                try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: phone, attemptID: id)
+            }
+            defer { pending.cancel(); Task { await gate.release(); _ = await f.service.close(); await f.runtime.runtime.close() } }
+            await fulfillment(of: [entered], timeout: 3)
+            pending.cancel()
+            let cancel = MusicAccountQueueOwnerCall("SMS page cancelled " + outcome) { await f.service.cancelSMSLogin(attemptID: id) }
+            await fulfillment(of: [cancel.finished], timeout: 3)
+            try cancel.value()
+            let closing = MusicAccountQueueOwnerCall("SMS pending close " + outcome) { await f.service.close() }
+            await fulfillment(of: [closing.finished], timeout: 3)
+            let report = try closing.value()
+            XCTAssertFalse(report.cleanupComplete)
+            XCTAssertEqual(report.inFlight, 1)
+            XCTAssertEqual(report.pendingCredentialWrites, 0)
+            let repeated = await f.service.close()
+            XCTAssertEqual(repeated, report)
+            XCTAssertNil(pending.result)
+            await gate.release()
+            await fulfillment(of: [pending.finished], timeout: 3)
+            if outcome == "confirmed" {
+                XCTAssertEqual(try pending.value().retryAt, f.clock.now().addingTimeInterval(60))
+            } else {
+                XCTAssertThrowsError(try pending.value()) {
+                    let failure = $0 as? MusicSMSFailure
+                    XCTAssertEqual(failure?.reason, outcome == "unknown" ? .commitUnconfirmed : .rateLimited)
+                    XCTAssertEqual(failure?.retryAt, outcome == "unknown" ? f.clock.now().addingTimeInterval(60) : nil)
+                }
+            }
+            let requests = await f.platform.recorded()
+            XCTAssertEqual(requests.filter { $0.operation == "sms.send" }.count, 1)
+            XCTAssertNil(f.store.peek(f.identity))
+            let drained = await f.service.close()
+            XCTAssertTrue(drained.cleanupComplete)
+            XCTAssertEqual(drained.inFlight, 0)
+            await f.runtime.runtime.close()
         }
-        XCTAssertThrowsError(try MusicAccountSMSInput.validate(platform: .kugou, countryCode: "1", phone: "5550100"))
-        XCTAssertThrowsError(try MusicAccountSMSInput.validate(platform: .qq, countryCode: "86", phone: phone))
-        let records = await f.http.recorded()
-        XCTAssertTrue(records.isEmpty); XCTAssertTrue(f.store.calls().isEmpty)
+    }
+
+    @MainActor func testBridgeFailureAfterSMSDispatchReturnsUnknownWithTheExistingClockAndNeverResends() async throws {
+        let phone = phone
+        let f = try MusicNativeFixture(platform: .netease, restored: false)
+        try await f.enable()
+        let entered = expectation(description: "SMS crossed the runtime dispatch boundary")
+        let gate = MusicAccountTestGate { entered.fulfill() }
+        await f.platform.hold("sms.send", gate)
+        let pending = MusicAccountQueueOwnerCall("SMS bridge failure settled") {
+            try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: phone, attemptID: UUID())
+        }
+        defer { pending.cancel(); Task { await gate.release(); _ = await f.service.close() } }
+        await fulfillment(of: [entered], timeout: 3)
+        let bridge = MusicAccountQueueOwnerCall("runtime HTTP client closed") { await f.runtime.runtime.close() }
+        await fulfillment(of: [bridge.finished, pending.finished], timeout: 3)
+        try bridge.value()
+        XCTAssertThrowsError(try pending.value()) {
+            let failure = $0 as? MusicSMSFailure
+            XCTAssertEqual(failure?.reason, .commitUnconfirmed)
+            XCTAssertEqual(failure?.retryAt, f.clock.now().addingTimeInterval(60))
+        }
+        await gate.release()
+        let requests = await f.platform.recorded()
+        XCTAssertEqual(requests.filter { $0.operation == "sms.send" }.count, 1)
+        XCTAssertNil(f.store.peek(f.identity))
         _ = await f.service.close()
     }
 
+    func testUnconfirmedSMSSendReceiptHasTheSameUnknownCooldownWithoutAnAutomaticRetry() async throws {
+        let f = try MusicNativeFixture(platform: .netease, restored: false)
+        try await f.enable()
+        await f.platform.replies("sms.send", .object(["confirmed": .bool(false)]))
+        do {
+            _ = try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: phone, attemptID: UUID())
+            XCTFail("An unconfirmed send cannot become a confirmed receipt")
+        } catch {
+            let failure = error as? MusicSMSFailure
+            XCTAssertEqual(failure?.reason, .commitUnconfirmed)
+            XCTAssertEqual(failure?.retryAt, f.clock.now().addingTimeInterval(60))
+        }
+        let requests = await f.platform.recorded()
+        XCTAssertEqual(requests.filter { $0.operation == "sms.send" }.count, 1)
+        XCTAssertNil(f.store.peek(f.identity))
+        _ = await f.service.close()
+        await f.runtime.runtime.close()
+    }
+
+    func testExplicitSMSSendDoesNotAuthenticateAndSubmitSavesBeforePublication() async throws {
+        for platform in [MusicAccountPlatform.netease, .kugou] {
+            let f = try MusicNativeFixture(platform: platform, restored: false), id = UUID()
+            try await f.enable(); _ = try await f.service.statuses()
+            let before = await f.platform.recorded(); XCTAssertTrue(before.isEmpty)
+            let sent = try await f.service.sendSMS(platform: platform, countryCode: "86", phone: phone, attemptID: id)
+            XCTAssertEqual(sent.retryAt, f.clock.now().addingTimeInterval(60)); XCTAssertNil(f.store.peek(f.identity))
+            let status = try await f.service.submitSMS(platform: platform, countryCode: "86", phone: phone,
+                code: "000000", attemptID: id)
+            XCTAssertEqual(status.phase, .signedIn)
+            let credential = try XCTUnwrap(f.store.peek(f.identity)).credential
+            let text = String(decoding: credential.dataRepresentation(), as: UTF8.self)
+            XCTAssertFalse(text.contains(phone)); XCTAssertFalse(text.contains("captcha"))
+            let calls = await f.platform.recorded()
+            XCTAssertEqual(calls.map(\.operation), ["sms.send", "sms.login"])
+            XCTAssertEqual(calls.first?.parameters[music: "phone"], .string(phone))
+            XCTAssertEqual(calls.last?.parameters[music: "captcha"], .string("000000"))
+            let publication = f.runtime.requests().last { $0.transportOperation == "session.update" && $0.fields[music: "session"] != .null }
+            XCTAssertEqual(publication?.fields[music: "session"][music: "userId"], .string("101"))
+            XCTAssertEqual(f.store.calls().filter { $0 == "write" }.count, 1)
+            _ = await f.service.close()
+        }
+    }
+    func testQQSMSRemainsUnsupportedWithoutStorageOrRuntimeIO() async throws {
+        let f = try MusicNativeFixture(restored: false); try await f.enable()
+        for submit in [false, true] {
+            do {
+                if submit { _ = try await f.service.submitSMS(platform: .qq, countryCode: "86", phone: phone, code: "000000", attemptID: UUID()) }
+                else { _ = try await f.service.sendSMS(platform: .qq, countryCode: "86", phone: phone, attemptID: UUID()) }
+                XCTFail("No new QQ SMS capability")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .unsupported) }
+        }
+        let calls = await f.platform.recorded(); XCTAssertTrue(calls.isEmpty)
+        XCTAssertTrue(f.store.calls().isEmpty); _ = await f.service.close()
+    }
+    func testRequiredSMSMaterialFailureIsAttributedToNodeAndNeverCommitsCredentials() async throws {
+        let f = try MusicNativeFixture(platform: .netease, restored: false); try await f.enable()
+        await f.platform.fail("sms.send", code: "INVALID_REQUEST")
+        do { _ = try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: "", attemptID: UUID()); XCTFail("Required material") }
+        catch { XCTAssertEqual((error as? MusicSMSFailure)?.reason, .invalidRequest) }
+        let calls = await f.platform.recorded()
+        XCTAssertEqual(calls.map(\.operation), ["sms.send"]); XCTAssertEqual(calls.first?.parameters[music: "phone"], .string(""))
+        XCTAssertNil(f.store.peek(f.identity)); _ = await f.service.close()
+    }
     func testCancelledOrLockedSMSCannotCommitLateCredential() async throws {
         for lock in [false, true] {
-            let f = try MusicNeteaseNativeFixture(restored: false), gate = MusicAccountTestGate(), id = UUID()
-            try await smsReplies(f); try await f.enable()
-            await f.http.hold("/weapi/w/login/cellphone", gate)
+            let f = try MusicNativeFixture(platform: .netease, restored: false), gate = MusicAccountTestGate(), id = UUID()
+            try await f.enable(); await f.platform.hold("sms.login", gate)
             let task = Task { try await f.service.submitSMS(platform: .netease, countryCode: "86", phone: phone, code: "000000", attemptID: id) }
             await gate.started()
             if lock { _ = try await f.service.setAccess(available: false, generation: 2) }
             else { await f.service.cancelSMSLogin(attemptID: id) }
             await gate.release()
-            do { _ = try await task.value; XCTFail("Late login accepted") } catch {}
+            do { _ = try await task.value; XCTFail("Late login") }
+            catch { XCTAssertTrue([.cancelled, .staleResult, .accessUnavailable].contains(error as? MusicServiceError ?? .unavailable)) }
             XCTAssertNil(f.store.peek(f.identity))
-            let records = await f.http.recorded()
-            XCTAssertFalse(records.contains { $0.request.url.path == "/weapi/w/nuser/account/get" })
-            let statuses = try await f.service.statuses()
-            XCTAssertNotEqual(statuses.first?.phase, .signedIn)
+            XCTAssertFalse(f.runtime.requests().contains { $0.transportOperation == "session.update" && $0.fields[music: "session"] != .null })
+            let statuses = try await f.service.statuses(); XCTAssertNotEqual(statuses.first?.phase, .signedIn)
             _ = await f.service.close()
         }
     }
-
-    func testSMSFailureDoesNotResendAndCooldownSurvivesCancel() async throws {
-        let f = try MusicNeteaseNativeFixture(restored: false), id = UUID()
-        try await f.enable()
-        await f.http.replies("/weapi/sms/captcha/sent", [try MusicNeteaseFixture.response(["code": 509])])
-        do {
-            _ = try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: phone, attemptID: id)
-            XCTFail("Failed send accepted")
-        } catch { XCTAssertEqual((error as? MusicSMSFailure)?.reason, .rateLimited) }
-        await f.service.cancelSMSLogin(attemptID: id)
-        do {
-            _ = try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: phone, attemptID: UUID())
-            XCTFail("Cancellation reset cooldown")
-        } catch { XCTAssertEqual((error as? MusicSMSFailure)?.reason, .rateLimited) }
-        let records = await f.http.recorded(); XCTAssertEqual(records.count, 1)
-        XCTAssertNil(f.store.peek(f.identity))
-        _ = await f.service.close()
-    }
-
-    func testKugouSMSUsesPinnedPayloadRoutesSameDeviceAndNoMembershipFromLogin() async throws {
-        let s = MusicKugouTestSystem(), id = UUID()
-        await s.http.respond("/v7/send_mobile_code", [try MusicKugouFixture.response(["status": 1, "data": "synthetic-sent"])])
-        await s.http.respond("/v7/login_by_verifycode", [
-            try MusicKugouFixture.response(["status": 1, "data": ["userid": 42, "token": MusicKugouFixture.token, "vip_type": 99,
-                                                              "t1": "synthetic-device-token"]])
-        ])
-        try await s.provider.sendSMS(countryCode: "86", phone: phone, attemptID: id)
-        let result = try await s.provider.loginSMS(countryCode: "86", phone: phone, code: "000000", attemptID: id)
-        XCTAssertEqual(result.nativeID, "42")
-        let stored = try MusicQQWire.decode(result.credential.dataRepresentation())
-        XCTAssertEqual((stored["auth"] as? [String: Any])?["t1"] as? String, "synthetic-device-token")
-        let requests = await s.http.recorded()
-        XCTAssertEqual(requests.map(\.url.path), ["/risk/v2/r_register_dev", "/v7/send_mobile_code", "/v7/login_by_verifycode", "/v3/get_my_info"])
-        let send = requests[1], login = requests[2]
-        XCTAssertEqual(send.headers["x-router"], "login.user.kugou.com")
-        XCTAssertEqual(login.url.host, "loginserviceretry.kugou.com")
-        XCTAssertEqual(login.headers["support-calm"], "1")
-        XCTAssertEqual(try MusicKugouFixture.fields(send)["mid"], try MusicKugouFixture.fields(login)["mid"])
-        let sendBody = try MusicQQWire.decode(send.body!)
-        XCTAssertEqual(sendBody["mobile"] as? String, phone)
-        XCTAssertEqual(sendBody["businessid"] as? Int, 5)
-        let loginBody = try MusicQQWire.decode(login.body!)
-        XCTAssertEqual(loginBody["mobile"] as? String, "10*****0")
-        XCTAssertEqual((loginBody["pk"] as? String)?.count, 256)
-        XCTAssertEqual(loginBody["pk"] as? String, (loginBody["pk"] as? String)?.uppercased())
-        XCTAssertFalse(String(decoding: login.body!, as: UTF8.self).contains(phone))
-        XCTAssertNil(loginBody["code"]); XCTAssertNil(loginBody["token"])
-        let profile = try await s.provider.accountProfile(result.credential).profile
-        XCTAssertEqual(profile.membership.tier, "vip", "Display uses get_union_vip, not login vip_type")
-        await s.provider.cancelSMS(id)
-    }
-
-    func testKugouOwnerSMSCommitProfileWithoutEchoedUIDAndSizedAvatar() async throws {
-        let s = MusicKugouTestSystem(), store = MusicAccountTestStore(), identity = try MusicAccountFixture.identity("kg")
-        let service = NativeMusicAccountService(accounts: .init(store: store), scopes: [.kugou: identity],
-                                                transport: s.http, clock: { [clock = s.clock] in clock.now() })
-        await s.http.respond("/v7/login_by_verifycode", [
-            try MusicKugouFixture.response(["status": 1, "data": ["userid": 42, "token": MusicKugouFixture.token]])
-        ])
-        await s.http.respond("/v3/get_my_info", [try MusicKugouFixture.response(["status": 1, "data": [
-            "nickname": "合成酷狗昵称", "pic": "http://imge.kugou.com/kugouicon/{size}/synthetic.jpg"
-        ]])])
-        _ = try await service.setAccess(available: true, generation: 1)
-        let status = try await service.submitSMS(platform: .kugou, countryCode: "86", phone: phone,
-                                                 code: "000000", attemptID: UUID())
-        XCTAssertEqual(status.phase, .signedIn); XCTAssertNotNil(store.peek(identity))
-        let display = try await service.refreshProfile(platform: .kugou)
-        XCTAssertEqual(display.profile?.nickname, "合成酷狗昵称")
-        XCTAssertEqual(display.profile?.avatarURL?.absoluteString, "https://imge.kugou.com/kugouicon/480/synthetic.jpg")
-        XCTAssertEqual(display.profile?.membership.vip, true)
-        let requests = await s.http.recorded()
-        XCTAssertFalse(requests.contains { $0.url.path == "/v7/send_mobile_code" }, "Submit never sends")
-        _ = await service.close()
-    }
-
-    func testTypedInvalidCodeAndMultiAccountErrorsSurviveOwnerWithoutCredentialWrite() async throws {
-        let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
-        await f.http.replies("/weapi/w/login/cellphone", [try MusicNeteaseFixture.response(["code": 503])])
-        do {
-            _ = try await f.service.submitSMS(platform: .netease, countryCode: "86", phone: phone, code: "000000", attemptID: UUID())
-            XCTFail("Invalid code authenticated")
-        } catch {
-            XCTAssertEqual((error as? MusicSMSFailure)?.detail, .invalidCode)
-            XCTAssertEqual(error.localizedDescription, "验证码错误或已过期")
+    func testSMSFailuresAndUnknownReceiptsNeverAutomaticallyResend() async throws {
+        for (code, expected) in [("RATE_LIMITED", MusicServiceError.rateLimited), ("SMS_SEND_UNCONFIRMED", .commitUnconfirmed)] {
+            let f = try MusicNativeFixture(platform: .netease, restored: false); try await f.enable()
+            await f.platform.fail("sms.send", code: code)
+            do { _ = try await f.service.sendSMS(platform: .netease, countryCode: "86", phone: phone, attemptID: UUID()); XCTFail("Failed send") }
+            catch {
+                let failure = error as? MusicSMSFailure
+                XCTAssertEqual(failure?.reason, expected)
+                if code == "SMS_SEND_UNCONFIRMED" {
+                    XCTAssertEqual(failure?.retryAt, f.clock.now().addingTimeInterval(60))
+                }
+            }
+            let calls = await f.platform.recorded(); XCTAssertEqual(calls.map(\.operation), ["sms.send"])
+            XCTAssertNil(f.store.peek(f.identity)); _ = await f.service.close()
         }
-        XCTAssertNil(f.store.peek(f.identity))
-        let requests = await f.http.recorded(); XCTAssertEqual(requests.count, 1)
-        _ = await f.service.close()
-
-        let s = MusicKugouTestSystem(), store = MusicAccountTestStore(), identity = try MusicAccountFixture.identity("kg")
-        let service = NativeMusicAccountService(accounts: .init(store: store), scopes: [.kugou: identity],
-                                                transport: s.http, clock: { [clock = s.clock] in clock.now() })
-        await s.http.respond("/v7/login_by_verifycode", [
-            try MusicKugouFixture.response(["status": 1, "data": ["info_list": [["userid": 42], ["userid": 99]]]])
-        ])
-        _ = try await service.setAccess(available: true, generation: 1)
-        do {
-            _ = try await service.submitSMS(platform: .kugou, countryCode: "86", phone: phone, code: "000000", attemptID: UUID())
-            XCTFail("Implicitly selected one of multiple accounts")
-        } catch { XCTAssertEqual((error as? MusicSMSFailure)?.detail, .accountSelectionRequired) }
+    }
+    func testCloseReportsUncooperativeSMSSendUntilItsActualReceiptSettles() async throws {
+        let identity = try MusicAccountFixture.identity("wy"), store = MusicAccountTestStore()
+        let provider = MusicAccountTestProvider(), gate = MusicAccountTestGate()
+        let owner = NativeMusicAccountService(accounts: .init(store: store), scopes: [.netease: identity],
+            providers: [.netease: provider])
+        _ = try await owner.setAccess(available: true, generation: 1)
+        await provider.holdSMS(gate)
+        let pending = Task { try await owner.sendSMS(platform: .netease, countryCode: "86",
+            phone: self.phone, attemptID: UUID()) }
+        await gate.started()
+        let closing = await owner.close()
+        XCTAssertFalse(closing.cleanupComplete)
+        XCTAssertEqual(closing.inFlight, 1)
+        XCTAssertEqual(closing.pendingCredentialWrites, 0)
+        await gate.release()
+        let receipt = try await pending.value
+        XCTAssertEqual(receipt.retryAt, .distantFuture, "Closing cannot erase a send which actually settled")
+        let drained = await owner.close()
+        XCTAssertTrue(drained.cleanupComplete)
+        XCTAssertEqual(drained.inFlight, 0)
         XCTAssertNil(store.peek(identity))
-        _ = await service.close()
     }
-
-    func testQQProfileUsesHomepageIdentityAvatarAndMembershipNotPlaybackCapabilities() async throws {
-        let f = try MusicNativeFixture(); try await f.enable()
-        await f.http.replies("GetHomepageHeader", try MusicAccountFixture.rpc(["Info": ["BaseInfo": [
-            "EncryptedUin": "synthetic-euin-101", "Name": "合成QQ昵称", "Avatar": "https://y.gtimg.cn/synthetic.jpg"
-        ]]]))
-        let value = try await f.service.refreshProfile(platform: .qq)
-        XCTAssertEqual(value.profile?.nickname, "合成QQ昵称")
-        XCTAssertEqual(value.profile?.avatarURL?.host, "y.gtimg.cn")
-        XCTAssertEqual(value.profile?.membership.tier, "svip")
-        XCTAssertEqual(value.profile?.membership.expiresAt, f.clock.now().addingTimeInterval(300))
-        let requests = await f.http.recorded()
-        let methods = try requests.map(MusicAccountTestHTTP.method)
-        XCTAssertEqual(methods.filter { $0 == "vip_login_base" }.count, 1)
-        XCTAssertFalse(methods.contains("CgiGetTrackInfo")); XCTAssertFalse(methods.contains("UrlGetVkey"))
-        await f.http.replies("GetHomepageHeader", try MusicAccountFixture.rpc(["Info": ["BaseInfo": [
-            "EncryptedUin": "synthetic-euin-other", "Name": "不应显示"
-        ]]]))
-        do { _ = try await f.service.refreshProfile(platform: .qq); XCTFail("Foreign profile accepted") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
-        let rows = try await f.service.statuses()
-        XCTAssertNotEqual(rows.first?.nickname, "不应显示")
-        _ = await f.service.close()
+    func testTypedInvalidCodeAndAccountSelectionSurviveTheNativeOwner() async throws {
+        for (platform, code, detail) in [(MusicAccountPlatform.netease, "INVALID_CODE", MusicSMSFailure.Detail.invalidCode),
+                                        (.kugou, "ACCOUNT_SELECTION_REQUIRED", .accountSelectionRequired)] {
+            let f = try MusicNativeFixture(platform: platform, restored: false); try await f.enable()
+            await f.platform.fail("sms.login", code: code)
+            do { _ = try await f.service.submitSMS(platform: platform, countryCode: "86", phone: phone, code: "000000", attemptID: UUID()); XCTFail("Authentication failed") }
+            catch { XCTAssertEqual((error as? MusicSMSFailure)?.detail, detail) }
+            XCTAssertNil(f.store.peek(f.identity)); _ = await f.service.close()
+        }
     }
-
-    func testNeteaseProfileUnknownFailurePreservesProfileButNotPrivilegeAndLogoutClears() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
-        await f.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response([
-            "code": 200, "profile": ["userId": 42, "nickname": "合成昵称", "avatarUrl": "https://p1.music.126.net/synthetic.jpg"]
-        ])])
-        await f.http.replies("/weapi/music-vip-membership/client/vip/info", [try MusicNeteaseFixture.response(["code": 502])])
+    func testMembershipAndProfileAreConsumedWithoutSecondIdentityOrRightsValidation() async throws {
+        for platform in MusicAccountPlatform.allCases {
+            let f = try MusicNativeFixture(platform: platform); try await f.enable()
+            await f.platform.replies("account.profile", .object([
+                "profile": .object(["displayName": .string("合成昵称"), "avatar": .string("https://not-a-cdn.invalid/avatar.png")]),
+                "entitlements": .object(["membership": .object(["vip": .bool(true), "tier": .string("svip"),
+                    "expiresAt": .number(f.clock.now().addingTimeInterval(300).timeIntervalSince1970 * 1000)]),
+                    "recheckAt": .number(f.clock.now().addingTimeInterval(100).timeIntervalSince1970 * 1000)]),
+                "unused": .array([.object(["cookie": .string("must-not-enter-public-profile")])])]))
+            let status = try await f.service.refreshProfile(platform: platform)
+            XCTAssertEqual(status.nickname, "合成昵称"); XCTAssertEqual(status.profile?.avatarURL?.host, "not-a-cdn.invalid")
+            XCTAssertEqual(status.profile?.membership.vip, true); XCTAssertEqual(status.profile?.membership.tier, "svip")
+            XCTAssertEqual(status.profile?.membership.expiresAt, f.clock.now().addingTimeInterval(300))
+            let profile = try JSONEncoder().encode(XCTUnwrap(status.profile))
+            XCTAssertFalse(String(decoding: profile, as: UTF8.self).contains("must-not-enter-public-profile"))
+            let calls = await f.platform.recorded(); XCTAssertEqual(calls.map(\.operation), ["account.verify", "account.profile"])
+            XCTAssertFalse(calls.contains { $0.operation == "audio.options" || $0.operation.hasPrefix("sms.") })
+            _ = await f.service.close()
+        }
+    }
+    func testUnknownMembershipIsNotFalseAndLogoutClearsTheProfile() async throws {
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
+        await f.platform.replies("account.profile", .object(["profile": .object(["displayName": .string("合成昵称")]),
+            "entitlements": .object(["membership": .object([:])])]))
         let status = try await f.service.refreshProfile(platform: .netease)
-        XCTAssertEqual(status.profile?.nickname, "合成昵称")
-        XCTAssertEqual(status.profile?.avatarURL?.host, "p1.music.126.net")
-        XCTAssertNil(status.profile?.membership.vip, "Failure must not claim non-membership")
+        XCTAssertEqual(status.profile?.nickname, "合成昵称"); XCTAssertNil(status.profile?.membership.vip)
         try await f.service.logout(platform: .netease)
-        let rows = try await f.service.statuses()
-        XCTAssertNil(rows.first?.profile); XCTAssertEqual(rows.first?.nickname, "")
+        let statuses = try await f.service.statuses(); XCTAssertNil(statuses.first?.profile); XCTAssertEqual(statuses.first?.nickname, "")
         _ = await f.service.close()
     }
-
     func testOldProfileCannotRefillAfterLogout() async throws {
-        let f = try MusicNeteaseNativeFixture(), gate = MusicAccountTestGate()
+        let f = try MusicNativeFixture(platform: .netease), gate = MusicAccountTestGate()
         try await f.enable(); _ = try await f.service.validate(platform: .netease)
-        await f.http.hold("/weapi/music-vip-membership/client/vip/info", gate)
+        await f.platform.hold("account.profile", gate)
         let task = Task { try await f.service.refreshProfile(platform: .netease) }
         await gate.started(); try await f.service.logout(platform: .netease); await gate.release()
-        do { _ = try await task.value; XCTFail("Late profile accepted") } catch {}
-        let rows = try await f.service.statuses()
-        XCTAssertEqual(rows.first?.phase, .signedOut); XCTAssertNil(rows.first?.profile)
+        do { _ = try await task.value; XCTFail("Late profile") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
+        let statuses = try await f.service.statuses(); XCTAssertEqual(statuses.first?.phase, .signedOut); XCTAssertNil(statuses.first?.profile)
         _ = await f.service.close()
     }
-
-    func testMembershipAbsoluteTimeUnknownExpiredFutureStartAndTierPriority() throws {
-        let now = Date(timeIntervalSince1970: 1_800_000_000), ms = 1_800_000_000_000
-        let wy = MusicAccountProfileWire.neteaseMembership([
-            "now": ms + 100_000, "associator": ["expireTime": ms + 90_000], "redplus": ["expireTime": ms + 200_000]
-        ], at: now)
-        XCTAssertEqual(wy.tier, "svip"); XCTAssertEqual(wy.expiresAt, now.addingTimeInterval(200), "Do not replace absolute expiry with receipt time")
-        XCTAssertNil(MusicAccountProfileWire.neteaseMembership([:], at: now).vip)
-        let kg = MusicAccountProfileWire.kugouMembership([
-            "busi_vip": [["busi_type": "concept", "product_type": "svip", "is_vip": 1,
-                          "vip_begin_time": 1_800_000_100, "vip_end_time": 1_800_000_200]],
-            "is_vip": 0, "vip_end_time": 1_799_999_000
-        ], at: now)
-        XCTAssertEqual(kg.vip, false); XCTAssertEqual(kg.expiresAt, now.addingTimeInterval(-1000))
-        let qq = MusicAccountProfileWire.qqMembership(["identity": ["vip": 1], "userinfo": ["expire": "2020-01-02"]], at: now)
-        XCTAssertEqual(qq.vip, false)
-        XCTAssertEqual(qq.expiresAt, Date(timeIntervalSince1970: 1_577_894_400))
-        XCTAssertNil(MusicAccountProfileWire.qqMembership(["identity": ["vip": "1"]], at: now).vip)
-        let futureProduct: [String: Any] = ["svip": 1, "userinfo": ["expire": 1_800_001_000],
-            "identity": ["huge_vip": 1, "huge_vip_start": 1_800_000_100, "huge_vip_end": 1_800_002_000]]
-        let qqActive = MusicAccountProfileWire.qqMembership(futureProduct, at: now)
-        XCTAssertEqual(MusicAccountProfileWire.productDeadline(futureProduct, platform: .qq, value: qqActive, at: now),
-                       now.addingTimeInterval(100), "A future product start invalidates the old display early")
-        XCTAssertEqual(MusicAccountProfileWire.neteaseDeadline(["now": ms + 100_000], value: wy, at: now),
-                       now.addingTimeInterval(100), "Display expiry and upstream-clock cache deadline are distinct")
-        XCTAssertNil(MusicAccountProfileWire.kugouMembership(["is_vip": 0,
-            "busi_vip": [["product_type": "svip"]]], at: now).vip)
-    }
-
-    func testDisplayDTOOldFieldsAndAvatarSecretBoundaries() throws {
-        let old = try JSONDecoder().decode(MusicAccountProfile.self, from: Data("{\"nickname\":\"合成旧昵称\"}".utf8))
-        XCTAssertNil(old.avatarURL); XCTAssertNil(old.membership.vip); XCTAssertNil(old.membership.expiresAt)
-        let membership = try JSONDecoder().decode(MusicAccountMembership.self, from: Data("{}".utf8))
-        XCTAssertNil(membership.vip); XCTAssertEqual(membership.tier, "")
-        XCTAssertThrowsError(try MusicAccountProfileWire.avatar("https://p1.music.126.net/%73ynthetic-secret", platform: .netease, secrets: ["synthetic-secret"]))
-        // Avatars use the shared host-agnostic artwork URL contract; reflected
-        // secrets and unsafe URL forms remain the boundaries.
-        XCTAssertEqual(try MusicAccountProfileWire.avatar("https://not-a-cdn.invalid/avatar.png", platform: .qq, secrets: []),
-                       URL(string: "https://not-a-cdn.invalid/avatar.png"))
-    }
-
-    func testSMSWhitelistRejectsHostMethodQueryAndRedirectTargets() {
-        for path in ["/weapi/sms/captcha/sent", "/weapi/w/login/cellphone"] {
-            XCTAssertTrue(MusicAccountSMSHTTP.permits(.init(url: URL(string: "https://music.163.com" + path)!, method: "POST")))
-            for url in ["http://music.163.com" + path, "https://music.163.com" + path + "?next=1", "https://music.163.com.evil.invalid" + path] {
-                XCTAssertFalse(MusicAccountSMSHTTP.permits(.init(url: URL(string: url)!, method: "POST")))
-            }
-            XCTAssertFalse(MusicAccountSMSHTTP.permits(.init(url: URL(string: "https://music.163.com" + path)!)))
-        }
-    }
-
-    func testSMSLimitReservationsAreHashedAndKeepSingleFlightWithoutCrossLoginQuota() throws {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        var limits = MusicAccountSMSLimits()
-        let key = try limits.reserve(platform: .netease, country: "86", phone: phone, send: false, at: now)
-        XCTAssertFalse(key.contains(phone)); XCTAssertEqual(key.count, 64)
-        XCTAssertThrowsError(try limits.reserve(platform: .netease, country: "86", phone: phone, send: true, at: now))
-        limits.release(key)
-        for _ in 1..<20 {
-            let next = try limits.reserve(platform: .netease, country: "86", phone: phone, send: false, at: now)
-            limits.release(next)
-        }
-        let afterQuotaWindow = now.addingTimeInterval(61)
-        XCTAssertNoThrow(try limits.reserve(platform: .netease, country: "86", phone: phone,
-                                           send: true, at: afterQuotaWindow))
-        XCTAssertThrowsError(try MusicAccountSMSInput.validate(platform: .netease, countryCode: "86\n", phone: phone))
-        XCTAssertThrowsError(try MusicAccountSMSInput.validate(platform: .netease, countryCode: "86", phone: phone, code: "000000\n"))
+    func testCurrentDisplayDTOEncodesAndReloadsItsActualFields() throws {
+        let profile = MusicAccountProfile(nickname: "合成昵称", avatarURL: URL(string: "https://images.invalid/a.png"),
+            membership: .init(vip: true, tier: "svip", expiresAt: Date(timeIntervalSince1970: 1_800_000_300)))
+        let restored = try JSONDecoder().decode(MusicAccountProfile.self, from: JSONEncoder().encode(profile))
+        XCTAssertEqual(restored, profile)
     }
 }

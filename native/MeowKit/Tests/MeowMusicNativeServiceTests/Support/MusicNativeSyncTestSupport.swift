@@ -25,14 +25,23 @@ enum NativeSyncFixture {
     static func store(_ members: [MusicLibrarySyncMember] = [], platform: MusicAccountPlatform = .netease) throws -> NativeMusicMemoryDocument {
         var document = try MusicDocument(nil, runID: "synthetic")
         for member in members {
-            let song = try MusicModel.normalize(.init(platform: platform.rawValue, data: member.track))
+            let song = try NativeMusicFixture.storedSong(.init(platform: platform.rawValue, data: member.track))
+            let key = song["sources"].array[0]["sourceKey"]
+            if document.library["library"]["songs"].fields.contains(where: {
+                $0.1["sources"].array.contains { $0["sourceKey"] == key }
+            }) { continue }
             document.library["library"]["songs"][song["songId"].string] = song
         }
         return NativeMusicMemoryDocument(try document.encode(changed: ["library"]))
     }
-    static func refs(_ members: [MusicLibrarySyncMember], platform: MusicAccountPlatform = .netease) throws -> [MusicReference] {
-        try members.map {
-            let song = try MusicModel.normalize(.init(platform: platform.rawValue, data: $0.track))
+    static func refs(_ members: [MusicLibrarySyncMember], platform: MusicAccountPlatform = .netease,
+                     service: NativeMusicService) async throws -> [MusicReference] {
+        let songs = try await service.read().library["library"]["songs"].fields.map(\.1)
+        return try members.map { member in
+            let key = try MusicModel.normalize(.init(platform: platform.rawValue, data: member.track))["sources"].array[0]["sourceKey"]
+            guard let song = songs.first(where: { $0["sources"].array.contains { $0["sourceKey"] == key } }) else {
+                throw MusicServiceError.notFound
+            }
             return .init(kind: .library, id: song["songId"].string)
         }
     }

@@ -11,7 +11,6 @@ extension NativeMusicService {
             for remote in subscriptions {
                 let id = MusicNativeNetworkPlaylists.id(platform: platform, remoteID: remote.remoteID)
                 if !references.contains(where: { $0["id"].string == id }) {
-                    try musicRequire(round.library["collections"].array.count + references.count < 2000, .limit)
                     var row = try MusicNativeNetworkPlaylists.row(.init(platform: .init(accountPlatform: selection.platform),
                         nativeID: remote.remoteID, title: remote.name, creator: remote.creator,
                         artwork: MusicArtworkURL.normalized(remote.artwork), count: remote.count))

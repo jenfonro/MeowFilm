@@ -51,6 +51,7 @@ import Combine
         remaining.insert(contentsOf: moving, at: destination - offsets.filter { $0 < destination }.count)
         tracks = remaining
     }
+    fileprivate func project(_ songs: [String: MusicRemoteTrack]) { tracks = tracks.map { $0.projected(songs) } }
 }
 
 /// A page admission, never a replacement for the native writer's access/CAS
@@ -181,8 +182,7 @@ enum MusicCollectionOwnerChange {
         try Task.checkCancellation()
         guard self.presentationID == presentationID, canAct, editor == nil,
               let displayed = tracks.first(where: { $0.ref == track.ref }),
-              displayed.songId.utf8.elementsEqual(track.songId.utf8),
-              displayed.sources == track.sources else { throw MusicServiceError.staleResult }
+              displayed.songId.utf8.elementsEqual(track.songId.utf8) else { throw MusicServiceError.staleResult }
         return displayed
     }
 
@@ -196,6 +196,8 @@ enum MusicCollectionOwnerChange {
     // Cancellation revokes publication immediately; physical reads remain
     // tracked until they return without blocking a new valid page binding.
     private var reads: [UUID: Task<Void, Never>] = [:]
+    private var songObservation: Task<Void, Never>?
+    private var songProjectionID = UUID()
     private var action: (id: UUID, task: Task<Void, Never>, filterSensitive: Bool)?
     private var favoriteSnapshot: MusicCollectionPageSnapshot?
     private var favoriteReadID: UUID?
@@ -216,11 +218,41 @@ enum MusicCollectionOwnerChange {
     @discardableResult public func appear() -> Task<Void, Never>? {
         guard !visible else { return nil }
         visible = true; model.observeCollectionPage(self, id: observerID)
+        observeSongs()
         return reload()
     }
     public func disappear() {
         visible = false; model.removeCollectionPage(id: observerID)
+        songObservation?.cancel(); songObservation = nil
         invalidate(); searchQuery = ""
+    }
+    private func observeSongs() {
+        songObservation?.cancel(); songObservation = nil
+        guard visible, isAvailable, let repository = model.service as? any MusicSongRepositoryReading else { return }
+        let access = model.accountAccessGeneration
+        songObservation = Task { [weak self] in
+            let changes = await repository.songChanges()
+            await self?.refreshSongProjections(repository, access: access)
+            for await _ in changes {
+                guard !Task.isCancelled else { return }
+                await self?.refreshSongProjections(repository, access: access)
+            }
+        }
+    }
+    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID) async {
+        guard !Task.isCancelled, visible, isAvailable, model.accountAccessGeneration == access else { return }
+        let id = presentationID, projection = UUID()
+        songProjectionID = projection
+        let ids = Set((tracks + (editor?.tracks ?? []) + (favoriteSnapshot?.tracks ?? [])).map(\.songId))
+        do {
+            let songs = try await repository.repositoryTracks(songIDs: ids)
+            guard !Task.isCancelled, visible, isAvailable, model.accountAccessGeneration == access,
+                  presentationID == id, songProjectionID == projection else { return }
+            tracks = tracks.map { $0.projected(songs) }; editor?.project(songs)
+            if let snapshot = favoriteSnapshot {
+                favoriteSnapshot = .init(collection: snapshot.collection, tracks: snapshot.tracks.map { $0.projected(songs) })
+            }
+        } catch {}
     }
 
     private func invalidate() {
@@ -242,6 +274,7 @@ enum MusicCollectionOwnerChange {
         case .revoking:
             invalidate(); searchQuery = ""; collectionQueue = nil
         case .access:
+            observeSongs()
             invalidate()
             if isAvailable && !isMissing { reload() }
         case .catalogue(let rows):
@@ -299,6 +332,9 @@ enum MusicCollectionOwnerChange {
                 if snapshot.collection.kind == "favorites" {
                     self.favoriteSnapshot = snapshot; self.favoritesLoaded = true
                 } else { self.refreshFavorites() }
+                if let repository = self.model.service as? any MusicSongRepositoryReading {
+                    await self.refreshSongProjections(repository, access: self.model.accountAccessGeneration)
+                }
             } catch {
                 guard own.matches(self.model), self.visible, self.binding === own else { return }
                 let safe = MusicServiceError.sanitized(error)
@@ -519,7 +555,7 @@ enum MusicCollectionOwnerChange {
                 try ticket.check(self.model)
                 try await operation(self.model)
                 try ticket.check(self.model)
-                if reportsModelError, let message = self.model.error {
+                if reportsModelError, let message = self.model.notices.error {
                     self.actionError = message
                     if mutation { self.needsReload = true }
                     return
@@ -545,5 +581,6 @@ enum MusicCollectionOwnerChange {
         action = (id, task, filterSensitive)
         return task
     }
+    deinit { songObservation?.cancel() }
 }
 #endif

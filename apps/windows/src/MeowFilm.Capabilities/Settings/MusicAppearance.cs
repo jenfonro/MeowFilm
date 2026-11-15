@@ -35,8 +35,16 @@ public sealed record MusicAppearancePalette(string Key, string Name, string Colo
 
 public sealed partial class MusicCapability
 {
-    private long appearanceRevision;
+    private long appearanceRevision, appearanceGeneration;
     private bool appearanceLoaded, appearanceBusy;
+    private Task appearanceWork = Task.CompletedTask;
+    private bool AppearanceCurrent(long generation) =>
+        generation == appearanceGeneration && !stopping && !disposed;
+    internal void RetireAppearanceSettings()
+    {
+        appearanceGeneration++;
+        appearanceLoaded = false;
+    }
     private string savedPlaylistView = "grid", savedColorMode = "song", savedColorPalette = "lilac";
     private string appearanceStatus = "";
     public MusicCatalogChoice[] ColorModes { get; } =
@@ -77,24 +85,29 @@ public sealed partial class MusicCapability
 
     private async Task ReadAppearance(CancellationToken token)
     {
+        long generation = appearanceGeneration;
         var reply = await QualityCall("music.appearance.get", null, token);
         token.ThrowIfCancellationRequested();
-        AcceptAppearance(reply);
+        if (AppearanceCurrent(generation)) AcceptAppearance(reply);
     }
 
-    internal Task EnsureAppearanceAsync() =>
-        appearanceLoaded ? Task.CompletedTask : ReloadAppearanceAsync();
+    internal async Task EnsureAppearanceAsync()
+    {
+        await appearanceWork;
+        if (!appearanceLoaded) await ReloadAppearanceAsync();
+    }
 
     internal Task ReloadAppearanceAsync()
     {
         if (appearanceBusy || stopping || disposed) return Task.CompletedTask;
         appearanceBusy = true;
+        long generation = appearanceGeneration;
         AppearanceBindings();
-        return RunAsync(async () =>
+        return appearanceWork = RunAsync(async () =>
         {
             try { await ReadAppearance(lifetime.Token); }
-            catch { appearanceStatus = "外观设置读取失败"; }
-            finally { appearanceBusy = false; AppearanceBindings(); }
+            catch { if (AppearanceCurrent(generation)) appearanceStatus = "外观设置读取失败"; }
+            finally { appearanceBusy = false; if (AppearanceCurrent(generation)) AppearanceBindings(); }
         });
     }
 
@@ -131,19 +144,24 @@ public sealed partial class MusicCapability
             colorPalette
         };
         appearanceBusy = true;
+        long generation = appearanceGeneration;
         AppearanceBindings();
-        return RunAsync(async () =>
+        return appearanceWork = RunAsync(async () =>
         {
             try
             {
-                AcceptAppearance(await QualityCall("music.appearance.save", draft, lifetime.Token));
+                var reply = await QualityCall("music.appearance.save", draft, lifetime.Token);
+                if (AppearanceCurrent(generation)) AcceptAppearance(reply);
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
             {
+                if (!AppearanceCurrent(generation)) return;
                 try
                 {
-                    AcceptAppearance(await QualityCall("music.appearance.get", null, lifetime.Token));
+                    var reply = await QualityCall("music.appearance.get", null, lifetime.Token);
+                    if (!AppearanceCurrent(generation)) return;
+                    AcceptAppearance(reply);
                     if (!AppearanceMatches(playlistView, colorMode, colorPalette))
                         appearanceStatus = error.Code == "REVISION_CONFLICT"
                             ? "外观设置已更新"
@@ -151,19 +169,21 @@ public sealed partial class MusicCapability
                 }
                 catch
                 {
+                    if (!AppearanceCurrent(generation)) return;
                     appearanceLoaded = false;
                     appearanceStatus = "外观设置保存失败";
                 }
             }
             catch
             {
+                if (!AppearanceCurrent(generation)) return;
                 appearanceLoaded = false;
                 appearanceStatus = "外观设置保存失败";
             }
             finally
             {
                 appearanceBusy = false;
-                AppearanceBindings();
+                if (AppearanceCurrent(generation)) AppearanceBindings();
             }
         });
     }

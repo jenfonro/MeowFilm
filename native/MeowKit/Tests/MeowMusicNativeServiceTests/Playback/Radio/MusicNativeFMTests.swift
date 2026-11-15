@@ -3,11 +3,39 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeFMTests: XCTestCase {
+    func testContinuationUpdatesTheSharedRecordWhileKeepingOccurrenceAndCurrentPlayback() async throws {
+        var data = try MJ.parse(NativeMusicFixture.track("A").data)
+        data["name"] = .string("Current A")
+        data["albumName"] = .string("Current album")
+        let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A")],
+            [.init(platform: "tx", data: data.bytes)]])
+        let service = try await NativeMusicFixture.service(scripts: NativeMusicScriptFixture())
+        let source = MusicAccountQueueFixture.source(loader, kind: .fm)
+        let start = try await MusicAccountQueueFixture.start(service, source)
+        _ = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
+        let before = try await service.queue()
+        let audio = try await playing(service), pending = await service.fmPlayback?.pending
+        await pending?.value
+        let after = try await service.queue()
+        XCTAssertEqual(after.entries.count, 2)
+        XCTAssertEqual(after.entries[0].id, before.entries[0].id)
+        XCTAssertNotEqual(after.entries[0].id, after.entries[1].id)
+        XCTAssertEqual(Set(after.entries.map(\.track.songId)), [before.entries[0].track.songId])
+        XCTAssertTrue(after.entries.allSatisfy { $0.track.title == "Current A" && $0.track.album == "Current album" })
+        XCTAssertEqual(after.currentId, before.currentId)
+        let currentAttempt = await service.attempt?.id
+        XCTAssertEqual(currentAttempt, audio.attemptId)
+        let calls = await loader.events(); XCTAssertEqual(calls, ["root", "root"])
+        await source.close(); await service.close()
+    }
+
     func testFMUsesGlobalLoopPriorityFailuresAndWrapsExistingQueue() async throws {
         let service = try await NativeMusicFixture.service()
         var d = try MusicDocument(nil, runID: "fixture")
         d.queue["entries"] = .array(try (1...4).map { n in
-            .obj([("id", .string("entry-\(n)")), ("song", try NativeMusicFixture.song("ID-\(n)"))])
+            let song = try NativeMusicFixture.song("ID-\(n)")
+            d.library["library"]["songs"][song["songId"].string] = song
+            return .obj([("id", .string("entry-\(n)")), ("songId", song["songId"])])
         })
         d.queue["currentId"] = .string("entry-2"); d.queue["serial"] = .n(4)
         d.queue["failed"] = .strings(["entry-3"])

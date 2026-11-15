@@ -19,6 +19,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private var action: (() -> Void)?
     private var style = MusicPublicBrowseSection.Layout.list
     private var representedArtworkURL: URL?
+    private var representedTrack: MusicRemoteTrack?
     private var featurePalette = MusicBrowseFeaturePalette.fallback
     private var featurePaletteRole = MusicBrowseFeaturePalette.Role.standard
     private var rankingShowsFallback = false
@@ -145,7 +146,10 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         if style == .songColumns || style == .vipSongs || style == .list { applyCardSurface() }
     }
 
-    func updateArtwork(_ url: URL?) { loadArtwork(url) }
+    func updateArtwork(_ url: URL?) {
+        representedTrack = nil
+        loadArtwork(url)
+    }
 
     func configure(item: MusicPublicBrowseItem, layout: MusicPublicBrowseSection.Layout,
                    theme: PageTheme, artworkURL: URL? = nil,
@@ -157,6 +161,8 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         artwork.layer.cornerRadius = layout == .banner || layout == .artistUpdates ? 0 : 8
         artwork.backgroundColor = layout == .artistUpdates ? .clear : UIColor.white.withAlphaComponent(0.18)
         featurePaletteRole = MusicBrowseFeaturePalette.Role(item)
+        if case .track(let track) = item.content { representedTrack = track }
+        else { representedTrack = nil }
         rankingShowsFallback = false
         if layout != .rankingStack { loadArtwork(artworkURL ?? item.artwork) }
         title.text = layout == .rankingStack || layout == .artistUpdates || item.coverLabel.isEmpty ?
@@ -224,6 +230,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         if layout == .rankingStack {
             let covers = entries.compactMap(\.artwork)
             let url = covers.first ?? item.ranking?.songArtwork ?? item.artwork
+            representedTrack = item.previewSongs.first { $0.artwork == url }
             loadArtwork(url)
         }
         title.textColor = UIColor(theme.ink); subtitle.textColor = UIColor(theme.muted)
@@ -273,7 +280,11 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             applyTextGradient()
             applyCardSurface()
         }
-        artwork.load(url)
+        if let track = representedTrack {
+            artwork.load(.init(ref: track.ref, songId: track.songId, title: track.title,
+                artist: track.artist, album: track.album, duration: track.duration, sources: track.sources,
+                artwork: url, artistNames: track.artistNames, sourcePosition: track.sourcePosition))
+        } else { artwork.load(url) }
     }
 
     private func applyFeatureColor(from image: UIImage) {
@@ -681,7 +692,7 @@ private final class MusicBrowsePreviewButton: UIButton {
         reference = track.ref; self.action = action
         pressedColor = UIColor(theme.chip)
         backgroundColor = isHighlighted ? pressedColor : .clear
-        cover.load(track.artwork)
+        cover.load(track)
         title.text = track.title; title.textColor = UIColor(theme.ink)
         artist.text = track.artist; artist.textColor = UIColor(theme.muted)
         accessibilityLabel = "播放" + track.title

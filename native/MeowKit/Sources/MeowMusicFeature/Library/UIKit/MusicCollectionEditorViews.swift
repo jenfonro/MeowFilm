@@ -266,7 +266,7 @@ final class MusicCollectionEditorTrackCell: UITableViewCell {
     ) {
         representedReference = track.ref
         representedTitle = track.title
-        artwork.load(track.artwork)
+        artwork.load(track)
         titleLabel.text = track.title
         subtitleLabel.text = [track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " · ")
         selectionControl.isEnabled = selectable

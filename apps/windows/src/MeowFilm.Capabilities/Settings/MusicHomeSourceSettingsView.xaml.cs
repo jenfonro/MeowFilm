@@ -22,7 +22,7 @@ public partial class MusicHomeSourceSettingsView : UserControl
         {
             activation?.Cancel();
             activation = null;
-            await module.DeactivateCatalogSourceSettingsAsync();
+            await module.DeactivateCatalogSourceSettingsAsync(retirePage: true);
             return;
         }
         if (activation is not null) return;

@@ -1,5 +1,3 @@
-using System.Net;
-using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -7,7 +5,6 @@ using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
-using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.PlaybackCache;
@@ -24,27 +21,17 @@ public static class MusicOfficialAudioTests
         {
             await using var f = new MusicPlaybackCacheTests.Fixture();
             f.Clock.Now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var runtime = new NoRuntime(); int vkeys = 0, offlineRequests = 0; bool offline = false;
-            var app = new MusicNativeApplication(f.Store, runtime, f.CacheStore, new Handler(async request =>
-            {
-                if (offline) { offlineRequests++; throw new HttpRequestException("Synthetic offline"); }
-                if (request.Content is null) return new(HttpStatusCode.ServiceUnavailable);
-                var input = JsonNode.Parse(await request.Content.ReadAsStringAsync())!;
-                string? method = input["req_0"]?["method"]?.GetValue<string>();
-                return method switch {
-                    "GetLoginUserInfo" => Qq(new { code = 0 }),
-                    "GetHomepageHeader" => Qq(new { Info = new { BaseInfo = new { EncryptedUin = "FixtureEUIN", Name = "Synthetic", Avatar = "" } } }),
-                    "vip_login_base" => Qq(new { identity = new { vip = 1 }, userinfo = new { expire = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds() } }),
-                    "CgiGetTrackInfo" => Qq(new { tracks = new[] { new { mid = "FixtureMID", interval = 1, file = new { size_320mp3 = f.Bytes.Length } } } }),
-                    "UrlGetVkey" => Vkey(),
-                    _ => new(HttpStatusCode.ServiceUnavailable)
-                };
-                HttpResponseMessage Vkey()
-                {
-                    vkeys++; return Qq(new { expiration = 120, midurlinfo = new[] { new { songmid = "FixtureMID", result = 0,
-                        filename = "M800FixtureMIDFixtureMID.mp3", purl = "M800FixtureMIDFixtureMID.mp3", ekey = "" } } });
-                }
-            }));
+            int vkeys = 0, offlineRequests = 0; bool offline = false;
+            await using var runtime = AudioPeer(1, f.Bytes.Length, audio: () => vkeys++);
+            var respond = runtime.OnRequest;
+            runtime.OnRequest = async (call, token) => {
+                if (offline) { offlineRequests++; throw new MusicPlatformException("NETWORK_ERROR"); }
+                var result = await respond(call, token);
+                if (call.Operation != "audio") return result;
+                var audio = JsonNode.Parse(result.GetRawText())!.AsObject(); audio["actualQuality"] = "flac";
+                return MusicPlatformRuntimeFixture.Json(audio);
+            };
+            var app = new MusicNativeApplication(f.Store, runtime, f.CacheStore);
             await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
             await using var module = new MusicCapability(app, f.Store, new NativeMusicPlayback(player), new CacheDialogs(),
                 playbackCacheRoot: f.Root, cacheStore: f.CacheStore);
@@ -56,7 +43,7 @@ public static class MusicOfficialAudioTests
             var oneSecondSong = JsonSerializer.SerializeToNode(Song("tx", "FixtureMID"))!.AsObject();
             oneSecondSong["duration"] = 1; // Match the actual one-second WAV fixture and protocol duration.
             oneSecondSong["sources"]![0]!["musicInfo"]!["duration"] = 1;
-            var song = JsonSerializer.SerializeToElement(oneSecondSong);
+            var song = await MusicSongFixture.AdoptAsync(app, oneSecondSong);
             var response = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k" });
             Check(response.GetProperty("ok").GetBoolean());
             var receipt = JsonNode.Parse(response.GetRawText())!.AsObject();
@@ -66,6 +53,10 @@ public static class MusicOfficialAudioTests
             await f.Cache.StorePlayedAsync(response.GetProperty("scope").GetString()!,
                 response.GetProperty("songId").GetString()!, response.GetProperty("qualityCacheSignature").GetString()!,
                 JsonSerializer.SerializeToElement(receipt), () => true, default);
+            // The independent chorus lookup must not masquerade as another audio request.
+            await new MusicChorusCache(f.CacheStore).PutAsync(MusicChorusCache.Key(
+                response.GetProperty("scope").GetString()!, response.GetProperty("songId").GetString()!,
+                "tx", "FixtureMID", 1), 1, 0, 0.5, default);
             Check((await app.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 })).GetProperty("ok").GetBoolean());
             await module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             var queueRow = module.QueueSurfaceRows.Single();
@@ -76,43 +67,27 @@ public static class MusicOfficialAudioTests
             Check(player.HasMedia, "module open:" + module.Status);
             await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
             await player.PauseAsync();
-            Check(player.HasMedia && player.OwnerId == "music" && vkeys == 1 && runtime.Calls == 0 && offlineRequests == 0,
-                "licensed file-first must play with zero network and zero Node calls");
+            Check(player.HasMedia && player.OwnerId == "music" && vkeys == 1  && offlineRequests == 0,
+                "licensed file-first must play without another platform media request");
             Check(module.CurrentSource.Contains("QQ", StringComparison.Ordinal), "source is official not LX");
             Check(module.CurrentQualityLabel == "无损", "the decoded cache reports its actual higher quality, not the 320k request");
             await app.ExecuteAsync("music.accounts.logout", new { platform = "tx" });
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             while (player.HasMedia) await Task.Delay(10, deadline.Token);
-            Check(runtime.Calls == 0);
+            Check(!runtime.Calls.Any(call => call.Method.StartsWith("music.script.", StringComparison.Ordinal) && call.Method != "music.script.sources.list"));
         }));
-        yield return new("Official native owner resolves and caches exact QQ recording then revokes on logout without Node", async () =>
+        yield return new("Official native owner caches canonical QQ audio then revokes on logout", async () =>
         {
-            await using var store = new MemoryStore(); var runtime = new NoRuntime();
+            await using var store = new MemoryStore();
             await using var cacheStore = new CacheDocumentStore(store);
             int vkeys = 0;
-            await using var app = new MusicNativeApplication(store, runtime, cacheStore, new Handler(async request =>
-            {
-                var input = JsonNode.Parse(await request.Content!.ReadAsStringAsync())!;
-                string method = input["req_0"]!["method"]!.GetValue<string>();
-                return method switch {
-                    "GetLoginUserInfo" => Qq(new { code = 0 }),
-                    "GetHomepageHeader" => Qq(new { Info = new { BaseInfo = new { EncryptedUin = "FixtureEUIN", Name = "Synthetic", Avatar = "" } } }),
-                    "vip_login_base" => Qq(new { identity = new { vip = 1 }, userinfo = new { expire = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds() } }),
-                    "CgiGetTrackInfo" => Qq(new { tracks = new[] { new { mid = "FixtureMID", interval = 100, file = new { size_320mp3 = 120 } } } }),
-                    "UrlGetVkey" => Reply(),
-                    _ => throw new InvalidOperationException("Unexpected method " + method)
-                };
-                HttpResponseMessage Reply()
-                {
-                    vkeys++;
-                    return Qq(new { expiration = 120, midurlinfo = new[] { new { songmid = "FixtureMID", result = 0,
-                        filename = "M800FixtureMIDFixtureMID.mp3", purl = "M800FixtureMIDFixtureMID.mp3", ekey = "" } } });
-                }
-            }));
+            await using var runtime = AudioPeer(audio: () => vkeys++);
+            await using var app = new MusicNativeApplication(store, runtime, cacheStore);
             var login = await app.ExecuteAsync("music.accounts.import",
                 new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
             Check(login.GetProperty("ok").GetBoolean(), "native import");
-            var input = new { platform = "tx", song = Song("tx", "FixtureMID"), quality = "320k" };
+            var song = await MusicSongFixture.AdoptAsync(app, Song("tx", "FixtureMID"));
+            var input = new { platform = "tx", song, quality = "320k" };
             var resolved = await app.ExecuteAsync("music.official.resolve", input);
             Check(resolved.GetProperty("ok").GetBoolean(), "native resolve:" + resolved.GetRawText());
             Check(!resolved.TryGetProperty("installationId", out _) && resolved.GetProperty("kind").GetString() == "official");
@@ -128,151 +103,34 @@ public static class MusicOfficialAudioTests
             Check(logout.GetProperty("ok").GetBoolean());
             Check(!app.IsOfficialPlaybackCurrent("tx", scope, generation));
             var revoked = await app.ExecuteAsync("music.official.resolve", input);
-            Check(!revoked.GetProperty("ok").GetBoolean() && runtime.Calls == 0 && vkeys == 1);
+            Check(!revoked.GetProperty("ok").GetBoolean()  && vkeys == 1);
         });
         yield return new("Official native cache-only resolve is local and reuses its admitted URL without membership requests", async () =>
         {
-            await using var store = new MemoryStore(); var runtime = new NoRuntime();
-            int calls = 0, vkeys = 0, rights = 0;
-            await using var app = new MusicNativeApplication(store, runtime, new Handler(async request =>
-            {
-                Interlocked.Increment(ref calls);
-                var input = JsonNode.Parse(await request.Content!.ReadAsStringAsync())!;
-                string method = input["req_0"]!["method"]!.GetValue<string>();
-                if (method == "vip_login_base") Interlocked.Increment(ref rights);
-                if (method == "UrlGetVkey") Interlocked.Increment(ref vkeys);
-                return method switch {
-                    "GetLoginUserInfo" => Qq(new { code = 0 }),
-                    "GetHomepageHeader" => Qq(new { Info = new { BaseInfo = new { EncryptedUin = "FixtureEUIN", Name = "Synthetic", Avatar = "" } } }),
-                    "vip_login_base" => Qq(new { identity = new { vip = 1 }, userinfo = new { expire = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds() } }),
-                    "CgiGetTrackInfo" => Qq(new { tracks = new[] { new { mid = "FixtureMID", interval = 100, file = new { size_320mp3 = 120 } } } }),
-                    "UrlGetVkey" => Qq(new { expiration = 120, midurlinfo = new[] { new { songmid = "FixtureMID", result = 0,
-                        filename = "M800FixtureMIDFixtureMID.mp3", purl = "M800FixtureMIDFixtureMID.mp3", ekey = "" } } }),
-                    _ => throw new InvalidOperationException("Unexpected method " + method)
-                };
-            }));
+            await using var store = new MemoryStore(); int vkeys = 0;
+            await using var runtime = AudioPeer(audio: () => vkeys++);
+            await using var app = new MusicNativeApplication(store, runtime);
             Check((await app.ExecuteAsync("music.accounts.import",
                 new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" })).GetProperty("ok").GetBoolean());
-            var song = Song("tx", "FixtureMID");
-            int before = calls;
+            var song = await MusicSongFixture.AdoptAsync(app, Song("tx", "FixtureMID"));
+            int before = runtime.Requests.Count;
             var miss = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k", cacheOnly = true });
-            Check(!miss.GetProperty("ok").GetBoolean() && miss.GetProperty("code").GetString() == "CACHE_MISS" && calls == before,
+            Check(!miss.GetProperty("ok").GetBoolean() && miss.GetProperty("code").GetString() == "CACHE_MISS" && runtime.Requests.Count == before,
                 "a cache-only miss performs no account, catalog or media request: " + miss.GetRawText());
             var resolved = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k" });
             Check(resolved.GetProperty("ok").GetBoolean() && vkeys == 1, resolved.GetRawText());
-            int checks = rights;
+            int checks = runtime.Requests.Count;
             var hit = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k", cacheOnly = true });
             Check(hit.GetProperty("ok").GetBoolean() && vkeys == 1 &&
                 hit.GetProperty("url").GetString() == resolved.GetProperty("url").GetString(), "a valid receipt is reused: " + hit.GetRawText());
-            Check(rights == checks, "an admitted URL needs no membership-derived rights check");
+            Check(runtime.Requests.Count == checks, "an admitted URL needs no membership-derived rights check");
             var invalid = await app.ExecuteAsync("music.official.resolve",
                 new { platform = "tx", song, quality = "320k", cacheOnly = true, refresh = true });
             Check(!invalid.GetProperty("ok").GetBoolean() && invalid.GetProperty("code").GetString() == "INVALID_REQUEST");
-            Check(runtime.Calls == 0);
+            Check(!runtime.Calls.Any(call => call.Method.StartsWith("music.script.", StringComparison.Ordinal) && call.Method != "music.script.sources.list"));
         });
-        yield return new("Official audio QQ vkey exact identity has no script target or credential CDN headers", async () =>
-        {
-            int calls = 0;
-            using var http = MusicPlatformHttp.CreateWithHandler(new Handler(async request =>
-            {
-                var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync())!;
-                string method = body["req_0"]!["method"]!.GetValue<string>();
-                calls++;
-                if (method == "CgiGetTrackInfo") return Qq(new { tracks = new[] { new {
-                    mid = "FixtureMID", interval = 180, file = new { size_320mp3 = 1234567 }
-                } } });
-                Check(method == "UrlGetVkey");
-                var p = body["req_0"]!["param"]!;
-                Check(p["songmid"]![0]!.GetValue<string>() == "FixtureMID");
-                Check(p["filename"]![0]!.GetValue<string>() == "M800FixtureMIDFixtureMID.mp3");
-                return Qq(new { expiration = 600, midurlinfo = new[] { new { songmid = "FixtureMID", result = 0,
-                    filename = "M800FixtureMIDFixtureMID.mp3", purl = "M800FixtureMIDFixtureMID.mp3?vkey=synthetic", ekey = "" } } });
-            }));
-            await using var clients = new MusicClientContextFixture(http);
-            var result = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("tx"),
-                new JsonObject { ["songmid"] = "FixtureMID" }, ["320k"], default, () => { });
-            Check(calls == 2 && result.RequestQuality == "320k" && !result.QualityVerified && result.ActualQuality == "" &&
-                result.Full && result.Size == 1234567 && result.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(120).ToUnixTimeMilliseconds());
-        });
-        yield return new("Official audio QQ refuses encrypted or mismatched vkey", async () =>
-        {
-            foreach (string wrong in new[] { "ekey", "songmid", "filename", "host" })
-            {
-                int n = 0;
-                using var http = MusicPlatformHttp.CreateWithHandler(new Handler(_ => Task.FromResult(++n == 1
-                    ? Qq(new { tracks = new[] { new { mid = "FixtureMID", interval = 10, file = new { size_320mp3 = 120 } } } })
-                    : Qq(new { expiration = 120, midurlinfo = new[] { new { songmid = wrong == "songmid" ? "Other" : "FixtureMID", result = 0,
-                        filename = wrong == "filename" ? "M800OtherOther.mp3" : "M800FixtureMIDFixtureMID.mp3",
-                        purl = wrong == "host" ? "https://example.org/M800FixtureMIDFixtureMID.mp3" : "M800FixtureMIDFixtureMID.mp3",
-                        ekey = wrong == "ekey" ? "protected" : "" } } }))));
-                bool denied = false;
-                await using var clients = new MusicClientContextFixture(http);
-                try { await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("tx"), new() { ["songmid"] = "FixtureMID" }, ["320k"], default, () => { }); }
-                catch (MusicPlatformException) { denied = true; }
-                Check(denied, wrong);
-            }
-        });
-        yield return new("Official audio KG tracker carries exact hash key and rejects trial flag", async () =>
-        {
-            foreach (bool trial in new[] { false, true })
-            {
-                const string hash = "ABCDEF0123456789ABCDEF0123456789";
-                int calls = 0;
-                using var http = MusicPlatformHttp.CreateWithHandler(new Handler(request =>
-                {
-                    calls++;
-                    if (request.RequestUri!.AbsolutePath == "/v1/audio/audio")
-                        return Task.FromResult(Json(new { status = 1, data = new[] { new { hash, filesize = 5555,
-                            duration = 100, name = "Fixture - Song", album_id = 12, album_audio_id = 34 } } }));
-                    Check(request.RequestUri.AbsolutePath == "/v5/url");
-                    string query = Uri.UnescapeDataString(request.RequestUri.Query);
-                    string key = PlatformProtocols.Md5(hash.ToLowerInvariant() + "57ae12eb6890223e355ccfcb74edf70d1005" + "123456" + "123");
-                    Check(query.Contains("key=" + key) && query.Contains("signature=") && query.Contains("IsFreePart=0"));
-                    Check(request.Headers.GetValues("x-router").Single() == "trackercdn.kugou.com");
-                    return Task.FromResult(Json(new { status = 1, hash, fileSize = 5555, is_free_part = trial ? 1 : 0,
-                        url = new[] { "https://audio.kugou.com/fixture.mp3" } }));
-                }));
-                bool denied = false;
-                await using var clients = new MusicClientContextFixture(http);
-                try
-                {
-                    var result = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("kg"),
-                        new() { ["hash"] = hash }, ["128k"], default, () => { });
-                    Check(result.Full && !result.QualityVerified && result.ExpiresAt is null);
-                }
-                catch (MusicPlatformException e) when (e.Code == "TRIAL_ONLY") { denied = true; }
-                Check(denied == trial && calls == 2);
-            }
-        });
-        yield return new("Official audio never rejects a non-member locally; the platform response decides", async () =>
-        {
-            int requests = 0;
-            using var http = MusicPlatformHttp.CreateWithHandler(new Handler(_ => { requests++; throw new InvalidOperationException("synthetic upstream"); }));
-            await using var clients = new MusicClientContextFixture(http);
-            foreach (string platform in new[] { "tx", "kg" })
-            {
-                int before = requests;
-                try
-                {
-                    await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session(platform),
-                        platform == "kg" ? new() { ["hash"] = new string('a', 32) } : new() { ["songmid"] = "FixtureMID" }, ["320k"], default, () => { });
-                }
-                catch (MusicPlatformException e) { Check(e.Code != "VIP_REQUIRED", e.Code); }
-                catch (Exception) { }
-                Check(requests > before, "a non-member request reaches the platform: " + platform);
-            }
-        });
-        yield return new("Official audio application without account fails AUTH_REQUIRED without Node", async () =>
-        {
-            await using var store = new MemoryStore(); var runtime = new NoRuntime();
-            await using var app = new MusicNativeApplication(store, runtime);
-            foreach (string platform in new[] { "wy", "tx", "kg" })
-            {
-                var result = await app.ExecuteAsync("music.official.resolve", new { platform, song = Song(platform), quality = "320k" });
-                Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == "AUTH_REQUIRED");
-            }
-            Check(runtime.Calls == 0);
-        });
+        yield return new("Official native audio reads current recording after account publication without rebinding queue identity", CurrentRecording);
+        foreach (var test in AdapterCases()) yield return test;
         yield return new("Music source and chorus caches roundtrip current facts and honor identity and TTL", async () =>
         {
             await using var backing = new MemoryStore();
@@ -314,7 +172,7 @@ public static class MusicOfficialAudioTests
                 await using var backing = new MemoryStore { Failure = error };
                 backing.Data[MusicSourceCache.Namespace] = "{"u8.ToArray();
                 backing.Data[MusicChorusCache.Namespace] = "{\"entries\":null}"u8.ToArray();
-                backing.Data["music.library.v1"] = "business"u8.ToArray();
+                backing.Data[MusicLibraryOwner.DocumentNamespace] = "business"u8.ToArray();
                 await using var store = new CacheDocumentStore(backing);
                 var clock = new Clock();
                 var source = new MusicSourceCache(store, clock);
@@ -326,7 +184,7 @@ public static class MusicOfficialAudioTests
                 Check(await source.ReadAsync("scope", "song", Hash('a'), default) is not null);
                 Check(await chorus.ReadAsync(Hash('b'), 100, default) == (20d, 30d));
                 await store.DrainAsync();
-                Check(Encoding.UTF8.GetString(backing.Data["music.library.v1"]) == "business");
+                Check(Encoding.UTF8.GetString(backing.Data[MusicLibraryOwner.DocumentNamespace]) == "business");
             }
         });
         yield return new("Music source and chorus saves never wait for initial disk read or slow persistence", async () =>
@@ -410,6 +268,163 @@ public static class MusicOfficialAudioTests
             Check(actual.GetProperty("targetId").GetString() == next);
         });
     }
+    internal static MusicPlatformRuntimeFixture AudioPeer(double duration = 100, long size = 120,
+        string quality = "320k", Action? audio = null)
+    {
+        var runtime = new MusicPlatformRuntimeFixture();
+        var script = new NoRuntime();
+        runtime.OnOtherCall = (call, token) => script.CallAsync(call.Method, call.Payload, token);
+        runtime.OnRequest = (call, _) => {
+            if (call.Operation is "account.verify" or "account.profile") {
+                var value = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation(call.Platform, "123", vip: true).GetRawText())!.AsObject();
+                if (call.Operation == "account.verify") value["cookie"] = call.Payload.GetProperty("candidate").GetProperty("cookie").GetString();
+                return Task.FromResult(MusicPlatformRuntimeFixture.Json(value));
+            }
+            if (call.Operation == "qr.cancel") return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { cancelled = true }));
+            if (call.Operation == "lyrics") return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { text = "", translation = "", romanization = "" }));
+            if (call.Operation == "chorus") return Task.FromResult(MusicPlatformRuntimeFixture.Json(new {
+                platform = call.Platform, id = call.Parameters.GetProperty("id").GetString(), point = (object?)null }));
+            Check(call.Operation == "audio", "Unexpected media operation " + call.Operation);
+            audio?.Invoke();
+            return Task.FromResult(AudioValue(duration, size, quality));
+        };
+        return runtime;
+    }
+    private static async Task CurrentRecording()
+    {
+        await using var store = new MemoryStore();
+        await using var runtime = AudioPeer();
+        await using var app = new MusicNativeApplication(store, runtime);
+        // Use the real repository owner for the concurrent authoritative observation;
+        // a second platform request would wait behind the very publication under test.
+        var library = (MusicLibraryOwner)typeof(MusicNativeApplication).GetField("library",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(app)!;
+        async Task<JsonElement> Call(string method, object? p = null)
+        {
+            var result = await app.ExecuteAsync(method, p);
+            Check(result.GetProperty("ok").GetBoolean(), method + ":" + result.GetRawText());
+            return result;
+        }
+        var original = await MusicSongFixture.AdoptAsync(library, Song("tx", "FixtureMID"));
+        string songId = original["songId"]!.GetValue<string>(), key = original["sources"]![0]!["sourceKey"]!.GetValue<string>();
+        await Call("music.queue.replace", new { songs = new[] { original, original }, index = 0 });
+        var queue = await Call("music.queue.get");
+        Check(queue.GetProperty("entries")[0].GetProperty("id").GetString() != queue.GetProperty("entries")[1].GetProperty("id").GetString());
+        await Call("music.history.recordPlayed", new { entryId = queue.GetProperty("current").GetProperty("id").GetString(),
+            at = DateTimeOffset.Now.ToUnixTimeMilliseconds() });
+        async Task<string> Control()
+        {
+            var current = JsonNode.Parse((await Call("music.queue.get")).GetRawText())!.AsObject();
+            foreach (var entry in current["entries"]!.AsArray().OfType<JsonObject>().Append(current["current"]!.AsObject()))
+                entry["song"] = new JsonObject { ["songId"] = entry["song"]!["songId"]!.DeepClone() };
+            var history = store.Root(MusicLibraryOwner.DocumentNamespace)["entries"]!.AsArray().Single(entry =>
+                entry!["key"]!.GetValue<string>() == new JsonArray("meowfilm", "music", 1, "local", "history").ToJsonString())!["value"]!;
+            return current.ToJsonString() + history.ToJsonString();
+        }
+        string control = await Control();
+        await Call("music.accounts.import", new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
+        int requests = runtime.Requests.Count;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        JsonElement publication = default;
+        runtime.OnSessionUpdate = async (call, token) =>
+        {
+            if (call.Payload.GetProperty("session").ValueKind == JsonValueKind.Object)
+            {
+                publication = call.Payload.GetProperty("session").Clone();
+                entered.TrySetResult(); await release.Task.WaitAsync(token);
+            }
+            return MusicPlatformRuntimeFixture.Json(new { published = true });
+        };
+        var resolve = app.ExecuteAsync("music.official.resolve", new { platform = "tx", song = original, sourceKey = key, quality = "320k" });
+        JsonObject corrected;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!resolve.IsCompleted && runtime.Requests.Count == requests, "actual audio must await current account publication");
+            var observation = Song("tx", "FixtureMID", "Corrected official", 104);
+            MusicSongFixture.Info(observation)["size"] = 4096L;
+            MusicSongFixture.Info(observation)["types"] = new JsonArray(new JsonObject { ["type"] = "320k" }, new JsonObject { ["type"] = "flac" });
+            corrected = await MusicSongFixture.AdoptAsync(library, observation);
+        }
+        finally { release.TrySetResult(); }
+        var media = await resolve;
+        Check(media.GetProperty("ok").GetBoolean(), media.GetRawText());
+        var audio = runtime.Requests.Last();
+        var info = audio.Parameters.GetProperty("musicInfo");
+        Check(runtime.Requests.Count == requests + 1 && audio.Operation == "audio" && audio.Platform == "tx" &&
+            audio.Parameters.GetProperty("id").GetString() == "FixtureMID" &&
+            audio.Parameters.GetProperty("qualities").EnumerateArray().Select(value => value.GetString()).SequenceEqual(["320k"]) &&
+            info.GetProperty("name").GetString() == "Corrected official" && info.GetProperty("duration").GetDouble() == 104 &&
+            info.GetProperty("size").GetInt64() == 4096 &&
+            info.GetProperty("types").EnumerateArray().Select(value => value.GetProperty("type").GetString()).SequenceEqual(["320k", "flac"]),
+            "the actual official request must build its material after publication, not retain the earlier DTO");
+        Check(media.GetProperty("songId").GetString() == songId && media.GetProperty("sourceKey").GetString() == key &&
+            media.GetProperty("scope").GetString() == publication.GetProperty("scope").GetString() &&
+            media.GetProperty("generation").GetInt64() == publication.GetProperty("generation").GetInt64() &&
+            audio.Payload.GetProperty("expectedSession").GetProperty("scope").GetString() == publication.GetProperty("scope").GetString() &&
+            audio.Payload.GetProperty("expectedSession").GetProperty("generation").GetInt64() == publication.GetProperty("generation").GetInt64() &&
+            corrected["songId"]!.GetValue<string>() == songId && corrected["baselineDuration"]!.GetValue<double>() == 100 &&
+            await Control() == control,
+            "correction keeps the exact account, selected recording, permanent ID, fixed basis, occurrences, revision and history");
+    }
+    internal static JsonElement AudioValue(double duration = 100, long size = 120, string quality = "320k",
+        string url = "https://audio.example.test/synthetic.mp3") => MusicPlatformRuntimeFixture.Json(new {
+            url, requestQuality = quality, actualQuality = quality, qualityVerified = true, duration, size,
+            expiresAt = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeMilliseconds(), full = true });
+    private static IEnumerable<TestCase> AdapterCases()
+    {
+        yield return new("Official pre-cancelled audio consumes no recording material and creates no runtime work", async () =>
+        {
+            await using var runtime = AudioPeer(); var session = Session("tx"); runtime.Sessions.Current = session;
+            using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+            int materials = 0;
+            try
+            {
+                await new OfficialMusicAudio(runtime.Client).ResolveAsync(session,
+                    () => { materials++; return new() { ["songmid"] = "FixtureMID" }; },
+                    ["320k"], cancellation.Token, () => { });
+                throw new InvalidOperationException("Cancelled audio was accepted");
+            }
+            catch (OperationCanceledException) { }
+            await runtime.DisposeAsync();
+            Check(materials == 0 && runtime.Calls.Count == 0);
+        });
+        foreach (string platform in new[] { "wy", "tx", "kg" })
+        {
+            string p = platform;
+            yield return new("Official native audio consumes canonical facts without membership revalidation " + p, async () => {
+                await using var runtime = AudioPeer();
+                var session = Session(p); runtime.Sessions.Current = session;
+                var result = await new OfficialMusicAudio(runtime.Client).ResolveAsync(session,
+                    () => new() { ["songmid"] = "canonical/alias" }, ["320k"], default, () => { });
+                Check(result.RequestQuality == "320k" && result.ActualQuality == "320k" && result.QualityVerified &&
+                    result.Full && result.Duration == 100 && result.Size == 120);
+                Check(runtime.Requests.Count == 1 && runtime.Requests.Single().Parameters.GetProperty("id").GetString() == "canonical/alias");
+            });
+        }
+        foreach (string uri in new[] { "file:///private", "https://user:secret@audio.invalid/file", "javascript:invalid" })
+        {
+            string url = uri;
+            yield return new("Official native media URI constraint " + uri.Split(':')[0], async () => {
+                await using var runtime = AudioPeer(); var session = Session("tx"); runtime.Sessions.Current = session;
+                runtime.OnRequest = (_, _) => Task.FromResult(AudioValue(url: url));
+                try { await new OfficialMusicAudio(runtime.Client).ResolveAsync(session, () => new() { ["songmid"] = "1" }, ["320k"], default, () => { }); }
+                catch (MusicPlatformException e) when (e.Code == "INVALID_RESPONSE") { return; }
+                throw new InvalidOperationException("Unsafe media URI admitted");
+            });
+        }
+        yield return new("Official high-quality resolve without account is local AUTH_REQUIRED", async () => {
+            await using var store = new MemoryStore(); await using var runtime = AudioPeer();
+            await using var app = new MusicNativeApplication(store, runtime);
+            foreach (string platform in new[] { "wy", "tx", "kg" }) {
+                var song = await MusicSongFixture.AdoptAsync(app, Song(platform));
+                var result = await app.ExecuteAsync("music.official.resolve", new { platform, song, quality = "320k" });
+                Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == "AUTH_REQUIRED");
+            }
+            Check(runtime.Requests.Count == 0);
+        });
+    }
     internal static string Hash(char value) => new(value, 64);
     internal static JsonObject Recording(string platform = "tx", string id = "FixtureMID")
     {
@@ -474,13 +489,6 @@ public static class MusicOfficialAudioTests
     { if (!value) throw new InvalidOperationException(message); }
     private static MusicPlatformSession Session(string platform) => new(platform, new string('a', 64), 1, "123",
         platform switch { "tx" => "musicid=123; musickey=synthetic", "kg" => "userid=123; token=synthetic; KUGOU_API_MID=123456", _ => "MUSIC_U=synthetic; deviceId=fixture" });
-    private static HttpResponseMessage Qq(object value) => Json(new { code = 0, req_0 = new { code = 0, data = value } });
-    private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK) {
-        Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json") };
-    private sealed class Handler(Func<HttpRequestMessage, Task<HttpResponseMessage>> run) : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) => run(request);
-    }
     internal sealed class MemoryStore : IDocumentStore
     {
         internal readonly Dictionary<string, byte[]> Data = [];

@@ -1,5 +1,8 @@
 import Foundation
 import MeowMusicFeature
+import MeowMusicPlatform
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 // All values are synthetic. No Keychain, network, Node or reference checkout.
@@ -40,13 +43,23 @@ final class NativeMusicFixtureClock: @unchecked Sendable {
 enum NativeMusicFixture {
     static let installation = "11111111-1111-4111-8111-111111111111"
     static let date = Date(timeIntervalSince1970: 1_800_000_000)
+    static func client() throws -> MusicPlatformClient { try NativeMusicPlatformFixture().makeClient() }
+    static func routes(primary: any MusicPlatformFixtureResponding, others: any MusicPlatformFixtureResponding) -> MusicPlatformFixtureRouter {
+        .init(["tx": primary, "wy": others, "kg": others, "kw": others, "mg": others])
+    }
+    static func storedSong(_ track: MusicNativeTrackData) throws -> MJ {
+        var value = try MusicModel.normalize(track)
+        value["songId"] = .string(UUID().uuidString.lowercased())
+        if value["duration"].number > 0 { value["baselineDuration"] = value["duration"] }
+        return value
+    }
     static func track(_ mid: String = "SyntheticMID") -> MusicNativeTrackData {
         .init(platform: "tx", data: MJ.obj([("songmid", .string(mid)),
             ("qqSongId", .string("9007199254740993")), ("name", .string("Synthetic " + mid)), ("singer", .string("Fixture")),
             ("albumName", .string("Synthetic album")), ("albumMid", .string("SyntheticAlbum")), ("duration", .n(180)),
             ("types", .array([.obj([("type", .string("128k"))]), .obj([("type", .string("flac"))])]))]).bytes)
     }
-    static func song(_ mid: String = "SyntheticMID") throws -> MJ { try MusicModel.normalize(track(mid)) }
+    static func song(_ mid: String = "SyntheticMID") throws -> MJ { try storedSong(track(mid)) }
     static func source(generation: Int = 1, hash: String = String(repeating: "a", count: 64),
                        state: MusicScriptSourceItem.State = .ready) -> MusicScriptSource {
         .init(installationID: installation, generation: generation, enabled: true, state: state, version: "1",
@@ -54,29 +67,64 @@ enum NativeMusicFixture {
     }
     static func service(_ store: NativeMusicMemoryDocument = .init(), scripts: (any MusicScriptResolving)? = nil,
                         accounts: (any MusicNativeAccountProviding)? = nil,
-                        qq: any MusicPublicQQProviding = NativeMusicQQFixture(),
-                        http: any MusicNativeHTTPTransport = NativeMusicNoNetwork(),
+                        platform: (any MusicPlatformFixtureResponding)? = nil,
                         sourceDiscovery: (any MusicSourceDiscoveryCaching)? = nil,
                         clock: @escaping @Sendable () -> Date = { date },
                         monotonicClock: @escaping @Sendable () -> TimeInterval = { 0 }) async throws -> NativeMusicService {
-        let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts, qq: qq,
-            sourceDiscovery: sourceDiscovery, transport: http, clock: clock, monotonicClock: monotonicClock, random: { 0 })
+        let peer = platform ?? (accounts as? any MusicPlatformFixtureResponding) ?? NativeMusicPlatformFixture()
+        let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts,
+            platformClient: try peer.makeClient(), sourceDiscovery: sourceDiscovery,
+            clock: clock, monotonicClock: monotonicClock, random: { 0 })
         try await service.setAccess(available: true, generation: 1); return service
     }
 }
-struct NativeMusicNoNetwork: MusicNativeHTTPTransport {
-    func send(_ request: MusicNativeHTTPRequest) async throws -> MusicNativeHTTPResponse { throw MusicServiceError.unavailable }
-}
-actor NativeMusicQQFixture: MusicPublicQQProviding {
+actor NativeMusicPlatformFixture: MusicPlatformFixtureResponding {
     var gate: NativeMusicGate?
+    private var recorded: [MusicPlatformFixture.Request] = []
     func suspend(_ gate: NativeMusicGate) { self.gate = gate }
-    func search(query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage {
+    func calls() -> [MusicPlatformFixture.Request] { recorded }
+    func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
+        recorded.append(request)
         if let gate { await gate.wait() }
-        return .init(items: [NativeMusicFixture.track(query)], total: 1)
+        switch request.operation {
+        case "search":
+            let query = request.parameters[music: "keyword"].musicText
+            return try MusicPlatformFixture.page([NativeMusicFixture.track(query)], platform: request.platform)
+        case "lyrics":
+            return .object(["text": .string("[00:01.000]Synthetic\n[00:02.000]next"),
+                            "translation": .string("[00:01.000]合成")])
+        default: throw MusicPlatformFixture.Failure.remote("UNSUPPORTED")
+        }
     }
-    func lyrics(mid: String) async throws -> MusicNativeLyrics {
-        if let gate { await gate.wait() }
-        return .init(text: "[00:01.000]Synthetic\n[00:02.000]next", translation: "[00:01.000]合成")
+}
+
+/// Ordered canonical replies through the real runtime client. Gates deliberately
+/// allow late completion so consumers must isolate cancelled/access-old results.
+actor NativeMusicResultFixture: MusicPlatformFixtureResponding {
+    private var results: [RuntimeValue]
+    private let failure: MusicServiceError?
+    private let gate: NativeMusicGate?
+    private let gatedCall: Int
+    private var recorded: [MusicPlatformFixture.Request] = []
+    private var active = 0
+    private var idle: [CheckedContinuation<Void, Never>] = []
+    init(_ results: [RuntimeValue] = [], failure: MusicServiceError? = nil, gate: NativeMusicGate? = nil, gatedCall: Int = 1) {
+        self.results = results; self.failure = failure; self.gate = gate; self.gatedCall = gatedCall
+    }
+    func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
+        recorded.append(request); active += 1
+        defer {
+            active -= 1
+            if active == 0 { idle.forEach { $0.resume() }; idle.removeAll() }
+        }
+        if recorded.count == gatedCall, let gate { await gate.wait() }
+        if let failure { throw failure }
+        guard !results.isEmpty else { throw MusicServiceError.upstreamInvalid }
+        return results.removeFirst()
+    }
+    func calls() -> [MusicPlatformFixture.Request] { recorded }
+    func waitUntilIdle() async {
+        if active > 0 { await withCheckedContinuation { idle.append($0) } }
     }
 }
 actor NativeMusicScriptFixture: MusicScriptResolving {
@@ -104,23 +152,14 @@ actor NativeMusicScriptFixture: MusicScriptResolving {
     func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> { .init(value: .init(text: "[00:01.000]LX"), source: request.source) }
     func calls() -> [MusicScriptRequest] { requests }
 }
-actor NativeMusicHTTPFixture: MusicNativeHTTPTransport {
-    private var responses: [Data]
-    private var sent: [MusicNativeHTTPRequest] = []
-    init(_ responses: [MJ]) { self.responses = responses.map(\.bytes) }
-    func send(_ request: MusicNativeHTTPRequest) throws -> MusicNativeHTTPResponse {
-        sent.append(request)
-        guard !responses.isEmpty else { throw MusicServiceError.upstreamFailed }
-        return .init(status: 200, data: responses.removeFirst())
-    }
-    func calls() -> [MusicNativeHTTPRequest] { sent }
-}
 actor NativeMusicAccountFixture: MusicNativeAccountProviding {
     var bound = 1
     var gate: NativeMusicGate?
+    private var qualities = ["128k"]
     private var calls: [String] = []
     func suspend(_ gate: NativeMusicGate) { self.gate = gate }
     func logout() { bound += 1 }
+    func configureQualities(_ values: [String]) { qualities = values }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) async throws -> MusicNativeTrackPage {
         let own = bound; calls.append("recommendations")
         if let gate { await gate.wait() }
@@ -135,7 +174,7 @@ actor NativeMusicAccountFixture: MusicNativeAccountProviding {
     }
     func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) -> [MusicPlaybackOption] {
         calls.append("options")
-        return [.init(installationId: "official:synthetic", generation: bound, siteId: "tx", sourceKey: sourceKey, qualities: ["128k"],
+        return [.init(installationId: "official:synthetic", generation: bound, siteId: platform.rawValue, sourceKey: sourceKey, qualities: qualities,
                       title: "Official", version: "1", contentHash: String(repeating: "a", count: 64))]
     }
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) async throws -> MusicNativeAudio {

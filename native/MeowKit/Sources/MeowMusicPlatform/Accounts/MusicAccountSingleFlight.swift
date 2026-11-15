@@ -17,6 +17,7 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
     }
     private let lock = NSLock()
     private var flights: [Key: Flight] = [:]
+    private var physical: [UUID: Flight] = [:]
     private let joined: (@Sendable (Key) -> Void)?
 
     init(onJoin: (@Sendable (Key) -> Void)? = nil) { joined = onJoin }
@@ -27,6 +28,9 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
         lock.lock(); defer { lock.unlock() }
         return flights.values.reduce(0) { $0 + $1.waiters.count }
     }
+    var inFlight: Int {
+        lock.lock(); defer { lock.unlock() }; return physical.count
+    }
 
     private func enroll(_ key: Key, id: UUID, gate: MusicAccountOperation<Value>) -> (UUID, Bool) {
         lock.lock(); defer { lock.unlock() }
@@ -35,21 +39,23 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
             return (flight.id, false)
         }
         let flight = Flight()
-        flight.waiters[id] = gate; flights[key] = flight
+        flight.waiters[id] = gate; flights[key] = flight; physical[flight.id] = flight
         return (flight.id, true)
     }
     private func install(_ task: Task<Void, Never>, key: Key, flightID: UUID) {
         lock.lock()
-        if let flight = flights[key], flight.id == flightID {
+        if let flight = physical[flightID] {
             flight.task = task
+            let retired = flights[key]?.id != flightID
             lock.unlock()
+            if retired { task.cancel() }
         } else { lock.unlock(); task.cancel() }
     }
     private func finish(_ result: Result<Value, Error>, key: Key, flightID: UUID) {
         lock.lock()
-        guard let flight = flights[key], flight.id == flightID else { lock.unlock(); return }
-        flights.removeValue(forKey: key)
-        let waiters = Array(flight.waiters.values)
+        physical.removeValue(forKey: flightID)
+        let flight = flights[key]?.id == flightID ? flights.removeValue(forKey: key) : nil
+        let waiters = flight.map { Array($0.waiters.values) } ?? []
         lock.unlock()
         for waiter in waiters { waiter.finish(result) }
     }

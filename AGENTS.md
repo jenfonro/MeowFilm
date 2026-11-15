@@ -1,8 +1,8 @@
 # AGENTS.md
 
 meowfilm 的 iPhone 与 Windows 原生客户端：
-- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供原生业务、平台、账号、播放和持久化能力。公共 Node 运行器随 App 启动恢复启用猫源，并持有影视规则、搜索、智能播放、业务数据缓存与本地播放资料。
-- Windows：WPF / .NET 原生桌面应用；公共 Node 运行器随 App 启动，影视使用同一规则、搜索、智能播放与数据契约，音乐脚本仅在启用、调用或显式检测时执行。既有原生音乐和本地收藏不因影视业务而迁入运行器。
+- iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供原生业务、账号安全、播放和持久化能力。公共 Node 运行器随 App 启动恢复启用猫源，持有影视规则与会话，并执行两端共同音乐平台请求配方。
+- Windows：WPF / .NET 原生桌面应用；公共 Node 运行器随 App 启动，影视与音乐平台请求使用共同实现，音乐脚本仅在启用、调用或显式检测时执行。音乐账号安全保存、永久歌曲仓库、引用队列、共享图片和原生播放由本端 owner 管理。
 
 ## 命令
 
@@ -67,7 +67,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.3.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease 八模块，保留各自平台受信启动，不保留旧运行器协议回退；数据、媒体、会话与网易 token 契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`。
+- `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.3.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease、music-platform 九模块，保留各自平台受信启动；契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`、`docs/runtime/music-platform.md`。
 - `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
@@ -76,6 +76,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `packages/film-playback/` — 影视规则配置、搜索/智能播放会话、唯一业务数据缓存、本地历史/人工匹配/屏蔽/偏好，以及受控二进制媒体流；不复制原生收藏或图片缓存
 - `packages/film-rules/`、`packages/film-search/` — Node 影视 owner 使用的纯计算程序，共用宿主 QuickJS-NG；不在客户端执行或持久化规则
 - `packages/netease-token/` — 网易订阅实时 token 的按需 SDK Worker；账号和订阅写入仍由原生管理，契约与信任边界见 `docs/runtime/netease-token.md`
+- `packages/music-platform/` — 五平台现有请求配方、字段转换、匿名协议状态和 API 缓存的共同 Node owner；借用既有网易 token owner，不持久保存原生账号、歌曲仓库或图片。
 - `packages/novel-rules/` — source 运行器使用的小说身份、搜索归并、章节匹配、净化与简繁纯规则；客户端保留原生状态、排版与交互，不再链接独立规则引擎
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
 - `scripts/windows/` — Windows 构建、测试、打包与结构检查

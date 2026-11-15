@@ -79,6 +79,8 @@ public sealed partial class MusicCapability
         if (!CanConfirmDailyStyle || application is not IMusicDailyStylePreferences preferences || dailyStyleEditor is not { } editor) return;
         if (dailyStyleAccount != CatalogAccountKey("wy")) { RetireDailyStyleEditor(); return; }
         string saveAccount = dailyStyleAccount;
+        string receiptKey = "music.platform.dailyStyle:wy:" + editor.UserId;
+        long submission = ++settingSubmission;
         long generation = loadGeneration;
         bool CanPublishSave() => !stopping && generation == loadGeneration && IsDailyStyle && saveAccount == CatalogAccountKey("wy");
         void RetireSavedAccountSnapshots()
@@ -91,19 +93,10 @@ public sealed partial class MusicCapability
         void SettleSavePage()
         {
             RetireSavedAccountSnapshots();
-            if (stopping || !IsDailyStyle || saveAccount != CatalogAccountKey("wy")) return;
-            bool returned = generation != loadGeneration;
-            RetireCatalogLoad();
-            generation = loadGeneration;
-            InvalidateCatalogAction();
+            if (!CanPublishSave()) return;
             catalogPages.Clear(); catalogAccountStamp = ""; catalogMembersLoaded = false;
             catalogSongs.Clear(); utilitySections.Clear(); selectedSong = null;
             dailyStyleNeedsRead = true;
-            if (returned)
-            {
-                RetireDailyStyleEditor();
-                dailyStyleSelected = []; dailyStyleSelectedCategory = "";
-            }
             Changed(nameof(SelectedSong)); RefreshBindings(); DailyStyleBindings();
         }
         var previousPage = catalogPages.GetValueOrDefault(catalogPage);
@@ -123,6 +116,8 @@ public sealed partial class MusicCapability
             catalogSongs.Clear(); utilitySections.Clear(); selectedSong = null;
             Changed(nameof(SelectedSong)); RefreshBindings();
             var result = await preferences.SaveDailyStyleAsync(editor, selection, lifetime.Token);
+            if (result.Status is MusicDailyStyleWriteStatus.Confirmed or MusicDailyStyleWriteStatus.Unknown)
+                SettingReceipt(receiptKey, "风格偏好", submission, result.Status == MusicDailyStyleWriteStatus.Confirmed);
             SettleSavePage();
             if (!CanPublishSave()) return;
             if (result.Readback is null && result.Status is (MusicDailyStyleWriteStatus.NotSent or MusicDailyStyleWriteStatus.Rejected) && previousPage is not null)
@@ -133,8 +128,7 @@ public sealed partial class MusicCapability
             if (result.Readback is { } reply)
             {
                 var sections = MusicCatalogDto.Read(reply, "wy", "daily", "风格推荐", "songs").ToArray();
-                ValidatePersonalCatalog(reply, catalogLoadedTarget, sections.Sum(s => s.Items.Count));
-                var state = new CatalogPageState(sections, [], "", "", "风格推荐", MusicCatalogDto.Text(reply, "cover"), false, null,
+                var state = new CatalogPageState(sections, [], "", "风格推荐", MusicCatalogDto.Text(reply, "cover"), false, null,
                     sections.Sum(s => s.Items.Count), Target: catalogLoadedTarget, AccountStamp: saveAccount, ExpiresAt: CatalogExpiry(reply), DailySelection: DailySelectionSnapshot(reply));
                 catalogPages.Clear(); catalogPages[1] = state;
                 PublishDailyStyleSelection(reply);
@@ -152,7 +146,13 @@ public sealed partial class MusicCapability
             if (result.Status != MusicDailyStyleWriteStatus.Confirmed || result.SelectionMatches != true)
             { status = result.ErrorCode is { } code ? MusicCatalogDto.ErrorText(code) : "风格偏好尚未确认，请重新读取"; Changed(nameof(Status)); }
         }
-        catch (Exception error) { SettleSavePage(); if (CanPublishSave()) { dailyStyleNeedsRead = true; status = DailyStyleError(error); Changed(nameof(Status)); } }
+        catch (Exception error)
+        {
+            if (error is MusicPlatformException { Code: "COMMIT_UNKNOWN" })
+                SettingReceipt(receiptKey, "风格偏好", submission, confirmed: false);
+            SettleSavePage();
+            if (CanPublishSave()) { dailyStyleNeedsRead = true; status = DailyStyleError(error); Changed(nameof(Status)); }
+        }
         finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); dailyStyleBusy = false; DailyStyleBindings(); CatalogBindings(); }
     }
 

@@ -41,7 +41,7 @@ internal static class Program
                         protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
                 });
                 capabilities.Add(new MusicCapability(runtime, storage, playback,
-                    Path.Combine(cacheRoot, "audio"), cacheStore));
+                    Path.Combine(cacheRoot, "music-audio"), cacheStore));
                 pendingRules = new FilmRuleService(runtime);
                 pendingSources = new FilmSourceService(runtime, storage);
                 pendingMetadata = new FilmMetadataService(runtime);

@@ -18,6 +18,8 @@ public partial class MusicRecordView : UserControl
         typeof(bool), typeof(MusicRecordView), new PropertyMetadata(false, Changed));
     public static readonly DependencyProperty TrackIdentityProperty = DependencyProperty.Register(nameof(TrackIdentity),
         typeof(string), typeof(MusicRecordView), new PropertyMetadata("", Changed));
+    public static readonly DependencyProperty ArtworkIdentityProperty = DependencyProperty.Register(nameof(ArtworkIdentity),
+        typeof(string), typeof(MusicRecordView), new PropertyMetadata("", Changed));
     public static readonly DependencyProperty SwipeEnabledProperty = DependencyProperty.Register(nameof(SwipeEnabled),
         typeof(bool), typeof(MusicRecordView), new PropertyMetadata(false, SwipeStateChanged));
     public static readonly DependencyProperty SwipeIdentityProperty = DependencyProperty.Register(nameof(SwipeIdentity),
@@ -25,6 +27,7 @@ public partial class MusicRecordView : UserControl
     public string Address { get => (string)GetValue(AddressProperty); set => SetValue(AddressProperty, value); }
     public bool Playing { get => (bool)GetValue(PlayingProperty); set => SetValue(PlayingProperty, value); }
     public string TrackIdentity { get => (string)GetValue(TrackIdentityProperty); set => SetValue(TrackIdentityProperty, value); }
+    public string ArtworkIdentity { get => (string)GetValue(ArtworkIdentityProperty); set => SetValue(ArtworkIdentityProperty, value); }
     public bool SwipeEnabled { get => (bool)GetValue(SwipeEnabledProperty); set => SetValue(SwipeEnabledProperty, value); }
     public string SwipeIdentity { get => (string)GetValue(SwipeIdentityProperty); set => SetValue(SwipeIdentityProperty, value); }
     public static readonly DependencyProperty PaletteBrushProperty = DependencyProperty.Register(nameof(PaletteBrush),
@@ -45,12 +48,10 @@ public partial class MusicRecordView : UserControl
     internal bool IsSwiping { get; private set; }
     internal double SwipeOffset => SwipeTranslation.X;
     public event EventHandler<MusicRecordSwipeEventArgs>? SwipeCommitted;
-    public event EventHandler<ArtworkLoadEventArgs>? ArtworkLoadCompleted;
 
     public MusicRecordView()
     {
         InitializeComponent();
-        Cover.LoadCompleted += (_, e) => ArtworkLoadCompleted?.Invoke(this, e);
         UpdateGrooves();
         SetBinding(PaletteBrushProperty, new Binding(nameof(ArtworkImage.PaletteBrush)) { Source = Cover, Mode = BindingMode.OneWay });
         Focusable = true;
@@ -94,6 +95,8 @@ public partial class MusicRecordView : UserControl
         if (record.Cover is null) return;
         if (args.Property == AddressProperty)
             record.Cover.Address = record.Address;
+        if (args.Property == ArtworkIdentityProperty)
+            record.Cover.DisplayIdentity = record.ArtworkIdentity;
         if (args.Property == TrackIdentityProperty)
         {
             // A committed swipe has already taken the old disc out of view.

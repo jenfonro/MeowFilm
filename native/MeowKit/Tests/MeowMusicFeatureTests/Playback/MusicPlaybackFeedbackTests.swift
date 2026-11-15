@@ -70,6 +70,7 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
 }
 
 @MainActor final class MusicPlaybackFeedbackTests: XCTestCase {
+    private let receipts = MusicSettingsReceiptOwner()
     private func candidate(_ id: String = "observed") -> MusicPlaybackCandidate {
         .init(attemptId: id, occurrenceId: "entry-1", resourceId: "music:" + id,
               url: URL(string: "https://media.invalid/synthetic.mp3")!, title: "Synthetic", requestedQuality: "128k",
@@ -190,7 +191,7 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
     }
 
     func testKGRequiresCurrentExplicitConfirmationAndCancelDoesNotWrite() async throws {
-        let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store)
+        let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store, receipts: receipts)
         model.setAccess(available: true, generation: UUID()); await model.load()
         model.update(.kugou, true)
         let cancelled = try XCTUnwrap(model.confirmation)
@@ -210,7 +211,7 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
 
     func testConfirmationCannotSurviveRereadOtherSettingOrAccessEpochEvenForSameRevision() async throws {
         for change in ["reread", "generation", "lock", "disappear", "other-setting"] {
-            let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store)
+            let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store, receipts: receipts)
             let generation = UUID()
             model.setAccess(available: true, generation: generation); await model.load()
             model.update(.kugou, true)
@@ -235,13 +236,15 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
 
     func testCASOrUnknownResultInvalidatesConsentAndIsNeverAutomaticallyReplayed() async throws {
         for failure in [MusicServiceError.staleRevision, .storageConflict, .commitUnconfirmed] {
-            let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store)
+            let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store, receipts: receipts)
             model.setAccess(available: true, generation: UUID()); await model.load()
             await store.fail(failure)
             model.update(.kugou, true); let ticket = try XCTUnwrap(model.confirmation)
             model.confirm(ticket); await model.flush()
             XCTAssertEqual(model.value?.revision, failure == .commitUnconfirmed ? 1 : 0)
-            XCTAssertNil(model.confirmation); XCTAssertEqual(model.error, failure.localizedDescription)
+            XCTAssertNil(model.confirmation)
+            XCTAssertEqual(model.error, failure == .commitUnconfirmed ? nil : failure.localizedDescription)
+            XCTAssertEqual(receipts.unknown.map(\.setting), failure == .commitUnconfirmed ? ["playback/feedback/kg"] : [])
             let reads = await store.readCount(); XCTAssertEqual(reads, 2)
             await store.fail(nil); await model.load()
             model.confirm(ticket); await model.flush()
@@ -254,7 +257,7 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
         for changedAccess in [false, true] {
             let store = FeedbackSettingsStore(), gate = FeedbackSettingsGate(), generation = UUID()
             var reconciliations: [UUID?] = []
-            let model = MusicPlaybackFeedbackSettingsModel(service: store, onChanged: {
+            let model = MusicPlaybackFeedbackSettingsModel(service: store, receipts: receipts, onChanged: {
                 reconciliations.append($0)
             })
             model.setAccess(available: true, generation: generation); await model.load()
@@ -269,13 +272,32 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
             XCTAssertNil(model.value); XCTAssertNil(model.error); XCTAssertFalse(model.busy)
             let writes = await store.count(); XCTAssertEqual(writes, 1)
             let reads = await store.readCount(); XCTAssertEqual(reads, changedAccess ? 1 : 2)
+            XCTAssertEqual(receipts.unknown.map(\.setting), ["playback/feedback/tx"])
+            model.setAccess(available: true, generation: UUID()); await model.load()
+            XCTAssertEqual(model.value?.platforms[.qq]?.enabled, true)
+            XCTAssertEqual(receipts.unknown.map(\.setting), ["playback/feedback/tx"], "Reopening does not confirm the write")
+            await store.fail(nil)
+            model.update(.netease, true); await model.flush()
+            XCTAssertEqual(receipts.unknown.map(\.setting), ["playback/feedback/tx"])
+            await store.fail(.storageFailed)
+            let beforeFailure = model.value
+            model.update(.qq, false); await model.flush()
+            XCTAssertEqual(model.error, MusicServiceError.storageFailed.localizedDescription)
+            XCTAssertEqual(model.value, beforeFailure); XCTAssertFalse(model.busy)
+            let failedWrites = await store.count(); XCTAssertEqual(failedWrites, 3)
+            XCTAssertEqual(receipts.unknown.map(\.setting), ["playback/feedback/tx"])
+            await store.fail(nil)
+            model.update(.qq, false); await model.flush(); await receipts.flush()
+            XCTAssertTrue(receipts.unknown.isEmpty)
+            XCTAssertEqual(model.value?.platforms[.qq]?.enabled, false)
+            let finalWrites = await store.count(); XCTAssertEqual(finalWrites, 4, "Only explicit saves may write after an unknown")
         }
     }
 
     func testSharedSettingsChangesCoalesceBehindLoadAndCommitWithoutCancellingOrReplaying() async {
         for reading in [true, false] {
             let store = FeedbackSettingsStore(), gate = FeedbackSettingsGate()
-            let model = MusicPlaybackFeedbackSettingsModel(service: store)
+            let model = MusicPlaybackFeedbackSettingsModel(service: store, receipts: receipts)
             model.setAccess(available: true, generation: UUID()); await model.load()
             var published: [Int] = []
             let observation = model.$value.compactMap { $0?.revision }.sink { published.append($0) }
@@ -310,7 +332,7 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
     }
 
     func testInsufficientSharedRevisionStopsReadingUntilExplicitRetry() async {
-        let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store)
+        let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store, receipts: receipts)
         model.setAccess(available: true, generation: UUID()); await model.load()
         model.settingsChanged(revision: 2); await model.flush()
         XCTAssertNil(model.value)

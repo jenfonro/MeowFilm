@@ -204,8 +204,9 @@ final class MusicCandidateIntegrationTests: XCTestCase {
     @MainActor func testNativeServiceDiscoveryKeepsQueueAndUsesExistingPlayerAndFactOwner() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store(), scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["wy"]) // Seed is tx; the existing-only picker cannot resolve it.
-        let service = try await NativeMusicFixture.service(store, scripts: scripts,
-            qq: MusicNativeCandidateDiscoveryQQ(), http: MusicNativeCandidateDiscoveryHTTP())
+        let service = try await NativeMusicFixture.service(store,
+            scripts: scripts,
+            platform: NativeMusicFixture.routes(primary: MusicNativeCandidateDiscoveryQQ(), others: MusicNativeDiscoveryPlatforms()))
         let player = MusicCandidateIntegrationPlayer(), model = MusicViewModel(service: service, player: player)
         var requests: [MusicPlaybackDestination] = []
         model.onRequestPresentation = { requests.append($0) }
@@ -216,15 +217,32 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         XCTAssertEqual(calls.count, 1, "No choose/second resolve after discovery")
         XCTAssertEqual(calls.first?.siteID, "wy")
         XCTAssertEqual(model.state.revision, original.queue["revision"].int)
-        XCTAssertEqual(model.queue, queue)
+        let expectedQueue = queue.map { entry in
+            let old = entry.track
+            let track = MusicRemoteTrack(ref: old.ref, songId: old.songId, title: old.title,
+                artist: old.artist, album: old.album, duration: old.duration,
+                sources: old.sources + [.init(sourceKey: MJ.strings(["wy", "321", ""]).json, platform: "wy", nativeId: "321")],
+                artwork: old.artwork, artistNames: old.artistNames, sourcePosition: old.sourcePosition)
+            return MusicQueueEntry(id: entry.id, track: track, sourceTitle: entry.sourceTitle,
+                remoteSessionID: entry.remoteSessionID, displayIdentity: entry.displayIdentity)
+        }
+        XCTAssertEqual(model.queue, expectedQueue)
+        XCTAssertEqual(snapshot.entries, expectedQueue)
+        XCTAssertEqual(snapshot.revision, original.queue["revision"].int)
+        XCTAssertEqual(snapshot.currentId, original.queue["currentId"].string)
         XCTAssertEqual(snapshot.entries.map(\.id), queue.map(\.id))
         XCTAssertEqual(snapshot.entries[0].track.sources.map(\.platform), ["tx", "wy"])
         let prepared = try await service.read()
         XCTAssertEqual(prepared.queue, original.queue)
+        XCTAssertEqual(prepared.playback, original.playback)
+        XCTAssertEqual(prepared.history, original.history)
         XCTAssertEqual(model.position, 0, "Cold restoration does not restore playback time")
         XCTAssertEqual(player.resources.count, 1)
         XCTAssertTrue(requests.isEmpty); XCTAssertFalse(model.isResolving)
-        XCTAssertEqual(store.snapshot().2, writes)
+        XCTAssertGreaterThan(store.snapshot().2, writes, "Discovered sources belong to the durable song repository")
+        let stored = try await service.song(.init(kind: .queue, id: queue[0].id), prepared)
+        XCTAssertEqual(stored["songId"].string, snapshot.entries[0].track.songId)
+        XCTAssertEqual(try MusicModel.sources(stored).map(\.platform), ["tx", "wy"])
         let before = try await service.playedSongs(); XCTAssertTrue(before.isEmpty)
         let resource = try XCTUnwrap(model.activeResourceID), occurrence = try XCTUnwrap(model.activeOccurrenceID)
         model.onPlayback(.init(attemptId: String(resource.dropFirst(6)), occurrenceId: occurrence,
@@ -440,9 +458,11 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         let kept = try XCTUnwrap(second["sources"].array.first)["sourceKey"].string
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["wy"])
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        let service = try await NativeMusicFixture.service(store, scripts: scripts, qq: MusicNativeCandidateDiscoveryQQ(),
-            http: MusicNativeCandidateDiscoveryHTTP(), sourceDiscovery: cache)
+        let cache = MusicNativeMemorySourceDiscoveryCache()
+        let service = try await NativeMusicFixture.service(store,
+            scripts: scripts,
+            platform: NativeMusicFixture.routes(primary: MusicNativeCandidateDiscoveryQQ(), others: MusicNativeDiscoveryPlatforms()),
+            sourceDiscovery: cache)
         let player = MusicCandidateIntegrationHandoffPlayer(), model = MusicViewModel(service: service, player: player)
         await model.load()
         await model.togglePlayback()
@@ -465,8 +485,9 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         XCTAssertEqual(calls.filter { $0.sourceKey == rejected }.count, 1)
         XCTAssertTrue(calls.dropFirst().allSatisfy { $0.sourceKey == kept })
         XCTAssertEqual(player.resources.count, 2); XCTAssertEqual(player.stopped.count, 1)
-        XCTAssertEqual(model.state.revision, 2)
-        XCTAssertFalse(try XCTUnwrap(model.current).track.sources.contains { $0.sourceKey == rejected })
+        XCTAssertEqual(model.state.revision, 1)
+        XCTAssertTrue(try XCTUnwrap(model.current).track.sources.contains { $0.sourceKey == rejected },
+                      "Exclusion changes playback eligibility, not permanent source ownership")
         let excluded = try await service.recordingSourceExclusions(song)
         XCTAssertEqual(excluded, [rejected])
         await session.close(); await model.close(); await service.close()

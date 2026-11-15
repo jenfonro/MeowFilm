@@ -53,6 +53,111 @@ final class MusicSystemMediaMetadataTests: XCTestCase {
         await fixture.model.close()
     }
 
+    func testSamePermanentSongURLChangeKeepsContentAndSystemImagesUntilReadyAndTrackSwitchClearsThem() async throws {
+        for succeeds in [true, false] {
+            let changedStarted = expectation(description: "Replacement artwork requested, succeeds: \(succeeds)")
+            let nextStarted = expectation(description: "Next song artwork requested, succeeds: \(succeeds)")
+            let first = SystemMetadataArtworkFixture(data: png(.red))
+            let changed = SystemMetadataArtworkFixture(
+                data: succeeds ? png(.blue) : Data([1, 2, 3]), held: true,
+                started: { changedStarted.fulfill() })
+            let next = SystemMetadataArtworkFixture(data: png(.green), held: true, started: { nextStarted.fulfill() })
+            defer { first.close(); changed.close(); next.close() }
+            let sharedImages = images()
+            let service = SystemMusicMetadataService()
+            let fixture = try SystemMusicMetadataFixture(images: sharedImages, service: service)
+            defer { fixture.dispose() }
+            let songID = UUID().uuidString
+            func song(artwork: URL) -> MusicRemoteTrack {
+                .init(ref: .init(kind: .library, id: songID), songId: songID,
+                      title: "Same permanent song", artist: "Artist", artwork: artwork)
+            }
+            let initial = song(artwork: first.url)
+            await service.setMetadata(initial, candidates: [])
+            let attempt = try fixture.select(initial)
+            fixture.model.beginPlaybackMetadata()
+            await fixture.model.playbackMetadata.flush()
+            await wait("Initial content and real system artwork are ready") {
+                fixture.content.artwork != nil && fixture.playback.nowPlayingMetadata?.artwork != nil &&
+                    self.systemArtwork != nil
+            }
+            let initialImage = try XCTUnwrap(fixture.content.artwork)
+            let initialData = try XCTUnwrap(fixture.playback.nowPlayingMetadata?.artwork?.data)
+            let initialSystemImage = try XCTUnwrap(systemArtwork)
+            let revision = fixture.model.state.revision
+            var contentImages: [UIImage?] = [initialImage]
+            var systemImages: [Data?] = []
+            let contentObservation = fixture.content.artworkChanges.sink {
+                contentImages.append(fixture.content.artwork)
+            }
+            let systemObservation = fixture.appearance.$displayedArtwork.sink { systemImages.append($0?.data) }
+
+            let replacement = song(artwork: changed.url)
+            XCTAssertNotEqual(replacement.artwork, initial.artwork)
+            await service.setMetadata(replacement, candidates: [])
+            fixture.model.playbackState.queue = [.init(id: songID, track: replacement)]
+            fixture.model.beginPlaybackMetadata()
+            await fixture.model.playbackMetadata.flush()
+            await fulfillment(of: [changedStarted], timeout: 3)
+            await updates()
+            XCTAssertEqual(fixture.model.displayTrack?.songId, songID)
+            XCTAssertEqual(fixture.model.displayTrack?.artwork, changed.url)
+            XCTAssertEqual(fixture.model.state.revision, revision)
+            XCTAssertEqual(fixture.playback.currentAttempt, attempt)
+            XCTAssertTrue(fixture.content.artwork === initialImage, "Held same-song replacement cannot flash a placeholder")
+            XCTAssertEqual(fixture.playback.nowPlayingMetadata?.artwork?.data, initialData)
+            XCTAssertTrue(systemArtwork === initialSystemImage, "The OS image must also retain the successful previous cover")
+            XCTAssertTrue(contentImages.allSatisfy { $0 === initialImage })
+            XCTAssertTrue(systemImages.allSatisfy { $0 == initialData })
+
+            changed.finish()
+            await fixture.content.flushArtwork()
+            await updates()
+            if succeeds {
+                let readyImage = try XCTUnwrap(sharedImages.cached(changed.url))
+                await wait("Ready replacement reaches both content and the system image") {
+                    fixture.content.artwork === readyImage &&
+                        fixture.playback.nowPlayingMetadata?.artwork?.data != initialData &&
+                        self.systemArtwork != nil && self.systemArtwork !== initialSystemImage
+                }
+                XCTAssertFalse(readyImage === initialImage)
+                XCTAssertNotNil(fixture.playback.nowPlayingMetadata?.artwork)
+                XCTAssertGreaterThan(systemArtwork?.image(at: CGSize(width: 64, height: 64))?.size.width ?? 0, 0)
+                XCTAssertTrue(contentImages.allSatisfy { $0 === initialImage || $0 === readyImage })
+                XCTAssertTrue(systemImages.allSatisfy { $0 != nil }, "Same-song replacement never publishes empty artwork")
+            } else {
+                XCTAssertNil(sharedImages.cached(changed.url), "A failed decode must not become a successful cache entry")
+                XCTAssertTrue(fixture.content.artwork === initialImage)
+                XCTAssertEqual(fixture.playback.nowPlayingMetadata?.artwork?.data, initialData)
+                XCTAssertTrue(systemArtwork === initialSystemImage)
+                XCTAssertTrue(contentImages.allSatisfy { $0 === initialImage })
+                XCTAssertTrue(systemImages.allSatisfy { $0 == initialData })
+            }
+            XCTAssertEqual(first.requestCount, 1)
+            XCTAssertEqual(changed.requestCount, 1)
+            contentObservation.cancel(); systemObservation.cancel()
+
+            let nextID = UUID().uuidString
+            try fixture.select(track(nextID, artwork: next.url))
+            await fulfillment(of: [nextStarted], timeout: 3)
+            await updates()
+            XCTAssertNil(fixture.content.artwork, "Another song cannot display this song's retained cover")
+            XCTAssertNil(fixture.appearance.displayedArtwork)
+            XCTAssertNil(fixture.playback.nowPlayingMetadata?.artwork)
+            XCTAssertNil(systemArtwork)
+            next.finish()
+            await fixture.content.flushArtwork()
+            await wait("The new song publishes only its own ready artwork") {
+                fixture.playback.nowPlayingMetadata?.title == "歌曲 " + nextID &&
+                    fixture.playback.nowPlayingMetadata?.artwork != nil && self.systemArtwork != nil
+            }
+            let nextImage = try XCTUnwrap(sharedImages.cached(next.url))
+            XCTAssertTrue(fixture.content.artwork === nextImage)
+            XCTAssertFalse(nextImage === initialImage)
+            await fixture.model.close()
+        }
+    }
+
     func testBackgroundFirstArtworkReachesSystemAndLyricsReuseTheSameImage() async throws {
         let started = expectation(description: "Current artwork requested")
         let cover = SystemMetadataArtworkFixture(data: png(.red), held: true, started: { started.fulfill() })
@@ -104,6 +209,95 @@ final class MusicSystemMediaMetadataTests: XCTestCase {
         XCTAssertEqual(cover.requestCount, 1)
         XCTAssertEqual(fixture.playback.nowPlayingMetadata?.artwork?.data, data)
         XCTAssertTrue(systemArtwork === published, "Text, progress and pause/resume retain the encoded system image")
+        await fixture.model.close()
+    }
+
+    func testClearingImagesDuringSameSongReplacementDoesNotRotateCandidatesOrRefillFromOldWork() async throws {
+        let started = expectation(description: "Replacement image requested")
+        let original = SystemMetadataArtworkFixture(data: png(.red))
+        let replacement = SystemMetadataArtworkFixture(data: png(.blue), held: true, started: { started.fulfill() })
+        defer { original.close(); replacement.close() }
+        let cache = MusicUIKitArtworkCache([:])
+        let sharedImages = images()
+        sharedImages.configure(cache: cache, selector: nil)
+        let service = SystemMusicMetadataService()
+        let fixture = try SystemMusicMetadataFixture(images: sharedImages, service: service)
+        defer { fixture.dispose() }
+        defer { NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil) }
+        let songID = UUID().uuidString
+        let initial = track(songID, artwork: original.url)
+        await service.setMetadata(initial, candidates: [])
+        let attempt = try fixture.select(initial)
+        fixture.model.beginPlaybackMetadata()
+        await fixture.model.playbackMetadata.flush()
+        await wait("Original image reaches the player and system media") {
+            fixture.content.artwork != nil && self.systemArtwork != nil
+        }
+        let previousImage = try XCTUnwrap(fixture.content.artwork)
+        let previousSystemImage = try XCTUnwrap(systemArtwork)
+        let revision = fixture.model.state.revision
+        let changed = track(songID, artwork: replacement.url)
+        await service.setMetadata(changed, candidates: [])
+        fixture.model.playbackState.queue = [.init(id: songID, track: changed)]
+        fixture.model.beginPlaybackMetadata()
+        await fixture.model.playbackMetadata.flush()
+        await fulfillment(of: [started], timeout: 3)
+
+        await cache.clearImages()
+        replacement.finish()
+        await fixture.content.flushArtwork()
+        await fixture.model.playbackMetadata.flush()
+        await updates()
+        // Normal presentation updates are not new image demand or retry.
+        fixture.model.clock.position = 1
+        await updates()
+        await fixture.content.flushArtwork()
+        let rotations = await service.artworkFailureCount
+        let stored = await cache.read(replacement.url)
+        XCTAssertEqual(rotations, 0, "Cache invalidation is cancellation, not a failed candidate")
+        XCTAssertEqual(replacement.requestCount, 1, "Old demand cannot immediately refill a cleared cache")
+        XCTAssertNil(stored)
+        XCTAssertNil(sharedImages.cached(replacement.url))
+        XCTAssertEqual(fixture.model.displayTrack?.artwork, replacement.url)
+        XCTAssertEqual(fixture.model.state.revision, revision)
+        XCTAssertEqual(fixture.playback.currentAttempt, attempt)
+        XCTAssertTrue(fixture.content.artwork === previousImage)
+        XCTAssertTrue(systemArtwork === previousSystemImage)
+
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        await updates()
+        XCTAssertEqual(replacement.requestCount, 1)
+        XCTAssertTrue(fixture.content.artwork === previousImage)
+        XCTAssertTrue(systemArtwork === previousSystemImage)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await fixture.content.flushArtwork()
+        await fixture.model.playbackMetadata.flush()
+        await wait("New foreground demand replaces the retained player and system images") {
+            fixture.content.artwork != nil && fixture.content.artwork !== previousImage &&
+                self.systemArtwork != nil && self.systemArtwork !== previousSystemImage
+        }
+        let readyImage = try XCTUnwrap(fixture.content.artwork)
+        let readySystemImage = try XCTUnwrap(systemArtwork)
+        let recovered = await cache.read(replacement.url)
+        let recoveredRotations = await service.artworkFailureCount
+        XCTAssertTrue(readyImage === sharedImages.cached(replacement.url))
+        XCTAssertNotNil(recovered)
+        XCTAssertNotNil(UIImage(data: try XCTUnwrap(fixture.playback.nowPlayingMetadata?.artwork?.data)))
+        XCTAssertGreaterThan(readySystemImage.image(at: CGSize(width: 64, height: 64))?.size.width ?? 0, 0)
+        XCTAssertEqual(replacement.requestCount, 2, "Only the new explicit demand may reload the same URL")
+        XCTAssertEqual(original.requestCount, 1)
+        XCTAssertEqual(recoveredRotations, 0)
+        XCTAssertEqual(fixture.model.displayTrack?.artwork, replacement.url)
+        XCTAssertEqual(fixture.model.state.revision, revision)
+        XCTAssertEqual(fixture.playback.currentAttempt, attempt)
+        fixture.model.clock.position = 2
+        fixture.model.metadataState.lyricState = "none"
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await updates()
+        await fixture.content.flushArtwork()
+        XCTAssertEqual(replacement.requestCount, 2)
+        XCTAssertTrue(fixture.content.artwork === readyImage)
+        XCTAssertTrue(systemArtwork === readySystemImage)
         await fixture.model.close()
     }
 
@@ -436,11 +630,18 @@ private final class SystemMusicMetadataFixture {
     }
 }
 
-private actor SystemMusicMetadataService: MusicServing, MusicSourceExclusionServing {
+private actor SystemMusicMetadataService: MusicServing, MusicSourceExclusionServing, MusicArtworkSelecting {
     private var metadata: MusicMetadataCandidates?
     private var nextExclusionRead: (@Sendable () -> Void)?
     private var pendingExclusionRead: CheckedContinuation<[MusicSourceExclusion], Never>?
     private(set) var exclusionReadCount = 0
+    private(set) var artworkFailureCount = 0
+
+    func failedArtwork(songID: String, url: URL, attempted: Set<URL>) -> URL? {
+        artworkFailureCount += 1
+        return nil
+    }
+    func succeededArtwork(songID: String, url: URL, replacing requested: URL) -> URL? { url }
 
     func holdNextExclusionRead(_ started: @escaping @Sendable () -> Void) { nextExclusionRead = started }
     func releaseExclusionRead() {
@@ -476,7 +677,7 @@ private actor SystemMusicMetadataService: MusicServing, MusicSourceExclusionServ
     func setMetadata(_ track: MusicRemoteTrack, candidates: [MusicMetadataCandidate]) {
         metadata = .init(occurrenceID: track.ref.id, queueRevision: 0,
             preferences: .init(revision: 0, platforms: [.netease, .qq], enabledPlatforms: [.netease, .qq]),
-            track: track, contentRevision: nil, contentFingerprint: track.songId, candidates: candidates)
+            track: track, candidates: candidates)
     }
     func metadataCandidates(occurrenceID: String) throws -> MusicMetadataCandidates {
         guard let metadata, metadata.occurrenceID == occurrenceID else { throw MusicServiceError.unsupported }

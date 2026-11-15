@@ -5,14 +5,224 @@ import MeowMusicPlatform
 @testable import MeowMusicNativeService
 
 final class MusicAudioCacheAdmissionTests: XCTestCase {
+    func testPublicOfficialResolveUsesCurrentRepositoryAfterAccountSuspension() async throws {
+        let cases: [(metadata: Int, allowed: Bool)] = [(180, true), (190, true), (191, false)]
+        for value in cases {
+            let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(duration: 100))
+            let source = try XCTUnwrap(MusicModel.sources(song).first)
+            let selected = MusicPlaybackSelection(installationId: AdmissionAccounts.provider, generation: 1,
+                siteId: source.platform, sourceKey: source.sourceKey, quality: "flac")
+            let gate = MusicNativeCandidateDiscoveryBarrier(), accounts = AdmissionAccounts()
+            await accounts.holdResolve(gate)
+            let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
+                accounts: accounts)
+            let before = try await service.read(), attemptID = UUID().uuidString.lowercased()
+            let task = Task { try await service.resolve(attemptId: attemptID, occurrenceId: "entry-1", selection: selected) }
+            await gate.started(1)
+            let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                title: "Current official title", duration: value.metadata))
+            let adopted = try await service.adoptSongs([corrected], authoritative: true)
+            XCTAssertEqual(adopted.first?["songId"], song["songId"])
+            await gate.release()
+            if value.allowed {
+                let result = try await task.value
+                XCTAssertEqual(result.title, "Current official title")
+                XCTAssertEqual(result.delivery?.duration, 180)
+                XCTAssertEqual(result.resolvedSelection, selected); XCTAssertEqual(result.requestedQuality, "flac")
+                XCTAssertEqual(result.attemptId, attemptID); XCTAssertEqual(result.occurrenceId, "entry-1")
+                XCTAssertNil(result.byteSource)
+            } else {
+                do { _ = try await task.value; XCTFail("Official media outside the current duration boundary was published") }
+                catch { XCTAssertEqual(MusicServiceError.sanitized(error), .invalidMediaCandidate) }
+            }
+            let requests = await accounts.resolutionRequests
+            XCTAssertEqual(requests.count, 1); XCTAssertEqual(requests.first?.platform, .qq)
+            XCTAssertEqual(requests.first?.nativeID, source.nativeId); XCTAssertEqual(requests.first?.selection, selected)
+            let after = try await service.read()
+            XCTAssertEqual(after.queue, before.queue); XCTAssertEqual(after.playback, before.playback)
+            XCTAssertEqual(after.history, before.history)
+            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["songId"], song["songId"])
+            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["baselineDuration"].number, 100)
+            await service.close()
+        }
+    }
+
+    func testPublicResolveKeepsCurrentTitleAndMediaAdmissionAfterCachePreparation() async throws {
+        let cases: [(metadata: Int, allowed: Bool)] = [(181, true), (190, true), (191, false)]
+        for value in cases {
+            let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(duration: 180))
+            let source = try XCTUnwrap(MusicModel.sources(song).first)
+            let identity = MusicAudioFileCacheIdentity(scope: "old-account-scope", songID: song["songId"].string,
+                sourceKey: source.sourceKey, platform: source.platform, nativeID: source.nativeId,
+                requestedQuality: "flac", provider: AdmissionAccounts.provider)
+            let gate = MusicNativeCandidateDiscoveryBarrier(), accounts = AdmissionAccounts()
+            let file = AdmissionLookupCache(hit: .init(identity: identity,
+                fileURL: URL(fileURLWithPath: "/synthetic-cache/current.flac"), duration: 180, measuredQuality: "flac",
+                expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)),
+                gate: MusicNativeCandidateDiscoveryBarrier(), prepareGate: gate)
+            let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+                accounts: accounts, platformClient: try NativeMusicFixture.client(), audioFileCache: file,
+                clock: { NativeMusicFixture.date })
+            try await service.setAccess(available: true, generation: 1)
+            let before = try await service.read(), attemptID = UUID().uuidString.lowercased()
+            let selected = identity.selection
+            let task = Task { try await service.resolve(attemptId: attemptID, occurrenceId: "entry-1", selection: selected) }
+            await gate.started(1)
+            let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                title: "Current prepared title", duration: value.metadata))
+            _ = try await service.adoptSongs([corrected], authoritative: true)
+            await gate.release()
+            if value.allowed {
+                let result = try await task.value
+                XCTAssertEqual(result.title, "Current prepared title")
+                XCTAssertEqual(result.delivery?.duration, 180)
+                XCTAssertEqual(result.resolvedSelection, selected); XCTAssertEqual(result.requestedQuality, "flac")
+                XCTAssertEqual(result.attemptId, attemptID); XCTAssertEqual(result.occurrenceId, "entry-1")
+                XCTAssertNotNil(result.byteSource)
+            } else {
+                do { _ = try await task.value; XCTFail("Stale prepared media escaped the public resolver") }
+                catch { XCTAssertEqual(MusicServiceError.sanitized(error), .invalidMediaCandidate) }
+            }
+            let prepared = await file.requests, requests = await accounts.resolutionRequests
+            XCTAssertEqual(prepared.count, 1); XCTAssertEqual(prepared.first?.expectedDuration, 180)
+            XCTAssertEqual(prepared.first?.identity.selection, selected)
+            XCTAssertEqual(requests.count, 1); XCTAssertEqual(requests.first?.selection, selected)
+            let after = try await service.read()
+            XCTAssertEqual(after.queue, before.queue); XCTAssertEqual(after.playback, before.playback)
+            XCTAssertEqual(after.history, before.history)
+            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["songId"], song["songId"])
+            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["baselineDuration"].number, 180)
+            await service.close()
+        }
+    }
+
+    func testLookupUsesCurrentDurationAndTitleAfterMetadataCorrection() async throws {
+        let cases: [(metadata: Int, media: Double, allowed: Bool)] = [(101, 100, true), (130, 130, true), (130, 100, false)]
+        for official in [false, true] {
+            for value in cases {
+                let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(duration: 100))
+                let source = try XCTUnwrap(MusicModel.sources(song).first)
+                let identity = MusicAudioFileCacheIdentity(scope: official ? "old-account-scope" : "script-history",
+                    songID: song["songId"].string, sourceKey: source.sourceKey, platform: source.platform, nativeID: source.nativeId,
+                    requestedQuality: "flac", provider: official ? AdmissionAccounts.provider : "historical-script")
+                let gate = MusicNativeCandidateDiscoveryBarrier()
+                let file = AdmissionLookupCache(hit: .init(identity: identity,
+                    fileURL: URL(fileURLWithPath: "/synthetic-cache/current.flac"), duration: value.media,
+                    measuredQuality: "flac", expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)), gate: gate)
+                let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+                    accounts: AdmissionAccounts(), platformClient: try NativeMusicFixture.client(),
+                    audioFileCache: file, clock: { NativeMusicFixture.date })
+                try await service.setAccess(available: true, generation: 1)
+                let before = try await service.read()
+                let lookup = Task { try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(),
+                    occurrenceID: "entry-1", selection: nil) }
+                await gate.started(1)
+                let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                    title: "Current cached title", duration: value.metadata))
+                let adopted = try await service.adoptSongs([corrected], authoritative: true)
+                XCTAssertEqual(adopted.first?["songId"], song["songId"])
+                await gate.release()
+                let result = try await lookup.value
+                XCTAssertEqual(result != nil, value.allowed)
+                if value.allowed {
+                    XCTAssertEqual(result?.candidate.title, "Current cached title")
+                    XCTAssertEqual(result?.candidate.delivery?.duration, value.media)
+                    XCTAssertEqual(result?.selection, identity.selection)
+                }
+                let after = try await service.read(), requests = await file.requests
+                XCTAssertEqual(after.queue, before.queue)
+                XCTAssertEqual(after.playback, before.playback)
+                XCTAssertTrue(requests.isEmpty, "Complete-file admission does not start a transfer")
+                let history = try await service.playedSongs()
+                XCTAssertTrue(history.isEmpty)
+                await service.close()
+            }
+        }
+    }
+
+    func testFilePreparationUsesCurrentMetadataAfterScopeAndFileSuspensions() async throws {
+        for phase in ["scope", "file"] {
+            let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(duration: 100))
+            let source = try XCTUnwrap(MusicModel.sources(song).first)
+            let identity = MusicAudioFileCacheIdentity(scope: "old-account-scope", songID: song["songId"].string,
+                sourceKey: source.sourceKey, platform: source.platform, nativeID: source.nativeId,
+                requestedQuality: "flac", provider: AdmissionAccounts.provider)
+            let gate = MusicNativeCandidateDiscoveryBarrier(), accounts = AdmissionAccounts()
+            if phase == "scope" { await accounts.holdScope(gate) }
+            let file = AdmissionLookupCache(hit: .init(identity: identity,
+                fileURL: URL(fileURLWithPath: "/synthetic-cache/current.flac"), duration: 100, measuredQuality: "flac",
+                expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)),
+                gate: MusicNativeCandidateDiscoveryBarrier(), prepareGate: phase == "file" ? gate : nil)
+            let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+                accounts: accounts, platformClient: try NativeMusicFixture.client(), audioFileCache: file)
+            try await service.setAccess(available: true, generation: 1)
+            let before = try await service.read()
+            let duration = phase == "scope" ? 130.0 : 100.0
+            let audio = MusicNativeAudio(url: URL(string: "https://isure.stream.qqmusic.qq.com/current.flac")!,
+                delivery: .init(quality: "flac", evidence: .officialResponse, duration: duration))
+            let task = Task { try await service.prepareAudioCache(audio: audio, song: song, selection: identity.selection,
+                attemptID: UUID().uuidString.lowercased(), playbackAuthorization: MusicQueueAuthorization(), preparing: true) }
+            await gate.started(1)
+            let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(title: "Current prepared title", duration: 130))
+            _ = try await service.adoptSongs([corrected], authoritative: true)
+            await gate.release()
+            if phase == "scope" {
+                let result = try await task.value
+                let prepared = try XCTUnwrap(result)
+                XCTAssertEqual(prepared.expectedDuration, 130)
+                prepared.source?.retire()
+                prepared.playbackAuthorization.revoke(); prepared.authorization.revoke()
+            } else {
+                do { _ = try await task.value; XCTFail("A stale receipt escaped final file preparation") }
+                catch { XCTAssertEqual(MusicServiceError.sanitized(error), .invalidMediaCandidate) }
+            }
+            let requests = await file.requests
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests.first?.expectedDuration, phase == "scope" ? 130 : 100)
+            let after = try await service.read()
+            XCTAssertEqual(after.queue, before.queue)
+            XCTAssertEqual(after.playback, before.playback)
+            let history = try await service.playedSongs()
+            XCTAssertTrue(history.isEmpty)
+            await service.close()
+        }
+    }
+
+    func testPreparedCachedFileRechecksCurrentMediaAtActivation() async throws {
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(duration: 100))
+        let source = try XCTUnwrap(MusicModel.sources(song).first)
+        let identity = MusicAudioFileCacheIdentity(scope: "script-history", songID: song["songId"].string,
+            sourceKey: source.sourceKey, platform: source.platform, nativeID: source.nativeId,
+            requestedQuality: "flac", provider: "historical-script")
+        let gate = MusicNativeCandidateDiscoveryBarrier()
+        await gate.release()
+        let file = AdmissionLookupCache(hit: .init(identity: identity,
+            fileURL: URL(fileURLWithPath: "/synthetic-cache/current.flac"), duration: 100, measuredQuality: "flac",
+            expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)), gate: gate)
+        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+            platformClient: try NativeMusicFixture.client(), audioFileCache: file, clock: { NativeMusicFixture.date })
+        try await service.setAccess(available: true, generation: 1)
+        let result = try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(), occurrenceID: "entry-1",
+            selection: nil, requestedQuality: "flac", preparing: true)
+        let prepared = try XCTUnwrap(result)
+        let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(duration: 130))
+        _ = try await service.adoptSongs([corrected], authoritative: true)
+        do { try await service.activateSource(attemptID: prepared.candidate.attemptId); XCTFail("Stale prepared media activated") }
+        catch { XCTAssertEqual(MusicServiceError.sanitized(error), .invalidMediaCandidate) }
+        await service.discardSource(attemptID: prepared.candidate.attemptId)
+        let history = try await service.playedSongs()
+        XCTAssertTrue(history.isEmpty)
+        await service.close()
+    }
+
     func testCachedPeerPlaybackUsesSharedRecordingWithoutQueueWrite() async throws {
         for preparing in [false, true] {
-            let original = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
+            let original = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
             let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "PeerMID"))
             let source = try XCTUnwrap(MusicModel.sources(peer).first)
             let identity = MusicAudioFileCacheIdentity(scope: "script-history", songID: original["songId"].string,
                 sourceKey: source.sourceKey, platform: source.platform, nativeID: source.nativeId,
-                requestedQuality: "flac", playbackSignature: NativeMusicService.scriptAudioSignature(original),
+                requestedQuality: "flac",
                 provider: "historical-script")
             let gate = MusicNativeCandidateDiscoveryBarrier()
             await gate.release()
@@ -20,8 +230,8 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
                 fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
                 measuredQuality: "flac", expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)), gate: gate)
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: original)
-            let service = NativeMusicService(document: store, qq: NativeMusicQQFixture(), audioFileCache: file,
-                transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+            let service = NativeMusicService(document: store, platformClient: try NativeMusicFixture.client(), audioFileCache: file,
+                clock: { NativeMusicFixture.date })
             try await service.setAccess(available: true, generation: 1)
             try await service.retainSongMetadata([peer])
             let before = try await service.read(), writes = store.snapshot().2
@@ -39,7 +249,8 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
             XCTAssertTrue(accepted)
             let after = try await service.read()
             XCTAssertEqual(after.queue, before.queue)
-            XCTAssertTrue(after.history["days"].array.first?["songs"].array.first?["song"]["sources"].array
+            let recorded = try XCTUnwrap(after.history["days"].array.first?["songs"].array.first)
+            XCTAssertTrue(after.library["library"]["songs"][recorded["songId"].string]["sources"].array
                 .contains { $0["sourceKey"].string == source.sourceKey } == true)
             await service.close()
         }
@@ -51,25 +262,25 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
                 let song = try MusicNativeCandidateDiscoveryFixture.song()
                 let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
                 var document = try MusicDocument(store.read(), runID: "cache-admission")
-                let other = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "OtherMID", title: "Other recording"))
+                let other = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(id: "OtherMID", title: "Other recording"))
                 XCTAssertNotEqual(other["songId"], song["songId"], "The unrelated-song control must be a different recording")
+                document.library["library"]["songs"][other["songId"].string] = other
                 document.queue["entries"] = .array(document.queue["entries"].array + [
-                    .obj([("id", .string("entry-2")), ("song", other)])])
+                    .obj([("id", .string("entry-2")), ("songId", other["songId"])])])
                 document.queue["serial"] = .n(2)
-                store.replace(try document.encode(changed: ["queue"]))
+                store.replace(try document.encode(changed: ["library", "queue"]))
                 let source = try XCTUnwrap(MusicModel.sources(song).first)
                 let provider = official ? AdmissionAccounts.provider : "historical-script"
                 let scope = official ? "old-account-scope" : "script-history"
                 let identity = MusicAudioFileCacheIdentity(scope: scope, songID: song["songId"].string,
                     sourceKey: source.sourceKey, platform: "tx", nativeID: source.nativeId, requestedQuality: "flac",
-                    playbackSignature: official ? NativeMusicService.audioCacheSignature(song: song, playback: document.playback) :
-                        NativeMusicService.scriptAudioSignature(song), provider: provider)
+                    provider: provider)
                 let gate = MusicNativeCandidateDiscoveryBarrier()
                 let file = AdmissionLookupCache(hit: .init(identity: identity,
                     fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
                     measuredQuality: "flac", expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)), gate: gate)
-                let service = NativeMusicService(document: store, accounts: AdmissionAccounts(), qq: NativeMusicQQFixture(),
-                    audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+                let service = NativeMusicService(document: store, accounts: AdmissionAccounts(), platformClient: try NativeMusicFixture.client(),
+                    audioFileCache: file, clock: { NativeMusicFixture.date })
                 try await service.setAccess(available: true, generation: 1)
                 let id = UUID().uuidString.lowercased()
                 let lookup = Task { try await service.cachedPlayback(attemptID: id, occurrenceID: "entry-1", selection: identity.selection) }
@@ -106,9 +317,10 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
         let file = AdmissionFillCache(real: real, clock: clock), accounts = AdmissionAccounts()
-        let store = try MusicNativeCandidateDiscoveryFixture.store()
-        let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
-            audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+        let song = try MusicNativeCandidateDiscoveryFixture.song()
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+            audioFileCache: file, clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         clock.advance(1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
@@ -135,7 +347,7 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         let history = try await service.playedSongs()
         XCTAssertEqual(history.count, 1)
         let scope = await accounts.scope
-        let hit = await real.lookup(scope: scope.scope, songID: try MusicNativeCandidateDiscoveryFixture.song()["songId"].string,
+        let hit = await real.lookup(scope: scope.scope, songID: song["songId"].string,
             authorization: scope.authorization, accepts: { _ in true })
         XCTAssertNotNil(hit)
         // Publication must not retire the reader that is still playing this file.
@@ -151,7 +363,7 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
             let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: AdmissionBytes(), inspector: AdmissionMeasurement())
             let accounts = AdmissionAccounts()
             let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
-                qq: NativeMusicQQFixture(), audioFileCache: real, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+                platformClient: try NativeMusicFixture.client(), audioFileCache: real, clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)
             let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
             let selected = try await session.match(intent: .quality("flac"))
@@ -175,7 +387,7 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
         let accounts = AdmissionAccounts(), file = AdmissionFillCache(real: real, clock: clock)
         let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
-            qq: NativeMusicQQFixture(), audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+            platformClient: try NativeMusicFixture.client(), audioFileCache: file, clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let old = try await session.match(intent: .quality("flac"))
@@ -183,7 +395,8 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         _ = try await service.record(fact(old.candidate, kind: .paused))
         let captured = await service.audioCacheAttempt
         let staged = try XCTUnwrap(captured)
-        let audio = try XCTUnwrap(staged.audio), song = try MusicNativeCandidateDiscoveryFixture.song()
+        let audio = try XCTUnwrap(staged.audio)
+        let current = try await service.read(), song = try await service.entrySong(current.queue["entries"].array[0], current)
         let gate = MusicNativeCandidateDiscoveryBarrier()
         await accounts.holdScope(gate)
         let preparing = Task {
@@ -211,8 +424,8 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
         let file = AdmissionFillCache(real: real, clock: clock), accounts = AdmissionAccounts()
         let song = try MusicNativeCandidateDiscoveryFixture.song(), source = try XCTUnwrap(MusicModel.sources(song).first)
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
-            qq: NativeMusicQQFixture(), audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song), accounts: accounts,
+            platformClient: try NativeMusicFixture.client(), audioFileCache: file, clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let options = await accounts.nativeOptions(platform: .qq, nativeID: source.nativeId, sourceKey: source.sourceKey)
         let selection = try XCTUnwrap(options.first).selection(quality: "flac")
@@ -248,7 +461,7 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
             let media = MusicQueueAuthorization()
             if revoke { media.revoke() }
             let identity = MusicAudioFileCacheIdentity(scope: "replacement-account-scope", songID: "synthetic-song", sourceKey: "tx:synthetic",
-                platform: "tx", nativeID: "synthetic", requestedQuality: "flac", playbackSignature: "signature", provider: AdmissionAccounts.provider)
+                platform: "tx", nativeID: "synthetic", requestedQuality: "flac", provider: AdmissionAccounts.provider)
             let version = await real.storeAfterPlayback(.init(identity: identity, audio: AdmissionAccounts.audio(media),
                 expectedDuration: 180, confirmedAt: clock.now(), authorization: MusicQueueAuthorization(),
                 playbackAuthorization: MusicQueueAuthorization()))
@@ -268,10 +481,10 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         let source = try XCTUnwrap(MusicModel.sources(song).first)
         let hit = MusicAudioFileCacheHit(identity: .init(scope: "unused", songID: song["songId"].string,
             sourceKey: source.sourceKey, platform: "tx", nativeID: source.nativeId, requestedQuality: "flac",
-            playbackSignature: "unused", provider: AdmissionAccounts.provider), fileURL: URL(fileURLWithPath: "/unused.flac"),
+            provider: AdmissionAccounts.provider), fileURL: URL(fileURLWithPath: "/unused.flac"),
             duration: 180, measuredQuality: "flac", expiresAt: NativeMusicFixture.date.addingTimeInterval(3600))
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
-            qq: NativeMusicQQFixture(), audioFileCache: AdmissionLookupCache(hit: hit, gate: gate), transport: NativeMusicNoNetwork())
+        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song), accounts: accounts,
+            platformClient: try NativeMusicFixture.client(), audioFileCache: AdmissionLookupCache(hit: hit, gate: gate))
         try await service.setAccess(available: true, generation: 1)
         let media = MusicQueueAuthorization(); media.revoke()
         do {
@@ -303,12 +516,15 @@ private actor AdmissionAccounts: MusicNativeAccountProviding, MusicNativeCacheSc
     var scope = MusicNativeCacheScope(scope: "old-account-scope")
     private let media = MusicQueueAuthorization()
     private var scopeGate: MusicNativeCandidateDiscoveryBarrier?
+    private var resolveGate: MusicNativeCandidateDiscoveryBarrier?
     var scopeReads = 0
+    var resolutionRequests: [(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection)] = []
     static func audio(_ authorization: MusicQueueAuthorization) -> MusicNativeAudio {
         .init(url: URL(string: "https://isure.stream.qqmusic.qq.com/synthetic.flac")!, fileCachePolicy: .init(allowed: true),
             delivery: .init(quality: "flac", evidence: .officialResponse, duration: 180), playbackAuthorization: authorization)
     }
     func holdScope(_ gate: MusicNativeCandidateDiscoveryBarrier) { scopeGate = gate }
+    func holdResolve(_ gate: MusicNativeCandidateDiscoveryBarrier) { resolveGate = gate }
     func revokeMedia() { media.revoke() }
     func rotate() {
         media.revoke(); scope.authorization.revoke(); scope = .init(scope: "replacement-account-scope")
@@ -331,7 +547,11 @@ private actor AdmissionAccounts: MusicNativeAccountProviding, MusicNativeCacheSc
         return [.init(installationId: Self.provider, generation: 1, siteId: "tx", sourceKey: sourceKey,
             qualities: ["flac"], title: "Synthetic", version: "1", contentHash: String(repeating: "a", count: 64))]
     }
-    func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) -> MusicNativeAudio { Self.audio(media) }
+    func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) async -> MusicNativeAudio {
+        resolutionRequests.append((platform, nativeID, selection))
+        if let gate = resolveGate { resolveGate = nil; await gate.enter() }
+        return Self.audio(media)
+    }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage { throw MusicServiceError.unsupported }
     func nativeCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
     func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicNativeTrackPage { throw MusicServiceError.unsupported }
@@ -340,14 +560,23 @@ private actor AdmissionAccounts: MusicNativeAccountProviding, MusicNativeCacheSc
 private actor AdmissionLookupCache: MusicAudioFileCaching {
     let hit: MusicAudioFileCacheHit
     let gate: MusicNativeCandidateDiscoveryBarrier
-    init(hit: MusicAudioFileCacheHit, gate: MusicNativeCandidateDiscoveryBarrier) { self.hit = hit; self.gate = gate }
+    let prepareGate: MusicNativeCandidateDiscoveryBarrier?
+    var requests: [MusicAudioFilePlaybackRequest] = []
+    init(hit: MusicAudioFileCacheHit, gate: MusicNativeCandidateDiscoveryBarrier,
+         prepareGate: MusicNativeCandidateDiscoveryBarrier? = nil) {
+        self.hit = hit; self.gate = gate; self.prepareGate = prepareGate
+    }
     func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
                 accepts: @escaping @Sendable (MusicAudioFileCacheIdentity) -> Bool) async -> MusicAudioFileCacheHit? {
         guard authorization.isActive, hit.identity.scope == scope, hit.identity.songID == songID, accepts(hit.identity) else { return nil }
         await gate.enter()
         return hit // Eligibility was captured before suspension, just like an asynchronous cache port.
     }
-    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback { MusicTestByteSource() }
+    func preparePlayback(_ request: MusicAudioFilePlaybackRequest) async throws -> any MusicAudioFilePlayback {
+        requests.append(request)
+        await prepareGate?.enter()
+        return MusicTestByteSource()
+    }
     func storeAfterPlayback(_ request: MusicAudioFileCacheRequest) -> MusicAudioFileCacheVersion? { nil }
     func touch(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion, confirmedAt: Date, authorization: MusicQueueAuthorization) {}
     func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) {}

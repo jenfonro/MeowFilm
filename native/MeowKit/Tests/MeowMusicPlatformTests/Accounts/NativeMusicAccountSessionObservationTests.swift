@@ -2,6 +2,8 @@ import Foundation
 import XCTest
 import MeowMusicFeature
 import MeowJSON
+import MeowRuntime
+import MeowMusicTestSupport
 @testable import MeowAccounts
 @testable import MeowMusicPlatform
 
@@ -78,14 +80,13 @@ final class NativeMusicAccountSessionObservationTests: XCTestCase {
         let challenge = try await f.service.beginLogin(platform: .qq)
         let qr = await observe(f.service); await waitForEvents(qr)
         _ = await qr.events.take()
-        for (code, expected) in [("66", MusicLoginProgress.waiting), ("67", .scanned), ("66", .waiting)] {
-            await f.http.replies("/ptqrlogin", .init(status: 200, data: Data("ptuiCB('\(code)','0','');".utf8)))
+        for (status, expected) in [("waiting", MusicLoginProgress.waiting), ("confirming", .scanned), ("waiting", .waiting)] {
+            await f.platform.replies("qr.poll", .object(["status": .string(status)]))
             let progress = try await f.service.checkLogin(challengeID: challenge.id)
             XCTAssertEqual(progress, expected)
         }
         let unchanged = await qr.events.take(); XCTAssertTrue(unchanged.isEmpty)
-        await f.http.replies("/ptqrlogin", .init(status: 200, data: Data(
-            "ptuiCB('0','0','https://ssl.ptlogin2.graph.qq.com/check_sig?uin=101&ptsigx=synthetic-sign','0','ok','Synthetic');".utf8)))
+        await f.platform.clearReply("qr.poll")
         let progress = try await f.service.checkLogin(challengeID: challenge.id)
         XCTAssertEqual(progress, .confirmed); await waitForEvents(qr)
         let signedIn = try await f.service.statuses(); XCTAssertEqual(signedIn.first?.phase, .signedIn)
@@ -93,9 +94,9 @@ final class NativeMusicAccountSessionObservationTests: XCTestCase {
 
         let business = await observe(f.service); await waitForEvents(business)
         _ = await business.events.take()
-        let before = await f.http.recorded()
+        let before = await f.platform.recorded()
         for _ in 0..<2 { _ = try await f.service.nativeRecommendations(platform: .qq, kind: "guess", cursor: nil) }
-        let after = await f.http.recorded(), echoed = await business.events.take()
+        let after = await f.platform.recorded(), echoed = await business.events.take()
         XCTAssertTrue(echoed.isEmpty); XCTAssertEqual(after.count - before.count, 2)
         try await f.service.logout(platform: .qq); await waitForEvents(business)
         let changed = await business.events.take(); XCTAssertTrue(changed.allSatisfy { $0 == .qq })
@@ -133,7 +134,7 @@ final class NativeMusicAccountSessionObservationTests: XCTestCase {
         _ = try await guest.invoke("recommendations", ["kind": .string("guess")])
         await waitForEvents(guestObservation); _ = await guestObservation.events.take()
         for _ in 0..<3 { _ = try await guest.invoke("recommendations", ["kind": .string("guess")]) }
-        let repeated = await guestObservation.events.take(), network = await guest.http.recorded()
+        let repeated = await guestObservation.events.take(), network = await guest.platform.recorded()
         XCTAssertTrue(repeated.isEmpty); XCTAssertTrue(network.isEmpty)
         _ = await guest.service.close(); await fulfillment(of: [guestObservation.finished], timeout: 3)
     }
@@ -201,27 +202,28 @@ final class NativeMusicAccountSessionObservationTests: XCTestCase {
 
     func testTrustedAuthenticationFailureNotifiesWithoutTouchingOtherStoredAccounts() async throws {
         let f = try MusicNativeFixture(), other = try MusicAccountFixture.identity("kg")
-        let otherRecord = try CredentialRecord(credential: MusicAccountFixture.credential(202))
+        let otherRecord = try CredentialRecord(credential: MusicAccountFixture.credential(202, platform: .kugou))
         try f.store.write(otherRecord, for: other); try await f.enable()
         _ = try await f.service.validate(platform: .qq)
         let observation = await observe(f.service); await waitForEvents(observation)
         _ = await observation.events.take()
-        await f.http.replies("get_radio_track", .init(status: 401, data: Data()))
+        await f.platform.fail("recommendations", code: "AUTH_EXPIRED")
         let reply = try await f.invoke("recommendations", ["kind": .string("guess")])
         XCTAssertEqual(reply["code"], .string("SESSION_EXPIRED"))
         await waitForEvents(observation)
         let changed = await observation.events.take(); XCTAssertTrue(changed.allSatisfy { $0 == .qq })
         XCTAssertNil(f.store.peek(f.identity)); XCTAssertEqual(f.store.peek(other), otherRecord)
-        let requests = await f.http.recorded()
-        XCTAssertEqual(try requests.map(MusicAccountTestHTTP.method).filter { $0 == "get_radio_track" }.count, 1)
+        let requests = await f.platform.recorded()
+        XCTAssertEqual(requests.filter { $0.operation == "recommendations" }.count, 1)
         _ = await f.service.close(); await fulfillment(of: [observation.finished], timeout: 3)
     }
 
     func testCommitThatWonBeforeUICancellationStillPublishesWithoutReportingOldSuccess() async throws {
         let store = MusicSessionWriteStore(), clock = MusicAccountTestClock(), identity = try MusicAccountFixture.identity()
-        let accounts = AccountSessionCoordinator(store: store), http = MusicAccountTestHTTP(clock: clock)
+        let accounts = AccountSessionCoordinator(store: store), peer = MusicAccountRuntimePeer(clock: clock)
+        let runtime = try peer.makeClient()
         let service = NativeMusicAccountService(accounts: accounts, scopes: [.qq: identity],
-                                               transport: http, clock: { clock.now() })
+                                               platformClient: runtime, clock: { clock.now() })
         _ = try await service.setAccess(available: true, generation: 1)
         let challenge = try await service.beginLogin(platform: .qq)
         let observation = await observe(service); await waitForEvents(observation)
@@ -242,17 +244,18 @@ final class NativeMusicAccountSessionObservationTests: XCTestCase {
     }
 
     func testCancellationReleasesObservationsAndBoundedBufferPreservesPlatformIdentities() async throws {
-        let store = MusicAccountTestStore(), clock = MusicAccountTestClock(), http = MusicAccountTestHTTP(clock: MusicAccountTestClock())
+        let store = MusicAccountTestStore(), clock = MusicAccountTestClock(), peer = MusicAccountRuntimePeer(clock: MusicAccountTestClock())
+        let runtime = try peer.makeClient()
         let accounts = AccountSessionCoordinator(store: store)
         let scopes: [MusicAccountPlatform: AccountIdentity] = [
             .qq: try MusicAccountFixture.identity(), .netease: try MusicAccountFixture.identity("wy"),
             .kugou: try MusicAccountFixture.identity("kg")
         ]
-        let service = NativeMusicAccountService(accounts: accounts, scopes: scopes, transport: http, clock: { clock.now() })
+        let service = NativeMusicAccountService(accounts: accounts, scopes: scopes, platformClient: runtime, clock: { clock.now() })
         _ = try await service.setAccess(available: true, generation: 1)
         let first = await observe(service); await waitForEvents(first, count: 3)
         XCTAssertTrue(store.calls().isEmpty)
-        let requests = await http.recorded(); XCTAssertTrue(requests.isEmpty)
+        let requests = await peer.recorded(); XCTAssertTrue(requests.isEmpty)
         await cancel(first); try await waitForObserverCount(0, service: service)
         let released = await service.accountSessionObservationCount; XCTAssertEqual(released, 0)
 

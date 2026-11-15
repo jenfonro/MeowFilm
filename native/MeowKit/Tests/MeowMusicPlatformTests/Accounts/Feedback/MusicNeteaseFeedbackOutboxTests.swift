@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import MeowMusicFeature
 import MeowStorage
+import MeowRuntime
 @testable import MeowMusicPlatform
 
 final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
@@ -65,7 +66,7 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         XCTAssertEqual(coldIDs, ids)
         let (cold, _) = try XCTUnwrap(restored.reserve(coldIDs[0]))
         XCTAssertEqual(cold.occurredAt, 1_800_000_000)
-        XCTAssertEqual(try cold.records(), try start.records())
+        XCTAssertEqual(try RuntimeJSON.decode(cold.eventBody()), try RuntimeJSON.decode(start.eventBody()))
         try restored.complete(cold, confirmed: true, notSent: false)
         let (end, _) = try XCTUnwrap(restored.reserve(coldIDs[1]))
         XCTAssertEqual(end.occurredAt, 1_800_000_001.25)
@@ -104,25 +105,26 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         let target = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
             source: "actual-heart-source", sourceID: "actual-source-id", algorithm: "actual-alg",
             origin: .init(kind: .heartbeat, platform: .netease, sourceID: "501"))
-        var expected: [Data] = []
         for event in [MusicPlaybackFeedbackReport.Event.start, .end] {
             let value = MusicPlaybackFeedbackReport(instanceID: instance, target: target, event: event,
                 duration: 0, listened: event == .start ? 0 : 4, mediaListened: event == .start ? 0 : 8,
                 position: event == .start ? 0 : 8, rate: 2, reason: event == .start ? nil : .ui,
                 startedAt: now - 5, occurredAt: event == .start ? now - 5 : now - 1)
             XCTAssertEqual(try queue.enqueue(value, scope: "original-account", setting: setting, at: now), .registered)
-            expected.append(try MusicAccountFeedbackNeteaseWire.records(value))
         }
         queue.suspend(preserving: true, closing: true)
         let cold = try ready(store), ids = try cold.candidates(at: now)
         XCTAssertEqual(ids.count, 2)
         for (index, id) in ids.enumerated() {
             let (entry, _) = try XCTUnwrap(cold.reserve(id))
-            XCTAssertEqual(try entry.records(), expected[index])
-            let text = String(decoding: try entry.records(), as: UTF8.self)
-            XCTAssertTrue(text.contains("\"play_scene\":\"heartbeat\""))
-            XCTAssertTrue(text.contains("\"source\":\"actual-heart-source\""))
-            XCTAssertFalse(text.contains("\"sourceId\":\"501\""), "The local favorite list is not an upstream source ID")
+            let body = try RuntimeJSON.decode(entry.eventBody())
+            XCTAssertEqual(body[music: "event"], .string(index == 0 ? "start" : "end"))
+            XCTAssertEqual(body[music: "listened"], .number(index == 0 ? 0 : 4))
+            XCTAssertEqual(body[music: "mediaListened"], .number(index == 0 ? 0 : 8))
+            XCTAssertEqual(body[music: "target"][music: "origin"][music: "kind"], .string("heartbeat"))
+            XCTAssertEqual(body[music: "target"][music: "source"], .string("actual-heart-source"))
+            XCTAssertEqual(body[music: "target"][music: "sourceId"], .string("actual-source-id"),
+                "The local favorite list is not an upstream source ID")
             try cold.complete(entry, confirmed: true, notSent: false)
         }
     }

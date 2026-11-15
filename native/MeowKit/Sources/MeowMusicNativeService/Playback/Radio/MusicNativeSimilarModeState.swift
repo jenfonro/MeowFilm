@@ -1,6 +1,18 @@
 import Foundation
 import MeowMusicFeature
 
+/// Public roaming owns a platform read fence, not a fabricated signed-in account.
+enum MusicNativeSimilarLease: Sendable {
+    case account(MusicAccountQueueLease)
+    case platform(id: UUID, binding: MusicNativeHomeBinding, authorization: MusicQueueAuthorization)
+    var id: UUID {
+        switch self { case .account(let lease): return lease.id; case .platform(let id, _, _): return id }
+    }
+    var authorization: MusicQueueAuthorization {
+        switch self { case .account(let lease): return lease.authorization; case .platform(_, _, let value): return value }
+    }
+}
+
 // All mutable session/preview fields are confined to NativeMusicService's actor.
 final class MusicNativeSimilarPreview {
     let id = UUID()
@@ -13,7 +25,7 @@ final class MusicNativeSimilarPreview {
     let navigation: UUID
     var enterAfter = false
     var scope = ""
-    var lease: MusicAccountQueueLease?
+    var lease: MusicNativeSimilarLease?
     var context: MusicSimilarHeartbeatContext?
     var offset = 0
     var exhausted = false
@@ -30,6 +42,15 @@ final class MusicNativeSimilarPreview {
     }
 }
 
+/// An adopted tail keeps references, never a replayable metadata observation.
+struct MusicNativeSimilarBatchReferences {
+    let songIDs: [String]
+    let recommendations: [String: MJ]
+    let heartbeatContext: MusicSimilarHeartbeatContext?
+    let hasMore: Bool?
+    let offset: Int
+}
+
 final class MusicNativeSimilarSession {
     let id = UUID()
     let seed: MJ
@@ -38,9 +59,9 @@ final class MusicNativeSimilarSession {
     let fromHome: Bool
     let provider: MusicSimilarModeProvider
     let sourceIDs: [String]
-    let context: MusicSimilarHeartbeatContext?
+    var context: MusicSimilarHeartbeatContext?
     let scope: String
-    let lease: MusicAccountQueueLease
+    let lease: MusicNativeSimilarLease
     var continueEnabled = false
     var offset = 0
     var exhausted = false
@@ -52,17 +73,17 @@ final class MusicNativeSimilarSession {
     var pending: Task<Void, Never>?
     var pendingID: UUID?
     var pendingTail: String?
-    var buffered: MusicNativeSimilarModeBatch?
+    var buffered: MusicNativeSimilarBatchReferences?
     init(seed: MJ, seedEntryID: String?, returnQueue: MJ, fromHome: Bool, provider: MusicSimilarModeProvider,
-         sourceIDs: [String], context: MusicSimilarHeartbeatContext?, scope: String, lease: MusicAccountQueueLease) {
+         sourceIDs: [String], context: MusicSimilarHeartbeatContext?, scope: String, lease: MusicNativeSimilarLease) {
         self.seed = seed; self.seedEntryID = seedEntryID; self.returnQueue = returnQueue; self.fromHome = fromHome
         self.provider = provider; self.sourceIDs = sourceIDs; self.context = context; self.scope = scope; self.lease = lease
     }
     var saved: MJ {
         let context = self.context.map {
-            MJ.obj([("pid", .string($0.playlistID)), ("sid", .string($0.seedID))])
+            MJ.obj([("pid", .string($0.playlistID)), ("sid", .string($0.seedID)), ("count", .n($0.count))])
         } ?? .null
-        return .obj([("schema", .n(2)), ("seed", MusicModel.durable(seed)),
+        return .obj([("schema", .n(2)), ("seedSongId", seed["songId"]), ("seedTitle", .string(seed["songId"].string.isEmpty ? seed["title"].string : "")),
             ("seedEntryId", seedEntryID.map(MJ.string) ?? .null), ("returnQueue", returnQueue),
             ("sourceIds", .strings(sourceIDs)), ("fromHome", .bool(fromHome)),
             ("provider", .string(provider.rawValue)), ("providerContext", context),
@@ -128,37 +149,18 @@ enum MusicNativeSimilarData {
         return result
     }
     static func recommendation(_ item: MusicNativeTrackData) throws -> MJ? {
-        let song = try MJ.parse(item.data, maximum: 64 * 1024), raw = song["_recommendation"]
-        guard raw != .null else { return nil }
-        try raw.requireFields(["songId", "alg", "source", "sourceId", "feedbackSource", "feedbackSourceId", "seedId"],
-                              required: ["songId", "source", "feedbackSource"])
-        let songID = raw["songId"].id, source = raw["source"].string
-        try musicRequire(id(songID) && ["heartbeat", "similar", "moreRcmd", "fm", "daily"].contains(source), .invalidResponse)
-        _ = try raw["alg"].text(8000, empty: true)
-        try musicRequire(raw["alg"].string.utf16.count <= 2000, .invalidResponse)
-        _ = try raw["feedbackSource"].text(8000, empty: true)
-        if raw["feedbackSourceId"] != .null { _ = try raw["feedbackSourceId"].text(2048, empty: true) }
-        try musicRequire(raw["feedbackSource"].string.utf16.count <= 2000 &&
-            item.platform == "wy" && song["songmid"].id == songID, .invalidResponse)
-        if source == "heartbeat" {
-            try musicRequire(id(raw["sourceId"].id), .invalidResponse)
-        } else { try musicRequire(raw["sourceId"].string.isEmpty, .invalidResponse) }
-        if raw["seedId"] != .null { try musicRequire(source == "heartbeat" && id(raw["seedId"].id), .invalidResponse) }
-        return raw
-    }
-    static func id(_ value: String) -> Bool {
-        value.range(of: "^[1-9][0-9]{0,17}$", options: .regularExpression) != nil &&
-            (UInt64(value).map { $0 <= 9_007_199_254_740_991 } ?? false)
+        let raw = try MJ.parse(item.data)["_recommendation"]
+        return raw.isObject ? raw : nil
     }
     static func nativeID(_ song: MJ) -> String? {
-        let sources = song["sources"].array.map { MusicModel.sourceData($0) }
-        return sources.first(where: {
-            $0["source"].string == "wy" && id($0["songmid"].id)
-        }).map { $0["songmid"].id }
+        song["sources"].array.first { $0["source"].string == "wy" }
+            .flatMap { $0["musicInfo"]["songmid"].id.isEmpty ? nil : $0["musicInfo"]["songmid"].id }
     }
-    static func display(_ song: MJ) -> MusicSimilarModeSong {
-        .init(title: song["title"].string, artist: song["artist"].string,
-              album: song["album"].string, artwork: MusicNativePublicBrowseSupport.artwork(song["cover_url"]))
+    static func display(_ song: MJ, songs: MJ) throws -> MusicSimilarModeSong {
+        let current = song["songId"].string.isEmpty ? song : songs[song["songId"].string]
+        try musicRequire(current.isObject, .notFound)
+        return .init(title: current["title"].string, artist: current["artist"].string,
+              album: current["album"].string, artwork: MusicNativePublicBrowseSupport.artwork(current["cover_url"]))
     }
     static func unique(_ values: [MJ], excluding known: [MJ]) -> [MJ] {
         var seen = Set(known.compactMap(nativeID))
@@ -168,52 +170,56 @@ enum MusicNativeSimilarData {
         }
     }
     static func songs(_ response: MusicNativeSimilarModeBatch) throws -> [MJ] {
-        try musicRequire(response.items.allSatisfy { $0.platform == "wy" }, .invalidResponse)
-        let songs = try response.items.map(MusicModel.normalize)
-        try musicRequire(songs.allSatisfy { nativeID($0) != nil }, .invalidResponse)
-        return songs
+        try response.items.map(MusicModel.normalize)
     }
     static func queueSnapshot(_ queue: MJ) -> MJ {
         .obj(["entries", "currentId", "priority", "history", "source"].map { ($0, MusicModel.durable(queue[$0])) })
     }
-    static func validateSession(_ saved: MJ, serial: Int) throws {
-        try musicRequire(saved["schema"] == .n(2) && saved["seed"].isObject &&
-            saved["batches"].isArray && saved["attempted"].isArray &&
-            saved["attempted"].array.allSatisfy(\.isString) &&
-            saved["continue"].isBool && saved["fromHome"].isBool &&
-            saved["offset"].isInteger && saved["offset"].int >= 0 && saved["exhausted"].isBool, .corruptDocument)
-        if saved["returnQueue"] != .null { try validateQueue(saved["returnQueue"]) }
+    static func validateSession(_ saved: MJ, serial: Int, songs: MJ) throws {
+        try musicRequire(saved["schema"] == .n(2) &&
+            (saved["seedSongId"] == .null || songs[saved["seedSongId"].string].isObject) &&
+            saved["seedTitle"].isString && saved["batches"].isArray && saved["attempted"].isArray &&
+            saved["attempted"].array.allSatisfy(\.isString) && saved["continue"].isBool && saved["fromHome"].isBool &&
+            saved["offset"].isInteger && saved["exhausted"].isBool, .corruptDocument)
+        if saved["returnQueue"] != .null { try validateQueue(saved["returnQueue"], songs: songs) }
         let maximum = saved["returnQueue"]["entries"].array.compactMap { Int($0["id"].string.dropFirst(6)) }.max() ?? 0
-        try musicRequire(serial >= maximum, .corruptDocument)
-        let sourceIDs = saved["sourceIds"]
-        try musicRequire(sourceIDs.isArray && sourceIDs.array.allSatisfy(\.isString) &&
-            !sourceIDs.array.isEmpty && sourceIDs.array.count <= 20 &&
-            sourceIDs.strings.allSatisfy(id), .corruptDocument)
-        guard MusicSimilarModeProvider(rawValue: saved["provider"].string) != nil else { throw MusicServiceError.corruptDocument }
+        try musicRequire(serial >= maximum && saved["sourceIds"].isArray &&
+            saved["sourceIds"].array.allSatisfy(\.isString) && !saved["sourceIds"].array.isEmpty &&
+            MusicSimilarModeProvider(rawValue: saved["provider"].string) != nil, .corruptDocument)
+        if saved["provider"].string == MusicSimilarModeProvider.heartbeat.rawValue {
+            try musicRequire(!saved["providerContext"]["pid"].id.isEmpty &&
+                !saved["providerContext"]["sid"].id.isEmpty &&
+                saved["providerContext"]["count"].isInteger, .corruptDocument)
+        }
         for batch in saved["batches"].array {
-            try musicRequire(batch.isObject && !batch["id"].string.isEmpty &&
-                batch["basedOn"].isObject && batch["entryIds"].isArray &&
-                batch["entryIds"].array.allSatisfy(\.isString) &&
+            try musicRequire(!batch["id"].string.isEmpty &&
+                (batch["basedOnSongId"] == .null || songs[batch["basedOnSongId"].string].isObject) &&
+                batch["basedOnTitle"].isString && batch["entryIds"].isArray && batch["entryIds"].array.allSatisfy(\.isString) &&
                 MusicSimilarModeProvider(rawValue: batch["provider"].string) != nil, .corruptDocument)
         }
     }
-    static func validateQueue(_ saved: MJ) throws {
+    static func validateQueue(_ saved: MJ, songs: MJ) throws {
         try musicRequire(saved.isObject && saved["entries"].isArray, .corruptDocument)
-        var d = try MusicDocument(nil, runID: "similar-validation")
-        for key in ["entries", "currentId", "priority", "history", "source"] { d.queue[key] = saved[key] }
-        let serial = saved["entries"].array.compactMap { Int($0["id"].string.dropFirst(6)) }.max() ?? 0
-        d.queue["serial"] = .n(serial)
-        try d.validate()
+        var ids = Set<String>()
+        for row in saved["entries"].array {
+            try musicRequire(!row["id"].string.isEmpty && ids.insert(row["id"].string).inserted &&
+                songs[row["songId"].string].isObject, .corruptDocument)
+        }
+        try musicRequire(saved["currentId"] == .null || ids.contains(saved["currentId"].string), .corruptDocument)
+        for key in ["priority", "history"] {
+            try musicRequire(saved[key].isArray && saved[key].strings.allSatisfy(ids.contains), .corruptDocument)
+        }
     }
     static func batch(_ id: String, basedOn: MJ, provider: MusicSimilarModeProvider, rows: [MJ]) -> MJ {
-        .obj([("id", .string(id)), ("basedOn", MusicModel.durable(basedOn)),
+        .obj([("id", .string(id)), ("basedOnSongId", basedOn["songId"]),
+              ("basedOnTitle", .string(basedOn["songId"].string.isEmpty ? basedOn["title"].string : "")),
               ("provider", .string(provider.rawValue)), ("entryIds", .strings(rows.map { $0["id"].string }))])
     }
-    static func batchDTO(_ row: MJ) throws -> MusicSimilarModeBatch {
+    static func batchDTO(_ row: MJ, songs: MJ) throws -> MusicSimilarModeBatch {
         guard let provider = MusicSimilarModeProvider(rawValue: row["provider"].string) else {
             throw MusicServiceError.corruptDocument
         }
-        return .init(id: row["id"].string, basedOn: display(row["basedOn"]),
+        return try .init(id: row["id"].string, basedOn: display(row["basedOnSongId"] == .null ? .obj([("title", row["basedOnTitle"])]) : songs[row["basedOnSongId"].string], songs: songs),
               provider: provider,
               entryIDs: row["entryIds"].strings)
     }

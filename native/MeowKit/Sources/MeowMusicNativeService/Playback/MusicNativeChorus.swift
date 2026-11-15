@@ -9,12 +9,11 @@ extension NativeMusicService: MusicChorusProviding {
               let owner = accounts as? any MusicNativeChorusProviding else { return nil }
         let own = epoch, d = try read(), selection = current.selection
         guard d.queue["currentId"].string == current.occurrence else { return nil }
-        let song = try playbackSong(.init(kind: .queue, id: current.occurrence), d)
+        let song = try self.song(.init(kind: .queue, id: current.occurrence), d)
         let (source, info) = try target(song, selection.sourceKey)
         guard platformEnabled(source.platform), selection.siteId == source.platform,
               ["wy", "kg"].contains(source.platform),
-              let row = song["sources"].array.first(where: { $0["sourceKey"].string == selection.sourceKey }),
-              MusicModel.compatible(song, row) else { return nil }
+              let row = song["sources"].array.first(where: { $0["sourceKey"].string == selection.sourceKey }) else { return nil }
         // Do not borrow WY's mapping for an actual QQ/KG delivery.
         let recorded = row["duration"].number > 0 ? row["duration"].number : info["duration"].number
         guard recorded.isFinite, recorded > 0, actualDuration.isFinite, actualDuration > 0,

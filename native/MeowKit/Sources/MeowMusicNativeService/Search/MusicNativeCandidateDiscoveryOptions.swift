@@ -56,6 +56,7 @@ extension NativeMusicService {
     private func candidateScriptOptions(song: MJ, seed: MusicNativeCandidateDiscoverySeed, label: String,
                                         excluded: Set<String>) async throws -> MusicNativeCandidateDiscoveryOptions {
         guard let scripts else { return .init() }
+        try candidateCheck(seed)
         let snapshots = try await work(label: label) { try await scripts.sources() }
         try candidateCheck(seed)
         var result = MusicNativeCandidateDiscoveryOptions(scriptState: .ready)
@@ -106,9 +107,7 @@ extension NativeMusicService {
                     try await accounts.nativeOptions(platform: platformValue, nativeID: source.nativeId, sourceKey: source.sourceKey)
                 }
                 try candidateCheck(seed)
-                try musicRequire(values.count <= 1, .invalidResponse)
                 for value in values {
-                    try candidateValidateOfficial(value, source: source)
                     let qualities = Self.officialQualities(value.qualities, prefs)
                     if !qualities.isEmpty {
                         result.rows.append(.init(playback: .init(installationId: value.installationId, generation: value.generation,
@@ -123,14 +122,4 @@ extension NativeMusicService {
         return result
     }
 
-    func candidateValidateOfficial(_ value: MusicPlaybackOption, source: MusicNativeSource) throws {
-        try musicRequire(value.installationId.hasPrefix("official:") && value.siteId == source.platform &&
-            musicSame(value.sourceKey, source.sourceKey) && value.generation > 0 &&
-            value.generation <= 9_007_199_254_740_991 && musicHex(value.contentHash) &&
-            value.qualities.count <= 10 && Set(value.qualities).count == value.qualities.count &&
-            value.qualities.allSatisfy { ["128k", "192k", "320k", "flac", "flac24bit", "master",
-                "jyeffect", "dolby", "sky", "vivid"].contains($0) }, .invalidResponse)
-        _ = try musicText(value.installationId, maximum: 128)
-        _ = try musicText(value.version, maximum: 128)
-    }
 }

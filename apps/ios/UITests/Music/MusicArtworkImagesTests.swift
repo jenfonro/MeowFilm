@@ -77,6 +77,37 @@ private final class ArtworkImageProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() { fixture?.stop(self) }
 }
 
+private final class ArtworkPresentationFixture: MusicPresentationCaching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var imageRevision = UUID()
+    private var bytes: [URL: ArtworkBytes] = [:]
+    let lyricRevision = UUID()
+    var revision: UUID { lock.withLock { imageRevision } }
+    func read(_ url: URL) async -> ArtworkBytes? { lock.withLock { bytes[url] } }
+    func store(_ data: Data, for url: URL, revision: UUID) async -> ArtworkBytes? {
+        lock.withLock {
+            guard revision == imageRevision else { return nil }
+            let value = ArtworkBytes(data: data, expiresAt: Date().addingTimeInterval(30 * 86_400))
+            bytes[url] = value; return value
+        }
+    }
+    func clearImages() async { lock.withLock { imageRevision = UUID(); bytes.removeAll() } }
+    func lyrics(songID: String, authorization: MusicQueueAuthorization) async -> MusicLyricDisplaySnapshot? { nil }
+    func storeLyrics(_ lines: [MusicLyricLine], sourceKey: String, songID: String,
+                     revision: UUID, authorization: MusicQueueAuthorization) async { XCTFail("Unexpected lyric write") }
+    func played(songID: String, artwork: URL?, confirmedAt: Date) async { XCTFail("Unexpected playback renewal") }
+    func clearLyrics() async { XCTFail("Unexpected lyric clear") }
+    func clear() async { await clearImages(); await clearLyrics() }
+}
+
+private actor ArtworkSelectionFixture: MusicArtworkSelecting {
+    private(set) var failures = 0
+    func failedArtwork(songID: String, url: URL, attempted: Set<URL>) -> URL? {
+        failures += 1; return nil
+    }
+    func succeededArtwork(songID: String, url: URL, replacing requested: URL) -> URL? { url }
+}
+
 @MainActor
 final class MusicArtworkImagesTests: XCTestCase {
     private func images() -> MusicArtworkImages {
@@ -334,6 +365,81 @@ final class MusicArtworkImagesTests: XCTestCase {
         XCTAssertEqual(fixture.requestCount, 2); XCTAssertNotNil(view.image)
     }
 
+    func testCancelledTrackReadAllowsOneNewSameTrackBindingWithoutFailureOrHotReload() async throws {
+        let started = expectation(description: "track read cancelled")
+        let fixture = ArtworkImageFixture([
+            .init(status: 200, data: Data(), error: URLError(.cancelled)),
+            .init(status: 200, data: png())
+        ], started: { if $0 == 1 { started.fulfill() } })
+        defer { fixture.close() }
+        let images = images(), cache = ArtworkPresentationFixture(), selector = ArtworkSelectionFixture()
+        images.configure(cache: cache, selector: selector)
+        let view = MusicArtworkView(images: images)
+        let songID = UUID().uuidString
+        let track = MusicRemoteTrack(ref: .init(kind: .library, id: songID),
+            songId: songID, title: "Track", artwork: fixture.url)
+        let failure = expectation(description: "cancellation remains neutral"); failure.isInverted = true
+        view.onFailure = { _ in failure.fulfill() }
+        view.load(track)
+        await fulfillment(of: [started], timeout: 3)
+        await fulfillment(of: [failure], timeout: 0.1)
+        let failedSelections = await selector.failures
+        XCTAssertEqual(failedSelections, 0); XCTAssertEqual(fixture.requestCount, 1)
+        XCTAssertNil(view.image); XCTAssertNil(images.cached(fixture.url))
+        let displayed = expectation(description: "new same-track demand displays image")
+        view.onImage = { _, _ in displayed.fulfill() }
+        for _ in 0..<20 { view.load(track) }
+        await fulfillment(of: [displayed], timeout: 3)
+        let image = try XCTUnwrap(view.image)
+        view.onImage = nil
+        for _ in 0..<20 { view.load(track); view.retryFailedLoad() }
+        XCTAssertTrue(view.image === image); XCTAssertEqual(fixture.requestCount, 2)
+        let after = await selector.failures; XCTAssertEqual(after, 0)
+        await images.close()
+    }
+
+    func testClearedTrackReadWaitsForNewVisibleDemandBeforeTheSameViewReloads() async throws {
+        let started = expectation(description: "track read started")
+        let data = png()
+        let fixture = ArtworkImageFixture([
+            .init(status: 200, data: data, held: true), .init(status: 200, data: data)
+        ], started: { if $0 == 1 { started.fulfill() } })
+        defer { fixture.close() }
+        let images = images(), cache = ArtworkPresentationFixture(), selector = ArtworkSelectionFixture()
+        images.configure(cache: cache, selector: selector)
+        let view = MusicArtworkView(images: images)
+        let songID = UUID().uuidString
+        let track = MusicRemoteTrack(ref: .init(kind: .library, id: songID),
+            songId: songID, title: "Track", artwork: fixture.url)
+        let premature = expectation(description: "clear neither fails nor refills"); premature.isInverted = true
+        view.onFailure = { _ in premature.fulfill() }; view.onImage = { _, _ in premature.fulfill() }
+        view.load(track)
+        await fulfillment(of: [started], timeout: 3)
+        await cache.clearImages(); fixture.finish()
+        await fulfillment(of: [premature], timeout: 0.1)
+        let stored = await cache.read(fixture.url), failures = await selector.failures
+        XCTAssertNil(stored); XCTAssertNil(images.cached(fixture.url)); XCTAssertNil(view.image)
+        XCTAssertEqual(fixture.requestCount, 1); XCTAssertEqual(failures, 0)
+        let root = UIViewController()
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) }
+            ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = root; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        view.frame = CGRect(x: 10, y: 10, width: 48, height: 48)
+        let displayed = expectation(description: "visible same-view demand reloads")
+        view.onFailure = { _ in XCTFail("Cancelled track must not rotate candidates") }
+        view.onImage = { _, _ in displayed.fulfill() }
+        root.view.addSubview(view)
+        await fulfillment(of: [displayed], timeout: 3)
+        view.onImage = nil
+        for _ in 0..<20 { view.load(track); MusicArtworkView.retryFailedLoads(in: root.view) }
+        let replacement = await cache.read(fixture.url), after = await selector.failures
+        XCTAssertEqual(replacement?.data, data); XCTAssertNotNil(view.image)
+        XCTAssertEqual(fixture.requestCount, 2); XCTAssertEqual(after, 0)
+        await images.close()
+    }
+
     func testCancellationErrorDoesNotReportArtworkFailure() async {
         let images = ArtworkImages(maximumBytes: 1_024) { _ in throw CancellationError() }
         let view = ArtworkView(images: images)
@@ -350,11 +456,13 @@ final class MusicArtworkImagesTests: XCTestCase {
             let fixture = ArtworkImageFixture([.init(status: 200, data: webP(kind))])
             defer { fixture.close() }
             let images = images()
-            let (image, _) = try await images.read(fixture.url)
+            let (image, bytes, resource) = try await images.read(fixture.url)
+            XCTAssertEqual(bytes, webP(kind)); XCTAssertEqual(resource, fixture.url)
             let cgImage = try XCTUnwrap(image.cgImage)
             XCTAssertEqual(cgImage.width, kind == "lossy" ? 1_024 : 8)
             XCTAssertEqual(cgImage.height, kind == "lossy" ? 512 : 4)
-            let (warm, _) = try await images.read(fixture.url)
+            let (warm, warmBytes, warmResource) = try await images.read(fixture.url)
+            XCTAssertNil(warmBytes); XCTAssertEqual(warmResource, fixture.url)
             XCTAssertTrue(warm === image); XCTAssertEqual(fixture.requestCount, 1)
             let pixel = try rgba(cgImage, x: kind == "animated" ? 3 : 1, y: 1)
             if kind == "lossy" {

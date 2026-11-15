@@ -79,7 +79,7 @@ private struct ManualExplorationFileCache: MusicAudioFileCaching {
     private func song(types: [String] = ManualExplorationScripts.qualities) throws -> MJ {
         var raw = try MJ.parse(MusicNativeCandidateDiscoveryFixture.track(id: "101").data, maximum: 16 * 1024)
         raw["types"] = .array(types.map { .obj([("type", .string($0))]) })
-        return try MusicModel.normalize(.init(platform: "tx", data: raw.bytes))
+        return try NativeMusicFixture.storedSong(.init(platform: "tx", data: raw.bytes))
     }
     private func policy(_ service: NativeMusicService) async throws {
         let state = try await service.state()
@@ -97,8 +97,10 @@ private struct ManualExplorationFileCache: MusicAudioFileCaching {
     func testManualPagesReachAllScriptQualitiesAndNeverRepeatSuccessfulCandidates() async throws {
         let clock = MusicRecoveryTestClock(), scripts = ManualExplorationScripts(clock)
         let qq = MusicNativeCandidateDiscoveryQQ()
-        let service = try await NativeMusicFixture.service(
-            MusicNativeCandidateDiscoveryFixture.store(song: song()), scripts: scripts, qq: qq, clock: { clock.now() })
+        let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song()),
+            scripts: scripts,
+            platform: qq,
+            clock: { clock.now() })
         try await policy(service)
         let settingsBefore = try await service.state()
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
@@ -135,8 +137,10 @@ private struct ManualExplorationFileCache: MusicAudioFileCaching {
     func testDisabledAutomaticTierCanBeChosenFromHistoryAndRenewedWithoutSearching() async throws {
         let clock = MusicRecoveryTestClock(), scripts = ManualExplorationScripts(clock)
         let qq = MusicNativeCandidateDiscoveryQQ()
-        let service = try await NativeMusicFixture.service(
-            MusicNativeCandidateDiscoveryFixture.store(song: song()), scripts: scripts, qq: qq, clock: { clock.now() })
+        let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song()),
+            scripts: scripts,
+            platform: qq,
+            clock: { clock.now() })
         try await policy(service)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let queue = try await service.queue(), source = try XCTUnwrap(queue.entries.first?.track.sources.first)
@@ -223,26 +227,26 @@ private struct ManualExplorationFileCache: MusicAudioFileCaching {
         catch { XCTAssertEqual(error as? MusicServiceError, .staleAccess) }
         await service.close()
     }
-    func testManualCompleteFileIgnoresAutomaticTierAndPolicySignature() async throws {
+    func testManualCompleteFileIgnoresAutomaticTierPreferences() async throws {
         for official in [false, true] {
             let clock = MusicRecoveryTestClock()
             let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: song())
             let document = try MusicDocument(store.read(), runID: "manual-file")
-            let recording = try song(), source = try XCTUnwrap(MusicModel.sources(recording).first)
+            let entry = try XCTUnwrap(document.queue["entries"].array.first)
+            let recording = document.library["library"]["songs"][entry["songId"].string]
+            let source = try XCTUnwrap(MusicModel.sources(recording).first)
             let scope: String
             if official { scope = try await accounts.nativeCacheScope().scope }
             else { scope = "script-history" }
             let identity = MusicAudioFileCacheIdentity(scope: scope, songID: recording["songId"].string,
                 sourceKey: source.sourceKey, platform: "tx", nativeID: source.nativeId, requestedQuality: "master",
-                playbackSignature: official ? NativeMusicService.audioCacheSignature(song: recording, playback: document.playback) :
-                    NativeMusicService.scriptAudioSignature(recording),
                 provider: official ? "official:recovery-synthetic" : "manual")
             let cache = ManualExplorationFileCache(hit: .init(identity: identity,
                 fileURL: URL(fileURLWithPath: "/synthetic/manual-master.flac"), duration: 180,
                 measuredQuality: "master", expiresAt: clock.now().addingTimeInterval(3600)))
-            let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
-                audioFileCache: cache, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+            let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+                audioFileCache: cache, clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)
             try await policy(service)
             let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)

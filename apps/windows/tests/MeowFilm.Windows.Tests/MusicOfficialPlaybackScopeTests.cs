@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Net.Http;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -14,7 +13,6 @@ using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
-using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 
@@ -621,6 +619,7 @@ public static partial class MusicOfficialPlaybackScopeTests
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly MusicPlaybackCacheTests.Fixture Files;
+        internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly Output Output = new();
         internal readonly OfficialApp App;
         internal readonly MusicCapability Module;
@@ -628,7 +627,8 @@ public static partial class MusicOfficialPlaybackScopeTests
         {
             Files = new(bytes);
             Files.Clock.Now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            App = new(new MusicNativeApplication(Files.Store, new NoNode(), Files.CacheStore, new NoHttp()), Files);
+            App = new(new MusicNativeApplication(Files.Store, Runtime, Files.CacheStore), Files);
+            Runtime.OnRequest = App.ReadPlatform;
             Module = new(App, Files.Store, playback ?? Output, files ? Files.Cache : null, new Dialogs(), cacheStore: Files.CacheStore);
         }
         internal static async Task<Scene> Create(bool files = false, IMusicPlayback? playback = null, byte[]? bytes = null)
@@ -670,18 +670,51 @@ public static partial class MusicOfficialPlaybackScopeTests
             await Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default); // settles a pending row reload
             await Module.PlayQueueSurfaceItemAsync(Module.QueueSurfaceRows.First());
         }
-        internal async Task<string> Queue() =>
-            (await App.Ok("music.queue.get", new { offset = 0, limit = 10 })).GetRawText();
+        internal async Task<string> Queue()
+        {
+            var queue = JsonNode.Parse((await App.Ok("music.queue.get", new { offset = 0, limit = 10 })).GetRawText())!.AsObject();
+            // Metadata changes are observable through the repository, not queue mutations.
+            foreach (var entry in queue["entries"]!.AsArray().OfType<JsonObject>()
+                .Concat(queue["current"] is JsonObject current ? new[] { current } : []))
+                entry["song"] = new JsonObject { ["songId"] = entry["song"]!["songId"]!.DeepClone() };
+            return queue.ToJsonString();
+        }
         public async ValueTask DisposeAsync()
         {
             App.DiscoveryRelease.TrySetResult(); App.ResolutionRelease.TrySetResult();
             try { await Module.DisposeAsync(); }
-            finally { await Files.DisposeAsync(); }
+            finally { await Runtime.DisposeAsync(); await Files.DisposeAsync(); }
         }
     }
     private sealed class OfficialApp(MusicNativeApplication inner, MusicPlaybackCacheTests.Fixture files)
         : MusicApplicationForwarder(inner)
     {
+        private readonly Dictionary<(string Platform, string Id), JsonElement> platformSongs = [];
+        internal Task<JsonElement> ReadPlatform(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            return Task.FromResult(call.Operation == "song"
+                ? platformSongs[(call.Platform, call.Parameters.GetProperty("id").GetString()!)]
+                : call.Operation == "chorus"
+                    ? Element(new { platform = call.Platform, id = call.Parameters.GetProperty("id").GetString(), point = (object?)null })
+                    : throw new InvalidOperationException("unexpected canonical playback operation: " + call.Operation));
+        }
+        private async Task AdoptSong(JsonObject song, CancellationToken token)
+        {
+            string knownId = LJ.S(song["songId"]);
+            JsonElement adopted = default;
+            foreach (var source in song["sources"]!.AsArray().OfType<JsonObject>().ToArray())
+            {
+                string platform = LJ.S(source["source"]), id = NativeMusicSong.NativeId(source);
+                var display = NativeMusicSong.Display(source);
+                platformSongs[(platform, id)] = Element(NativeMusicSong.CreateOnline(platform, NativeMusicSong.SourceData(source),
+                    display.Title, display.Artist, display.Album, display.Duration, display.Cover));
+                adopted = (await inner.ExecuteAsync("music.catalog.song", new { platform, id }, token)).GetProperty("song").Clone();
+            }
+            var current = JsonNode.Parse((inner.SongSnapshot(knownId) ?? adopted).GetRawText())!.AsObject();
+            song.Clear();
+            foreach (var field in current) song[field.Key] = field.Value?.DeepClone();
+        }
         internal readonly List<JsonElement> Plans = [], Resolutions = [], Completions = [];
         internal readonly Dictionary<string, string> Failures = [];
         internal readonly MusicSourceCache Urls = new(files.CacheStore, files.Clock);
@@ -732,6 +765,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         }
         internal async Task<JsonObject> Receipt(JsonObject song, string platform)
         {
+            if (LJ.S(song["songId"]).Length == 0) await AdoptSong(song, default);
             var policy = await inner.ExecuteAsync("music.quality.settings.get");
             string request = policy.GetProperty("settings").GetProperty("request").GetString()!;
             return new()
@@ -768,6 +802,8 @@ public static partial class MusicOfficialPlaybackScopeTests
                     raw["sources"]!.AsArray().Add(MusicSongFixture.Online("tx", "Discovered", LJ.S(raw["title"]),
                         LJ.S(raw["artist"]), LJ.S(raw["album"]), LJ.N(raw["duration"]), DiscoveryArtwork)["sources"]![0]!.DeepClone());
                 DiscoveryReturns++;
+                cancellationToken.ThrowIfCancellationRequested();
+                await AdoptSong(raw, cancellationToken);
                 return Element(new { ok = true, song = NativeMusicSong.Normalize(raw) });
             }
             if (method == "music.official.candidates")
@@ -1006,19 +1042,6 @@ public static partial class MusicOfficialPlaybackScopeTests
         public Task ReopenAsync(NativePlaybackContinuation continuation, Uri uri,
             IReadOnlyDictionary<string, string> headers, CancellationToken token = default) =>
             throw new InvalidOperationException("source discovery must never reopen playback");
-    }
-    private sealed class NoNode : IRuntimeClient
-    {
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
-        { throw new InvalidOperationException("Native business must not upload script sources"); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null,
-            CancellationToken cancellationToken = default) => throw new InvalidOperationException("NO_NODE_ALLOWED");
-    }
-    private sealed class NoHttp : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
-            throw new InvalidOperationException("NO_UPSTREAM_ALLOWED");
     }
     private sealed class Dialogs : IMusicDialogs
     {

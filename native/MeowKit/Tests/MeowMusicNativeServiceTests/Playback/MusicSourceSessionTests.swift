@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import MeowContracts
 @testable import MeowMusicFeature
+import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 private actor SourceSessionScripts: MusicScriptResolving {
@@ -119,9 +120,10 @@ final class MusicSourceSessionTests: XCTestCase {
             XCTAssertTrue(cold.enabled); XCTAssertTrue(cold.isCandidate)
             XCTAssertEqual(cold.state, .idle); XCTAssertEqual(cold.generation, 0)
             XCTAssertEqual(cold.capabilities.first?.actions, ["musicUrl"])
-            let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
+            let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
             let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(),
-                scripts: scripts, qq: qq, http: http)
+            scripts: scripts,
+            platform: NativeMusicFixture.routes(primary: qq, others: http))
             let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
             var initialUpdates = await inspection.updates().makeAsyncIterator()
             let initial = try await initialUpdates.next()
@@ -206,8 +208,8 @@ final class MusicSourceSessionTests: XCTestCase {
     }
     func testOpeningListIsZeroIOAndAutomaticResultIsSharedWithExplicitChoice() async throws {
         let scripts = SourceSessionScripts(), store = try MusicNativeCandidateDiscoveryFixture.store()
-        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
-        let service = try await NativeMusicFixture.service(store, scripts: scripts, qq: qq, http: http)
+        let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts, platform: NativeMusicFixture.routes(primary: qq, others: http))
         let lease = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
         var iterator = await lease.updates().makeAsyncIterator()
         let empty = try await iterator.next(); XCTAssertTrue(empty?.sources.isEmpty == true)
@@ -355,9 +357,11 @@ final class MusicSourceSessionTests: XCTestCase {
         let historyBefore = try MusicDocument(store.read(), runID: "session-cancellation").history
         let document = SourceSessionCancellationDocument(store)
         let scripts = SourceSessionPublicationScripts(cancellingPublicationWith: document)
-        let service = NativeMusicService(document: document, scripts: scripts,
-            qq: MusicNativeCandidateDiscoveryQQ(), enabledPlatforms: [.qq],
-            transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: document,
+            scripts: scripts,
+            platformClient: try MusicNativeCandidateDiscoveryQQ().makeClient(),
+            enabledPlatforms: [.qq],
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let first = Task { try await session.match(intent: .quality("flac")) }
@@ -387,11 +391,10 @@ final class MusicSourceSessionTests: XCTestCase {
         let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
         let discovery = try await service.sourceDiscoveryState(song)
         XCTAssertTrue(history.isEmpty); XCTAssertTrue(exclusions.isEmpty)
-        XCTAssertEqual(Set(discovery.entries.keys), ["tx"])
-        let known = try XCTUnwrap(discovery.entries["tx"])
-        XCTAssertEqual(known.sources.map(\.source), ["tx"])
-        XCTAssertEqual(known.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
-        XCTAssertEqual(known.checkedAt, 0); XCTAssertTrue(known.observations.isEmpty)
+        XCTAssertTrue(discovery.entries.isEmpty, "resolution does not manufacture search observations")
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries[0].track.songId, song["songId"].string)
+        XCTAssertEqual(queue.entries[0].track.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
         XCTAssertTrue(discovery.excluded.isEmpty)
         XCTAssertEqual(try MusicDocument(store.read(), runID: "session-cancellation").history, historyBefore)
         await service.discardSource(attemptID: retried.candidate.attemptId)
@@ -402,9 +405,11 @@ final class MusicSourceSessionTests: XCTestCase {
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let historyBefore = try MusicDocument(store.read(), runID: "session-publication").history
         let document = SourceSessionCancellationDocument(store), scripts = SourceSessionPublicationScripts()
-        let service = NativeMusicService(document: document, scripts: scripts,
-            qq: MusicNativeCandidateDiscoveryQQ(), enabledPlatforms: [.qq],
-            transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: document,
+            scripts: scripts,
+            platformClient: try MusicNativeCandidateDiscoveryQQ().makeClient(),
+            enabledPlatforms: [.qq],
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let first = try await session.match(intent: .quality("flac"))
@@ -420,11 +425,10 @@ final class MusicSourceSessionTests: XCTestCase {
         let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
         let discovery = try await service.sourceDiscoveryState(song)
         XCTAssertTrue(history.isEmpty); XCTAssertTrue(exclusions.isEmpty)
-        XCTAssertEqual(Set(discovery.entries.keys), ["tx"])
-        let known = try XCTUnwrap(discovery.entries["tx"])
-        XCTAssertEqual(known.sources.map(\.source), ["tx"])
-        XCTAssertEqual(known.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
-        XCTAssertEqual(known.checkedAt, 0); XCTAssertTrue(known.observations.isEmpty)
+        XCTAssertTrue(discovery.entries.isEmpty, "resolution does not manufacture search observations")
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries[0].track.songId, song["songId"].string)
+        XCTAssertEqual(queue.entries[0].track.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
         XCTAssertTrue(discovery.excluded.isEmpty)
         XCTAssertEqual(try MusicDocument(store.read(), runID: "session-publication").history, historyBefore)
         await service.discardSource(attemptID: first.candidate.attemptId)

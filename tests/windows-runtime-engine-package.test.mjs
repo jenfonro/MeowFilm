@@ -53,7 +53,7 @@ function verifyManifest(output, manifest) {
   assert.equal(manifest.platform, 'win32');
   assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
   assert.equal(manifest.assemblyProfile, 'common-native');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   const paths = manifest.files.map(file => file.path);
   assert.deepEqual(paths, [...paths].sort());
   assert.equal(new Set(paths.map(path => path.normalize('NFC').toLowerCase())).size, paths.length);
@@ -67,7 +67,7 @@ function verifyManifest(output, manifest) {
   assert.deepEqual(paths.filter(path => path.startsWith('app/')), [
     'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
     'app/modules/cat-script.mjs', 'app/modules/film-playback.mjs',
-    ...metadataFiles.map(file => `app/${file}`), 'app/modules/music-script.mjs',
+    ...metadataFiles.map(file => `app/${file}`), 'app/modules/music-platform.mjs', 'app/modules/music-script.mjs',
     'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-library.mjs',
     'app/modules/source-rules.mjs', 'app/modules/source-runtime.mjs', 'app/modules/source-web.mjs',
     'app/pan-entry.mjs',
@@ -84,8 +84,11 @@ function packagingFixture({
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: { '': { ...manifest } } };
   const inert = 'throw new Error("Synthetic fixture must not execute");\n';
   write(source, 'package.json', manifest);
+  for (const name of ['NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt',
+    'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt'])
+    write(source, `LICENSES/${name}`, readFileSync(join(root, 'LICENSES', name)));
   for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'pan-runtime',
-    'film-rules', 'film-search', 'film-playback', 'netease-token', 'novel-rules', 'inactive-core']) {
+    'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
       name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
@@ -109,7 +112,7 @@ function packagingFixture({
   }
   write(source, 'package-lock.json', lock);
   for (const file of ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
-    'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'modules/source-candidates.mjs',
+    'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'modules/music-platform.mjs', 'modules/source-candidates.mjs',
     'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs'])
     write(source, `apps/runtime/${file}`, inert);
   if (!missingCommonModule) {
@@ -209,7 +212,7 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
   const second = await packageWindowsRuntime({ root: f.root, product: 'aggregate', output: join(f.area, 'second') });
   assert.deepEqual(first, second);
   const shared = await packageRuntime({ root: f.root, product: 'aggregate', output: join(f.area, 'common'), profile: 'common-native' });
-  assert.deepEqual(shared.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
+  assert.deepEqual(shared.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.deepEqual(first.files.filter(file => !file.path.startsWith('app/windows/')), shared.files);
   assert.deepEqual(first.dependencies, shared.dependencies);
   assert.deepEqual(first.omittedOptionalDependencies, shared.omittedOptionalDependencies);
@@ -265,6 +268,7 @@ for (const [target, importer] of [
   ['modules/pan-runtime.mjs', 'pan-entry.mjs'],
   ['modules/film-playback.mjs', 'entry.mjs'],
   ['modules/netease-token.mjs', 'entry.mjs'],
+  ['modules/music-platform.mjs', 'entry.mjs'],
   ['modules/source-library.mjs', 'modules/source-runtime.mjs'],
   ['modules/source-web.mjs', 'modules/source-runtime.mjs'],
   ['modules/source-rules.mjs', 'modules/source-runtime.mjs'],
@@ -294,7 +298,7 @@ for (const [name, mutate, code] of [
     const manifest = readJSON(join(f.output, 'runtime-manifest.json'));
     assert.equal(manifest.status, 'failed');
     assert.equal(manifest.error.code, code);
-    assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
+    assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
     for (const file of manifest.files) {
       const bytes = readFileSync(join(f.output, file.path));
       assert.equal(bytes.length, file.bytes);
@@ -350,7 +354,7 @@ function nativeFixture(t) {
     for (const path of new Set(['package.json', 'package-lock.json', 'scripts/script-host-native.json',
       artifactPath, receiptPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
     for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-      'film-rules', 'film-search', 'film-playback', 'netease-token', 'novel-rules']) {
+      'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules']) {
       copy(`packages/${name}/package.json`);
       for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
         : name === 'film-search' ? ['film-search.js']
@@ -364,6 +368,8 @@ function nativeFixture(t) {
     }
     copy('apps/runtime');
     copy('apps/windows/runtime');
+    for (const name of ['NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt',
+      'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt']) copy(`LICENSES/${name}`);
     nativeSource = { root: source, area: base };
   }
   const f = { ...nativeSource, output: join(nativeSource.area, 'payload') }, originals = new Map();

@@ -51,7 +51,7 @@ public final class MusicMetadataState: ObservableObject {
     @Published public internal(set) var lyricState = "idle"
     @Published public internal(set) var lyricLines: [MusicLyricLine] = []
     @Published public internal(set) var artworkURL: URL?
-    @Published public internal(set) var artworkData: Data?
+    @Published public internal(set) var track: MusicRemoteTrack?
     @Published internal var occurrenceID: String?
 }
 
@@ -168,7 +168,7 @@ public extension MusicViewModel {
         merged(distinctChanges(metadataState.$lyricState),
                distinctChanges(metadataState.$lyricLines),
                distinctChanges(metadataState.$artworkURL),
-               distinctChanges(metadataState.$artworkData),
+               distinctChanges(metadataState.$track),
                distinctChanges(metadataState.$occurrenceID))
     }
 
@@ -195,7 +195,8 @@ public extension MusicViewModel {
     }
 
     var noticeChanges: AnyPublisher<Void, Never> {
-        merged(distinctChanges(notices.$error), distinctChanges(notices.$queueNotice))
+        merged(distinctChanges(notices.$error), distinctChanges(notices.$queueNotice),
+               distinctChanges(settingsReceipts.$unknown))
     }
 }
 #endif

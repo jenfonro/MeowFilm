@@ -81,6 +81,17 @@ public struct MusicAutomaticLibrarySyncPreferences: Equatable, Sendable {
     }
 }
 
+/// A confirmed local preference write and the following network round are
+/// separate facts. A remote unknown must not relabel the settings commit.
+public struct MusicAutomaticLibrarySyncSaveResult: Sendable {
+    public let preferences: MusicAutomaticLibrarySyncPreferences
+    public let synchronization: Result<MusicLibrarySyncState, MusicServiceError>
+    public init(preferences: MusicAutomaticLibrarySyncPreferences,
+                synchronization: Result<MusicLibrarySyncState, MusicServiceError>) {
+        self.preferences = preferences; self.synchronization = synchronization
+    }
+}
+
 public enum MusicAutomaticLibrarySyncEvent: Sendable {
     /// Emitted only after a successful local library CAS, never after import.
     case localMutation
@@ -107,7 +118,7 @@ public struct MusicAutomaticLibrarySyncRequest: Sendable {
 public protocol MusicAutomaticLibrarySyncing: MusicLibrarySyncing {
     func automaticLibrarySyncPreferences() async throws -> MusicAutomaticLibrarySyncPreferences
     func saveAutomaticLibrarySync(_ preferences: MusicAutomaticLibrarySyncPreferences, requestID: UUID,
-                                  authorization: MusicQueueAuthorization) async throws -> MusicLibrarySyncState
+                                  authorization: MusicQueueAuthorization) async throws -> MusicAutomaticLibrarySyncSaveResult
     func synchronizeAutomaticLibrary(_ request: MusicAutomaticLibrarySyncRequest) async throws -> MusicLibrarySyncState
     func automaticLibrarySyncEvents() async -> AsyncStream<MusicAutomaticLibrarySyncEvent>
 }
@@ -156,11 +167,14 @@ public struct MusicLibrarySyncSnapshot: Sendable {
     public let accountID: String
     public let collections: [MusicLibrarySyncCollection]
     public let subscriptions: [MusicLibrarySyncSubscription]
+    public let ownedCollectionIDs: [String]
     public let revision: String
     public init(accountID: String, collections: [MusicLibrarySyncCollection],
-                subscriptions: [MusicLibrarySyncSubscription] = [], revision: String) {
+                subscriptions: [MusicLibrarySyncSubscription] = [], revision: String,
+                ownedCollectionIDs: [String] = []) {
         self.accountID = accountID; self.collections = collections
         self.subscriptions = subscriptions; self.revision = revision
+        self.ownedCollectionIDs = ownedCollectionIDs
     }
 }
 /// A subscribed/read-only directory entry, never a collection member snapshot.
@@ -206,4 +220,7 @@ public enum MusicLibrarySyncWriteResult: Sendable {
     case acknowledged(createdID: String?, createdName: String?)
     /// The adapter did not dispatch a mutation. No sensitive write is replayed.
     case notDispatched(MusicServiceError)
+    /// The upstream explicitly rejected a dispatched mutation; no unknown write
+    /// remains, but this is not a proof that the request was never sent.
+    case rejected(MusicServiceError)
 }

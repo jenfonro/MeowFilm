@@ -1,6 +1,8 @@
 import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 private enum MetadataNativeFixture {
@@ -27,8 +29,9 @@ private enum MetadataNativeFixture {
 
     static func song(_ rows: [MJ]) throws -> MJ {
         let primary = try row(.qq, "AudioMID")
-        return .obj([("songId", .string("song:metadata-fixture")), ("title", .string("Recording")),
+        return .obj([("songId", .string(UUID().uuidString.lowercased())), ("title", .string("Recording")),
             ("artist", .string("Fixture")), ("album", .string("Synthetic album")), ("duration", .n(180)),
+            ("baselineDuration", .n(180)),
             ("cover_url", primary["musicInfo"]["img"]), ("sources", .array(rows))])
     }
 
@@ -36,9 +39,10 @@ private enum MetadataNativeFixture {
         var d = try MusicDocument(nil, runID: "metadata-fixture")
         d.playback = playback
         if let song {
+            d.library["library"]["songs"][song["songId"].string] = song
             d.queue["entries"] = .array([
-                .obj([("id", .string("entry-1")), ("song", song)]),
-                .obj([("id", .string("entry-2")), ("song", song)])
+                .obj([("id", .string("entry-1")), ("songId", song["songId"])]),
+                .obj([("id", .string("entry-2")), ("songId", song["songId"])])
             ])
             d.queue["serial"] = .n(2); d.queue["revision"] = .n(3)
             d.queue["currentId"] = .string("entry-1")
@@ -50,8 +54,11 @@ private enum MetadataNativeFixture {
     static func service(_ store: NativeMusicMemoryDocument,
                         enabled: Set<MusicPublicBrowsePlatform> = threePlatformScope,
                         probe: MetadataNetworkProbe = MetadataNetworkProbe()) async throws -> NativeMusicService {
-        let service = NativeMusicService(document: store, scripts: probe, qq: probe,
-            enabledPlatforms: enabled, transport: probe, clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: store,
+            scripts: probe,
+            platformClient: try NativeMusicFixture.routes(primary: probe, others: probe).makeClient(),
+            enabledPlatforms: enabled,
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         return service
     }
@@ -59,16 +66,10 @@ private enum MetadataNativeFixture {
 
 /// Every possible provider entry point is observable. Candidate enumeration
 /// must not probe scripts, search a title, fetch artwork or resolve audio.
-private actor MetadataNetworkProbe: MusicNativeHTTPTransport, MusicPublicQQProviding, MusicScriptResolving {
+private actor MetadataNetworkProbe: MusicPlatformFixtureResponding, MusicScriptResolving {
     private var events: [String] = []
-    func send(_ request: MusicNativeHTTPRequest) throws -> MusicNativeHTTPResponse {
-        events.append("http"); throw MusicServiceError.unavailable
-    }
-    func search(query: String, page: Int, limit: Int) throws -> MusicNativeTrackPage {
-        events.append("search"); throw MusicServiceError.unavailable
-    }
-    func lyrics(mid: String) throws -> MusicNativeLyrics {
-        events.append("lyrics"); throw MusicServiceError.unavailable
+    func respond(_ request: MusicPlatformFixture.Request) throws -> RuntimeValue {
+        events.append(request.operation); throw MusicServiceError.unavailable
     }
     func sources() throws -> [MusicScriptSource] {
         events.append("scripts"); throw MusicServiceError.unavailable
@@ -108,8 +109,8 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         var playback = MusicModel.playback
         playback["metadataPlatforms"] = .strings(["kw", "tx", "mg", "wy", "kg"])
         playback["metadataEnabled"] = .strings(["kw", "tx", "wy"])
-        playback["retainedPreference"] = .string("legacy-value")
-        let bytes = try MetadataNativeFixture.document(song: MetadataNativeFixture.song([]), playback: playback)
+        playback["retainedPreference"] = .string("unrelated-value")
+        let bytes = try MetadataNativeFixture.document(playback: playback)
         let before = try MJ.parse(bytes), store = NativeMusicMemoryDocument(bytes)
         let service = try await MetadataNativeFixture.service(store)
         let value = try await service.updateMetadataPreferences(.init(ifRevision: 0,
@@ -223,15 +224,13 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         XCTAssertEqual(maxStore.snapshot().2, 0); await maxService.close()
     }
 
-    func testCandidatesUseMetadataOrderCompatibilityAndProductPolicyWithoutNetwork() async throws {
+    func testCandidatesUseMetadataOrderAndProductScopeWithoutCountOrCompatibilityGate() async throws {
         var rows = try MetadataNativeFixture.all.flatMap { platform in
             try ["03", "01", "02"].map { try MetadataNativeFixture.row(platform, $0) }
         }
-        // The compact model accepts at most 16 source rows. Keep this case at
-        // the boundary so candidate enumeration is exercised on the maximum
-        // document shape, not only 15 rows.
         rows.append(try MetadataNativeFixture.row(.qq, "04"))
-        XCTAssertEqual(rows.count, 16)
+        rows.append(try MetadataNativeFixture.row(.kugou, "04", title: "Corrected title", duration: 240))
+        rows.append(try MetadataNativeFixture.row(.netease, "04", title: "Recording (Live)"))
         var playback = MusicModel.playback
         playback["metadataPlatforms"] = .strings(["kg", "wy", "kw", "tx", "mg"])
         playback["metadataEnabled"] = .strings(["kg", "wy", "kw", "mg"])
@@ -241,66 +240,25 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         let store = NativeMusicMemoryDocument(bytes), probe = MetadataNetworkProbe()
         let service = try await MetadataNativeFixture.service(store, probe: probe)
         let result = try await service.metadataCandidates(occurrenceID: "entry-1")
-        XCTAssertEqual(result.candidates.map(\.source.platform), ["kg", "kg", "wy", "wy"])
-        let expected = try [
-            MetadataNativeFixture.row(.kugou, "01"), MetadataNativeFixture.row(.kugou, "02"),
-            MetadataNativeFixture.row(.netease, "01"), MetadataNativeFixture.row(.netease, "02")
-        ]
+        XCTAssertEqual(result.candidates.map(\.source.platform), Array(repeating: "kg", count: 4) + Array(repeating: "wy", count: 4))
+        let expected = ["kg", "wy"].flatMap { platform in
+            rows.filter { $0["source"].string == platform }.sorted { $0["sourceKey"].string < $1["sourceKey"].string }
+        }
         XCTAssertEqual(result.candidates.map(\.source.sourceKey), expected.map { $0["sourceKey"].string })
         XCTAssertEqual(result.candidates.map { $0.artwork?.absoluteString },
                        expected.map { Optional($0["musicInfo"]["img"].string) })
-        XCTAssertEqual(result.track.sources.count, 16)
+        XCTAssertEqual(result.track.sources.count, 18)
         XCTAssertTrue(result.track.sources.contains { $0.platform == "tx" && $0.nativeId == "04" })
         XCTAssertEqual(result.track.ref, .init(kind: .queue, id: "entry-1"))
-        XCTAssertNil(result.contentRevision); XCTAssertEqual(result.queueRevision, 3)
+        XCTAssertEqual(result.queueRevision, 3)
         let attempt = await service.attempt; XCTAssertNil(attempt)
         let calls = await probe.calls(); XCTAssertTrue(calls.isEmpty)
         XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
 
-        // A compact source row must carry the key derived from its own native
-        // locator, and a conflicting native recording fails document validation
-        // before candidates are enumerated.
-        let valid = try MetadataNativeFixture.row(.qq, "AudioMID")
-        var wrongKey = valid
-        wrongKey["sourceKey"] = .string("not-the-native-key")
-        let wrongKeyBytes = try MetadataNativeFixture.document(
-            song: MetadataNativeFixture.song([valid, wrongKey]))
-        XCTAssertThrowsError(try MusicDocument(wrongKeyBytes, runID: "fixture")) {
-            XCTAssertEqual($0 as? MusicServiceError, .nativeIDConflict)
-        }
-
-        var conflict = valid
-        conflict["musicInfo"]["duration"] = .n(240)
-        let conflictBytes = try MetadataNativeFixture.document(song: MetadataNativeFixture.song([conflict]))
-        XCTAssertThrowsError(try MusicDocument(conflictBytes, runID: "fixture")) {
-            XCTAssertEqual($0 as? MusicServiceError, .nativeIDConflict)
-        }
-
-        let live = try MetadataNativeFixture.row(.qq, "LiveMID", title: "Recording (Live)")
-        let liveBytes = try MetadataNativeFixture.document(song: MetadataNativeFixture.song([valid, live]))
-        XCTAssertThrowsError(try MusicDocument(liveBytes, runID: "fixture")) {
-            XCTAssertEqual($0 as? MusicServiceError, .nativeIDConflict)
-        }
-
-        // cleanSong rejects a seventeenth source row before candidate
-        // enumeration.
-        let overflow = rows + [try MetadataNativeFixture.row(.qq, "05")]
-        XCTAssertEqual(overflow.count, 17)
-        let overflowBytes = try MetadataNativeFixture.document(song: MetadataNativeFixture.song(overflow))
-        XCTAssertThrowsError(try MusicDocument(overflowBytes, runID: "fixture")) {
-            XCTAssertEqual($0 as? MusicServiceError, .invalidImport)
-        }
-        // MusicModel.sources keeps its separate .limit guard for callers that
-        // bypass document validation.
-        var bypass = song
-        bypass["sources"] = .array(overflow)
-        XCTAssertThrowsError(try MusicModel.sources(bypass)) {
-            XCTAssertEqual($0 as? MusicServiceError, .limit)
-        }
     }
 
-    func testFivePlatformCapAndCandidateArtworkNeverInheritThePrimaryCover() async throws {
+    func testEveryKnownFivePlatformCandidateKeepsItsOwnArtwork() async throws {
         var rows = try MetadataNativeFixture.all.flatMap { p in
             try ["03", "01", "02"].map { try MetadataNativeFixture.row(p, $0) }
         }
@@ -311,13 +269,13 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: MetadataNativeFixture.song(rows)))
         let service = try await MetadataNativeFixture.service(store, enabled: Set(MetadataNativeFixture.all))
         let result = try await service.metadataCandidates(occurrenceID: "entry-1")
-        XCTAssertEqual(result.candidates.count, 10)
-        XCTAssertEqual(result.candidates.map(\.source.platform), ["wy", "wy", "tx", "tx", "kg", "kg", "kw", "kw", "mg", "mg"])
+        XCTAssertEqual(result.candidates.count, 15)
+        XCTAssertEqual(result.candidates.map(\.source.platform), ["wy", "tx", "kg", "kw", "mg"].flatMap { Array(repeating: $0, count: 3) })
         XCTAssertNil(result.candidates[0].artwork)
         XCTAssertEqual(result.candidates[1].artwork, URL(string: "https://independent-cdn.invalid/image.jpg"))
-        XCTAssertEqual(result.candidates[2].artwork?.host, "y.gtimg.cn")
-        XCTAssertEqual(result.candidates[6].artwork?.host, "img.kuwo.cn")
-        XCTAssertEqual(result.candidates[8].artwork?.host, "d.musicapp.migu.cn")
+        XCTAssertEqual(result.candidates[3].artwork?.host, "y.gtimg.cn")
+        XCTAssertEqual(result.candidates[9].artwork?.host, "img.kuwo.cn")
+        XCTAssertEqual(result.candidates[12].artwork?.host, "d.musicapp.migu.cn")
         XCTAssertFalse(result.candidates.compactMap { $0.artwork?.absoluteString }
             .contains("https://y.gtimg.cn/AudioMID.jpg"), "primary audio artwork is not a candidate cover")
         await service.close()
@@ -355,28 +313,20 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
     }
 
     func testExplicitEmptySourcesDoNotResurrectSongLevelPrimaryOrWrite() async throws {
-        let primary = try MetadataNativeFixture.row(.qq, "AudioMID")["musicInfo"]
-        var song = try MetadataNativeFixture.song([])
-        // A song-level primary locator is not a source after the compact
-        // schema migration; only an explicit source list is authoritative.
-        song["musicInfo"] = primary
+        let song = try MetadataNativeFixture.song([])
         XCTAssertEqual(song["sources"], .array([]))
         let bytes = try MetadataNativeFixture.document(song: song)
         let store = NativeMusicMemoryDocument(bytes), service = try await MetadataNativeFixture.service(store)
         let result = try await service.metadataCandidates(occurrenceID: "entry-1")
         XCTAssertTrue(result.candidates.isEmpty)
         XCTAssertTrue(result.track.sources.isEmpty)
-        XCTAssertNil(result.contentRevision)
         XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
     }
 
     func testMissingSourcesFailAtDocumentReadBoundaryWithoutWriting() async throws {
-        let primary = try MetadataNativeFixture.row(.qq, "AudioMID")["musicInfo"]
         var song = try MetadataNativeFixture.song([])
-        song["musicInfo"] = primary
         song.remove("sources")
-        XCTAssertEqual(song["musicInfo"]["songmid"].string, "AudioMID")
         let bytes = try MetadataNativeFixture.document(song: song)
         let store = NativeMusicMemoryDocument(bytes), service = try await MetadataNativeFixture.service(store)
         await expect(.corruptDocument) { _ = try await service.metadataCandidates(occurrenceID: "entry-1") }
@@ -384,7 +334,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         await service.close()
     }
 
-    func testFingerprintExcludesOccurrenceAndSettingsButIncludesHiddenLocatorAndCover() async throws {
+    func testOccurrencesAndPolicyReadOnePermanentRepositoryWithoutQueueRewrite() async throws {
         let row = try MetadataNativeFixture.row(.qq, "AudioMID")
         let song = try MetadataNativeFixture.song([row])
         let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: song))
@@ -393,23 +343,69 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         _ = try await service.changeQueue(.select("entry-2"), expectedRevision: 3)
         _ = try await service.updateMetadataPreferences(.init(ifRevision: 0, platforms: [.qq, .netease, .kugou]))
         let second = try await service.metadataCandidates(occurrenceID: "entry-2")
-        XCTAssertEqual(first.contentFingerprint, second.contentFingerprint)
-        XCTAssertEqual(first.contentRevision, second.contentRevision)
+        XCTAssertEqual(first.track.songId, second.track.songId)
+        XCTAssertEqual(first.track.sources, second.track.sources)
+        XCTAssertEqual(second.queueRevision, 4)
+        let current = try await service.read()
+        XCTAssertTrue(current.queue["entries"].array.allSatisfy { $0["song"] == .null && $0["songId"].string == first.track.songId })
+        XCTAssertEqual(current.library["library"]["songs"].fields.count, 1)
+        XCTAssertEqual(second.preferences.platforms, [.qq, .netease, .kugou])
         await expect(.targetChanged) { _ = try await service.metadataCandidates(occurrenceID: "entry-1") }
         await service.close()
-        for variant in ["locator", "cover"] {
-            var changed = song
-            switch variant {
-            case "locator":
-                var source = row, info = row["musicInfo"]; info["albumId"] = .string("ChangedAlbum")
-                source["musicInfo"] = info; changed["sources"] = .array([source])
-            default: changed["cover_url"] = .string("https://p1.music.126.net/changed.jpg")
-            }
-            let other = try await MetadataNativeFixture.service(.init(try MetadataNativeFixture.document(song: changed)))
-            let result = try await other.metadataCandidates(occurrenceID: "entry-1")
-            XCTAssertNotEqual(first.contentFingerprint, result.contentFingerprint, variant)
-            await other.close()
+        let cold = try await MetadataNativeFixture.service(store)
+        let restored = try await cold.metadataCandidates(occurrenceID: "entry-2")
+        XCTAssertEqual(restored.track.songId, first.track.songId)
+        XCTAssertEqual(restored.track.artwork, second.track.artwork)
+        await cold.close()
+    }
+
+    func testArtworkSelectionKeepsEntranceUntilExplicitPolicyChangeAndPersistsAcrossColdRead() async throws {
+        let primary = try MetadataNativeFixture.row(.qq, "AudioMID")
+        var song = try MetadataNativeFixture.song([primary])
+        song["artworkSourceKey"] = primary["sourceKey"]
+        let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: song))
+        let service = try await MetadataNativeFixture.service(store)
+        let original = try await service.queue()
+        let peer = try MetadataNativeFixture.row(.netease, "Peer")
+        let incoming = MJ.obj([("title", song["title"]), ("artist", song["artist"]), ("duration", song["duration"]),
+            ("cover_url", peer["musicInfo"]["img"]), ("sources", .array([peer]))])
+        _ = try await service.adoptSongs([incoming], authoritative: true)
+        let beforeChange = try await service.repositoryTracks(songIDs: [song["songId"].string])
+        XCTAssertEqual(beforeChange[song["songId"].string]?.artwork?.absoluteString, primary["musicInfo"]["img"].string)
+        _ = try await service.updateMetadataPreferences(.init(ifRevision: 0, platforms: [.netease, .kugou, .qq]))
+        let selected = try await service.repositoryTracks(songIDs: [song["songId"].string])
+        XCTAssertEqual(selected[song["songId"].string]?.artwork?.absoluteString, peer["musicInfo"]["img"].string)
+        let after = try await service.queue()
+        XCTAssertEqual(after.revision, original.revision); XCTAssertEqual(after.currentId, original.currentId)
+        XCTAssertEqual(after.entries.map(\.id), original.entries.map(\.id))
+        XCTAssertEqual(Set(after.entries.map { $0.track.songId }), [song["songId"].string])
+        XCTAssertTrue(after.entries.allSatisfy { $0.track.artwork == selected[song["songId"].string]?.artwork })
+        let failedURL = try XCTUnwrap(selected[song["songId"].string]?.artwork)
+        let fallback = try await service.failedArtwork(songID: song["songId"].string, url: failedURL, attempted: [failedURL])
+        XCTAssertEqual(fallback?.absoluteString, primary["musicInfo"]["img"].string)
+        // The old request cannot overwrite the now-current fallback.
+        let late = try await service.succeededArtwork(songID: song["songId"].string, url: failedURL, replacing: failedURL)
+        XCTAssertEqual(late, fallback)
+        let beforeUnsafe = store.snapshot()
+        let credentialURL = try XCTUnwrap(URL(string: primary["musicInfo"]["img"].string + "?access_token=synthetic"))
+        let unsafe = try await service.succeededArtwork(songID: song["songId"].string, url: credentialURL,
+                                                        replacing: try XCTUnwrap(fallback))
+        XCTAssertEqual(unsafe, fallback)
+        XCTAssertEqual(store.snapshot().0, beforeUnsafe.0); XCTAssertEqual(store.snapshot().2, beforeUnsafe.2)
+        let beforeFailure = store.snapshot()
+        store.fail(.storageConflict)
+        await expect(.storageConflict) {
+            _ = try await service.updateMetadataPreferences(.init(ifRevision: 1, enabledPlatforms: [.netease]))
         }
+        XCTAssertEqual(store.snapshot().0, beforeFailure.0); XCTAssertEqual(store.snapshot().2, beforeFailure.2)
+        store.fail(nil)
+        await service.close()
+        let cold = try await MetadataNativeFixture.service(store)
+        let restored = try await cold.queue()
+        XCTAssertEqual(restored.revision, original.revision)
+        XCTAssertEqual(restored.entries.map { $0.track.songId }, after.entries.map { $0.track.songId })
+        XCTAssertTrue(restored.entries.allSatisfy { $0.track.artwork == fallback })
+        await cold.close()
     }
 
     func testProtectionRevocationAndCancelledCallerDoNotReadOrWrite() async throws {
@@ -439,16 +435,17 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
     func testCommittedPolicyChangeRevokesAnAlreadyRunningLyricRequest() async throws {
         let song = try MetadataNativeFixture.song([MetadataNativeFixture.row(.qq, "AudioMID")])
         let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: song))
-        let qq = NativeMusicQQFixture(), gate = NativeMusicGate()
-        let service = try await NativeMusicFixture.service(store, qq: qq)
+        let gate = NativeMusicGate()
+        let qq = NativeMusicResultFixture([.object(["text": .string("[00:01.000]Synthetic")])], gate: gate)
+        let service = try await NativeMusicFixture.service(store, platform: qq)
         let snapshot = try await service.metadataCandidates(occurrenceID: "entry-1")
         let source = try XCTUnwrap(snapshot.candidates.first?.source)
-        await qq.suspend(gate)
         let request = Task { try await service.lyrics(occurrenceId: "entry-1", sourceKey: source.sourceKey) }
         await gate.started()
         _ = try await service.updateMetadataPreferences(.init(ifRevision: 0, enabledPlatforms: []))
-        await expect(.cancelled) { _ = try await request.value }
         await gate.release()
+        await expect(.cancelled) { _ = try await request.value }
+        await qq.waitUntilIdle()
         let state = try await service.state()
         XCTAssertEqual(state.currentId, "entry-1"); XCTAssertEqual(state.position, 0)
         await service.close()

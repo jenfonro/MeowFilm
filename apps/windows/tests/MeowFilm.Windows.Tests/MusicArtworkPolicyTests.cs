@@ -17,19 +17,21 @@ public static class MusicArtworkPolicyTests
             Equal("https://wy.example.test/a", Pick(current, ["tx", "wy"], ["wy"]));
             Equal("", Pick(current, ["wy", "tx"], [])); return Task.CompletedTask;
         });
-        yield return new("Native music artwork rejects a noncurrent root and reads recording metadata", () =>
+        yield return new("Native music artwork reads current recording metadata rather than an unrelated root cover", () =>
         {
-            var invalid = Song("wy", "42");
-            invalid["sources"]![0]!["musicInfo"]!["img"] = "https://unrelated.example.test/a?token=x";
-            Equal("", Pick(MusicSongFixture.Element(invalid), ["wy"], ["wy"]));
+            var missing = Song("wy", "42");
+            missing["cover_url"] = "https://unrelated.example.test/a";
+            Equal("", Pick(MusicSongFixture.Element(missing), ["wy"], ["wy"]));
             var song = Song("wy", "42", "https://native.example.test/a");
             song["cover_url"] = "https://display.example.test/a";
             Equal("https://native.example.test/a", Pick(MusicSongFixture.Element(song), ["wy"], ["wy"]));
+            song["sources"]![0]!["musicInfo"]!["img"] = "https://native.example.test/a?token=resource&size=256";
+            Equal("https://native.example.test/a?token=resource&size=256", Pick(MusicSongFixture.Element(song), ["wy"], ["wy"]));
             return Task.CompletedTask;
         });
-        yield return new("Native music artwork ignores credentialed URLs and limits each provider to two candidates", () =>
+        yield return new("Native music artwork rejects unsafe transport targets and consumes every known candidate", () =>
         {
-            foreach (string uri in new[] { "https://u:secret@example.test/a", "https://example.test/a?token=private",
+            foreach (string uri in new[] { "https://u:secret@example.test/a",
                 "file:///C:/private.png", "https://example.test/a#x" })
             {
                 var song = Song("wy", "42");
@@ -40,7 +42,7 @@ public static class MusicArtworkPolicyTests
             many["sources"]!.AsArray().Add(Row("wy", "2", ""));
             many["sources"]!.AsArray().Add(Row("wy", "3", "https://third.example.test/a"));
             many["sources"]!.AsArray().Add(Row("tx", "other", "https://tx.example.test/a"));
-            Equal("https://tx.example.test/a", Pick(MusicSongFixture.Element(many), ["wy", "tx"], ["wy", "tx"]));
+            Equal("https://third.example.test/a", Pick(MusicSongFixture.Element(many), ["wy", "tx"], ["wy", "tx"]));
             return Task.CompletedTask;
         });
     }

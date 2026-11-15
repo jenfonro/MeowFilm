@@ -6,8 +6,9 @@ import MeowMusicFeature
 extension NativeMusicService: MusicHistoryManaging {
     public func historyDetail(id: String) async throws -> MusicHistoryDetail {
         let own = epoch
-        let raw = try historySnapshot(id: id, in: read())
-        let snapshot = try MusicNativeHistorySnapshot(raw)
+        let state = try read()
+        let raw = try historySnapshot(id: id, in: state)
+        let snapshot = try MusicNativeHistorySnapshot(raw, songs: state.library["library"]["songs"])
         let result = MusicHistoryDetail(
             summary: snapshot.summary, entries: snapshot.displayEntries,
             selectedIndex: snapshot.selectedIndex, sourceLabel: snapshot.sourceLabel,
@@ -44,18 +45,12 @@ extension NativeMusicService: MusicHistoryManaging {
                 try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
                 try musicRequire(expectedRevision < 9_007_199_254_740_991, .limit)
                 let raw = try boundHistorySnapshot(detail, in: d)
-                let snapshot = try MusicNativeHistorySnapshot(raw)
+                let snapshot = try MusicNativeHistorySnapshot(raw, songs: d.library["library"]["songs"])
                 guard let index = startIndex ?? snapshot.selectedIndex else { throw MusicServiceError.notFound }
                 try musicRequire(snapshot.entries.indices.contains(index))
 
                 let old = d.queue
-                // Like queue.restore: normalize songs through makeEntry, but
-                // preserve the archived occurrence IDs and each row's context.
-                var rows = try makeEntries(snapshot.entries.map { $0["song"] }, queue: &d.queue)
-                for i in rows.indices {
-                    rows[i]["id"] = snapshot.entries[i]["id"]
-                    rows[i]["context"] = snapshot.entries[i]["context"]
-                }
+                let rows = snapshot.entries
                 d.queue["serial"] = .n(max(d.queue["serial"].int, snapshot.maximumSerial))
                 archive(old, into: &d)
                 let selected = rows[index]["id"].string
@@ -119,7 +114,7 @@ private struct MusicNativeHistorySnapshot {
     let history: [String]
     let source: MJ
 
-    init(_ raw: MJ) throws {
+    init(_ raw: MJ, songs: MJ) throws {
         do {
             try musicRequire(raw.isObject && raw["entries"].isArray, .corruptDocument)
             let id = try raw["id"].text()
@@ -141,19 +136,18 @@ private struct MusicNativeHistorySnapshot {
                 let occurrence = entry["id"].string
                 guard occurrence.range(of: "^entry-[1-9][0-9]*$", options: .regularExpression) != nil,
                       let number = Int(occurrence.dropFirst(6)), number <= 9_007_199_254_740_991,
-                      ids.insert(occurrence).inserted, entry["song"].isObject,
+                      ids.insert(occurrence).inserted, songs[entry["songId"].string].isObject,
                       entry["context"] == .null || entry["context"].isObject else {
                     throw MusicServiceError.corruptDocument
                 }
                 serial = max(serial, number)
-                let song = try MusicModel.cleanSong(entry["song"])
+                let song = songs[entry["songId"].string]
                 _ = try song["songId"].text()
                 _ = try MusicModel.sources(song)
-                let title = try song["title"].text(1024)
-                try musicRequire(song["duration"].number.isFinite && song["duration"].number >= 0, .corruptDocument)
+                let title = song["title"].string
                 var context = entry["context"] == .null ? MJ.obj() : MusicModel.durable(entry["context"])
                 context.remove("queueSource")
-                rows.append(.obj([("id", .string(occurrence)), ("song", song), ("context", context)]))
+                rows.append(.obj([("id", .string(occurrence)), ("songId", entry["songId"]), ("context", context)]))
                 display.append(.init(id: occurrence, index: index, title: title,
                     artist: song["artist"].string, album: song["album"].string,
                     artwork: MusicNativePublicBrowseSupport.artwork(song["cover_url"]),

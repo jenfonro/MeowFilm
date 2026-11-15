@@ -110,7 +110,7 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
 
 @MainActor final class MusicSourceConsumerBoundaryTests: XCTestCase {
     private func song() throws -> MJ {
-        var song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        var song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321"))
         song["sources"] = .array(song["sources"].array + peer["sources"].array)
         return song
@@ -148,7 +148,8 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
         let selected = try XCTUnwrap(results.sources.first { $0.selection.siteId == (playingPeer ? "wy" : "tx") })
         await model.chooseInspectedSource(selected, session: session)
         try emit(model, paused ? .paused : .playing); await model.flushPlaybackFacts()
-        let old = model.activeResourceID, before = await scripts.calls()
+        let old = model.activeResourceID, oldAttempt = model.candidate?.attemptId, before = await scripts.calls()
+        let queueBefore = try await service.queue()
         player.onPause = { [weak model] in if let model { try? self.emit(model, .paused) } }
         await model.rejectInspectedSource(rejected, session: session)
         await model.flushPlaybackFacts()
@@ -157,8 +158,19 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
         XCTAssertEqual(after.resolved, before.resolved, "A valid same-song result must not be resolved again")
         XCTAssertEqual(model.activePlaybackSelection?.siteId, "tx")
         XCTAssertEqual(model.activePlaybackSelection?.quality, "flac")
-        XCTAssertEqual(model.current?.track.sources.map(\.platform), ["tx"])
+        XCTAssertEqual(model.current?.track.sources, queueBefore.entries[0].track.sources)
+        XCTAssertEqual(model.current?.track.sources.map(\.platform), ["tx", "wy"])
+        XCTAssertEqual(model.current?.track.songId, queueBefore.entries[0].track.songId)
         XCTAssertEqual(model.current?.id, "entry-1")
+        let queueAfter = try await service.queue()
+        XCTAssertEqual(queueAfter.entries.map(\.id), queueBefore.entries.map(\.id))
+        XCTAssertEqual(queueAfter.currentId, queueBefore.currentId)
+        XCTAssertEqual(queueAfter.revision, queueBefore.revision)
+        var updates = await session.updates().makeAsyncIterator()
+        let update = try await updates.next(), available = try XCTUnwrap(update)
+        XCTAssertFalse(available.sources.contains { $0.selection.sourceKey == rejected.selection.sourceKey })
+        let retainedSource = try XCTUnwrap(queueBefore.entries[0].track.sources.first { $0.platform == "tx" })
+        XCTAssertTrue(available.sources.contains { $0.selection.sourceKey == retainedSource.sourceKey && $0.selection.siteId == "tx" })
         XCTAssertEqual(player.stops, playingPeer ? 1 : 0)
         XCTAssertEqual(player.handoffs, 0, "A rejected recording is not a handoff donor")
         XCTAssertEqual(player.resumes, playingPeer && !paused ? 1 : 0)
@@ -167,14 +179,17 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
             XCTAssertEqual(model.candidate?.startPosition, 41)
             if case .quality("flac") = model.sourceIntent {} else { XCTFail("Recording replacement must keep the same flac tier") }
             if paused { XCTAssertEqual(model.phase, .paused) }
-        } else { XCTAssertEqual(model.activeResourceID, old) }
+        } else {
+            XCTAssertEqual(model.activeResourceID, old)
+            XCTAssertEqual(model.candidate?.attemptId, oldAttempt)
+        }
         let exclusions = try await service.sourceExclusions()
         XCTAssertEqual(exclusions.count, 1)
         let exclusion = try XCTUnwrap(exclusions.first)
         XCTAssertEqual(exclusion.songID, model.current?.track.songId)
         XCTAssertEqual(exclusion.provider, "")
-        if case .recording(_, let duration, let sourceKey) = exclusion.scope {
-            XCTAssertEqual(duration, 180)
+        XCTAssertEqual(model.current?.track.duration, 180)
+        if case .recording(let sourceKey) = exclusion.scope {
             XCTAssertEqual(sourceKey, rejected.selection.sourceKey)
         } else { XCTFail("Recording exclusion must not become provider exclusion") }
         await session.close(); await model.close(); await service.close()
@@ -267,8 +282,8 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
         let clock = MusicRecoveryTestClock(), scripts = ConsumerBoundaryScripts(clock), accounts = ConsumerBoundaryAccounts(clock)
         await accounts.failScope(.busy); await accounts.fail(.busy)
         let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song()),
-            scripts: scripts, accounts: accounts, qq: NativeMusicQQFixture(), audioFileCache: ConsumerBoundaryEmptyCache(),
-            transport: NativeMusicNoNetwork(), clock: { clock.now() })
+            scripts: scripts, accounts: accounts, platformClient: try NativeMusicFixture.client(), audioFileCache: ConsumerBoundaryEmptyCache(),
+            clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let result = try await session.match(intent: .quality("flac"))

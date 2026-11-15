@@ -23,20 +23,4 @@ public sealed partial class MusicLibraryOwner
         Set(doc, "online-settings", next); return (LJ.Obj(("settings", next)), true);
     }
 
-    /// <summary>
-    /// Script installations and their private data moved to the shared music source module.
-    /// Earlier native entries are neither read, migrated nor deleted; they are carried
-    /// through whole-document writes unchanged so playlists and settings stay readable.
-    /// </summary>
-    private bool IsRetiredArea(string encoded)
-    {
-        if (encoded == Key("lx-installations")) return true;
-        try
-        {
-            return JsonNode.Parse(encoded) is JsonArray { Count: 5 } key && LJ.S(key[0]) == "meowfilm" &&
-                LJ.S(key[1]) == "music" && LJ.N(key[2]) == 1 && LJ.S(key[3]) == scope &&
-                JsonNode.Parse(LJ.S(key[4])) is JsonArray { Count: 3 } area && LJ.S(area[0]) == "lx-data";
-        }
-        catch (System.Text.Json.JsonException) { return false; }
-    }
 }

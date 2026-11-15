@@ -21,23 +21,22 @@ internal static class AccountDetailsDocument
         long generation = AccountRules.Integer(raw.GetProperty("accountGeneration"));
         var scope = AccountRules.String(raw, "accountScope", 128);
         var binding = AccountRules.String(raw, "accountFingerprint", 64);
-        var user = AccountRules.Id(AccountRules.String(raw, "userId", 20));
+        var user = raw.GetProperty("userId").GetString()!;
         var p = raw.GetProperty("profile");
-        var profile = AccountRules.Profile(new(AccountRules.String(p, "platform", 8), AccountRules.String(p, "userId", 20),
-            AccountRules.String(p, "displayName", 200, empty: true),
-            p.TryGetProperty("avatar", out var avatar) ? avatar.GetString() : null), platform);
-        AccountRules.Require(profile.UserId == user, "CORRUPT_STORAGE");
+        var profile = new MusicAccountProfile(p.GetProperty("platform").GetString()!, p.GetProperty("userId").GetString()!,
+            p.GetProperty("displayName").GetString()!, p.TryGetProperty("avatar", out var avatar) ? avatar.GetString() : null);
+        AccountRules.Require(profile.Platform == platform, "CORRUPT_STORAGE");
         long fetched = AccountRules.Integer(raw.GetProperty("profileFetchedAt")), expires = AccountRules.Integer(raw.GetProperty("profileExpiresAt"));
         AccountRules.Require(fetched > 0 && expires == fetched + AccountDetailsSnapshot.ProfileTtl, "CORRUPT_STORAGE");
         var r = raw.GetProperty("rights");
         bool? vip = r.GetProperty("vip").ValueKind == JsonValueKind.Null ? null : r.GetProperty("vip").GetBoolean();
         var absolute = r.GetProperty("expiresAt");
         var levels = r.GetProperty("audioLevels");
-        var rights = AccountDetailsSnapshot.Validate(new(new(vip, AccountRules.String(r, "tier", 32),
+        var rights = AccountDetailsSnapshot.Freeze(new(new(vip, r.GetProperty("tier").GetString()!,
             absolute.ValueKind == JsonValueKind.Null ? null : AccountRules.Integer(absolute)),
             AccountRules.Integer(r.GetProperty("checkedAt")), AccountRules.Integer(r.GetProperty("recheckAt")),
             levels.EnumerateArray().Select(x => x.GetString()!).ToArray(), r.GetProperty("verificationDeferred").GetBoolean(),
-            r.GetProperty("errorCode").GetString(), AccountRules.Integer(r.GetProperty("retryAt"))), platform);
+            r.GetProperty("errorCode").GetString(), AccountRules.Integer(r.GetProperty("retryAt"))));
         return new(generation, scope, binding, user, profile, fetched, expires, rights);
     }
     internal static JsonObject Encode(StoredAccountDetails next)

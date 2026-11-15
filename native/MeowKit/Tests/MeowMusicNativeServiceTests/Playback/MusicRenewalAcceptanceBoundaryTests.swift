@@ -147,7 +147,7 @@ private actor RenewalPeerScripts: MusicScriptResolving {
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         let grant = await accounts.enablePlaybackAuthorization()
         let scripts = RenewalPeerScripts()
-        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let native = try await NativeMusicFixture.service(store,
             scripts: scripts, accounts: accounts, clock: { clock.now() })

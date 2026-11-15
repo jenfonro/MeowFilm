@@ -123,6 +123,7 @@ async function assertRealBusiness(client) {
     { id: 'douban', version: '0.1.0', contract: 'douban.data.v1' },
     { id: 'film', version: '0.1.0', contract: 'film.playback.v1' },
     { id: 'netease', version: '0.1.0', contract: 'netease.token.v1' },
+    { id: 'music-platform', version: '0.1.0', contract: 'music.platform.v1' },
   ]);
   const operations = {
     music: ['sources.list', 'sources.detail', 'sources.add', 'sources.download', 'sources.edit',
@@ -138,6 +139,7 @@ async function assertRealBusiness(client) {
     tmdb: ['settings.get', 'settings.update', 'request'],
     douban: ['settings.get', 'settings.update', 'request', 'search'],
     netease: ['get'],
+    'music-platform': ['cache.clear', 'describe', 'request', 'session.update'],
     film: ['session.open', 'session.command', 'session.snapshot', 'session.release', 'session.attempt',
       'session.media.release', 'settings.get', 'settings.set', 'library.get', 'library.remove', 'manual.update',
       'data.catalog', 'data.search', 'data.detail', 'data.metadata', 'data.metadata.entry', 'data.cache.entry', 'data.invalidate',
@@ -147,7 +149,8 @@ async function assertRealBusiness(client) {
   };
   for (const module of description.modules) {
     const prefix = { music: 'music.script.', cat: 'cat.script.', source: 'source.runtime.',
-      pan: 'pan.', tmdb: 'tmdb.data.', douban: 'douban.data.', film: 'film.', netease: 'netease.token.' }[module.id];
+      pan: 'pan.', tmdb: 'tmdb.data.', douban: 'douban.data.', film: 'film.', netease: 'netease.token.',
+      'music-platform': 'music.platform.' }[module.id];
     assert.deepEqual(module.methods, operations[module.id].map(name => prefix + name).sort());
   }
   for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
@@ -399,13 +402,13 @@ for (const packaged of [false, true]) {
   // Disk inventory/copy of the native and jsdom payload has a separate fixture
   // budget; it must not consume the unchanged real-runtime protocol deadline.
   const options = { ...windows, timeout: packaged ? 120000 : windows.timeout };
-  test(`${packaged ? 'packaged' : 'source'} Windows entry serves eight App modules over HTTP and drains on close`, options, async t => {
+  test(`${packaged ? 'packaged' : 'source'} Windows entry serves nine App modules over HTTP and drains on close`, options, async t => {
     const area = temporary(t);
     let entry = join(root, 'apps/windows/runtime/entries/aggregate.mjs'), payload, manifest;
     if (packaged) {
       payload = join(area, 'payload');
       manifest = await packageWindowsRuntime({ root, product: 'aggregate', output: payload });
-      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
+      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
       assert.equal(manifest.transport, 'windows-http-v1');
       assert.equal(manifest.trustedNative[0].platform, 'win32');
       assert.equal(manifest.trustedNative[0].arch, process.arch);

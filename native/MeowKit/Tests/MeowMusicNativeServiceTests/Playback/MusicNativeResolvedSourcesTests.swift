@@ -12,13 +12,66 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         }
     }
 
+    func testInspectionMatchesCurrentQueryAfterCapabilityScopeSuspension() async throws {
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123", duration: 100))
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        let cache = MusicNativeMemorySourceDiscoveryCache(), barrier = MusicNativeCandidateDiscoveryBarrier()
+        let at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+        await cache.observe(songID: song["songId"].string,
+            observation: .init(startedAt: at, checkedAt: at, platform: "tx",
+                query: "Synthetic recording Fixture", scope: .recording, outcome: .notFound), sourceKeys: [])
+        let scripts = MusicNativeCandidateDiscoveryScripts()
+        await scripts.supported(["tx"]); await scripts.holdSources(barrier)
+        let qq = MusicNativeCandidateDiscoveryQQ(items: [
+            MusicNativeCandidateDiscoveryFixture.track("tx", id: "NewMID", title: "Current matching title", duration: 101)
+        ])
+        let http = MusicNativeDiscoveryPlatforms()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts,
+            platform: NativeMusicFixture.routes(primary: qq, others: http), sourceDiscovery: cache)
+        let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
+        let before = try await service.read()
+        do {
+            _ = try await inspection.loadMore(refresh: false)
+            await barrier.started(1)
+            let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                "kw", id: "123", title: "Current matching title", duration: 101))
+            let adopted = try await service.adoptSongs([corrected], authoritative: true)
+            XCTAssertEqual(adopted.first?["songId"], song["songId"])
+            await barrier.release()
+            let snapshot = try await MusicCandidateDiscoveryDeadline.run(seconds: 3) {
+                for try await value in await inspection.updates() where !value.isLoading { return value }
+                throw MusicServiceError.closed
+            }
+            XCTAssertTrue(snapshot.sources.contains { $0.selection.siteId == "tx" })
+            let queries = await qq.calls(), otherCalls = await http.calls()
+            XCTAssertEqual(queries, ["Current matching title Fixture"],
+                "A not-found check for the old query cannot suppress matching the current repository facts")
+            XCTAssertTrue(otherCalls.isEmpty)
+            let after = try await service.read(), current = try await service.queue()
+            XCTAssertEqual(after.queue, before.queue)
+            XCTAssertEqual(after.playback, before.playback)
+            XCTAssertEqual(after.history, before.history)
+            XCTAssertEqual(current.entries.first?.track.songId, song["songId"].string)
+            XCTAssertEqual(current.entries.first?.track.title, "Current matching title")
+            XCTAssertEqual(current.entries.first?.track.duration, 101)
+            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["baselineDuration"].number, 100)
+        } catch {
+            await barrier.release()
+            await inspection.close(); await service.close()
+            throw error
+        }
+        await inspection.close(); await service.close()
+    }
+
     func testInspectionPublishesRealLazyLoadGenerationAndRejectsReloadBeforeAdoption() async throws {
         for reload in [false, true] {
             let song = try MusicNativeCandidateDiscoveryFixture.song()
-            let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-            for platform in MusicNativeSearchProtocol.platforms {
-                await cache.record(fingerprint: MusicModel.fingerprint(song), duration: 180, platform: platform,
-                    checkedAt: NativeMusicFixture.date.timeIntervalSince1970 * 1000, sources: [])
+            let cache = MusicNativeMemorySourceDiscoveryCache()
+            for platform in MusicModel.sites {
+                let at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+                await cache.observe(songID: song["songId"].string,
+                    observation: .init(startedAt: at, checkedAt: at, platform: platform,
+                        query: "Synthetic recording Fixture", scope: .recording, outcome: .notFound), sourceKeys: [])
             }
             let scripts = MusicNativeCandidateDiscoveryScripts()
             await scripts.supported(["tx"]); await scripts.directory(.idle)
@@ -47,21 +100,23 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
     }
 
     func testInspectionMergesCachedSourcesWithoutSearchAndAdoptsWithoutQueueWrite() async throws {
-        let song = try MusicNativeCandidateDiscoveryFixture.song()
+        let primary = try MusicNativeCandidateDiscoveryFixture.song()
         let cached = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "cached"))
         let row = try XCTUnwrap(cached["sources"].array.first)
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        let fingerprint = MusicModel.fingerprint(song), at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
-        for platform in MusicNativeSearchProtocol.platforms {
-            await cache.record(fingerprint: fingerprint, duration: 180, platform: platform, checkedAt: at,
-                sources: platform == "wy" ? [.init(sourceKey: row["sourceKey"].string, source: platform,
-                    musicInfo: row["musicInfo"].json)] : [])
+        let song = try MusicModel.mergeSources(primary, adding: [row])
+        let cache = MusicNativeMemorySourceDiscoveryCache()
+        let at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+        for platform in MusicModel.sites {
+            await cache.observe(songID: song["songId"].string,
+                observation: .init(startedAt: at, checkedAt: at, platform: platform, query: "Synthetic recording Fixture",
+                    scope: .recording, outcome: platform == "wy" ? .found : .notFound),
+                sourceKeys: platform == "wy" ? [row["sourceKey"].string] : [])
         }
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), slow = NativeMusicGate()
         await slow.release()
         let accounts = MusicInspectionConcurrencyAccounts(slow: slow, onLower: {})
-        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
-        let service = try await NativeMusicFixture.service(store, accounts: accounts, qq: qq, http: http, sourceDiscovery: cache)
+        let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = try await NativeMusicFixture.service(store, accounts: accounts, platform: NativeMusicFixture.routes(primary: qq, others: http), sourceDiscovery: cache)
         let before = store.snapshot().0
         let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
         let snapshot = try await settle(inspection)
@@ -80,22 +135,24 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         await inspection.close(); await service.close()
     }
 
-    func testRejectedPeerIsRemovedThroughQueueCASAndNeverSelectedAgain() async throws {
+    func testRejectedPeerRetainsRepositoryOwnershipWithoutQueueCASAndIsNeverSelectedAgain() async throws {
         let primary = try MusicNativeCandidateDiscoveryFixture.song()
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "cached"))
         let row = try XCTUnwrap(peer["sources"].array.first), key = row["sourceKey"].string
         let song = try MusicModel.mergeSources(primary, adding: [row])
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        let fingerprint = MusicModel.fingerprint(song), at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
-        for platform in MusicNativeSearchProtocol.platforms {
-            await cache.record(fingerprint: fingerprint, duration: 180, platform: platform, checkedAt: at,
-                sources: platform == "wy" ? [.init(sourceKey: key, source: platform, musicInfo: row["musicInfo"].json)] : [])
+        let cache = MusicNativeMemorySourceDiscoveryCache()
+        let at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+        for platform in MusicModel.sites {
+            await cache.observe(songID: song["songId"].string,
+                observation: .init(startedAt: at, checkedAt: at, platform: platform, query: "Synthetic recording Fixture",
+                    scope: .recording, outcome: platform == "wy" ? .found : .notFound),
+                sourceKeys: platform == "wy" ? [key] : [])
         }
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), slow = NativeMusicGate()
         await slow.release()
         let accounts = MusicInspectionConcurrencyAccounts(slow: slow, onLower: {})
-        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
-        let service = try await NativeMusicFixture.service(store, accounts: accounts, qq: qq, http: http, sourceDiscovery: cache)
+        let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = try await NativeMusicFixture.service(store, accounts: accounts, platform: NativeMusicFixture.routes(primary: qq, others: http), sourceDiscovery: cache)
         let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
         let before = try await settle(inspection)
         XCTAssertTrue(before.sources.contains { $0.selection.sourceKey == key })
@@ -107,14 +164,14 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         XCTAssertEqual(store.snapshot().0, bytes, "a refused rejection writes nothing")
         try await inspection.reject(sourceKey: key, occurrenceID: "entry-1", expectedQueueRevision: 1)
         let queue = try await service.queue()
-        XCTAssertEqual(queue.revision, 2); XCTAssertEqual(queue.entries[0].track.sources.map(\.platform), ["tx"])
+        XCTAssertEqual(queue.revision, 1); XCTAssertEqual(Set(queue.entries[0].track.sources.map(\.platform)), ["tx", "wy"])
         let after = try await settle(inspection)
         XCTAssertFalse(after.sources.contains { $0.selection.sourceKey == key }, "the cached match is not merged back")
         XCTAssertTrue(after.sources.contains { $0.selection.siteId == "tx" })
         await inspection.close()
-        let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 2)
+        let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let snapshot = try await session.snapshot(discover: true, force: false)
-        XCTAssertFalse(snapshot.track.sources.contains { $0.sourceKey == key })
+        XCTAssertTrue(snapshot.track.sources.contains { $0.sourceKey == key })
         XCTAssertFalse(snapshot.options.contains { $0.playback.sourceKey == key })
         await session.close(retainingAttemptID: nil)
         let calls = await http.calls(), qqCalls = await qq.calls()
@@ -125,21 +182,20 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
     func testExcludedSourceStillInTheQueueIsNotOfferedOrPlayedFromAudioCache() async throws {
         let clock = MusicRecoveryTestClock()
         // A Kuwo primary has no account options; the QQ peer is the cached, account-backed source.
-        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
+        let primary = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let row = try XCTUnwrap(peer["sources"].array.first), key = row["sourceKey"].string
         let song = try MusicModel.mergeSources(primary, adding: [row])
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
-        let d = try MusicDocument(store.read(), runID: "exclusion")
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         let file = MusicRecoveryTestFileCache(hit: .init(identity: .init(scope: String(repeating: "c", count: 64),
             songID: song["songId"].string, sourceKey: key, platform: "tx", nativeID: "101", requestedQuality: "flac",
-            playbackSignature: NativeMusicService.audioCacheSignature(song: song, playback: d.playback), provider: "official:recovery-synthetic"),
+            provider: "official:recovery-synthetic"),
             fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
             measuredQuality: "flac", expiresAt: clock.now().addingTimeInterval(3600)))
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { clock.now() })
-        let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
-            sourceDiscovery: cache, audioFileCache: file, transport: NativeMusicNoNetwork(), clock: { clock.now() })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
+        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+            sourceDiscovery: cache, audioFileCache: file, clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let hit = try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(), occurrenceID: "entry-1", selection: nil)
         XCTAssertNotNil(hit)
@@ -169,39 +225,52 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
 
     func testInspectionManualRefreshBypassesSuccessfulEmptyCacheChecks() async throws {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        for platform in MusicNativeSearchProtocol.platforms {
-            await cache.record(fingerprint: MusicModel.fingerprint(song), duration: 180, platform: platform,
-                checkedAt: NativeMusicFixture.date.timeIntervalSince1970 * 1000, sources: [])
+        let cache = MusicNativeMemorySourceDiscoveryCache()
+        for platform in MusicModel.sites {
+            let at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+            await cache.observe(songID: song["songId"].string,
+                observation: .init(startedAt: at, checkedAt: at, platform: platform, query: "Synthetic recording Fixture",
+                    scope: .recording, outcome: .notFound), sourceKeys: [])
         }
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), slow = NativeMusicGate()
         await slow.release()
         let accounts = MusicInspectionConcurrencyAccounts(slow: slow, onLower: {})
-        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
-        let service = try await NativeMusicFixture.service(store, accounts: accounts, qq: qq, http: http, sourceDiscovery: cache)
+        let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = try await NativeMusicFixture.service(store, accounts: accounts, platform: NativeMusicFixture.routes(primary: qq, others: http), sourceDiscovery: cache)
         let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
         _ = try await settle(inspection)
         let initial = await http.calls(), initialQQ = await qq.calls()
         XCTAssertTrue(initial.isEmpty); XCTAssertTrue(initialQQ.isEmpty)
-        let before = store.snapshot().0
+        let before = try await service.read()
         _ = try await inspection.loadMore(refresh: true)
         _ = try await settle(inspection)
         let refreshed = await http.calls(), refreshedQQ = await qq.calls()
         XCTAssertEqual(Set(refreshed), ["wy", "kg", "kw", "mg"]); XCTAssertEqual(refreshed.count, 4)
         XCTAssertEqual(refreshedQQ.count, 1)
-        XCTAssertEqual(store.snapshot().0, before)
+        let after = try await service.read()
+        XCTAssertEqual(after.queue, before.queue)
+        XCTAssertEqual(after.playback, before.playback)
+        XCTAssertEqual(after.history, before.history)
+        let current = try await service.queue()
+        XCTAssertEqual(current.entries[0].track.songId, song["songId"].string)
+        XCTAssertEqual(Set(current.entries[0].track.sources.map(\.platform)), Set(MusicModel.sites))
         await inspection.close(); await service.close()
     }
 
     func testInspectionAndCloseKeepCurrentAttemptDocumentAndListeningFactsUntouched() async throws {
         let f = try await MusicRecoveryTestFixture.make()
-        let before = f.store.snapshot().0
+        let before = try await f.service.read()
         let inspection = try await f.service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
         let snapshot = try await settle(inspection)
         XCTAssertFalse(snapshot.sources.isEmpty)
         XCTAssertTrue(snapshot.sources.allSatisfy { $0.delivery == nil },
                       "Requested capability cannot prove actual quality")
-        XCTAssertEqual(f.store.snapshot().0, before)
+        let after = try await f.service.read()
+        XCTAssertEqual(after.queue, before.queue)
+        XCTAssertEqual(after.playback, before.playback)
+        XCTAssertEqual(after.history, before.history)
+        XCTAssertEqual(after.queue["entries"].array.first?["songId"],
+                       before.queue["entries"].array.first?["songId"])
         let history = try await f.service.playedSongs(); XCTAssertTrue(history.isEmpty)
         await inspection.close()
         let accepted = try await f.service.record(f.fact(f.original, kind: .playing))
@@ -273,14 +342,14 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
     }
 
     func testSlowProviderDoesNotBlockExplicitExpansionOfReadyPeer() async throws {
-        var song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
+        var song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("wy", id: "101"))
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "102"))
         song["sources"] = .array(song["sources"].array + peer["sources"].array)
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let slow = NativeMusicGate(), lower = expectation(description: "Ready peer reaches next tier")
         let accounts = MusicInspectionConcurrencyAccounts(slow: slow, onLower: { lower.fulfill() })
-        let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
-            enabledPlatforms: [.netease, .qq], transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+            enabledPlatforms: [.netease, .qq], clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         _ = try await service.updateSettings(.init(ifRevision: 0, qualityEnabled: ["lossless", "standard"],
                                                    qualityOrder: ["lossless", "standard"]))
@@ -297,8 +366,9 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         XCTAssertTrue(fast.isLoading, "Other provider is still physically in flight")
         _ = try await inspection.loadMore(refresh: false)
         await fulfillment(of: [lower], timeout: 2)
-        await inspection.close()
+        let closing = Task { await inspection.close() }
         await slow.release()
+        await closing.value
         let counts = await accounts.maximums()
         XCTAssertLessThanOrEqual(counts.total, 3)
         XCTAssertLessThanOrEqual(counts.perProvider, 1)

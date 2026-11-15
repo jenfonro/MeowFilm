@@ -61,7 +61,7 @@ final class MeowfilmUserDataResetTests: XCTestCase {
         let f = try ResetFixture()
         defer { f.dispose() }
         try f.store().request()
-        f.failingService = ResetFixture.expectedServices[1]
+        f.failingService = ResetFixture.expectedServices[0]
         XCTAssertThrowsError(try f.store().completePendingReset()) {
             XCTAssertEqual($0 as? MeowfilmUserDataReset.Failure, .keychainPermission)
         }
@@ -205,14 +205,7 @@ final class MeowfilmLaunchResetTests: XCTestCase {
 /// network stores, standard preferences or the App's production reset factory.
 private final class ResetFixture: @unchecked Sendable {
     static let expectedServices = [
-        "dev.meowfilm.aggregate.music.accounts.v1",
-        "dev.meowfilm.aggregate.music.client-context.wy.v1",
-        "dev.meowfilm.aggregate.music.client-context.kg.v1",
-        "dev.meowfilm.aggregate.music.qq-public.v1",
-        "dev.meowfilm.aggregate.music.library.v1",
-        "dev.meowfilm.aggregate.music.playback-display.v1",
-        "dev.meowfilm.aggregate.music.source-discovery.v1",
-        "dev.meowfilm.aggregate.music.account-url-cache.v1"
+        "dev.meowfilm.aggregate.music.platform.accounts.v1"
     ]
     let root: URL, support: URL, caches: URL, temporary: URL, external: URL, unrelated: URL
     let payloads: [URL]
@@ -237,7 +230,7 @@ private final class ResetFixture: @unchecked Sendable {
         external = root.appendingPathComponent("original.js")
         unrelated = support.appendingPathComponent("other-owner")
         payloads = [support.appendingPathComponent("meowfilm"), caches.appendingPathComponent("meowfilm"),
-                    caches.appendingPathComponent("meowfilm.music.audio-cache.v1"), temporary.appendingPathComponent("meowfilm")]
+                    caches.appendingPathComponent("meowfilm.music.audio-resources.v1"), temporary.appendingPathComponent("meowfilm")]
         domain = "MeowfilmResetTests." + UUID().uuidString
         defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         for url in payloads {

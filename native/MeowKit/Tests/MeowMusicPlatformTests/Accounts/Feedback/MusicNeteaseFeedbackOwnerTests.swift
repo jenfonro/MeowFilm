@@ -3,6 +3,7 @@ import XCTest
 import MeowAccounts
 import MeowMusicFeature
 import MeowStorage
+import MeowRuntime
 @testable import MeowMusicPlatform
 
 @MainActor
@@ -16,7 +17,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         let service: NativeMusicAccountService
         init(document: DocumentStore) throws {
             identity = try MusicAccountFixture.identity("wy"); self.document = document
-            credentials.seed(try MusicUpdateProvider.credential(), for: identity)
+            credentials.seed(try MusicAccountFixture.credential(42, platform: .netease), for: identity)
             service = .init(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
                 providers: [.netease: provider], feedbackOutboxStoreFactory: { [document] in document }, clock: { [clock] in clock.now() })
         }
@@ -105,15 +106,16 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         XCTAssertEqual(finished, .registered)
         await f.service.flushPendingPlaybackFeedback()
         let before = await f.provider.uploads()
-        XCTAssertTrue(before.allSatisfy { String(decoding: $0, as: UTF8.self).contains("\u{1}_plv\u{1}") })
+        XCTAssertTrue(try before.allSatisfy { try RuntimeJSON.decode($0)[music: "event"] == .string("start") })
         let credentials = f.credentials.peek(f.identity)
         await f.provider.setUploadOutcome(.confirmed)
         _ = try await f.service.validate(platform: .netease) // Account-ready trigger, no timer.
         await f.service.flushPendingPlaybackFeedback()
         let sent = Array((await f.provider.uploads()).dropFirst(before.count))
         XCTAssertEqual(sent.count, 2)
-        XCTAssertTrue(String(decoding: sent[0], as: UTF8.self).hasPrefix("1800000000\u{1}_plv\u{1}"))
-        XCTAssertTrue(String(decoding: sent[1], as: UTF8.self).hasPrefix("1800000001\u{1}_pld\u{1}"))
+        XCTAssertEqual(try sent.map { try RuntimeJSON.decode($0)[music: "event"] }, [.string("start"), .string("end")])
+        XCTAssertEqual(try sent.map { try RuntimeJSON.decode($0)[music: "occurredAt"] },
+                       [.number(1_800_000_000), .number(1_800_000_001.25)])
         XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
         XCTAssertEqual(f.credentials.peek(f.identity)?.revision, credentials?.revision)
         _ = await f.service.close()
@@ -144,8 +146,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         await cold.flushPendingPlaybackFeedback()
         let recovered = Array((await f.provider.uploads()).dropFirst(before))
         XCTAssertEqual(recovered.count, 2)
-        XCTAssertTrue(String(decoding: recovered[0], as: UTF8.self).contains("_plv"))
-        XCTAssertTrue(String(decoding: recovered[1], as: UTF8.self).contains("_pld"))
+        XCTAssertEqual(try recovered.map { try RuntimeJSON.decode($0)[music: "event"] }, [.string("start"), .string("end")])
         XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
         _ = await cold.close()
     }
@@ -166,8 +167,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         await f.service.flushPendingPlaybackFeedback()
         let recovered = Array((await f.provider.uploads()).dropFirst(offline))
         XCTAssertEqual(recovered.count, 2)
-        XCTAssertTrue(String(decoding: recovered[0], as: UTF8.self).contains("_plv"))
-        XCTAssertTrue(String(decoding: recovered[1], as: UTF8.self).contains("_pld"))
+        XCTAssertEqual(try recovered.map { try RuntimeJSON.decode($0)[music: "event"] }, [.string("start"), .string("end")])
         XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
         _ = await f.service.close()
     }
@@ -226,8 +226,10 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
                 await f.service.flushPendingPlaybackFeedback()
                 let recovered = Array((await f.provider.uploads()).dropFirst(before))
                 XCTAssertEqual(recovered.count, 2)
-                XCTAssertTrue(recovered.allSatisfy { String(decoding: $0, as: UTF8.self).contains("original-per-song-alg") })
-                XCTAssertTrue(String(decoding: recovered[1], as: UTF8.self).contains("_pld"))
+                XCTAssertTrue(try recovered.allSatisfy {
+                    try RuntimeJSON.decode($0)[music: "target"][music: "algorithm"] == .string("original-per-song-alg")
+                })
+                XCTAssertEqual(try RuntimeJSON.decode(recovered[1])[music: "event"], .string("end"))
             }
             _ = await f.service.close()
         }
@@ -280,7 +282,9 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         let cold = f.cold(); try await ready(cold)
         let recovered = Array((await f.provider.uploads()).dropFirst(before))
         XCTAssertEqual(recovered.count, 1)
-        XCTAssertTrue(String(decoding: recovered[0], as: UTF8.self).hasPrefix("1800000001\u{1}_pld\u{1}"))
+        let recoveredEnd = try RuntimeJSON.decode(recovered[0])
+        XCTAssertEqual(recoveredEnd[music: "event"], .string("end"))
+        XCTAssertEqual(recoveredEnd[music: "occurredAt"], .number(1_800_000_001.25))
         XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
         _ = await cold.close()
     }
@@ -318,7 +322,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         _ = try await lease.report(report(.start, instance: UUID()))
         await f.service.flushPendingPlaybackFeedback()
         _ = await f.service.close()
-        f.credentials.seed(try MusicUpdateProvider.credential("replacement", uid: "99"), for: f.identity)
+        f.credentials.seed(try MusicAccountFixture.credential(99, platform: .netease), for: f.identity)
         let before = await f.provider.uploads().count
         await f.provider.setUploadOutcome(.confirmed)
         let replacement = f.cold()

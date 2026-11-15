@@ -85,14 +85,18 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
             let source = MusicRemoteCollectionActionsFixture.source(pages, probe: probe)
             let task = Task { try await service.saveRemoteCollection(source: source, name: "Remote", intent: intent) }
             await gate.started()
+            var retiring: Task<Void, Error>?
             switch mode {
             case 0: source.revoke()
             case 1: intent.revoke()
             case 2: service.revokeAccess(generation: 2)
-            case 3: try await service.setAccess(available: true, generation: 2)
+            case 3:
+                service.revokeAccess(generation: 1)
+                retiring = Task { try await service.setAccess(available: true, generation: 2) }
             default: task.cancel()
             }
             await gate.release()
+            try await retiring?.value
             do { _ = try await task.value; XCTFail("late save mode \(mode)") }
             catch {
                 XCTAssertTrue([MusicServiceError.staleAccess, .cancelled, .accessUnavailable].contains(error as? MusicServiceError ?? .invalidResponse))
@@ -121,12 +125,11 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
         }
     }
 
-    func testMissingWrongKindOrMismatchedIdentityCannotBeSaved() async throws {
+    func testMissingWrongKindOrPlatformIsRejectedButStringLocatorCanBeSaved() async throws {
         let cases: [(MusicPublicBrowseCollection?, MusicServiceError)] = [
             (nil, .unsupported),
             (.init(platform: .qq, nativeID: "501", kind: .album, title: "Album"), .unsupported),
-            (.init(platform: .netease, nativeID: "501", title: "Other platform"), .unsupported),
-            (.init(platform: .qq, nativeID: "playlist:1", title: "Not a remote ID"), .invalidRequest)
+            (.init(platform: .netease, nativeID: "501", title: "Other platform"), .unsupported)
         ]
         for (collection, expected) in cases {
             let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
@@ -134,8 +137,15 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
             do { _ = try await service.saveRemoteCollection(source: source, name: "Remote", intent: .init()); XCTFail("invalid identity") }
             catch { XCTAssertEqual(error as? MusicServiceError, expected) }
             XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
-            await source.close()
+            await source.close(); await service.close()
         }
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let collection = MusicPublicBrowseCollection(platform: .qq, nativeID: "playlist:1", title: "String locator")
+        let source = MusicRemoteCollectionActionsFixture.source(MusicRemoteCollectionActionsFixture.pages([]), collection: collection)
+        let saved = try await service.saveRemoteCollection(source: source, name: "Remote", intent: .init())
+        XCTAssertEqual(saved.remoteCollection?.nativeID, collection.nativeID)
+        XCTAssertEqual(store.snapshot().2, 1)
+        await source.close(); await service.close()
     }
 
     func testMalformedOrMixedMembersAreNotImportedWhenSavingAReference() async throws {
@@ -169,7 +179,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
 
     func testReferenceDisplayTitleDoesNotUseTheManagedPlaylistNameLimit() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let title = String(repeating: "T", count: 201), pages = MusicRemoteCollectionActionsFixture.pages([])
+        let title = String(repeating: "T", count: 1001), pages = MusicRemoteCollectionActionsFixture.pages([])
         let collection = MusicPublicBrowseCollection(platform: .qq, nativeID: "501", title: title)
         let source = MusicRemoteCollectionActionsFixture.source(pages, collection: collection)
         let saved = try await service.saveRemoteCollection(source: source, name: title, intent: .init())

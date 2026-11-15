@@ -15,11 +15,10 @@ struct MeowfilmResources: Sendable {
     let musicAccounts: NativeMusicAccountService?
     let musicAccountGate: MusicAccountAccessGate?
     let musicAudioCache: NativeMusicAudioFileCache?
-    let musicDisplayCache: MusicNativePlaybackDisplayCache
+    let musicPresentationCache: MusicNativePresentationCache
     let musicSourceDiscoveryCache: MusicNativePersistentSourceDiscoveryCache
     let musicHomeSnapshot: MusicNativeHomeSnapshotDocument
-    let musicPublicQQ: NativeMusicQQPublicService
-    let musicClients: NativeMusicClientService
+    let musicPlatform: MusicPlatformClient
     let musicScripts: NativeMusicScriptService
     let scriptSession: RuntimeSession
     let filmRules: FilmRuleService
@@ -39,19 +38,19 @@ struct MeowfilmResources: Sendable {
             .appendingPathComponent("meowfilm", isDirectory: true)
         let caches = try? FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
                                                   appropriateFor: nil, create: true)
-        // Ordinary documents are plain JSON: the library is backed up, disposable
-        // caches live in Caches. Only sensitive device sessions stay encrypted.
+        // The library is backed up; disposable caches live in Caches. Credentials
+        // stay in Keychain and anonymous protocol state belongs to Node.
         let libraryRoot = root.appendingPathComponent("documents", isDirectory: true)
         let cacheRoot = caches?.appendingPathComponent("meowfilm", isDirectory: true)
             .appendingPathComponent("documents", isDirectory: true)
         musicDocument = MusicNativeLibraryDocument(storeFactory: Self.documentFactory(
             base: libraryRoot, namespace: MusicNativeLibraryDocument.namespace))
-        musicDisplayCache = MusicNativePlaybackDisplayCache(storeFactory: Self.documentFactory(
-            base: cacheRoot, namespace: MusicNativePlaybackDisplayCache.namespace,
+        musicPresentationCache = MusicNativePresentationCache(storeFactory: Self.documentFactory(
+            base: cacheRoot, namespace: MusicNativePresentationCache.namespace,
             maximumDocumentBytes: 16 * 1024 * 1024))
         if let caches {
             musicAudioCache = NativeMusicAudioFileCache(rootURL: caches.resolvingSymlinksInPath()
-                .appendingPathComponent("meowfilm.music.audio-cache.v1", isDirectory: true), displayCache: musicDisplayCache)
+                .appendingPathComponent("meowfilm.music.audio-resources.v1", isDirectory: true), presentationCache: musicPresentationCache)
         } else { musicAudioCache = nil }
         musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativePersistentSourceDiscoveryCache.namespace,
@@ -68,26 +67,19 @@ struct MeowfilmResources: Sendable {
         self.novelRuntime = novelRuntime
         novelRules = NovelRuleProcessor(runtime: novelRuntime)
         musicScripts = NativeMusicScriptService(connection: connection)
-        let neteaseToken = RuntimeMusicNeteaseTokenProvider(connection: connection)
+        musicPlatform = MusicPlatformClient(connection: connection)
         filmMetadata = FilmTMDBService(connection: connection)
         filmDoubanSettings = FilmDoubanSettingsService(connection: connection)
         filmRules = FilmRuleService(connection: connection)
         filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),
             storeFactory: Self.documentFactory(base: libraryRoot, namespace: FilmSourceService.documentNamespace))
-        let protectedRoot = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)
-        musicClients = NativeMusicClientService(storeFactory: { platform in
-            try Self.protectedDocumentFactory(base: protectedRoot,
-                                              namespace: NativeMusicClientService.namespace(platform))()
-        })
-        musicPublicQQ = NativeMusicQQPublicService(storeFactory: Self.protectedDocumentFactory(
-            base: protectedRoot, namespace: MusicQQPublicPersistenceDocument.namespace))
         musicAccountGate = try? MusicAccountAccessGate(
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier,
-            urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.account-url-cache.v1")(),
+            urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.platform.audio-locators.v1")(),
             feedbackOutboxStoreFactory: Self.documentFactory(
-                base: libraryRoot, namespace: "music.netease-feedback-outbox.v1"),
-            audioCache: musicAudioCache, displayCache: musicDisplayCache,
-            clientContexts: musicClients, qqClient: musicPublicQQ, neteaseTokenProvider: neteaseToken
+                base: libraryRoot, namespace: "music.platform.feedback-events.v1"),
+            audioCache: musicAudioCache,
+            platformClient: musicPlatform
         )
         musicAccounts = musicAccountGate?.service
     }
@@ -104,14 +96,4 @@ struct MeowfilmResources: Sendable {
         }
     }
 
-    /// Sensitive device-session namespace: encrypted with its own Keychain key.
-    private static func protectedDocumentFactory(base: URL, namespace: String)
-        -> @Sendable () throws -> EncryptedDocumentStore {
-        let service = MeowfilmIdentity.bundleIdentifier + "." + namespace
-        return {
-            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-            let provider = try KeychainEncryptedDocumentKeyProvider(service: service)
-            return try EncryptedDocumentStore(baseURL: base, namespace: namespace, keyProvider: provider)
-        }
-    }
 }

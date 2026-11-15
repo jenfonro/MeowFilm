@@ -15,7 +15,12 @@ public partial class MusicAppearanceView : UserControl
             .Select(option => new ColorPreset(option.Key, option.Name, option.Color)).ToArray();
         DataContext = module;
         Loaded += async (_, _) => { if (IsVisible) await module.EnsureAppearanceAsync(); };
-        IsVisibleChanged += async (_, _) => { if (IsLoaded && IsVisible) await module.EnsureAppearanceAsync(); };
+        Unloaded += (_, _) => module.RetireAppearanceSettings();
+        IsVisibleChanged += async (_, _) =>
+        {
+            if (!IsVisible) module.RetireAppearanceSettings();
+            else if (IsLoaded) await module.EnsureAppearanceAsync();
+        };
     }
     private async void Choice_Changed(object sender, SelectionChangedEventArgs e)
     {

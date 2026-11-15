@@ -33,6 +33,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
     private var refreshes: [Request] = []
     private var refreshGate: NativeMusicGate?
     private var resolveGate: NativeMusicGate?
+    private var scopeCheckGate: MusicNativeCandidateDiscoveryBarrier?
     private var scope = MusicNativeCacheScope(scope: String(repeating: "c", count: 64))
     private var playbackAuthorization: MusicQueueAuthorization?
     private var optionsGates: [Int: NativeMusicGate] = [:]
@@ -41,11 +42,13 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
     private var qualityURLs: [String: URL] = [:]
     private var rotationOnReturn = false, withdrawOnReturn = false
     private var expiration: Date?
+    private var duration: Double?
     init(platform: MusicAccountPlatform, nativeID: String, clock: MusicRecoveryTestClock) {
         self.platform = platform; self.nativeID = nativeID; self.clock = clock
     }
     func holdRefresh(_ gate: NativeMusicGate) { refreshGate = gate }
     func holdResolve(_ gate: NativeMusicGate) { resolveGate = gate }
+    func holdScopeCheckAfterResolve(_ gate: MusicNativeCandidateDiscoveryBarrier) { scopeCheckGate = gate }
     func enablePlaybackAuthorization() -> MusicQueueAuthorization {
         let authorization = MusicQueueAuthorization()
         playbackAuthorization = authorization
@@ -53,7 +56,11 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
     }
     func nativeCacheScope() throws -> MusicNativeCacheScope { scopeReads += 1; try scope.authorization.check(); return scope }
     func scopeReadCount() -> Int { scopeReads }
-    func checkNativeCacheScope(_ value: MusicNativeCacheScope) throws {
+    func checkNativeCacheScope(_ value: MusicNativeCacheScope) async throws {
+        if resolves > 0, let gate = scopeCheckGate {
+            scopeCheckGate = nil
+            await gate.enter()
+        }
         try value.authorization.check()
         guard value == scope else { throw MusicServiceError.staleAccess }
     }
@@ -71,6 +78,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
     func failRefresh(_ error: MusicServiceError) { refreshError = error }
     func setResolveURL(_ url: URL, quality: String) { qualityURLs[quality] = url }
     func setResult(_ url: URL, expiresAt: Date? = nil) { replacementURL = url; expiration = expiresAt }
+    func setDuration(_ duration: Double) { self.duration = duration }
     func changeAfterRefresh(account: Bool) { rotationOnReturn = account; withdrawOnReturn = !account }
     func counts() -> (options: Int, resolves: Int, refreshes: Int) { (optionsCount, resolves, refreshes.count) }
     func requests() -> [Request] { refreshes }
@@ -108,7 +116,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
         resolves += 1
         if let gate = resolveGate { resolveGate = nil; await gate.wait() }
         return .init(url: qualityURLs[selection.quality] ?? Self.originalURL, expiresAt: clock.now().addingTimeInterval(60),
-                     playbackAuthorization: playbackAuthorization)
+                     playbackAuthorization: playbackAuthorization, duration: duration)
     }
     func nativeRefreshAudio(platform: MusicAccountPlatform, nativeID: String,
                             selection: MusicPlaybackSelection, rejectedURL: URL) async throws -> MusicNativeAudio {
@@ -127,7 +135,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
         if rotationOnReturn { generation += 1 }
         if withdrawOnReturn { qualities = ["128k"] }
         return .init(url: value, expiresAt: expiration ?? clock.now().addingTimeInterval(60),
-                     playbackAuthorization: playbackAuthorization)
+                     playbackAuthorization: playbackAuthorization, duration: duration)
     }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {
         throw MusicServiceError.unsupported
@@ -149,24 +157,23 @@ struct MusicRecoveryTestFixture {
     let original: MusicPlaybackCandidate
 
     static func make(platform: MusicAccountPlatform = .qq, discovery: Bool = false, cached: Bool = false,
-                     authorized: Bool = false) async throws -> Self {
+                     authorized: Bool = false, duration: Int = 180) async throws -> Self {
         let nativeID = platform == .kugou ? String(repeating: "A", count: 32) : "101"
-        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(platform.rawValue, id: nativeID))
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(platform.rawValue, id: nativeID, duration: duration))
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let clock = MusicRecoveryTestClock()
         let accounts = MusicRecoveryTestAccounts(platform: platform, nativeID: nativeID, clock: clock)
         if authorized { _ = await accounts.enablePlaybackAuthorization() }
-        let d = try MusicDocument(store.read(), runID: "cache-fixture")
         let source = try MusicModel.sources(song)[0]
         let file = MusicRecoveryTestFileCache(hit: .init(identity: .init(scope: String(repeating: "c", count: 64),
             songID: song["songId"].string, sourceKey: source.sourceKey, platform: platform.rawValue,
             nativeID: nativeID, requestedQuality: "flac",
-            playbackSignature: NativeMusicService.audioCacheSignature(song: song, playback: d.playback), provider: "official:recovery-synthetic"),
-            fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
+            provider: "official:recovery-synthetic"),
+            fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: Double(duration),
             measuredQuality: "flac", expiresAt: clock.now().addingTimeInterval(3600)))
-        let service = NativeMusicService(document: store, accounts: accounts, qq: NativeMusicQQFixture(),
+        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
             audioFileCache: cached ? file : nil,
-            transport: NativeMusicNoNetwork(), clock: { clock.now() })
+            clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let selection: MusicPlaybackSelection, original: MusicPlaybackCandidate
         if discovery {

@@ -78,12 +78,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard case .object(let description) = try await describe(),
               description["protocol"] == .string(Self.protocolName),
               description["product"] == .string("aggregate"),
-              case .array(let modules)? = description["modules"], modules.count == 8 else {
+              case .array(let modules)? = description["modules"], modules.count == 9 else {
             throw RuntimeHTTPError.invalidResponse
         }
         let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.3.0"),
                                                    (.pan, "0.1.0"), (.tmdb, "0.1.0"), (.douban, "0.1.0"),
-                                                   (.film, "0.1.0"), (.netease, "0.1.0")]
+                                                   (.film, "0.1.0"), (.netease, "0.1.0"), (.musicPlatform, "0.1.0")]
         for ((module, version), supplied) in zip(expected, modules) {
             guard case .object(let fields) = supplied,
                   fields["id"] == .string(module.rawValue),
@@ -103,6 +103,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                 guard fields["methods"] == .array([.string("netease.token.get")]) else {
                     throw RuntimeHTTPError.invalidResponse
                 }
+            }
+            if module == .musicPlatform {
+                guard fields["methods"] == .array([
+                    .string("music.platform.cache.clear"), .string("music.platform.describe"),
+                    .string("music.platform.request"), .string("music.platform.session.update")
+                ]) else { throw RuntimeHTTPError.invalidResponse }
             }
         }
     }
@@ -165,7 +171,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     public func call(module: RuntimeModule, operation: String,
-                     parameters: RuntimeValue = .object([:]), timeout: TimeInterval? = nil) async throws -> RuntimeValue {
+                     parameters: RuntimeValue = .object([:]), timeout: TimeInterval? = nil,
+                     onDispatch: (@Sendable () throws -> Void)? = nil) async throws -> RuntimeValue {
         if let timeout, !timeout.isFinite || timeout <= 0 { throw RuntimeHTTPError.invalidRequest }
         guard operation.range(of: #"^[a-z]+(?:\.[a-z][A-Za-z]*)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
             throw RuntimeHTTPError.invalidRequest
@@ -179,7 +186,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         if module == .source, operation == "rules.process" {
             let transport = try state.rulesClient { RuntimeHTTPClient(rulesFor: self) }
             let value = try await transport.request(method: "POST", path: "/v1/source/rules.process",
-                                                    body: body, module: .source)
+                                                    body: body, module: .source, onDispatch: onDispatch)
             guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
             guard !isClosed else { throw RuntimeHTTPError.closed }
             return value
@@ -187,7 +194,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
                                  body: body, module: module,
                                  timeout: timeout ?? (module == .netease ? max(self.timeout, Self.neteaseTokenTimeout) : self.timeout),
-                                 preservingAcceptedReceipt: module == .source && operation == "library.image")
+                                 preservingAcceptedReceipt: module == .source && operation == "library.image",
+                                 onDispatch: onDispatch)
     }
 
     /// Observes snapshots without owning the business session or the App runtime.
@@ -246,7 +254,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
 
     private func request(method: String, path: String, body: Data? = nil, raw: Bool = false,
                          module: RuntimeModule? = nil, timeout: TimeInterval? = nil,
-                         preservingAcceptedReceipt: Bool = false) async throws -> RuntimeValue {
+                         preservingAcceptedReceipt: Bool = false,
+                         onDispatch: (@Sendable () throws -> Void)? = nil) async throws -> RuntimeValue {
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
@@ -269,6 +278,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         let (data, response): (Data, HTTPURLResponse) = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 state.start(continuation: continuation) {
+                    do { try onDispatch?() }
+                    catch { continuation.resume(throwing: error); return }
                     let task = session.dataTask(with: outgoingRequest) { data, response, error in
                         let cancellation = owner.finish()
                         if state.isClosed { continuation.resume(throwing: RuntimeHTTPError.closed) }

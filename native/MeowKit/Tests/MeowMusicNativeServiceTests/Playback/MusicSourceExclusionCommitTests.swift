@@ -49,11 +49,12 @@ enum ExclusionTestFixture {
     static func store(song: MJ? = nil) throws -> NativeMusicMemoryDocument {
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         var document = try MusicDocument(store.read(), runID: "exclusion")
-        let other = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "OtherMID", title: "Other recording"))
+        let other = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(id: "OtherMID", title: "Other recording"))
         document.queue["entries"] = .array(document.queue["entries"].array + [
-            .obj([("id", .string("entry-2")), ("song", other)])])
+            .obj([("id", .string("entry-2")), ("songId", other["songId"])])])
         document.queue["serial"] = .n(2)
-        store.replace(try document.encode(changed: ["queue"]))
+        document.library["library"]["songs"][other["songId"].string] = other
+        store.replace(try document.encode(changed: ["library", "queue"]))
         return store
     }
     static func snapshot(_ session: any MusicSourceInspectionSession) async throws -> MusicResolvedSourcesSnapshot {
@@ -153,16 +154,16 @@ private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchec
         let store = try ExclusionTestFixture.store(), document = ExclusionCommitDocument(store)
         let scripts = ExclusionTestScripts(["a": ["128k"], "b": ["flac"]])
         let data = try MusicDocument(store.read(), runID: "exclusion")
-        let song = data.queue["entries"].array[0]["song"], source = try XCTUnwrap(MusicModel.sources(song).first)
+        let song = data.library["library"]["songs"][data.queue["entries"].array[0]["songId"].string], source = try XCTUnwrap(MusicModel.sources(song).first)
         let file = MusicRecoveryTestFileCache(hit: .init(identity: .init(scope: "script-history",
             songID: song["songId"].string, sourceKey: source.sourceKey, platform: source.platform,
             nativeID: source.nativeId, requestedQuality: "flac",
-            playbackSignature: NativeMusicService.scriptAudioSignature(song), provider: "b"),
+            provider: "b"),
             fileURL: URL(fileURLWithPath: "/synthetic-cache/exclusion.flac"), duration: 180, measuredQuality: "flac",
             expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)))
-        let service = NativeMusicService(document: document, scripts: scripts, qq: NativeMusicQQFixture(),
+        let service = NativeMusicService(document: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
             enabledPlatforms: [.qq], audioFileCache: cached ? file : nil,
-            transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let initial = try await service.state()
         _ = try await service.updateSettings(.init(ifRevision: initial.settingsRevision, requestQuality: "128k"))
@@ -244,8 +245,8 @@ private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchec
     private func restoreExhausted(_ receipt: ExclusionCommitDocument.Receipt) async throws {
         let document = ExclusionCommitDocument(try ExclusionTestFixture.store())
         let scripts = ExclusionTestScripts(["a": ["flac"]])
-        let service = NativeMusicService(document: document, scripts: scripts, qq: NativeMusicQQFixture(),
-            enabledPlatforms: [.qq], transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
+            enabledPlatforms: [.qq], clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         try await service.excludeSource(for: .init(kind: .queue, id: "entry-1"), provider: "a", platform: "tx")
         let exclusions = try await service.sourceExclusions(), row = try XCTUnwrap(exclusions.first)
@@ -277,44 +278,47 @@ private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchec
 }
 
 extension MusicSourceExclusionCommitTests {
-    func testMetadataProjectionFiltersStagedAdditionsUsingCurrentCrossSongIDDecisions() async throws {
-        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
+    func testRecordingDecisionsKeepRepositoryFactsAndApplyToEveryReferenceOfTheirOwner() async throws {
+        let primary = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
         let existing = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "existing"))
         let rejected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "rejected"))
         let allowed = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "allowed"))
         let song = try MusicModel.mergeSources(primary, adding: existing["sources"].array)
-        let staged = try MusicModel.mergeSources(song, adding: rejected["sources"].array + allowed["sources"].array)
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let service = try await NativeMusicFixture.service(store)
-        // The staged result predates both decisions, made through another entrance.
-        var otherEntrance = primary
-        otherEntrance["songId"] = .string("song:other-entrance")
+        let before = try await service.read()
+        let reference = try await service.adoptSongs([primary])[0]
+        XCTAssertEqual(reference["songId"], song["songId"])
         for source in [existing, rejected] {
-            try await service.excludeRecordingSource(otherEntrance, sourceKey: source["sources"].array[0]["sourceKey"].string)
+            try await service.excludeRecordingSource(reference, sourceKey: source["sources"].array[0]["sourceKey"].string)
         }
-        try await service.retainSongMetadata([staged])
+        _ = try await service.adoptSongs([rejected, allowed], authoritative: true)
         let projected = try await service.sharedSongMetadata(song)
-        let expected = song["sources"].array + allowed["sources"].array
+        let expected = song["sources"].array + rejected["sources"].array + allowed["sources"].array
         XCTAssertEqual(Set(projected["sources"].array.map { $0["sourceKey"].string }),
             Set(expected.map { $0["sourceKey"].string }))
         XCTAssertEqual(projected["sources"].array.first, song["sources"].array.first)
-        let saved = try MusicDocument(store.read(), runID: "exclusion").queue["entries"].array[0]["song"]
-        XCTAssertEqual(saved, song)
+        let saved = try await service.read()
+        XCTAssertEqual(saved.queue, before.queue)
+        XCTAssertEqual(saved.playback["position"], before.playback["position"])
+        XCTAssertEqual(saved.queue["entries"].array[0]["songId"], song["songId"])
         let decisions = try await service.sourceExclusions()
         XCTAssertEqual(decisions.count, 2)
-        XCTAssertTrue(decisions.allSatisfy { $0.songID == "song:other-entrance" })
+        XCTAssertTrue(decisions.allSatisfy { $0.songID == song["songId"].string })
+        let excluded = try await service.recordingSourceExclusions(projected)
+        XCTAssertEqual(excluded, Set([existing, rejected].map { $0["sources"].array[0]["sourceKey"].string }))
         await service.close()
     }
 
     func testRecordingDecisionSaveFailureIsReportedWithoutChangingQueueOrDecisions() async throws {
-        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
+        let primary = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "peer"))
         let song = try MusicModel.mergeSources(primary, adding: peer["sources"].array)
         let key = peer["sources"].array[0]["sourceKey"].string
         let backing = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let document = ExclusionCommitDocument(backing)
-        let service = NativeMusicService(document: document, qq: NativeMusicQQFixture(),
-            transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: document, platformClient: try NativeMusicFixture.client(),
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let before = try backing.read()

@@ -3,8 +3,16 @@ using MeowFilm.Capabilities.Recommendations;
 
 namespace MeowFilm.Capabilities;
 
-public sealed record MusicRecommendationCandidate(string SessionId, string Id, SongRow Song)
+public sealed record MusicRecommendationCandidate(string SessionId, string Id, SongRow Song) : System.ComponentModel.INotifyPropertyChanged
 {
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    internal void RefreshSong(JsonElement? value)
+    {
+        if (value is null) return;
+        Song.ApplyRepository(value);
+        foreach (var name in new[] { nameof(Title), nameof(Artist), nameof(Cover), nameof(Duration) })
+            PropertyChanged?.Invoke(this, new(name));
+    }
     public string Title => Song.Title;
     public string Artist => Song.Artist;
     public string Cover => Song.Cover;
@@ -357,7 +365,8 @@ public sealed partial class MusicCapability
         {
             await EnsureAccountsForRequestAsync(recommendationLifetime.Token);
             if (!Current()) return;
-            if (Accounts.Single(a => a.Platform == target.Platform).State is not ("saved" or "verified"))
+            if (target.Operation == "heartbeat" &&
+                Accounts.Single(a => a.Platform == target.Platform).State is not ("saved" or "verified"))
                 throw new MusicOperationException("AUTH_REQUIRED");
             if (target.Operation == "heartbeat" && RecText(target.Parameters, "entry") == "current" &&
                 !HasHeartbeatContext && !CurrentFromLocalFavorites)

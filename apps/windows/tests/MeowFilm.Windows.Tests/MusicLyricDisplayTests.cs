@@ -1,7 +1,5 @@
 using System.ComponentModel;
 using System.IO;
-using System.Net;
-using System.Net.Http;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +12,7 @@ using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -28,6 +27,31 @@ public static partial class MusicLyricDisplayTests
         yield return new("Native lyric edge projection fades viewport coordinates through resize without masking text", () => Sta(VerifyLocalEdgeFade));
         yield return new("Native full player lyric text uses automatic rendering through loading selection and content changes", () => Sta(VerifyLyricRendering));
         yield return new("Native recording presentation preserves multiple songs independent artwork and cold lyrics", VerifyMultiplePresentations);
+        yield return new("Native long lyric source persists and restores from the current cold display cache", async () =>
+        {
+            await using var store = new MemoryStore();
+            await using var disk = new DisplayDisk();
+            JsonElement song;
+            string key;
+            var lines = MusicLyricTiming.Parse("[00:01]long locator");
+            await using (var cache = new CacheDocumentStore(disk))
+            await using (var owner = new MusicLibraryOwner(store, cacheStore: cache))
+            {
+                Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("canonical/" + new string('x', 9000)) }, index = 0 }));
+                song = Ok(await owner.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song").Clone();
+                key = song.GetProperty("sources")[0].GetProperty("sourceKey").GetString()!;
+                Ok(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key, lines }));
+                await cache.DrainAsync();
+            }
+            int writes = store.Writes;
+            await using var coldCache = new CacheDocumentStore(disk);
+            await using var cold = new MusicLibraryOwner(store, cacheStore: coldCache);
+            var restored = Ok(await cold.ExecuteAsync("music.lyrics.display.get", new { song, sourceKey = key }));
+            Equal("restored", restored.GetProperty("state").GetString());
+            Equal(key, restored.GetProperty("sourceKey").GetString());
+            Check(JsonNode.DeepEquals(JsonNode.Parse(lines.GetRawText()), JsonNode.Parse(restored.GetProperty("lines").GetRawText())));
+            Equal(writes, store.Writes);
+        });
         yield return new("Native lyric source selection loads exact recording immediately without a refresh button", () => Sta(async () =>
         {
             await using var f = await Fixture.Create();
@@ -65,14 +89,14 @@ public static partial class MusicLyricDisplayTests
                 await f.Module.SetMetadataEnabledAsync(
                     f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), false);
                 Equal("", f.Module.CurrentArtwork);
-                Equal(0, f.Runtime.Calls); Equal(0, f.Http.Calls);
+                Equal(0, f.Runtime.Calls); Equal(0, f.Peer.Calls);
             }
             await using var restored = await Fixture.Create(root, seed: false);
             Equal("", restored.Module.CurrentArtwork);
             await restored.Module.SetMetadataEnabledAsync(
                 restored.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), true);
             Equal("https://art.example.test/recording42.png", restored.Module.CurrentArtwork);
-            Equal(0, restored.Runtime.Calls); Equal(0, restored.Http.Calls);
+            Equal(0, restored.Runtime.Calls); Equal(0, restored.Peer.Calls);
         }));
         yield return new("Native current artwork reconciles an unknown metadata receipt internally", () => Sta(() => WithArtworkFixture(async f =>
         {
@@ -80,7 +104,7 @@ public static partial class MusicLyricDisplayTests
             await f.Module.SetMetadataEnabledAsync(
                 f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), false);
             Equal("", f.Module.CurrentArtwork); Equal("", f.Module.Status);
-            Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls);
+            Equal(0, f.Peer.Calls); Equal(0, f.Runtime.Calls);
         })));
         yield return new("Native current artwork unknown save remains internally reconciled when actual Sync overlaps its receipt",
             () => Sta(() => WithArtworkFixture(f => SyncPreservesUnknownSave(f, duringSave: true), holdSync: true)));
@@ -93,7 +117,7 @@ public static partial class MusicLyricDisplayTests
             {
                 await f.Module.ActivateGlobalSurfaceAsync(
                     MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
-                Equal(2, f.Module.Lyrics.Count); Equal(1, f.Http.Calls); Equal(0, f.Runtime.Calls);
+                Equal(2, f.Module.Lyrics.Count); Equal(1, f.Peer.Calls); Equal(0, f.Runtime.Calls);
                 Equal("", f.Module.LyricStatus);
                 var document = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
                 Check(!Encoding.UTF8.GetString(document.Data!).Contains("SYNTHETIC_LYRIC", StringComparison.Ordinal));
@@ -103,13 +127,13 @@ public static partial class MusicLyricDisplayTests
                 f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
             }
             await using var restored = await Fixture.Create(root, seed: false);
-            restored.Http.Fail = true;
+            restored.Peer.Fail = true;
             await restored.Module.ActivateGlobalSurfaceAsync(
                 MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
             Equal(2, restored.Module.Lyrics.Count); Equal("", restored.Module.LyricStatus);
-            Equal(0, restored.Http.Calls); Equal(0, restored.Runtime.Calls); Equal(0, restored.Playback.Opens);
+            Equal(0, restored.Peer.Calls); Equal(0, restored.Runtime.Calls); Equal(0, restored.Playback.Opens);
             await restored.Module.RefreshLyricsAsync();
-            Equal(1, restored.Http.Calls); Equal(0, restored.Module.Lyrics.Count);
+            Equal(1, restored.Peer.Calls); Equal(0, restored.Module.Lyrics.Count);
             Check(restored.Module.LyricStatus.Length > 0); // Explicit refresh does not hide auth/network failure with saved text.
             restored.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
         }));
@@ -181,7 +205,7 @@ public static partial class MusicLyricDisplayTests
             var arrived = Signal(); var release = Signal();
             var published = new List<string>();
             f.Module.Lyrics.CollectionChanged += (_, _) => published.AddRange(f.Module.Lyrics.Select(row => row.Text));
-            f.Http.Block = async () => { arrived.TrySetResult(); await release.Task; };
+            f.Peer.Block = async () => { arrived.TrySetResult(); await release.Task; };
             var read = f.Module.RefreshLyricsAsync();
             try
             {
@@ -195,10 +219,10 @@ public static partial class MusicLyricDisplayTests
                 var retry = f.Module.RefreshLyricsAsync();
                 await lookups.SecondLookupEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
                 Check(!retry.IsCompleted && !release.Task.IsCompleted);
-                Equal(1, f.Http.Calls);
+                Equal(1, f.Peer.Calls);
                 release.TrySetResult();
                 await retry;
-                Equal(1, f.Http.Calls);
+                Equal(1, f.Peer.Calls);
                 Equal(2, f.Module.Lyrics.Count); Equal(0, f.Runtime.Calls);
                 Equal("SYNTHETIC_LYRIC", f.Module.Lyrics[0].Text);
                 Equal("second", f.Module.Lyrics[1].Text);
@@ -209,20 +233,20 @@ public static partial class MusicLyricDisplayTests
         {
             await using var f = await Fixture.Create();
             var arrived = Signal(); var release = Signal();
-            f.Http.Block = async () => { arrived.TrySetResult(); await release.Task; };
+            f.Peer.Block = async () => { arrived.TrySetResult(); await release.Task; };
             var refresh = f.Module.RefreshLyricsAsync();
             await arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var detail = f.Module.ActivateGlobalSurfaceAsync(
                 MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
             var repeated = f.Module.RestoreLyricsAsync();
             await Task.Delay(30);
-            Equal(1, f.Http.Calls);
+            Equal(1, f.Peer.Calls);
             release.TrySetResult();
             await Task.WhenAll(refresh, detail, repeated);
-            Equal(1, f.Http.Calls); Equal(2, f.Module.Lyrics.Count);
+            Equal(1, f.Peer.Calls); Equal(2, f.Module.Lyrics.Count);
             var published = f.Module.Lyrics[0];
             await f.Module.RestoreLyricsAsync();
-            Equal(1, f.Http.Calls); Check(ReferenceEquals(published, f.Module.Lyrics[0]));
+            Equal(1, f.Peer.Calls); Check(ReferenceEquals(published, f.Module.Lyrics[0]));
             f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
         }));
         foreach (var mutation in new[] { "disable", "update" })
@@ -235,13 +259,13 @@ public static partial class MusicLyricDisplayTests
                 var arrived = Signal(); var release = Signal();
                 var published = new List<string>();
                 f.Module.Lyrics.CollectionChanged += (_, _) => published.AddRange(f.Module.Lyrics.Select(row => row.Text));
-                f.Http.Text = "OLD_SOURCE";
-                f.Http.Block = async () => { arrived.TrySetResult(); await release.Task; };
+                f.Peer.Text = "OLD_SOURCE";
+                f.Peer.Block = async () => { arrived.TrySetResult(); await release.Task; };
                 var read = f.Module.RefreshLyricsAsync();
                 try
                 {
                     await arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
-                    f.Http.Block = null; f.Http.Text = "CURRENT_SOURCE";
+                    f.Peer.Block = null; f.Peer.Text = "CURRENT_SOURCE";
                     if (mutation == "disable")
                     {
                         await f.Module.SetSourceEnabledAsync(f.Module.Sources.Single(row => !row.IsBuiltIn), false);
@@ -262,13 +286,13 @@ public static partial class MusicLyricDisplayTests
                     // Invalidating a source creates a new generation without
                     // waiting for the old provider that ignores cancellation.
                     Check(!release.Task.IsCompleted);
-                    Equal(2, f.Http.Calls);
+                    Equal(2, f.Peer.Calls);
                     release.TrySetResult();
                     Equal(2, f.Module.Lyrics.Count);
                     Equal("CURRENT_SOURCE", f.Module.Lyrics[0].Text);
                     Equal("second", f.Module.Lyrics[1].Text);
                     Check(!published.Contains("OLD_SOURCE"));
-                    Equal(2, f.Http.Calls); Equal(0, f.Runtime.Invocations); Equal(0, f.Playback.Opens);
+                    Equal(2, f.Peer.Calls); Equal(0, f.Runtime.Invocations); Equal(0, f.Playback.Opens);
                     var queue = Ok(await f.Application.ExecuteAsync("music.queue.get"));
                     var saved = Ok(await f.Application.ExecuteAsync("music.lyrics.display.get",
                         new { song = queue.GetProperty("current").GetProperty("song") }));
@@ -280,12 +304,12 @@ public static partial class MusicLyricDisplayTests
         {
             await using var f = await Fixture.Create();
             await f.Module.RefreshLyricsAsync();
-            Equal(2, f.Module.Lyrics.Count); Equal(1, f.Http.Calls);
-            f.Http.Fail = true;
+            Equal(2, f.Module.Lyrics.Count); Equal(1, f.Peer.Calls);
+            f.Peer.Fail = true;
             await f.InstallScript();
             await f.Module.RestoreLyricsAsync();
             Equal("SYNTHETIC_LYRIC", f.Module.Lyrics[0].Text);
-            Equal(1, f.Http.Calls); Equal(0, f.Runtime.Invocations); Equal(0, f.Playback.Opens);
+            Equal(1, f.Peer.Calls); Equal(0, f.Runtime.Invocations); Equal(0, f.Playback.Opens);
         }));
         yield return new("Native lyric lookup after restart activates only the first usable enabled script", () => Sta(async () =>
         {
@@ -309,11 +333,11 @@ public static partial class MusicLyricDisplayTests
                 Equal("idle", detail.GetProperty("item").GetProperty("state").GetString());
             }
             Equal(0, f.Runtime.Invocations); Check(f.Runtime.Loaded.Count == 0);
-            f.Http.Empty = true;
+            f.Peer.Empty = true;
             await f.Module.RefreshLyricsAsync();
             Equal("SCRIPT_LYRIC", f.Module.Lyrics.Single().Text);
             Check(f.Runtime.Loaded.SequenceEqual([firstId]) && !f.Runtime.Loaded.Contains(unusedId));
-            Equal(1, f.Runtime.Invocations); Equal(1, f.Http.Calls); Equal(0, f.Playback.Opens);
+            Equal(1, f.Runtime.Invocations); Equal(1, f.Peer.Calls); Equal(0, f.Playback.Opens);
         }));
         yield return new("Native lyric display source scope cannot restore another recording or accept an unknown field", async () =>
         {
@@ -474,7 +498,7 @@ public static partial class MusicLyricDisplayTests
             Equal("tx", f.Module.MetadataPlatforms[0].Platform);
             Check(f.Module.MetadataPlatforms.All(row => !row.Enabled));
             await f.Module.RefreshLyricsAsync();
-            Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls); Equal("暂无歌词", f.Module.LyricStatus);
+            Equal(0, f.Peer.Calls); Equal(0, f.Runtime.Calls); Equal("暂无歌词", f.Module.LyricStatus);
             Check(!f.Module.CanCancelLyrics && f.Module.CanEditMetadata);
         }));
         yield return new("Native metadata changes restore visible player lyrics once without manual refresh", () => Sta(async () =>
@@ -482,14 +506,14 @@ public static partial class MusicLyricDisplayTests
             await using var f = await Fixture.Create();
             await f.Module.ActivateGlobalSurfaceAsync(
                 MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
-            Equal(2, f.Module.Lyrics.Count); Equal(1, f.Http.Calls);
+            Equal(2, f.Module.Lyrics.Count); Equal(1, f.Peer.Calls);
             await f.Module.SetMetadataEnabledAsync(
                 f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), false);
-            Equal(0, f.Module.Lyrics.Count); Equal(1, f.Http.Calls);
+            Equal(0, f.Module.Lyrics.Count); Equal(1, f.Peer.Calls);
             await f.Module.SetMetadataEnabledAsync(
                 f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), true);
             Equal(2, f.Module.Lyrics.Count); Equal("SYNTHETIC_LYRIC", f.Module.Lyrics[0].Text);
-            Equal(1, f.Http.Calls); // Re-enable restores the exact saved display; it is not a refresh request.
+            Equal(1, f.Peer.Calls); // Re-enable restores the exact saved display; it is not a refresh request.
             f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
         }));
         yield return new("Native quality changes retain exact visible lyrics without another lookup", () => Sta(async () =>
@@ -497,10 +521,10 @@ public static partial class MusicLyricDisplayTests
             await using var f = await Fixture.Create();
             await f.Module.ActivateGlobalSurfaceAsync(
                 MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
-            Equal(2, f.Module.Lyrics.Count); Equal(1, f.Http.Calls);
+            Equal(2, f.Module.Lyrics.Count); Equal(1, f.Peer.Calls);
             var published = f.Module.Lyrics[0];
             await f.Module.SetPlaybackQualityRequestAsync("128k");
-            Equal(1, f.Http.Calls);
+            Equal(1, f.Peer.Calls);
             Check(ReferenceEquals(published, f.Module.Lyrics[0]));
             f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
         }));
@@ -514,7 +538,7 @@ public static partial class MusicLyricDisplayTests
                 f.Dialogs.LyricFile = selected; f.Dialogs.Accept = true;
                 await f.Module.ImportLocalLyricsAsync();
                 Equal("", f.Module.LyricStatus); Equal(2, f.Module.Lyrics.Count);
-                Check(f.Module.CanRemoveLocalLyrics); Equal(0, f.Runtime.Calls); Equal(0, f.Http.Calls);
+                Check(f.Module.CanRemoveLocalLyrics); Equal(0, f.Runtime.Calls); Equal(0, f.Peer.Calls);
                 Equal(0, f.Playback.Opens); Check((await File.ReadAllBytesAsync(selected)).SequenceEqual(original));
                 var document = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
                 string text = Encoding.UTF8.GetString(document.Data!);
@@ -525,14 +549,14 @@ public static partial class MusicLyricDisplayTests
             await reopened.Module.ActivateGlobalSurfaceAsync(
                 MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
             Equal("", reopened.Module.LyricStatus); Equal("用户选择", reopened.Module.Lyrics[0].Text);
-            Equal(0, reopened.Runtime.Calls); Equal(0, reopened.Http.Calls); Equal(0, reopened.Playback.Opens);
+            Equal(0, reopened.Runtime.Calls); Equal(0, reopened.Peer.Calls); Equal(0, reopened.Playback.Opens);
             reopened.Dialogs.Accept = true;
             await DisableAllMetadata(reopened.Module);
             await reopened.Module.RestoreLyricsAsync(); // Manual local text grants no platform lookup.
             Equal("", reopened.Module.LyricStatus);
             await reopened.Module.RemoveLocalLyricsAsync();
             Check(!reopened.Module.CanRemoveLocalLyrics); Equal(0, reopened.Module.Lyrics.Count);
-            Equal(0, reopened.Http.Calls); Check((await File.ReadAllBytesAsync(selected)).SequenceEqual(original));
+            Equal(0, reopened.Peer.Calls); Check((await File.ReadAllBytesAsync(selected)).SequenceEqual(original));
             reopened.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
         }));
         yield return new("Native local lyric declined confirmation makes no durable mutation or metadata request", () => Sta(async () =>
@@ -545,7 +569,7 @@ public static partial class MusicLyricDisplayTests
             await f.Module.ImportLocalLyricsAsync();
             var after = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
             Equal(before.Fingerprint, after.Fingerprint);
-            Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls); Check(!f.Module.CanRemoveLocalLyrics);
+            Equal(0, f.Peer.Calls); Equal(0, f.Runtime.Calls); Check(!f.Module.CanRemoveLocalLyrics);
         }));
         yield return new("Native metadata disabled platform suppresses the previously saved display on restart", () => Sta(async () =>
         {
@@ -563,7 +587,7 @@ public static partial class MusicLyricDisplayTests
             await next.Module.ActivateGlobalSurfaceAsync(
                 MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
             Equal(0, next.Module.Lyrics.Count); Equal("暂无歌词", next.Module.LyricStatus);
-            Equal(0, next.Http.Calls); Equal(0, next.Runtime.Calls);
+            Equal(0, next.Peer.Calls); Equal(0, next.Runtime.Calls);
             next.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
         }));
         yield return new("Native metadata unknown save reconciles inside the immediate setting operation", () => Sta(async () =>
@@ -579,7 +603,7 @@ public static partial class MusicLyricDisplayTests
                 f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), false);
             Equal(writes, f.Access.LibraryWrites);
             await f.Module.RefreshLyricsAsync();
-            Equal("暂无歌词", f.Module.LyricStatus); Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls);
+            Equal("暂无歌词", f.Module.LyricStatus); Equal(0, f.Peer.Calls); Equal(0, f.Runtime.Calls);
             Equal("", f.Module.Status);
         }));
     }
@@ -614,6 +638,7 @@ public static partial class MusicLyricDisplayTests
         await f.Module.NavigateAsync("favorites", default);
         await f.SyncNoticeEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var committed = Signal(); var releaseReceipt = Signal();
+        string originalArtwork = f.Module.CurrentArtwork;
         try
         {
             f.Access.FailAfterLibraryWrite = true;
@@ -634,7 +659,7 @@ public static partial class MusicLyricDisplayTests
                 await save;
                 Equal("", f.Module.Status);
             }
-            Equal("", f.Module.CurrentArtwork);
+            Equal(duringSave ? originalArtwork : "", f.Module.CurrentArtwork);
             f.ReleaseSyncNotice();
             await f.SyncNoticeDelivered.Task.WaitAsync(TimeSpan.FromSeconds(10));
             Ok(await f.SyncRound!);
@@ -660,7 +685,7 @@ public static partial class MusicLyricDisplayTests
             await f.Module.CreatePlaylistAsync(""); Equal("请输入歌单名称", f.Module.Status);
             await f.Module.RefreshAsync(); Equal("", f.Module.Status);
             Equal(writes, f.Access.LibraryWrites);
-            Equal(0, f.Http.Calls); Equal(0, f.Runtime.Calls); Equal(0, f.Playback.Opens);
+            Equal(0, f.Peer.Calls); Equal(0, f.Runtime.Calls); Equal(0, f.Playback.Opens);
         }
         finally
         {
@@ -757,7 +782,7 @@ public static partial class MusicLyricDisplayTests
         internal readonly WriteFaultStore Access;
         internal readonly CacheDocumentStore Cache;
         internal readonly LyricRuntime Runtime;
-        internal readonly Handler Http = new();
+        internal readonly LyricPeer Peer = new();
         internal readonly MusicNativeApplication Application;
         internal readonly Playback Playback = new();
         internal readonly Dialogs Dialogs = new();
@@ -771,6 +796,7 @@ public static partial class MusicLyricDisplayTests
         private Fixture(string root, bool holdSync, Func<IMusicApplication, IMusicApplication>? decorate = null)
         {
             Runtime = new(root);
+            Runtime.Platform.OnRequest = Peer.Read;
             ScriptPath = Path.Combine(root, "lyric-source.js");
             Store = new(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             Access = new(Store);
@@ -781,7 +807,7 @@ public static partial class MusicLyricDisplayTests
                 return new LocalDocumentStore(cacheRoot, AppIdentity.CacheNamespaces,
                     protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
             });
-            Application = new(Access, Runtime, Cache, Http);
+            Application = new(Access, Runtime, Cache);
             if (holdSync) Application.LibrarySyncChanged += HoldSyncNotice;
             Module = new(decorate?.Invoke(Application) ?? Application, Access, Playback, Dialogs);
             if (holdSync) Application.LibrarySyncChanged += () => SyncNoticeDelivered.TrySetResult();
@@ -830,7 +856,15 @@ public static partial class MusicLyricDisplayTests
             {
                 if (SyncRound is not null) Ok(await SyncRound);
             }
-            finally { try { await Module.DisposeAsync(); } finally { await Cache.DisposeAsync(); await Store.DisposeAsync(); } }
+            finally
+            {
+                try { await Module.DisposeAsync(); }
+                finally
+                {
+                    try { await Runtime.DisposeAsync(); }
+                    finally { await Cache.DisposeAsync(); await Store.DisposeAsync(); }
+                }
+            }
         }
     }
     private sealed class WriteFaultStore(IDocumentStore store) : IDocumentStore
@@ -854,27 +888,30 @@ public static partial class MusicLyricDisplayTests
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask; // Fixture owns the real DPAPI store.
     }
-    private sealed class Handler : HttpMessageHandler
+    private sealed class LyricPeer
     {
         internal int Calls;
         internal bool Fail, Empty;
         internal string Text = "SYNTHETIC_LYRIC";
         internal Func<Task>? Block;
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
             Calls++;
-            Check(request.RequestUri!.Host is "music.163.com" or "interfacepc.music.163.com");
+            Check(call.Platform == "wy" && call.Operation == "lyrics");
             string text = Text;
-            if (Block is { } block) await block();
-            if (Fail) throw new HttpRequestException("Synthetic unavailable");
-            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new {
-                code = 200, id = "42", lrc = new { lyric = Empty ? "" : "[00:01]" + text + "\n[00:20]second" },
-                tlyric = new { lyric = Empty ? "" : "[00:01]合成译文" }
-            }), Encoding.UTF8, "application/json") };
+            if (Block is { } block) await block(); // Deliberately ignore cancellation until actual completion.
+            if (Fail) throw new MusicPlatformException("NETWORK_ERROR");
+            return MusicPlatformRuntimeFixture.Json(new
+            {
+                text = Empty ? "" : "[00:01]" + text + "\n[00:20]second",
+                translation = Empty ? "" : "[00:01]合成译文",
+                romanization = ""
+            });
         }
     }
-    private sealed class LyricRuntime(string root) : IRuntimeClient
+    private sealed class LyricRuntime(string root) : IRuntimeClient, IAsyncDisposable
     {
+        internal readonly MusicPlatformRuntimeFixture Platform = new();
         // Durable state of the fake shared module, shared only by fixture reopen.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Dictionary<string, JsonObject>> documents = new();
         private readonly Dictionary<string, JsonObject> items = documents.GetOrAdd(root, _ => []);
@@ -894,6 +931,8 @@ public static partial class MusicLyricDisplayTests
         }
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
+            if (method.StartsWith("music.platform.", StringComparison.Ordinal))
+                return Platform.CallAsync(method, parameters, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested(); Calls++;
             var input = JsonSerializer.SerializeToElement(parameters); object result;
             string Id() => input.GetProperty("installationId").GetString()!;
@@ -910,7 +949,9 @@ public static partial class MusicLyricDisplayTests
                     Check(candidates.Remove((id, input.GetProperty("sourceRevision").GetInt64())));
                     items[id] = JsonSerializer.SerializeToNode(new { installationId = id, name = "Lyric fixture", version = "1",
                         origin = new { kind = "file" }, enabled = false, executionHash = new string('a', 64), rollbackAvailable = false,
-                        sites = new { wy = new { actions = new[] { "lyric" }, qualitys = Array.Empty<string>() } }, check = (object?)null })!.AsObject();
+                        sites = new { wy = new { actions = new[] { "lyric" }, qualitys = Array.Empty<string>() } },
+                        capabilities = new { wy = new { actions = new[] { "lyric" }, qualitys = Array.Empty<string>() } },
+                        check = (object?)null })!.AsObject();
                     result = new { item = Row(id) }; break;
                 case "music.script.sources.list": result = new { items = items.Keys.Select(Row).ToArray() }; break;
                 case "music.script.sources.detail": result = new { item = Row(Id()) }; break;
@@ -929,6 +970,7 @@ public static partial class MusicLyricDisplayTests
             }
             return Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", value = result }));
         }
+        public ValueTask DisposeAsync() => Platform.DisposeAsync();
     }
     private sealed class Dialogs : IMusicDialogs
     {

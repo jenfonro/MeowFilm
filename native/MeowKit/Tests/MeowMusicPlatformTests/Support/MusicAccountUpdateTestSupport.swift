@@ -66,7 +66,7 @@ final class MusicUpdateStore: CredentialStore, @unchecked Sendable {
 
 actor MusicUpdateProvider: MusicAccountProvider {
     static func credential(_ label: String = "old", uid: String = "42") throws -> AccountCredential {
-        try .init(data: MusicQQWire.json(["uid": uid, "secret": "synthetic-" + label]))
+        try MusicAccountCredential.make(platform: .qq, userID: uid, cookie: "musickey=synthetic-" + label)
     }
     private var replacement: AccountCredential?
     private var claimedID: String?
@@ -81,35 +81,36 @@ actor MusicUpdateProvider: MusicAccountProvider {
     func counts() -> (verifies: Int, refreshes: Int, resolutions: Int) { (verifies, refreshes, resolutions) }
     func received() -> [AccountCredential] { inputs }
     func nativeID(_ credential: AccountCredential) throws -> String {
-        try MusicQQWire.string(MusicQQWire.decode(credential.dataRepresentation())["uid"])
+        try MusicAccountFixture.userID(credential)
     }
-    private func update(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    private func update(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         inputs.append(credential)
         let value = replacement ?? credential, id = try claimedID ?? nativeID(value), gate = hold
         if let gate { await gate.wait() } // Non-cooperative on purpose.
         return .init(credential: value, nickname: "Synthetic", nativeID: id)
     }
-    func verify(_ credential: AccountCredential) async throws -> MusicQQVerified { verifies += 1; return try await update(credential) }
-    func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified { refreshes += 1; return try await update(credential) }
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified { verifies += 1; return try await update(credential) }
+    func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified { refreshes += 1; return try await update(credential) }
     func createQR(id: UUID) async throws -> MusicLoginChallenge {
         .init(id: id, platform: .qq, image: Data([0]), expiresAt: Date().addingTimeInterval(180))
     }
-    func pollQR(id: UUID) async throws -> MusicQQLoginResult { .init(progress: .waiting, verified: nil) }
+    func pollQR(id: UUID) async throws -> MusicAccountLoginResult { .init(progress: .waiting, verified: nil) }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) async throws -> MusicQQRecommendation {
+    func recommendations(kind: String, page: Int) async throws -> MusicAccountRecommendation {
         .init(rows: [], nextPage: nil)
     }
-    func collectionRows(credential: AccountCredential) async throws -> [JSONValue] { [] }
-    func tracks(collectionID: String, credential: AccountCredential) async throws -> [JSONValue] { [] }
-    func capabilities(mid: String, credential: AccountCredential) async throws -> [String] {
+    func collectionRows() async throws -> [JSONValue] { [] }
+    func tracks(collectionID: String) async throws -> [JSONValue] { [] }
+    func capabilities(mid: String) async throws -> [String] {
         if let capabilityHold { await capabilityHold.wait() }
         return ["128k"]
     }
-    func resolve(mid: String, quality: String, credential: AccountCredential) async throws -> JSONValue {
+    func resolve(mid: String, quality: String) async throws -> JSONValue {
         resolutions += 1
-        return .object(["url": .string("https://media.invalid/synthetic.mp3"), "quality": .string(quality),
-                        "qualityVerified": .bool(false), "expiresAt": .null])
+        return .object(["url": .string("https://media.invalid/synthetic.mp3"),
+                        "requestQuality": .string(quality), "actualQuality": .string(quality),
+                        "full": .bool(true), "expiresAt": .null])
     }
 }
 
@@ -126,7 +127,7 @@ struct MusicUpdateFixture {
         service = .init(accounts: accounts, scopes: [.qq: identity, .netease: otherIdentity],
                         providers: [.qq: provider, .netease: otherProvider])
         store.seed(try MusicUpdateProvider.credential(), for: identity)
-        store.seed(try MusicUpdateProvider.credential("other", uid: "99"), for: otherIdentity)
+        store.seed(try MusicAccountFixture.credential(99, platform: .netease), for: otherIdentity)
     }
     func enable() async throws { _ = try await service.setAccess(available: true, generation: 1) }
 }

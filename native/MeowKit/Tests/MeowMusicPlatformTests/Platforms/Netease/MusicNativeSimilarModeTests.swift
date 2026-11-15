@@ -3,107 +3,93 @@ import Foundation
 import MeowAccounts
 import MeowMusicFeature
 import MeowJSON
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicPlatform
 
 @MainActor final class MusicNativeSimilarModeTests: XCTestCase {
-    func testExactReferenceRequestShapesAndBounds() throws {
-        let context = MusicSimilarHeartbeatContext(playlistID: "501", seedID: "101")
+    func testCanonicalRequestsPreserveExplicitContextAndDoNotRevalidateOrdinaryIDsOrSourceCounts() async throws {
+        let fixture = try MusicPlatformFixture { _ in .object(["items": .array([])]) }
+        let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .netease, client: client)
+        let context = MusicSimilarHeartbeatContext(playlistID: "canonical-list", seedID: "900719925474099312", count: 2)
         for home in [false, true] {
-            let spec = try XCTUnwrap(MusicNeteaseSimilarModeRequest.specification(
-                .heartbeat(lastID: "102", fromHome: home, context: context), heartbeatCount: 2))
-            XCTAssertEqual(spec.path, "/api/playmode/intelligence/list"); XCTAssertEqual(spec.crypto, "eapi")
-            XCTAssertEqual(spec.data["type"] as? String, home ? "fromPlayAll" : "fromPlayOne")
-            XCTAssertEqual(spec.data["playlistId"] as? String, "501")
-            XCTAssertEqual(spec.data["startMusicId"] as? String, "101")
-            XCTAssertEqual(spec.data["songId"] as? String, "102")
-            XCTAssertEqual(spec.data["count"] as? Int, 2)
+            _ = try await provider.similarMode(.heartbeat(lastID: "actual-tail", fromHome: home, context: context), authorize: {})
         }
-        let similar = try XCTUnwrap(MusicNeteaseSimilarModeRequest.specification(.songRoaming(sourceIDs: ["101", "102"]), heartbeatCount: 0))
-        XCTAssertEqual(similar.path, "/api/v1/radio/get"); XCTAssertEqual(similar.crypto, "weapi")
-        XCTAssertEqual(similar.data["mode"] as? String, "SIMILAR")
-        XCTAssertEqual(similar.data["sourceType"] as? String, "song")
-        XCTAssertEqual(similar.data["sourceIds"] as? String, "[101,102]")
-        XCTAssertEqual(similar.data["unplaySonIds"] as? String, "[]")
-        for invalid in ["0", "01", "-1", "1e3", "9007199254740992", "١", " 101"] {
-            XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(.songRoaming(sourceIDs: [invalid])))
-            XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(
-                .songRecommendations(seedID: invalid, offset: 0)))
+        let ids = (0..<21).map { "actual-source-\($0)" }
+        _ = try await provider.similarMode(.songRoaming(sourceIDs: ids), authorize: {})
+        _ = try await provider.similarMode(.artistRoaming(sourceIDs: ["artist-alias"]), authorize: {})
+        _ = try await provider.similarMode(.songRecommendations(seedID: "canonical-song", offset: 53), authorize: {})
+        let requests = fixture.requests()
+        XCTAssertEqual(requests.map(\.operation), ["heartbeat", "heartbeat", "similar", "similar", "queueRecommendations"])
+        for request in requests.prefix(2) {
+            XCTAssertEqual(request.parameters[music: "songId"], .string("actual-tail"))
+            XCTAssertEqual(request.parameters[music: "continuation"], .object([
+                "playlistId": .string("canonical-list"), "startMusicId": .string("900719925474099312"), "count": .number(2)]))
         }
-        XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(.songRoaming(sourceIDs: [])))
-        XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(.songRoaming(sourceIDs: Array(repeating: "101", count: 21))))
-        XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(
-            .songRecommendations(seedID: "102", offset: -1)))
-        XCTAssertNoThrow(try MusicNeteaseSimilarModeRequest.validate(
-            .songRecommendations(seedID: "101", offset: 0)))
+        XCTAssertEqual(requests[0].parameters[music: "entry"], .string("song"))
+        XCTAssertEqual(requests[1].parameters[music: "entry"], .string("favorites"))
+        XCTAssertEqual(requests[2].parameters[music: "sourceIds"], .array(ids.map(RuntimeValue.string)))
+        XCTAssertEqual(requests[3].parameters[music: "sourceType"], .string("artist"))
+        XCTAssertEqual(requests[4].parameters[music: "offset"], .number(53))
+        try await client.close(); await fixture.runtime.close()
     }
 
-    func testHeartbeatReadsActualFavoriteSeedAndUsesExplicitContinuationContext() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
-        let path = "/eapi/playmode/intelligence/list"
-        await f.http.replies(path, [try MusicNeteaseFixture.response([
-            "code": 200, "data": [["songInfo": MusicNeteaseFixture.song(102), "alg": "synthetic-alg",
-                "source": "actual-heart-source", "sourceId": "actual-source-id"]]
-        ])])
+    func testHeartbeatConsumesCanonicalAttributionAndExplicitContinuationContext() async throws {
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
+        let origin: RuntimeValue = .object(["source": .string("heartbeat"), "feedbackSource": .string("actual-heart-source"),
+            "feedbackSourceId": .string("actual-source-id"), "sourceId": .string("501"),
+            "seedId": .string("102"), "alg": .string("synthetic-alg")])
+        let song = try recommendationSong("102", origin: origin)
+        await f.platform.replies("heartbeat", .object(["items": .array([song]),
+            "continuation": .object(["playlistId": .string("501"), "startMusicId": .string("102"), "count": .number(2)])]))
         let lease = try await f.service.beginAccountQueue(platform: .netease)
         let batch = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: "102", fromHome: false, context: nil))
         let context = try XCTUnwrap(batch.heartbeatContext)
-        XCTAssertEqual(context, .init(playlistID: "501", seedID: "102"))
-        let first = try MusicQQWire.decode(XCTUnwrap(batch.items.first?.data))
-        let attribution = try MusicQQWire.object(first["_recommendation"])
-        XCTAssertEqual(attribution["source"] as? String, "heartbeat")
-        XCTAssertEqual(attribution["feedbackSource"] as? String, "actual-heart-source")
-        XCTAssertEqual(attribution["feedbackSourceId"] as? String, "actual-source-id")
-        XCTAssertEqual(attribution["sourceId"] as? String, "501")
-        XCTAssertEqual(attribution["seedId"] as? String, "102")
-        XCTAssertEqual(attribution["alg"] as? String, "synthetic-alg")
+        XCTAssertEqual(context, .init(playlistID: "501", seedID: "102", count: 2))
+        let first = try RuntimeJSON.decode(XCTUnwrap(batch.items.first?.data))
+        XCTAssertEqual(first[music: "_recommendation"], origin)
         _ = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: "102", fromHome: false, context: context))
-        let records = await f.http.recorded(), requests = records.filter { $0.request.url.path == path }
+        let records = await f.platform.recorded(), requests = records.filter { $0.operation == "heartbeat" }
         XCTAssertEqual(requests.count, 2)
-        let one = try MusicQQWire.decode(XCTUnwrap(requests.first?.payload))
-        let all = try MusicQQWire.decode(XCTUnwrap(requests.last?.payload))
-        XCTAssertEqual(one["type"] as? String, "fromPlayOne"); XCTAssertEqual(one["songId"] as? String, "102")
-        XCTAssertEqual(all["type"] as? String, "fromPlayOne")
-        XCTAssertEqual(all["songId"] as? String, "102")
-        XCTAssertEqual(one["count"] as? Int, 2); XCTAssertEqual(all["count"] as? Int, 2)
-        XCTAssertEqual(records.filter { $0.request.url.path == "/weapi/user/playlist" }.count, 2)
-        XCTAssertEqual(records.filter { $0.request.url.path == "/eapi/v6/playlist/detail" }.count, 2)
+        XCTAssertEqual(requests[0].parameters[music: "continuation"], .null)
+        XCTAssertEqual(requests[1].parameters[music: "continuation"][music: "count"], .number(2))
+        XCTAssertEqual(records.map(\.operation), ["account.verify", "heartbeat", "heartbeat"])
         _ = await f.service.close()
     }
 
     func testQueueRecommendationsReadFreshBatchesPreserveAllIDsAndAttribution() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
-        let path = "/eapi/homepage/scene/more/rcmd/song"
-        await f.http.replies(path, try [101, 102].map { id in
-            try MusicNeteaseFixture.response(["code": 200, "data": [
-                "songList": [MusicNeteaseFixture.song(id)], "algMap": [String(id): "synthetic-\(id)"], "hasMore": true, "offset": (id - 100) * 15
-            ]])
-        })
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
+        let firstSong = try recommendationSong("101", origin: .object(["source": .string("moreRcmd")]))
+        let secondOrigin: RuntimeValue = .object(["source": .string("moreRcmd"), "feedbackSource": .string(""),
+            "songId": .string("102"), "alg": .string("synthetic-102")])
+        let secondSong = try recommendationSong("102", origin: secondOrigin)
+        await f.platform.replies("queueRecommendations",
+            .object(["items": .array([firstSong]), "hasMore": .bool(true), "offset": .number(53)]))
         let lease = try await f.service.beginAccountQueue(platform: .netease)
         let before = f.store.peek(f.identity)
         let request = MusicNativeSimilarModeRequest.songRecommendations(seedID: "500", offset: 0)
         let first = try await f.service.similarModeBatch(lease, request: request)
+        await f.platform.replies("queueRecommendations",
+            .object(["items": .array([secondSong]), "hasMore": .bool(false), "offset": .number(107)]))
         let second = try await f.service.similarModeBatch(lease, request: .songRecommendations(seedID: "500", offset: XCTUnwrap(first.offset)))
         XCTAssertNotEqual(first.items.first?.data, second.items.first?.data)
         XCTAssertNil(first.heartbeatContext); XCTAssertTrue(first.items.allSatisfy { $0.platform == "wy" })
-        let song = try MusicQQWire.decode(XCTUnwrap(second.items.first?.data))
-        let recommendation = try MusicQQWire.object(song["_recommendation"])
-        XCTAssertEqual(recommendation["source"] as? String, "moreRcmd")
-        XCTAssertEqual(recommendation["feedbackSource"] as? String, "")
-        XCTAssertEqual(recommendation["songId"] as? String, "102")
-        XCTAssertEqual(recommendation["alg"] as? String, "synthetic-102")
-        let records = await f.http.recorded(), pages = records.filter { $0.request.url.path == path }
+        let song = try RuntimeJSON.decode(XCTUnwrap(second.items.first?.data))
+        XCTAssertEqual(song[music: "_recommendation"], secondOrigin)
+        XCTAssertEqual(first.hasMore, true); XCTAssertEqual(second.hasMore, false); XCTAssertEqual(second.offset, 107)
+        let records = await f.platform.recorded(), pages = records.filter { $0.operation == "queueRecommendations" }
         XCTAssertEqual(pages.count, 2)
-        let payload = try MusicQQWire.decode(XCTUnwrap(pages.last?.payload))
-        XCTAssertEqual(payload["songIds"] as? String, "[500]")
-        XCTAssertEqual(payload["currentPlaySongId"] as? String, "500")
-        XCTAssertEqual(payload["source"] as? String, "curlist_more_rcmd")
-        XCTAssertEqual(records.filter { $0.request.url.path == "/weapi/w/nuser/account/get" }.count, 1)
+        XCTAssertEqual(pages[1].parameters[music: "seedSongId"], .string("500"))
+        XCTAssertEqual(pages[1].parameters[music: "offset"], .number(53))
+        XCTAssertEqual(records.filter { $0.operation == "account.verify" }.count, 1)
         XCTAssertEqual(f.store.peek(f.identity), before)
         _ = await f.service.close()
     }
 
-    func testSongRoamingUsesRealRadioRouteAndScopeBelongsToExactLease() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+    func testSongRoamingConsumesCanonicalAttributionAndScopeBelongsToExactLease() async throws {
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
+        let song = try recommendationSong("101", origin: .object(["source": .string("similar"), "feedbackSource": .string("")]))
+        await f.platform.replies("similar", .object(["items": .array([song])]))
         let lease = try await f.service.beginAccountQueue(platform: .netease)
         let scope = try await f.service.similarModeScope(lease)
         let secondLease = try await f.service.beginAccountQueue(platform: .netease)
@@ -111,43 +97,42 @@ import MeowJSON
         XCTAssertEqual(scope, sameAccountScope)
         await f.service.endAccountQueue(secondLease)
         let batch = try await f.service.similarModeBatch(lease, request: .songRoaming(sourceIDs: ["101"]))
-        let song = try MusicQQWire.decode(XCTUnwrap(batch.items.first?.data))
-        XCTAssertEqual(try MusicQQWire.object(song["_recommendation"])["source"] as? String, "similar")
-        XCTAssertEqual(try MusicQQWire.object(song["_recommendation"])["feedbackSource"] as? String, "",
+        let row = try RuntimeJSON.decode(XCTUnwrap(batch.items.first?.data))
+        XCTAssertEqual(row[music: "_recommendation"][music: "source"], .string("similar"))
+        XCTAssertEqual(row[music: "_recommendation"][music: "feedbackSource"], .string(""),
             "A similar-mode request does not invent a playback source")
         let forged = MusicAccountQueueLease(id: lease.id, platform: lease.platform)
         do { _ = try await f.service.similarModeScope(forged); XCTFail("Copied UUID accepted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         XCTAssertTrue(lease.authorization.isActive)
-        let records = await f.http.recorded()
-        XCTAssertEqual(records.filter { $0.request.url.path == "/weapi/v1/radio/get" }.count, 1)
+        let records = await f.platform.recorded()
+        XCTAssertEqual(records.filter { $0.operation == "similar" }.count, 1)
         await f.service.endAccountQueue(lease)
         do { _ = try await f.service.similarModeBatch(lease, request: .songRoaming(sourceIDs: ["101"])); XCTFail("Ended lease reused") }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleAccess) }
-        let after = await f.http.recorded()
+        let after = await f.platform.recorded()
         XCTAssertEqual(after.count, records.count)
         _ = await f.service.close()
     }
 
-    func testForeignFavoriteCannotBecomeHeartbeatSeed() async throws {
-        let f = try MusicNeteaseNativeFixture(); try await f.enable()
-        await f.http.replies("/weapi/user/playlist", [try MusicNeteaseFixture.response([
-            "code": 200, "more": false, "playlist": [MusicNeteaseFixture.collection(owner: 99)]
-        ])])
+    func testActualPermissionFailureDoesNotBecomeAuthenticationFailureOrFallback() async throws {
+        let f = try MusicNativeFixture(platform: .netease); try await f.enable()
+        await f.platform.fail("heartbeat", code: "FORBIDDEN")
         let lease = try await f.service.beginAccountQueue(platform: .netease)
         do {
             _ = try await f.service.similarModeBatch(lease, request: .heartbeat(lastID: nil, fromHome: true, context: nil))
-            XCTFail("Foreign favorite used")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
-        let records = await f.http.recorded()
-        XCTAssertFalse(records.contains { $0.request.url.path == "/eapi/playmode/intelligence/list" })
+            XCTFail("Permission failure hidden")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .permissionDenied) }
+        XCTAssertTrue(lease.authorization.isActive); XCTAssertNotNil(f.store.peek(f.identity))
+        let records = await f.platform.recorded()
+        XCTAssertEqual(records.map(\.operation), ["account.verify", "heartbeat"])
         _ = await f.service.close()
     }
 
     func testLateBatchCannotEscapeProtectionOrExternalCredentialReplacement() async throws {
         for replace in [false, true] {
             let store = MusicAccountTestStore(), identity = try MusicAccountFixture.identity("wy")
-            try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+            try store.write(.init(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
             let provider = MusicSimilarModeGateProvider(), gate = MusicAccountQueueOwnerGate("similar reply")
             let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: store),
                 scopes: [.netease: identity], providers: [.netease: provider])
@@ -158,7 +143,7 @@ import MeowJSON
                 try await owner.similarModeBatch(lease, request: .songRoaming(sourceIDs: ["101"]))
             }
             await fulfillment(of: [gate.entered], timeout: 3)
-            if replace { try store.write(.init(credential: MusicNeteaseFixture.credential("99")), for: identity) }
+            if replace { try store.write(.init(credential: MusicAccountFixture.credential(99, platform: .netease)), for: identity) }
             else { _ = try await owner.setAccess(available: false, generation: 2) }
             await gate.release()
             await fulfillment(of: [call.finished, gate.departed], timeout: 3)
@@ -170,7 +155,7 @@ import MeowJSON
 
     func testCallerCancellationDrainsPhysicalWorkerAndLeavesLeaseReusable() async throws {
         let store = MusicAccountTestStore(), identity = try MusicAccountFixture.identity("wy")
-        try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+        try store.write(.init(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
         let provider = MusicSimilarModeGateProvider(), gate = MusicAccountQueueOwnerGate("cancelled batch")
         let probe = MusicSimilarModeDrainProbe()
         let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: store),
@@ -201,7 +186,7 @@ import MeowJSON
     func testLeaseEndAndSynchronousRevokeCancelAndDrainPhysicalWorker() async throws {
         for direct in [false, true] {
             let store = MusicAccountTestStore(), identity = try MusicAccountFixture.identity("wy")
-            try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+            try store.write(.init(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
             let provider = MusicSimilarModeGateProvider(), gate = MusicAccountQueueOwnerGate("revoked batch \(direct)")
             let probe = MusicSimilarModeDrainProbe()
             let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: store),
@@ -231,7 +216,7 @@ import MeowJSON
     func testCancellationIsolatedToOperationOrExactLeaseOfSameAccount() async throws {
         for sameLease in [false, true] {
             let store = MusicAccountTestStore(), identity = try MusicAccountFixture.identity("wy")
-            try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+            try store.write(.init(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
             let provider = MusicSimilarModeGateProvider(), gate = MusicAccountQueueOwnerGate("isolated batch \(sameLease)")
             let probe = MusicSimilarModeDrainProbe()
             let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: store),
@@ -264,7 +249,7 @@ import MeowJSON
         }
     }
 
-    func testRecommendationBatchesKeepPerItemAndTotalByteBoundaries() async throws {
+    func testCanonicalRecommendationBatchesAreNotRebudgetedPerItemOrAsMergedHTTPResponses() async throws {
         func paddedSong(_ count: Int) throws -> Data {
             try JSONEncoder().encode(JSONValue.object([
                 "songmid": .string("101"), "name": .string("合成歌曲"),
@@ -277,20 +262,25 @@ import MeowJSON
         ]
         for items in cases {
             let store = MusicAccountTestStore(), identity = try MusicAccountFixture.identity("wy")
-            try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+            try store.write(.init(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
             let provider = MusicSimilarModeGateProvider()
             await provider.reply(.init(items: items))
             let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: store),
                 scopes: [.netease: identity], providers: [.netease: provider])
             _ = try await owner.setAccess(available: true, generation: 1)
             let lease = try await owner.beginAccountQueue(platform: .netease)
-            do {
-                _ = try await owner.similarModeBatch(lease,
-                    request: .songRecommendations(seedID: "101", offset: 0))
-                XCTFail("Byte resource boundary removed")
-            } catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+            let result = try await owner.similarModeBatch(lease,
+                request: .songRecommendations(seedID: "101", offset: 0))
+            XCTAssertEqual(result.items.map(\.data), items.map(\.data))
             _ = await owner.close()
         }
+    }
+
+    private func recommendationSong(_ id: String, origin: RuntimeValue) throws -> RuntimeValue {
+        let track = try MusicAccountFixture.track(id, platform: "wy")
+        guard case .object(var info) = try RuntimeJSON.decode(track.data) else { throw MusicServiceError.invalidResponse }
+        info["_recommendation"] = origin
+        return try MusicPlatformFixture.song(.init(platform: "wy", data: RuntimeJSON.encode(.object(info))))
     }
 }
 
@@ -317,7 +307,7 @@ private actor MusicSimilarModeGateProvider: MusicAccountProvider, MusicAccountSi
         held = (value, probe, recheck)
     }
     func reply(_ value: MusicNativeSimilarModeBatch) { batch = value }
-    func similarMode(_ request: MusicNativeSimilarModeRequest, credential: AccountCredential,
+    func similarMode(_ request: MusicNativeSimilarModeRequest,
                      authorize: @escaping @Sendable () async throws -> Void) async throws -> MusicNativeSimilarModeBatch {
         try await authorize()
         let pending = held; held = nil
@@ -327,22 +317,22 @@ private actor MusicSimilarModeGateProvider: MusicAccountProvider, MusicAccountSi
             if pending.recheck { try await authorize() }
         }
         if let batch { return batch }
-        let row = try NeteaseMusicAccountAdapter.song(MusicNeteaseFixture.song(), id: "101")
+        let track = try MusicAccountFixture.track("101", platform: "wy")
         if case .songRecommendations(_, let offset) = request {
-            return .init(items: [.init(platform: "wy", data: try JSONEncoder().encode(row))], hasMore: true, offset: offset + 15)
+            return .init(items: [track], hasMore: true, offset: offset + 15)
         }
-        return .init(items: [.init(platform: "wy", data: try JSONEncoder().encode(row))])
+        return .init(items: [track])
     }
     func nativeID(_ credential: AccountCredential) async throws -> String { try await account.nativeID(credential) }
-    func verify(_ credential: AccountCredential) async throws -> MusicQQVerified { try await account.verify(credential) }
-    func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified { try await account.refresh(credential) }
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await account.verify(credential) }
+    func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await account.refresh(credential) }
     func createQR(id: UUID) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
-    func pollQR(id: UUID) throws -> MusicQQLoginResult { throw MusicServiceError.unsupported }
+    func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) -> MusicQQRecommendation { .init(rows: [], nextPage: nil) }
-    func collectionRows(credential: AccountCredential) -> [JSONValue] { [] }
-    func tracks(collectionID: String, credential: AccountCredential) -> [JSONValue] { [] }
-    func capabilities(mid: String, credential: AccountCredential) -> [String] { [] }
-    func resolve(mid: String, quality: String, credential: AccountCredential) -> JSONValue { .null }
+    func recommendations(kind: String, page: Int) -> MusicAccountRecommendation { .init(rows: [], nextPage: nil) }
+    func collectionRows() -> [JSONValue] { [] }
+    func tracks(collectionID: String) -> [JSONValue] { [] }
+    func capabilities(mid: String) -> [String] { [] }
+    func resolve(mid: String, quality: String) -> JSONValue { .null }
 }

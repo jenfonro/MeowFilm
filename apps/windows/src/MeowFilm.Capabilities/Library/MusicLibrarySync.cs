@@ -6,10 +6,18 @@ namespace MeowFilm.Capabilities.Library;
 /// <summary>Immutable optimistic token issued by one library owner; contains no account credentials.</summary>
 public sealed class MusicLibrarySyncSnapshot
 {
-    internal MusicLibrarySyncSnapshot(MusicLibraryOwner owner, JsonObject library, JsonObject state)
-    { Owner = owner; Library = LJ.Element(library); State = LJ.Element(state); Stamp = LJ.Digest(new JsonArray(library.DeepClone(), state.DeepClone())); }
+    internal MusicLibrarySyncSnapshot(MusicLibraryOwner owner, JsonObject library, JsonObject state, long songObservation)
+    {
+        Owner = owner; Library = LJ.Element(library); State = LJ.Element(state); SongObservation = songObservation;
+        Stamp = ControlStamp(library, state);
+    }
+    internal static JsonObject ControlLibrary(JsonObject library) => new(library.Where(pair => pair.Key != "songs")
+        .Select(pair => KeyValuePair.Create(pair.Key, pair.Value?.DeepClone())));
+    internal static string ControlStamp(JsonObject library, JsonObject state) =>
+        LJ.Digest(new JsonArray(ControlLibrary(library), state.DeepClone()));
     internal MusicLibraryOwner Owner { get; }
     internal string Stamp { get; }
+    internal long SongObservation { get; }
     public JsonElement Library { get; }
     public JsonElement State { get; }
 }
@@ -43,12 +51,12 @@ public sealed partial class MusicLibraryOwner
                 LJ.Require(LJ.IsBool(p["favorites"]) && LJ.IsBool(p["playlists"]) &&
                     p["accountId"] is JsonValue accountValue && accountValue.TryGetValue<string>(out _));
                 string accountId = LJ.S(p["accountId"]);
-                LJ.Require(LJ.B(p["favorites"]) || LJ.B(p["playlists"]) ?
-                    LJ.Id(accountId, 64) : accountId.Length == 0 || LJ.Id(accountId, 64));
+                if (LJ.B(p["favorites"]) || LJ.B(p["playlists"])) LJ.Require(accountId.Length > 0);
             }
             if (s["pending"] is JsonObject w)
             {
-                LJ.Require(SyncPlatforms.Contains(LJ.S(w["platform"])) && LJ.Id(LJ.S(w["accountId"]), 64) && LJ.Id(LJ.S(w["collectionId"])));
+                LJ.Require(SyncPlatforms.Contains(LJ.S(w["platform"])));
+                _ = NetworkPlaylistText(w["accountId"]);
                 string operation = LJ.S(w["operation"]);
                 if (operation is "subscribe" or "unsubscribe")
                 {
@@ -57,27 +65,24 @@ public sealed partial class MusicLibraryOwner
                     LJ.Require(LJ.IsBool(w["beforePresent"]) && LJ.IsBool(w["desiredPresent"]) &&
                         LJ.B(w["beforePresent"]) != LJ.B(w["desiredPresent"]) && LJ.B(w["desiredPresent"]) == (operation == "subscribe") &&
                         LJ.S(w["collectionId"]) == NetworkPlaylistId(LJ.S(w["platform"]), LJ.S(w["remoteId"])));
-                    var locator = LJ.Object(w["locator"]);
-                    string fields = LJ.S(w["platform"]) == "kg" ? operation == "subscribe" ? "creatorId creatorListId" : "listId" : "";
-                    LJ.Fields(locator, fields, fields);
-                    foreach (string field in fields.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                        LJ.Require(System.Text.RegularExpressions.Regex.IsMatch(LJ.Text(locator[field], 20), "^[1-9][0-9]{0,19}$"));
+                    _ = LJ.Object(w["locator"]);
+                    _ = NetworkPlaylistText(w["name"]);
                 }
                 else
                 {
                     LJ.Fields(w, "platform accountId collectionId remoteId operation before desired ids name directory",
                         "platform accountId collectionId remoteId operation before desired ids name directory");
+                    LJ.Require(LJ.Id(LJ.S(w["collectionId"])) && LJ.Id(LJ.S(w["name"]), 200));
                     LJ.Require(operation is "create" or "delete" or "add" or "remove" or "order");
                     foreach (string field in new[] { "before", "desired", "ids", "directory" })
                     {
                         var values = LJ.Array(w[field]);
                         LJ.Require((field != "directory" || values.Count <= 10000) && values.All(value =>
-                            value is JsonValue scalar && scalar.TryGetValue<string>(out string? id) && LJ.Id(id)));
+                            value is JsonValue scalar && scalar.TryGetValue<string>(out string? id) && id is { Length: > 0 }));
                     }
                     string remoteId = LJ.S(w["remoteId"]);
-                    LJ.Require(operation == "create" ? remoteId.Length == 0 : LJ.Id(remoteId, 240));
+                    LJ.Require(operation == "create" ? remoteId.Length == 0 : remoteId.Length > 0);
                 }
-                LJ.Require(LJ.Id(LJ.S(w["name"]), 200));
             }
             else LJ.Require(s["pending"] is null);
             foreach (string field in new[] { "confirmation", "approved" })
@@ -100,8 +105,8 @@ public sealed partial class MusicLibraryOwner
             foreach (var issue in issues.OfType<JsonObject>())
             {
                 LJ.Fields(issue, "platform collectionId code", "platform collectionId code");
-                LJ.Require(SyncPlatforms.Contains(LJ.S(issue["platform"])) && LJ.Id(LJ.S(issue["collectionId"])) &&
-                    LJ.Id(LJ.S(issue["code"]), 80));
+                _ = NetworkPlaylistText(issue["collectionId"]);
+                LJ.Require(SyncPlatforms.Contains(LJ.S(issue["platform"])) && LJ.Id(LJ.S(issue["code"]), 80));
             }
             LJ.Require(issues.All(issue => issue is JsonObject));
             LJ.Require(phase switch
@@ -184,21 +189,42 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(!closed && !preparing, "CLOSED"); LJ.Require(pending is null, pending?.Code ?? "PENDING_WRITE");
             await LoadAsync(cancellationToken).ConfigureAwait(false);
             var state = LibrarySync(document!); ValidateLibrarySync(state);
-            return new(this, LJ.Object(LibraryState(document!)["library"]), state);
+            return new(this, LJ.Object(LibraryState(document!)["library"]), state, BeginSongObservation());
         }
         finally { gate.Release(); }
     }
-    private MusicLibrarySyncSnapshot CheckLibrarySyncLocked(MusicLibrarySyncSnapshot expected)
+    private void CheckLibrarySyncLocked(MusicLibrarySyncSnapshot expected)
     {
         LJ.Require(ReferenceEquals(expected.Owner, this), "INVALID_SYNC_TOKEN");
         LJ.Require(!closed && !preparing, "CLOSED"); LJ.Require(pending is null, pending?.Code ?? "PENDING_WRITE");
-        var current = new MusicLibrarySyncSnapshot(this, LJ.Object(LibraryState(document!)["library"]), LibrarySync(document!));
-        LJ.Require(expected.Stamp == current.Stamp, "SYNC_SUPERSEDED"); return current;
+        string current = MusicLibrarySyncSnapshot.ControlStamp(
+            LJ.Object(LibraryState(document!)["library"]), LibrarySync(document!));
+        LJ.Require(expected.Stamp == current, "SYNC_SUPERSEDED");
     }
     public async Task CheckLibrarySyncAsync(MusicLibrarySyncSnapshot expected, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(expected); await EnterAsync(cancellationToken).ConfigureAwait(false);
-        try { _ = CheckLibrarySyncLocked(expected); } finally { gate.Release(); }
+        try { CheckLibrarySyncLocked(expected); } finally { gate.Release(); }
+    }
+    internal async Task<MusicLibrarySyncSnapshot> AdoptLibrarySyncSongsAsync(MusicLibrarySyncSnapshot expected,
+        IReadOnlyList<(JsonObject Song, bool HasMetadata)> songs, CancellationToken cancellationToken)
+    {
+        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            CheckLibrarySyncLocked(expected);
+            var candidate = document!.DeepClone().AsObject();
+            var accepted = new Dictionary<(string SongId, string Platform), long>();
+            _ = RegisterSongs(candidate, songs.Where(row => row.HasMetadata).Select(row => row.Song),
+                authoritative: true, observation: expected.SongObservation, accepted: accepted);
+            _ = RegisterSongs(candidate, songs.Where(row => !row.HasMetadata).Select(row => row.Song));
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!JsonNode.DeepEquals(candidate, document))
+                await CommitAsync(candidate, PendingOwner.Sync, cancellationToken).ConfigureAwait(false);
+            foreach (var pair in accepted) songObservations[pair.Key] = pair.Value;
+            return new(this, LJ.Object(LibraryState(candidate)["library"]), LibrarySync(candidate), expected.SongObservation);
+        }
+        finally { gate.Release(); }
     }
     /// <summary>Only this owner writes. Unrelated queue/settings changes are retained in the same envelope CAS.</summary>
     public async Task<MusicLibrarySyncSnapshot> CommitLibrarySyncAsync(MusicLibrarySyncSnapshot expected,
@@ -210,21 +236,35 @@ public sealed partial class MusicLibraryOwner
         await EnterAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            _ = CheckLibrarySyncLocked(expected);
+            CheckLibrarySyncLocked(expected);
             nextLibrary = ValidateLibrary(nextLibrary, scope); ValidateLibrarySync(nextState);
             LJ.Require(Revision(nextLibrary) == expected.Library.GetProperty("revision").GetInt64() &&
                 Revision(nextState) == expected.State.GetProperty("revision").GetInt64(), "SYNC_SUPERSEDED");
             var candidate = (JsonObject)document!.DeepClone(); var wrapper = (JsonObject)LibraryState(candidate).DeepClone();
-            if (!JsonNode.DeepEquals(nextLibrary, JsonNode.Parse(expected.Library.GetRawText())))
+            var previousLibrary = JsonNode.Parse(expected.Library.GetRawText())!.AsObject();
+            var previousSongs = LJ.Object(previousLibrary["songs"]);
+            var changedSongs = LJ.Object(nextLibrary["songs"]).Where(pair =>
+                !JsonNode.DeepEquals(pair.Value, previousSongs[pair.Key])).ToArray();
+            var accepted = new Dictionary<(string SongId, string Platform), long>();
+            // Membership already uses registered source owners. Only genuine source
+            // observations may enrich the current repository; a plan never replaces it.
+            if (changedSongs.Length > 0)
+                _ = RegisterSongs(candidate, changedSongs.Select(pair => LJ.Object(pair.Value)),
+                    authoritative: true, observation: expected.SongObservation, accepted: accepted);
+            nextLibrary["songs"] = Repository(candidate).DeepClone();
+            if (!JsonNode.DeepEquals(MusicLibrarySyncSnapshot.ControlLibrary(nextLibrary),
+                MusicLibrarySyncSnapshot.ControlLibrary(previousLibrary)))
             { Increment(nextLibrary); Increment(wrapper); }
             Increment(nextState); wrapper["library"] = nextLibrary.DeepClone();
             Set(candidate, "library", wrapper); Set(candidate, LibrarySyncArea, nextState);
+            ApplyArtworkPolicy(candidate);
             await CommitAsync(candidate, PendingOwner.Sync, cancellationToken).ConfigureAwait(false);
-            return new(this, nextLibrary, nextState);
+            foreach (var pair in accepted) songObservations[pair.Key] = pair.Value;
+            return new(this, LJ.Object(LibraryState(candidate)["library"]), nextState, BeginSongObservation());
         }
         finally { gate.Release(); }
     }
     internal static string[] AddLibrarySyncSongs(JsonObject library, IEnumerable<JsonObject> songs, NativeMusicSongGroups groups) =>
-        AddSongs(library, songs, groups);
+        AddSongs(library, songs, groups, authoritative: true);
 
 }

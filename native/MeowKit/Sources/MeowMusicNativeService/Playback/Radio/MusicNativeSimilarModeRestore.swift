@@ -19,40 +19,24 @@ extension NativeMusicService {
                 similarMode.restoring = nil; similarMode.restorationCompletion = nil
             }
         }
-        var acquired: MusicAccountQueueLease?
+        var acquired: MusicNativeSimilarLease?
         do {
             let sourceIDs = saved["sourceIds"].strings
             guard let provider = MusicSimilarModeProvider(rawValue: saved["provider"].string) else {
                 throw MusicServiceError.corruptDocument
             }
-            let owner = try similarOwner(), opening = MusicAccountQueueOpening()
-            let lease: MusicAccountQueueLease
-            do {
-                lease = try await similarWork(restoration) {
-                    let lease = try await owner.beginAccountQueue(platform: .netease)
-                    guard opening.receive(lease) else {
-                        lease.revoke(); await owner.endAccountQueue(lease); throw MusicServiceError.cancelled
-                    }
-                    try Task.checkCancellation(); return lease
-                }
-                _ = opening.finish(); acquired = lease
-            } catch {
-                if let lease = opening.finish() { lease.revoke(); await owner.endAccountQueue(lease) }
-                throw error
-            }
-            let scope = try await similarWork(restoration) { try await owner.similarModeScope(lease) }
-            try await owner.checkAccountQueue(lease); try check(own); try lease.authorization.check()
+            let lease = try await openSimilarLease(provider: provider, workID: restoration)
+            acquired = lease
+            let scope = try await similarWork(restoration) { try await self.similarScope(lease) }
+            try await checkSimilarLease(lease); try check(own); try lease.authorization.check()
             let current = try read()
             try musicRequire(similarMode.restoring == restoration &&
                 current.queue["similar"].stable.digest == saved.stable.digest, .targetChanged)
             try musicRequire(!scope.isEmpty && musicSame(scope, saved["scope"].string), .staleAccess)
             let context = saved["providerContext"].isObject ? MusicSimilarHeartbeatContext(
-                playlistID: saved["providerContext"]["pid"].id, seedID: saved["providerContext"]["sid"].id) : nil
-            if let context {
-                try musicRequire(MusicNativeSimilarData.id(context.playlistID) &&
-                    MusicNativeSimilarData.id(context.seedID), .corruptDocument)
-            }
-            let session = MusicNativeSimilarSession(seed: saved["seed"],
+                playlistID: saved["providerContext"]["pid"].id, seedID: saved["providerContext"]["sid"].id,
+                count: try saved["providerContext"]["count"].integer()) : nil
+            let session = MusicNativeSimilarSession(seed: saved["seedSongId"] == .null ? .obj([("title", saved["seedTitle"])]) : try repositorySong(saved["seedSongId"].string, current),
                 seedEntryID: saved["seedEntryId"].isString ? saved["seedEntryId"].string : nil,
                 returnQueue: saved["returnQueue"], fromHome: saved["fromHome"].bool, provider: provider,
                 sourceIDs: sourceIDs, context: context, scope: scope, lease: lease)

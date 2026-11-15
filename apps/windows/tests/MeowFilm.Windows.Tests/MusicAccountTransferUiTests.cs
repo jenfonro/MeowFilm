@@ -34,7 +34,7 @@ public static partial class MusicUiTests
         });
         yield return Case("file transfer asks once per conflicting batch and publishes one final safe summary", async () =>
         {
-            await using var f = new TransferFixture(); await f.Initialize(); await f.Seed(TransferFixture.Only("wy"));
+            await using var f = new TransferFixture(); await f.Seed(TransferFixture.Only("wy"));
             var dialogs = await TransferDialogs.Create(f); dialogs.Policy = MusicAccountTransferPolicy.Skip;
             await using var module = new MusicCapability(new TransferApplication(f.Owner), f.Inner, new PlaybackProbe(), dialogs);
             await module.ImportAccountsFileAsync();
@@ -46,7 +46,7 @@ public static partial class MusicUiTests
         });
         yield return Case("fresh file import has no conflict prompt and safe account rows update after readback", async () =>
         {
-            await using var f = new TransferFixture(); await f.Initialize(); var dialogs = await TransferDialogs.Create(f);
+            await using var f = new TransferFixture(); var dialogs = await TransferDialogs.Create(f);
             await using var module = new MusicCapability(new TransferApplication(f.Owner), f.Inner, new PlaybackProbe(), dialogs);
             await module.ImportAccountsFileAsync(); Equal(0, dialogs.Choices);
             True(module.Accounts.All(item => item.State == "verified") && module.AccountStatus.Contains("已导入 3", StringComparison.Ordinal), "readback refreshes safe rows");
@@ -56,7 +56,7 @@ public static partial class MusicUiTests
         {
             foreach (bool failRead in new[] { false, true })
             {
-                await using var f = new TransferFixture(); await f.Initialize();
+                await using var f = new TransferFixture();
                 var dialogs = await TransferDialogs.Create(f);
                 var application = new DelayedTransferApplication(f.Owner);
                 await using var module = new MusicCapability(application, f.Inner, new PlaybackProbe(), dialogs);
@@ -78,7 +78,7 @@ public static partial class MusicUiTests
         });
         yield return Case("explicit account read joining a passive read clears the previous transfer notice", async () =>
         {
-            await using var f = new TransferFixture(); await f.Initialize();
+            await using var f = new TransferFixture();
             var dialogs = new TransferDialogs();
             var application = new DelayedTransferApplication(f.Owner);
             await using var module = new MusicCapability(application, f.Inner, new PlaybackProbe(), dialogs);
@@ -103,12 +103,12 @@ public static partial class MusicUiTests
             await module.ImportAccountsFileAsync(); Equal("", module.AccountStatus);
             await module.ExportAccountsFileAsync(); Equal("没有可导出的账号", module.AccountStatus);
             Equal(0, dialogs.ExportSelections); True(!File.Exists(dialogs.ExportPath), "no empty success file");
-            await f.Initialize(); await f.Seed(TransferFixture.Only("wy")); dialogs.ExportPath = null;
+            await f.Seed(TransferFixture.Only("wy")); dialogs.ExportPath = null;
             await module.ExportAccountsFileAsync(); Equal(1, dialogs.ExportSelections); Equal(0, f.Requests.Values.Sum());
         });
         yield return Case("file read and write failures use the account notice without raw paths", async () =>
         {
-            await using var f = new TransferFixture(); await f.Initialize(); await f.Seed(TransferFixture.Only("wy"));
+            await using var f = new TransferFixture(); await f.Seed(TransferFixture.Only("wy"));
             var dialogs = new TransferDialogs { ImportPath = Path.Combine(f.Root, "SYNTHETIC_SECRET_PATH", "missing.json"), ExportPath = f.Root };
             await using var module = new MusicCapability(new TransferApplication(f.Owner), f.Inner, new PlaybackProbe(), dialogs);
             await module.ImportAccountsFileAsync(); Equal("账号文件读写失败", module.AccountStatus);
@@ -117,7 +117,7 @@ public static partial class MusicUiTests
         });
         yield return Case("export writes only the selected user file and preserves exact fixture credentials", async () =>
         {
-            await using var f = new TransferFixture(); await f.Initialize(); await f.Seed();
+            await using var f = new TransferFixture(); await f.Seed();
             var dialogs = new TransferDialogs { ExportPath = Path.Combine(f.Root, "synthetic-user-export.json") };
             await using var module = new MusicCapability(new TransferApplication(f.Owner), f.Inner, new PlaybackProbe(), dialogs);
             await module.ExportAccountsFileAsync(); Equal("账号已导出", module.AccountStatus);
@@ -127,7 +127,7 @@ public static partial class MusicUiTests
         });
         yield return Case("retiring settings cancels pending transfer and prevents old result summary or permission changes", async () =>
         {
-            await using var f = new TransferFixture(); await f.Initialize(); await f.Seed(TransferFixture.Only("wy"));
+            await using var f = new TransferFixture(); await f.Seed(TransferFixture.Only("wy"));
             var old = await f.Owner.AcquireAsync("wy"); var dialogs = await TransferDialogs.Create(f); f.HoldPlatform = "wy";
             await using var module = new MusicCapability(new TransferApplication(f.Owner), f.Inner, new PlaybackProbe(), dialogs);
             var importing = module.ImportAccountsFileAsync(); await f.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -137,7 +137,7 @@ public static partial class MusicUiTests
         });
         yield return Case("unknown file import notice keeps normal close blocked without automatic reconciliation", async () =>
         {
-            await using var f = new TransferFixture(); await f.Initialize(); f.Store.LoseReceipt = true;
+            await using var f = new TransferFixture(); f.Store.LoseReceipt = true;
             var dialogs = await TransferDialogs.Create(f);
             var module = new MusicCapability(new TransferApplication(f.Owner), f.Inner, new PlaybackProbe(), dialogs);
             try

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createCipheriv, createDecipheriv, randomBytes, webcrypto, createHmac, generateKeyPairSync, publicEncrypt, constants } from 'node:crypto';
-import { mkdirSync, writeFileSync, readFileSync, openSync, readSync, fsyncSync, closeSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, openSync, readSync, fsyncSync, closeSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { once } from 'node:events';
@@ -34,7 +34,7 @@ await check('ios-native-framework-payload', async () => {
   const manifest = JSON.parse(readFileSync(new URL('./runtime-manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.transport, 'runtime.http.v1');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.equal(manifest.trustedNative.length, 1);
   const native = manifest.trustedNative[0];
   assert.equal(native.path, 'Frameworks/MeowScriptHost.framework/MeowScriptHost');
@@ -113,6 +113,174 @@ await check('http-loopback', async () => {
     assert.equal(body, 'node-mobile');
   } finally {
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+await check('music-platform-default-http-json-and-close', async () => {
+  assert.equal(process.platform, 'ios');
+  assert.equal(process.version, 'v18.20.4');
+  const { createMusicPlatformModule } = await import('./app/entry.mjs');
+  const { default: https } = await import('node:https');
+  const dataRoot = mkdtempSync(join(directory, 'music-platform-node18-'));
+  const id = '900719925474099313', adjacentId = '900719925474099312';
+  const requests = [], paths = [];
+  const held = Array.from({ length: 2 }, () => {
+    let enter;
+    const entered = new Promise(resolve => { enter = resolve; });
+    return { entered, enter };
+  });
+  let service, peerFailure, homes = 0, searches = 0, lyrics = 0;
+  async function bounded(work, stage) {
+    let timer;
+    try {
+      return await Promise.race([work, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Music platform preflight timed out: ${stage}`)), 10000);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+  const upstream = http.createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      assert.equal(request.method, 'POST');
+      assert.equal(request.headers['content-type'], 'application/x-www-form-urlencoded');
+      const cipher = Buffer.from(new URLSearchParams(Buffer.concat(chunks).toString()).get('params'), 'hex');
+      const decipher = createDecipheriv('aes-128-ecb', Buffer.from('e82ckenh8dichen8'), null);
+      const parts = Buffer.concat([decipher.update(cipher), decipher.final()]).toString().split('-36cd479b6b5-');
+      assert.equal(parts.length, 3);
+      const [path, json, signature] = parts, data = JSON.parse(json);
+      assert.equal(signature, createHash('md5').update(`nobody${path}use${json}md5forencrypt`).digest('hex'));
+      assert.equal(request.url, '/eapi/' + path.slice(5));
+      assert.equal(data.header.MUSIC_U, undefined);
+      assert.equal(data.header.MUSIC_A, undefined);
+      paths.push(path);
+      response.setHeader('Content-Type', 'application/json');
+      if (path === '/api/link/page/rcmd/resource/show') {
+        const first = homes++ === 0, cursor = /"cursor":(-?\d+)(?=[,}])/.exec(json)?.[1];
+        assert.equal(cursor, first ? '0' : id);
+        if (first) assert.equal(data.cursor, 0);
+        assert.equal(data.pageCode, 'HOME_RECOMMEND_PAGE');
+        assert.equal(data.isFirstScreen, first);
+        const songId = first ? 42 : 43;
+        const blocks = [{ positionCode: 'node18', uiElement: { mainTitle: { title: 'Node 18' } },
+          creatives: [{ creativeType: 'song', resources: [{ resourceType: 'song', resourceId: songId,
+            resourceExtInfo: { songData: { id: songId, name: 'Home', ar: [{ name: 'A' }], al: {}, dt: 240000 } } }] }] }];
+        response.end(`{"code":200,"data":{"blocks":${JSON.stringify(blocks)},"hasMore":${first},"cursor":${id}}}`);
+      } else if (path === '/api/cloudsearch/pc') {
+        assert.equal(data.s, 'Node 18 music');
+        assert.equal(data.type, 1);
+        assert.equal(data.limit, 30);
+        assert.equal(data.offset, 0);
+        assert.equal(data.unused, undefined);
+        assert.ok(searches < 2);
+        const duplicate = searches++ === 1;
+        const songs = `[{"id":${duplicate ? adjacentId + ',"id":' : ''}${id},"name":"Exact","ar":[{"name":"A"}],"al":{},"dt":240000},` +
+          `{"id":${adjacentId},"name":"Adjacent","ar":[{"name":"A"}],"al":{},"dt":240000}]`;
+        response.end(`{"code":${duplicate ? '500,"code":' : ''}200,"result":{"songCount":2,"hasMore":false,"songs":${songs}}` +
+          (duplicate ? ',"unused":1e400}' : '}'));
+      } else {
+        assert.equal(path, '/api/song/lyric/v1');
+        assert.equal(data.id, id);
+        assert.ok(lyrics < held.length);
+        const pending = held[lyrics++];
+        pending.peerClosed = new Promise(resolve => response.once('close', resolve));
+        response.writeHead(200);
+        response.flushHeaders();
+        response.write('{"code":200,"lrc":{"lyric":"');
+        pending.enter();
+      }
+    } catch (error) { peerFailure ??= error; response.destroy(); }
+  });
+  const originalRequest = https.request;
+  try {
+    upstream.listen(0, '127.0.0.1');
+    await bounded(once(upstream, 'listening'), 'local HTTP listen');
+    const origin = `http://127.0.0.1:${upstream.address().port}`;
+    // Same test-only routing seam as nativeHTTP: the default transport still
+    // owns real ClientRequest/IncomingMessage/socket I/O, not injected fetch.
+    https.request = (url, options, receive) => {
+      const address = new URL(url);
+      assert.equal(address.origin, 'https://interfacepc.music.163.com');
+      const entry = { closed: false, socketClosed: false, responseClosed: false };
+      let received;
+      entry.responseReceived = new Promise(resolve => { received = resolve; });
+      const request = http.request(new URL(address.pathname + address.search, origin), options, incoming => {
+        entry.incomingClosed = new Promise(resolve => incoming.once('close', () => { entry.responseClosed = true; resolve(); }));
+        receive(incoming);
+        received();
+      });
+      entry.request = request;
+      entry.requestClosed = new Promise(resolve => request.once('close', () => { entry.closed = true; resolve(); }));
+      entry.socketClosedWork = new Promise(resolve => request.once('socket', socket => {
+        socket.once('close', () => { entry.socketClosed = true; resolve(); });
+      }));
+      requests.push(entry);
+      return request;
+    };
+    service = createMusicPlatformModule({ dataRoot });
+    async function call(operation, params = {}, signal) {
+      try {
+        const reply = await bounded(service.methods['music.platform.request']({
+          platform: 'wy', operation, params,
+        }, { signal }), operation);
+        if (peerFailure) throw peerFailure;
+        assert.equal(reply.ok, true);
+        assert.equal(reply.contract, 'music.platform.v1');
+        return reply.value;
+      } catch (error) { throw peerFailure ?? error; }
+    }
+    const home = await call('home');
+    assert.equal(home.more, true);
+    assert.equal(home.continuation.cursor, id);
+    assert.deepEqual(home.sections.flatMap(section => section.items).map(song => song.sources[0].musicInfo.songmid), ['42']);
+    const next = await call('home', { continuation: home.continuation });
+    assert.equal(next.more, false);
+    assert.equal(next.continuation, null);
+    assert.deepEqual(next.sections.flatMap(section => section.items).map(song => song.sources[0].musicInfo.songmid), ['43']);
+    const plain = await call('search', { keyword: 'Node 18 music' });
+    assert.deepEqual(plain.items.map(song => song.sources[0].musicInfo.songmid), [id, adjacentId]);
+    assert.deepEqual(await call('search', { keyword: 'Node 18 music', unused: { nested: null } }), plain);
+    for (const entry of requests) {
+      assert.equal(entry.closed, true);
+      assert.equal(entry.socketClosed, true);
+      assert.equal(entry.responseClosed, true);
+    }
+    const controller = new AbortController();
+    const cancelled = call('lyrics', { id }, controller.signal);
+    cancelled.catch(() => {});
+    await bounded(held[0].entered, 'cancel request entered');
+    await bounded(requests[4].responseReceived, 'cancel response headers received');
+    controller.abort();
+    await bounded(Promise.all([assert.rejects(cancelled, { code: 'CANCELLED' }), held[0].peerClosed,
+      requests[4].requestClosed, requests[4].socketClosedWork, requests[4].incomingClosed]), 'cancel physical drain');
+    const pending = call('lyrics', { id });
+    pending.catch(() => {});
+    await bounded(held[1].entered, 'close request entered');
+    await bounded(requests[5].responseReceived, 'close response headers received');
+    const closing = service.close();
+    assert.equal(service.close(), closing);
+    await bounded(Promise.all([closing, assert.rejects(pending, { code: 'CLOSED' }), held[1].peerClosed,
+      requests[5].requestClosed, requests[5].socketClosedWork, requests[5].incomingClosed]), 'module physical close');
+    if (peerFailure) throw peerFailure;
+    assert.deepEqual(paths, ['/api/link/page/rcmd/resource/show', '/api/link/page/rcmd/resource/show',
+      '/api/cloudsearch/pc', '/api/cloudsearch/pc', '/api/song/lyric/v1', '/api/song/lyric/v1']);
+    assert.equal(requests.length, 6);
+    for (const entry of requests) {
+      assert.equal(entry.closed, true);
+      assert.equal(entry.socketClosed, true);
+      assert.equal(entry.responseClosed, true);
+    }
+    return { platform: 'wy', contract: 'music.platform.v1', network: 'loopback-only',
+      requests: requests.length, home: true, integerRequest: true, integerResponse: true,
+      duplicateLast: true, unusedOverflow: true, cancelled: true, physicalClose: true };
+  } finally {
+    for (const entry of requests) entry.request.destroy();
+    upstream.closeAllConnections();
+    try { await bounded(service?.close(), 'module cleanup'); }
+    finally {
+      https.request = originalRequest;
+      try { await bounded(new Promise(resolve => upstream.close(resolve)), 'local HTTP cleanup'); }
+      finally { rmSync(dataRoot, { recursive: true, force: true }); }
+    }
   }
 });
 await check('worker-and-runaway-termination', async () => {
@@ -195,11 +363,11 @@ await check('public-three-module-http-and-source-sdk', async () => {
   } finally { await runtime.close(); await client?.close(); }
 });
 
-await check('ios-eight-module-http-and-tmdb', async () => {
+await check('ios-nine-module-http-and-tmdb', async () => {
   const { createRuntimeClient } = await import('./app/entry.mjs');
   const { createConnection, createServer } = await import('node:net');
   const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
-  const dataRoot = join(directory, 'eight-modules');
+  const dataRoot = join(directory, 'nine-modules');
   const seen = [];
   const upstream = http.createServer((request, response) => {
     seen.push(request.url);
@@ -255,6 +423,7 @@ await check('ios-eight-module-http-and-tmdb', async () => {
       ['source', '0.3.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
       ['tmdb', '0.1.0', 'tmdb.data.v1'], ['douban', '0.1.0', 'douban.data.v1'],
       ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
+      ['music-platform', '0.1.0', 'music.platform.v1'],
     ]);
     const settings = okay(await client.call('tmdb.data.settings.update', {
       apiBase: `http://127.0.0.1:${upstream.address().port}/proxy/3`,

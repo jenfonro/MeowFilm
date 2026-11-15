@@ -10,7 +10,7 @@ public sealed record MusicFeedbackSettings(long Revision, IReadOnlyList<string> 
 /// <summary>One native-only preferences owner. It never stores listening instances or credentials.</summary>
 public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDisposable
 {
-    public const string DocumentNamespace = "music.feedback.v1";
+    public const string DocumentNamespace = "music.feedback.v2";
     public const string ContractVersion = "1.0.0";
     private const long MaximumRevision = 9007199254740991;
     private readonly SemaphoreSlim lane = new(1, 1);

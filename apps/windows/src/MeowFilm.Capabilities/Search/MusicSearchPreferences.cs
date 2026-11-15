@@ -89,6 +89,8 @@ public sealed partial class MusicCapability
     private int searchHistoryCount;
     private long searchPreferenceRevision, searchHistoryRevision, searchSubmission;
     private long searchHistoryEpoch;
+    private long searchPreferencesGeneration;
+    private Task searchPreferencesWork = Task.CompletedTask;
     private SearchHistorySurface searchHistorySurfaces;
     private CancellationTokenSource? searchHistoryRequest;
     private Task searchHistoryTail = Task.CompletedTask;
@@ -98,25 +100,35 @@ public sealed partial class MusicCapability
     public bool CanEditSearchPreferences => CanEdit && searchPreferencesLoaded && !searchPreferencesBusy;
     public bool HasSearchHistory => searchHistoryCount > 0;
     public string SearchPreferenceStatus => searchPreferenceStatus;
+    private bool SearchPreferencesCurrent(long generation) =>
+        generation == searchPreferencesGeneration && !stopping && !disposed;
+    private void RetireSearchPreferencesSettings()
+    {
+        searchPreferencesGeneration++;
+        searchPreferencesLoaded = false;
+    }
 
     private async Task ReadSearchPreferences(CancellationToken token)
     {
+        long generation = searchPreferencesGeneration;
         try
         {
             var reply = await Call("music.search.settings.get", cancellationToken: token);
+            if (!SearchPreferencesCurrent(generation)) return;
             PublishSearchPreferences(reply.GetProperty("settings"));
             searchPreferenceStatus = "";
         }
         catch (OperationCanceledException) { throw; }
         catch
         {
+            if (!SearchPreferencesCurrent(generation)) return;
             searchPreferencesLoaded = false;
             searchPreferenceStatus = "搜索设置不可用";
             throw;
         }
         finally
         {
-            SearchPreferenceBindings();
+            if (SearchPreferencesCurrent(generation)) SearchPreferenceBindings();
         }
     }
 
@@ -283,25 +295,29 @@ public sealed partial class MusicCapability
             playlists = playlists.Request
         };
         searchPreferencesBusy = true;
+        long generation = searchPreferencesGeneration;
         SearchPreferenceBindings();
-        return RunAsync(async () =>
+        return searchPreferencesWork = RunAsync(async () =>
         {
             await RetireSearchAsync();
             if (IsSearchPage)
                 ClearSearchVisibleSnapshot();
             try
             {
-                PublishSearchPreferences((await Call("music.search.settings.save", request, lifetime.Token))
-                    .GetProperty("settings"));
+                var reply = await CallSettledReceipt("music.search.settings.save", request, lifetime.Token);
+                if (!SearchPreferencesCurrent(generation)) return;
+                PublishSearchPreferences(reply.GetProperty("settings"));
                 searchPreferenceStatus = "";
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
             {
+                if (!SearchPreferencesCurrent(generation)) return;
                 try
                 {
-                    PublishSearchPreferences((await Call("music.search.settings.get",
-                        cancellationToken: lifetime.Token)).GetProperty("settings"));
+                    var reply = await Call("music.search.settings.get", cancellationToken: lifetime.Token);
+                    if (!SearchPreferencesCurrent(generation)) return;
+                    PublishSearchPreferences(reply.GetProperty("settings"));
                     searchPreferenceStatus = Matches(SongSearch, songs) && Matches(PlaylistSearch, playlists)
                         ? ""
                         : error.Code == "REVISION_CONFLICT"
@@ -311,6 +327,7 @@ public sealed partial class MusicCapability
                 catch (OperationCanceledException) { throw; }
                 catch
                 {
+                    if (!SearchPreferencesCurrent(generation)) return;
                     searchPreferencesLoaded = false;
                     searchPreferenceStatus = "搜索设置保存失败";
                     throw;
@@ -319,13 +336,14 @@ public sealed partial class MusicCapability
             catch (OperationCanceledException) { throw; }
             catch
             {
+                if (!SearchPreferencesCurrent(generation)) return;
                 searchPreferenceStatus = "搜索设置保存失败";
                 throw;
             }
             finally
             {
                 searchPreferencesBusy = false;
-                SearchPreferenceBindings();
+                if (SearchPreferencesCurrent(generation)) SearchPreferenceBindings();
             }
         });
     }

@@ -8,6 +8,7 @@ open class ArtworkView: UIImageView {
     private let images: ArtworkImages
     private var task: Task<Void, Never>?
     private var representedURL: URL?
+    private var displayIdentity: String?
     private var generation: UInt64 = 0
     private var completed = false
     private enum Failure { case retryable, deterministic }
@@ -31,21 +32,23 @@ open class ArtworkView: UIImageView {
     @available(*, unavailable)
     required public init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    public func load(_ url: URL?, cachedData: Data? = nil) {
-        if representedURL == url, task != nil || completed || failure != nil { return }
+    public func load(_ url: URL?, displayIdentity: String? = nil, cachedData: Data? = nil) {
+        if self.displayIdentity == displayIdentity, representedURL == url, task != nil || completed || failure != nil { return }
+        let retainImage = displayIdentity != nil && self.displayIdentity == displayIdentity
         task?.cancel()
         task = nil
         generation &+= 1
         let expected = generation
         representedURL = url
+        self.displayIdentity = displayIdentity
         completed = false
         failure = nil
-        image = nil
+        if !retainImage { image = nil }
         guard let url else { completed = true; return }
         if cachedData == nil, let cached = images.cached(url) {
             image = cached
             completed = true
-            onImage?(cached, nil)
+            didLoadImage(cached, data: nil)
             return
         }
         let images = self.images
@@ -54,11 +57,14 @@ open class ArtworkView: UIImageView {
                 let (value, data) = try await images.read(url, cachedData: cachedData)
                 try Task.checkCancellation()
                 guard let self, self.generation == expected, self.representedURL == url else { return }
-                self.image = value
+                if self.image == nil { self.image = value }
+                else {
+                    UIView.transition(with: self, duration: 0.2, options: .transitionCrossDissolve) { self.image = value }
+                }
                 self.task = nil
                 self.completed = true
                 self.failure = nil
-                self.onImage?(value, data)
+                self.didLoadImage(value, data: data)
             } catch {
                 guard !Task.isCancelled, let self,
                       self.generation == expected, self.representedURL == url else { return }
@@ -71,15 +77,19 @@ open class ArtworkView: UIImageView {
                 default:
                     self.failure = .retryable
                 }
-                self.onFailure?(url)
+                self.didFailImage(url, error: error)
             }
         }
     }
 
-    public func retryFailedLoad() {
+    open func didLoadImage(_ image: UIImage, data: Data?) { onImage?(image, data) }
+    open func didFailImage(_ url: URL) { onFailure?(url) }
+    open func didFailImage(_ url: URL, error: Error) { didFailImage(url) }
+
+    open func retryFailedLoad() {
         guard failure == .retryable, let representedURL else { return }
         failure = nil
-        load(representedURL)
+        load(representedURL, displayIdentity: displayIdentity)
     }
 
     deinit { task?.cancel() }

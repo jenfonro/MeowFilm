@@ -37,7 +37,7 @@ packages/netease-token/、apps/runtime/modules/netease-token.mjs
 
 受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)、`tmdb@0.1.0/tmdb.data.v1` 与 `douban@0.1.0/douban.data.v1` 的[元数据能力](metadata-data.md)，以及 `film@0.1.0/film.playback.v1` 的[影视播放业务](film-playback.md)。这些是 Node 内置业务，不是新的脚本执行所有者；通用默认三模块不变。
 
-iOS 与 Windows 的正式 App entry 在同一 HTTP 会话中按 `music,cat,source,pan,tmdb,douban,film,netease` 顺序装配八模块。`connectFilmPlayback` 复用前六个 provider owner 并连接变更撤权，不另建来源或账号实例；[网易实时 token 模块](netease-token.md)最后追加，原生订阅按需取用，不改变默认三模块。film 持有智能播放会话、业务缓存及新增本地播放资料；原生收藏、客户端规则与图片缓存仍由原 owner 管理。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。模块装配不等于原生导航／搜索交接、实际媒体输出或设备验证已完成；搜索交接规则只见[共同契约](../common/film/search.md)，不据此声明 Android 已接入。
+iOS 与 Windows 的正式 App entry 在同一 HTTP 会话中按 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 顺序装配九模块。`connectFilmPlayback` 复用前六个 provider owner 并连接变更撤权，不另建来源或账号实例；随后追加[网易实时 token 模块](netease-token.md)与借用其能力的[音乐平台模块](music-platform.md)，不改变默认三模块。film 持有智能播放会话、业务缓存及新增本地播放资料；原生收藏、客户端规则与图片缓存仍由原 owner 管理。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。模块装配不等于原生导航／搜索交接、实际媒体输出或设备验证已完成；搜索交接规则只见[共同契约](../common/film/search.md)，不据此声明 Android 已接入。
 
 ## 三类执行所有者
 

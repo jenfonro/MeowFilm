@@ -236,7 +236,7 @@ final class MusicSearchDiscoveryCellsTests: XCTestCase {
         for (row, text) in zip(rows, ["1", "3", "4"]) {
             let rank = try label("music.search.chart.rank.hot.\(row.id)", in: cell)
             XCTAssertEqual(rank.text, text)
-            XCTAssertEqual(rank.textColor, UIColor(row.rank <= 3 ? theme.accent : theme.muted))
+            XCTAssertEqual(rank.textColor, UIColor(try XCTUnwrap(row.rank) <= 3 ? theme.accent : theme.muted))
             XCTAssertEqual(rank.textAlignment, .right)
             XCTAssertEqual(("1" as NSString).size(withAttributes: [.font: rank.font!]).width,
                            ("8" as NSString).size(withAttributes: [.font: rank.font!]).width, accuracy: 0.1)

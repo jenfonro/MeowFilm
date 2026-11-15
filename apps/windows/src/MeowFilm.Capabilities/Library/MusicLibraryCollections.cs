@@ -4,12 +4,11 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private JsonObject[] Songs(JsonObject p, bool empty, bool full = false)
+    private JsonObject[] Songs(JsonObject p, bool empty)
     {
         var a = p["songs"] is null && empty ? new JsonArray() : LJ.Array(p["songs"]);
-        LJ.Require((full || a.Count <= 1000) && (empty || a.Count > 0), "LIMIT");
+        LJ.Require(empty || a.Count > 0, "INVALID_REQUEST");
         var songs = a.Select(NativeMusicSong.Normalize).ToArray();
-        SongsObserved?.Invoke(songs);
         return songs;
     }
     internal static NativeMusicSongGroups IndexLibrarySongs(JsonObject library, CancellationToken token = default)
@@ -18,7 +17,8 @@ public sealed partial class MusicLibraryOwner
         foreach (var pair in LJ.Object(library["songs"])) groups.Import(LJ.Object(pair.Value));
         return groups;
     }
-    private static string[] AddSongs(JsonObject library, IEnumerable<JsonObject> input, NativeMusicSongGroups? groups = null)
+    private static string[] AddSongs(JsonObject library, IEnumerable<JsonObject> input,
+        NativeMusicSongGroups? groups = null, bool authoritative = false)
     {
         var store = LJ.Object(library["songs"]); var ids = new HashSet<string>(StringComparer.Ordinal);
         var ordered = new List<string>();
@@ -26,17 +26,13 @@ public sealed partial class MusicLibraryOwner
         {
             var incoming = new NativeMusicSong.Recordings(NativeMusicSong.Normalize(raw));
             groups ??= IndexLibrarySongs(library);
-            var owners = incoming.Sources.Select(source => groups.NativeOwner(LJ.S(source["sourceKey"])))
-                .OfType<NativeMusicSong.Recordings>().Distinct().ToArray();
-            // A native recording has exactly one library owner; do not silently rebind collections.
-            LJ.Require(owners.Length <= 1 && owners.All(owner => owner.CanMerge(incoming)), "NATIVE_ID_CONFLICT");
-            var group = groups.Add(incoming, preferIncoming: true);
+            var group = groups.Add(incoming, preferIncoming: authoritative);
             store[group.Id] = group.ToSong();
             if (ids.Add(group.Id)) ordered.Add(group.Id);
         }
         return ordered.ToArray();
     }
-    private (JsonObject Result, bool Mutate) CollectionCommand(string method, JsonObject p, JsonObject doc, bool full)
+    private (JsonObject Result, bool Mutate) CollectionCommand(string method, JsonObject p, JsonObject doc)
     {
         var state = LibraryState(doc); var library = LJ.Object(state["library"]); var collections = LJ.Array(library["collections"]);
         JsonObject AtRevision()
@@ -82,7 +78,7 @@ public sealed partial class MusicLibraryOwner
         JsonObject result;
         if (method == "music.library.create")
         {
-            LJ.Fields(p, "name songs", "name"); string name = LJ.Text(p["name"], 200); var songs = Songs(p, true, full);
+            LJ.Fields(p, "name songs", "name"); string name = LJ.Text(p["name"], 200); var songs = Songs(p, true);
             long next = LJ.I(library["nextId"], 1); LJ.Require(next < LJ.MaxInteger, "LIMIT");
             var c = FreshCollection("playlist:" + next, name, "playlist"); library["nextId"] = next + 1;
             var order = AddSongs(library, songs); c["order"] = LJ.Arr(order); c["manualOrder"] = true; c["locallyCreated"] = true; c["revision"] = 1;
@@ -108,8 +104,8 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(p, allowed, "id ifRevision"); var c = AtRevision(); var before = Order(c); string[] next = before;
             if (method == "music.library.edit") LJ.Require(p.ContainsKey("name") || p.ContainsKey("songs") || p.ContainsKey("order"));
             if (p.ContainsKey("songs")) next = AddSongs(library, method == "music.library.addSongs" ?
-                before.Select(id => LJ.Object(LJ.Object(library["songs"])[id])).Concat(Songs(p, false, full)) :
-                Songs(p, true, full));
+                before.Select(id => LJ.Object(LJ.Object(library["songs"])[id])).Concat(Songs(p, false)) :
+                Songs(p, true));
             else LJ.Require(method != "music.library.addSongs");
             if (method == "music.library.removeSong")
             {
@@ -148,6 +144,7 @@ public sealed partial class MusicLibraryOwner
             result = LJ.Obj(("collection", CollectionView(c)));
         }
         Increment(state); Increment(library); Set(doc, "library", state);
+        if (p.ContainsKey("songs")) ApplyArtworkPolicy(doc);
         return (result, true);
     }
 }

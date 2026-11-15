@@ -1,11 +1,14 @@
 import Foundation
 
 /// Public, credential-free native locator. JSON is data, never executable code.
-/// The consumer validates and normalizes this data before persisting or invoking a script.
 public struct MusicNativeTrackData: Sendable {
     public let platform: String
     public let data: Data
-    public init(platform: String, data: Data) { self.platform = platform; self.data = data }
+    /// Optional collection occurrence position, never part of song identity.
+    public let sourcePosition: Int?
+    public init(platform: String, data: Data, sourcePosition: Int? = nil) {
+        self.platform = platform; self.data = data; self.sourcePosition = sourcePosition
+    }
 }
 public struct MusicNativeTrackPage: Sendable {
     public let items: [MusicNativeTrackData]
@@ -19,14 +22,42 @@ public struct MusicNativeTrackPage: Sendable {
         self.dailyStyle = dailyStyle
     }
 }
+/// A queue-read occurrence in the native song repository, not another song
+/// document. The source locator and feedback context belong to this entrance.
+public struct MusicQueueTrackReference: Sendable {
+    public let songID: String
+    public let occurrenceID: String
+    public let platform: String
+    public let sourceKey: String
+    public let sourcePosition: Int?
+    public let recommendation: Data?
+    /// Actual bytes received for this occurrence, before adopting its song.
+    public let byteCount: Int
+    public init(songID: String, occurrenceID: String, platform: String, sourceKey: String,
+                sourcePosition: Int? = nil, recommendation: Data? = nil, byteCount: Int) {
+        self.songID = songID; self.occurrenceID = occurrenceID
+        self.platform = platform; self.sourceKey = sourceKey; self.sourcePosition = sourcePosition
+        self.recommendation = recommendation; self.byteCount = byteCount
+    }
+}
+public struct MusicQueueReferencePage: Sendable {
+    public let items: [MusicQueueTrackReference]
+    public let total: Int
+    public let nextPage: Int?
+    public let cursor: String?
+    public let dailyStyle: MusicDailyStyleSelection?
+    public init(items: [MusicQueueTrackReference], total: Int = 0, nextPage: Int? = nil, cursor: String? = nil,
+                dailyStyle: MusicDailyStyleSelection? = nil) {
+        self.items = items; self.total = total; self.nextPage = nextPage
+        self.cursor = cursor; self.dailyStyle = dailyStyle
+    }
+}
 public struct MusicNativeLyrics: Sendable {
-    public enum Encoding: Sendable { case text, qqQRC, kugouKRC }
     public let text: String
     public let translation: String
     public let romanization: String
-    public let encoding: Encoding
-    public init(text: String, translation: String = "", romanization: String = "", encoding: Encoding = .text) {
-        self.text = text; self.translation = translation; self.romanization = romanization; self.encoding = encoding
+    public init(text: String, translation: String = "", romanization: String = "") {
+        self.text = text; self.translation = translation; self.romanization = romanization
     }
 }
 public struct MusicNativeAudio: Sendable {
@@ -48,11 +79,6 @@ public struct MusicNativeAudio: Sendable {
     }
 }
 
-/// Anonymous native QQ HTTP/device protocol; never consults an account coordinator.
-public protocol MusicPublicQQProviding: Sendable {
-    func search(query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage
-    func lyrics(mid: String) async throws -> MusicNativeLyrics
-}
 /// Native account adapter. Login/control remains MusicAccountsServing.
 /// Every operation must recheck both access and account binding after suspended work.
 public protocol MusicNativeAccountProviding: Sendable {

@@ -146,6 +146,7 @@ public final class MusicPlaybackFeedbackAuthorization: @unchecked Sendable {
     private var active = true
     private var operations: [UUID: @Sendable () -> Void] = [:]
     private var completedBeforeRegistration = Set<UUID>()
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
     private let current: @Sendable () async throws -> Void
     public init(current: @escaping @Sendable () async throws -> Void = {}) { self.current = current }
     public func checkLocal() throws {
@@ -166,7 +167,17 @@ public final class MusicPlaybackFeedbackAuthorization: @unchecked Sendable {
     public func remove(_ id: UUID) {
         lock.lock()
         if operations.removeValue(forKey: id) == nil { completedBeforeRegistration.insert(id) }
+        let waiting = operations.isEmpty ? drainWaiters : []
+        if operations.isEmpty { drainWaiters.removeAll() }
         lock.unlock()
+        for waiter in waiting { waiter.resume() }
+    }
+    public func drain() async {
+        await withCheckedContinuation { waiting in
+            lock.lock()
+            if operations.isEmpty { lock.unlock(); waiting.resume() }
+            else { drainWaiters.append(waiting); lock.unlock() }
+        }
     }
     public var isActive: Bool { lock.lock(); defer { lock.unlock() }; return active }
     public var inFlight: Int { lock.lock(); defer { lock.unlock() }; return operations.count }
@@ -184,31 +195,55 @@ public final class MusicPlaybackFeedbackLease: @unchecked Sendable {
     public let registersLocally: Bool
     private let send: @Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt
     private let release: @Sendable () -> Void
+    private let cleanup: @Sendable () async -> Void
     private let lock = NSLock()
     private var released = false
+    private var cleanupFinished = false
+    private var cleanupTask: Task<Void, Never>?
     public init(id: UUID = UUID(), platform: MusicAccountPlatform, scope: String, generation: UUID,
                 authorization: MusicPlaybackFeedbackAuthorization,
                 registersLocally: Bool = false,
                 send: @escaping @Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt,
-                release: @escaping @Sendable () -> Void = {}) {
+                release: @escaping @Sendable () -> Void = {},
+                cleanup: @escaping @Sendable () async -> Void = {}) {
         self.id = id; self.platform = platform; self.scope = scope; self.generation = generation
         self.authorization = authorization; self.send = send; self.release = release
         self.registersLocally = registersLocally
+        self.cleanup = cleanup
     }
     public func report(_ value: MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt {
         guard value.target.platform == platform, !scope.isEmpty else { throw MusicServiceError.targetChanged }
         try await authorization.check()
-        let result = try await send(value)
-        try await authorization.check()
-        return result
+        // A durable admission or a dispatched remote receipt is still a fact
+        // when the listening scope was revoked while it was settling.
+        return try await send(value)
     }
     public func revoke() {
         authorization.revoke()
         lock.lock()
         let shouldRelease = !released
         released = true
+        if shouldRelease { cleanupTask = Task { [weak self, authorization, cleanup] in
+            await authorization.drain()
+            await cleanup()
+            self?.finishCleanup()
+        } }
         lock.unlock()
         if shouldRelease { release() }
+    }
+    private func pendingCleanup() -> Task<Void, Never>? {
+        lock.lock(); defer { lock.unlock() }; return cleanupTask
+    }
+    private func finishCleanup() {
+        lock.lock(); cleanupFinished = true; lock.unlock()
+    }
+    public var isDrained: Bool {
+        lock.lock(); let finished = released && cleanupFinished; lock.unlock()
+        return finished && authorization.inFlight == 0
+    }
+    public func drain() async {
+        revoke()
+        await pendingCleanup()?.value
     }
     deinit { revoke() }
 }
@@ -228,4 +263,5 @@ public protocol MusicNativeFeedbackLifecycleProviding: MusicPlaybackFeedbackClos
     func configurePlaybackFeedback(_ settings: MusicPlaybackFeedbackSettings) async throws
     func cancelPendingPlaybackFeedback(platform: MusicAccountPlatform?)
     func preparePlaybackFeedbackForClose() async
+    func flushPendingPlaybackFeedback() async
 }

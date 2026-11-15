@@ -38,8 +38,8 @@ public static partial class MusicUiTests
                 ifRevision = sources.GetProperty("settings").GetProperty("revision").GetInt64(),
                 enabled = Array.Empty<string>()
             });
-            f.Http.SearchResult = _ => new { code = 200, result = new { songCount = 3,
-                songs = Enumerable.Range(1001, 3).Select(id => SearchHttp.WyTrack(id, "歌曲" + id, "歌手", "专辑")).ToArray() } };
+            f.Http.SearchResult = (_, _) => new { items = Enumerable.Range(1001, 3)
+                .Select(id => SearchHttp.WyTrack(id, "歌曲" + id, "歌手", "专辑")).ToArray(), more = false };
             await f.Search("栏目播放");
             await SearchUntil(() => !f.Module.SearchSongsLoading && f.Module.CatalogSections.Any(s => s.Items.Count == 3));
             var section = f.Module.CatalogSections.Single(s => s.Items.Count == 3);
@@ -95,8 +95,8 @@ public static partial class MusicUiTests
                 f.Module.SelectedSong = f.Module.Songs[0]; RaiseSongMenu(grid); grid.ContextMenu.IsOpen = true;
                 try { await AssertOpenedSongMenuStyles(grid.ContextMenu, grid); }
                 finally { grid.ContextMenu.IsOpen = false; }
-                True(!grid.ContextMenu.Items.OfType<MenuItem>().Single(i => i.Header as string == "移除").IsEnabled,
-                    "search songs retain removal permissions");
+                True(!grid.ContextMenu.Items.OfType<MenuItem>().Any(i => i.Header as string == "移除"),
+                    "search results have no collection membership to remove");
             }
             finally { window.Content = null; window.Close(); }
         });
@@ -357,18 +357,20 @@ public static partial class MusicUiTests
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
-            f.Http.SearchResult = count => new { code = 200, result = new { songCount = 61,
-                songs = Enumerable.Range(0, count == 3 ? 1 : 30)
-                    .Select(index => SearchHttp.Track(1001 + (count - 1) * 30 + index)).ToArray() } };
+            f.Http.SearchResult = (count, _) => new {
+                items = Enumerable.Range(0, count == 3 ? 1 : 30)
+                    .Select(index => SearchHttp.Track(1001 + (count - 1) * 30 + index)).ToArray(),
+                more = count < 3, continuation = count < 3 ? new { page = count + 1 } : null };
             await f.Search("分页录音");
             await f.Module.OpenSearchTabAsync("songs");
-            await SearchUntil(() => f.Module.Songs.Count == 1 && f.Module.CanLoadMoreSearchSongs);
+            await SearchUntil(() => f.Module.Songs.Count == 1 && f.Module.CanLoadMoreSearchSongs &&
+                !f.Module.SearchSongsLoading && f.Module.Songs[0].Raw.GetProperty("sources").GetArrayLength() == 30);
             string id = f.Module.Songs[0].Id;
             for (int round = 2; round <= 3; round++)
             {
                 True(f.Module.CanLoadMoreSearchSongs, "provider continuation is available");
                 await f.Module.MoreSearchAsync();
-                await SearchUntil(() => f.Module.Songs.Count == 1 &&
+                await SearchUntil(() => !f.Module.SearchSongsLoading && f.Module.Songs.Count == 1 &&
                     f.Module.Songs[0].Raw.GetProperty("sources").GetArrayLength() == (round == 3 ? 61 : round * 30));
                 Equal(id, f.Module.Songs[0].Id);
                 Equal("1001", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
@@ -381,8 +383,8 @@ public static partial class MusicUiTests
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
-            f.Http.SearchResult = count => new { code = 200, result = new { songCount = 58,
-                songs = SearchSongPage(count).ToArray() } };
+            f.Http.SearchResult = (count, _) => new { items = SearchSongPage(count).ToArray(),
+                more = count < 2, continuation = count < 2 ? new { page = count + 1 } : null };
             await f.Search("追加");
             await f.Module.OpenSearchTabAsync("songs");
             await SearchUntil(() => f.Module.Songs.Count == 30 && f.Module.CanLoadMoreSearchSongs);
@@ -407,9 +409,12 @@ public static partial class MusicUiTests
             True(!ReferenceEquals(oldRows[1], f.Module.Songs[1]), "the second merged row is replaced in place");
             Equal(2, f.Module.Songs[1].Raw.GetProperty("sources").GetArrayLength());
             for (int index = 0; index < oldRows.Length; index++)
-                True(JsonElement.DeepEquals(oldSources[index],
-                    oldRows[index].Raw.GetProperty("sources")),
-                    "the original row payload remains the old snapshot");
+            {
+                Equal(1, oldSources[index].GetArrayLength());
+                Equal(oldRows[index].Id, f.Module.Songs[index].Id);
+                True(JsonElement.DeepEquals(oldRows[index].Raw, f.Module.Songs[index].Raw),
+                    "retained row references read the same current repository facts");
+            }
             var nativeIds = f.Module.Songs.Take(2)
                 .Select(row => row.Raw.GetProperty("sources").EnumerateArray()
                     .Select(source => source.GetProperty("musicInfo").GetProperty("songmid").GetString()))
@@ -462,9 +467,9 @@ public static partial class MusicUiTests
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]);
-            f.Http.SearchResult = count => new { code = 200, result = new { songCount = 60,
-                songs = SearchSongPage(1).ToArray(), playlistCount = 60,
-                playlists = SearchPlaylistPage(1).ToArray() } };
+            f.Http.SearchResult = (_, kind) => new { items = kind == "songs"
+                ? SearchSongPage(1).ToArray() : SearchPlaylistPage(1).ToArray(),
+                more = true, continuation = new { page = 2 } };
             await f.Search("稳定");
             await SearchUntil(() => f.Module.Songs.Count == 30 && f.Module.CatalogSections.Count == 2 &&
                 f.Module.CatalogSections.All(section => section.Items.Count == 6) &&
@@ -514,9 +519,9 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new NativeMusicScriptTestRuntime();
-            var http = new SearchHttp { SearchResult = count => new { code = 200, result =
-                new { songCount = 30, songs = SearchSongPage(count).ToArray() } } };
-            var inner = new MusicNativeApplication(store, runtime, http);
+            var http = new SearchHttp { SearchResult = (count, _) => new { items = SearchSongPage(count).ToArray(), more = false } };
+            runtime.Platform.OnRequest = http.Read;
+            var inner = new MusicNativeApplication(store, runtime);
             var forwarder = new SearchSnapshotForwarder(inner);
             await using var module = new MusicCapability(forwarder, store, new PlaybackProbe(), new Dialogs());
             await module.InitializeAsync(default); await Drain();
@@ -826,7 +831,7 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new NativeMusicScriptTestRuntime();
-            var inner = new MusicNativeApplication(store, runtime, new NoUpstream());
+            var inner = new MusicNativeApplication(store, runtime);
             var consumer = new SyncDuringResume(inner);
             await using var module = new MusicCapability(consumer, store, new PlaybackProbe(), new Dialogs());
             await module.InitializeAsync(default);
@@ -903,7 +908,7 @@ public static partial class MusicUiTests
             {
                 id = (start + index).ToString(System.Globalization.CultureInfo.InvariantCulture),
                 name = "歌单" + requestIndex + "-" + index,
-                trackCount = 1
+                count = 1, source = "wy"
             };
     }
 
@@ -941,7 +946,9 @@ public static partial class MusicUiTests
         internal readonly MusicCapability Module;
         private SearchScene(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)
         {
-            App = new(Store, scriptRuntime ?? Runtime, Http, null, null, clock);
+            var platform = scriptRuntime is QualityFixture.ScriptRuntime selected ? selected.Platform : Runtime.Platform;
+            platform.OnRequest = Http.Read;
+            App = new(Store, scriptRuntime ?? Runtime, null, null, clock);
             Module = new(App, Store, new PlaybackProbe(), new Dialogs());
         }
         internal static async Task<SearchScene> Create(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)
@@ -1006,7 +1013,7 @@ public static partial class MusicUiTests
         public async Task<DocumentSnapshot> ReadAsync(string documentNamespace,
             CancellationToken cancellationToken = default)
         {
-            if (documentNamespace == "music.accounts.v1")
+            if (documentNamespace == MeowFilm.Capabilities.Accounts.MusicAccountOwner.DocumentNamespace)
             {
                 Interlocked.Increment(ref AccountReads);
                 var hold = Interlocked.Exchange(ref nextAccountRead, null);
@@ -1040,7 +1047,7 @@ public static partial class MusicUiTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal void Release() => Released.TrySetResult();
     }
-    private sealed class SearchHttp : HttpMessageHandler
+    private sealed class SearchHttp
     {
         internal readonly ConcurrentQueue<string> Requests = new();
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1049,47 +1056,34 @@ public static partial class MusicUiTests
         internal readonly TaskCompletionSource DisposalRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool Hold, HoldDispose, FailOnce;
         internal int SearchRequests, HomeRequests, Completions;
-        internal Func<int, object>? SearchResult;
+        internal Func<int, string, object>? SearchResult;
         internal Func<int, Task>? BeforeSearchReply;
         internal static object Track(int id = 1001) => WyTrack(id, "合成歌曲", "歌手", "专辑");
-        internal static object WyTrack(int id, string name, string artist, string album) => new { id, name, dt = 180000, fee = 0,
-            ar = new[] { new { id = 1, name = artist } }, al = new { id = 2, name = album, picUrl = "" },
-            h = new { br = 320000 }, m = new { br = 192000 }, l = new { br = 128000 } };
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        internal static object WyTrack(int id, string name, string artist, string album) =>
+            MusicSongFixture.Online("wy", id.ToString(), name, artist, album, 180);
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
-            var uri = request.RequestUri!;
-            True(uri.Host is "music.163.com" or "interfacepc.music.163.com", "only synthetic WY origin admitted");
-            Requests.Enqueue(uri.AbsolutePath);
+            True(call.Platform == "wy", "only the selected canonical platform is requested");
+            Requests.Enqueue(call.Operation);
             object body;
-            if (uri.AbsolutePath.Contains("/cloudsearch/", StringComparison.Ordinal))
+            if (call.Operation == "search")
             {
                 int count = Interlocked.Increment(ref SearchRequests); Entered.TrySetResult();
                 if (Hold) await Release.Task; // Deliberately ignore cancellation until actual completion.
-                if (FailOnce) { FailOnce = false; return new(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{}") }; }
-                body = SearchResult?.Invoke(count) ?? new { code = 200, result = new { songCount = 1, songs = new[] { Track() },
-                    playlistCount = 1, playlists = new[] { new { id = "500", name = "合成歌单", trackCount = 1 } } } };
+                if (FailOnce) { FailOnce = false; throw new MeowFilm.Capabilities.Platforms.MusicPlatformException("UPSTREAM_ERROR"); }
+                string kind = call.Parameters.GetProperty("kind").GetString()!;
+                body = SearchResult?.Invoke(count, kind) ?? (kind == "songs"
+                    ? (object)new { items = new[] { Track() }, more = false }
+                    : new { items = new[] { new { id = "500", name = "合成歌单", count = 1, source = "wy" } }, more = false });
                 if (BeforeSearchReply is { } before) await before(count);
             }
-            else if (uri.AbsolutePath.Contains("/playlist/detail", StringComparison.Ordinal))
-                body = new { code = 200, playlist = new { id = "500", name = "合成歌单", trackCount = 1,
-                    trackIds = new[] { new { id = "1001" } }, updateTime = 1 } };
-            else if (uri.AbsolutePath.Contains("/song/detail", StringComparison.Ordinal))
-                body = new { code = 200, songs = new[] { Track() } };
+            else if (call.Operation is "playlist" or "playlist.complete")
+                body = new { platform = "wy", id = "500", name = "合成歌单", count = 1, items = new[] { Track() }, more = false };
+            else if (call.Operation == "song") body = Track();
             else { Interlocked.Increment(ref HomeRequests); throw new InvalidOperationException("Unexpected metadata request"); }
             Interlocked.Increment(ref Completions);
-            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(body);
-            HttpContent content = HoldDispose ? new StreamContent(new SearchDisposeStream(bytes, Disposing, DisposalRelease))
-                : new ByteArrayContent(bytes);
-            content.Headers.ContentType = new("application/json");
-            return new(HttpStatusCode.OK) { Content = content };
-        }
-    }
-    private sealed class SearchDisposeStream(byte[] bytes, TaskCompletionSource entered, TaskCompletionSource release)
-        : System.IO.MemoryStream(bytes)
-    {
-        public override async ValueTask DisposeAsync()
-        {
-            entered.TrySetResult(); await release.Task; await base.DisposeAsync();
+            if (HoldDispose) { Disposing.TrySetResult(); await DisposalRelease.Task; }
+            return MusicPlatformRuntimeFixture.Json(body);
         }
     }
 }

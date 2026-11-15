@@ -34,6 +34,7 @@ private actor ManagementReadbackOwner: MusicScriptSourceManaging {
     }
     func setUncertain(_ value: Bool) { uncertain = value }
     func failImportAfterCommit() { uncertainImport = true }
+    func confirmImports() { uncertainImport = false }
     func failChangeAfterCommit() { uncertainChange = true }
     func snapshot() -> [MusicScriptSourceItem] { items }
     func scriptSources() async -> [MusicScriptSourceItem] {
@@ -251,7 +252,23 @@ private actor ManagementReadbackOwner: MusicScriptSourceManaging {
             XCTAssertEqual(state.scripts, actual)
             XCTAssertNotNil(state.item("imported"))
             XCTAssertFalse(state.importing)
-            XCTAssertNotNil(state.error, "Reconciliation must not turn an uncertain receipt into success")
+            let setting = "scripts/import/" + (local ? file.absoluteString : "https://source.invalid/new.js")
+            XCTAssertNil(state.error)
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), [setting],
+                           "Readback cannot confirm an uncertain write")
+            state.close(); state.start(); await state.flush()
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), [setting],
+                           "Reopening cannot dismiss the unknown receipt")
+            state.setScript("a", enabled: true); await state.flush()
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), [setting],
+                           "Another setting's successful write cannot clear this receipt")
+            model.notices.error = "另一操作的错误"
+            await scripts.confirmImports()
+            if local { state.importFiles([file]) }
+            else { state.download("https://source.invalid/new.js") }
+            await state.flush()
+            XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+            XCTAssertEqual(model.notices.error, "另一操作的错误")
             state.close(); await model.close(); await service.close()
         }
     }
@@ -416,7 +433,10 @@ extension MusicSourceManagementReadbackTests {
             XCTAssertEqual(calls["a"], operation == "remove" ? 1 : 2)
             XCTAssertEqual(calls["b"], 1, "Unrelated details must neither be invalidated nor fetched again")
             XCTAssertEqual(state.details["b"]?.item.id, "b")
-            XCTAssertNotNil(state.error, "An uncertain receipt must not be reported as success")
+            let field = operation == "remove" ? "installation" : operation == "edit" ? "metadata" : "source"
+            XCTAssertNil(state.error)
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), ["scripts/a/" + field],
+                           "A successful reconciliation is not a confirmed write receipt")
             state.close(); await model.close(); await service.close()
         }
     }

@@ -1,5 +1,6 @@
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 private actor AccessTransitionAudioCache: MusicAudioFileCaching {
@@ -19,9 +20,9 @@ private actor AccessTransitionAudioCache: MusicAudioFileCaching {
 
 final class MusicNativeAccessTransitionTests: XCTestCase {
     func testNewScopeCannotReadOrWriteBeforeOldCachesFinishRetiring() async throws {
-        let store = NativeMusicMemoryDocument(), gate = NativeMusicGate(), http = NativeMusicHTTPFixture([])
-        let service = NativeMusicService(document: store, qq: NativeMusicQQFixture(),
-            audioFileCache: AccessTransitionAudioCache(gate), transport: http)
+        let store = NativeMusicMemoryDocument(), gate = NativeMusicGate(), platform = NativeMusicPlatformFixture()
+        let service = NativeMusicService(document: store, platformClient: try platform.makeClient(),
+            audioFileCache: AccessTransitionAudioCache(gate))
         let enabling = Task { try await service.setAccess(available: true, generation: 1) }
         await gate.started()
         do { _ = try await service.state(); XCTFail("Partially retired scope admitted a read") }
@@ -31,7 +32,7 @@ final class MusicNativeAccessTransitionTests: XCTestCase {
         do { _ = try await service.publicPlaylists(platform: .netease, query: "Synthetic", cursor: nil); XCTFail("Early HTTP") }
         catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
         XCTAssertEqual(store.snapshot().1, 0); XCTAssertEqual(store.snapshot().2, 0)
-        let requests = await http.calls(); XCTAssertTrue(requests.isEmpty)
+        let requests = await platform.calls(); XCTAssertTrue(requests.isEmpty)
         await gate.release(); try await enabling.value
         _ = try await service.state()
         _ = try await service.createPlaylist(name: "Synthetic", refs: [])

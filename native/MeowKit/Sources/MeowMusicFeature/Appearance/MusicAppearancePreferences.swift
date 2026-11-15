@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 import MeowUI
-import CoreFoundation
 
 // Reference: iWebPlus b900c259:
 // - browse-settings.js:229-266 / account-settings.js:3-19: grid, starlight,
@@ -50,13 +49,13 @@ public struct MusicAppearancePreferences: Codable, Equatable, Sendable {
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        playlistView = (try? values.decode(MusicPlaylistAppearance.self, forKey: .playlistView)) ?? .grid
-        playerTheme = (try? values.decode(MusicPlayerAppearance.self, forKey: .playerTheme)) ?? .starlight
-        colorMode = (try? values.decode(MusicColorMode.self, forKey: .colorMode)) ?? .song
-        colorPalette = (try? values.decode(PagePalette.self, forKey: .colorPalette)) ?? .preset(.lilac)
-        lockLyric = (try? values.decode(Bool.self, forKey: .lockLyric)) ?? true
-        lyricTranslation = (try? values.decode(Bool.self, forKey: .lyricTranslation)) ?? true
-        lyricBackground = (try? values.decode(Bool.self, forKey: .lyricBackground)) ?? true
+        playlistView = try values.decode(MusicPlaylistAppearance.self, forKey: .playlistView)
+        playerTheme = try values.decode(MusicPlayerAppearance.self, forKey: .playerTheme)
+        colorMode = try values.decode(MusicColorMode.self, forKey: .colorMode)
+        colorPalette = try values.decode(PagePalette.self, forKey: .colorPalette)
+        lockLyric = try values.decode(Bool.self, forKey: .lockLyric)
+        lyricTranslation = try values.decode(Bool.self, forKey: .lyricTranslation)
+        lyricBackground = try values.decode(Bool.self, forKey: .lyricBackground)
     }
 
     /// Display only. Never clears parsed lines, rebuilds a queue, seeks or refetches lyrics.
@@ -111,18 +110,11 @@ struct MusicDisplayedArtwork {
     let data: Data
 
     func matches(_ track: MusicRemoteTrack) -> Bool {
-        ticket.songKey.utf16.elementsEqual(MusicAppearanceSongIdentity(track: track).stableKey.utf16) &&
-            ticket.artworkID.utf16.elementsEqual((track.artwork?.absoluteString ?? "").utf16)
+        ticket.songKey.utf16.elementsEqual(MusicAppearanceSongIdentity(track: track).stableKey.utf16)
     }
 }
 
-private struct MusicAppearanceDocument: Codable {
-    var version = 1
-    var preferences: MusicAppearancePreferences
-}
-
 private struct MusicSongColorCache: Codable {
-    var version = 1
     var last: PageColorway = .lilac
     var colors: [[String]] = []
 
@@ -139,8 +131,7 @@ private struct MusicSongColorCache: Codable {
     static func read(_ data: Data?) -> Self {
         guard let data, data.count <= 2_000_000,
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let version = json["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
-              version.doubleValue == 1, let entries = json["colors"] as? [Any] else { return .init() }
+              let entries = json["colors"] as? [Any] else { return .init() }
         var result = Self()
         result.last = PageColorway(rawValue: json["last"] as? String ?? "") ?? .lilac
         let valid = entries.compactMap { entry -> [String]? in
@@ -165,8 +156,8 @@ import Combine
 /// One owner is injected into the music root, settings and player. No singleton,
 /// notification bus or observation of unrelated UserDefaults domains.
 @MainActor public final class MusicAppearancePreferencesStore: ObservableObject, PageThemeProviding {
-    public static let preferencesKey = "music.ui.appearance.v1"
-    public static let songColorsKey = "music.ui.songColors.v1"
+    public static let preferencesKey = "music.ui.preferences.v1"
+    public static let songColorsKey = "music.ui.song-palettes.v1"
     @Published public private(set) var preferences = MusicAppearancePreferences()
     @Published public private(set) var effectivePalette: PagePalette = .preset(.lilac)
     @Published public private(set) var persistenceError: String?
@@ -206,13 +197,10 @@ import Combine
         persistenceError = nil
         if let raw = defaults.object(forKey: Self.preferencesKey) {
             guard let data = raw as? Data,
-                  let document = try? JSONDecoder().decode(MusicAppearanceDocument.self, from: data) else {
+                  let value = try? JSONDecoder().decode(MusicAppearancePreferences.self, from: data) else {
                 persistenceError = "音乐偏好读取失败"; return
             }
-            guard document.version == 1 else {
-                persistenceError = "音乐偏好版本不受支持"; return
-            }
-            next = document.preferences
+            next = value
         }
         let colorChanged = next.colorMode != preferences.colorMode || next.colorPalette != preferences.colorPalette
         if colorChanged { generation = UUID(); coverPreferenceRevision = UUID() }
@@ -254,7 +242,7 @@ import Combine
         save(.init())
     }
 
-    /// Stable song identity, never queue occurrence/ref handle. Multiple views
+    /// Stable song identity, never queue occurrence. Multiple views
     /// of the same current song do not invalidate each other's pending cover.
     /// nil keeps the last color while invalidating the preceding song's cover.
     public func selectSong(_ identity: MusicAppearanceSongIdentity?) {
@@ -296,7 +284,7 @@ import Combine
                   target.artworkID.utf16.elementsEqual(artworkID.utf16) else { return nil }
         }
         if displayArtworkID?.utf16.elementsEqual(artworkID.utf16) != true {
-            displayGeneration = UUID(); displayArtworkID = artworkID; displayedArtwork = nil
+            displayGeneration = UUID(); displayArtworkID = artworkID
         }
         return .init(generation: displayGeneration, songKey: songKey, artworkID: artworkID)
     }
@@ -325,7 +313,7 @@ import Combine
         systemArtworkTarget = (identity.stableKey, url)
         selectSong(identity) // Idempotent: progress/lyrics never reset tickets.
         if displayArtworkID?.utf16.elementsEqual(url.utf16) != true {
-            displayGeneration = UUID(); displayArtworkID = url; displayedArtwork = nil
+            displayGeneration = UUID(); displayArtworkID = url
         }
         if targetChanged, systemArtworkEnabled { displayedArtworkRevision = UUID() }
         setSystemArtworkEnabled(true)
@@ -365,8 +353,7 @@ import Combine
         preferences.colorMode == .song
     }
     @discardableResult private func save(_ next: MusicAppearancePreferences) -> Bool {
-        let document = MusicAppearanceDocument(preferences: next)
-        guard let data = try? JSONEncoder().encode(document) else {
+        guard let data = try? JSONEncoder().encode(next) else {
             persistenceError = "音乐偏好保存失败"; return false
         }
         defaults.set(data, forKey: Self.preferencesKey)

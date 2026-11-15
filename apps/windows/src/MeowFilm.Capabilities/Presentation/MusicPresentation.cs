@@ -3,6 +3,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
 
@@ -32,14 +33,16 @@ internal sealed class MusicPresentation
     }
 
     internal Dispatcher Dispatcher { get; }
-    internal MusicView Page => page ??= new(module);
-    internal MusicSettingsView Settings => settings ??= new(module);
-    internal MusicAppearanceView Appearance => appearance ??= new(module);
-    internal MusicHomeSourceSettingsView HomeSourceSettings => homeSourceSettings ??= new(module);
-    internal MusicCacheSettingsView CacheSettings => cacheSettings ??= new(module);
-    internal MusicPlayerView Player => player ??= new(module);
-    internal MusicPlayerDetailView Detail => detail ??= new(module);
-    internal MusicQueueView Queue => queue ??= new(module);
+    private T WithArtwork<T>(T view) where T : FrameworkElement
+    { ArtworkScope.SetLoader(view, module.ArtworkLoader); return view; }
+    internal MusicView Page => page ??= WithArtwork(new MusicView(module));
+    internal MusicSettingsView Settings => settings ??= WithArtwork(new MusicSettingsView(module));
+    internal MusicAppearanceView Appearance => appearance ??= WithArtwork(new MusicAppearanceView(module));
+    internal MusicHomeSourceSettingsView HomeSourceSettings => homeSourceSettings ??= WithArtwork(new MusicHomeSourceSettingsView(module));
+    internal MusicCacheSettingsView CacheSettings => cacheSettings ??= WithArtwork(new MusicCacheSettingsView(module));
+    internal MusicPlayerView Player => player ??= WithArtwork(new MusicPlayerView(module));
+    internal MusicPlayerDetailView Detail => detail ??= WithArtwork(new MusicPlayerDetailView(module));
+    internal MusicQueueView Queue => queue ??= WithArtwork(new MusicQueueView(module));
     internal bool IsSettingsActive => settings is { IsLoaded: true, IsVisible: true };
     internal bool IsPageActive => page is { IsLoaded: true, IsVisible: true };
     internal DesktopNavigationGroupAction CreatePlaylistAction { get; }

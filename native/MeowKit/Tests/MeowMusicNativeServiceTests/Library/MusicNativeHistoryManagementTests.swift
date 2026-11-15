@@ -1,16 +1,57 @@
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 final class MusicNativeHistoryManagementTests: XCTestCase {
-    func testPlayedSongUsesPersistedIdentityAfterDisplayHandleExpires() async throws {
+    func testUnknownMatchingDurationKeepsPermanentReferencesThroughArchiveRestoreAndColdRead() async throws {
+        let store = NativeMusicMemoryDocument()
+        var info = try MJ.parse(NativeMusicFixture.track("UnknownDuration").data)
+        info["duration"] = .number(-0.75)
+        let track = MusicNativeTrackData(platform: "tx", data: info.bytes)
+        let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([track], platform: "tx")])
+        let service = try await NativeMusicFixture.service(store, platform: peer)
+        let page = try await service.search(platform: "tx", query: "UnknownDuration", page: 1, limit: 30)
+        let ref = try XCTUnwrap(page.items.first?.ref)
+        let queue = try await service.changeQueue(.replace([ref, ref], index: 1), expectedRevision: 0)
+        let queued = try MusicHistoryFixture.saved(store)["records"][MusicModel.key("queue")]
+        let permanentID = try XCTUnwrap(queued["entries"].array.first?["songId"].string)
+        XCTAssertEqual(Set(queued["entries"].array.map { $0["songId"].string }), [permanentID])
+        XCTAssertEqual(Set(queued["entries"].array.map { $0["id"].string }).count, 2)
+        let replacement = try await service.changeQueue(.replace([ref], index: 0), expectedRevision: queue.revision)
+        let archives = try await service.playedPlaylists()
+        let archive = try XCTUnwrap(archives.first)
+        let before = store.snapshot()
+        let detail = try await service.historyDetail(id: archive.id)
+        XCTAssertEqual(detail.entries.map(\.duration), [-0.75, -0.75])
+        XCTAssertEqual(detail.selectedIndex, 1)
+        XCTAssertEqual(store.snapshot().0, before.0)
+        XCTAssertEqual(store.snapshot().2, before.2)
+        let restored = try await service.restoreHistory(detail: detail, startIndex: nil, expectedRevision: replacement.revision)
+        XCTAssertEqual(restored.total, 2); XCTAssertEqual(restored.position, 0)
+        XCTAssertEqual(restored.currentId, detail.entries[1].id)
+        let savedQueue = try MusicHistoryFixture.saved(store)["records"][MusicModel.key("queue")]
+        XCTAssertEqual(savedQueue["entries"], queued["entries"])
+        await service.close()
+        let cold = try await NativeMusicFixture.service(store)
+        let coldDetail = try await cold.historyDetail(id: archive.id), coldState = try await cold.state()
+        XCTAssertEqual(coldDetail.entries.map(\.id), detail.entries.map(\.id))
+        XCTAssertEqual(coldDetail.entries.map(\.duration), detail.entries.map(\.duration))
+        XCTAssertEqual(coldState.currentId, restored.currentId)
+        XCTAssertEqual(coldState.revision, restored.revision)
+        let coldQueue = try MusicHistoryFixture.saved(store)["records"][MusicModel.key("queue")]
+        XCTAssertEqual(coldQueue["entries"], savedQueue["entries"])
+        await cold.close()
+    }
+
+    func testPlayedSongUsesPermanentRepositoryReferenceAndDeletedHistoryCannotReplay() async throws {
         let store = NativeMusicMemoryDocument(try MusicHistoryFixture.document([]))
         let service = try await NativeMusicFixture.service(store)
         let history = try await service.playedSongs()
         let displayed = try XCTUnwrap(history.first)
         XCTAssertNotNil(displayed.displayIdentity)
         let track = displayed.track
-        let stale = MusicRemoteTrack(ref: .init(kind: .handle, id: "expired-history-handle"),
+        let stale = MusicRemoteTrack(ref: track.ref,
             songId: track.songId, title: track.title, artist: track.artist, album: track.album,
             duration: track.duration, sources: track.sources, artwork: track.artwork)
         let state = try await service.replaceDisplayedQueue([stale], index: 0,
@@ -28,12 +69,11 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         } catch { XCTAssertEqual(error as? MusicServiceError, .notFound) }
         XCTAssertEqual(store.snapshot().0, before.0)
     }
-    func testTwoThousandAndOneOccurrenceDetailUsesNoHandlesOrWrites() async throws {
+    func testTwoThousandAndOneOccurrenceDetailUsesCurrentRepositoryWithoutWrites() async throws {
         let raw = try MusicHistoryFixture.snapshot(count: 2001, selected: 2000)
         let store = NativeMusicMemoryDocument(try MusicHistoryFixture.document([raw]))
         let service = try await NativeMusicFixture.service(store)
-        _ = try await service.search(platform: "tx", query: "Existing handle", page: 1, limit: 30)
-        let handles = await service.handles.keys.sorted(), before = store.snapshot()
+        let before = store.snapshot()
         let detail = try await service.historyDetail(id: "archive")
 
         XCTAssertEqual(detail.summary.id, "archive")
@@ -47,8 +87,6 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         XCTAssertEqual(detail.entries.last?.index, 2000)
         XCTAssertEqual(detail.entries.first?.title, detail.entries.last?.title, "duplicate songs remain separate occurrences")
         XCTAssertEqual(detail.entries.first?.artwork?.absoluteString, "https://p1.music.126.net/fixture.jpg")
-        let afterHandles = await service.handles.keys.sorted()
-        XCTAssertEqual(afterHandles, handles)
         XCTAssertEqual(store.snapshot().0, before.0)
         XCTAssertEqual(store.snapshot().2, before.2)
         let again = try await service.historyDetail(id: "archive")
@@ -149,7 +187,7 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
             let backing = NativeMusicMemoryDocument(try MusicHistoryFixture.document([MusicHistoryFixture.snapshot()]))
             let store = MusicHistoryCancellingDocument(backing)
             let service = NativeMusicService(document: store, accounts: NativeMusicAccountFixture(),
-                qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+                platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
             try await service.setAccess(available: true, generation: 1)
             let fact = try await currentFact(service), before = backing.snapshot()
             store.cancelAfterNextCommit()
@@ -179,7 +217,7 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         XCTAssertEqual(state.total, 3); XCTAssertEqual(state.revision, 8)
         XCTAssertEqual(state.position, 0)
         XCTAssertEqual(queue["entries"].array.map { $0["id"].string }, detail.entries.map(\.id))
-        XCTAssertEqual(queue["entries"].array[0]["song"]["songId"], queue["entries"].array[2]["song"]["songId"])
+        XCTAssertEqual(queue["entries"].array[0]["songId"], queue["entries"].array[2]["songId"])
         XCTAssertEqual(queue["entries"].array.map { $0["context"] }, raw["entries"].array.map { $0["context"] })
         XCTAssertEqual(queue["priority"].strings, ["entry-102", "entry-100"])
         XCTAssertEqual(queue["history"].strings, ["entry-100", "entry-100", "entry-102"])
@@ -236,7 +274,7 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
             },
             {
                 var entries = $0["entries"].array
-                entries[0]["song"]["album"] = .string("Changed metadata")
+                entries[0]["songId"] = .string(UUID().uuidString.lowercased())
                 $0["entries"] = .array(entries)
             }
         ]
@@ -355,7 +393,7 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         let backing = NativeMusicMemoryDocument(try MusicHistoryFixture.document([MusicHistoryFixture.snapshot()]))
         let store = MusicHistoryCancellingDocument(backing)
         let service = NativeMusicService(document: store, accounts: NativeMusicAccountFixture(),
-            qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+            platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         _ = try await currentFact(service)
         let detail = try await service.historyDetail(id: "archive"), before = backing.snapshot()
@@ -376,7 +414,7 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         var entries = raw["entries"].array
         entries[1]["id"] = entries[0]["id"]; duplicate["entries"] = .array(entries)
         entries = raw["entries"].array; entries[0]["id"] = .string("entry-9007199254740992"); badID["entries"] = .array(entries)
-        entries = raw["entries"].array; entries[0]["song"] = .array([]); badSong["entries"] = .array(entries)
+        entries = raw["entries"].array; entries[0]["songId"] = .array([]); badSong["entries"] = .array(entries)
         repeatedOccurrences["entries"] = .array(Array(repeating: raw["entries"].array[0], count: 2001))
         for snapshots in [[duplicate], [badID], [badSong], [repeatedOccurrences], [raw, raw]] {
             let store = NativeMusicMemoryDocument(try MusicHistoryFixture.document(snapshots))
@@ -416,11 +454,14 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
 }
 
 private enum MusicHistoryFixture {
-    static func snapshot(id: String = "archive", count: Int = 3, selected: Int? = 1) throws -> MJ {
-        var song = try NativeMusicFixture.song("Archived")
+    static let archived: MJ = {
+        var song = try! NativeMusicFixture.song("Archived")
         song["cover_url"] = .string("https://p1.music.126.net/fixture.jpg")
+        return song
+    }()
+    static func snapshot(id: String = "archive", count: Int = 3, selected: Int? = 1) throws -> MJ {
         let rows = (0..<count).map { index in
-            MJ.obj([("id", .string("entry-\(index + 100)")), ("key", song["songId"]), ("song", song),
+            MJ.obj([("id", .string("entry-\(index + 100)")), ("songId", archived["songId"]),
                     ("context", .obj([("sourceType", .string("playlist")), ("sourceTitle", .string("Archived playlist")),
                                       ("position", .n(index))]))])
         }
@@ -434,8 +475,10 @@ private enum MusicHistoryFixture {
     static func document(_ snapshots: [MJ]) throws -> Data {
         var d = try MusicDocument(nil, runID: "fixture")
         let song = try NativeMusicFixture.song("Current")
+        d.library["library"]["songs"][song["songId"].string] = song
+        d.library["library"]["songs"][archived["songId"].string] = archived
         d.queue["entries"] = .array((1...2).map {
-            .obj([("id", .string("entry-\($0)")), ("key", song["songId"]), ("song", song),
+            .obj([("id", .string("entry-\($0)")), ("songId", song["songId"]),
                   ("context", .obj([("sourceTitle", .string("Current playlist"))]))])
         })
         d.queue["currentId"] = .string("entry-1")
@@ -443,7 +486,7 @@ private enum MusicHistoryFixture {
         d.queue["source"] = .obj([("title", .string("Current playlist"))])
         d.playback["position"] = .obj([("occurrenceId", .string("entry-1")), ("seconds", .n(42))])
         d.history["playlists"] = .array(snapshots)
-        let played = MJ.obj([("song", song), ("context", .obj()), ("at", .n(1))])
+        let played = MJ.obj([("songId", song["songId"]), ("context", .obj()), ("at", .n(1))])
         let day = MJ.obj([("date", .string("2026-10-23")), ("songs", .array([played]))])
         d.history["days"] = .array([day])
         return try d.encode(changed: ["library", "queue", "history", "playback"])

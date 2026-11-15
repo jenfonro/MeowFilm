@@ -5,6 +5,7 @@ import MeowMusicFeature
 extension NativeMusicService {
     func syncConfirm(_ fence: MusicNativeSyncFence, snapshot: MusicLibrarySyncSnapshot,
                      round: inout MusicNativeSyncRound) throws {
+        round.library["songs"] = try read().library["library"]["songs"]
         if fence.mutation.action.isSubscription {
             try syncConfirmSubscription(fence, snapshot: snapshot, round: &round)
             return
@@ -34,8 +35,7 @@ extension NativeMusicService {
                 ("accountId", .string(fence.accountID)), ("id", .string(target)), ("map", .obj())])
             var mapping = b["map"]
             for member in remote.members {
-                let song = try MusicModel.normalize(.init(platform: fence.platform.rawValue, data: member.track))
-                let id = try upsert([song], library: &round.library)[0]
+                let id = try registeredSongID(.init(platform: fence.platform.rawValue, data: member.track), library: round.library)
                 mapping[member.occurrenceID] = .string(id)
             }
             b["map"] = mapping; b["baseline"] = .strings(remote.members.map(\.occurrenceID))
@@ -60,7 +60,7 @@ extension NativeMusicService {
         try await syncCurrent(round)
         try musicRequire(round.ledger.fences.count < 512, .limit)
         var fence = MusicNativeSyncFence(platform: session.platform, accountID: session.accountID, scope: session.scope,
-            localID: local["id"].string, localRevision: local["revision"].int, mutation: mutation)
+            localID: local["id"].string, localRevision: local["revision"].int, mutation: .init(mutation))
         round.ledger.fences.append(fence)
         // Durable "dispatched" fence precedes the external boundary. Even an
         // ambiguous document CAS prevents calling the provider.
@@ -77,7 +77,7 @@ extension NativeMusicService {
         do {
             let result = try await round.port.writeLibrarySync(session, mutation: mutation)
             switch result {
-            case .notDispatched(let reason):
+            case .notDispatched(let reason), .rejected(let reason):
                 round.ledger.fences.removeAll { $0.mutation.id == mutation.id }
                 do {
                     try await syncCurrent(round)
@@ -196,9 +196,10 @@ extension NativeMusicService {
         for id in c["order"].strings {
             let existing = remote.members.filter { mapping[$0.occurrenceID].string == id || mapping[$0.nativeID].string == id }
             if !existing.isEmpty { desired += existing; continue }
-            let song = round.library["songs"][id]
+            let song = try repositorySong(id, read())
+            let excluded = try recordingSourceExclusions(song)
             if let source = song["sources"].array.first(where: {
-                   $0["source"].string == selection.platform.rawValue
+                   $0["source"].string == selection.platform.rawValue && !excluded.contains($0["sourceKey"].string)
                }),
                let locator = try MusicModel.sources(song).first(where: { $0.sourceKey == source["sourceKey"].string }) {
                 let data = MusicModel.sourceData(source)

@@ -293,7 +293,6 @@ internal sealed class NeteasePlaybackOutbox(IDocumentStore store, MusicFeedbackS
             }
             finally { disk.Release(); }
             await upload.SendAsync(request.Token).ConfigureAwait(false);
-            GuardLocal(account, request.Token);
             await disk.WaitAsync().ConfigureAwait(false);
             try
             {
@@ -314,9 +313,25 @@ internal sealed class NeteasePlaybackOutbox(IDocumentStore store, MusicFeedbackS
         }
         catch (Exception error)
         {
-            lock (sync) uploadError = error is OperationCanceledException ? null :
+            lock (sync) uploadError = error is OperationCanceledException or MusicFeedbackException { Code: "CANCELLED" } ? null :
                 error is MusicFeedbackException feedback ? feedback.Code : FeedbackProtocolRules.SafeError(error);
-            if (marked || error is MusicFeedbackException { Code: "AUTH_EXPIRED" or "IDENTITY_MISMATCH" or "LIMIT" } ||
+            if (marked && error is MusicFeedbackException { WriteStatus: "notSent" } &&
+                !request.IsCancellationRequested && settings.IsEnabled("wy") && accounts.IsCurrent(account))
+            {
+                await disk.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    if (entries.TryGetValue(id, out var current))
+                    {
+                        if (current.Start?.Id == next.Id) entries[id] = current with { Start = current.Start with { Inflight = false } };
+                        else if (current.End?.Id == next.Id) entries[id] = current with { End = current.End with { Inflight = false } };
+                        await SaveAsync().ConfigureAwait(false);
+                    }
+                }
+                finally { disk.Release(); }
+                return false; // Only a later real admission/recovery event can request another pass.
+            }
+            if (marked || error is MusicFeedbackException { Code: "AUTH_EXPIRED" or "IDENTITY_MISMATCH" or "VERIFICATION_REQUIRED" or "LIMIT" } ||
                 error is MusicFeedbackException { Code: "SESSION_CHANGED" } && !accounts.IsCurrent(account))
             {
                 // Includes missing/wrong filename, lost receipt, cancellation

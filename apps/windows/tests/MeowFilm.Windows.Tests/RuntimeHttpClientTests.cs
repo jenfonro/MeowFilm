@@ -64,7 +64,11 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(97, declared.Count);
+            BridgeTests.Equal(101, declared.Count);
+            BridgeTests.Equal(true, declared.Contains("music.platform.request"));
+            BridgeTests.Equal(true, declared.Contains("music.platform.session.update"));
+            BridgeTests.Equal(true, declared.Contains("music.platform.cache.clear"));
+            BridgeTests.Equal(true, declared.Contains("music.platform.describe"));
             BridgeTests.Equal(true, declared.Contains("netease.token.get"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.set"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.defaults"));
@@ -625,7 +629,7 @@ public static class RuntimeHttpClientTests
 
     internal static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.3.0"),
         new("pan", "0.1.0"), new("tmdb", "0.1.0"), new("douban", "0.1.0"), new("film", "0.1.0"),
-        new("netease", "0.1.0")];
+        new("netease", "0.1.0"), new("music-platform", "0.1.0")];
     internal static object Description() => new
     {
         protocol = "runtime.http.v1", product = "aggregate", modules = new[]
@@ -678,6 +682,10 @@ public static class RuntimeHttpClientTests
             new { id = "netease", version = "0.1.0", contract = "netease.token.v1", methods = new[]
             {
                 "netease.token.get"
+            } },
+            new { id = "music-platform", version = "0.1.0", contract = "music.platform.v1", methods = new[]
+            {
+                "music.platform.request", "music.platform.session.update", "music.platform.cache.clear", "music.platform.describe"
             } }
         }
     };

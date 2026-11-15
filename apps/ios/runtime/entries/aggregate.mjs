@@ -6,7 +6,7 @@ import { createSourceRuntimeModule } from '../../../runtime/modules/source-runti
 import { createNeteaseTokenModule } from '../../../runtime/modules/netease-token.mjs';
 import { createPanRuntimeModule } from '../../../runtime/modules/pan-runtime.mjs';
 import { createTMDBDataModule, createDoubanDataModule } from '../../../runtime/modules/metadata-data.mjs';
-import { connectFilmPlayback } from '../../../runtime/entry.mjs';
+import { connectFilmPlayback, connectMusicPlatform } from '../../../runtime/entry.mjs';
 
 let stage = 'arguments';
 try {
@@ -32,6 +32,8 @@ try {
         connectFilmPlayback(modules, { dataRoot });
         stage = 'netease';
         modules.push(createNeteaseTokenModule());
+        stage = 'music-platform';
+        connectMusicPlatform(modules, { dataRoot });
         return modules;
       } catch (error) {
         for (const module of modules) void Promise.resolve(module.close()).catch(() => {});

@@ -14,7 +14,7 @@ import { discoverWorkspaces } from './verify-dependency-lock.mjs';
 import { iosTargetPolicy, lockedNodeHeaders, nativeSourceInputs } from './quickjs/native-inputs.mjs';
 
 const PRODUCTS = Object.freeze({
-  aggregate: ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease'],
+  aggregate: ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform'],
 });
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
@@ -22,6 +22,12 @@ const NATIVE_POLICY = 'scripts/script-host-native.json';
 const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.node';
 const NATIVE_RECEIPT = 'packages/script-host/build/Release/script-host-native.json';
 const SOURCE_SDK = 'packages/script-host/build/Release/source-sdk.js';
+// The common music recipes retain these upstream licenses and original notices.
+// They are central repository texts, independent of npm package files pruning.
+const MUSIC_LICENSES = [
+  'NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt',
+  'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt',
+];
 const NATIVE_SOURCES = Object.freeze({
   quickjs: { version: '0.18.0', commit: 'd7215b0ad3fc2c562e8317fd9bca058fd4863804',
     repository: 'quickjs-ng/quickjs', license: 'LICENSES/quickjs-ng-LICENSE.txt' },
@@ -989,6 +995,7 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       };
     });
     copySharedRuntime();
+    for (const name of MUSIC_LICENSES) copy(`LICENSES/${name}`, `licenses/${name}`);
     for (const node of graph.nodes) {
       copyPackage(node);
       if (node.nativeBuild) {

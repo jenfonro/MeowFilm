@@ -19,6 +19,7 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
     @Published public private(set) var confirmation: MusicLibrarySyncConfirmation?
     private let service: any MusicLibrarySyncing
     private let accountService: (any MusicAccountsServing)?
+    private let settingsReceipts: MusicSettingsReceiptOwner
     private let onLibraryChanged: @MainActor () async -> Void
     private var automatic: (any MusicAutomaticLibrarySyncing)? { service as? any MusicAutomaticLibrarySyncing }
     public var supportsAutomatic: Bool { automatic != nil }
@@ -30,16 +31,19 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
     private var active = false
     private var syncID: UUID?
     private var syncTask: Task<MusicLibrarySyncState, Error>?
+    private var settingsTask: Task<MusicAutomaticLibrarySyncSaveResult, Error>?
     private var loadID = UUID()
     private var presentationActive = true
     private var pendingConfirmation: UUID?
 
     public init(service: any MusicLibrarySyncing, accounts: (any MusicAccountsServing)? = nil,
+                settingsReceipts: MusicSettingsReceiptOwner,
                 onLibraryChanged: @escaping @MainActor () async -> Void = {}) {
-        self.service = service; accountService = accounts; self.onLibraryChanged = onLibraryChanged
+        self.service = service; accountService = accounts; self.settingsReceipts = settingsReceipts
+        self.onLibraryChanged = onLibraryChanged
     }
     public var canSync: Bool {
-        active && isAvailable && presentationActive && !busy && pendingConfirmation == nil &&
+        active && isAvailable && presentationActive && !busy && settingsTask == nil && pendingConfirmation == nil &&
             selections.contains { !$0.kinds.isEmpty }
     }
     public func prepareConfirmation() {
@@ -72,7 +76,7 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
         selections.first { $0.platform == platform } ?? .init(platform: platform)
     }
     public func select(_ platform: MusicAccountPlatform, favorites: Bool? = nil, playlists: Bool? = nil) {
-        guard active, isAvailable, presentationActive, !busy, pendingConfirmation == nil,
+        guard active, isAvailable, presentationActive, !busy, settingsTask == nil, pendingConfirmation == nil,
               !supportsAutomatic || automaticRevision != nil else { return }
         confirmation = nil
         loadID = UUID() // A late status load must not undo this explicit choice.
@@ -83,14 +87,41 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
         if let automatic, let revision = automaticRevision {
             let own = epoch, id = UUID(), permission = MusicQueueAuthorization()
             let preferences = MusicAutomaticLibrarySyncPreferences(revision: revision, selections: selections)
-            syncID = id; busy = true; error = nil; writeAuthorization = permission
-            let task = Task {
-                try permission.check(); try Task.checkCancellation()
+            busy = true; error = nil
+            let keys = [
+                favorites == nil ? nil : "library/automatic/" + platform.rawValue + "/favorites",
+                playlists == nil ? nil : "library/automatic/" + platform.rawValue + "/playlists"
+            ].compactMap { $0 }
+            let task = settingsReceipts.submit(settings: keys, operation: "保存自动同步设置") {
+                defer { permission.revoke() }
                 return try await automatic.saveAutomaticLibrarySync(preferences, requestID: id, authorization: permission)
             }
-            syncTask = task
-            completionTask = Task { [weak self] in
-                await self?.finishAutomatic(task, own: own, id: id, permission: permission)
+            settingsTask = task
+            Task { [weak self] in
+                let result = await task.result
+                guard let self else { return }
+                settingsTask = nil
+                guard current(own) else {
+                    if active, isAvailable, presentationActive { await load() }
+                    return
+                }
+                busy = false
+                switch result {
+                case .success(let receipt):
+                    selections = receipt.preferences.selections
+                    automaticRevision = receipt.preferences.revision
+                    switch receipt.synchronization {
+                    case .success(let value): state = value; error = nil
+                    case .failure(let failure): error = failure.localizedDescription
+                    }
+                    await onLibraryChanged()
+                case .failure(let failure):
+                    let problem = failure as? MusicServiceError ?? MusicServiceError.sanitized(failure)
+                    error = problem == .commitUnconfirmed ? nil : problem.localizedDescription
+                    // Read once on the live page, never replay an uncertain save.
+                    await load()
+                    if current(own), problem != .commitUnconfirmed { error = problem.localizedDescription }
+                }
             }
         }
     }

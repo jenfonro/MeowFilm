@@ -16,33 +16,6 @@ public enum MusicSearchPagination {
         }
     }
     public static func pageSize(_ platform: MusicPublicBrowsePlatform) -> Int { 30 }
-    public static func offset(platform: MusicPublicBrowsePlatform, page: Int, limit: Int) throws -> Int {
-        guard page > 0, (1...100).contains(limit) else { throw MusicServiceError.invalidRequest }
-        let (offset, overflow) = (page - 1).multipliedReportingOverflow(by: limit)
-        guard !overflow, offset <= Int.max - limit else { throw MusicServiceError.invalidRequest }
-        return offset
-    }
-    public static func validNextPage(page: Int, limit: Int, next: Int?, hasItems: Bool) -> Bool {
-        guard page > 0, (1...100).contains(limit) else { return false }
-        guard let next else { return true }
-        let (expected, overflow) = page.addingReportingOverflow(1)
-        return !overflow && hasItems && next == expected
-    }
-    /// A short raw page is terminal. A full page ends when its end offset
-    /// has reached or exceeded the reported total. Empty pages
-    /// are a normal end, even when the reported total is still larger.
-    public static func nextPage(page: Int, limit: Int, count: Int, total: Int) throws -> Int? {
-        guard page > 0, (1...100).contains(limit), count >= 0, count <= limit, total >= 0 else {
-            throw MusicServiceError.upstreamInvalid
-        }
-        let (offset, overflow) = (page - 1).multipliedReportingOverflow(by: limit)
-        guard !overflow, offset <= Int.max - limit else {
-            throw MusicServiceError.upstreamInvalid
-        }
-        guard count == limit, offset + count < total else { return nil }
-        let (next, nextOverflow) = page.addingReportingOverflow(1)
-        return nextOverflow ? nil : next
-    }
 }
 
 public struct MusicPlaylistSearchPage: Sendable {

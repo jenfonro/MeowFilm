@@ -5,12 +5,53 @@ import MeowMusicFeature
 
 final class MusicScriptAudioFileCacheTests: XCTestCase {
     private func request(_ f: AudioCacheTestFixture, provider: String = "script-a", quality: String = "flac",
-                         platform: String = "mg") -> MusicAudioFileCacheRequest {
-        .init(identity: .init(scope: "script-history", songID: "one", sourceKey: "mg:one", platform: platform,
-                             nativeID: "one", requestedQuality: quality, playbackSignature: "recording", provider: provider),
+                         platform: String = "mg", sourceKey: String = "mg:one", nativeID: String = "one") -> MusicAudioFileCacheRequest {
+        .init(identity: .init(scope: "script-history", songID: "one", sourceKey: sourceKey, platform: platform,
+                             nativeID: nativeID, requestedQuality: quality, provider: provider),
               audio: .init(url: URL(string: "https://script-media.invalid/file?token=synthetic")!,
                            headers: ["referer": "https://script.invalid/", "user-agent": "Synthetic"], fileCachePolicy: .init(allowed: true)),
               expectedDuration: 60, confirmedAt: f.clock.now(), authorization: MusicQueueAuthorization())
+    }
+    func testLongRawPlatformLocatorsPrepareAndSurviveCurrentFormatColdRead() async throws {
+        let f = try AudioCacheTestFixture(); defer { f.cleanup() }
+        let locator = " \t" + String(repeating: "平台定位", count: 600) + "\n"
+        let value = request(f, sourceKey: "mg:" + locator, nativeID: locator)
+        let transport = AudioCacheTestTransport()
+        let first = f.cache(transport: transport)
+        let source = try await first.preparePlayback(.init(identity: value.identity, audio: value.audio,
+            expectedDuration: value.expectedDuration, authorization: value.authorization,
+            playbackAuthorization: value.playbackAuthorization))
+        source.confirmPlayback(at: f.clock.now())
+        let version = await source.result()
+        XCTAssertNotNil(version)
+        source.retire()
+        await first.close()
+        let cold = f.cache(transport: transport)
+        let hit = await cold.lookup(scope: value.identity.scope, songID: value.identity.songID,
+            authorization: MusicQueueAuthorization(), accepts: { $0 == value.identity })
+        XCTAssertEqual(hit?.identity, value.identity)
+        XCTAssertEqual(hit?.version, version)
+        XCTAssertEqual(hit?.duration, 60)
+        XCTAssertEqual(hit?.measuredQuality, "flac")
+        let transfers = await transport.count
+        XCTAssertEqual(transfers, 1, "Cold lookup cannot redownload a valid locator's complete file")
+        await cold.close()
+    }
+    func testActualEmptyPlatformLocatorsCannotStartFilePreparation() async throws {
+        let f = try AudioCacheTestFixture(); defer { f.cleanup() }
+        let transport = AudioCacheTestTransport(), cache = f.cache(transport: transport)
+        for locator in [(sourceKey: "", nativeID: "one"), (sourceKey: "mg:one", nativeID: "")] {
+            let value = request(f, sourceKey: locator.sourceKey, nativeID: locator.nativeID)
+            do {
+                _ = try await cache.preparePlayback(.init(identity: value.identity, audio: value.audio,
+                    expectedDuration: value.expectedDuration, authorization: value.authorization,
+                    playbackAuthorization: value.playbackAuthorization))
+                XCTFail("An actual missing locator started file preparation")
+            } catch NativeMusicAudioCacheFailure.miss {}
+        }
+        let transfers = await transport.count
+        XCTAssertEqual(transfers, 0)
+        await cache.close()
     }
     func testMultipleProviderAndQualityFilesSurviveDiskReopenAndOfficialClear() async throws {
         let f = try AudioCacheTestFixture(); defer { f.cleanup() }
@@ -99,6 +140,6 @@ final class MusicScriptAudioFileCacheTests: XCTestCase {
         XCTAssertTrue(MusicMediaDuration.matches(expected: 180, actual: nil))
         XCTAssertTrue(MusicMediaDuration.matches(expected: 0, actual: 180))
         XCTAssertFalse(MusicRecordingIdentity(title: "Song", artist: "Artist", duration: 180)
-            .isCompatible(with: .init(title: "Song", artist: "Artist", duration: 190)))
+            .matches(.init(title: "Song", artist: "Artist", duration: 190)))
     }
 }

@@ -88,8 +88,6 @@ public sealed partial class MusicCapability
                 { chorusStart = hit.Start; chorusEnd = hit.End; ChorusBindings(); return; }
                 var reply = await Call("music.catalog.chorus", new { platform, id }, request.Token);
                 if (request.IsCancellationRequested || chorusKey != key || epoch != Interlocked.Read(ref chorusAccountEpoch)) return;
-                if (MusicDto.Text(reply, "platform") != platform ||
-                    !string.Equals(MusicDto.Text(reply, "id"), id, StringComparison.OrdinalIgnoreCase)) return;
                 var point = reply.GetProperty("point");
                 if (point.ValueKind != JsonValueKind.Object) return;
                 double start = point.GetProperty("start").GetDouble(), end = point.GetProperty("end").GetDouble();

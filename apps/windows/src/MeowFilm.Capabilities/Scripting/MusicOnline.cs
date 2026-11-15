@@ -88,17 +88,11 @@ public sealed partial class MusicCapability
         if (ReferenceEquals(onlineCancellation, source)) onlineCancellation = null;
         source.Dispose(); OnlineBindings();
     }
-    private static JsonElement ParseObject(string json)
-    {
-        if (json.Length > 16384) throw new MusicOperationException("LIMIT");
-        using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 24 });
-        if (document.RootElement.ValueKind != JsonValueKind.Object) throw new MusicOperationException("INVALID_REQUEST");
-        return document.RootElement.Clone();
-    }
-    private async Task ReadOnlineSettings(CancellationToken token)
+    private async Task ReadOnlineSettings(CancellationToken token, long? sourceGeneration = null)
     {
         var reply = await QualityCall("music.quality.settings.get", null, token);
         token.ThrowIfCancellationRequested();
+        if (sourceGeneration is { } generation && !SourceManagementCurrent(generation)) return;
         AcceptQuality(reply);
         PublishOnlineSettings(reply.GetProperty("onlineSettings"));
     }
@@ -112,7 +106,8 @@ public sealed partial class MusicCapability
         TrackMusicRecovery(RetireMusicRecovery());
         InvalidateCatalogAction();
         title = title.Trim(); artist = artist.Trim(); album = album.Trim();
-        var locator = ParseObject(musicInfo.GetRawText());
+        if (musicInfo.ValueKind != JsonValueKind.Object) throw new MusicOperationException("INVALID_REQUEST");
+        var locator = musicInfo.Clone();
         onlineCancellation?.Cancel();
         return RunAsync(async () =>
         {
