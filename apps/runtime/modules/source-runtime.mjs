@@ -106,10 +106,12 @@ export function createSourceRuntimeModule({
   platform = 'unknown',
   dataRoot,
   documents,
+  configurationOwner = 'runtime',
 } = {}) {
   requireValue(typeof hostFactory === 'function' &&
     typeof network === 'function' &&
     typeof platform === 'string' && platform.length > 0 &&
+    ['runtime', 'native'].includes(configurationOwner) &&
     (capabilityOwner === undefined ||
       typeof capabilityOwner?.invoke === 'function' &&
       typeof capabilityOwner?.releaseProfiles === 'function'));
@@ -151,8 +153,9 @@ export function createSourceRuntimeModule({
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
   };
-  library = createSourceLibrary({ dataRoot, documents, host, owner, web, network,
-    fail: code => new Failure(code), errorCode, guard, lifetime });
+  library = createSourceLibrary({ dataRoot, documents, host, owner, web, network, configurationOwner,
+    fail: code => new Failure(code), errorCode, guard, lifetime,
+    externalInstallation: id => bindings.has(id) || operations.has(id) });
   const current = id => host.list().find(value => value.installationId === id);
   const instance = (binding, live = current(binding.installationId)) => {
     requireValue(live && live.generation === binding.generation, 'STALE_SOURCE');
@@ -520,6 +523,7 @@ export function createSourceRuntimeModule({
   };
 
   const libraryParameters = {
+    'library.apply': ['revision', 'sources'],
     'library.list': [],
     'library.get': ['installationId'],
     'library.previewImport': ['text', 'url', 'fileName'],

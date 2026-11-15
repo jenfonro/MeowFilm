@@ -32,7 +32,7 @@ public static partial class NovelTests
     private static async Task RetainedProcessing()
     {
         await using var store = new MemoryStore(); var library = new NovelLibrary(store);
-        var runtime = new Runtime { Text = "广告漢語" }; var sources = new NovelSourceService(runtime);
+        var runtime = new Runtime { Text = "广告漢語" }; var sources = NovelTestSources.Create(runtime);
         await using var engine = new RuleProbe();
         await using var module = new NovelCapability(sources, library, new NovelRuleProgram(engine));
         await module.InitializeAsync(default);
@@ -89,7 +89,7 @@ public static partial class NovelTests
     private static async Task ReprocessingAtomic()
     {
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-        var runtime = new Runtime { Text = "广告漢語" }; var sources = new NovelSourceService(runtime);
+        var runtime = new Runtime { Text = "广告漢語" }; var sources = NovelTestSources.Create(runtime);
         await using var engine = new RuleProbe(); await using var rules = new NovelRuleProgram(engine);
         var rule = new NovelRule { Pattern = "广告", Replacement = "旧", IsRegex = false };
         await library.SaveRulesAsync([rule]);
@@ -163,7 +163,7 @@ public static partial class NovelTests
     private static async Task SettingsReturnProcessing()
     {
         await using var store = new MemoryStore(); var runtime = new Runtime { Text = "广告漢語" };
-        var sources = new NovelSourceService(runtime); await using var engine = new RuleProbe();
+        var sources = NovelTestSources.Create(runtime); await using var engine = new RuleProbe();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(engine));
         var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync(), () => module.AbortAsync(), module.CancelShutdownPreparationAsync)
         { Width = 1050, Height = 760, Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
@@ -178,7 +178,7 @@ public static partial class NovelTests
             await OpenSettings();
             await module.Library.SaveRulesAsync([new() { Pattern = "[", IsRegex = true }]);
             await module.Library.SaveAppearanceAsync(module.Library.Appearance with { Conversion = "simplified" });
-            Back(); await Until(() => module.View.IsVisible && !session.Loading && module.Notice.Contains("失败"));
+            Back(); await Until(() => module.View.IsVisible && !session.Loading && module.Notice == "小说设置已保存，当前正文暂未生效");
             Check(session.Blocks.Single().Text == "广告漢語" && module.CaptureNavigationLocation() == location);
             await OpenSettings();
             await module.Library.SaveRulesAsync([new() { Pattern = "广告", Replacement = "返回", IsRegex = false }]);
@@ -208,7 +208,7 @@ public static partial class NovelTests
             [new("image", Src: "https://a.invalid/tall.png"), new("text", string.Concat(Enumerable.Repeat("字号与窗口重排后的正文。\n", 300)))],
             ImageReadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously), ImageReadHold = new(TaskCreationOptions.RunContinuationsAsynchronously) };
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        await using var module = new NovelCapability(new NovelSourceService(runtime), library, new NovelRuleProgram(ruleRuntime));
+        await using var module = new NovelCapability(NovelTestSources.Create(runtime), library, new NovelRuleProgram(ruleRuntime));
         await module.InitializeAsync(default); await library.SaveAppearanceAsync(new() { Mode = "none" });
         await module.ReceiveBookAsync(Book(), default); await module.NavigateAsync(NovelCapability.BookRoute, default);
         await module.Session!.ContinueAsync();

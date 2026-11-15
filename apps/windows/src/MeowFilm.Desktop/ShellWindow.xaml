@@ -382,7 +382,8 @@
                                 VerticalContentAlignment="Stretch" Focusable="False" IsTabStop="False" SizeChanged="OnQueueHostSizeChanged" />
             </Border>
 
-            <local:PlayerDialogHost x:Name="ChannelDialogHost" Grid.Row="1" Grid.RowSpan="2" Grid.ColumnSpan="2" Panel.ZIndex="40"/>
+            <local:PlayerDialogHost x:Name="ChannelDialogHost" Grid.RowSpan="3" Grid.ColumnSpan="2" Panel.ZIndex="40"
+                                   shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
 
             <!-- Auto-sized layout row, never an overlay on scrolling content. No player is created by the shell. -->
             <Border x:Name="PlayerFrame" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed">

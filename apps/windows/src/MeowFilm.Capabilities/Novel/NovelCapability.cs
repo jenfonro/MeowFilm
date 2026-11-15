@@ -17,10 +17,10 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     private readonly NovelSettingsView settings;
     internal FrameworkElement? SearchWebOwner { get; set; }
     internal CancellationToken PresentationToken => presentation.Token;
-    private bool stopping, disposed;
+    private bool stopping, disposed, applyingReaderSettings;
     private Task? preparation, disposal;
     private string route = HomeRoute;
-    public NovelCapability(IRuntimeClient runtime, IDocumentStore store) : this(new NovelSourceService(runtime),
+    public NovelCapability(IRuntimeClient runtime, IDocumentStore store) : this(new NovelSourceService(runtime, store),
         new NovelLibrary(store), new NovelRuleProgram(runtime)) { }
     public NovelCapability(NovelSourceService sources, NovelLibrary library, NovelRuleProgram rules)
     {
@@ -30,7 +30,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
             new(CategoriesRoute, "分类", "\uE8A9"),
             new(BookRoute, "书籍详情", "\uE8F1", ShowInSidebar: false), new(ReaderRoute, "阅读", "\uE8F1", ShowInSidebar: false)];
         view = new(this); settings = new(this);
-        Library.Changed += LibraryChanged; Sources.Changed += SourcesChanged;
+        Library.Changed += LibraryChanged; Sources.Changed += SourcesChanged; Sources.ApplyFailed += SourceApplyFailed;
         Sources.InteractAsync = (request, token) =>
         {
             view.PauseReading();
@@ -59,12 +59,43 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
     public event EventHandler? SettingsRequested;
     internal void RequestSettings() => SettingsRequested?.Invoke(this, EventArgs.Empty);
-    private void LibraryChanged(object? sender, EventArgs e) { settings.Refresh(); Publish(); }
+    private void LibraryChanged(object? sender, EventArgs e)
+    {
+        settings.Refresh(); Publish();
+        RefreshReaderSettings();
+    }
+    internal void RefreshReaderSettings()
+    {
+        if (!stopping && !disposed && !applyingReaderSettings && view.IsVisible && route == ReaderRoute &&
+            Session is { NeedsReprocessing: true, Loading: false })
+            _ = ApplyReaderSettingsAsync();
+    }
+    private async Task ApplyReaderSettingsAsync()
+    {
+        applyingReaderSettings = true;
+        try
+        {
+            await work.Run(async ct =>
+            {
+                while (view.IsVisible && route == ReaderRoute && Session is { NeedsReprocessing: true, Loading: false })
+                    await ReprocessCurrentAsync(ct);
+                return true;
+            });
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception) { if (!stopping && !disposed) Notify("小说设置已保存，当前正文暂未生效"); }
+        finally { applyingReaderSettings = false; }
+    }
+    private void SourceApplyFailed(object? sender, string text)
+    {
+        if (stopping || disposed) return;
+        if (view.Dispatcher.CheckAccess()) Notify(text);
+        else _ = view.Dispatcher.InvokeAsync(() => { if (!stopping && !disposed) Notify(text); });
+    }
     private void SourcesChanged(object? sender, EventArgs e)
     {
         Search.SourcesChanged();
-        if (e is not NovelSourceProjectionChange { Initial: true } && Session is { } book &&
-            !Sources.Sources.Any(s => s.InstallationId == book.Book.InstallationId && s.Enabled && s.Revision == book.Book.Revision))
+        if (e is NovelSourceProjectionChange change && Session is { } book && change.Retired.Contains(book.Book.InstallationId))
         { book.Cancel(); view.PauseReading(); }
         InvalidateDiscoverySource();
         settings.Refresh(); Publish();
@@ -72,7 +103,9 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     public async Task InitializeAsync(CancellationToken token)
     {
         await Library.InitializeAsync(token);
+        await Sources.EnsureReadyAsync(token);
     }
+    public Task StartSourcesAsync(CancellationToken token = default) => Sources.StartAsync(token);
     public Task NavigateAsync(string next, CancellationToken token) => NavigateAsync(next, Session, token);
     private async Task NavigateAsync(string next, NovelBookSession? session, CancellationToken token)
     {
@@ -81,7 +114,13 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         if (!Navigation.Any(n => n.Route == next)) throw new ArgumentException("Unknown novel route.", nameof(next));
         bool changed = route != next || !ReferenceEquals(Session, session);
         if (route == ReaderRoute && (changed || session?.NeedsReprocessing == true)) await view.SaveAndPauseAsync();
-        if (next == ReaderRoute && session is not null) await session.ReprocessAsync(token);
+        if (next == ReaderRoute && session is not null)
+        {
+            try { await session.ReprocessAsync(token); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception) when (ReferenceEquals(session, Session) && route == ReaderRoute)
+            { Notify("小说设置已保存，当前正文暂未生效"); }
+        }
         token.ThrowIfCancellationRequested();
         if (changed) CancelPresentation();
         if (!ReferenceEquals(Session, session)) { Session?.Cancel(); Session = session; }
@@ -174,7 +213,12 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         catch (OperationCanceledException) { }
         catch (Exception error) { Notify(error is DocumentStoreException ? "小说数据保存失败，原记录已保留" : "小说操作失败，请重试"); }
     }
-    public void Notify(string text) { Notice = text; Publish(); }
+    public void Notify(string text)
+    {
+        Notice = text;
+        if (settings.IsVisible) settings.PostNotice(text); else view.PostNotice(text);
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Notice)));
+    }
     private void Publish()
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null)); view.Present();
@@ -213,7 +257,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         finally
         {
             disposed = true; presentation.Cancel(); presentation.Dispose(); view.Dispose(); settings.Dispose();
-            Sources.Changed -= SourcesChanged; Library.Changed -= LibraryChanged;
+            Sources.Changed -= SourcesChanged; Sources.ApplyFailed -= SourceApplyFailed; Library.Changed -= LibraryChanged;
             await Rules.DisposeAsync();
         }
     }

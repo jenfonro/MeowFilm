@@ -3,6 +3,7 @@
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop">
  <ResourceDictionary.MergedDictionaries>
   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
+  <ResourceDictionary Source="/MeowFilm.Desktop;component/FilterChrome.xaml"/>
  </ResourceDictionary.MergedDictionaries>
  <Style x:Key="Novel.Discovery.Icon" TargetType="Path">
   <Setter Property="Stroke" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
@@ -42,53 +43,14 @@
    </Trigger>
   </Style.Triggers>
  </Style>
- <Style x:Key="Novel.Discovery.Tab" TargetType="RadioButton">
-  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
-  <Setter Property="Height" Value="55"/><Setter Property="Margin" Value="0,0,30,0"/>
-  <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
-  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
-   <Grid Background="Transparent">
-    <ContentPresenter VerticalAlignment="Center"/>
-    <Border x:Name="Underline" Height="2" VerticalAlignment="Bottom" Background="Transparent"/>
-   </Grid>
-   <ControlTemplate.Triggers>
-    <Trigger Property="IsChecked" Value="True">
-     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-     <Setter TargetName="Underline" Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
-    </Trigger>
-    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/></Trigger>
-    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-    </Trigger>
-    <MultiTrigger><MultiTrigger.Conditions>
-     <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsChecked" Value="True"/>
-    </MultiTrigger.Conditions>
-     <Setter TargetName="Underline" Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
-    </MultiTrigger>
-   </ControlTemplate.Triggers>
-  </ControlTemplate></Setter.Value></Setter>
+ <Style x:Key="Novel.Discovery.Tab" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}">
+  <Setter Property="Margin" Value="0,0,28,0"/>
  </Style>
- <Style x:Key="Novel.Discovery.Choice" TargetType="RadioButton">
-  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/><Setter Property="MinHeight" Value="24"/>
-  <Setter Property="Padding" Value="10,3"/><Setter Property="Margin" Value="0,3,12,3"/>
-  <Setter Property="Background" Value="Transparent"/>
-  <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
-  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
-   <Border Background="{TemplateBinding Background}" CornerRadius="4" Padding="{TemplateBinding Padding}">
-    <ContentPresenter VerticalAlignment="Center"/>
-   </Border>
-  </ControlTemplate></Setter.Value></Setter>
+ <Style x:Key="Novel.Discovery.Choice" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.FilterChip}">
   <Style.Triggers>
-   <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
    <Trigger Property="IsChecked" Value="True">
-    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/>
+    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.FloatingSurface}"/>
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-   </Trigger>
-   <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-    <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
    </Trigger>
    <MultiTrigger><MultiTrigger.Conditions>
     <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsChecked" Value="True"/>
@@ -118,7 +80,7 @@
  </Style>
  <Style x:Key="Novel.Discovery.Surface" TargetType="Border">
   <Setter Property="CornerRadius" Value="8"/>
-  <Setter Property="Background" Value="#F6F7F6"/>
+  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
   <Style.Triggers>
    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
@@ -128,6 +90,6 @@
   </Style.Triggers>
  </Style>
  <Style x:Key="Novel.Discovery.Feature" TargetType="Border" BasedOn="{StaticResource Novel.Discovery.Surface}">
-  <Setter Property="Background" Value="#F0F4F0"/>
+  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/>
  </Style>
 </ResourceDictionary>

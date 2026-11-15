@@ -1,7 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media;
 
 namespace MeowFilm.Desktop;
 
@@ -11,7 +10,7 @@ public sealed class PlayerDialogHost : Grid
     private static readonly DependencyProperty HostProperty = DependencyProperty.RegisterAttached(
         "Host", typeof(PlayerDialogHost), typeof(PlayerDialogHost));
     private FrameworkElement? anchor, panel;
-    private Action? closed;
+    private Action? closed, closeRequested;
     private MouseButton? dismissButton;
     private bool dismissOnOutside = true;
     public bool IsOpen => panel is not null;
@@ -20,7 +19,7 @@ public sealed class PlayerDialogHost : Grid
     public PlayerDialogHost()
     {
         Visibility = Visibility.Collapsed;
-        Background = new SolidColorBrush(Color.FromArgb(100, 0, 0, 0));
+        SetResourceReference(StyleProperty, "MeowFilm.DialogHost");
         ClipToBounds = true;
         FocusManager.SetIsFocusScope(this, true);
         KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.Cycle);
@@ -39,10 +38,11 @@ public sealed class PlayerDialogHost : Grid
     public static PlayerDialogHost? Find(DependencyObject owner) =>
         Window.GetWindow(owner)?.GetValue(HostProperty) as PlayerDialogHost;
 
-    public void Show(FrameworkElement owner, FrameworkElement content, Action onClosed, bool dismissOnOutside = true)
+    public void Show(FrameworkElement owner, FrameworkElement content, Action onClosed, bool dismissOnOutside = true,
+        Action? onCloseRequested = null)
     {
         Close();
-        anchor = owner; panel = content; closed = onClosed; this.dismissOnOutside = dismissOnOutside;
+        anchor = owner; panel = content; closed = onClosed; closeRequested = onCloseRequested; this.dismissOnOutside = dismissOnOutside;
         owner.Unloaded += OwnerUnloaded;
         owner.IsVisibleChanged += OwnerVisibilityChanged;
         content.HorizontalAlignment = HorizontalAlignment.Center;
@@ -66,7 +66,7 @@ public sealed class PlayerDialogHost : Grid
     {
         if (!IsOpen || e.Key != Key.Escape) return false;
         e.Handled = true;
-        Close();
+        RequestClose();
         return true;
     }
 
@@ -89,7 +89,7 @@ public sealed class PlayerDialogHost : Grid
             e.OriginalSource is DependencyObject node && (ReferenceEquals(node, panel) || panel.IsAncestorOf(node))) return;
         HandleOutsidePointer(e, this);
     }
-    // The shell also routes application header controls here; native caption/drag areas remain untouched.
+    // The shell routes header pointers through the same outside-press barrier.
     public void HandleOutsidePointer(MouseButtonEventArgs e, FrameworkElement bounds)
     {
         if (!IsOpen) return;
@@ -110,7 +110,7 @@ public sealed class PlayerDialogHost : Grid
             e.Handled = true;
             bool inside = new Rect(bounds.RenderSize).Contains(e.GetPosition(bounds));
             CancelPress();
-            if (inside) Close();
+            if (inside) RequestClose();
         }
     }
     protected override void OnLostMouseCapture(MouseEventArgs e)
@@ -119,6 +119,11 @@ public sealed class PlayerDialogHost : Grid
     {
         dismissButton = null;
         if (ReferenceEquals(Mouse.Captured, this)) Mouse.Capture(null);
+    }
+    public void RequestClose()
+    {
+        if (!IsOpen) return;
+        if (closeRequested is { } request) request(); else Close();
     }
     public void Close()
     {
@@ -132,6 +137,7 @@ public sealed class PlayerDialogHost : Grid
         if (panel is null) return;
         Children.Remove(panel);
         panel = null;
+        closeRequested = null;
         Visibility = Visibility.Collapsed;
         dismissOnOutside = true;
         FocusManager.SetFocusedElement(this, null);

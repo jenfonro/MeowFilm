@@ -27,7 +27,7 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 - 窗口只观察 AppHost 的真实两阶段关闭结果。超时/失败保留窗口与确认；强制清理不冒称保存成功，取消准备只有实际成功后才恢复业务。首次 `ShutdownCompletion` 不能用来无条件退出。
 - `PrepareForRender()` 只挂载视图并支持 STA 离屏检查，不 Show、不初始化业务。
 
-资源为 `/MeowFilm.Desktop;component/Theme.xaml`。样式覆盖焦点、键盘、悬停、按下、取消、禁用、卸载、高对比、减少动画与缩放。能力可覆盖明确语义色，不复制未知资源或按领域名分支。通知经 NoticeOutlet/NoticeStack，不添加解释性文字。
+资源为 `/MeowFilm.Desktop;component/Theme.xaml`。样式覆盖焦点、键盘、悬停、按下、取消、禁用、卸载、高对比、减少动画与缩放。能力可覆盖明确语义色，不复制未知资源或按领域名分支。通知经 NoticeOutlet/NoticeStack，不添加解释性文字。`Message` 保留同端点状态替换语义；一次性操作结果使用 `Post`，以独立事件身份发布，不随页面重绘或重新显示重发。
 
 应用菜单使用 `MeowFilm.ContextMenu`／`MeowFilm.MenuItem`：根菜单与子菜单共用圆角、阴影留白及 `MeowFilm.FloatingSurface`；动态子项的局部样式须 `BasedOn` 公共项。模板保留富内容 Header、访问键、图标、快捷键文字、普通可勾选项和 WPF 子菜单键盘逻辑。音质仅以公共项派生当前背景，不另建模板或画勾。Shell 对自身及 Owner 链归属该 Shell 的窗口中的 WPF 自动编辑菜单及其内部派生项目只应用外观，不新建、删减或替换剪贴板、拼写／IME 项及 CommandTarget；原生默认菜单没有提供的操作也不自行增加；不接管无 Shell owner 的独立窗口。
 

@@ -26,16 +26,17 @@ public static class NovelManagementTests
     private static void Check(bool condition, string message = "Novel management assertion failed") { if (!condition) throw new InvalidOperationException(message); }
     private static async Task SavedRevision()
     {
-        var runtime = new NovelTests.Runtime(); var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+        var runtime = new NovelTests.Runtime(); var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         var original = sources.Sources.Single(); runtime.Listing = _ => throw new IOException("list unavailable");
         try
         {
-            var first = await sources.SaveAsync(original, "{}");
+            string definition = (await sources.GetAsync(original)).GetProperty("definition").GetString()!;
+            var first = await sources.SaveAsync(original, definition);
             Check(first.GetProperty("source").GetProperty("revision").GetInt32() == original.Revision + 1);
             Check(sources.Sources.Single().Revision == original.Revision + 1);
-            await sources.SaveAsync(sources.Sources.Single(), "{}");
+            await sources.SaveAsync(sources.Sources.Single(), definition);
             Check(sources.Sources.Single().Revision == original.Revision + 2);
-            Check(runtime.Calls.Count(c => c.Method.EndsWith("library.list", StringComparison.Ordinal)) == 1);
+            Check(runtime.SourceStore.Reads == 1 && !runtime.Calls.Any(c => c.Method.EndsWith("library.save", StringComparison.Ordinal)));
         }
         finally { await sources.PrepareShutdownAsync(); }
     }
@@ -224,7 +225,7 @@ public static class NovelManagementTests
             await DialogPreview(surface, address, "网络导入", "确定", "source-network-import");
             var rulePreview = new ManagementImportSelection([new("净化一", "正文", "新增"), new("净化二", "正文", "已有")], [0]); Check(rulePreview.Selected.SetEquals([0]));
 
-            var runtime = new NovelTests.Runtime(); var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+            var runtime = new NovelTests.Runtime(); var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
             await using var store = new NovelTests.MemoryStore();
             var library = new NovelLibrary(store); await library.InitializeAsync();
             await library.SaveRulesAsync([new NovelRule { Id = "visual-rule", Name = "净化广告", Group = "正文", Pattern = "广告" }]);
@@ -244,8 +245,8 @@ public static class NovelManagementTests
             host.Background = priorBackground; host.UpdateLayout();
             Check(NovelTests.Find<TextBlock>(module.SettingsView).Any(text => text.Text == "书源a"));
             await Preview("source-manager-product", 880, 900);
-            NovelTests.Find<Button>(module.SettingsView).Single(button => button.Content as string == "替换净化")
-                .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            NovelTests.Find<RadioButton>(module.SettingsView).Single(button => button.Content as string == "替换净化")
+                .IsChecked = true;
             await Dispatcher.Yield(DispatcherPriority.Render);
             Check(NovelTests.Find<TextBlock>(module.SettingsView).Any(text => text.Text == "净化广告"));
             await Preview("rule-manager-product", 880, 900);

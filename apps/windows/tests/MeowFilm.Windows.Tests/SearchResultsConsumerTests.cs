@@ -567,7 +567,7 @@ public static partial class MusicUiTests
             Music = music; Search = search;
             Film = new(new SearchHome(), search.Service, new FilmPlaybackSession(Runtime.CaptureConnectionAsync, new FilmNativeProbe()),
                 new FilmLibrary(new FilmMemoryStore()), metadata);
-            Novel = new(new NovelSourceService(novelRuntime ?? new NovelTests.Runtime()), new NovelLibrary(new NovelTests.MemoryStore()),
+            Novel = new(NovelTestSources.Create(novelRuntime ?? new NovelTests.Runtime()), new NovelLibrary(new NovelTests.MemoryStore()),
                 new NovelRuleProgram(novelRules));
             Page = new(music.Module, Film, Novel);
             Shell = new ShellWindow([Music.Module, Film, Novel], [Page], async () =>
