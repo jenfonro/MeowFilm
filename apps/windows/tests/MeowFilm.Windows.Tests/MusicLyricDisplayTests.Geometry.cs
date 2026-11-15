@@ -162,7 +162,9 @@ public static partial class MusicLyricDisplayTests
             var scroll = LyricVisuals(list).OfType<ScrollViewer>().First();
             Check(fade.OpacityMask is null,
                 "the lyric text layer is not composited through a whole-viewport opacity mask");
-            Check(TextOptions.GetTextRenderingMode(list) == TextRenderingMode.Auto,
+            var text = LyricVisuals(list).OfType<TextBlock>().ToArray();
+            Check(text.Length > 0 && text.All(block =>
+                TextOptions.GetTextRenderingMode(block) == TextRenderingMode.Auto),
                 "detail lyric glyphs use native automatic rendering");
             Check(ReferenceEquals(edge.Source, backdrop), "the edge fade projects the page's own cover backdrop");
             Check(ReferenceEquals(backdrop.Background, view.Background),
@@ -258,6 +260,107 @@ public static partial class MusicLyricDisplayTests
             Equal(0, f.Playback.Seeks);
         }
         finally { window.Close(); f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); }
+    }
+
+    private static async Task VerifyLyricRendering()
+    {
+        await using var f = await Fixture.Create();
+        var entered = Signal();
+        var release = Signal();
+        f.Http.Block = () => { entered.TrySetResult(); return release.Task; };
+        var activation = f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
+        var view = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+        var window = LyricWindow(view);
+        void Typography(FrameworkElement text, double size)
+        {
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(text));
+            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(text));
+            Equal(SystemFonts.MessageFontFamily, (FontFamily)text.GetValue(TextBlock.FontFamilyProperty));
+            Equal(FontWeights.Normal, (FontWeight)text.GetValue(TextBlock.FontWeightProperty));
+            Equal(size, (double)text.GetValue(TextBlock.FontSizeProperty));
+        }
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            window.Show(); window.UpdateLayout();
+            var state = (TextBlock)view.FindName("LyricState");
+            Equal("加载中…", state.Text);
+            Typography(state, 20);
+            Check(state.IsVisible, "the real loading text is mounted");
+            release.TrySetResult();
+            await activation;
+            var queue = Ok(await f.Application.ExecuteAsync("music.queue.get"));
+            await f.Playback.OpenAsync("music", queue.GetProperty("currentId").GetString()!,
+                new Uri("https://synthetic.invalid/unused"), "", default);
+            f.Module.Lyrics[0] = new(1, "And disappear inside", "然后隐去", "ran hou yin qu");
+            f.Module.Lyrics[1] = new(20, "逐字歌词", "逐字译文", "zhu zi ge ci",
+                [new("逐字", 20, 2), new("歌词", 22, 2)]);
+            var list = (ListBox)view.FindName("LyricList");
+            foreach (var position in new[] { 0d, 21d, 23d, 1d })
+            {
+                f.Playback.Position = position;
+                int selected = position < 1 ? -1 : position < 20 ? 0 : 1;
+                await WaitForLyric(() => list.SelectedIndex == selected &&
+                    list.ItemContainerGenerator.ContainerFromIndex(0) is ListBoxItem &&
+                    LyricVisuals(list).OfType<MusicLyricWordView>().Count() == 2);
+                window.UpdateLayout();
+                await Dispatcher.Yield(DispatcherPriority.Render);
+                var plain = LyricVisuals(list).OfType<TextBlock>()
+                    .Single(text => text.Text == "And disappear inside");
+                Check(plain.IsVisible, "ordinary lyrics retain their native text control");
+                Typography(plain, 20);
+                Equal(selected == 0 ? Color.FromRgb(235, 234, 237) : Color.FromRgb(139, 137, 140),
+                    ((SolidColorBrush)plain.Foreground).Color);
+                foreach (var content in new[] { "然后隐去", "ran hou yin qu", "逐字译文", "zhu zi ge ci" })
+                {
+                    var optional = LyricVisuals(list).OfType<TextBlock>().Single(text => text.Text == content);
+                    Check(optional.IsVisible, "translation and romanization are actually presented");
+                    Typography(optional, 14);
+                }
+                var words = LyricVisuals(list).OfType<MusicLyricWordView>().ToArray();
+                foreach (var word in words)
+                {
+                    Typography(word, 20);
+                    Check(word.Stroke is null, "full player words do not acquire desktop outlines");
+                    Equal(selected == 1 ? Color.FromRgb(244, 243, 246) : Color.FromRgb(146, 143, 144),
+                        ((SolidColorBrush)word.Highlight).Color);
+                    Equal(Math.Clamp((position - word.Word!.Time) / word.Word.Duration, 0, 1), word.WordProgress);
+                }
+            }
+            await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
+            window.UpdateLayout();
+            Check(LyricVisuals(list).OfType<TextBlock>().Where(text => text.Name == "LyricTranslation")
+                .All(text => text.Visibility == Visibility.Collapsed), "the normal translation toggle still hides translations");
+            await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
+            DesktopTheme.SetIsHighContrast(view, true);
+            window.UpdateLayout();
+            foreach (var text in LyricVisuals(list).OfType<TextBlock>())
+                Typography(text, text.Name == "LyricTranslation" || text.Text is "ran hou yin qu" or "zhu zi ge ci" ? 14 : 20);
+            foreach (var word in LyricVisuals(list).OfType<MusicLyricWordView>()) Typography(word, 20);
+            var title = (TextBlock)view.FindName("DetailTitle");
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(title));
+            var footer = (MusicPlayerView)((ContentControl)view.FindName("DetailPlayerHost")).Content;
+            var footerText = LyricVisuals(footer).OfType<TextBlock>().ToArray();
+            Check(footerText.Length > 0 && footerText.All(text =>
+                TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto), "the footer keeps native automatic rendering");
+            var delay = (Button)view.FindName("DelayLyricButton");
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(LyricVisuals(delay).OfType<TextBlock>().Single()));
+            f.Http.Block = null;
+            await f.Module.SetMetadataEnabledAsync(
+                f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), false);
+            window.UpdateLayout();
+            Equal(0, f.Module.Lyrics.Count);
+            Equal("暂无歌词", state.Text);
+            Typography(state, 20);
+            Equal(0, f.Playback.Seeks);
+        }
+        finally
+        {
+            release.TrySetResult();
+            window.Close();
+            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            await activation;
+        }
     }
 
     private static Window LyricWindow(FrameworkElement view)

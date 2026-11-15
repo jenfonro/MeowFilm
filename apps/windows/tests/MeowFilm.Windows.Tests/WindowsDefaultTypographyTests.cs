@@ -334,6 +334,8 @@ public static class WindowsDefaultTypographyTests
             Equal(Brushes.LightPink, plain.Foreground, "desktop lyric keeps the user normal color");
             Equal(17d, translation.FontSize, "desktop translation keeps its source size");
             Equal(Brushes.LightPink, translation.Foreground, "desktop translation keeps the user color");
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(plain), "desktop lyrics retain automatic rendering");
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(translation), "desktop translation retains automatic rendering");
 
             line.Row = row with { Words = [new("用户", 0, 1), new("原文", 1, 1)] };
             window.UpdateLayout();
@@ -342,6 +344,8 @@ public static class WindowsDefaultTypographyTests
             Equal(2, words.Length, "real timed words remain in the desktop lyric");
             True(words.All(word => word.FontSize == 32 && word.FontWeight == FontWeights.Normal &&
                 word.FontFamily.Equals(SystemFonts.MessageFontFamily)), "timed words keep the lyric role and size");
+            True(words.All(word => TextOptions.GetTextRenderingMode(word) == TextRenderingMode.Auto),
+                "desktop timed words retain automatic rendering");
             True(words.All(word => Equals(word.Foreground, line.Normal) && Equals(word.Highlight, line.Highlight) &&
                 word.Stroke is not null && word.StrokeThickness > 0), "user colors and outline remain separate roles");
             Equal("用户原文 🙂", UIElementAutomationPeer.CreatePeerForElement(plain)!.GetName(), "lyric retains accessible text");
