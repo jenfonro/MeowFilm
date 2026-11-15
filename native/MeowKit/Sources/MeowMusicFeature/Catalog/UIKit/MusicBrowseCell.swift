@@ -5,6 +5,10 @@ import MeowUI
 @MainActor
 final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     static let reuseIdentifier = "MusicBrowseCell"
+    enum PlaybackLoading {
+        case card
+        case preview(MusicReference)
+    }
     private let artwork = MusicArtworkView(size: 0)
     private let textGradient = CAGradientLayer()
     private let title = UILabel(), subtitle = UILabel(), preview = UILabel()
@@ -14,6 +18,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private let rankingPreview = UIView()
     private let rankingRows = (0..<3).map { _ in MusicBrowseRankingPreviewRow() }
     private let play = UIButton(type: .system)
+    private let spinner = UIActivityIndicatorView(style: .medium)
     private let regularPlayImage = PageIcon.image(.play, size: 17)
     private let rankingPlayImage = PageIcon.image(.play, size: 23)
     private var action: (() -> Void)?
@@ -27,6 +32,8 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private var openAction: (() -> Void)?
     private lazy var pressFeedback = PressFeedback(view: contentView)
     private var embeddedTouchPressed = false
+    private var playbackLoading: PlaybackLoading?
+    private var displayVisible = true
     private(set) var itemID = ""
     var bannerTrailingInset: CGFloat = 14 {
         didSet {
@@ -76,6 +83,14 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         play.layer.shadowOffset = .zero
         play.layer.shadowRadius = 3
         play.addAction(UIAction { [weak self] _ in self?.action?() }, for: .touchUpInside)
+        spinner.isUserInteractionEnabled = false
+        spinner.isAccessibilityElement = false
+        play.addSubview(spinner)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: play.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: play.centerYAnchor),
+        ])
     }
 
     @available(*, unavailable)
@@ -85,13 +100,19 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         didSet { applyPressFeedback() }
     }
 
+    override var isHidden: Bool {
+        didSet { updatePlaybackLoading() }
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         resetPressFeedback()
+        setPlaybackLoading(nil, visible: false)
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        updatePlaybackLoading()
         guard window != nil else { resetPressFeedback(); return }
         var ancestor = superview
         while let view = ancestor {
@@ -136,6 +157,35 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         }
     }
 
+    func setPlaybackLoading(_ loading: PlaybackLoading?, visible: Bool) {
+        playbackLoading = loading
+        displayVisible = visible
+        updatePlaybackLoading()
+    }
+
+    func setDisplayVisible(_ visible: Bool) {
+        displayVisible = visible
+        updatePlaybackLoading()
+    }
+
+    private func updatePlaybackLoading() {
+        let visible = displayVisible && window != nil && !isHidden
+        let loading: Bool
+        if case .card? = playbackLoading { loading = visible && !play.isHidden }
+        else { loading = false }
+        play.setImage(loading ? nil : style == .rankingStack ? rankingPlayImage : regularPlayImage, for: .normal)
+        play.isEnabled = !loading
+        play.accessibilityValue = loading ? "加载中" : nil
+        spinner.color = play.tintColor
+        if loading { if !spinner.isAnimating { spinner.startAnimating() } }
+        else { spinner.stopAnimating() }
+        for button in previews.arrangedSubviews.compactMap({ $0 as? MusicBrowsePreviewButton }) {
+            if case .preview(let reference)? = playbackLoading {
+                button.setPlaybackLoading(visible && !previews.isHidden && reference == button.reference)
+            } else { button.setPlaybackLoading(false) }
+        }
+    }
+
     private func applyPressFeedback() {
         // Grouped song previews own their feedback so their rows never scale twice.
         if previews.arrangedSubviews.contains(where: { ($0 as? MusicBrowsePreviewButton)?.isHighlighted == true }) {
@@ -155,7 +205,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
                    theme: PageTheme, artworkURL: URL? = nil,
                    onPreview: ((MusicRemoteTrack) -> Void)? = nil, showsPlayButton: Bool = true,
                    onPlay: @escaping () -> Void) {
-        if itemID != item.id || style != layout { resetPressFeedback() }
+        if itemID != item.id || style != layout { resetPressFeedback(); playbackLoading = nil }
         style = layout; action = onPlay; itemID = item.id; currentTheme = theme
         artwork.contentMode = layout == .banner ? .scaleAspectFit : .scaleAspectFill
         artwork.layer.cornerRadius = layout == .banner || layout == .artistUpdates ? 0 : 8
@@ -260,6 +310,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             .filter { !$0.isEmpty }.joined(separator: "，")
         play.accessibilityLabel = "播放" + item.title
         play.accessibilityIdentifier = "music.browse.play.\(item.id)"
+        spinner.accessibilityIdentifier = "music.browse.loading.\(item.id)"
         let overlaysArtwork = layout == .featureRail || layout == .banner
         let hasOverlayText = [title.text, subtitle.text].contains {
             $0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -270,6 +321,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         applyTextGradient()
         applyCardSurface()
         applyPressFeedback()
+        updatePlaybackLoading()
         setNeedsLayout()
     }
 
@@ -651,11 +703,13 @@ private enum MusicBrowseFeaturePalette {
 @MainActor
 private final class MusicBrowsePreviewButton: UIButton {
     private let cover = MusicArtworkView(size: 40)
+    private let spinner = UIActivityIndicatorView(style: .medium)
     private let title = UILabel(), artist = UILabel()
     private let row = UIStackView()
     private lazy var pressFeedback = PressFeedback(view: row)
     private var pressedColor = UIColor.clear
     private var action: (() -> Void)?
+    private var playbackLoading = false
     private(set) var reference: MusicReference
     var onHighlightChanged: (() -> Void)?
 
@@ -669,6 +723,14 @@ private final class MusicBrowsePreviewButton: UIButton {
         row.isUserInteractionEnabled = false
         layer.cornerRadius = 8
         addSubview(row); row.pinEdges(to: self, insets: UIEdgeInsets(top: 3, left: 0, bottom: 3, right: 8))
+        spinner.isUserInteractionEnabled = false
+        spinner.isAccessibilityElement = false
+        addSubview(spinner)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: cover.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: cover.centerYAnchor),
+        ])
         addAction(UIAction { [weak self] _ in self?.action?() }, for: .touchUpInside)
         configure(track: track, theme: theme, action: action)
     }
@@ -680,8 +742,12 @@ private final class MusicBrowsePreviewButton: UIButton {
             onHighlightChanged?()
         }
     }
+    override var isHidden: Bool {
+        didSet { updatePlaybackLoading() }
+    }
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        updatePlaybackLoading()
         if window == nil { resetPressFeedback() }
     }
     func resetPressFeedback() {
@@ -689,6 +755,7 @@ private final class MusicBrowsePreviewButton: UIButton {
         pressFeedback.reset()
     }
     func configure(track: MusicRemoteTrack, theme: PageTheme, action: @escaping () -> Void) {
+        if reference != track.ref { playbackLoading = false }
         reference = track.ref; self.action = action
         pressedColor = UIColor(theme.chip)
         backgroundColor = isHighlighted ? pressedColor : .clear
@@ -696,6 +763,21 @@ private final class MusicBrowsePreviewButton: UIButton {
         title.text = track.title; title.textColor = UIColor(theme.ink)
         artist.text = track.artist; artist.textColor = UIColor(theme.muted)
         accessibilityLabel = "播放" + track.title
+        spinner.color = UIColor(theme.ink)
+        spinner.accessibilityIdentifier = "music.browse.preview.loading.\(track.songId)"
+        updatePlaybackLoading()
+    }
+    func setPlaybackLoading(_ loading: Bool) {
+        playbackLoading = loading
+        updatePlaybackLoading()
+    }
+    private func updatePlaybackLoading() {
+        let loading = playbackLoading && window != nil && !isHidden
+        cover.alpha = loading ? 0 : 1
+        isEnabled = !loading
+        accessibilityValue = loading ? "加载中" : nil
+        if loading { if !spinner.isAnimating { spinner.startAnimating() } }
+        else { spinner.stopAnimating() }
     }
 }
 
