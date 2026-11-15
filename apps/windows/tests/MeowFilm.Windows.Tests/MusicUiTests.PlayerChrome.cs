@@ -1202,6 +1202,10 @@ public static partial class MusicUiTests
                     Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(title));
                     Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(lyrics));
                     Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(lyrics));
+                    var lyricText = Visuals(lyrics).OfType<TextBlock>().ToArray();
+                    True(lyricText.Length > 0 && lyricText.All(block =>
+                        TextOptions.GetTextRenderingMode(block) == TextRenderingMode.Auto),
+                        "the actual lyric text uses native automatic rendering");
                     var viewport = Visuals(lyrics).OfType<ScrollViewer>().First();
                     True(Math.Abs(viewport.ViewportHeight - lyrics.ActualHeight) < 1,
                         "lyric edge spacing belongs to scrolling rows, not the visible viewport");
