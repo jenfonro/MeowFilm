@@ -166,7 +166,7 @@ public static partial class NovelTests
         var original = StoredLibrary(store).GetProperty("rules");
         Check(library.Rules.Select(rule => rule.Id).SequenceEqual(["name", "group"]) &&
             library.Rules[0].Name == "" && library.Rules[1].Group == "");
-        var runtime = new Runtime { Text = "广告正文" }; var sources = new NovelSourceService(runtime);
+        var runtime = new Runtime { Text = "广告正文" }; var sources = NovelTestSources.Create(runtime);
         await using var engine = new RuleProbe(); await using var rules = new NovelRuleProgram(engine);
         var session = new NovelBookSession(sources, library, rules, new("projection", "key", Book()));
         NovelBookSession? restored = null;
@@ -290,19 +290,19 @@ public static partial class NovelTests
         await using var store = new MemoryStore();
         var sourceRuntime = new Runtime();
         await using var runtime = new RuleReceiptRuntime { Respond = (_, _) => throw new IOException("runtime offline") };
-        await using var module = new NovelCapability(new NovelSourceService(sourceRuntime), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await using var module = new NovelCapability(NovelTestSources.Create(sourceRuntime), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.InitializeAsync(default);
         await ((NovelSettingsView)module.SettingsView).ImportRulesAsync("""
             [{"id":"bad-regex","pattern":"[","isRegex":true},
-             {"id":"disabled","pattern":"x","isEnabled":false,"timeoutMillisecond":0},
+             {"id":"disabled","pattern":"x","isEnabled":false,"timeoutMillisecond":1},
              {"id":"literal","pattern":"[x]","isRegex":false,"regex":true,"enable":false},false]
             """, default);
-        Check(module.Library.Rules.Count == 3 && module.Library.Rules[0].Pattern == "[" && module.Library.Rules[1].TimeoutMillisecond == 0 &&
+        Check(module.Library.Rules.Count == 3 && module.Library.Rules[0].Pattern == "[" && module.Library.Rules[1].TimeoutMillisecond == 1 &&
             module.Library.Rules[2].Enabled && !module.Library.Rules[2].IsRegex && module.Notice.Contains("规则 4 无效"));
         Check(runtime.Calls.Count == 0 && sourceRuntime.Calls.Count == 0, "Local rule import performed a runtime preflight.");
         var reopened = new NovelLibrary(store); await reopened.InitializeAsync();
         Check(reopened.Rules.Count == 3 && reopened.Rules[0].Pattern == "[" && reopened.Rules[1].Enabled == false);
         var editor = new NovelRuleEditor(module.Library.Rules[1], _ => { });
-        Check(editor.Read().TimeoutMillisecond == 0, "An unchanged rule budget was checked before execution.");
+        Check(editor.Read().TimeoutMillisecond == 1, "The native rule budget changed while opening the editor.");
     }
 }

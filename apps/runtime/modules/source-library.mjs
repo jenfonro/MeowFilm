@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 import { isUtf8 } from 'node:buffer';
 import { PrivateDocuments, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
 import { normalizeSourceDefinition } from '@meowfilm/source-runtime';
+import { decodeJSONValue, encodeJSONValue } from '@meowfilm/runtime-bridge';
 import { InstallationOperations } from './source-candidates.mjs';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -11,13 +12,22 @@ const profile = (id, generation) => `source:${id}:${generation}:`;
 const bool = (value, fallback) => value === undefined ? fallback
   : typeof value === 'string' ? !['false', '0', ''].includes(value.trim().toLowerCase()) : Boolean(value);
 const hash = value => createHash('sha256').update(value).digest('hex');
+const configurationKeys = ['installationId', 'revision', 'name', 'sourceUrl', 'group', 'order',
+  'enabled', 'enabledExplore', 'protocol', 'definition'];
+const installationId = value => typeof value === 'string' &&
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$(?![\s\S])/.test(value);
+const sameConfiguration = (left, right, revision = true) => left && right &&
+  configurationKeys.every(key => !revision && key === 'revision' || left[key] === right[key]);
 
-/** The single permanent source repository; native clients only hold records. */
+/** Source sessions and private state; the default mode also owns permanent definitions. */
 export function createSourceLibrary({ dataRoot, documents, host, owner, web, network,
-  fail, errorCode, guard, lifetime }) {
+  fail, errorCode, guard, lifetime, configurationOwner, externalInstallation = () => false }) {
+  const native = configurationOwner === 'native';
   const disk = documents ?? (dataRoot === undefined ? null : new PrivateDocuments(dataRoot, 'source'));
   const records = new Map(), states = new Map(), images = new Map(), streams = new Set();
+  const sourceLeases = new Map();
   const operations = new InstallationOperations();
+  let privateRecords = new Map(), nativeConfiguration = new Map(), nativeRevision = 0, nativeSnapshotHash;
   let readFailure;
 
   const require = (value, code = 'INVALID_REQUEST') => { if (!value) throw fail(code); };
@@ -40,28 +50,39 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       hasExplore: Boolean(raw.exploreUrl || actions.includes('explore')),
       actions: [...actions], ...(state?.errorCode ? { errorCode: state.errorCode } : {}) };
   }
-  function persist(next = records) {
+  function persist(next = records, removed = []) {
     if (readFailure) throw readFailure;
-    if (!disk) return;
-    const bytes = Buffer.from(JSON.stringify({ schema: 1, sources: [...next.values()] }));
+    if (!native && !disk) return;
+    const nextPrivate = new Map(privateRecords);
+    if (native) {
+      for (const id of removed) nextPrivate.delete(id);
+      for (const item of next.values()) nextPrivate.set(item.installationId, item.private);
+    }
+    const name = native ? 'private.json' : 'library.json';
+    const bytes = Buffer.from(JSON.stringify({ schema: 1, sources: native
+      ? [...nextPrivate].map(([installationId, privateState]) => ({ installationId, private: privateState }))
+      : [...next.values()] }));
     let previous, readComplete = false;
     try {
-      previous = disk.read('library.json'); readComplete = true;
-      disk.write('library.json', bytes);
+      if (disk) {
+        previous = disk.read(name); readComplete = true;
+        if (!native || !Buffer.from(previous ?? []).equals(bytes)) disk.write(name, bytes);
+      }
     }
     catch {
       // A writer may fail after rename. Restore the previous committed bytes,
       // and fence further operations if the storage owner cannot establish them.
       try {
         if (!readComplete) throw fail('STORAGE_ERROR');
-        const current = disk.read('library.json');
+        const current = disk.read(name);
         if (!Buffer.from(current ?? []).equals(Buffer.from(previous ?? []))) {
-          if (previous) disk.write('library.json', previous);
-          else disk.remove('library.json');
+          if (previous) disk.write(name, previous);
+          else disk.remove(name);
         }
       } catch { readFailure = fail('STORAGE_ERROR'); }
       throw fail('STORAGE_ERROR');
     }
+    if (native) privateRecords = nextPrivate;
   }
   function parseDefinition(definition) {
     require(typeof definition === 'string' && definition.trim().length > 0);
@@ -109,6 +130,27 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       definition, private: structuredClone(old?.private ?? emptyPrivate()),
     };
   }
+  function validatePrivate(value) {
+    require(object(value) && Array.isArray(value.cookies) && Array.isArray(value.storage), 'CORRUPT_STORAGE');
+    for (const kind of ['cookies', 'storage']) {
+      for (const entry of value[kind]) {
+        require(Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' &&
+          /^:[A-Za-z0-9._-]+$/.test(`:${entry[0]}`) && Array.isArray(entry[1]), 'CORRUPT_STORAGE');
+        for (const pair of entry[1]) {
+          require(Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string', 'CORRUPT_STORAGE');
+          if (kind === 'cookies') {
+            const cookie = pair[1];
+            require(object(cookie) && ['name', 'value', 'domain', 'path'].every(key =>
+              typeof cookie[key] === 'string') && typeof cookie.hostOnly === 'boolean' &&
+              typeof cookie.secure === 'boolean' && Number.isSafeInteger(cookie.sequence) &&
+              (cookie.httpOnly === undefined || typeof cookie.httpOnly === 'boolean') &&
+              (cookie.sameSite === undefined || [null, 'Lax', 'Strict', 'None'].includes(cookie.sameSite)) &&
+              (cookie.expires === null || Number.isFinite(cookie.expires)), 'CORRUPT_STORAGE');
+          }
+        }
+      }
+    }
+  }
   function validateStored(value) {
     require(object(value) && value.schema === 1 && Array.isArray(value.sources), 'CORRUPT_STORAGE');
     for (const item of value.sources) {
@@ -127,36 +169,35 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       try {
         const normalized = parseDefinition(item.definition);
         require(normalized.importedProtocol === item.protocol, 'CORRUPT_STORAGE');
-        for (const kind of ['cookies', 'storage']) {
-          for (const entry of item.private[kind]) {
-            require(Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' &&
-              /^:[A-Za-z0-9._-]+$/.test(`:${entry[0]}`) && Array.isArray(entry[1]), 'CORRUPT_STORAGE');
-            for (const pair of entry[1]) {
-              require(Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string', 'CORRUPT_STORAGE');
-              if (kind === 'cookies') {
-                const cookie = pair[1];
-                require(object(cookie) && ['name', 'value', 'domain', 'path'].every(key =>
-                  typeof cookie[key] === 'string') && typeof cookie.hostOnly === 'boolean' &&
-                  typeof cookie.secure === 'boolean' && Number.isSafeInteger(cookie.sequence) &&
-                  (cookie.httpOnly === undefined || typeof cookie.httpOnly === 'boolean') &&
-                  (cookie.sameSite === undefined || [null, 'Lax', 'Strict', 'None'].includes(cookie.sameSite)) &&
-                  (cookie.expires === null || Number.isFinite(cookie.expires)), 'CORRUPT_STORAGE');
-              }
-            }
-          }
-        }
+        validatePrivate(item.private);
       } catch { throw fail('CORRUPT_STORAGE'); }
       records.set(item.installationId, item);
     }
   }
   try {
-    const bytes = disk?.read('library.json');
-    if (bytes) {
-      require(isUtf8(bytes), 'CORRUPT_STORAGE');
-      validateStored(JSON.parse(bytes.toString('utf8')));
+    if (native) {
+      const bytes = disk?.read('private.json');
+      if (bytes) {
+        const value = decodeJSONValue(bytes), ids = new Set();
+        require(object(value) && value.schema === 1 && Array.isArray(value.sources), 'CORRUPT_STORAGE');
+        for (const item of value.sources) {
+          require(object(item) && installationId(item.installationId) && !ids.has(item.installationId),
+            'CORRUPT_STORAGE');
+          validatePrivate(item.private);
+          ids.add(item.installationId);
+          privateRecords.set(item.installationId, item.private);
+        }
+      }
+    } else {
+      const bytes = disk?.read('library.json');
+      if (bytes) {
+        require(isUtf8(bytes), 'CORRUPT_STORAGE');
+        validateStored(JSON.parse(bytes.toString('utf8')));
+      }
     }
   } catch (error) {
     records.clear();
+    privateRecords.clear();
     readFailure = error?.code === 'STORAGE_ERROR' || error?.code === 'PERMISSION_DENIED'
       ? fail('STORAGE_ERROR') : fail('CORRUPT_STORAGE');
   }
@@ -227,6 +268,10 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     }
     catch { throw fail('SOURCE_CLEANUP'); }
   }
+  function cleanup(id) {
+    require(!host.stats().cleanupIssues.some(issue => issue.installationId === id) &&
+      host.cleanupPending(id) === 0, 'SOURCE_CLEANUP');
+  }
   async function restore(old) {
     const id = old.installationId;
     const state = stage(old);
@@ -279,7 +324,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     }
   }
   const ready = Promise.resolve().then(async () => {
-    if (readFailure) return;
+    if (readFailure || native) return;
     for (const saved of records.values()) {
       guard(lifetime.signal);
       const item = structuredClone(saved);
@@ -304,6 +349,142 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
   async function access(signal) { assertOpen(signal); await ready; assertOpen(signal); }
   function manage(signal, body) {
     return operations.run('library', async () => { await access(signal); return body(); });
+  }
+  function validateNativeSnapshot(params) {
+    require(native, 'PERMISSION_DENIED');
+    require(Number.isSafeInteger(params.revision) && params.revision > 0 && Array.isArray(params.sources));
+    require(encodeJSONValue(params).length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
+    const next = new Map(), urls = new Set(), liveIds = new Set(host.list().map(item => item.installationId));
+    for (const item of params.sources) {
+      require(object(item) && Object.keys(item).length === configurationKeys.length &&
+        configurationKeys.every(key => Object.hasOwn(item, key)) && installationId(item.installationId) &&
+        Number.isSafeInteger(item.revision) && item.revision > 0 &&
+        ['name', 'sourceUrl', 'group', 'protocol', 'definition'].every(key => typeof item[key] === 'string') &&
+        item.name.trim().length > 0 && item.sourceUrl.trim().length > 0 &&
+        item.sourceUrl === item.sourceUrl.trim() && Number.isSafeInteger(item.order) &&
+        typeof item.enabled === 'boolean' && typeof item.enabledExplore === 'boolean');
+      require(!next.has(item.installationId) && !urls.has(item.sourceUrl), 'SOURCE_INTEGRITY');
+      require(['legado', 'qysg'].includes(item.protocol), 'UNSUPPORTED_PROTOCOL');
+      if (!item.definition.replace(/^\uFEFF/, '').trimStart().startsWith('<')) {
+        decodeJSONValue(Buffer.from(item.definition));
+      }
+      const normalized = runtimeDefinition(item);
+      require(normalized.importedProtocol === item.protocol, 'SOURCE_INTEGRITY');
+      require(encodeJSONValue(normalized.source).length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
+      require(!externalInstallation(item.installationId), 'STALE_SOURCE');
+      require(!liveIds.has(item.installationId) || records.has(item.installationId) ||
+        states.has(item.installationId), 'STALE_SOURCE');
+      next.set(item.installationId, item);
+      urls.add(item.sourceUrl);
+    }
+    return next;
+  }
+  function nativeGuard(params, signal) {
+    assertOpen(signal);
+    require(params.revision === nativeRevision, 'STALE_SOURCE');
+  }
+  function nativeSourceGuard(item, signal) {
+    assertOpen(signal);
+    require(sameConfiguration(item, nativeConfiguration.get(item.installationId)), 'STALE_SOURCE');
+  }
+  async function applyNativeSource(item, old, signal) {
+    const id = item.installationId, previous = states.get(id), current = live(id);
+    if (sameConfiguration(item, old) && previous && !previous.trial && !previous.errorCode &&
+        (item.enabled ? previous.accepting && current?.state === 'ready' &&
+          current.generation === previous.generation : !current)) return;
+    const reuse = item.enabled && sameConfiguration(item, old, false) && !previous?.errorCode &&
+      current?.state === 'ready' && current.generation === previous?.generation;
+    const savedPrivate = structuredClone(item.private), state = stage(item);
+    try {
+      if (reuse) {
+        seed(id, current.generation, state);
+        item.actions = [...(current.capabilities?.source?.actions ?? [])];
+      } else if (item.enabled) {
+        await execute(item, state, AbortSignal.any([signal, state.controller.signal]));
+      } else if (current) {
+        await host.uninstall(id);
+        require(!live(id), 'SOURCE_CLEANUP');
+      }
+      await release(id, state.generation);
+      cleanup(id);
+      nativeSourceGuard(item, signal);
+      persist();
+      state.trial = false; state.accepting = item.enabled;
+    } catch (error) {
+      retire(id);
+      state.trial = false; state.errorCode = errorCode(error);
+      item.actions = []; item.private = savedPrivate;
+      try {
+        if (live(id)) await host.uninstall(id);
+        require(!live(id), 'SOURCE_CLEANUP');
+      } catch { state.errorCode = 'SOURCE_CLEANUP'; }
+      try { await release(id); cleanup(id); }
+      catch { state.errorCode = 'SOURCE_CLEANUP'; }
+      state.generation = undefined;
+      nativeSourceGuard(item, signal);
+    }
+  }
+  function applyNative(params, signal) {
+    assertOpen(signal);
+    const next = validateNativeSnapshot(params);
+    const signature = hash(JSON.stringify(params.sources.map(item =>
+      configurationKeys.map(key => item[key]))));
+    require(params.revision >= nativeRevision, 'STALE_SOURCE');
+    require(params.revision !== nativeRevision || signature === nativeSnapshotHash, 'SOURCE_INTEGRITY');
+    const leases = new Map();
+    for (const item of next.values()) {
+      const signature = hash(JSON.stringify(configurationKeys.filter(key => key !== 'revision')
+        .map(key => item[key])));
+      const old = sourceLeases.get(item.installationId);
+      require(!old || item.revision >= old.revision, 'STALE_SOURCE');
+      require(!old || item.revision !== old.revision || signature === old.signature, 'SOURCE_INTEGRITY');
+      leases.set(item.installationId, { revision: item.revision, signature });
+    }
+    nativeRevision = params.revision; nativeSnapshotHash = signature; nativeConfiguration = next;
+    for (const [id, lease] of leases) sourceLeases.set(id, lease);
+    // Interrupt the captured initialization before waiting for library management.
+    for (const id of states.keys()) {
+      if (sameConfiguration(records.get(id), next.get(id))) continue;
+      const stop = host.captureInitialization(id);
+      retire(id);
+      stop?.();
+    }
+    return manage(signal, async () => {
+      nativeGuard(params, signal);
+      const old = new Map(records);
+      records.clear();
+      for (const [id, input] of next) {
+        const prior = old.get(id);
+        records.set(id, sameConfiguration(input, prior) ? prior : { ...input,
+          actions: sameConfiguration(input, prior, false) ? [...prior.actions] : [],
+          private: structuredClone(prior?.private ?? privateRecords.get(id) ?? emptyPrivate()) });
+      }
+      const removed = [];
+      for (const [id, state] of states) {
+        if (next.has(id)) continue;
+        retire(id);
+        try {
+          if (live(id)) await host.uninstall(id);
+          require(!live(id), 'SOURCE_CLEANUP');
+          await release(id);
+          cleanup(id);
+          removed.push(id);
+        } catch {
+          state.errorCode = 'SOURCE_CLEANUP';
+          try { await release(id); } catch {}
+        }
+        nativeGuard(params, signal);
+      }
+      for (const item of records.values()) {
+        nativeGuard(params, signal);
+        await applyNativeSource(item, old.get(item.installationId), signal);
+      }
+      nativeGuard(params, signal);
+      persist(records, removed);
+      for (const id of removed) states.delete(id);
+      require(![...states.values()].some(state => state.errorCode === 'SOURCE_CLEANUP'), 'SOURCE_CLEANUP');
+      return { revision: params.revision, sources: [...records.values()].map(publicRecord) };
+    });
   }
   async function admitted(id, revision, signal) {
     return manage(signal, () => {
@@ -381,6 +562,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     return build(definition, undefined, params.fileName, params.url);
   }
   const methods = {
+    'library.apply': applyNative,
     async 'library.list'(_params, signal) {
       await access(signal);
       return { sources: [...records.values()].sort((a, b) => a.order - b.order ||
@@ -526,13 +708,18 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
   return {
     methods,
     interrupt(name, params) {
+      if (native) {
+        require(!['library.import', 'library.save', 'library.update', 'library.remove'].includes(name),
+          'PERMISSION_DENIED');
+        return;
+      }
       if (!['library.remove', 'library.save'].includes(name) &&
           !(name === 'library.update' && params.patch.enabled === false)) return;
       const item = records.get(params.installationId);
       if (!item || item.revision !== params.expectedRevision) return;
       host.captureInitialization(item.installationId)?.();
     },
-    owns: id => records.has(id) || states.has(id),
+    owns: id => records.has(id) || states.has(id) || nativeConfiguration.has(id),
     prepareCapability(_name, input, context) {
       const id = context.scope?.installationId, state = states.get(id);
       if (!state) return;
@@ -590,6 +777,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       await Promise.allSettled([...streams].map(stream => stream.dispose()));
       const results = await Promise.allSettled([...states.keys()].map(id => release(id)));
       states.clear(); images.clear();
+      if (native) { records.clear(); nativeConfiguration.clear(); sourceLeases.clear(); privateRecords.clear(); }
       require(results.every(result => result.status === 'fulfilled'), 'SOURCE_CLEANUP');
     },
   };

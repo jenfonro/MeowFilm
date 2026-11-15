@@ -12,6 +12,7 @@ using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Runtime;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -40,11 +41,13 @@ public static partial class NovelTests
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT") ?? throw new InvalidOperationException("Runtime bundles required");
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
         var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
-        string data = TestWorkspace.DataPath("novel-runtime-library"); string id; long revision;
+        string data = TestWorkspace.DataPath("novel-runtime-library");
+        string configuration = TestWorkspace.DataPath("novel-runtime-configuration"); Directory.CreateDirectory(configuration); string id; long revision;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
         await using (var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, data, deadline.Token))
+        await using (var store = new LocalDocumentStore(configuration, [NovelSourceConfiguration.DocumentNamespace]))
         {
-            var source = new NovelSourceService(runtime);
+            var source = new NovelSourceService(runtime, store);
             var imported = await source.ImportAsync(fileName: "novel.html", text: """
                 <script>async function search(keyword) {
                   const bridge = window.flutter_inappwebview;
@@ -62,14 +65,17 @@ public static partial class NovelTests
             await source.PrepareShutdownAsync();
         }
         await using (var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, data, deadline.Token))
+        await using (var store = new LocalDocumentStore(configuration, [NovelSourceConfiguration.DocumentNamespace]))
         {
-            var source = new NovelSourceService(runtime); await source.RefreshAsync(deadline.Token);
+            var source = new NovelSourceService(runtime, store); await source.RefreshAsync(deadline.Token);
             var item = source.Sources.Single(); Check(item.InstallationId == id && item.Revision == revision && item.Group == "持久化" && item.Order == -4 && !item.EnabledExplore);
             var result = await source.InvokeAsync(item, "search", new { keyword = "read", page = 1 }, deadline.Token);
             Check(result.GetProperty("books")[0].GetProperty("name").GetString() == "persisted");
             await source.PrepareShutdownAsync();
         }
-        Check(File.Exists(Path.Combine(data, "source", "library.json")));
+        using var privateState = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(data, "source", "private.json"), deadline.Token));
+        Check(privateState.RootElement.GetProperty("sources")[0].GetProperty("installationId").GetString() == id &&
+            !privateState.RootElement.GetProperty("sources")[0].TryGetProperty("definition", out _));
     }
     private static async Task WebHost()
     {
@@ -133,7 +139,7 @@ public static partial class NovelTests
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
         var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
-        var runtime = new Runtime(); var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+        var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         await using var server = new WebFixture();
         bool physicallyClosed = false; bool entered = false;
         sources.InteractAsync = async (pending, token) =>
@@ -162,7 +168,7 @@ public static partial class NovelTests
     private static async Task ConcurrentWebCancellation()
     {
         var runtime = new Runtime { Records = [Source("a"), Source("b")] };
-        var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+        var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var retiring = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var physical = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -243,7 +249,7 @@ public static partial class NovelTests
     {
         await using var server = new RuntimeHttpClientTests.Server();
         await using var runtime = new RuntimeHttpClient(server.BaseUrl);
-        var sources = new NovelSourceService(runtime);
+        var sources = NovelTestSources.Create(runtime);
         const string reference = "/v1/source/images/novel-full-size";
         byte[] pixels = new byte[4 * 1024 * 1024 + 1]; new Random(31).NextBytes(pixels);
         foreach (bool chunked in new[] { false, true })
@@ -268,7 +274,7 @@ public static partial class NovelTests
     }
     private static async Task CoverViewport()
     {
-        var runtime = new Runtime(); var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+        var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         var oldStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var oldCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var oldPixels = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -414,7 +420,7 @@ public static partial class NovelTests
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
         var runtime = new Runtime { IncludeImages = true, ImageReadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously), ImageReadHold = new(TaskCreationOptions.RunContinuationsAsynchronously) };
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        var sources = new NovelSourceService(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
+        var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("image", "key", Book())); await session.ContinueAsync();
         var surface = new NovelReadingSurface(sources); var host = GeneralAppearanceTests.Window(surface); host.Show();
         try
@@ -434,7 +440,7 @@ public static partial class NovelTests
     private static async Task Purchase()
     {
         await using var store = new MemoryStore(); var runtime = new Runtime { Locked = true };
-        var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+        var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
         await module.InitializeAsync(default); await module.ReceiveBookAsync(Book(), default); await module.Session!.ContinueAsync();
@@ -480,7 +486,7 @@ public static partial class NovelTests
     }
     private static async Task Shell()
     {
-        await using var store = new MemoryStore(); var sources = new NovelSourceService(new Runtime()); await sources.RefreshAsync();
+        await using var store = new MemoryStore(); var sources = NovelTestSources.Create(new Runtime()); await sources.RefreshAsync();
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
         var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync(), () => module.AbortAsync(), module.CancelShutdownPreparationAsync)

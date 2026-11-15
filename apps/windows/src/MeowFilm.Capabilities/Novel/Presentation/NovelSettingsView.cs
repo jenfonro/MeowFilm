@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Data;
 using MeowFilm.Desktop;
@@ -31,7 +32,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         root.SetBinding(Panel.BackgroundProperty, new Binding(nameof(Window.Background))
         { RelativeSource = new(RelativeSourceMode.FindAncestor, typeof(Window), 1) });
         root.Children.Add(body); root.Children.Add(notice);
-        sourceSort = MenuButton("\uE8CB", "排序"); sourceGroups = MenuButton("\uE71C", "分组与协议"); sourceMore = MenuButton("\uE712", "更多");
+        sourceSort = MenuButton("\uE8CB", "排序"); sourceGroups = MenuButton("\uE71C", "分组与协议"); sourceMore = MenuButton("\uE710", "添加书源");
         ruleGroups = MenuButton("\uE71C", "分组"); ruleMore = MenuButton("\uE712", "更多");
         foreach (var button in new[] { sourceSort, sourceGroups, sourceMore }) sourceList.Tools.Children.Add(button);
         foreach (var button in new[] { ruleGroups, ruleMore }) ruleList.Tools.Children.Add(button);
@@ -43,15 +44,24 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         sourceList.SelectionChanged += SourceMenus; ruleList.SelectionChanged += RuleMenus;
         IsVisibleChanged += (_, _) => { if (disposed) return; if (IsVisible) { Resume(); Run(async ct => { await module.Library.InitializeAsync(ct); await module.Sources.RefreshAsync(ct); Refresh(); }); } else Cancel(); };
         Loaded += (_, _) => { if (disposed) return; if (pending.IsCancellationRequested) Resume(); Refresh(); };
-        module.PropertyChanged += ModuleChanged; BuildLayout(); Refresh();
+        BuildLayout(); Refresh();
     }
-    private void ModuleChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e) { notice.Message = module.Notice; }
+    internal void PostNotice(string text) => notice.Post(text);
     private void BuildLayout()
     {
         var layout = new DockPanel { Margin = new(32, 20, 24, 20) };
-        var header = NovelUi.Bar(NovelUi.Button("书源管理", () => { tab = "sources"; BuildLayout(); Refresh(); }),
-            NovelUi.Button("替换净化", () => { tab = "rules"; BuildLayout(); Refresh(); }),
-            NovelUi.Button("阅读排版", () => Run(EditAppearanceAsync)), NovelUi.Button("取消操作", Cancel));
+        var header = new DockPanel { Margin = new(0, 0, 0, 12) };
+        var appearance = NovelUi.Button("阅读排版", () => Run(EditAppearanceAsync)); appearance.Margin = new(0);
+        DockPanel.SetDock(appearance, Dock.Right); header.Children.Add(appearance);
+        var navigation = new StackPanel { Orientation = Orientation.Horizontal };
+        foreach (var (id, title) in new[] { ("sources", "书源管理"), ("rules", "替换净化") })
+        {
+            var area = new RadioButton { Content = title, GroupName = "novel-settings-area", IsChecked = tab == id, Margin = new(0, 0, 28, 0) };
+            area.SetResourceReference(StyleProperty, "MeowFilm.SettingsArea"); AutomationProperties.SetName(area, title);
+            area.Checked += (_, _) => { if (tab == id) return; tab = id; BuildLayout(); Refresh(); };
+            navigation.Children.Add(area);
+        }
+        header.Children.Add(navigation);
         DockPanel.SetDock(header, Dock.Top); layout.Children.Add(header);
         // A manager belongs to one tree at a time, including when switching tabs.
         if (sourceList.Parent is Panel sourceParent) sourceParent.Children.Remove(sourceList);
@@ -91,13 +101,13 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         string[] sorts = ["手动", "智能", "名称", "地址", "更新时间", "响应时间", "启用"];
         foreach (var (name, index) in sorts.Select((name, index) => (name, index))) sourceSort.ContextMenu.Items.Add(Item(name, () => { sort = index; RefreshSources(); }, sort == index));
         var protocols = new MenuItem { Header = "书源协议" }; protocols.Items.Add(Item("全部协议", () => { sourceProtocol = null; RefreshSources(); }, sourceProtocol is null));
-        foreach (string protocol in new[] { "legado", "qysg" }) protocols.Items.Add(Item(NovelSourceFields.Title(protocol), () => { sourceProtocol = protocol; RefreshSources(); }, sourceProtocol == protocol));
+        foreach (string protocol in NovelSourceEditor.Protocols) protocols.Items.Add(Item(NovelSourceFields.Title(protocol), () => { sourceProtocol = protocol; RefreshSources(); }, sourceProtocol == protocol));
         var menu = Menu(Item("分组管理", () => Run(ct => ManageGroupsAsync(true, ct))), protocols,
             Item("全部分组", () => { sourceGroup = null; sourceStatus = 0; RefreshSources(); }, sourceGroup is null && sourceStatus == 0));
         foreach (var (name, index) in new[] { "已启用", "已禁用", "已启用发现", "已禁用发现" }.Select((name, index) => (name, index))) menu.Items.Add(Item(name, () => { sourceGroup = null; sourceStatus = index + 1; RefreshSources(); }, sourceStatus == index + 1));
         foreach (string group in module.Sources.Sources.SelectMany(s => NovelGroups.Split(s.Group)).Distinct().Order(StringComparer.CurrentCulture)) menu.Items.Add(Item(group, () => { sourceGroup = group; sourceStatus = 0; RefreshSources(); }, sourceGroup == group));
         sourceGroups.ContextMenu = menu;
-        var create = new MenuItem { Header = "新建书源" }; foreach (string protocol in new[] { "legado", "qysg" }) create.Items.Add(Item(NovelSourceFields.Title(protocol), () => Run(ct => EditSourceAsync(null, protocol, ct))));
+        var create = Item("新建书源", () => Run(ct => EditSourceAsync(null, "legado", ct)));
         sourceMore.ContextMenu = Menu(create, Item("本地导入", () => Run(ImportSourceFileAsync)), Item("网络导入", () => Run(ImportSourceUrlAsync)),
             Item("粘贴导入", () => Run(async ct => await PreviewSourcesAsync(this, await module.Sources.PreviewImportAsync(text: Clipboard.GetText(), token: ct), ct))),
             Item("导出书源", () => Run(ct => ExportSourcesAsync(module.Sources.Sources.Select(s => s.InstallationId).ToArray(), ct))));
@@ -124,32 +134,60 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         if (sources.Length == 0 || !await NovelUi.ConfirmAsync(this, "删除书源", $"删除所选 {sources.Length} 个书源及其私有数据？", "删除", token, applicationOverlay: true)) return;
         foreach (var source in sources) await module.Sources.RemoveAsync(source, token);
     }
-    private async Task EditSourceAsync(NovelSource? source, string protocol, CancellationToken token)
+    internal async Task EditSourceAsync(NovelSource? source, string protocol, CancellationToken token)
     {
         string? definition = null;
         if (source is not null)
         {
             var current = await module.Sources.GetAsync(source, token);
-            source = NovelSource.From(current.GetProperty("source")); definition = NovelJson.Text(current, "definition");
+            source = NovelJson.Decode<NovelSource>(current.GetProperty("source")); definition = NovelJson.Text(current, "definition");
         }
         var editor = new NovelSourceEditor(protocol, definition);
-        // Keep the controls/tabs fixed while only the selected form scrolls inside the dialog viewport.
-        var panel = new DockPanel { Height = Math.Max(300, Window.GetWindow(this)?.ActualHeight - 220 ?? 520) };
-        var actions = NovelUi.Bar(NovelUi.Button("复制书源", () => { try { Clipboard.SetText(editor.Draft.Definition()); module.Notify("书源已复制"); } catch (Exception error) { module.Notify(error.Message); } }),
-            NovelUi.Button("导出书源", () => { try { var dialog = new SaveFileDialog { Filter = "JSON|*.json", FileName = "book-source.json" }; if (dialog.ShowDialog(Window.GetWindow(this)) == true) File.WriteAllText(dialog.FileName, editor.Draft.Definition()); } catch (Exception error) { module.Notify(error.Message); } }));
-        DockPanel.SetDock(actions, Dock.Top); panel.Children.Add(actions); panel.Children.Add(editor);
-        await NovelUi.DialogAsync(this, "编辑书源", panel, "保存", async ct =>
+        var type = new ComboBox { ItemsSource = NovelSourceEditor.Protocols.Select(value => new ComboBoxItem { Content = NovelSourceFields.Title(value), Tag = value }).ToArray(),
+            SelectedValuePath = "Tag", SelectedValue = protocol, Width = 118, Height = 32, MinHeight = 32, Margin = new(0, 0, 4, 0) };
+        type.SetResourceReference(StyleProperty, "Novel.ComboBox"); AutomationProperties.SetName(type, "书源协议"); AutomationProperties.SetAutomationId(type, "novel.source.protocol");
+        var more = EditorButton("\uE712", "更多书源操作");
+        var import = EditorButton("\uE8B5", "导入书源");
+        var export = EditorButton("\uE8A7", "导出书源", ExportDraft);
+        var tools = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        foreach (var tool in new FrameworkElement[] { type, more, import, export }) tools.Children.Add(tool);
+        var editing = new NovelDialogEditing(tools, () => editor.Draft.HasInput);
+        Func<CancellationToken, Task>? importAfterClose = null;
+        bool selecting = false;
+        type.SelectionChanged += async (_, _) =>
+        {
+            if (selecting || type.SelectedValue is not string next || next == editor.Draft.Protocol) return;
+            await editing.ContinueAsync(() => { editor.ChangeProtocol(next); source = null; });
+            selecting = true; type.SelectedValue = editor.Draft.Protocol; selecting = false;
+        };
+        more.ContextMenu = Menu(Item("复制书源", () =>
+        {
+            try { Clipboard.SetText(editor.Draft.Definition()); module.Notify("书源已复制"); }
+            catch (Exception error) { module.Notify(error.Message); }
+        }));
+        import.ContextMenu = Menu(Item("本地导入", () => QueueImport(ImportSourceFileAsync)), Item("网络导入", () => QueueImport(ImportSourceUrlAsync)),
+            Item("粘贴导入", () => QueueImport(async ct => await PreviewSourcesAsync(this, await module.Sources.PreviewImportAsync(text: Clipboard.GetText(), token: ct), ct))));
+        void ExportDraft()
+        {
+            try
+            {
+                var dialog = new SaveFileDialog { Filter = "JSON|*.json", FileName = "book-source.json" };
+                if (dialog.ShowDialog(Window.GetWindow(this)) == true)
+                { File.WriteAllText(dialog.FileName, editor.Draft.Definition()); module.Notify("书源已导出"); }
+            }
+            catch (Exception error) { module.Notify(error.Message); }
+        }
+        await NovelUi.DialogAsync(this, "编辑书源", editor, "保存", async ct =>
         {
             string text = editor.Draft.Definition();
-            if (source is null)
-            {
-                var result = await module.Sources.ImportAsync(text: text, token: ct);
-                var errors = ImportErrors(result).ToArray(); if (errors.Length > 0) throw new InvalidDataException(string.Join("\n", errors));
-                source = result.GetProperty("sources").EnumerateArray().Select(NovelSource.From).Single();
-            }
-            else source = NovelSource.From((await module.Sources.SaveAsync(source, text, ct)).GetProperty("source"));
+            var result = source is null ? await module.Sources.SaveDraftAsync(editor.Draft.Protocol, text, ct) : await module.Sources.SaveAsync(source, text, ct);
+            source = NovelJson.Decode<NovelSource>(result.GetProperty("source")); editor.Draft.MarkSaved(text);
             module.Notify("书源已保存"); return false;
-        }, token, applicationOverlay: true);
+        }, token, applicationOverlay: true, editing: editing);
+        if (importAfterClose is not null && !token.IsCancellationRequested) await importAfterClose(token);
+
+        void QueueImport(Func<CancellationToken, Task> operation) => _ = editing.ContinueAsync(() =>
+        { importAfterClose = operation; PlayerDialogHost.Find(this)!.Close(); });
     }
     private async Task ImportSourceFileAsync(CancellationToken token)
     {
@@ -195,6 +233,14 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         var result = await module.Sources.ExportAsync(ids, token); await File.WriteAllTextAsync(dialog.FileName, NovelJson.Text(result, "text"), token); module.Notify("书源已导出");
     }
     private static Button MenuButton(string title, string name) { Button? button = null; button = ManagementList.Button(title, () => ManagementList.OpenMenu(button!)); button.SetResourceReference(StyleProperty, "MeowFilm.IconButton"); button.Padding = new(0); button.Width = button.Height = 40; button.ToolTip = name; System.Windows.Automation.AutomationProperties.SetName(button, name); return button; }
+    private static Button EditorButton(string title, string name, Action? action = null)
+    {
+        Button? button = null;
+        button = ManagementList.Button(title, action ?? (() => ManagementList.OpenMenu(button!)));
+        button.SetResourceReference(StyleProperty, "MeowFilm.IconButton"); button.Padding = new(0); button.Margin = new(4, 0, 0, 0);
+        button.ToolTip = name; AutomationProperties.SetName(button, name);
+        button.Width = button.Height = button.MinHeight = 32; return button;
+    }
     private static ContextMenu Menu(params object[] items) { var menu = new ContextMenu(); menu.SetResourceReference(StyleProperty, "MeowFilm.ContextMenu"); foreach (var item in items) menu.Items.Add(item); return menu; }
     private static MenuItem Item(string title, Action action, bool selected = false) { var item = new MenuItem { Header = title, IsChecked = selected }; item.SetResourceReference(StyleProperty, "MeowFilm.MenuItem"); item.Click += (_, e) => { e.Handled = true; action(); }; return item; }
     private async Task EditAppearanceAsync(CancellationToken token)
@@ -202,8 +248,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         var editor = new NovelAppearanceEditor(module.Library.Appearance);
         await NovelUi.DialogAsync(this, "阅读排版", editor, "保存", async ct =>
         {
-            var prior = module.Library.Appearance; var next = editor.Read(); await module.Library.SaveAppearanceAsync(next, ct);
-            if (prior.Conversion != next.Conversion) await module.ReprocessCurrentAsync(ct);
+            await module.Library.SaveAppearanceAsync(editor.Read(), ct);
             return true;
         }, token, applicationOverlay: true);
     }
@@ -224,5 +269,5 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     public void Cancel() => pending.Cancel();
     public Task DrainAsync() => work.PauseAsync();
     public void Resume() { if (pending.IsCancellationRequested) { pending.Dispose(); pending = new(); } work.Resume(); }
-    public void Dispose() { disposed = true; Cancel(); module.PropertyChanged -= ModuleChanged; pending.Dispose(); }
+    public void Dispose() { disposed = true; Cancel(); pending.Dispose(); }
 }

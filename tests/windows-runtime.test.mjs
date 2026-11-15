@@ -13,7 +13,7 @@ import { createRuntimeClient } from '../apps/runtime/client.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
 import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
 import { verifyPanAndDoubanAssembly, verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
-import { seedSourceLibrary, verifyRecoveredSourceLibrary } from './source-library-assembly-support.mjs';
+import { seedNativeSourceLibrary, verifyRecoveredNativeSourceLibrary } from './source-library-assembly-support.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const windows = { skip: process.platform !== 'win32' ? 'Requires real Windows named pipes' : false, timeout: 20000 };
@@ -132,7 +132,7 @@ async function assertRealBusiness(client) {
     cat: ['start', 'status', 'refresh', 'install', 'import', 'edit', 'update', 'restart',
       'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
     source: ['load', 'unload', 'invoke', 'status', 'close',
-      'library.list', 'library.get', 'library.previewImport', 'library.import', 'library.save', 'library.update', 'library.remove',
+      'library.list', 'library.get', 'library.apply', 'library.previewImport', 'library.import', 'library.save', 'library.update', 'library.remove',
       'library.export', 'library.invoke', 'library.image', 'library.releaseImage', 'web.pending', 'web.respond', 'rules.process'],
     pan: ['providers', 'settings.get', 'settings.set', 'settings.clear', 'login.start',
       'login.poll', 'login.cancel', 'list', 'prepare', 'play', 'refresh'],
@@ -345,7 +345,7 @@ async function runProduct(t, entry, payload, dataRoot, manifest) {
   await verifyPanAndDoubanAssembly(client);
   await verifyScriptExecution(t, client, dataRoot);
   await verifySourceExecution(t, client);
-  const sourceLibrary = await seedSourceLibrary(client);
+  const sourceLibrary = await seedNativeSourceLibrary(client);
   await verifyCatExecution(client);
   assert.equal(server.replies.length, 1);
   assert.deepEqual(await client.shutdown(), {
@@ -358,7 +358,7 @@ async function runProduct(t, entry, payload, dataRoot, manifest) {
   const recovered = await pipeServer(t, dataRoot);
   const second = spawnRuntime(t, entry, recovered.argv, payload);
   const connected = await bounded(recovered.connection);
-  await verifyRecoveredSourceLibrary(connected.client, sourceLibrary);
+  await verifyRecoveredNativeSourceLibrary(connected.client, sourceLibrary);
   const restoredSettings = await connected.client.call('tmdb.data.settings.get');
   assert.equal(typeof restoredSettings.value?.revision, 'string');
   const { revision, ...restoredConfiguration } = restoredSettings.value;

@@ -36,7 +36,7 @@ public static partial class NovelTests
                 2 => new[] { DiscoveryBook("次本", "book-2"), DiscoveryBook("第三本", "book-3") },
                 _ => Array.Empty<JsonElement>()
             } }));
-        await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.InitializeAsync(default);
         await module.NavigateAsync(NovelCapability.HomeRoute, default);
         Check(module.ExploreSource?.InstallationId == "a" && module.ExploreKind?.Title == "a源站月榜" &&
@@ -67,7 +67,7 @@ public static partial class NovelTests
     private static async Task DiscoveryIsolation()
     {
         await using var store = new MemoryStore(); var runtime = new Runtime { Records = [Source("a"), Source("b")] };
-        var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+        var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(runtime));
         var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var late = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -86,6 +86,7 @@ public static partial class NovelTests
             try { await old; throw new InvalidOperationException("Retired discovery was accepted."); } catch (OperationCanceledException) { }
             Check(module.Kinds[1].Title == "源站月榜" && module.DiscoveryState == NovelDiscoveryState.Ready && !module.LoadingDiscovery);
 
+            await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
             var pageAccepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var page = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
             runtime.Read = async (_, action, input, _) =>
@@ -122,8 +123,8 @@ public static partial class NovelTests
               {"bookUrl":"","name":"空身份"},{"bookUrl":"missing-name"}]}
             """);
         runtime.Read = (_, action, _, _) => Task.FromResult(action == "exploreKinds" ? kinds : books);
-        await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
-        await module.LoadDiscoveryAsync(null, null, true);
+        await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
         Check(module.DiscoveryState == NovelDiscoveryState.Ready && module.MoreDiscovery &&
             module.Kinds.Select(kind => kind.Title).SequenceEqual(["源站分组", "健康分类", "第二分类"]) &&
             module.ExploreKind?.Title == "健康分类");
@@ -196,10 +197,11 @@ public static partial class NovelTests
     private static async Task DiscoveryRetirement()
     {
         await using var store = new MemoryStore(); var runtime = new Runtime { Records = [Source("a"), Source("b")] };
-        var sources = new NovelSourceService(runtime);
+        var sources = NovelTestSources.Create(runtime);
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(runtime));
-        await module.LoadDiscoveryAsync(null, null, true);
+        await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
         var before = module.DiscoverBooks.ToArray();
+        Check(before.Length == 1 && module.MoreDiscovery && module.ExploreKind?.Title == "榜单");
         var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         runtime.Read = async (_, _, _, _) => { accepted.TrySetResult(); await release.Task; return Json(new { books = new[] { DiscoveryBook("退休结果", "late") } }); };
@@ -256,7 +258,7 @@ public static partial class NovelTests
     private static async Task DiscoveryFailures()
     {
         await using var store = new MemoryStore(); var runtime = new Runtime { Records = [Source("a"), Source("b")] };
-        var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+        var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(runtime));
         bool failKinds = true, failPage = false, empty = false;
         runtime.Read = (_, action, input, _) =>
@@ -311,7 +313,7 @@ public static partial class NovelTests
                 _ => new[] { DiscoveryBook("追加" + page, "more-" + page) }
             } });
         };
-        await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.LoadDiscoveryAsync(runtime.Records[0], null, true);
         await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, false);
         var original = module.DiscoverBooks.ToArray(); var kinds = module.Kinds.ToArray(); var kind = module.ExploreKind;
@@ -353,6 +355,7 @@ public static partial class NovelTests
         await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, false);
         Check(module.DiscoverBooks.Select(b => b.Name).SequenceEqual(new[] { "刷新首本", "刷新次本", "刷新更多" }) &&
             runtime.Calls.Last(c => IsAction(c, "explore")).Payload.GetProperty("payload").GetProperty("page").GetInt32() == 2);
+        await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
         response = "fail-page"; await module.LoadDiscoveryAsync(module.ExploreSource, module.Kinds[2], false);
         Check(module.DiscoverBooks.Count == 0 && module.ExploreKind?.Url.EndsWith("/new") == true && !module.MoreDiscovery,
             "A new category kept unrelated books after failure.");
@@ -376,7 +379,7 @@ public static partial class NovelTests
             }
             return Json(new { books = new[] { DiscoveryBook("重试结果", "retry") } });
         };
-        await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.InitializeAsync(default);
         var root = new Grid(); root.Children.Add(module.View);
         var dialogs = new PlayerDialogHost(); root.Children.Add(dialogs);
@@ -418,7 +421,7 @@ public static partial class NovelTests
         runtime.Read = (source, action, _, _) => Task.FromResult(action == "exploreKinds" ? DiscoveryKinds() :
             Json(new { books = new[] { Book(source.InstallationId, author: "林舟").Json() } }));
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
+        await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
         await module.InitializeAsync(default);
         var book = Book(author: "林舟");
         var saved = new NovelEntry("canonical", await module.Rules.IdentityAsync(book),
@@ -452,7 +455,7 @@ public static partial class NovelTests
         foreach (bool sameSource in new[] { true, false })
         {
             await using var store = new MemoryStore(); var runtime = new Runtime { Records = [Source("a"), Source("b")] };
-            await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
+            await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
             await module.InitializeAsync(default);
             var book = Book(author: "林舟");
             string key = await module.Rules.IdentityAsync(book);
@@ -517,78 +520,91 @@ public static partial class NovelTests
             finally { window.Close(); }
         }
     }
-    private sealed class DiscoveryImportRuntime : IRuntimeClient
-    {
-        internal readonly Runtime Inner = new();
-        internal JsonElement PreviewPayload, ImportPayload;
-        internal int Previews, Imports;
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        {
-            if (method == "source.runtime.library.previewImport")
-            {
-                Previews++; PreviewPayload = NovelJson.Value(parameters!);
-                return Task.FromResult(Json(new { ok = true, contract = "source.runtime.v2", value = new
-                {
-                    items = new[] { "b", "c" }.Select(id => new
-                    {
-                        name = Source(id).Name, protocol = "legado", group = "", exists = false,
-                        definition = Json(new { bookSourceName = Source(id).Name, bookSourceUrl = Source(id).SourceUrl, enabled = false }).GetRawText()
-                    }).ToArray(), failures = Array.Empty<object>()
-                } }));
-            }
-            if (method == "source.runtime.library.import")
-            {
-                Imports++; ImportPayload = NovelJson.Value(parameters!);
-                Inner.Records = [Source("a"), Source("b") with { Enabled = false }];
-            }
-            return Inner.CallAsync(method, parameters, cancellationToken);
-        }
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("Discovery import never uploads scripts.");
-    }
     private static async Task DiscoveryImport()
     {
-        await using var store = new MemoryStore(); var runtime = new DiscoveryImportRuntime();
-        await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await using var store = new MemoryStore(); var runtime = new Runtime();
+        await using var server = new RuntimeHttpClientTests.Server();
+        await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.InitializeAsync(default); await module.NavigateAsync(NovelCapability.HomeRoute, default);
-        var root = new Grid(); root.Children.Add(module.SidebarView);
-        var dialogs = new PlayerDialogHost(); root.Children.Add(dialogs);
-        var window = GeneralAppearanceTests.Window(root); dialogs.Attach(window); window.Show();
+        var before = runtime.SourceStore.Bytes!.ToArray();
+        var root = new Grid();
+        root.ColumnDefinitions.Add(new() { Width = new(216) }); root.ColumnDefinitions.Add(new());
+        root.Children.Add(module.SidebarView); Grid.SetColumn(module.View, 1); root.Children.Add(module.View);
+        var dialogs = new PlayerDialogHost(); Grid.SetColumnSpan(dialogs, 2); root.Children.Add(dialogs);
+        var emitted = new List<DesktopNoticeEventArgs>();
+        var window = GeneralAppearanceTests.Window(root); dialogs.Attach(window);
+        window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
+        { if (e.Message.Length > 0) emitted.Add(e); e.Handled = true; }));
+        window.Show();
         try
         {
             var import = Find<Button>(module.SidebarView).Single(b => AutomationProperties.GetName(b) == "导入书源");
             import.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             await Until(() => dialogs.IsOpen && Find<TextBox>(dialogs).Any(t =>
                 AutomationProperties.GetName(t) == "书源地址或内容" && t.IsLoaded && t.IsVisible));
-            var input = Find<TextBox>(dialogs).Single();
-            input.Text = "https://sources.invalid/list.json";
-            Check(runtime.Previews == 0 && runtime.Imports == 0);
+            var input = Find<TextBox>(dialogs).Single(t => AutomationProperties.GetName(t) == "书源地址或内容");
+            input.Text = server.BaseUrl + "/list.json";
+            Check(!server.HasConnection && runtime.SourceStore.Writes == 0 && runtime.SourceStore.Bytes!.SequenceEqual(before));
             Find<Button>(dialogs).Single(b => Equals(b.Content, "预览")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            await using (var request = await server.AcceptAsync())
+            {
+                Check(request.Method == "GET" && request.Path == "/list.json" && request.Body.Length == 0);
+                await request.ReplyAsync(JsonSerializer.SerializeToUtf8Bytes(new[] { "b", "c" }.Select(id => new
+                {
+                    bookSourceName = Source(id).Name, bookSourceUrl = Source(id).SourceUrl,
+                    enabled = false, enabledExplore = true, ruleSearch = new { },
+                    exploreUrl = "榜单::https://catalog.invalid/month"
+                }).ToArray()));
+            }
             await Until(() => Find<ManagementImportSelection>(dialogs).Any() &&
                 Find<CheckBox>(dialogs).Any(c => AutomationProperties.GetName(c) == "选择 书源c" && c.IsLoaded && c.IsVisible) &&
                 Find<Button>(dialogs).Any(b => Equals(b.Content, "确定导入") && b.IsLoaded && b.IsVisible));
-            Check(runtime.Previews == 1 && runtime.Imports == 0 && module.Sources.Sources.Count == 1 &&
-                runtime.PreviewPayload.GetProperty("url").GetString() == input.Text && !runtime.PreviewPayload.TryGetProperty("text", out _));
+            Check(runtime.SourceStore.Writes == 0 && runtime.SourceStore.Bytes!.SequenceEqual(before) &&
+                module.Sources.Sources.Single().InstallationId == "a" && emitted.Count == 0 && !server.HasConnection,
+                "Preview changed the native configuration or emitted an import receipt before confirmation.");
             var second = Find<CheckBox>(dialogs).Single(c => AutomationProperties.GetName(c) == "选择 书源c");
             second.IsChecked = false; second.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             Find<Button>(dialogs).Single(b => Equals(b.Content, "确定导入")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-            await Until(() => !dialogs.IsOpen && runtime.Imports == 1);
-            using var selected = JsonDocument.Parse(runtime.ImportPayload.GetProperty("text").GetString()!);
-            Check(selected.RootElement.GetArrayLength() == 1 &&
-                selected.RootElement[0].GetProperty("bookSourceName").GetString() == "书源b" &&
-                !selected.RootElement[0].GetProperty("enabled").GetBoolean() &&
-                !runtime.ImportPayload.TryGetProperty("url", out _) &&
-                module.Sources.Sources.Single(s => s.InstallationId == "b").Enabled == false &&
-                !Find<Button>(module.SidebarView).Any(b => AutomationProperties.GetName(b) == "书源b"));
+            await Until(() => !dialogs.IsOpen && runtime.SourceStore.Writes == 1 && emitted.Count == 1);
+            var saved = JsonSerializer.Deserialize<NovelSourceConfigurationSnapshot>(runtime.SourceStore.Bytes!, NovelJson.Options)!;
+            var previous = JsonSerializer.Deserialize<NovelSourceConfigurationSnapshot>(before, NovelJson.Options)!;
+            var selected = saved.Sources.Single(s => s.SourceUrl == Source("b").SourceUrl);
+            using var definition = JsonDocument.Parse(selected.Definition);
+            Check(saved.Revision == previous.Revision + 1 && saved.Sources.Length == 2 &&
+                saved.Sources.Single(s => s.InstallationId == "a") == previous.Sources.Single() &&
+                selected.Name == "书源b" && selected.Protocol == "legado" && !selected.Enabled && selected.EnabledExplore &&
+                definition.RootElement.GetProperty("bookSourceName").GetString() == "书源b" &&
+                !definition.RootElement.GetProperty("enabled").GetBoolean() &&
+                module.Sources.Sources.Single(s => s.InstallationId == selected.InstallationId).Enabled == false &&
+                !Find<Button>(module.SidebarView).Any(b => AutomationProperties.GetName(b) is "书源b" or "书源c") &&
+                emitted.Single().Message == "已导入 1 个书源" && !server.HasConnection);
 
+            var reopenedRuntime = new Runtime { Records = [] };
+            var reopened = new NovelSourceService(reopenedRuntime, runtime.SourceStore);
+            try
+            {
+                await reopened.RefreshAsync();
+                var restored = reopened.Sources.Single(s => s.InstallationId == selected.InstallationId);
+                Check(reopened.Sources.Count == 2 && restored.Name == selected.Name && restored.SourceUrl == selected.SourceUrl &&
+                    restored.Revision == selected.Revision && !restored.Enabled && restored.EnabledExplore &&
+                    reopenedRuntime.Calls.Count == 0 && runtime.SourceStore.Writes == 1,
+                    "Confirmed import did not survive a native configuration reload without the runtime list.");
+            }
+            finally { await reopened.PrepareShutdownAsync(); }
+
+            var committed = runtime.SourceStore.Bytes!.ToArray();
             Find<Button>(module.SidebarView).Single(b => AutomationProperties.GetName(b) == "导入书源")
                 .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             await Until(() => dialogs.IsOpen && Find<Button>(dialogs).Any(b =>
                 Equals(b.Content, "取消") && b.IsLoaded && b.IsVisible));
             Find<Button>(dialogs).Single(b => Equals(b.Content, "取消")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             await Until(() => !dialogs.IsOpen);
-            Check(runtime.Previews == 1 && runtime.Imports == 1, "Cancelling the source input started a preview or permanent import.");
+            Check(runtime.SourceStore.Writes == 1 && runtime.SourceStore.Bytes!.SequenceEqual(committed) &&
+                !server.HasConnection && emitted.Count == 1,
+                "Cancelling the source input started a preview, permanent import or result notification.");
+            Check(!runtime.Calls.Any(call => call.Method is "source.runtime.library.list" or
+                "source.runtime.library.previewImport" or "source.runtime.library.import"),
+                "Discovery import delegated native configuration ownership back to the runtime.");
         }
         finally { dialogs.Close(); window.Close(); }
     }
@@ -597,7 +613,7 @@ public static partial class NovelTests
         await using var store = new MemoryStore(); var runtime = new Runtime { Records = [Source("a"), Source("b"), Source("c") with { Enabled = false }] };
         runtime.Read = (_, action, _, _) => Task.FromResult(action == "exploreKinds" ? DiscoveryKinds() :
             Json(new { books = Enumerable.Range(1, 6).Select(i => DiscoveryBook("真实书名" + i, "book-" + i)).ToArray() }));
-        await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await using var module = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.InitializeAsync(default); await module.NavigateAsync(NovelCapability.HomeRoute, default);
         // Component dimensions must not depend on the native window's frame or monitor tracking limits.
         var root = new Grid { Width = 1440, Height = 900 };
@@ -639,22 +655,40 @@ public static partial class NovelTests
             await Dispatcher.Yield(DispatcherPriority.Input);
             Check(Find<ComboBox>(module.View).Single(c => AutomationProperties.GetAutomationId(c) == "novel.discovery.source").IsKeyboardFocusWithin,
                 "Changing source lost the source selector's keyboard focus.");
-            var kindPicker = Find<RadioButton>(module.View).Single(r => Equals(r.Content, "源站新作"));
+            Check(Find<RadioButton>(module.View).Where(r => r.GroupName == "novel.discovery.channels")
+                .Select(r => r.Content).SequenceEqual(new[] { "源站月榜" }),
+                "Home exposed a non-ranking category.");
+            await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
+            await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
+            var filter = Find<Grid>(module.View).Single(g => AutomationProperties.GetName(g) == "当前频道筛选");
+            var kindPicker = Find<RadioButton>(filter).Single(r =>
+                AutomationProperties.GetAutomationId(r) == "novel.discovery.kind:https://catalog.invalid/new");
             Check(kindPicker.Focus(), "A source category could not receive keyboard focus."); kindPicker.IsChecked = true;
             await Until(() => !module.LoadingDiscovery && module.ExploreKind?.Title == "源站新作");
             await Dispatcher.Yield(DispatcherPriority.Input);
             Check(Find<RadioButton>(module.View).Single(r => Equals(r.Content, "源站新作")).IsKeyboardFocusWithin,
                 "Changing category lost the category control's keyboard focus.");
-            await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
             await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
             var catalog = Find<Panel>(module.View).Single(p => AutomationProperties.GetName(p) == "分类结果");
             var cards = catalog.Children.Cast<FrameworkElement>().ToArray();
             var points = cards.Select(c => c.TranslatePoint(new Point(), catalog)).ToArray();
             Check(cards.Length == 6 && Math.Abs(points[0].Y - points[2].Y) < 1 && points[3].Y > points[0].Y &&
                 Math.Abs(points[0].X - points[3].X) < 1, "The catalog did not keep three image/text columns in source order.");
-            Check(Find<RadioButton>(module.View).Any(r => Equals(r.Content, "源站分组")) &&
-                Find<RadioButton>(module.View).Any(r => Equals(r.Content, "原生分类")) &&
+            var channels = Find<RadioButton>(module.View).Where(r => r.GroupName == "novel.discovery.channels").ToArray();
+            Check(channels.Select(r => r.Content).SequenceEqual(new[] { "源站分组", "源站题材" }) &&
+                channels.All(r => ReferenceEquals(r.Style.BasedOn, module.View.FindResource("MeowFilm.SettingsArea"))) &&
                 Find<TextBlock>(module.View).Any(t => t.Text == "源题材 · 源字数"));
+            filter = Find<Grid>(module.View).Single(g => AutomationProperties.GetName(g) == "当前频道筛选");
+            Check(Find<RadioButton>(filter).Select(r => r.Content).SequenceEqual(new[] { "源站月榜", "源站新作" }) &&
+                !Find<RadioButton>(module.View).Any(r => Equals(r.Content, "原生分类")));
+            channels[1].IsChecked = true;
+            await Until(() => !module.LoadingDiscovery && module.ExploreKind?.Title == "原生分类");
+            await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
+            filter = Find<Grid>(module.View).Single(g => AutomationProperties.GetName(g) == "当前频道筛选");
+            Check(Equals(Find<RadioButton>(filter).Single().Content, "原生分类") &&
+                !Find<RadioButton>(module.View).Any(r => Equals(r.Content, "源站新作")),
+                "Changing channel did not replace the single current filter row.");
+            catalog = Find<Panel>(module.View).Single(p => AutomationProperties.GetName(p) == "分类结果");
             root.Width = host.Width = 780; await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
             Check(Math.Abs(root.ActualWidth - 780) < 1, $"Unexpected narrow component width: {root.ActualWidth}.");
             foreach (var card in catalog.Children.Cast<FrameworkElement>())

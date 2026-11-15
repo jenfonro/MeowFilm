@@ -13,7 +13,7 @@ public static partial class NovelTests
     private static async Task ChapterBlockMaterials()
     {
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-        var runtime = new Runtime(); var sources = new NovelSourceService(runtime);
+        var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime);
         await using var engine = new RuleProbe(); await using var rules = new NovelRuleProgram(engine);
         var session = new NovelBookSession(sources, library, rules, new("block-materials", "key", Book()));
         try
@@ -103,7 +103,7 @@ public static partial class NovelTests
     {
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        var runtime = new Runtime(); var sources = new NovelSourceService(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
+        var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
         bool paid = false; int bodyReads = 0;
         runtime.Read = (_, action, input, _) =>
         {
@@ -163,7 +163,7 @@ public static partial class NovelTests
             await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
             await library.SaveEntryAsync(new("cold-shelf", "key", Book(), OnShelf: true));
             var runtime = new Runtime { Records = state == "removed" ? [] : [Source() with { Revision = 2, Enabled = state == "enabled" }] };
-            var sources = new NovelSourceService(runtime);
+            var sources = NovelTestSources.Create(runtime);
             await using var ruleRuntime = new NovelRuleRuntimeFixture();
             await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
             await module.InitializeAsync(default);
@@ -177,24 +177,25 @@ public static partial class NovelTests
             catch (BridgeException error) { Check(state != "enabled" && error.Code == "SOURCE_DISABLED"); }
             Check(module.ExploreSource is null && !runtime.Calls.Any(c => c.Method.Contains("source.load") || IsAction(c, "explore")));
             if (state != "enabled") Check(!runtime.Calls.Any(c => c.Method == "source.runtime.library.invoke"));
-            Check(runtime.Calls.Count(c => c.Method == "source.runtime.library.list") == 1);
+            Check(runtime.SourceStore.Reads == 1 && !runtime.Calls.Any(c => c.Method == "source.runtime.library.list"));
         }
     }
     private static async Task ReaderRules()
     {
         await using var store = new MemoryStore(); var runtime = new Runtime { Text = "广告123\n[x]正文" };
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        var sources = new NovelSourceService(runtime); await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
+        var sources = NovelTestSources.Create(runtime); await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
         await module.InitializeAsync(default); await module.ReceiveBookAsync(Book(), default); await module.Session!.ContinueAsync();
         var settings = (NovelSettingsView)module.SettingsView;
         var original = module.Session.Blocks;
-        try
-        {
-            await settings.ImportRulesAsync("""
+        await settings.ImportRulesAsync("""
             [{"id":1700000000000,"name":"Reader默认正则","group":null,"pattern":"广告\\d+\\n","replacement":"","scope":null,"order":0,"isEnabled":true,"scopeContent":true},
              {"id":1700000000001,"name":"字面量","pattern":"[x]","replacement":"","isRegex":false,"order":1},
              {"id":1700000000002,"name":"非法","pattern":"[","replacement":""}]
             """, default);
+        try
+        {
+            await module.Session.ReprocessAsync();
             throw new InvalidOperationException("Invalid execution published a partial chapter");
         }
         catch (BridgeException error) { Check(error.Code == "INVALID_REQUEST"); }
@@ -204,8 +205,10 @@ public static partial class NovelTests
         var savedInvalid = new NovelLibrary(store); await savedInvalid.InitializeAsync();
         Check(savedInvalid.Rules.Count == 3 && savedInvalid.Rules[2].Pattern == "[");
         await settings.ImportRulesAsync("""[{"id":1700000000002,"pattern":"[","isEnabled":false}]""", default);
+        await module.Session.ReprocessAsync();
         Check(module.Session.Blocks.Single().Text == "正文");
         await settings.ImportRulesAsync("""[{"id":1700000000001,"pattern":"[x]","replacement":"保留","isRegex":false,"order":1}]""", default);
+        await module.Session.ReprocessAsync();
         Check(module.Library.Rules.Count == 3 && module.Session.Blocks.Single().Text == "保留正文");
         var reopened = new NovelLibrary(store); await reopened.InitializeAsync();
         Check(reopened.Rules.Select(r => r.Id).SequenceEqual(module.Library.Rules.Select(r => r.Id)));
@@ -213,7 +216,7 @@ public static partial class NovelTests
     private static async Task SessionCancellation()
     {
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-        var runtime = new Runtime { Locked = true }; var sources = new NovelSourceService(runtime);
+        var runtime = new Runtime { Locked = true }; var sources = NovelTestSources.Create(runtime);
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("cancel", "key", Book()));
@@ -243,7 +246,7 @@ public static partial class NovelTests
         foreach (bool keepShelf in new[] { false, true })
         {
             await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-            var runtime = new Runtime(); var sources = new NovelSourceService(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
+            var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
             var session = new NovelBookSession(sources, library, rules, new("retained-history", "key", Book()));
             try
             {
@@ -284,7 +287,7 @@ public static partial class NovelTests
         foreach (string route in new[] { "refresh", "continue", "read" })
         {
             await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-            var runtime = new Runtime(); var sources = new NovelSourceService(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
+            var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
             var session = new NovelBookSession(sources, library, rules, new("catalog-atomic", "key", Book()));
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             try
@@ -393,7 +396,7 @@ public static partial class NovelTests
         string after = string.Concat(Enumerable.Repeat("图后正文。\n", 150));
         var runtime = new Runtime { GradientImage = true, Blocks = [new("text", before), new("image", Src: "https://a.invalid/tall.png"), new("text", after)] };
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        var sources = new NovelSourceService(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
+        var sources = NovelTestSources.Create(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("image-anchor", "key", Book())); await session.ContinueAsync();
         var surface = new NovelReadingSurface(sources); var host = GeneralAppearanceTests.Window(surface); host.Width = 880; host.Height = 680;
         try

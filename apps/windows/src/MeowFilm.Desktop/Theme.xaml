@@ -6,6 +6,7 @@
     </ResourceDictionary.MergedDictionaries>
     <!-- Semantic tokens are deliberately dynamic: a module can override them in its view resources. -->
     <SolidColorBrush x:Key="MeowFilm.Brush.Window" Color="#F7F8FA" />
+    <SolidColorBrush x:Key="MeowFilm.Brush.DialogScrim" Color="#509CA3AF" />
     <x:Static x:Key="MeowFilm.Brush.AppBackground" Member="local:AppearanceColors.DefaultBackground"/>
     <x:Static x:Key="MeowFilm.Brush.FloatingSurface" Member="local:AppearanceColors.FloatingSurface"/>
     <x:Static x:Key="MeowFilm.Brush.ItemHover" Member="local:AppearanceColors.ItemHover"/>
@@ -29,6 +30,23 @@
     <SolidColorBrush x:Key="MeowFilm.Brush.ErrorSurface" Color="#FFF0F0" />
     <FontFamily x:Key="MeowFilm.Font.Icons">Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI Symbol</FontFamily>
     <BooleanToVisibilityConverter x:Key="MeowFilm.BoolToVisibility" />
+
+    <Style x:Key="MeowFilm.DialogHost" TargetType="Grid">
+        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.DialogScrim}"/>
+        <Style.Triggers>
+            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="MeowFilm.DialogFooter" TargetType="Border">
+        <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+        <Style.Triggers>
+            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
 
     <Style x:Key="MeowFilm.FloatingSurface" TargetType="Border">
         <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.FloatingSurface}"/>
@@ -393,6 +411,21 @@
         </Style.Triggers>
     </Style>
     <Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}" />
+    <Style x:Key="MeowFilm.ManagementTextBox" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
+        <Style.Resources>
+            <ResourceDictionary>
+                <ResourceDictionary.MergedDictionaries>
+                    <ResourceDictionary Source="/MeowFilm.Desktop;component/SettingsScrollChrome.xaml"/>
+                </ResourceDictionary.MergedDictionaries>
+            </ResourceDictionary>
+        </Style.Resources>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TextBox">
+            <Border CornerRadius="10" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                <ScrollViewer x:Name="PART_ContentHost" Style="{StaticResource MeowFilm.SettingsScrollViewer}"
+                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+            </Border>
+        </ControlTemplate></Setter.Value></Setter>
+    </Style>
 
     <Style x:Key="MeowFilm.Text" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
@@ -462,6 +495,47 @@
         </Style.Triggers>
     </Style>
 
+    <Style x:Key="MeowFilm.ManagementList" TargetType="ListBox">
+        <Style.Resources>
+            <ResourceDictionary>
+                <ResourceDictionary.MergedDictionaries>
+                    <ResourceDictionary Source="/MeowFilm.Desktop;component/OverlayScrollChrome.xaml"/>
+                </ResourceDictionary.MergedDictionaries>
+            </ResourceDictionary>
+        </Style.Resources>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBox">
+            <Border Background="{TemplateBinding Background}">
+                <ScrollViewer Focusable="False" Style="{StaticResource MeowFilm.OverlayScrollViewer}"
+                              CanContentScroll="{TemplateBinding ScrollViewer.CanContentScroll}"
+                              VerticalScrollBarVisibility="{TemplateBinding ScrollViewer.VerticalScrollBarVisibility}"
+                              HorizontalScrollBarVisibility="{TemplateBinding ScrollViewer.HorizontalScrollBarVisibility}">
+                    <ItemsPresenter/>
+                </ScrollViewer>
+            </Border>
+        </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="MeowFilm.ManagementListItem" TargetType="ListBoxItem">
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/>
+        <Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="1"/><Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+            <Border CornerRadius="12" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" Margin="{TemplateBinding Padding}"/>
+            </Border>
+        </ControlTemplate></Setter.Value></Setter>
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/></Trigger>
+            <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/></Trigger>
+            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger>
+            <MultiTrigger><MultiTrigger.Conditions>
+                <Condition Property="local:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsSelected" Value="True"/>
+            </MultiTrigger.Conditions><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
+            <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Focus}"/></Trigger>
+            <MultiTrigger><MultiTrigger.Conditions>
+                <Condition Property="local:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsKeyboardFocusWithin" Value="True"/>
+            </MultiTrigger.Conditions><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
+        </Style.Triggers>
+    </Style>
     <Style x:Key="MeowFilm.NavigationList" TargetType="ListBox">
         <Setter Property="Focusable" Value="False" />
         <Setter Property="Background" Value="Transparent" />
@@ -667,12 +741,15 @@
   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
  </Style>
  <Style x:Key="MeowFilm.ManagementInput" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
+  <Style.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary Source="/MeowFilm.Desktop;component/SettingsScrollChrome.xaml"/>
+  </ResourceDictionary.MergedDictionaries></ResourceDictionary></Style.Resources>
   <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TextBox">
    <Border CornerRadius="12" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
     <Grid>
-     <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+     <ScrollViewer x:Name="PART_ContentHost" Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
      <TextBlock x:Name="Hint" Text="{TemplateBinding Tag}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" Style="{StaticResource MeowFilm.MutedText}" IsHitTestVisible="False" Visibility="Collapsed"/>
     </Grid>
    </Border>
@@ -745,11 +822,14 @@
   </ControlTemplate></Setter.Value></Setter>
  </Style>
  <Style x:Key="MeowFilm.ManagementTabs" TargetType="TabControl">
+  <Style.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary Source="/MeowFilm.Desktop;component/SettingsScrollChrome.xaml"/>
+  </ResourceDictionary.MergedDictionaries></ResourceDictionary></Style.Resources>
   <Setter Property="ItemContainerStyle" Value="{StaticResource MeowFilm.ManagementTab}"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TabControl">
    <DockPanel>
     <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="0,0,0,1">
-     <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+     <ScrollViewer x:Name="HeaderScroll" Style="{StaticResource MeowFilm.SettingsScrollViewer}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
       <TabPanel IsItemsHost="True" Margin="12,0"/>
      </ScrollViewer>
     </Border>

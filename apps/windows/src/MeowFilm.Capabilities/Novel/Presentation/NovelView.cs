@@ -56,18 +56,18 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             if (disposed) return;
             if (!IsVisible) { module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
             else if (module.Route == NovelCapability.ReaderRoute)
-                module.RunUi(module.ReprocessCurrentAsync);
+                module.RefreshReaderSettings();
         };
         Loaded += (_, _) => { AttachWindow(); Present(); RestoreDiscoveryFocus(); }; Unloaded += (_, _) => { PauseReading(); DetachWindow(); };
     }
     public DesktopHeaderContribution Header => new(module.Route == NovelCapability.HomeRoute ? "小说" : module.Route == NovelCapability.CategoriesRoute ? "分类" : "",
         SearchVisible: module.Route != NovelCapability.ReaderRoute) { SearchTargetId = "novel", SearchContextId = module.Route };
     public event EventHandler? HeaderChanged;
+    internal void PostNotice(string text) => notice.Post(text);
     internal void Present()
     {
         if (disposed) return;
         PresentSidebar();
-        notice.Message = module.Notice;
         bool reading = module.Route == NovelCapability.ReaderRoute && module.Session is not null;
         if (reading)
         {

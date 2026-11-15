@@ -28,9 +28,9 @@ public static partial class NovelTests
         yield return new("novel appearance: unknown values fall back only for consumption and unrelated editing preserves raw values", () => Sta(AppearanceRoundTrip));
         yield return new("novel rule management: offline import persists current rules without an execution preflight", () => Sta(OfflineRules));
         yield return new("novel native library: real atomic store reopens and second process restores reading", Durable);
-        yield return new("novel source repository: no native source copy revision retire import and export", () => Sta(Sources));
+        yield return new("novel source configuration: native owner offline import export and revision retirement", () => Sta(Sources));
         yield return new("novel source consumer contract: optional management fields preserve receipts actions and retirement", () => Sta(SourceProjectionContract));
-        yield return new("novel source editors: raw optional management fields keep get import and repeated save revisions usable", () => Sta(SourceProjectionEditors));
+        yield return new("novel native source editors: raw definitions preserve existing and new editor repeated save revisions", () => Sta(SourceProjectionEditors));
         yield return new("novel multi-source search: unknown authors pagination partial failure and stale query", () => Sta(Search));
         yield return new("novel reading session: metadata creates no history source switch ambiguity and failure preserve book", () => Sta(Reading));
         yield return new("novel retained shelf: deleted history stays deleted until new reading is saved", () => Sta(RetainedShelfHistory));
@@ -71,7 +71,7 @@ public static partial class NovelTests
         yield return new("novel Web lifecycle: actual environment exit releases profile before success cancellation and owner close", () => Sta(WebLifecycle));
         yield return new("novel session cancellation: continue selection and purchase refresh stay within one cancelled operation", () => Sta(SessionCancellation));
         yield return new("novel shared fixtures: real Node RPC ordered cleanup and final conversion", Fixtures);
-        yield return new("novel runtime host: library import metadata and private values persist after process restart", () => Sta(RuntimeLibrary));
+        yield return new("novel runtime host: native definitions metadata and private values restore after process restart", () => Sta(RuntimeLibrary));
         yield return new("novel Web host: real dynamic page cookie envelope verification and cancelled profile cleanup", () => Sta(WebHost));
         yield return new("novel purchase components: confirmation cancellation navigation and source declared purchase", () => Sta(Purchase));
         yield return new("novel cleanup RPC: per-rule budget whole-batch failure and runtime recovery", Budget);
@@ -148,16 +148,21 @@ public static partial class NovelTests
     }
     private static async Task Sources()
     {
-        var runtime = new Runtime(); var sources = new NovelSourceService(runtime); await sources.RefreshAsync();
+        var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         Check(sources.Sources.Count == 1); var source = sources.Sources[0];
         var get = await sources.GetAsync(source);
         using var definition = JsonDocument.Parse(get.GetProperty("definition").GetString()!);
-        Check(definition.RootElement.GetProperty("bookSourceName").GetString() == "合成" &&
+        Check(definition.RootElement.GetProperty("bookSourceName").GetString() == source.Name &&
             definition.RootElement.GetProperty("bookSourceUrl").GetString() == source.SourceUrl);
-        var exported = await sources.ExportAsync([source.InstallationId]); Check(exported.GetProperty("text").GetString() == "[]");
-        await sources.ImportAsync(text: "[]");
-        var import = runtime.Calls.Last(c => c.Method.EndsWith("library.import")).Payload;
-        Check(import.TryGetProperty("text", out _) && !import.TryGetProperty("url", out _));
+        var exported = await sources.ExportAsync([source.InstallationId]);
+        using var output = JsonDocument.Parse(exported.GetProperty("text").GetString()!);
+        Check(output.RootElement.GetArrayLength() == 1 && JsonElement.DeepEquals(output.RootElement[0], definition.RootElement));
+        var committed = runtime.SourceStore.Bytes!.ToArray();
+        var imported = await sources.ImportAsync(text: "[]");
+        Check(imported.GetProperty("sources").GetArrayLength() == 0 && runtime.SourceStore.Bytes!.SequenceEqual(committed) &&
+            sources.Sources.Single() is { InstallationId: "a", Revision: 1, Enabled: true } &&
+            runtime.SourceStore.Reads == 1 && !runtime.Calls.Any(call => call.Method is
+                "source.runtime.library.get" or "source.runtime.library.export" or "source.runtime.library.import"));
         var late = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         runtime.Read = (_, action, _, _) => action == "search" ? late.Task : Task.FromResult(Json(new { }));
         var pending = sources.InvokeAsync(source, "search", new { keyword = "旧", page = 1 });
@@ -170,7 +175,7 @@ public static partial class NovelTests
     {
         var runtime = new Runtime { Records = [Source("a"), Source("b"), Source("c")] };
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        var sources = new NovelSourceService(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
+        var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var search = new NovelSearch(sources, rules);
         runtime.Read = (source, action, payload, _) =>
         {
@@ -193,7 +198,7 @@ public static partial class NovelTests
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
         var runtime = new Runtime { Records = [Source("a"), Source("b")] };
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        var sources = new NovelSourceService(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
+        var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("stable", "key", Book()));
         await session.LoadMetadataAsync(); Check(library.Entries.Count == 0 && !session.HasContent);
         await session.ContinueAsync(); Check(session.HasContent && library.Entries.Count == 0);
@@ -226,7 +231,7 @@ public static partial class NovelTests
     private static async Task SwitchIdentity()
     {
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-        var sources = new NovelSourceService(new Runtime { Records = [Source("a"), Source("b")] });
+        var sources = NovelTestSources.Create(new Runtime { Records = [Source("a"), Source("b")] });
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var unknown = Book(author: "");
@@ -269,7 +274,7 @@ public static partial class NovelTests
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
         var runtime = new Runtime { Text = string.Concat(Enumerable.Repeat("正文😀组合字é和汉字。", 800)) };
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
-        var sources = new NovelSourceService(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
+        var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("layout", "key", Book())); await session.ContinueAsync();
         var surface = new NovelReadingSurface(sources);
         var host = new Window { Content = surface, Width = 900, Height = 720, Left = -10000, Top = -10000, ShowInTaskbar = false, ShowActivated = false };
@@ -297,7 +302,7 @@ public static partial class NovelTests
     private static async Task Composition()
     {
         await using var store = new MemoryStore(); var runtime = new Runtime { Records = [] };
-        var sources = new NovelSourceService(runtime);
+        var sources = NovelTestSources.Create(runtime);
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
         await module.InitializeAsync(default);
@@ -329,8 +334,8 @@ public static partial class NovelTests
             Preview(module.View, "novel-home-continuation", 1000, 700);
             host.Content = module.SettingsView; await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Preview(module.SettingsView, "novel-settings", 1000, 700);
-            var labels = Find<Button>(module.SettingsView).Select(b => b.Content as string).ToArray(); Check(labels.Contains("书源管理") && labels.Contains("替换净化"));
-            Find<Button>(module.SettingsView).Single(b => b.Content as string == "替换净化").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            var labels = Find<RadioButton>(module.SettingsView).Select(b => b.Content as string).ToArray(); Check(labels.Contains("书源管理") && labels.Contains("替换净化"));
+            Find<RadioButton>(module.SettingsView).Single(b => b.Content as string == "替换净化").IsChecked = true;
             Preview(module.SettingsView, "novel-settings-rules", 1000, 700);
             await module.PrepareShutdownAsync(); await module.CancelShutdownPreparationAsync();
         }
@@ -362,7 +367,14 @@ public static partial class NovelTests
     }
     internal sealed class Runtime : IRuntimeClient, IRuntimeImageClient
     {
-        internal NovelSource[] Records = [Source()];
+        private NovelSource[] records = [Source()];
+        internal NovelSource[] Records
+        {
+            get => records;
+            set { records = value; SourceStore.Seed(value); }
+        }
+        internal readonly NovelSourceMemoryStore SourceStore = new();
+        internal Runtime() { SourceStore.Seed(records); SourceStore.BeforeRead = token => Listing?.Invoke(token) ?? Task.CompletedTask; }
         internal readonly List<(string Method, JsonElement Payload)> Calls = [];
         internal Func<CancellationToken, Task>? Listing;
         internal Func<string, JsonElement, JsonElement>? Project;
@@ -381,6 +393,14 @@ public static partial class NovelTests
             var payload = BridgeCodec.Value(parameters ?? new { }); Calls.Add((method, payload)); JsonElement result;
             switch (method["source.runtime.".Length..])
             {
+                case "library.apply":
+                    var definitions = payload.GetProperty("sources").Deserialize<NovelSourceDefinition[]>(NovelJson.Options)!;
+                    records = definitions.Select(item => item.Source() with
+                    {
+                        Actions = Records.FirstOrDefault(s => s.InstallationId == item.InstallationId)?.Actions ?? item.Source().Actions
+                    }).ToArray();
+                    if (records.Any(s => !s.Enabled)) PendingWeb = [];
+                    result = Json(new { revision = payload.GetProperty("revision").GetInt64(), sources = records }); break;
                 case "library.list": if (Listing is not null) await Listing(token); result = Json(new { sources = Records }); break;
                 case "web.pending": result = Json(new { requests = PendingWeb }); break;
                 case "web.respond": result = Json(new { accepted = true }); break;
@@ -409,7 +429,7 @@ public static partial class NovelTests
             "content" => FailContent ? throw new BridgeException("NETWORK_ERROR") : Json(new { title = "第一章", content = Text,
                 blocks = Blocks ?? (IncludeImages ? new[] { new NovelBlock("image", Src: "https://a.invalid/full.png", Alt: "正文插图"), new("text", Text) } : Text.Length == 0 ? Array.Empty<NovelBlock>() : new[] { new NovelBlock("text", Text) }), imageStyle = "FULL" }),
             "payAction" => Pay(),
-            "exploreKinds" => Json(new { kinds = new[] { new { title = "分类", url = "https://a.invalid/explore" } } }),
+            "exploreKinds" => Json(new { kinds = new[] { new { title = "榜单", url = "https://a.invalid/explore" } } }),
             "explore" or "search" => Json(new { books = new[] { Book(source.InstallationId).Json() } }),
             _ => Json(new { })
         };

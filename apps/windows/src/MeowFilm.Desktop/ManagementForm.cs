@@ -23,7 +23,7 @@ public sealed class ManagementForm(bool boxedInputs = false) : StackPanel
         input.SetResourceReference(Control.FontSizeProperty, "MeowFilm.Font.Size.Body");
         AutomationProperties.SetName(input, label); if (id is not null) AutomationProperties.SetAutomationId(input, id);
         if (boxedInputs) { input.SetResourceReference(StyleProperty, "MeowFilm.ManagementInput"); input.BorderThickness = new(1); input.Padding = new(12, 9, 12, 9); input.SetResourceReference(Control.FontSizeProperty, "MeowFilm.Font.Size.Compact"); input.Height = rows > 1 ? Math.Max(92, rows * 19.5 + 18) : 40; }
-        else { input.SetResourceReference(StyleProperty, "MeowFilm.TextBox"); input.Background = Brushes.Transparent; }
+        else { input.SetResourceReference(StyleProperty, rows > 1 ? "MeowFilm.ManagementTextBox" : "MeowFilm.TextBox"); input.Background = Brushes.Transparent; }
         input.Tag = placeholder;
         section.Children.Add(input); Section(section); return input;
     }
@@ -83,7 +83,8 @@ public sealed class ManagementImportSelection : DockPanel
             line.Children.Add(text);
             var divider = new Border { Child = line, BorderThickness = new(0, 0, 0, 1) }; divider.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.Border"); rows.Children.Add(divider);
         }
-        Children.Add(new ScrollViewer { Content = rows, MaxHeight = 390, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        var scroll = new ScrollViewer { Content = rows, MaxHeight = 390, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+        scroll.SetResourceReference(StyleProperty, "MeowFilm.OverlayScrollViewer"); Children.Add(scroll);
         all.Click += (_, _) => { selected.Clear(); if (all.IsChecked == true) selected.UnionWith(Enumerable.Range(0, items.Count)); for (int index = 0; index < checks.Length; index++) checks[index].IsChecked = selected.Contains(index); Count(); }; Count();
     }
     private void Count() { all.Content = $"全选（{selected.Count}/{checks.Length}）"; all.IsChecked = checks.Length > 0 && selected.Count == checks.Length; }

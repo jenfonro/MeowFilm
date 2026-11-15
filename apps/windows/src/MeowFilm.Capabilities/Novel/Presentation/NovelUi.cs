@@ -76,14 +76,15 @@ internal static class NovelUi
     }
 
     internal static Task<bool> ConfirmAsync(FrameworkElement owner, string title, string message, string action,
-        CancellationToken token = default, bool applicationOverlay = false)
+        CancellationToken token = default, bool applicationOverlay = false, string cancelAction = "取消", Grid? parent = null)
     {
         var body = new StackPanel(); body.Children.Add(Text(message));
-        return DialogAsync(owner, title, body, action, _ => Task.FromResult(true), token, applicationOverlay: applicationOverlay);
+        return DialogAsync(owner, title, body, action, _ => Task.FromResult(true), token,
+            applicationOverlay: applicationOverlay, parent: parent, cancelAction: cancelAction);
     }
     internal static Task<bool> DialogAsync(FrameworkElement owner, string title, FrameworkElement body, string action,
         Func<CancellationToken, Task<bool>> save, CancellationToken token = default, bool autoSubmit = false,
-        bool applicationOverlay = false)
+        bool applicationOverlay = false, NovelDialogEditing? editing = null, Grid? parent = null, string cancelAction = "取消")
     {
         token.ThrowIfCancellationRequested();
         var host = applicationOverlay
@@ -91,18 +92,18 @@ internal static class NovelUi
             : null;
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pending = CancellationTokenSource.CreateLinkedTokenSource(token);
-        Popup? popup = applicationOverlay ? null : new Popup { PlacementTarget = owner, AllowsTransparency = true, StaysOpen = true };
+        Popup? popup = applicationOverlay || parent is not null ? null : new Popup { PlacementTarget = owner, AllowsTransparency = true, StaysOpen = true };
         if (popup is not null) DialogPlacement.SetCentered(popup, true);
         var window = Window.GetWindow(owner);
-        double availableWidth = host?.ActualWidth > 0 ? host.ActualWidth :
+        double availableWidth = parent?.ActualWidth > 0 ? parent.ActualWidth : host?.ActualWidth > 0 ? host.ActualWidth :
             window?.ActualWidth > 0 ? window.ActualWidth : 616;
-        double overlayMaxWidth = Math.Min(520, Math.Max(0, availableWidth - 32));
-        double dialogWidth = applicationOverlay
+        double overlayMaxWidth = Math.Min(editing is null ? 520 : 760, Math.Max(0, availableWidth - 32));
+        double dialogWidth = editing is not null ? overlayMaxWidth : applicationOverlay
             ? Math.Min(520, Math.Max(0, availableWidth - 96))
             : window?.ActualWidth > 0 ? Math.Min(640, Math.Max(320, window.ActualWidth - 64)) : 640;
         var surface = new Border
         {
-            Padding = applicationOverlay ? new Thickness(20) : new Thickness(0),
+            Padding = applicationOverlay && editing is null ? new Thickness(20) : new Thickness(0),
             MinWidth = applicationOverlay ? 0 : 320, MaxWidth = applicationOverlay ? overlayMaxWidth : 640,
             Width = dialogWidth, Focusable = true
         };
@@ -110,12 +111,25 @@ internal static class NovelUi
         Theme(surface);
         if (applicationOverlay) surface.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
         else surface.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface");
+        if (editing is not null)
+            surface.Height = Math.Min(720, Math.Max(0, (host?.ActualHeight > 0 ? host.ActualHeight : window?.ActualHeight ?? 752) - 32));
         KeyboardNavigation.SetTabNavigation(surface, KeyboardNavigationMode.Cycle);
         if (applicationOverlay) KeyboardNavigation.SetControlTabNavigation(surface, KeyboardNavigationMode.Cycle);
         AutomationProperties.SetName(surface, title);
+        var dialogLayer = new Grid();
         var grid = new DockPanel();
         var heading = Text(title, applicationOverlay ? 18 : 17);
-        if (applicationOverlay)
+        if (editing is not null)
+        {
+            heading.Margin = new(0); heading.VerticalAlignment = VerticalAlignment.Center;
+            heading.TextWrapping = TextWrapping.NoWrap; heading.TextTrimming = TextTrimming.CharacterEllipsis;
+            var header = new Grid();
+            header.ColumnDefinitions.Add(new()); header.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+            header.Children.Add(heading); Grid.SetColumn(editing.Tools, 1); header.Children.Add(editing.Tools);
+            var chrome = new Border { Child = header, MinHeight = 52, Padding = new(16, 8, 16, 8) };
+            DockPanel.SetDock(chrome, Dock.Top); grid.Children.Add(chrome);
+        }
+        else if (applicationOverlay)
         {
             heading.Margin = new(0, 0, 0, 12);
             DockPanel.SetDock(heading, Dock.Top); grid.Children.Add(heading);
@@ -129,10 +143,11 @@ internal static class NovelUi
         }
         var notices = new NoticeStack();
         var buttons = Bar(); buttons.HorizontalAlignment = HorizontalAlignment.Right; DockPanel.SetDock(buttons, Dock.Bottom);
-        bool busy = false, accepted = false, closed = false, finished = false;
+        bool busy = false, continuing = false, accepted = false, closed = false, finished = false;
         Exception? failure = null;
         CancellationTokenRegistration registration = default;
-        var cancel = Button("取消", CloseDialog);
+        Grid? nestedLayer = null;
+        var cancel = Button(cancelAction, () => { });
         var accept = Button(action, () => { }, style: applicationOverlay ? "MeowFilm.PrimaryButton" : "MeowFilm.QuietButton");
         if (!applicationOverlay)
         {
@@ -142,22 +157,29 @@ internal static class NovelUi
         }
         if (autoSubmit) accept.Visibility = Visibility.Collapsed;
         accept.Click += async (_, _) => await AcceptAsync();
-        async Task AcceptAsync()
+        async Task<bool> AcceptAsync(bool keepOpen = false)
         {
-            if (busy || finished || !IsOpen()) return;
+            if (busy || continuing && !keepOpen || finished || !IsOpen()) return false;
             busy = true; accept.IsEnabled = false;
-            try { if (await save(pending.Token) && !pending.IsCancellationRequested) { accepted = true; CloseDialog(); } }
-            catch (OperationCanceledException) { CloseDialog(); }
+            if (editing is not null) { body.IsEnabled = false; editing.Tools.IsEnabled = false; cancel.IsEnabled = false; }
+            try
+            {
+                bool closeAfterSave = await save(pending.Token);
+                if (pending.IsCancellationRequested || !IsOpen()) return false;
+                if (closeAfterSave && !keepOpen) { accepted = true; CloseDialog(); }
+                return true;
+            }
+            catch (OperationCanceledException) { CloseDialog(); return false; }
             catch (Exception error)
             {
-                if (autoSubmit || !IsOpen() || pending.IsCancellationRequested) { failure = error; CloseDialog(); }
-                else
-                {
-                    object noticeOwner = host is not null ? host : popup is not null ? popup : owner;
-                    notices.Show(noticeOwner, error is InvalidDataException ? error.Message : "操作失败，请检查输入或重试");
-                }
+                ReportFailure(error); return false;
             }
-            finally { busy = false; accept.IsEnabled = true; Complete(); }
+            finally
+            {
+                busy = false; accept.IsEnabled = true;
+                if (editing is not null) { body.IsEnabled = true; editing.Tools.IsEnabled = true; cancel.IsEnabled = true; }
+                Complete();
+            }
         }
         if (applicationOverlay)
         {
@@ -168,17 +190,47 @@ internal static class NovelUi
             buttons.Margin = new(20, 14, 10, 12);
             buttons.Children.Add(cancel); buttons.Children.Add(accept);
         }
-        grid.Children.Add(buttons);
+        if (editing is null) grid.Children.Add(buttons);
+        else
+        {
+            var footer = new Border { Child = buttons, BorderThickness = new(0, 1, 0, 0), Padding = new(16, 12, 6, 4) };
+            footer.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.DialogFooter");
+            AutomationProperties.SetAutomationId(footer, "novel.dialog.footer");
+            DockPanel.SetDock(footer, Dock.Bottom); grid.Children.Add(footer);
+        }
         DockPanel.SetDock(notices, Dock.Top); grid.Children.Add(notices);
-        grid.Children.Add(new ScrollViewer { Content = body,
-            Margin = applicationOverlay ? new Thickness(0, 2, 0, 4) : new Thickness(20, 20, 20, 0),
-            MaxHeight = applicationOverlay
-                ? Math.Max(180, window?.ActualHeight - 220 ?? 520)
-                : Math.Max(200, window?.ActualHeight - 220 ?? 520),
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
-        surface.Child = grid;
+        if (editing is not null)
+        {
+            body.Margin = new(12, 0, 12, 12); grid.Children.Add(body);
+        }
+        else
+        {
+            var scroll = Scroll(body);
+            scroll.Margin = applicationOverlay ? new Thickness(0, 2, 0, 4) : new Thickness(20, 20, 20, 0);
+            scroll.MaxHeight = Math.Max(applicationOverlay ? 180 : 200, window?.ActualHeight - 220 ?? 520);
+            grid.Children.Add(scroll);
+        }
+        dialogLayer.Children.Add(grid); surface.Child = dialogLayer;
+        cancel.Click += (_, _) => RequestClose();
+        if (editing is not null)
+        {
+            var close = Button("\uE711", RequestClose, style: "MeowFilm.IconButton");
+            close.Margin = new(4, 0, 0, 0); close.Padding = new(0); close.Width = close.Height = close.MinHeight = 32;
+            close.ToolTip = "关闭"; AutomationProperties.SetName(close, "关闭"); AutomationProperties.SetAutomationId(close, "novel.dialog.close");
+            editing.Tools.Children.Add(close); editing.ContinueAsync = ContinueAsync;
+        }
         registration = token.Register(() => owner.Dispatcher.BeginInvoke(new Action(() => { if (!finished) CloseDialog(); })));
-        if (popup is not null)
+        if (parent is not null)
+        {
+            nestedLayer = new Grid(); nestedLayer.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.DialogHost");
+            surface.HorizontalAlignment = HorizontalAlignment.Center; surface.VerticalAlignment = VerticalAlignment.Center;
+            surface.MaxWidth = Math.Max(0, parent.ActualWidth - 24);
+            surface.MaxHeight = Math.Max(0, parent.ActualHeight - 24);
+            nestedLayer.Children.Add(surface); parent.Children.Add(nestedLayer);
+            owner.Unloaded += NestedOwnerUnloaded; owner.IsVisibleChanged += NestedOwnerVisibilityChanged;
+            owner.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => { _ = FocusDialog(); }));
+        }
+        else if (popup is not null)
         {
             popup.Child = surface;
             popup.Opened += Opened;
@@ -187,19 +239,56 @@ internal static class NovelUi
         }
         else
         {
-            host!.Show(owner, surface, DialogClosed, dismissOnOutside: false);
+            host!.Show(owner, surface, DialogClosed, dismissOnOutside: editing is not null, onCloseRequested: RequestClose);
             owner.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => { _ = FocusDialog(); }));
         }
-        surface.PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { CloseDialog(); e.Handled = true; } };
+        surface.PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { if (parent is null) RequestClose(); e.Handled = true; } };
         return completion.Task;
 
-        bool IsOpen() => host is not null ? ReferenceEquals(surface.Parent, host) : popup?.IsOpen == true;
+        bool IsOpen() => parent is not null ? ReferenceEquals(nestedLayer?.Parent, parent) :
+            host is not null ? ReferenceEquals(surface.Parent, host) : popup?.IsOpen == true;
+        void RequestClose()
+        {
+            if (editing is null) CloseDialog(); else _ = ContinueAsync(CloseDialog);
+        }
+        async Task ContinueAsync(Action continuation)
+        {
+            if (continuing || busy || finished || !IsOpen()) return;
+            continuing = true; grid.IsEnabled = false;
+            try
+            {
+                if (editing!.HasInput())
+                {
+                    bool saveChanges = await ConfirmAsync(surface, "保存更改", "当前更改未保存，是否保存", "是",
+                        pending.Token, applicationOverlay: true, cancelAction: "否", parent: dialogLayer);
+                    if (pending.IsCancellationRequested || !IsOpen()) return;
+                    if (saveChanges && !await AcceptAsync(keepOpen: true)) return;
+                }
+                if (!pending.IsCancellationRequested && IsOpen()) continuation();
+            }
+            catch (OperationCanceledException) { CloseDialog(); }
+            catch (Exception error) { ReportFailure(error); }
+            finally { continuing = false; grid.IsEnabled = true; Complete(); }
+        }
+        void ReportFailure(Exception error)
+        {
+            if (autoSubmit || !IsOpen() || pending.IsCancellationRequested) { failure = error; CloseDialog(); }
+            else
+            {
+                object noticeOwner = host is not null ? host : popup is not null ? popup : owner;
+                notices.Show(noticeOwner, error is InvalidDataException ? error.Message : "操作失败，请检查输入或重试");
+            }
+        }
         void CloseDialog()
         {
             if (!IsOpen()) return;
-            if (host is not null) host.Close();
+            if (parent is not null) { parent.Children.Remove(nestedLayer!); DialogClosed(); }
+            else if (host is not null) host.Close();
             else if (popup is not null) popup.IsOpen = false;
         }
+        void NestedOwnerUnloaded(object sender, RoutedEventArgs e) => CloseDialog();
+        void NestedOwnerVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
+        { if (!(bool)e.NewValue) CloseDialog(); }
         async void Opened(object? sender, EventArgs e) => await FocusDialog();
         async Task FocusDialog()
         {
@@ -212,12 +301,13 @@ internal static class NovelUi
         {
             closed = true;
             pending.Cancel();
-            owner.Focus();
+            if (owner.IsVisible) owner.Focus();
             Complete();
         }
         void Complete()
         {
-            if (finished || !closed || busy) return; finished = true;
+            if (finished || !closed || busy || continuing) return; finished = true;
+            if (parent is not null) { owner.Unloaded -= NestedOwnerUnloaded; owner.IsVisibleChanged -= NestedOwnerVisibilityChanged; }
             if (popup is not null)
             {
                 popup.Opened -= Opened; popup.Closed -= PopupClosed;
@@ -227,6 +317,11 @@ internal static class NovelUi
             if (failure is not null) completion.TrySetException(failure); else completion.TrySetResult(accepted && !token.IsCancellationRequested);
         }
     }
+}
+
+internal sealed record NovelDialogEditing(Panel Tools, Func<bool> HasInput)
+{
+    internal Func<Action, Task> ContinueAsync { get; set; } = null!;
 }
 
 internal sealed class NovelImage : Image

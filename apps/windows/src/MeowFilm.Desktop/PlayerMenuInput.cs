@@ -106,7 +106,7 @@ public sealed class PlayerMenuInput
     }
     public void Toggle(Button button)
     {
-        if (PlayerDialogHost.Find(window)?.IsOpen == true) { PlayerDialogHost.Find(window)!.Close(); return; }
+        if (PlayerDialogHost.Find(window)?.IsOpen == true) { PlayerDialogHost.Find(window)!.RequestClose(); return; }
         var target = entries.Single(entry => ReferenceEquals(entry.Button, button));
         bool close = ReferenceEquals(current, target) || target.IsOpen() || target.Queue && queueClose is not null;
         CloseCurrent();

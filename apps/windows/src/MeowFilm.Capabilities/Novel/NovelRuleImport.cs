@@ -1,12 +1,14 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace MeowFilm.Capabilities;
 
 internal static class NovelRuleImport
 {
-    private static readonly JsonSerializerOptions Options = new(NovelJson.Options) { PropertyNameCaseInsensitive = false };
+    private static readonly JsonSerializerOptions Options = new(NovelJson.Options)
+    { PropertyNameCaseInsensitive = false, NumberHandling = JsonNumberHandling.Strict };
     internal static NovelRule[] Parse(string text)
     {
         var root = JsonNode.Parse(text.TrimStart('\uFEFF')) ?? throw new InvalidDataException("替换规则格式不对");

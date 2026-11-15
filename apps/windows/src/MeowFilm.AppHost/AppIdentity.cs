@@ -33,7 +33,7 @@ public static class AppIdentity
         "app.appearance.v1", "app.window.v1", "app.media-controls.v1", "music.library.v2", "music.files.v2", "music.accounts.v2", "music.feedback.v2",
         "music.playback-outbox.v2",
         "music.fm-selection.v2", "film.video-sources.v1", "film.library.v1",
-        "novel.library.v1"
+        "novel.library.v1", "novel.sources.v1"
     });
     public static IReadOnlyList<string> CacheNamespaces { get; } = Array.AsReadOnly(new[]
     {

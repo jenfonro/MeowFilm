@@ -1,4 +1,4 @@
-import { isDomNode } from './dom.js';
+import { isDomNode, parseMarkup } from './dom.js';
 import { contentBlocks, resolveContentImages } from './content.js';
 import { base64ToBytes } from './capabilities.js';
 import { sourceObject, sourceRequire } from './errors.js';
@@ -262,8 +262,10 @@ export class LegadoAdapter {
         ...(extra.sourceRegex ? { sourceRegex: String(extra.sourceRegex) } : {}),
       }, this.kernel.invocationContext(invocation));
       if (value && typeof value === 'object') {
+        const statusCode = Number(value.statusCode ?? value.status ?? 200);
+        sourceRequire(statusCode >= 200 && statusCode < 300, 'HTTP_ERROR');
         return {
-          statusCode: Number(value.statusCode ?? value.status ?? 200),
+          statusCode,
           statusMessage: String(value.statusMessage ?? value.statusText ?? ''),
           headers: objectOrEmpty(value.headers),
           url: String(value.url ?? requestUrl),
@@ -296,6 +298,7 @@ export class LegadoAdapter {
       timeout: options.timeout ?? this.source.respondTime,
       followRedirects: options.followRedirects,
     }, this.kernel.invocationContext(invocation));
+    sourceRequire(response.statusCode >= 200 && response.statusCode < 300, 'HTTP_ERROR');
     return { ...response, bodylessGet };
   }
 
@@ -348,9 +351,29 @@ export class LegadoAdapter {
     return result;
   }
 
-  async books(rule, content, payload, invocation, baseUrl) {
-    content = await this.initialized(rule, content, payload, invocation, { baseUrl });
+  async books(rule, response, payload, invocation) {
+    const baseUrl = response.url;
+    const content = await this.initialized(rule, response.data, payload, invocation, { baseUrl });
     const list = await this.list(rule.bookList, content, payload, invocation, { baseUrl });
+    if (!list.length && rule.bookList && !rule.init &&
+        !/@(?:js|webjs):|<(?:js|webjs)>|\{\{|@get:/i.test(String(rule.bookList)) &&
+        response.statusCode === 202) {
+      const contentType = Object.entries(response.headers)
+        .find(([name]) => name.toLowerCase() === 'content-type')?.[1];
+      if (/^text\/html(?:\s*;|$)/i.test(String(contentType ?? '').trim())) {
+        const document = parseMarkup(response.data, this.limits.maximumNodes, this.limits.maximumParseBytes);
+        const body = document.querySelector('body');
+        const scriptOnly = body && [...body.childNodes].every(node =>
+          node.nodeType === 8 || node.nodeType === 3 && !node.textContent.trim() ||
+          node.nodeType === 1 && ['SCRIPT', 'STYLE'].includes(node.nodeName));
+        const executable = [...document.querySelectorAll('script')].some(script => {
+          const type = (script.getAttribute('type') ?? '').trim();
+          return (!type || /^(?:module|(?:text|application)\/(?:javascript|ecmascript))$/i.test(type)) &&
+            Boolean(script.getAttribute('src')?.trim() || script.textContent.trim());
+        });
+        sourceRequire(!(scriptOnly && executable), 'WEB_INTERACTION_REQUIRED');
+      }
+    }
     const results = [];
     if (!list.length) return results;
     const variables = this.kernel.ruleVariables(invocation.id);
@@ -367,7 +390,7 @@ export class LegadoAdapter {
     sourceRequire(typeof payload.keyword === 'string' || typeof payload.key === 'string');
     const response = await this.request(this.source.searchUrl, payload, invocation);
     return {
-      books: await this.books(this.searchRule, response.data, payload, invocation, response.url),
+      books: await this.books(this.searchRule, response, payload, invocation),
       page: Number(payload.page ?? 1),
       url: response.url,
     };
@@ -408,7 +431,7 @@ export class LegadoAdapter {
     sourceRequire(typeof template === 'string' && template.length > 0);
     const response = await this.request(template, payload, invocation);
     return {
-      books: await this.books(this.exploreRule, response.data, payload, invocation, response.url),
+      books: await this.books(this.exploreRule, response, payload, invocation),
       page: Number(payload.page ?? 1),
       url: response.url,
     };

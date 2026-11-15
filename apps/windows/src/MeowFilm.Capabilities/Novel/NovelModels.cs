@@ -10,27 +10,6 @@ public sealed record NovelSource(string InstallationId, long Revision, string Na
     double RespondTime = 180000, bool HasExplore = false)
 {
     public override string ToString() => Name;
-    internal static NovelSource From(JsonElement value)
-    {
-        using var buffer = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(buffer))
-        {
-            writer.WriteStartObject();
-            foreach (var property in value.EnumerateObject())
-            {
-                if (property.Name is "weight" or "lastUpdateTime" or "respondTime")
-                    writer.WriteNumber(property.Name, property.Value.ValueKind == JsonValueKind.Number &&
-                        property.Value.TryGetDouble(out var number) && double.IsFinite(number)
-                            ? number : property.Name == "respondTime" ? 180000 : 0);
-                else if (property.NameEquals("hasExplore"))
-                    writer.WriteBoolean(property.Name, property.Value.ValueKind == JsonValueKind.True);
-                else property.WriteTo(writer);
-            }
-            writer.WriteEndObject();
-        }
-        using var document = JsonDocument.Parse(buffer.ToArray());
-        return NovelJson.Decode<NovelSource>(document.RootElement);
-    }
 }
 public sealed record NovelAnchor(string ChapterUrl = "", string ChapterTitle = "", int ChapterIndex = 0,
     int BlockIndex = 0, int Utf16Offset = 0, double Ratio = 0);

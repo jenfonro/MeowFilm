@@ -121,7 +121,7 @@ public static partial class NovelTests
             entered.TrySetResult(); return await physical.Task;
         };
         var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
-        var runtime = new Runtime(); var sources = new NovelSourceService(runtime);
+        var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime);
         await sources.RefreshAsync();
         await using var server = new WebFixture();
         bool closed = false;
@@ -163,7 +163,7 @@ public static partial class NovelTests
         var sources = new Runtime { Records = [] };
         await using var remote = new RuleReceiptRuntime();
         var physical = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var old = new NovelCapability(new NovelSourceService(sources), new NovelLibrary(store), new NovelRuleProgram(remote));
+        var old = new NovelCapability(NovelTestSources.Create(sources), new NovelLibrary(store), new NovelRuleProgram(remote));
         await old.InitializeAsync(default);
         await old.Library.SaveEntryAsync(new("old-book", "old-key", Book(), OnShelf: true));
         await old.Library.SaveRulesAsync([new() { Pattern = "旧规则" }]);
@@ -188,7 +188,7 @@ public static partial class NovelTests
             () => { Check(shutdown.IsReleased); store.Bytes = null; return Task.CompletedTask; },
             async () =>
             {
-                fresh = new(new NovelSourceService(sources), new NovelLibrary(store), new NovelRuleProgram(remote));
+                fresh = new(NovelTestSources.Create(sources), new NovelLibrary(store), new NovelRuleProgram(remote));
                 await fresh.InitializeAsync(default);
                 await fresh.NavigateAsync(NovelCapability.HomeRoute, default);
             });

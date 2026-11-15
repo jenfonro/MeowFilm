@@ -9,6 +9,7 @@
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
+    <ResourceDictionary Source="/MeowFilm.Desktop;component/FilterChrome.xaml"/>
    </ResourceDictionary.MergedDictionaries>
    <Style x:Key="Film.MoreButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
@@ -45,42 +46,13 @@
      </Border>
     </ControlTemplate></Setter.Value></Setter>
    </Style>
-   <Style x:Key="Film.FilterLabel" TargetType="TextBlock"
-          BasedOn="{StaticResource MeowFilm.SectionHeading}">
-    <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/>
-    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-    <Setter Property="Margin" Value="0"/>
-    <Setter Property="VerticalAlignment" Value="Center"/>
-   </Style>
-   <Style x:Key="Film.FilterGroup" TargetType="Border">
-    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/>
-    <Setter Property="CornerRadius" Value="18"/>
-    <Setter Property="Padding" Value="4"/>
-    <Style.Triggers>
-     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-      <Setter Property="BorderThickness" Value="1"/>
-     </Trigger>
-    </Style.Triggers>
-   </Style>
+   <Style x:Key="Film.FilterLabel" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.FilterLabel}"/>
+   <Style x:Key="Film.FilterGroup" TargetType="Border" BasedOn="{StaticResource MeowFilm.FilterGroup}"/>
    <Style x:Key="Film.FilterChip" TargetType="Button"
-          BasedOn="{StaticResource MeowFilm.QuietButton}">
-    <Setter Property="MinHeight" Value="32"/>
-    <Setter Property="Padding" Value="14,5"/>
-    <Setter Property="Margin" Value="2,0"/>
-    <Setter Property="BorderThickness" Value="0"/>
-    <Setter Property="Cursor" Value="Hand"/>
-    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-     <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-             BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}"
-             CornerRadius="16">
-      <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-     </Border>
-    </ControlTemplate></Setter.Value></Setter>
+          BasedOn="{StaticResource MeowFilm.FilterChip}">
     <Style.Triggers>
      <DataTrigger Binding="{Binding IsSelected}" Value="True">
-      <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}"/>
+      <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.FloatingSurface}"/>
       <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
      </DataTrigger>
      <MultiDataTrigger>
@@ -151,8 +123,7 @@
     <Button Grid.Column="1" Content="刷新" Click="DataRefresh_Click" Style="{StaticResource Film.MoreButton}"
             IsEnabled="{Binding ActiveData.CanRefresh}" AutomationProperties.Name="刷新影片数据"/>
     </Grid>
-    <Border Margin="0,0,0,24" Padding="18,9" CornerRadius="16"
-            Style="{StaticResource MeowFilm.Surface}">
+    <Border Margin="0,0,0,20">
      <ItemsControl x:Name="DataFilters" ItemsSource="{Binding ActiveData.FilterRows}">
       <ItemsControl.ItemsPanel>
        <ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate>
