@@ -97,7 +97,7 @@ public final class PlaybackVideoLease {
             try check(operation, admission: admission, candidate: candidate)
             emit(.prepared, transport: candidate, wantsPlayback: !paused)
             #if os(iOS)
-            surface.stage(candidate.output.presentationLayer)
+            surface.stage(candidate.output.presentationView)
             #endif
             var deadline = now().advanced(by: .seconds(15))
             commitAdmission: while true {
@@ -223,7 +223,7 @@ public final class PlaybackVideoLease {
             active = nil; pictureInPictureState = .unavailable
         }
         #if os(iOS)
-        surface.remove(transport.output.presentationLayer)
+        surface.remove(transport.output.presentationView)
         #endif
     }
 
@@ -248,7 +248,7 @@ public final class PlaybackVideoLease {
         if let release { recordSystemRelease(release); candidate.systemRelease = nil }
         candidate.cancel()
         #if os(iOS)
-        surface.remove(candidate.output.presentationLayer)
+        surface.remove(candidate.output.presentationView)
         #endif
         return retirement(for: candidate) {
             // Join both operations even if decoder/receipt release fails. A

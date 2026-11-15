@@ -57,7 +57,8 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
 | `MeowFilmFeature` | 影视页面、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime |
-| `native/VideoKernel` | 锁定 FFmpeg 8.1.2、私有 C／Swift 适配与系统 sample-buffer 输出 | Apple 系统媒体框架，无业务依赖 |
+| `native/VideoKernel` | 电影候选准备／提交、实际首帧、轨道与关闭适配 | 固定源码 KSPlayer，无业务或系统媒体会话 owner |
+| `native/KSPlayer` | core-only KSPlayer：解码、轨道／字幕、缓冲／同步、原生音频与 Metal／sample-buffer 输出 | FFmpeg 8.1.2 与 Apple 系统媒体框架，不编译上游播放控件 |
 | `packages/film-rules`／`packages/film-search` | Node 加载的共享规则／搜索程序，不再作为 SwiftPM 依赖 | 共享 script-host 原生载体 |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。

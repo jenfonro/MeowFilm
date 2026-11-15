@@ -45,7 +45,7 @@ class PrepareRecipeTests(unittest.TestCase):
 
     def recipe(self, name):
         inputs = {"prepareSHA256": self.prepare.digest(Path(self.prepare.__file__)),
-                  "lockSHA256": self.prepare.digest(self.prepare.LOCK_PATH),
+                  "lockSHA256": self.prepare.native_lock_digest(self.lock),
                   "target": self.lock["targets"][name], "sources": {"ffmpeg": "source-closure"}}
         return {"inputs": inputs,
                 "fingerprint": hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest(),
@@ -54,10 +54,43 @@ class PrepareRecipeTests(unittest.TestCase):
     def testCurrentRecipeAndArtifactsAreAccepted(self):
         self.prepare.verify_packaged(self.receipt, self.lock)
 
+    def testPublicBufferFiltersAreRequiredRegistryEntriesNotConfigMacros(self):
+        build = self.root / "configured"
+        build.mkdir()
+        (build / "config.h").write_text("#define CONFIG_AVFILTER 1\n")
+        (build / "config_components.h").write_text("#define CONFIG_ATEMPO_FILTER 1\n")
+        symbols = ["ff_asrc_abuffer", "ff_vsrc_buffer", "ff_asink_abuffer", "ff_vsink_buffer"]
+        registry = build / "libavfilter/filter_list.c"
+        registry.parent.mkdir()
+        registry.write_text("static const FFFilter * const filter_list[] = {\n" +
+                            "".join("    &" + symbol + ",\n" for symbol in symbols) + "    NULL };\n")
+        lock = {"requiredComponents": ["AVFILTER", "ATEMPO_FILTER"], "requiredFilterSymbols": symbols}
+        self.prepare.verify_configuration(build, lock, "fixture")
+        registry.write_text(registry.read_text().replace("    &ff_vsrc_buffer,\n", ""))
+        with self.assertRaisesRegex(ValueError, "missing required filter ff_vsrc_buffer"):
+            self.prepare.verify_configuration(build, lock, "fixture")
+        (build / "config_components.h").write_text("#define CONFIG_ATEMPO_FILTER 0\n")
+        with self.assertRaisesRegex(ValueError, "missing required component ATEMPO_FILTER"):
+            self.prepare.verify_configuration(build, lock, "fixture")
+
     def testChangedPrepareSourceRejectsPreviouslyHashedOutput(self):
         Path(self.prepare.__file__).write_text("changed recipe\n")
         with self.assertRaisesRegex(ValueError, "prepare source or target recipe"):
             self.prepare.verify_packaged(self.receipt, self.lock)
+
+    def testHTTPResponseCookiePatchCannotMutateRequestContext(self):
+        repository = Path(__file__).resolve().parents[4]
+        lock = json.loads((repository / "scripts/ios-video-kernel.json").read_text())
+        reviewed = (repository / lock["patch"]["path"]).read_text()
+        self.assertIn("libavformat/http.c", lock["patch"]["files"])
+        http = reviewed.split("--- a/libavformat/http.c\n", 1)[1].split("--- a/", 1)[0]
+        # Reconstruct the changed response-header branch. This is a source
+        # policy check, not a substitute for the real HTTP playback tests.
+        after = "\n".join(line[1:] for line in http.splitlines()
+                          if line.startswith((" ", "+")) and not line.startswith("+++"))
+        branch = re.search(r'!av_strcasecmp\(tag, "Set-Cookie"\)\) \{(.*?)\} else', after, re.S)
+        self.assertIsNotNone(branch)
+        self.assertEqual(re.sub(r"/\*.*?\*/", "", branch.group(1), flags=re.S).strip(), "")
 
     def testChangedSourceLockIsRejected(self):
         self.prepare.LOCK_PATH.write_text("changed lock")
@@ -106,7 +139,8 @@ class PrepareRecipeTests(unittest.TestCase):
         self.lock["libraries"] = locked["libraries"]
         self.lock["targets"] = locked["targets"]
         self.prepare.LOCK_PATH.write_text(json.dumps(self.lock))
-        bridge = (repository / "native/VideoKernel/Sources/CMeowVideoKernel/decoder.c").read_text()
+        bridge = "\n".join(path.read_text() for path in
+                           (repository / "native/KSPlayer/Sources").glob("Lib*/include/*.h"))
         bridge_headers = set(re.findall(r"#include <(lib[^/]+/[^>]+)>", bridge))
         paths = bridge_headers | {f"lib{library}/version.h" for library in self.lock["libraries"]}
         paths |= {"libavutil/avconfig.h", "libavcodec/nested/definitions.h"}
@@ -158,7 +192,7 @@ class PrepareRecipeTests(unittest.TestCase):
         with (output / "Info.plist").open("wb") as stream:
             plistlib.dump({"XCFrameworkFormatVersion": "1.0", "AvailableLibraries": entries}, stream)
 
-    def testFiveLibrariesOwnDisjointCompleteHeadersForEveryLockedSlice(self):
+    def testCoreLibrariesOwnDisjointCompleteHeadersForEveryLockedSlice(self):
         expected, bridge_headers = self.header_package_fixture()
         source = self.prepare.CACHE / "sources/ffmpeg/source.c"
         source.parent.mkdir(parents=True)
@@ -225,7 +259,8 @@ class PrepareRecipeTests(unittest.TestCase):
     def testDemuxPatchSourceClosureRejectsPartialOrForgedPerFileIdentity(self):
         # A local source archive exercises the same patch/inventory contract
         # without network, compilers or cached binaries.
-        originals = {"libavformat/hls.c": b"before hls\n", "libavformat/dashdec.c": b"before dash\n"}
+        originals = {"libavformat/hls.c": b"before hls\n", "libavformat/dashdec.c": b"before dash\n",
+                     "libavformat/http.c": b"before response cookie policy\n"}
         modified = {name: data.replace(b"before", b"after") for name, data in originals.items()}
         archive = self.root / "source.tar.gz"
         with tarfile.open(archive, "w:gz") as contents:

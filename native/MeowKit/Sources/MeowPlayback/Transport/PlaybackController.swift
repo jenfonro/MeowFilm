@@ -498,11 +498,13 @@ public final class PlaybackController: ObservableObject {
             throw PlaybackVideoError.staleAttempt
         }
         #endif
+        try transport.validateForCommit()
         finishHandoff = lease.willCommit()
         guard acceptsVideo(admission, owner: lease.owner), videoCandidate === transport else {
             throw PlaybackVideoError.staleAttempt
         }
         sampleCurrentProgress()
+        try transport.validateForCommit()
         // Extract only a genuinely active OS controller, only within the same
         // lease, after every throwing admission and before old retirement.
         if videoLease === lease, let pictureInPicture = videoTransport?.takeActivePictureInPicture() {
@@ -558,7 +560,7 @@ public final class PlaybackController: ObservableObject {
         state.progress(generation: token, position: transport.position)
         transport.commit(attempt: attempt, rate: 0, volume: Float(volume))
         #if os(iOS)
-        lease.surface.commit(transport.output.presentationLayer)
+        lease.surface.commit(transport.output.presentationView)
         #endif
         transport.installPictureInPicture(lease: lease, controller: self, attempt: attempt)
         #if os(iOS)

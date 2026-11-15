@@ -6,7 +6,8 @@
 | --- | --- |
 | `NOTICE.md` | 按上游项目列出来源、固定提交、版权方、许可及改编部分 |
 | `Apache-2.0.txt` | iWebPlus / iWebPlayer、LX Music Desktop |
-| `GPL-3.0-only.txt` | 本应用、MeowMusic、QQMusicApi |
+| `GPL-3.0-only.txt` | 本应用、MeowMusic、QQMusicApi、固定源码 KSPlayer 核心、FFmpegKit 源码桥与启用 GPL 滤镜的 iOS FFmpeg |
+| `LGPL-2.1-only.txt`、`LGPL-3.0-only.txt`、`FFmpeg-LICENSE.md`、`FFmpeg-IJG-NOTICE.txt` | FFmpeg 上游许可正文与来源声明，实际构建许可见 NOTICE |
 | `api-enhanced-MIT.txt` | NeteaseCloudMusicApiEnhanced/api-enhanced |
 | `KuGouMusicApi-MIT.txt` | MakcRe/KuGouMusicApi |
 | `iwebplus-NOTICE.txt`、`meowmusic-NOTICE.txt` | 上游 NOTICE 原文 |

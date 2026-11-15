@@ -14,7 +14,7 @@ import UIKit
 final class PlaybackVideoTestWindow {
     #if os(macOS)
     private let window: NSWindow
-    private let root: CALayer
+    private let root: NSView
     #elseif os(iOS)
     private let window: UIWindow
     private weak var surface: PlaybackVideoSurface?
@@ -32,13 +32,12 @@ final class PlaybackVideoTestWindow {
             }
         }
         let screen = try XCTUnwrap(NSScreen.main, "Video output requires an attached display")
-        root = CALayer()
+        root = NSView(frame: bounds)
         window = NSWindow(contentRect: bounds.offsetBy(dx: screen.visibleFrame.minX, dy: screen.visibleFrame.minY),
             styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        let view = NSView(frame: bounds)
-        root.frame = bounds; view.layer = root; view.wantsLayer = true
-        window.contentView = view
+        root.wantsLayer = true
+        window.contentView = root
         window.orderFrontRegardless(); window.displayIfNeeded()
         XCTAssertTrue(window.isVisible); XCTAssertNotNil(window.screen)
         #elseif os(iOS)
@@ -66,7 +65,7 @@ final class PlaybackVideoTestWindow {
     }
 
     func stage(_ transport: PlaybackVideoTransport) {
-        let display = transport.output.presentationLayer
+        let display = transport.output.presentationView
         #if os(iOS)
         guard let surface else {
             XCTFail("The lease's existing surface must be attached before staging output")
@@ -75,13 +74,17 @@ final class PlaybackVideoTestWindow {
         #endif
         CATransaction.begin(); CATransaction.setDisableActions(true)
         #if os(macOS)
-        root.addSublayer(display)
+        root.addSubview(display)
         display.frame = root.bounds
         #elseif os(iOS)
         surface.stage(display)
         surface.setNeedsLayout(); surface.layoutIfNeeded()
         #endif
+        #if os(macOS)
+        display.layoutSubtreeIfNeeded()
+        #else
         display.setNeedsLayout(); display.layoutIfNeeded()
+        #endif
         CATransaction.commit()
         #if os(macOS)
         window.contentView?.layoutSubtreeIfNeeded(); window.displayIfNeeded()
@@ -91,7 +94,7 @@ final class PlaybackVideoTestWindow {
         XCTAssertTrue(surface.window === window); XCTAssertFalse(window.isHidden)
         #endif
         CATransaction.flush()
-        XCTAssertNotNil(display.superlayer)
+        XCTAssertNotNil(display.superview)
         XCTAssertGreaterThan(display.bounds.width, 0); XCTAssertGreaterThan(display.bounds.height, 0)
     }
 

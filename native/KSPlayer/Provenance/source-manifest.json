@@ -1,0 +1,304 @@
+{
+  "files": {
+    "Package.swift": "758aad983fff0cfb304c5fdfaaa50e65d1cda22cd018dea071e97d3b6797e33b",
+    "Sources/DisplayCriteria/DisplayCriteria.m": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "Sources/DisplayCriteria/include/AVDisplayCriteriaKS.h": "3e876b4b85906b324dcecaa9c2c11fe36c223997980ace08ef7fe41acbdad16f",
+    "Sources/FFmpegKit/FFmpegKit.c": "1fb89a2d7ae5fef4b3b9423e358ae3e5c1b49bba24e22592b0d234d0f9a185aa",
+    "Sources/FFmpegKit/include/avcodec_shim.h": "331174b4ef2fa14ee133701bbcf27e6d99d5eae73b9604de1e5856af631e860e",
+    "Sources/FFmpegKit/include/avdevice_shim.h": "8abac6d79cfd89d021daeaed351b37e9ab3d7acf38c0cea71d62eb51b0b46228",
+    "Sources/FFmpegKit/include/avfilter_shim.h": "3668bb7e1e2eb5d197446e05c2da1c8c86075d45df62c025edeb1e789b4dedd5",
+    "Sources/FFmpegKit/include/avformat_shim.h": "2b1eebeb845860291b3568429d9a9935f17b2efdcb6cfbdc8753b5e54b0aa888",
+    "Sources/FFmpegKit/include/avutil_shim.h": "4320f02abf87bacf85a492c32f08eb9408c8128bb041379a8cfe0e9fded79a02",
+    "Sources/FFmpegKit/include/swresample_shim.h": "f2de03b7796b7f3be01b9cd0afb5c2edc805fb0ca10f0c3db2f3a1ca5ddbcaf9",
+    "Sources/FFmpegKit/include/swscale_shim.h": "eb3882e0b151afebffc7c87b1d9005b0d8468c27ca2010c694fd250526738933",
+    "Sources/KSPlayer/AVPlayer/KSOptions.swift": "8db40c0665e56a715b282db6ab905983e18cf82428c9021fed7903c513614493",
+    "Sources/KSPlayer/AVPlayer/KSPictureInPictureController.swift": "db01caa3af4679948912c5f5bd5fc0bdea9f844a0b09b72a4c5ae4a377021751",
+    "Sources/KSPlayer/AVPlayer/MediaPlayerProtocol.swift": "700595247d0ebecd61573da299a8d08f4f422d3f25789daefd8765dab4c34164",
+    "Sources/KSPlayer/AVPlayer/PlayerDefines.swift": "668fad615b97b31a04afa5493e20626e7534dd47bfb02e97bfa07b9950f094ff",
+    "Sources/KSPlayer/Core/AppKitExtend.swift": "bb1f426179a357a6cdc46e38f1c3ed82c20fb6e4ac0845dd13523a09554d64a5",
+    "Sources/KSPlayer/Core/UXKit.swift": "7437ea4f06ae9da47dda09b2c02f1d05d13414f1996e522a44e2965a0bc37930",
+    "Sources/KSPlayer/Core/Utility.swift": "e107d8b82353926138d2f95622dc55446eafb11f94d9261f40946535bad10044",
+    "Sources/KSPlayer/MEPlayer/AVFFmpegExtension.swift": "429e9d4c8b0b4b8a241c67f016e1092c0f8e4eb2e589858feb10d7891df0168e",
+    "Sources/KSPlayer/MEPlayer/AVFoundationExtension.swift": "b7212ac114db9c63459c4dd9085c8039bdd6c21577e168cf36d2038d7d858f83",
+    "Sources/KSPlayer/MEPlayer/AudioEnginePlayer.swift": "922568ac61e9a7387f4d164f1b5f82d9aa71666dbcf4afb10d7fa255a73f6b54",
+    "Sources/KSPlayer/MEPlayer/AudioGraphPlayer.swift": "373a804b9b3ee640ea95dd715d1506387fe8cfa4f20c744596411642c18cf48b",
+    "Sources/KSPlayer/MEPlayer/AudioRenderActivity.swift": "1e2cf9a1e5a2d9dc2a5ba14feef8f922a930894f394776da21aa3ca40b756253",
+    "Sources/KSPlayer/MEPlayer/AudioRendererPlayer.swift": "b25a4dc308aced8b3c67f42c33947825b55499ad51c8b56a8e5477e043972b56",
+    "Sources/KSPlayer/MEPlayer/AudioUnitPlayer.swift": "ee386d3a777437f27c5c23063f94355ed984b98045542074960f579b0012a029",
+    "Sources/KSPlayer/MEPlayer/CircularBuffer.swift": "82894b4c6818a03789c789510d6c0379f45d4a96b7f348abea0f68c1cea8c2a0",
+    "Sources/KSPlayer/MEPlayer/EmbedDataSouce.swift": "925cd6db8db024fa8bc3f2a681e2a0bd71ca48c47fc045b69ffeabbc858c9e6a",
+    "Sources/KSPlayer/MEPlayer/FFmpegAssetTrack.swift": "bd062178e703af017f8f267013b25258bac6cdc3d3f47037d5fa09e53cd8f254",
+    "Sources/KSPlayer/MEPlayer/FFmpegDecode.swift": "4f9e32fe611e9d3179af1a03804564dea9c01a0c3130e5a7a8ee531390afacf8",
+    "Sources/KSPlayer/MEPlayer/Filter.swift": "349d1dfffab84a0df1d1bcd56f65192eabe1398bcd158e957173842aa03867bf",
+    "Sources/KSPlayer/MEPlayer/KSMEPlayer.swift": "0378fef7b6880fe947d443eef7e052ac66dae6679459330ebb67ecdded664064",
+    "Sources/KSPlayer/MEPlayer/MEPlayerItem.swift": "1ebe88ca6532125eaa9c424accdcb5a3f9a89728f9e532172854cdeae31c3844",
+    "Sources/KSPlayer/MEPlayer/MEPlayerItemTrack.swift": "29d645ff28bed2fefbec33ad51990a12762bf648be7cb117e684a1335668bfdd",
+    "Sources/KSPlayer/MEPlayer/MetalPlayView.swift": "f077eee09806ca6e2d3dca07c521b1e09836137fc2cbd0251bfa2c35118e897a",
+    "Sources/KSPlayer/MEPlayer/Model.swift": "3405a703b9316a32a474d0be30c9bef67038b63b93372e3d0d1e0d37ab0cfcfd",
+    "Sources/KSPlayer/MEPlayer/Resample.swift": "01665cac435055f0c5dd3b26c0824960b044fdf771b1df30adbb793aa7f56612",
+    "Sources/KSPlayer/MEPlayer/SubtitleDecode.swift": "9a1109549a5bad37d3a059dc58c6e90b613198d55361a6e68ba757f9bdaa836f",
+    "Sources/KSPlayer/MEPlayer/ThumbnailController.swift": "34ae784ca9bb24ec986d855847eee23de69b78186d022751e73ce87ed2b0b54e",
+    "Sources/KSPlayer/MEPlayer/VideoToolboxDecode.swift": "5bbde3378f1022dc6c7815a15694d638f8ff272b41a118007a4c337921190af7",
+    "Sources/KSPlayer/Metal/DisplayModel.swift": "afd5ae5a31f62caf51d14a9e0ff4143a35df6cb6bacffef8ce3b12caf597831f",
+    "Sources/KSPlayer/Metal/MetalRender.swift": "d40383b01d6aacc6850f1bbd14b6957785cf05b12298af7625921899bffd205f",
+    "Sources/KSPlayer/Metal/MotionSensor.swift": "cbd61adcabbe1cf9af537e3657935bcfef65ed70c0d4c4ebbcf1f15ef08edf12",
+    "Sources/KSPlayer/Metal/PixelBufferProtocol.swift": "3300123764ee7a4d2cff5aab036e3bb594fe55b7c7f51b76368256f23f652da9",
+    "Sources/KSPlayer/Metal/Shaders.metal": "3263ac1ab7ce93e9fbd4cf66b12fe1862346dc5eb61f9461bbbe9e1bca5197f8",
+    "Sources/KSPlayer/Metal/Transforms.swift": "f7172c8e4f3ed6b33f660e5240f0a72ca44b1346c013f58c6aaa892808ce2624",
+    "Sources/KSPlayer/Subtitle/KSParseProtocol.swift": "1fff60f3a4fd5e3401176b7a89649a5c62cc116a3161e178b588f62a6c4e31cf",
+    "Sources/KSPlayer/Subtitle/KSSubtitle.swift": "53ecb42a01324e2c90dcca097a55a92f644f6d7d230fb90b538176783d800341",
+    "Sources/KSPlayer/Subtitle/SubtitleDataSouce.swift": "bc3cbd83de39fd5474a8024d32c5fee68b1a8aa7a2a0f20df7841605dd6903c2",
+    "Sources/Libavcodec/include/Libavcodec.h": "9e55ecea8e7aed6499730d3374903ededeccb07d9584cf95ee4f0fc2c6ce21f0",
+    "Sources/Libavcodec/module.c": "6bd2c6162262e87c5a243fd0d34d9c3e300fd3d82863abe16154c935869c8270",
+    "Sources/Libavfilter/include/Libavfilter.h": "53b4b4f922c44785c775318b3f4bb94c753f5223514c3932a4564f45b125e3f6",
+    "Sources/Libavfilter/module.c": "e513e7b548eba276cc61f578e44f898e2302e984382943bcd37a1b8da9d17a5e",
+    "Sources/Libavformat/include/Libavformat.h": "069454e984b573edc423df27e0dbffc3501a11d7e0fec733dd2b7cccfbd6d483",
+    "Sources/Libavformat/module.c": "f4b01d592b63f1f670010308c3c342e70c3fcbbf0879b1d6f744f7fd5e7474e5",
+    "Sources/Libavutil/include/Libavutil.h": "95f1a32bbc1953c2514985b8e67c630fb2774b683ca6d3f305d9c181f70f2100",
+    "Sources/Libavutil/module.c": "e9b9f7ad383c52e59226cd974b91dc2059b89536e91373e66559eca97b597eea",
+    "Sources/Libswresample/include/Libswresample.h": "c300fae8613397d52504bb9ed40a2ae112f7b121e8ff1256d6d85edc6cfdf9a0",
+    "Sources/Libswresample/module.c": "80681b6347daf9bfc8d6a1f0e0e06698a65e89fc543e2ebbfcf6797c7c6a15a7",
+    "Sources/Libswscale/include/Libswscale.h": "b2ed112b35adfdc69f4d89bcb18036d2aadc8a10b7af0c2ae28f9fe3bc0a06cf",
+    "Sources/Libswscale/module.c": "9b673219c5255b0e2acc09d9a2c58d5224e1dbd903ff7a27d655f98962959308",
+    "Tests/KSPlayerTests/DolbyVisionCoreTests.swift": "88cd4b0566f7ecf9534e9bbfb7d11df3e054839e07de513ea9591d262b82ff21",
+    "Tests/KSPlayerTests/HDRMetadataCoreTests.swift": "9518fb774ff39d0e53fd3af217725f955b5d319e45f9e4c4a460eb02e59ff474"
+  },
+  "origins": {
+    "Package.swift": {
+      "path": "Package.swift",
+      "sha256": "07435a7845d2bca8cbf6b2fb829355a4cf6a5ab61f4d64edf12f8b5f95e73629",
+      "source": "ksplayer"
+    },
+    "Sources/DisplayCriteria/DisplayCriteria.m": {
+      "path": "Sources/DisplayCriteria/DisplayCriteria.m",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "source": "ksplayer"
+    },
+    "Sources/DisplayCriteria/include/AVDisplayCriteriaKS.h": {
+      "path": "Sources/DisplayCriteria/include/AVDisplayCriteriaKS.h",
+      "sha256": "3e876b4b85906b324dcecaa9c2c11fe36c223997980ace08ef7fe41acbdad16f",
+      "source": "ksplayer"
+    },
+    "Sources/FFmpegKit/FFmpegKit.c": {
+      "path": "Sources/FFmpegKit/FFmpegKit.c",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "source": "ffmpegkit"
+    },
+    "Sources/FFmpegKit/include/avcodec_shim.h": {
+      "path": "Sources/FFmpegKit/include/avcodec_shim.h",
+      "sha256": "331174b4ef2fa14ee133701bbcf27e6d99d5eae73b9604de1e5856af631e860e",
+      "source": "ffmpegkit"
+    },
+    "Sources/FFmpegKit/include/avdevice_shim.h": {
+      "path": "Sources/FFmpegKit/include/avdevice_shim.h",
+      "sha256": "8abac6d79cfd89d021daeaed351b37e9ab3d7acf38c0cea71d62eb51b0b46228",
+      "source": "ffmpegkit"
+    },
+    "Sources/FFmpegKit/include/avfilter_shim.h": {
+      "path": "Sources/FFmpegKit/include/avfilter_shim.h",
+      "sha256": "3668bb7e1e2eb5d197446e05c2da1c8c86075d45df62c025edeb1e789b4dedd5",
+      "source": "ffmpegkit"
+    },
+    "Sources/FFmpegKit/include/avformat_shim.h": {
+      "path": "Sources/FFmpegKit/include/avformat_shim.h",
+      "sha256": "26cf5b0fb4bada80e1e4dfa2e0c4134d7d35d71774f12b89e0a04047f60a821c",
+      "source": "ffmpegkit"
+    },
+    "Sources/FFmpegKit/include/avutil_shim.h": {
+      "path": "Sources/FFmpegKit/include/avutil_shim.h",
+      "sha256": "7d8ef67f89af72dc5a15dcb0beb6b372d4d03da3391b6687445c139f4870b7e0",
+      "source": "ffmpegkit"
+    },
+    "Sources/FFmpegKit/include/swresample_shim.h": {
+      "path": "Sources/FFmpegKit/include/swresample_shim.h",
+      "sha256": "f2de03b7796b7f3be01b9cd0afb5c2edc805fb0ca10f0c3db2f3a1ca5ddbcaf9",
+      "source": "ffmpegkit"
+    },
+    "Sources/FFmpegKit/include/swscale_shim.h": {
+      "path": "Sources/FFmpegKit/include/swscale_shim.h",
+      "sha256": "eb3882e0b151afebffc7c87b1d9005b0d8468c27ca2010c694fd250526738933",
+      "source": "ffmpegkit"
+    },
+    "Sources/KSPlayer/AVPlayer/KSOptions.swift": {
+      "path": "Sources/KSPlayer/AVPlayer/KSOptions.swift",
+      "sha256": "7dd72c1d0b61677151644c13cd6ae7da16c1f802968855daf2250317c79e631c",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/AVPlayer/KSPictureInPictureController.swift": {
+      "path": "Sources/KSPlayer/AVPlayer/KSPictureInPictureController.swift",
+      "sha256": "0d57c034c3a549b17bff64c4c66c5faebab25a7d09c754b0a039d65a85218906",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/AVPlayer/MediaPlayerProtocol.swift": {
+      "path": "Sources/KSPlayer/AVPlayer/MediaPlayerProtocol.swift",
+      "sha256": "796c245c64012ec28d7b83c9b277a4c166f8fbfb7e624f1a0e2a24d5f5a04a8c",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/AVPlayer/PlayerDefines.swift": {
+      "path": "Sources/KSPlayer/AVPlayer/PlayerDefines.swift",
+      "sha256": "036e26d937c709b4f0bb0132ffa7ecb1326d52615ebfc6be98130259385d2905",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Core/AppKitExtend.swift": {
+      "path": "Sources/KSPlayer/Core/AppKitExtend.swift",
+      "sha256": "722a2d8c1900849dd924361e55e8739f528ed3e2479301e5b382b57631dcc59c",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Core/UXKit.swift": {
+      "path": "Sources/KSPlayer/Core/UXKit.swift",
+      "sha256": "12c05ffc91d096f2c3bf9da86d256ab84a265a57aeb63ab082fdbb41fa662d6a",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Core/Utility.swift": {
+      "path": "Sources/KSPlayer/Core/Utility.swift",
+      "sha256": "9714b599c38c05f516865353e7e545b71fe363494f48948ec459fda495963d3a",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/AVFFmpegExtension.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/AVFFmpegExtension.swift",
+      "sha256": "8c48d735cb0f09df765d9ea3fbce30eeea0df30bcf8b3b0f840c007f19b32d82",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/AVFoundationExtension.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/AVFoundationExtension.swift",
+      "sha256": "9c02b259df01b1c0201f8f66dd2e7d140a00526c7d63f59623e4a9875643982d",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/AudioEnginePlayer.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/AudioEnginePlayer.swift",
+      "sha256": "b9d8d94e10631f90288f0e0e48bcb681d5ab43e06e1a566bb0213505a90b1e05",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/AudioGraphPlayer.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/AudioGraphPlayer.swift",
+      "sha256": "99d432315107c011cdd63c3bbaf65b8e91cdb38555000968f9461b6976f7ffad",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/AudioRendererPlayer.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/AudioRendererPlayer.swift",
+      "sha256": "33796a075a6e5ab47658dfb19cc65a43486f3eddf3ff759f4fa93f6abd9f4b08",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/AudioUnitPlayer.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/AudioUnitPlayer.swift",
+      "sha256": "fc0b4f26f14302180fe6967678192f878493b6a20947f3889cc079a13245adaf",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/CircularBuffer.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/CircularBuffer.swift",
+      "sha256": "c0f9b907b7f5a3233029598beff68d90d91c83ca2a2144cce09df82ce447f56d",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/EmbedDataSouce.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/EmbedDataSouce.swift",
+      "sha256": "21874efc1bf3e5d44b5c7eebb766c065741b95b7942a54e25245ea65a59a2730",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/FFmpegAssetTrack.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/FFmpegAssetTrack.swift",
+      "sha256": "38e364bd9a3196a11f24c875c179815f298c310c4d76c163e7a5e869214364a4",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/FFmpegDecode.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/FFmpegDecode.swift",
+      "sha256": "ee9b733e72c1db7244c8d8769f0ff4c806482032cb5fe9ecbc9eea1dfd7f43d1",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/Filter.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/Filter.swift",
+      "sha256": "349d1dfffab84a0df1d1bcd56f65192eabe1398bcd158e957173842aa03867bf",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/KSMEPlayer.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/KSMEPlayer.swift",
+      "sha256": "d463ac26274c7365f0281a87e5490d0e3f61e01faa6888908a9bae224bc99627",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/MEPlayerItem.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/MEPlayerItem.swift",
+      "sha256": "01c7d0b484c08cb61eaf5d616a0f86c17914e3b94d49804004609a06915639db",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/MEPlayerItemTrack.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/MEPlayerItemTrack.swift",
+      "sha256": "bff7c097e0ecc8d5e47d3c737642a8285bf2d7b2b840b53aed257f77c63bb186",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/MetalPlayView.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/MetalPlayView.swift",
+      "sha256": "571c51b2f067406896c493e1cd349e8f933934c3fd797780ee54b11d49807ea7",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/Model.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/Model.swift",
+      "sha256": "9931611ecf425fb573eed92de01f68ffae12fc87658e65f5a613cabc4d46231c",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/Resample.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/Resample.swift",
+      "sha256": "5946ee515124f73a039de33b1fefb967fd87f992d38b319f5a11b20e6107b27a",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/SubtitleDecode.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/SubtitleDecode.swift",
+      "sha256": "95ae5d103116bb60104ffeca8ef7927d98969108adfe8145148d7c9e3b45e9de",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/ThumbnailController.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/ThumbnailController.swift",
+      "sha256": "a5de1133c25bc27d69ff903aad0a7258ae906ab1ff767c9b6e1b63d0c61cfaff",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/MEPlayer/VideoToolboxDecode.swift": {
+      "path": "Sources/KSPlayer/MEPlayer/VideoToolboxDecode.swift",
+      "sha256": "72e154e0d8a3150491e9d46516ddcb485a5923b9bbefc5e43b097aa3ef3e7cc4",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Metal/DisplayModel.swift": {
+      "path": "Sources/KSPlayer/Metal/DisplayModel.swift",
+      "sha256": "afd5ae5a31f62caf51d14a9e0ff4143a35df6cb6bacffef8ce3b12caf597831f",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Metal/MetalRender.swift": {
+      "path": "Sources/KSPlayer/Metal/MetalRender.swift",
+      "sha256": "0acb3715ef9495c55be98cd02716faf4a80a1c036ff7262b404d9475ada7699f",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Metal/MotionSensor.swift": {
+      "path": "Sources/KSPlayer/Metal/MotionSensor.swift",
+      "sha256": "cbd61adcabbe1cf9af537e3657935bcfef65ed70c0d4c4ebbcf1f15ef08edf12",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Metal/PixelBufferProtocol.swift": {
+      "path": "Sources/KSPlayer/Metal/PixelBufferProtocol.swift",
+      "sha256": "08982e9f25b67e7c2df20b5b6537a4608c3271c96f386f889a1de74f70153b57",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Metal/Shaders.metal": {
+      "path": "Sources/KSPlayer/Metal/Shaders.metal",
+      "sha256": "3263ac1ab7ce93e9fbd4cf66b12fe1862346dc5eb61f9461bbbe9e1bca5197f8",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Metal/Transforms.swift": {
+      "path": "Sources/KSPlayer/Metal/Transforms.swift",
+      "sha256": "f7172c8e4f3ed6b33f660e5240f0a72ca44b1346c013f58c6aaa892808ce2624",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Subtitle/KSParseProtocol.swift": {
+      "path": "Sources/KSPlayer/Subtitle/KSParseProtocol.swift",
+      "sha256": "5215201c68aaf286a88deca91b50d5aa36ab88d616f2a058e8188c62260c8427",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Subtitle/KSSubtitle.swift": {
+      "path": "Sources/KSPlayer/Subtitle/KSSubtitle.swift",
+      "sha256": "68980f1034a86d42e72226846b892ecd385825ebfe9a4dadd967548b6ec62e03",
+      "source": "ksplayer"
+    },
+    "Sources/KSPlayer/Subtitle/SubtitleDataSouce.swift": {
+      "path": "Sources/KSPlayer/Subtitle/SubtitleDataSouce.swift",
+      "sha256": "a45f1344de7ece11dc7404b4d780434750a896550e4e0f168e36e8d179e9c7c4",
+      "source": "ksplayer"
+    }
+  },
+  "schema": 1
+}

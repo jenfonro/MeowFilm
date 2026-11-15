@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import XCTest
 import MeowContracts
+import KSPlayer
 @testable import MeowPlayback
 
 @MainActor
@@ -281,6 +282,52 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
         XCTAssertEqual(released, 0)
         try await film.close()
         XCTAssertEqual(released, 1)
+    }
+
+    func testNativeFailureAfterFirstFrameRejectsCommitWithoutRetiringHealthyDonor() async throws {
+        let controller = PlaybackController()
+        var handoffs = 0, donorReleases = 0, candidateReleases = 0
+        let film = try bindWindowedVideo(controller, owner: "film", willCommit: {
+            handoffs += 1
+            return nil
+        }) { _ in }
+        let donor = try await film.play(.init(attemptID: "healthy-donor", input: input("healthy-donor")) {
+            donorReleases += 1
+        }, paused: true)
+        let media = try PlaybackVideoMediaLease(attemptID: "failed-candidate", input: input("failed-candidate")) {
+            candidateReleases += 1
+        }
+        let candidate = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()))
+        try await candidate.prepare()
+        #if os(iOS)
+        film.surface.stage(candidate.output.presentationView)
+        #else
+        let window = try PlaybackVideoTestWindow()
+        window.stage(candidate)
+        defer { window.close() }
+        #endif
+        try await candidate.renderFirstVideoFrame()
+        let admission = controller.admitVideo(owner: film.owner, candidate: candidate)
+        #if os(iOS)
+        try await controller.prepareVideoAudio(admission: admission, owner: film.owner, paused: true)
+        #endif
+        // Only the native failure delivery is injected. The candidate above
+        // really decoded and presented a frame; the donor remains a real owner.
+        let sender = KSMEPlayer(url: try input("sender").url, options: KSOptions())
+        candidate.kernel.finish(player: sender, error: NSError(domain: "SyntheticNativeFailure", code: Int.max))
+        await sender.shutdownAndWait()
+        do {
+            _ = try controller.commitVideo(candidate, lease: film, admission: admission, paused: true)
+            XCTFail("a stale first-frame witness cannot admit a failed core")
+        } catch { XCTAssertEqual(error as? PlaybackVideoError, .decodingFailed) }
+        XCTAssertEqual(controller.currentAttempt, donor)
+        XCTAssertEqual(film.currentAttempt, donor)
+        XCTAssertEqual(donorReleases, 0)
+        XCTAssertEqual(handoffs, 1, "only the original healthy commit may capture a handoff")
+        try await candidate.close()
+        XCTAssertEqual(candidateReleases, 1)
+        try await film.close()
+        XCTAssertEqual(donorReleases, 1)
     }
 
     func testCloseJoinsCandidateAlreadyRetiringFromCancelFailureOrReplacement() async throws {

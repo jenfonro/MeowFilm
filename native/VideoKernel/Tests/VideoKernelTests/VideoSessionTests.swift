@@ -1,4 +1,5 @@
 import XCTest
+@testable import KSPlayer
 import QuartzCore
 import AVFoundation
 import CoreVideo
@@ -19,7 +20,7 @@ final class VideoOutputTestHost {
     private let window: UIWindow
     #endif
 
-    init(output: VideoSampleOutput) throws {
+    init(output: MeowVideoKernel.VideoOutput) throws {
         let bounds = CGRect(x: 0, y: 0, width: 192, height: 128)
         #if os(macOS)
         _ = try XCTUnwrap(CGSessionCopyCurrentDictionary(), "Video output requires a Quartz GUI session with WindowServer")
@@ -35,8 +36,7 @@ final class VideoOutputTestHost {
             styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         let view = NSView(frame: bounds)
-        let root = CALayer()
-        root.frame = bounds; view.layer = root; view.wantsLayer = true
+        view.wantsLayer = true
         window.contentView = view
         #elseif os(iOS)
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -46,13 +46,16 @@ final class VideoOutputTestHost {
         window.rootViewController = controller
         let view = UIView(frame: bounds)
         controller.view.addSubview(view)
-        let root = view.layer
         #endif
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        root.addSublayer(output.presentationLayer)
-        output.presentationLayer.frame = bounds
-        output.presentationLayer.setNeedsLayout()
-        output.presentationLayer.layoutIfNeeded()
+        view.addSubview(output.presentationView)
+        output.presentationView.frame = bounds
+        #if os(macOS)
+        output.presentationView.layoutSubtreeIfNeeded()
+        #else
+        output.presentationView.setNeedsLayout()
+        output.presentationView.layoutIfNeeded()
+        #endif
         CATransaction.commit()
         #if os(macOS)
         window.orderFrontRegardless(); window.displayIfNeeded()
@@ -97,7 +100,7 @@ final class VideoSessionTests: XCTestCase {
         let session = try VideoSession()
         try await session.prepare(url: fixture(), format: nil, clearKeys: [:], position: 1)
         XCTAssertEqual(session.output.rate, 0)
-        XCTAssertEqual(session.info?.codec, "h264")
+        XCTAssertEqual(session.info?.codec, "avc1")
         // decode/seek is not a first-frame output fact or a committed owner.
         session.cancel()
         session.setRate(1)
@@ -106,20 +109,21 @@ final class VideoSessionTests: XCTestCase {
         XCTAssertNil(session.info)
     }
 
-    func testOutputUsesOneAudioVideoSynchronizerAndConfirmedNativeFirstFrame() async throws {
+    func testCoreSurfaceHasConfirmedSilentFirstFrameAndCloseDrains() async throws {
         let session = try VideoSession()
         try await hostVideoOutput(session)
         try await session.prepare(url: fixture(), format: nil, clearKeys: [:], position: 0)
-        XCTAssertEqual(session.output.synchronizer.renderers.count, 2)
         try await session.renderFirstVideoFrame()
         XCTAssertEqual(session.output.rate, 0, "first-frame witness must remain silent and paused")
-        // A second request must flush the prior image and confirm new output.
+        XCTAssertTrue(session.output.hasPresentedFrame)
+        // Rechecking the same generation retains its actual presented image.
         try await session.renderFirstVideoFrame()
         if #available(iOS 17.4, macOS 14.4, *) {
-            let pixel = try XCTUnwrap(session.output.displayLayer.sampleBufferRenderer.displayedPixelBuffer())
+            let layer = try XCTUnwrap(session.output.displayLayer)
+            let pixel = try XCTUnwrap(layer.sampleBufferRenderer.displayedPixelBuffer())
             XCTAssertEqual(CVPixelBufferGetWidth(pixel), session.info?.width)
             XCTAssertEqual(CVPixelBufferGetHeight(pixel), session.info?.height)
-            print("VideoOutputFirstFrame ready=\(session.output.displayLayer.isReadyForDisplay) " +
+            print("VideoOutputFirstFrame ready=\(layer.isReadyForDisplay) " +
                   "pixel=\(CVPixelBufferGetWidth(pixel))x\(CVPixelBufferGetHeight(pixel)) rate=\(session.output.rate)")
         }
         session.commit(rate: 0, volume: 0)
@@ -127,7 +131,38 @@ final class VideoSessionTests: XCTestCase {
         XCTAssertEqual(position, 1.5, accuracy: 0.15)
         XCTAssertEqual(session.output.rate, 0)
         await session.close()
-        XCTAssertEqual(session.output.synchronizer.renderers.count, 0)
+        XCTAssertNil(session.output.displayLayer)
+    }
+
+    func testAudioOutputStartFailureInvalidatesActualCommittedPictureAndCannotResume() async throws {
+        let previous = KSOptions.audioPlayerType
+        KSOptions.audioPlayerType = FailingAudioEnginePlayer.self
+        FailingAudioEnginePlayer.starts = 0
+        defer { KSOptions.audioPlayerType = previous }
+        let session = try VideoSession()
+        addTeardownBlock { await session.close() }
+        try await hostVideoOutput(session)
+        try await session.prepare(url: fixture(), format: nil, clearKeys: [:], position: 0)
+        try await session.renderFirstVideoFrame()
+        XCTAssertTrue(session.output.hasPresentedFrame)
+        let failed = expectation(description: "actual engine start boundary reports its fixed failure")
+        var failures = [VideoKernelFailure]()
+        var ends = 0
+        session.onFailure = { failures.append($0); failed.fulfill() }
+        session.onEnd = { ends += 1 }
+        session.commit(rate: 1, volume: 0)
+        await fulfillment(of: [failed], timeout: 5)
+        XCTAssertEqual(failures, [.outputFailed])
+        XCTAssertEqual(FailingAudioEnginePlayer.starts, 1)
+        XCTAssertEqual(session.output.rate, 0)
+        XCTAssertFalse(session.output.hasPresentedFrame)
+        session.setRate(2)
+        XCTAssertEqual(session.output.rate, 0)
+        XCTAssertEqual(FailingAudioEnginePlayer.starts, 1, "A failed output cannot silently restart")
+        XCTAssertEqual(ends, 0, "Audio start failure is not natural EOF")
+        await session.close()
+        XCTAssertNil(session.output.pixelBuffer)
+        XCTAssertNil(session.info)
     }
 
     func testCancellationOfPendingOutputJoinsConcurrentSessionClose() async throws {
@@ -140,7 +175,7 @@ final class VideoSessionTests: XCTestCase {
         _ = await (first, second)
         do { try await rendering.value; XCTFail("cancelled output cannot witness a frame") }
         catch { XCTAssertEqual(error as? VideoKernelFailure, .cancelled) }
-        XCTAssertEqual(session.output.synchronizer.renderers.count, 0)
+        XCTAssertNil(session.output.displayLayer)
         XCTAssertNil(session.info)
     }
 
@@ -151,7 +186,7 @@ final class VideoSessionTests: XCTestCase {
             .appendingPathComponent("main10.mp4")
         try await session.prepare(url: url, format: nil, clearKeys: [:], position: 0)
         XCTAssertEqual(session.info?.hasAudio, false)
-        XCTAssertEqual(session.output.synchronizer.renderers.count, 1)
+        XCTAssertNotNil(session.output.displayLayer)
         try await session.renderFirstVideoFrame()
         let ended = expectation(description: "video-only actual clock and EOF")
         session.onEnd = { ended.fulfill() }
@@ -160,21 +195,140 @@ final class VideoSessionTests: XCTestCase {
         await session.close()
     }
 
-    func testExplicitResumeAfterCancelledSeekRestartsActualFeeding() async throws {
+    func testExplicitResumeBeforeCancelledSeekJoinsRestartsActualFeeding() async throws {
+        try await checkPreNativeSeekCancellation(resumeBeforeJoin: true)
+    }
+
+    func testCancelledSeekDoesNotPublishOrReviveUnconfirmedTarget() async throws {
+        try await checkPreNativeSeekCancellation(resumeBeforeJoin: false)
+    }
+
+    private func checkPreNativeSeekCancellation(resumeBeforeJoin: Bool) async throws {
         let session = try VideoSession()
         try await hostVideoOutput(session)
         try await session.prepare(url: fixture(), format: nil, clearKeys: [:], position: 0)
         try await session.renderFirstVideoFrame()
+        XCTAssertEqual(try XCTUnwrap(session.info?.duration), 3, accuracy: 0.1)
+        let firstPixels = try XCTUnwrap(Self.outputLuma(session.output))
         session.commit(rate: 0, volume: 0)
-        let seeking = Task { try await session.seek(to: 1.2) }
-        await Task.yield()
-        seeking.cancel()
-        _ = await seeking.result
+        let confirmedPosition = session.position
+        let target = 2.4
+        let interrupted = expectation(description: "cancel a registered seek before native execution or join")
+        let settled = expectation(description: "cancelled seek settles without confirming its target")
+        let pausedProgress = resumeBeforeJoin ? nil : expectation(description: "paused progress retains the confirmed position")
+        let movingFrame = expectation(description: "explicit resume outputs a different frame before the cancelled target")
+        let ended = expectation(description: "resumed real output reaches natural EOF")
+        var seeking: Task<Double, Error>?
+        var cancellationObserved = false, returned = false, resumeRequested = false
+        var sawPausedProgress = false, sawMovingFrame = false, endCount = 0
+        defer {
+            session.onSeekInterrupted = nil
+            session.onProgress = nil
+            session.onEnd = nil
+            session.onFailure = nil
+        }
+        session.onFailure = { error in XCTFail("Real output failed: \(error)") }
+        session.onProgress = { [weak session] position in
+            guard let session, cancellationObserved else { return }
+            if !resumeRequested {
+                XCTAssertEqual(position, confirmedPosition, accuracy: 0.15, "An unconfirmed target is not progress")
+                if !sawPausedProgress {
+                    sawPausedProgress = true
+                    pausedProgress?.fulfill()
+                }
+                return
+            }
+            guard !sawMovingFrame else { return }
+            XCTAssertLessThan(position, target - 0.15, "Resume must not revive the unconfirmed target")
+            guard let pixels = Self.outputLuma(session.output), pixels != firstPixels else { return }
+            sawMovingFrame = true
+            movingFrame.fulfill()
+        }
+        session.onEnd = {
+            endCount += 1
+            XCTAssertTrue(sawMovingFrame, "EOF alone cannot stand in for resumed frame feeding")
+            ended.fulfill()
+        }
+        // This MainActor hook runs after seekOperation and its cancellation
+        // handler are registered, before awaiting the operation. Cancelling the
+        // parent immediately cancels that operation; native seek and frame
+        // invalidation have not run. Immediate resume stays in this same callback.
+        session.onSeekInterrupted = { [weak session] in
+            guard let session else { return }
+            session.onSeekInterrupted = nil
+            cancellationObserved = true
+            XCTAssertFalse(returned)
+            XCTAssertTrue(session.output.hasPresentedFrame, "The native operation has not invalidated the frame yet")
+            seeking?.cancel()
+            XCTAssertTrue(seeking?.isCancelled == true)
+            XCTAssertEqual(session.position, confirmedPosition, accuracy: 0.15)
+            if resumeBeforeJoin {
+                resumeRequested = true
+                session.setRate(1) // No await/join may precede this explicit command.
+            }
+            interrupted.fulfill()
+        }
+        let operation = Task {
+            defer { returned = true; settled.fulfill() }
+            return try await session.seek(to: target)
+        }
+        seeking = operation
+        await fulfillment(of: [interrupted, settled], timeout: 5, enforceOrder: true)
+        guard returned else {
+            operation.cancel()
+            await session.close()
+            return
+        }
+        switch await operation.result {
+        case .success: XCTFail("A cancelled seek must not confirm its target")
+        case .failure(let error):
+            XCTAssertTrue(error is CancellationError || (error as? VideoKernelFailure) == .cancelled)
+        }
+        XCTAssertTrue(cancellationObserved)
+        if let pausedProgress {
+            await fulfillment(of: [pausedProgress], timeout: 3)
+            XCTAssertEqual(session.position, confirmedPosition, accuracy: 0.15)
+            XCTAssertEqual(session.output.rate, 0)
+            XCTAssertEqual(endCount, 0, "Cancellation must not manufacture natural EOF")
+            resumeRequested = true
+            session.setRate(1)
+        }
+        await fulfillment(of: [movingFrame, ended], timeout: 8, enforceOrder: true)
+        XCTAssertTrue(sawMovingFrame)
+        XCTAssertEqual(endCount, 1)
+        XCTAssertGreaterThanOrEqual(session.position, 2.9)
         XCTAssertEqual(session.output.rate, 0)
-        let ended = expectation(description: "resumed decoded output reaches real EOF")
-        session.onEnd = { ended.fulfill() }
-        session.setRate(1)
-        await fulfillment(of: [ended], timeout: 8)
         await session.close()
+    }
+
+    private static func outputLuma(_ output: MeowVideoKernel.VideoOutput) -> [UInt8]? {
+        let pixel: CVPixelBuffer?
+        if #available(iOS 17.4, macOS 14.4, *) {
+            pixel = output.displayLayer?.sampleBufferRenderer.displayedPixelBuffer()
+        } else {
+            // On older OS versions the core separately confirms presentation;
+            // its current decoded storage still witnesses actual frame feeding.
+            pixel = output.pixelBuffer
+        }
+        guard let pixel, CVPixelBufferIsPlanar(pixel),
+              [kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+               kCVPixelFormatType_420YpCbCr8BiPlanarFullRange].contains(CVPixelBufferGetPixelFormatType(pixel)),
+              CVPixelBufferLockBaseAddress(pixel, .readOnly) == kCVReturnSuccess else { return nil }
+        defer { CVPixelBufferUnlockBaseAddress(pixel, .readOnly) }
+        guard let bytes = CVPixelBufferGetBaseAddressOfPlane(pixel, 0)?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        let width = CVPixelBufferGetWidthOfPlane(pixel, 0), height = CVPixelBufferGetHeightOfPlane(pixel, 0)
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(pixel, 0)
+        return (0..<height).flatMap { row in
+            Array(UnsafeBufferPointer(start: bytes.advanced(by: row * stride), count: width))
+        }
+    }
+}
+
+/// Only the fallible system start is controlled; media decode/presentation is real.
+private final class FailingAudioEnginePlayer: AudioEnginePlayer {
+    static var starts = 0
+    override func startEngine() throws {
+        Self.starts += 1
+        throw NSError(domain: "SyntheticAudioStartFailure", code: 1)
     }
 }
