@@ -14,6 +14,8 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
     public var onSizeChanged: (() -> Void)?
     private let content: MusicPlayerContentModel
     private let cover = UIButton(type: .custom)
+    private let cardCover = UIButton(type: .custom)
+    private let artworkHost = UIView()
     private let controls: MusicPlaybackControlsView
     private let cardBackground: MusicPlayerBackgroundView
     private var morphAnimator: UIViewPropertyAnimator?
@@ -46,15 +48,22 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         cardBackground.isUserInteractionEnabled = false
         cardBackground.accessibilityElementsHidden = true
         addSubview(cardBackground)
-        cover.imageView?.contentMode = .scaleAspectFill
-        cover.contentHorizontalAlignment = .fill
-        cover.contentVerticalAlignment = .fill
-        cover.clipsToBounds = true
-        cover.backgroundColor = UIColor.white.withAlphaComponent(0.18)
-        cover.accessibilityLabel = "打开播放器"
-        cover.accessibilityIdentifier = "music.miniPlayer.open"
-        cover.addAction(UIAction { [weak self] _ in self?.presentPlayer() }, for: .touchUpInside)
-        addSubview(cover)
+        artworkHost.clipsToBounds = true
+        addSubview(artworkHost)
+        for (button, name) in [(cover, "open"), (cardCover, "card.open")] {
+            button.imageView?.contentMode = .scaleAspectFill
+            button.contentHorizontalAlignment = .fill
+            button.contentVerticalAlignment = .fill
+            button.clipsToBounds = true
+            button.backgroundColor = UIColor.white.withAlphaComponent(0.18)
+            button.accessibilityLabel = "打开播放器"
+            button.accessibilityIdentifier = "music.miniPlayer." + name
+            button.addAction(UIAction { [weak self] _ in self?.presentPlayer() }, for: .touchUpInside)
+            artworkHost.addSubview(button)
+        }
+        cardCover.alpha = 0
+        cardCover.isUserInteractionEnabled = false
+        cardCover.accessibilityElementsHidden = true
         controls.clipsToBounds = true
         addSubview(controls)
         controls.onPresent = { [weak self] in self?.onPresent?($0) }
@@ -74,7 +83,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         tap.require(toFail: pan)
         subscriptions = [
             content.dockChanges.sink { [weak self] in self?.updateForm(); self?.updateRendering() },
-            content.artworkChanges.sink { [weak self] in self?.cover.setImage(self?.content.artwork, for: .normal) },
+            content.artworkChanges.sink { [weak self] in self?.updateArtwork() },
             content.appearanceChanges.sink { [weak self] in self?.updateBackground() },
             content.playbackChanges.sink { [weak self] in self?.reconcileTitleSwipe() },
             content.queueChanges.sink { [weak self] in self?.reconcileTitleSwipe() },
@@ -89,7 +98,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
                 }
             })
         }
-        cover.setImage(content.artwork, for: .normal)
+        updateArtwork()
         updateForm()
     }
 
@@ -260,15 +269,21 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
     public override func layoutSubviews() {
         super.layoutSubviews()
         cardBackground.frame = bounds
+        artworkHost.frame = bounds
         controls.frame = bounds
         layer.cornerRadius = form == .compact ? bounds.height / 2 : 24
         cardBackground.layer.cornerRadius = layer.cornerRadius
+        artworkHost.layer.cornerRadius = layer.cornerRadius
         controls.layer.cornerRadius = layer.cornerRadius
         layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
-        let size: CGFloat = form == .compact ? 42 : 84
-        let top = form == .compact ? CGFloat(controls.miniLayout.compactArtworkTop) : 16
-        cover.frame = CGRect(x: form == .compact ? 8 : 16, y: top, width: size, height: size)
-        cover.layer.cornerRadius = form == .compact ? size / 2 : 10
+        let metrics = controls.miniLayout
+        // Keep both covers in their own bottom-anchored slots, like the transport controls.
+        cover.frame = CGRect(x: 8, y: bounds.height - CGFloat(metrics.compactHeight - metrics.compactArtworkTop),
+                             width: 42, height: 42)
+        cover.layer.cornerRadius = 21
+        cardCover.frame = CGRect(x: 16, y: bounds.height - CGFloat(metrics.expandedHeight) + 16,
+                                 width: 84, height: 84)
+        cardCover.layer.cornerRadius = 10
         controls.layoutIfNeeded()
         if titleTransition.phase != .idle, bounds.size != titleSwipeSize { cancelTitleSwipe() }
     }
@@ -291,6 +306,11 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
             guard let self else { return }
             self.form = target
             self.controls.setLayout(target == .card ? .card : .compact, compatibleWith: self.traitCollection)
+            for (button, visible) in [(self.cover, target == .compact), (self.cardCover, target == .card)] {
+                button.alpha = visible ? 1 : 0
+                button.isUserInteractionEnabled = visible
+                button.accessibilityElementsHidden = !visible
+            }
             self.cardBackground.alpha = target == .card ? 1 : 0
             self.onSizeChanged?()
             self.setNeedsLayout()
@@ -315,6 +335,15 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         let rendering = window != nil && foreground && !content.presentation.isFullPlayerPresented
         if !rendering { cancelTitleSwipe() }
         controls.setRendering(rendering)
+    }
+
+    private func updateArtwork() {
+        UIView.performWithoutAnimation {
+            for button in [cover, cardCover] {
+                button.setImage(content.artwork, for: .normal)
+                button.layoutIfNeeded()
+            }
+        }
     }
 
     private func updateFontLayout() {

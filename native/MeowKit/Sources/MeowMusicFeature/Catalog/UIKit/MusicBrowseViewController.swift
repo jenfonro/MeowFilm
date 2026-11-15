@@ -15,6 +15,15 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         let section: String
         let item: String?
     }
+    private struct PlaybackOrigin {
+        let id = UUID()
+        let page: UUID
+        let section: String
+        let item: MusicPublicBrowseItem
+        let preview: MusicReference?
+    }
+    // The page owns the action lifetime; this identifies its originating control.
+    private var playbackOrigin: PlaybackOrigin?
     private var showsSectionPlayback: Bool {
         guard let request = page?.request else { return false }
         switch request {
@@ -149,12 +158,14 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     public override func pageDidBecomeInactive() {
         collection.layer.removeAnimation(forKey: "music.home.refresh")
         loadingSkeleton.setDisplayVisible(false)
+        for cell in collection.visibleCells.compactMap({ $0 as? MusicBrowseCell }) { cell.setDisplayVisible(false) }
         observationNeedsRestart = true
         observation?.cancel()
         for task in previewTasks.values { task.cancel() }
         previewRequests.removeAll()
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) { cell.setActive(false) }
         page?.disappear()
+        playbackOrigin = nil
     }
 
     public override func pageDidBecomeVisible() {
@@ -162,6 +173,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         if appearanceNeedsUpdate { applyTheme() }
         updateFMArtwork()
         MusicArtworkView.retryFailedLoads(in: view)
+        updateVisiblePlaybackLoading()
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) {
             cell.setActive(!tags.isExpanded)
         }
@@ -174,7 +186,10 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         loadingSkeleton.setDisplayVisible(false)
         automaticPaginationHeld = true
         tags.collapse()
-        for cell in collection.visibleCells.compactMap({ $0 as? MusicBrowseCell }) { cell.resetPressFeedback() }
+        for cell in collection.visibleCells.compactMap({ $0 as? MusicBrowseCell }) {
+            cell.resetPressFeedback()
+            cell.setDisplayVisible(false)
+        }
         page?.setDisplayVisible(false)
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) { cell.setActive(false) }
     }
@@ -227,6 +242,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             self.play(item, section: current)
         }
         cell.accessibilityIdentifier = "music.browse.item.\(item.id)"
+        configurePlaybackLoading(cell, section: section, item: item)
     }
 
     private func makeHeader(in collectionView: UICollectionView, kind: String,
@@ -280,6 +296,9 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         if isPageVisible { MusicArtworkView.retryFailedLoads(in: cell) }
         (cell as? MusicBannerCarouselCell)?.setActive(isPageVisible && !tags.isExpanded)
         guard let row = row(at: indexPath) else { return }
+        if let cell = cell as? MusicBrowseCell {
+            configurePlaybackLoading(cell, section: row.section, item: row.item)
+        }
         let item = row.item
         if case .action(let action) = item.content, action.isPersonalFM {
             loadFMPreview(item, action: action)
@@ -298,6 +317,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
         (cell as? MusicBrowseCell)?.resetPressFeedback()
+        (cell as? MusicBrowseCell)?.setDisplayVisible(false)
         (cell as? MusicBannerCarouselCell)?.setActive(false)
     }
 
@@ -488,6 +508,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     private func renderState() {
         guard isViewLoaded, isPageVisible, tagsHeight != nil else { return }
+        updateVisiblePlaybackLoading()
         configureTags()
         if page?.sections.allSatisfy({ $0.items.isEmpty }) ?? true {
             if page?.isLoading == true, page?.loaded == false {
@@ -571,6 +592,25 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             guard let id = dataSource.itemIdentifier(for: path), items?.contains(id) != false else { continue }
             if let row = row(at: path), let cell = collection.cellForItem(at: path) {
                 configure(cell, section: row.section, item: row.item)
+            }
+        }
+    }
+
+    private func configurePlaybackLoading(_ cell: MusicBrowseCell, section: MusicPublicBrowseSection,
+                                          item: MusicPublicBrowseItem) {
+        let loading: MusicBrowseCell.PlaybackLoading?
+        if let origin = playbackOrigin, page?.isActing == true, page?.actionPageID == origin.page,
+           origin.section == section.id, sameItem(origin.item, item) {
+            loading = origin.preview.map { .preview($0) } ?? .card
+        } else { loading = nil }
+        cell.setPlaybackLoading(loading, visible: isPageVisible)
+    }
+
+    private func updateVisiblePlaybackLoading() {
+        guard dataSource != nil else { return }
+        for path in collection.indexPathsForVisibleItems {
+            if let row = row(at: path), let cell = collection.cellForItem(at: path) as? MusicBrowseCell {
+                configurePlaybackLoading(cell, section: row.section, item: row.item)
             }
         }
     }
@@ -732,8 +772,17 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                       startingAt selected: MusicRemoteTrack? = nil) {
         guard let page else { return }
         let account = model.searchAccessGeneration
+        let origin = PlaybackOrigin(page: page.actionPageID, section: section.id, item: item, preview: selected?.ref)
         perform(operation: "播放歌曲") { [weak self] in
             guard let self else { return }
+            self.playbackOrigin = origin
+            self.updateVisiblePlaybackLoading()
+            defer {
+                if self.playbackOrigin?.id == origin.id {
+                    self.playbackOrigin = nil
+                    self.updateVisiblePlaybackLoading()
+                }
+            }
             try await self.model.performPrimaryPlayback(
                 presentation: self.embedded ? self.router?.primaryPlaybackPresentation : nil
             ) {
