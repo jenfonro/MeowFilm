@@ -1,12 +1,13 @@
 import { contracts } from '../contracts.mjs';
 import { createMetadataSettings, metadataFailure, object } from './metadata/settings.mjs';
-import { createMetadataRequest, openMetadataImage } from './metadata/network.mjs';
+import { createMetadataRequest, createMetadataImageTransport } from './metadata/network.mjs';
 import { requestTMDB, tmdbImageTarget } from './metadata/tmdb.mjs';
 
 function createMetadataModule(id, { dataRoot, request = createMetadataRequest() } = {}) {
   if (typeof request !== 'function') throw metadataFailure('INVALID_REQUEST');
   const spec = contracts[id], store = createMetadataSettings(dataRoot, id);
   const lifetime = new AbortController(), active = new Set(), streams = new Set();
+  const images = createMetadataImageTransport();
   let closed = false, closing, cleanupFailure;
   const failure = error => ({ ok: false, contract: spec.contract,
     code: spec.codes.has(error?.code) ? error.code : 'UPSTREAM_FORMAT' });
@@ -54,7 +55,7 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest() 
           const settings = store.read();
           const target = (id === 'douban' ? (await import('./metadata/douban.mjs')).doubanImageTarget
             : tmdbImageTarget)(path, settings);
-          const result = await openMetadataImage(target, signal);
+          const result = await images.open(target, signal);
           const dispose = () => {
             const done = result.dispose();
             done.catch(() => { cleanupFailure = metadataFailure('NETWORK_ERROR'); })
@@ -75,7 +76,9 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest() 
         closed = true;
         lifetime.abort();
         await Promise.allSettled([...active]);
-        const results = await Promise.allSettled([...streams].map(dispose => Promise.resolve().then(dispose)));
+        const results = await Promise.allSettled([
+          ...[...streams].map(dispose => Promise.resolve().then(dispose)), images.close(),
+        ]);
         if (cleanupFailure || results.some(result => result.status === 'rejected')) {
           throw metadataFailure('NETWORK_ERROR');
         }

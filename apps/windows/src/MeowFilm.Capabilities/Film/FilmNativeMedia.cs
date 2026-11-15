@@ -11,6 +11,7 @@ internal interface IFilmNativeMedia : INotifyPropertyChanged
     string? Identity { get; }
     bool HasOutput { get; }
     bool Buffering { get; }
+    string? FailureCode { get; }
     bool Paused { get; }
     double Position { get; }
     double Duration { get; }
@@ -39,6 +40,7 @@ internal sealed class FilmNativeMedia(NativePlayback native) : IFilmNativeMedia
         ? new(output.OwnerId, output.Identity, output.Generation) : null;
     public bool HasOutput => native.OwnerId == "film" && native.HasMedia && Scope is not null;
     public bool Buffering => native.IsBuffering;
+    public string? FailureCode => native.LastErrorCode;
     public bool Paused => native.PauseRequested;
     public double Position => native.PositionSeconds;
     public double Duration => native.DurationSeconds;

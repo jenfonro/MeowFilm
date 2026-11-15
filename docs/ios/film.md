@@ -26,6 +26,8 @@
 
 `FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。锁定的 MeowVideoKernel 处理媒体，Node 仍拥有业务会话及媒体资源授权。影片收藏继续由稳定 `FilmLibrary` 持有，用 `meowfilm.film.library.v1` 保存来源与影片复合身份；不复制进 Node 新增的历史／人工匹配／屏蔽／偏好库，也不写音乐曲库。
 
+媒体准备或真实播放失败的 `media.failed` 回执携带已有原生适配器的有限 `code`，不发送异常正文、URL 或凭据。运行器区分取回执、准备和播放阶段，保留真实原生失败原因；候选续选的过程错误不重复弹出最终错误。客户端沿用准确 attempt、取消、资源释放与系统 owner 边界，不因错误码扩展改变手动准确播放或自动准备策略。
+
 iOS 请求继续携带 `platform: ios`，“进入播放页自动准备”由运行器的 `iosAutoPrepare` 设置与既有入口范围控制。Swift 不为普通站点／聚合新增自动目录或准备命令，保留既有页面恢复刷新；收到 `prepareOnly` 也不启动原生媒体或写入观看事实，进入详情不自动实播或呈现全屏播放器。
 
 iOS 影视只使用共享原生媒体 owner，不提供外部播放器入口、URL 模板或应用启动注入。进入后台或离开播放器时，仅真实 PiP／系统 owner 可通过 `keepMedia` 保留当前媒体；普通关闭等待原生输出和准确资源回执排空。页面重开沿用既有会话恢复与显式播放流程，媒体回执由实际原生资源的释放完成确认。

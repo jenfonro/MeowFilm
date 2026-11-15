@@ -641,7 +641,7 @@ public final class FilmPlaybackModel: ObservableObject {
                 actionError = Self.failure(preparationError)
                 if handedToMedia {
                     request.terminal = true
-                    feedback("media.failed", attemptID: request.attempt.id)
+                    feedback("media.failed", attemptID: request.attempt.id, code: Self.failure(preparationError).code)
                 } else {
                     // An RPC/receipt failure is not a decoder failure or a watch
                     // fact. A fresh explicit intent may request this receipt
@@ -743,7 +743,7 @@ public final class FilmPlaybackModel: ObservableObject {
             actionError = error
             if request.started, let state = request.state { queueProgress(state) }
             request.terminal = true
-            feedback("media.failed", attemptID: id)
+            feedback("media.failed", attemptID: id, code: error.code)
         case .ended(let id):
             guard id == request.attempt.id, request.didCommit, !request.terminal else { return }
             if request.started, let state = request.state { queueProgress(state) }
@@ -769,8 +769,10 @@ public final class FilmPlaybackModel: ObservableObject {
         }
     }
 
-    private func feedback(_ action: String, attemptID: String) {
-        enqueue(.init(action: action, parameters: ["attemptId": .string(attemptID)],
+    private func feedback(_ action: String, attemptID: String, code: String? = nil) {
+        var parameters: RuntimeObject = ["attemptId": .string(attemptID)]
+        if let code { parameters["code"] = .string(code) }
+        enqueue(.init(action: action, parameters: parameters,
                       key: "\(action).\(attemptID)", intent: nil, ui: false))
     }
     private func progressFields(_ state: FilmMediaState) -> RuntimeObject {

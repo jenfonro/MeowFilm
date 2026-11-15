@@ -9,6 +9,7 @@ namespace MeowFilm.Core.Runtime;
 public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageClient, IAsyncDisposable
 {
     private readonly HttpClient client;
+    private readonly HttpClient imageClient;
     private readonly Uri endpoint;
     private readonly CancellationTokenSource lifetime = new();
     private readonly object gate = new();
@@ -25,6 +26,13 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             // connection dies before response headers. Fresh connections avoid
             // that implicit replay; concurrent requests have no admission quota.
             PooledConnectionLifetime = TimeSpan.Zero
+        }) { Timeout = Timeout.InfiniteTimeSpan };
+        imageClient = new(new SocketsHttpHandler
+        {
+            UseProxy = false, AllowAutoRedirect = false, UseCookies = false,
+            // Reuse complete image GETs; disposing an unfinished body must
+            // close its connection rather than start a background drain.
+            MaxResponseDrainSize = 0
         }) { Timeout = Timeout.InfiniteTimeSpan };
     }
 
@@ -94,7 +102,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         cancellationToken.ThrowIfCancellationRequested();
         var provider = RuntimeHttpProtocol.ImageProvider(reference);
         if (provider is null) throw new BridgeException("INVALID_REQUEST");
-        return ExchangeAsync(HttpMethod.Get, reference, default, false, async (response, token) =>
+        return ExchangeAsync(imageClient, HttpMethod.Get, reference, default, false, async (response, token) =>
         {
             var bytes = await readBody(response, token).ConfigureAwait(false);
             try
@@ -192,7 +200,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
 
     private Task<JsonElement> RequestAsync(HttpMethod method, string path, ReadOnlyMemory<byte> body,
         bool raw, string contract, IReadOnlySet<string> codes, CancellationToken cancellationToken, TimeSpan? timeout = null)
-        => ExchangeAsync(method, path, body, raw, async (response, token) =>
+        => ExchangeAsync(client, method, path, body, raw, async (response, token) =>
         {
             if (response.Content.Headers.ContentType?.ToString() != "application/json"
                 || (int)response.StatusCode is not (200 or 400 or 401 or 403 or 404 or 413 or 415))
@@ -208,7 +216,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             finally { Clear(bytes); }
         }, cancellationToken, timeout: timeout);
 
-    private async Task<T> ExchangeAsync<T>(HttpMethod method, string path, ReadOnlyMemory<byte> body,
+    private async Task<T> ExchangeAsync<T>(HttpClient transport, HttpMethod method, string path, ReadOnlyMemory<byte> body,
         bool raw, Func<HttpResponseMessage, CancellationToken, Task<T>> read, CancellationToken cancellationToken,
         Action<T>? discard = null, TimeSpan? timeout = null)
     {
@@ -240,7 +248,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                 request.Content = new ReadOnlyMemoryContent(body);
                 request.Content.Headers.ContentType = new MediaTypeHeaderValue(raw ? "application/octet-stream" : "application/json");
             }
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+            using var response = await transport.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
             if (!response.Headers.TryGetValues("X-Meow-Request-Id", out var ids)
                 || !ids.SequenceEqual([requestId], StringComparer.Ordinal)
                 || (int)response.StatusCode is >= 300 and < 400)
@@ -292,6 +300,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         {
             try { await lifetime.CancelAsync().ConfigureAwait(false); } catch { failed = true; }
             try { client.Dispose(); } catch { failed = true; }
+            try { imageClient.Dispose(); } catch { failed = true; }
             await Task.WhenAll(requests).ConfigureAwait(false);
         }
         finally

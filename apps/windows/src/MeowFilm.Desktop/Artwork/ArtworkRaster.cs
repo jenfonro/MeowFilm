@@ -1,12 +1,34 @@
 using System.Buffers.Binary;
 using System.IO;
-using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace MeowFilm.Desktop.Artwork;
 
 internal static class ArtworkRaster
 {
+    // BitmapImage retains StreamSource even with OnLoad. Drop the inner stream
+    // after decoding so the frozen image cannot retain the encoded byte array.
+    private sealed class DecodeStream(byte[] bytes) : Stream
+    {
+        private MemoryStream? input = new(bytes, writable: false);
+        private MemoryStream Input => input ?? throw new ObjectDisposedException(nameof(DecodeStream));
+        public override bool CanRead => input?.CanRead ?? false;
+        public override bool CanSeek => input?.CanSeek ?? false;
+        public override bool CanWrite => false;
+        public override long Length => Input.Length;
+        public override long Position { get => Input.Position; set => Input.Position = value; }
+        public override void Flush() => Input.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => Input.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => Input.Seek(offset, origin);
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { input?.Dispose(); input = null; }
+            base.Dispose(disposing);
+        }
+    }
+
     internal static BitmapSource Decode(byte[] bytes)
     {
         try
@@ -16,7 +38,7 @@ internal static class ArtworkRaster
                 return ArtworkWebP.Decode(bytes);
             var (width, height) = Dimensions(bytes);
             CheckDimensions(width, height);
-            using var input = new MemoryStream(bytes, writable: false);
+            using var input = new DecodeStream(bytes);
             var image = new BitmapImage();
             image.BeginInit();
             image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
@@ -27,19 +49,8 @@ internal static class ArtworkRaster
             image.EndInit();
             if (image.PixelWidth is <= 0 or > 512 || image.PixelHeight is <= 0 or > 512)
                 throw new ArtworkException("ARTWORK_LIMIT");
-            // One frozen, detached BGRA raster. No UriSource, decoder stream or
-            // external color profile is retained by the returned resource.
-            var converted = new FormatConvertedBitmap(image, PixelFormats.Bgra32, null, 0);
-            int stride = checked(converted.PixelWidth * 4);
-            byte[] pixels = new byte[checked(stride * converted.PixelHeight)];
-            converted.CopyPixels(pixels, stride, 0);
-            try
-            {
-                var result = BitmapSource.Create(converted.PixelWidth, converted.PixelHeight, 96, 96,
-                    PixelFormats.Bgra32, null, pixels, stride);
-                result.Freeze(); return result;
-            }
-            finally { Array.Clear(pixels); }
+            image.Freeze();
+            return image;
         }
         catch (ArtworkException) { throw; }
         catch { throw new ArtworkException("ARTWORK_FORMAT"); }

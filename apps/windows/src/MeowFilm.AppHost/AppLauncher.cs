@@ -219,7 +219,7 @@ public static class AppLauncher
                             _ => "ARTWORK_NETWORK"
                         });
                     }
-                });
+                }, cacheDirectory: Path.Combine(paths.Caches, "artwork"));
                 ArtworkScope.SetLoader(shell, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();
