@@ -176,6 +176,7 @@ private struct HomeItem: Codable {
     let previewSongIDs: [String]
     let recommendationReason: String
     let coverLabel: String
+    let requiresAccount: Bool
     init(_ value: MusicNativePublicBrowseItem) throws {
         id = value.id; content = try HomeContent(value.content)
         if case .record = value.content { title = ""; subtitle = ""; artwork = nil }
@@ -185,10 +186,11 @@ private struct HomeItem: Codable {
         }
         ranking = value.ranking; previewSongIDs = value.previewSongIDs
         recommendationReason = value.recommendationReason; coverLabel = value.coverLabel
+        requiresAccount = value.requiresAccount
     }
     var native: MusicNativePublicBrowseItem {
         .init(id: id, title: title, subtitle: subtitle, artwork: artwork, content: content.native,
               ranking: ranking, recommendationReason: recommendationReason, coverLabel: coverLabel,
-              previewSongIDs: previewSongIDs)
+              previewSongIDs: previewSongIDs, requiresAccount: requiresAccount)
     }
 }

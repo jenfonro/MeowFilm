@@ -70,10 +70,11 @@ function nativeSong(raw, resourceCover = '') {
 function entry(value, c) {
   const type = value.action?.type;
   const requiresAccount = type === 'daily' || type === 'heartbeat';
+  const display = !requiresAccount || Boolean(c.account);
   return { ...value, presentation: ['playlist', 'daily', 'album'].includes(type) ? 'preview' :
     type === 'similar' ? 'overlay' : ['fm', 'heartbeat'].includes(type) ? 'animated' : 'static',
-  requiresAccount, display: true, available: type !== 'unsupported' && (!requiresAccount || Boolean(c.account)),
-  ...(!requiresAccount || c.account ? {} : { errorCode: 'AUTH_REQUIRED' }) };
+  requiresAccount, display, available: type !== 'unsupported' && display,
+  ...(display ? {} : { errorCode: 'AUTH_REQUIRED' }) };
 }
 function resource(r, { modern = false, channel = false } = {}) {
   if (!r || typeof r !== 'object') return null;

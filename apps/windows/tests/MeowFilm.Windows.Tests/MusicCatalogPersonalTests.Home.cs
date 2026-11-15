@@ -46,7 +46,16 @@ public static partial class MusicCatalogPersonalTests
         foreach (bool settings in new[] { false, true })
             yield return Case("home cards survive " + (settings ? "settings activation and return" : "first explicit account read without blocking play"),
                 () => HomeAfterAccountSettings(settings));
-        yield return Case("guest private home card uses notice without private request or commit", GuestHomeCard);
+        foreach (bool grouped in new[] { false, true })
+        {
+            yield return Case("home entry display declarations retain order and unavailable content grouped=" + grouped,
+                () => HomeEntryDisplay(grouped));
+            foreach (bool failed in new[] { false, true })
+                yield return Case("anonymous home snapshot hides private entries through refresh grouped=" + grouped + " failed=" + failed,
+                    () => GuestHomeSnapshot(grouped, failed));
+        }
+        yield return Case("guest fresh private home declaration still requires action authentication", GuestHomeCard);
+        yield return Case("logout hides retained private home entries before a failed guest refresh", HomeAfterLogout);
         foreach (bool staleFailure in new[] { false, true })
             yield return Case("native account revocation refreshes guest home and rejects old " + (staleFailure ? "failure" : "success"),
                 () => HomeAfterRevocation(staleFailure));
@@ -571,6 +580,13 @@ public static partial class MusicCatalogPersonalTests
         await home.Arrived.Task.WaitAsync(HomeGuard);
         using var notices = new HomeNoticeMount(f.Module.View);
         await Drain();
+        Equal("歌单 801", HomeTitles(f));
+        var retained = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Kind == "daily");
+        await f.Module.PlayCatalogCardAsync(retained).WaitAsync(HomeGuard);
+        Equal(0, Calls(f, "music.catalog.daily"));
+        home.Release();
+        await f.Module.HomeRefresh.WaitAsync(HomeGuard);
+        // A peer can declare a fresh visible entry, but cannot grant native action authority.
         var card = f.Module.HomeSections.SelectMany(section => section.Items).Single(item => item.Kind == "daily");
         await f.Module.PlayCatalogCardAsync(card).WaitAsync(HomeGuard);
         await Drain();
@@ -580,9 +596,101 @@ public static partial class MusicCatalogPersonalTests
         Equal(0, Calls(f, "music.catalog.playlist.prepare"));
         AssertNoHomeCommit(f);
         Equal(0L, N(await f.Queue(), "total"));
+        Equal(1, Calls(f, "music.catalog.home"));
+    }
+
+    private static async Task HomeEntryDisplay(bool grouped)
+    {
+        await using var f = await Fixture.Create(initialize: false);
+        f.App.Authenticated = false;
+        await f.Module.InitializeAsync(default);
+        f.App.TransformNext("music.catalog.home", _ => HomeEntryPage(grouped, authenticated: false));
+        await f.Module.NavigateAsync("catalog-home", default).WaitAsync(HomeGuard);
+        await f.Module.CatalogEntryInitialization.WaitAsync(HomeGuard);
+        Equal("私人漫游,暂不可用", HomeTitles(f));
+        Check(f.Module.HomeSections.Single().IsEntrySection, "root and grouped entries use the existing home entry surface");
+        var unavailable = f.Module.HomeSections.Single().Items.Last();
+        Check(unavailable.Kind == "daily" && !unavailable.CanOpen && unavailable.ErrorCode == "AUTH_REQUIRED",
+            "display is independent of action kind, availability and error text");
+        var hidden = f.Module.CatalogSections.SelectMany(section => section.Items).Single(card => card.Id == "hidden");
+        await f.Module.OpenCatalogCardAsync(hidden);
+        Equal(0, Calls(f, "music.catalog.playlist"));
+        Equal(0, Calls(f, "music.catalog.daily"));
+        using var mount = new HomeNoticeMount(f.Module.View);
+        await Drain();
+        Check(Visuals<EntryCard>(f.Module.View).Where(view => view.IsVisible).Select(view => view.DataContext)
+            .SequenceEqual(f.Module.HomeSections.Single().Items.Cast<object>(), ReferenceEqualityComparer.Instance),
+            "actual home entry cards bind only the ordered display projection");
+        f.App.Authenticated = true; f.App.AccountGeneration++;
+        await f.Module.ReadAccountsAsync();
+        f.App.TransformNext("music.catalog.home", _ => HomeEntryPage(grouped, authenticated: true));
+        await f.Module.RefreshCatalogAsync().WaitAsync(HomeGuard);
+        Equal("每日推荐,风格推荐,心动模式,私人漫游,暂不可用", HomeTitles(f));
+        await Drain();
+        Equal(5, Visuals<EntryCard>(f.Module.View).Count(view => view.IsVisible));
+        AssertNoHomeCommit(f);
+    }
+
+    private static async Task GuestHomeSnapshot(bool grouped, bool failed)
+    {
+        await using var f = await Fixture.Create(initialize: false,
+            store: await SavedHome(HomeEntryPage(grouped, authenticated: true)));
+        f.App.Authenticated = false;
+        await f.Module.InitializeAsync(default);
+        var before = await f.Cache.ReadAsync(MusicHomeSnapshotStore.Namespace);
+        f.App.TransformNext("music.catalog.home", _ => failed ? HomeError("NETWORK_ERROR") :
+            HomeEntryPage(grouped, authenticated: false));
+        var home = f.App.HoldNext("music.catalog.home");
+        await f.Module.NavigateAsync("catalog-home", default).WaitAsync(HomeGuard);
+        await home.Arrived.Task.WaitAsync(HomeGuard);
+        Equal("私人漫游,暂不可用", HomeTitles(f));
+        Check(f.Module.CatalogSections.SelectMany(section => section.Items).Count(card => card.RequiresAccount) == 3,
+            "snapshot retains producer account declarations without restoring their display authority");
+        using var mount = new HomeNoticeMount(f.Module.View);
+        await Drain();
+        Check(Visuals<EntryCard>(f.Module.View).Where(view => view.IsVisible)
+            .All(view => view.DataContext is MusicCatalogCard { RequiresAccount: false }),
+            "anonymous restored home renders no old private entry");
         home.Release();
         await f.Module.HomeRefresh.WaitAsync(HomeGuard);
-        Equal(1, Calls(f, "music.catalog.home"));
+        await f.Module.CatalogEntryInitialization.WaitAsync(HomeGuard);
+        Equal("私人漫游,暂不可用", HomeTitles(f));
+        Equal(0, Calls(f, "music.catalog.daily"));
+        Equal(0, Calls(f, "music.catalog.playlist"));
+        if (failed)
+        {
+            var after = await f.Cache.ReadAsync(MusicHomeSnapshotStore.Namespace);
+            Check(before.Data!.SequenceEqual(after.Data!), "failed refresh preserves the durable display");
+        }
+        AssertNoHomeCommit(f);
+    }
+
+    private static async Task HomeAfterLogout()
+    {
+        await using var f = await Fixture.Create(store: await SavedHome(PrivateHomePage()));
+        f.App.TransformNext("music.catalog.home", _ => PrivateHomePage());
+        await f.Module.NavigateAsync("catalog-home", default).WaitAsync(HomeGuard);
+        await f.Module.HomeRefresh.WaitAsync(HomeGuard);
+        var card = f.Module.HomeSections.SelectMany(section => section.Items).Single(item => item.RequiresAccount);
+        f.App.TransformNext("music.accounts.logout", _ =>
+        {
+            f.App.Authenticated = false; f.App.AccountGeneration++;
+            return E(new { ok = true, account = new { platform = "wy", state = "none",
+                generation = f.App.AccountGeneration, profile = (object?)null } });
+        });
+        f.App.TransformNext("music.catalog.home", _ => HomeError("NETWORK_ERROR"));
+        var guest = f.App.HoldNext("music.catalog.home");
+        await f.Module.LogoutAccountAsync(f.Module.Accounts.Single(account => account.Platform == "wy"), confirmed: true)
+            .WaitAsync(HomeGuard);
+        await guest.Arrived.Task.WaitAsync(HomeGuard);
+        Equal("none", f.Module.Accounts.Single(account => account.Platform == "wy").State);
+        Equal("歌单 801", HomeTitles(f));
+        await f.Module.PlayCatalogCardAsync(card).WaitAsync(HomeGuard);
+        Equal(0, Calls(f, "music.catalog.daily"));
+        guest.Release();
+        await f.Module.HomeRefresh.WaitAsync(HomeGuard);
+        Equal("歌单 801", HomeTitles(f));
+        AssertNoHomeCommit(f);
     }
 
     private static async Task HomeAfterRevocation(bool staleFailure)
@@ -623,7 +731,7 @@ public static partial class MusicCatalogPersonalTests
         Equal("", account.UserId);
         Check(notices.Messages.Contains("当前内容需要平台登录"),
             "authoritative revocation notifies even if its original auth receipt was cancelled");
-        Equal("歌单 801,每日推荐", HomeTitles(f));
+        Equal("歌单 801", HomeTitles(f));
         var reads = f.App.Log.Where(call => call.Method == "music.catalog.home").ToArray();
         Equal(2, reads.Length);
         Check(reads[0].Authenticated && !reads[1].Authenticated, "new home uses guest authority after native revocation");
@@ -802,6 +910,28 @@ public static partial class MusicCatalogPersonalTests
                 action = new { type = "daily", branch = "default" } }
         }
     });
+    private static JsonElement HomeEntryPage(bool grouped, bool authenticated)
+    {
+        object[] entries =
+        [
+            new { id = "daily", name = "每日推荐", presentation = "static", requiresAccount = true,
+                display = authenticated, available = authenticated, action = new { type = "daily", branch = "default" } },
+            new { id = "style", name = "风格推荐", presentation = "static", requiresAccount = true,
+                display = authenticated, available = authenticated, action = new { type = "daily", branch = "style" } },
+            new { id = "heartbeat", name = "心动模式", presentation = "animated", requiresAccount = true,
+                display = authenticated, available = authenticated, action = new { type = "heartbeat" } },
+            new { id = "fm", name = "私人漫游", presentation = "animated", requiresAccount = false,
+                display = true, available = true, action = new { type = "fm" } },
+            new { id = "unavailable", name = "暂不可用", presentation = "static", requiresAccount = false,
+                display = true, available = false, errorCode = "AUTH_REQUIRED", action = new { type = "daily" } },
+            new { id = "hidden", name = "隐藏歌单", presentation = "preview", requiresAccount = false,
+                display = false, available = true, action = new { type = "playlist", id = "hidden" } }
+        ];
+        return grouped
+            ? E(new { ok = true, platform = "wy", more = false, sections = new[]
+                { new { id = "home-entries", title = "", type = "entries", items = entries } } })
+            : E(new { ok = true, platform = "wy", more = false, entries });
+    }
     private static JsonElement HomeError(string code) => E(new { ok = false, code });
     private static async Task<Store> SavedHome(params JsonElement[] pages)
     {

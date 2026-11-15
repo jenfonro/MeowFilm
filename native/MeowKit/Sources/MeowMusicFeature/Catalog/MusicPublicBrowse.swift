@@ -118,13 +118,16 @@ public struct MusicPublicBrowseItem: Sendable, Identifiable {
     public let previewSongs: [MusicRemoteTrack]
     public let recommendationReason: String
     public let coverLabel: String
+    /// Runtime-declared display scope; never an action or playback grant.
+    public let requiresAccount: Bool
     public init(id: String, title: String, subtitle: String = "", artwork: URL? = nil, content: MusicPublicBrowseContent,
                 ranking: MusicPublicBrowseRanking? = nil, previewSongs: [MusicRemoteTrack] = [],
-                recommendationReason: String = "", coverLabel: String = "") {
+                recommendationReason: String = "", coverLabel: String = "", requiresAccount: Bool = false) {
         self.id = id; self.title = title; self.subtitle = subtitle; self.artwork = artwork; self.content = content
         self.ranking = ranking; self.previewSongs = Array(previewSongs.prefix(3))
         self.recommendationReason = recommendationReason
         self.coverLabel = coverLabel
+        self.requiresAccount = requiresAccount
     }
 }
 public struct MusicPublicBrowseSectionTab: Sendable, Identifiable {

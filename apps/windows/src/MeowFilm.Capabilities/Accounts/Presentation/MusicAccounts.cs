@@ -128,6 +128,7 @@ public sealed partial class MusicCapability
         // transaction, otherwise ComboBox can clear the newly rebound selection.
         AccountBindings();
         RecommendationBindings();
+        if (value.Platform == homePlatform) RefreshHomeDisplay();
     }
     private async Task EnsureAccountsAsync()
     {

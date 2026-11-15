@@ -222,6 +222,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                         invalidate(clear: true)
                     } else {
                         invalidateHomeRead()
+                        retireHomeAccountEntries()
                     }
                     displayedHomeSource = source
                     homeNeedsRefresh = true
@@ -332,6 +333,26 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         cursorOffsets = ["": 0]; trackOffset = 0
         detailSourcePositions = [:]
         pageNumber = 1; requiresExplicitNext = false; usesPageNavigation = false
+    }
+    private func retireHomeAccountEntries() {
+        guard sections.contains(where: {
+            $0.items.contains(where: \.requiresAccount) || $0.tabs.contains(where: {
+                $0.items.contains(where: \.requiresAccount)
+            })
+        }) else { return }
+        sections = sections.compactMap { section in
+            let tabs = section.tabs.compactMap { tab -> MusicPublicBrowseSectionTab? in
+                let items = tab.items.filter { !$0.requiresAccount }
+                return items.isEmpty ? nil : .init(id: tab.id, title: tab.title, items: items, loadItems: tab.loadItems)
+            }
+            let selected = tabs.first { $0.id == section.selectedTab } ?? tabs.first
+            let items = selected?.items ?? section.items.filter { !$0.requiresAccount }
+            guard !items.isEmpty || !tabs.isEmpty || section.error != nil else { return nil }
+            return .init(id: section.id, title: section.title, items: items, layout: section.layout,
+                avatars: section.avatars, channel: section.channel, filters: section.filters,
+                selectedFilter: section.selectedFilter, error: section.error, tabs: tabs,
+                selectedTab: selected?.id ?? "")
+        }
     }
     public func selectFilter(_ id: String) async {
         guard available, visible, !isActing, selectedFilter != id,

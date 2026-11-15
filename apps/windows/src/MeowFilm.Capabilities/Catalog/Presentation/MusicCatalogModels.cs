@@ -139,10 +139,10 @@ public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalo
         Items.Count > 0 && Items.All(item => item.Kind is "playlist" or "album");
     public IReadOnlyList<MusicCatalogSongColumn> SongColumns => Items
         .Chunk(3).Select(items => new MusicCatalogSongColumn(items)).ToArray();
-    public MusicCatalogSection DisplayableCards() => this with
+    public MusicCatalogSection DisplayableCards(bool includeAccountEntries = true) => this with
     {
-        Items = Items.Where(item => item.Display).ToArray(),
-        Action = Action?.Display == false ? null : Action
+        Items = Items.Where(item => item.Display && (includeAccountEntries || !item.RequiresAccount)).ToArray(),
+        Action = Action is { } action && (!action.Display || !includeAccountEntries && action.RequiresAccount) ? null : Action
     };
 }
 

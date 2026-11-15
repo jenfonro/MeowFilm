@@ -31,11 +31,21 @@ public static class MusicHomeSnapshotTests
         await using var backing = new MusicOfficialAudioTests.MemoryStore();
         await using var store = new CacheDocumentStore(backing);
         var owner = new MusicHomeSnapshotStore(store);
-        await owner.SaveAsync(Snapshot("wy", Page("wy", "first"), Page("wy", "second")));
+        var first = Page("wy", "first");
+        first["entries"]!.AsArray().Add(new JsonObject
+        {
+            ["id"] = "daily", ["name"] = "每日推荐", ["requiresAccount"] = true,
+            ["display"] = true, ["available"] = true, ["presentation"] = "static",
+            ["action"] = new JsonObject { ["type"] = "daily", ["branch"] = "default" }
+        });
+        await owner.SaveAsync(Snapshot("wy", first, Page("wy", "second")));
         await store.DrainAsync();
         await using var reopened = new CacheDocumentStore(backing);
         var restored = (await new MusicHomeSnapshotStore(reopened).ReadAsync(_ => null))!;
         Check(restored.Platform == "wy" && restored.Pages.Select(PageId).SequenceEqual(new[] { "first", "second" }));
+        var entry = MusicCatalogDto.Read(restored.Pages[0], "wy", "home", "").First();
+        Check(entry.Items.Single() is { RequiresAccount: true, Display: true, Available: true });
+        Check(entry.DisplayableCards(includeAccountEntries: false).Items.Count == 0);
         restored.Pages[0] = default;
         Check(PageId((await owner.ReadAsync(_ => null))!.Pages[0]) == "first");
         foreach (var (account, content) in new[]

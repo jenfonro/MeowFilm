@@ -197,6 +197,63 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
         let calls = await service.calls
         XCTAssertEqual(calls.count, 4)
     }
+    func testAccountChangeRemovesDeclaredPrivateEntriesBeforeGuestRefreshAndKeepsThemHiddenOnFailure() async throws {
+        for failure in [MusicServiceError.authRequired, .connectionFailed] {
+            let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+            let publicItem = HomeLifecycleFixture.page(["public"]).sections[0].items[0]
+            let privateItem = MusicPublicBrowseItem(id: "private-playlist", title: "相同标题",
+                content: .collection(.init(platform: .netease, nativeID: "private", title: "相同标题")),
+                requiresAccount: true)
+            await service.setPages(["": .init(sections: [
+                .init(id: "mixed", title: "", items: [publicItem, privateItem], layout: .featureRail),
+                .init(id: "private", title: "", items: [privateItem], layout: .featureRail)
+            ])])
+            await value.loadIfNeeded()
+            let captured = try XCTUnwrap(value.makeActionIntent())
+            let observation = Task { await value.observeHomeChanges() }
+            await service.waitForSubscription()
+            await service.fail(failure); await service.hold(gate); await service.change()
+            await gate.didStart()
+            XCTAssertTrue(value.isLoading); XCTAssertTrue(value.loaded)
+            XCTAssertEqual(value.sections.map(\.id), ["mixed"])
+            XCTAssertEqual(value.sections[0].items.map(\.id), ["public"])
+            var acted = false
+            await value.perform(intent: captured) { acted = true }
+            XCTAssertTrue(acted, "Public content keeps its captured action during an account refresh")
+            await gate.release(); await service.end(); await observation.value
+            XCTAssertEqual(value.sections.flatMap(\.items).map(\.id), ["public"])
+            XCTAssertEqual(value.error, failure)
+            await value.loadIfNeeded()
+            let calls = await service.calls; XCTAssertEqual(calls.count, 2)
+        }
+    }
+    func testHiddenAccountChangeRetiresDeclaredPrivateTabsWithoutFetchingUntilVisible() async {
+        let service = HomeLifecycleFixture(), value = model(service)
+        let publicItem = HomeLifecycleFixture.page(["public"]).sections[0].items[0]
+        let privateItem = MusicPublicBrowseItem(id: "daily", title: "运行器入口",
+            content: .action(.daily(branch: .default)), requiresAccount: true)
+        await service.setPages(["": .init(sections: [
+            .init(id: "tabs", title: "", items: [privateItem], layout: .featureRail, tabs: [
+                .init(id: "private", title: "", items: [privateItem]),
+                .init(id: "mixed", title: "", items: [publicItem, privateItem])
+            ], selectedTab: "private")
+        ])])
+        await value.loadIfNeeded()
+        let observation = Task { await value.observeHomeChanges() }
+        await service.waitForSubscription()
+        value.setDisplayVisible(false)
+        await service.change(); await service.end(); await observation.value
+        XCTAssertEqual(value.sections[0].items.map(\.id), ["public"])
+        XCTAssertEqual(value.sections[0].tabs.map(\.id), ["mixed"])
+        XCTAssertEqual(value.sections[0].selectedTab, "mixed")
+        XCTAssertEqual(value.sections[0].tabs[0].items.map(\.id), ["public"])
+        let hidden = await service.calls; XCTAssertEqual(hidden.count, 1)
+        await service.setPages(["": HomeLifecycleFixture.page(["guest"])])
+        value.setDisplayVisible(true)
+        await value.loadIfNeeded()
+        XCTAssertEqual(value.sections[0].items.map(\.id), ["guest"])
+        let calls = await service.calls; XCTAssertEqual(calls.count, 2)
+    }
     func testPrivateActionFailureDoesNotClearHomeOrDiscardAuthenticationError() async throws {
         let service = HomeLifecycleFixture(), value = model(service)
         await value.loadIfNeeded()

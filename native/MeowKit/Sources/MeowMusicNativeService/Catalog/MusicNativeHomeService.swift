@@ -261,17 +261,17 @@ extension NativeMusicService: MusicHomeBrowsing {
         var page = display.page
         page.sections = page.sections.compactMap { section in
             var section = section
-            section.items.removeAll { $0.content.requiresAccount }
+            section.items.removeAll { $0.requiresAccount }
             section.tabs = section.tabs.compactMap { tab in
                 var tab = tab
-                tab.items.removeAll { $0.content.requiresAccount }
+                tab.items.removeAll { $0.requiresAccount }
                 return tab.items.isEmpty ? nil : tab
             }
             if !section.tabs.contains(where: { $0.id == section.selectedTab }) {
                 section.selectedTab = section.tabs.first?.id ?? ""
             }
             if let channel = section.channel,
-               MusicNativePublicBrowseContent.channel(channel).requiresAccount { section.channel = nil }
+               [.vip, .artistActivity].contains(channel.kind) { section.channel = nil }
             return section.items.isEmpty && section.tabs.isEmpty ? nil : section
         }
         let songs = try await publicSongMetadata(page)

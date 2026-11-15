@@ -391,14 +391,18 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let entries: [MusicNativePublicBrowseItem] = [
             .init(id: "similar", title: "", content: .action(.similar(sourceIDs: ["41"], sourceName: ""))),
             .init(id: "similar-artist", title: "", content: .action(.similarArtist(sourceIDs: ["42"], sourceName: ""))),
-            .init(id: "heartbeat", title: "", content: .action(.heartbeat)),
-            .init(id: "heartbeat-song", title: "", content: .action(.heartbeatSong(songID: "41"))),
-            .init(id: "daily", title: "", content: .daily), .init(id: "artist", title: "", content: .channel(channel))]
+            .init(id: "heartbeat", title: "", content: .action(.heartbeat), requiresAccount: true),
+            .init(id: "heartbeat-song", title: "", content: .action(.heartbeatSong(songID: "41")), requiresAccount: true),
+            .init(id: "daily", title: "", content: .daily, requiresAccount: true),
+            .init(id: "artist", title: "", content: .channel(channel), requiresAccount: true),
+            .init(id: "private-playlist", title: album.title, content: .collection(album), requiresAccount: true)]
         let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "mixed", title: "推荐", items: [
             .init(id: "album", title: album.title, content: .collection(album)), .init(id: "fm", title: "漫游", content: .action(.fm(mode: .default, submode: "", entry: nil)))
-        ] + entries, channel: channel), .init(id: "private", title: "", items: [.init(id: "style", title: "", content: .action(.daily(branch: .style)))]),
+        ] + entries, channel: channel), .init(id: "private", title: "", items: [
+            .init(id: "style", title: "", content: .action(.daily(branch: .style)), requiresAccount: true)]),
             .init(id: "tabs", title: "", items: [], tabs: [
-                .init(id: "private", title: "账号", items: [.init(id: "heartbeat", title: "", content: .action(.heartbeat))]),
+                .init(id: "private", title: "账号", items: [
+                    .init(id: "heartbeat", title: "", content: .action(.heartbeat), requiresAccount: true)]),
                 .init(id: "public", title: "公开", items: entries)
             ], selectedTab: "private")])
         store.write(try MusicNativeHomeSnapshot.encode(page, source: .netease))
@@ -412,6 +416,21 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         XCTAssertEqual(restored.sections[1].items.map(\.id), ["similar", "similar-artist"])
         XCTAssertEqual(restored.sections[1].tabs[0].items.map(\.id), ["similar", "similar-artist"])
         let calls = await account.calls, bindings = await account.bindingCalls; XCTAssertTrue(calls.isEmpty); XCTAssertEqual(bindings, 0); await value.close()
+    }
+    func testSnapshotWithoutRuntimeAccountDeclarationsIsDiscardedWithoutAcquiringAccountBinding() async throws {
+        let account = HomeAccountFixture(loggedIn: false), store = HomeSnapshotFixture()
+        let entry = MusicNativePublicBrowseItem(id: "private", title: "旧入口",
+            content: .action(.daily(branch: .default)), requiresAccount: true)
+        var raw = try JSONSerialization.jsonObject(with: MusicNativeHomeSnapshot.encode(
+            .init(sections: [.init(id: "entries", title: "", items: [entry])]), source: .netease)) as! [String: Any]
+        var sections = raw["sections"] as! [[String: Any]]
+        var items = sections[0]["items"] as! [[String: Any]]
+        items[0].removeValue(forKey: "requiresAccount")
+        sections[0]["items"] = items; raw["sections"] = sections
+        store.write(try JSONSerialization.data(withJSONObject: raw))
+        let value = try await service(account, store: store), restored = try await value.restoredHome()
+        XCTAssertNil(restored)
+        let calls = await account.bindingCalls; XCTAssertEqual(calls, 0); await value.close()
     }
     func testHomeSourceSelectionRejectsUnimplementedProvidersWithoutDiscardingValidCache() async throws {
         let account = HomeAccountFixture(), store = HomeSnapshotFixture(), value = try await service(account, store: store)

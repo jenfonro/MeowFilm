@@ -31,6 +31,59 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         XCTAssertEqual(collection.artwork, page.sections[0].items[0].artwork); XCTAssertEqual(document.snapshot().2, 0)
         let calls = await peer.calls(); XCTAssertEqual(calls.map(\.operation), ["home"]); await service.close()
     }
+    func testHomeConsumesRuntimeDisplayAndAvailabilityWithoutInferringActionAccountPolicy() async throws {
+        let hidden: RuntimeValue = .object(["display": .bool(false), "action": .object([
+            "type": .string("similar"), "sourceIds": .string("unused")])])
+        let visible: RuntimeValue = .object(["name": .string("运行器入口"), "display": .bool(true),
+            "requiresAccount": .bool(true), "available": .bool(true),
+            "action": .object(["type": .string("daily"), "branch": .string("style")])])
+        let unavailable: RuntimeValue = .object(["name": .string("不可用入口"), "display": .bool(true),
+            "available": .bool(false), "action": .object(["type": .string("similar")])])
+        let peer = NativeMusicResultFixture([.object(["entries": .array([hidden, visible, unavailable]), "sections": .array([])])])
+        let service = try await NativeMusicFixture.service(platform: peer), page = try await service.homePage(cursor: nil, refresh: true)
+        let section = try XCTUnwrap(page.sections.first)
+        XCTAssertEqual(section.layout, .featureRail)
+        XCTAssertEqual(section.items.map(\.id), ["entry:1", "entry:2"])
+        XCTAssertEqual(section.items.map(\.title), ["运行器入口", "不可用入口"])
+        XCTAssertTrue(section.items[0].requiresAccount)
+        guard case .action(.daily(branch: .style)) = section.items[0].content,
+              case .unavailable = section.items[1].content else { return XCTFail("Runtime display and availability must be consumed") }
+        await assertMusicFailure(.authRequired) {
+            _ = try await service.openHomeActionQueue(.daily(branch: .style), title: "运行器入口")
+        }
+        let calls = await peer.calls(); XCTAssertEqual(calls.map(\.operation), ["home"]); await service.close()
+    }
+    func testEntryTabsFollowRuntimeDisplayAndSelectTheRemainingVisibleTab() async throws {
+        let hidden: RuntimeValue = .object(["display": .bool(false)])
+        let visible = D.collection("42", title: "仍可显示")
+        let section: RuntimeValue = .object(["id": .string("tabbed"), "type": .string("entries"),
+            "items": .array([hidden]), "tabs": .array([
+                .object(["id": .string("hidden"), "items": .array([hidden])]),
+                .object(["id": .string("visible"), "items": .array([visible])])
+            ]), "selectedTab": .string("hidden")])
+        let peer = NativeMusicResultFixture([D.page([
+            D.section("hidden", items: [hidden], type: "entries"), section])])
+        let service = try await NativeMusicFixture.service(platform: peer)
+        let page = try await service.homePage(cursor: nil, refresh: true), shown = try XCTUnwrap(page.sections.first)
+        XCTAssertEqual(page.sections.count, 1)
+        XCTAssertEqual(shown.tabs.map(\.id), ["visible"]); XCTAssertEqual(shown.selectedTab, "visible")
+        XCTAssertEqual(shown.items.map(\.title), ["仍可显示"])
+        await service.close()
+    }
+    func testHiddenEntriesKeepTheRealContinuationWithoutAnEmptyFeatureRail() async throws {
+        let hidden: RuntimeValue = .object(["display": .bool(false)])
+        let peer = NativeMusicResultFixture([
+            .object(["entries": .array([hidden]), "sections": .array([]),
+                "continuation": .object(["cursor": .string("next")])]),
+            D.page([D.section("public", items: [D.collection("42")])])
+        ])
+        let service = try await NativeMusicFixture.service(platform: peer)
+        let first = try await service.homePage(cursor: nil, refresh: true)
+        XCTAssertTrue(first.sections.isEmpty)
+        let second = try await service.homePage(cursor: XCTUnwrap(first.cursor), refresh: false)
+        XCTAssertEqual(second.sections.first?.items.count, 1); XCTAssertNil(second.cursor)
+        let calls = await peer.calls(); XCTAssertEqual(calls.count, 2); await service.close()
+    }
     func testRepeatedCollectionsAndPreviewSongsReuseCurrentRepositoryWithoutCoverSearch() async throws {
         var item = D.collection("41")
         if case .object(var row) = item { row["previewSongs"] = .array([try D.song("71", cover: "https://artwork.invalid/song.jpg")]); item = .object(row) }

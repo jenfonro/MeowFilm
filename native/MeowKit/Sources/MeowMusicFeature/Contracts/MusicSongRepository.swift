@@ -42,7 +42,7 @@ extension MusicPublicBrowseItem {
         }
         return .init(id: id, title: nextTitle, subtitle: nextSubtitle, artwork: nextArtwork,
             content: nextContent, ranking: nextRanking, previewSongs: previews,
-            recommendationReason: recommendationReason, coverLabel: coverLabel)
+            recommendationReason: recommendationReason, coverLabel: coverLabel, requiresAccount: requiresAccount)
     }
 }
 

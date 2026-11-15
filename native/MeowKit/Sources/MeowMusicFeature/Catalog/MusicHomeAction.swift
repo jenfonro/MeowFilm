@@ -33,15 +33,6 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
         switch self { case .heartbeat, .heartbeatSong: return true; default: return false }
     }
 
-    /// Reading capability, not execution authorization. FM and similar actions
-    /// have anonymous provider paths; daily and heartbeat use the account owner.
-    public var requiresAccount: Bool {
-        switch self {
-        case .daily, .heartbeat, .heartbeatSong: return true
-        case .fm, .ruleFM, .similar, .similarArtist, .songCollection: return false
-        }
-    }
-
     // Explicit descriptor keys preserve the reference home-snapshot action
     // shape without persisting arbitrary parameters or native URLs/DSL.
     private enum CodingKeys: String, CodingKey {
