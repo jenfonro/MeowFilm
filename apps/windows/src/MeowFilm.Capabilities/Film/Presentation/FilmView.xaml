@@ -52,8 +52,8 @@
           BasedOn="{StaticResource MeowFilm.FilterChip}">
     <Style.Triggers>
      <DataTrigger Binding="{Binding IsSelected}" Value="True">
-      <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.FloatingSurface}"/>
-      <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+      <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/>
+      <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
      </DataTrigger>
      <MultiDataTrigger>
       <MultiDataTrigger.Conditions>
