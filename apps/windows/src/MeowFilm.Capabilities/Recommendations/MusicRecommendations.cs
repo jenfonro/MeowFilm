@@ -228,6 +228,8 @@ public sealed partial class MusicCapability
         if (stopping) return;
         var token = recommendationLifetime.Token;
         long command = ++recommendationCommandEpoch;
+        if (method != "music.recommendations.start" &&
+            preparingCatalogCard is { Kind: "fm" or "similar" or "heartbeat" }) ClearPreparingCatalogCard();
         RecommendationBindings();
         try
         {
@@ -350,7 +352,7 @@ public sealed partial class MusicCapability
         }
     }
 
-    private async Task StartRecommendation(CatalogTarget target)
+    private async Task StartRecommendation(CatalogTarget target, MusicCatalogCard? card = null)
     {
         if (stopping) return;
         InvalidateCatalogAction();
@@ -360,6 +362,8 @@ public sealed partial class MusicCapability
         bool Current() => !stopping && command == recommendationCommandEpoch &&
             action == catalogActionGeneration && navigation == navigationSubmission &&
             observation == CatalogAccountObservation(target.Platform);
+        preparingCatalogCard = card;
+        if (card is not null) card.IsPreparing = true;
         RecommendationBindings();
         try
         {
@@ -371,15 +375,20 @@ public sealed partial class MusicCapability
             if (target.Operation == "heartbeat" && RecText(target.Parameters, "entry") == "current" &&
                 !HasHeartbeatContext && !CurrentFromLocalFavorites)
                 throw new MusicOperationException("UNSUPPORTED");
+            var input = target.Parameters.EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.Clone());
+            input["kind"] = target.Operation; input["platform"] = target.Platform; input["local"] = true; input["play"] = true;
+            // Session identity and native recording IDs, never a synthesized title.
+            if (target.Operation != "heartbeat") input["continue"] = true;
+            if (target.Parameters.TryGetProperty("seedEntryId", out _)) input["play"] = playback.IsPlaying;
+            await RecommendationCommand("music.recommendations.start", input);
         }
-        catch (OperationCanceledException) { return; }
-        catch (Exception error) { if (Current()) PublishCatalogActionError(error); return; }
-        var input = target.Parameters.EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.Clone());
-        input["kind"] = target.Operation; input["platform"] = target.Platform; input["local"] = true; input["play"] = true;
-        // Session identity and native recording IDs, never a synthesized title.
-        if (target.Operation != "heartbeat") input["continue"] = true;
-        if (target.Parameters.TryGetProperty("seedEntryId", out _)) input["play"] = playback.IsPlaying;
-        await RecommendationCommand("music.recommendations.start", input);
+        catch (OperationCanceledException) { }
+        catch (Exception error) { if (Current()) PublishCatalogActionError(error); }
+        finally
+        {
+            if (action == catalogActionGeneration && ReferenceEquals(preparingCatalogCard, card))
+                ClearPreparingCatalogCard();
+        }
     }
 
     private async Task RefreshRecommendationQueue(CancellationToken token)

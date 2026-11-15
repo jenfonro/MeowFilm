@@ -41,6 +41,10 @@ public static partial class MusicCatalogPersonalTests
         yield return Case("playlist playback has no implicit search recommendation and can explicitly enter", PlaylistQueuePreview);
         yield return Case("playlist next preserves live FM and never starts playback or queue preview", PlaylistNextDuringFm);
         yield return Case("card loading belongs to the initiating card and retired receipt cannot clear its successor", CardLoading);
+        foreach (string kind in new[] { "fm", "similar", "heartbeat" })
+            yield return Case("recommendation card loading follows its own start failure and retired receipt " + kind,
+                () => RecommendationCardLoading(kind));
+        yield return Case("unresolved song card loading belongs to its own request and clears on cancellation", SongCardLoading);
         yield return Case("native chart opens real album details and keeps album playback separate", ChartNavigation);
         yield return Case("navigation and WPF actions are real entry points", Entries);
         foreach (string platform in new[] { "wy", "tx", "kg" })
@@ -250,6 +254,76 @@ public static partial class MusicCatalogPersonalTests
         Check(b.IsPreparing, "A's late finally cannot clear B's state");
         f.Module.CancelCatalog(); second.Release(); await playingB;
         Check(!a.IsPreparing && !b.IsPreparing); Equal(0L, N(await f.Queue(), "total")); Equal(0, f.Output.Opens);
+    }
+    private static async Task RecommendationCardLoading(string kind)
+    {
+        await using var f = await Fixture.Create();
+        object action = kind switch
+        {
+            "similar" => new { type = kind, sourceType = "song", sourceIds = new[] { "101" } },
+            "heartbeat" => new { type = kind, entry = "favorites", songId = "101" },
+            _ => new { type = kind }
+        };
+        f.Platform.HomeEntries = [new { id = kind, name = "推荐", presentation = "overlay",
+            requiresAccount = kind == "heartbeat", action },
+            new { id = "500", name = "歌单", presentation = "preview", action = new { type = "playlist", id = "500" } }];
+        if (kind == "heartbeat")
+            f.Platform.HomeEntries = [.. f.Platform.HomeEntries,
+                new { id = "fm", name = "私人雷达", presentation = "overlay", action = new { type = "fm" } }];
+        await f.Module.NavigateAsync("catalog-home", default);
+        var cards = f.Module.CatalogSections.SelectMany(section => section.Items).ToArray();
+        var card = cards.Single(item => item.Kind == kind);
+        var playlist = cards.Single(item => item.Kind == "playlist");
+        var accounts = f.App.HoldNext("music.accounts.list", before: true);
+        var reading = f.Module.ReadAccountsAsync();
+        await accounts.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var first = f.App.HoldNext("music.recommendations.start", before: true);
+        var starting = f.Module.PlayCatalogCardAsync(card);
+        Check(card.IsPreparing && !starting.IsCompleted, "the card is loading while it awaits shared account authority");
+        accounts.Release(); await reading;
+        await first.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(card.IsPreparing && !playlist.IsPreparing, "only the recommendation's originating card is loading");
+        first.Release(); await starting;
+        Check(!card.IsPreparing && f.Output.Opens == 1, "the card clears after the actual playback consumer completes");
+
+        var failure = f.App.HoldNext("music.recommendations.start", before: true);
+        f.App.FailNext("music.recommendations.start", "NETWORK_ERROR");
+        var failing = f.Module.OpenCatalogCardAsync(card);
+        await failure.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(card.IsPreparing, "opening a directly playable entry has the same loading feedback");
+        failure.Release(); await failing;
+        Check(!card.IsPreparing && f.Output.Opens == 1, "failed starts clear loading without another playback");
+
+        var retired = f.App.HoldNext("music.recommendations.start");
+        var oldStart = f.Module.PlayCatalogCardAsync(card);
+        await retired.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(card.IsPreparing && f.Module.CanCancelRecommendation);
+        await f.Module.CancelRecommendationAsync();
+        Check(!card.IsPreparing, "cancelling the recommendation clears its card before a delayed receipt");
+        var successor = kind == "heartbeat" ? cards.Single(item => item.Kind == "fm") : playlist;
+        var next = f.App.HoldNext(kind == "heartbeat" ? "music.recommendations.start" : "music.catalog.playlist.prepare", before: true);
+        var nextStart = f.Module.PlayCatalogCardAsync(successor);
+        await next.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(successor.IsPreparing);
+        retired.Release(); await oldStart;
+        Check(successor.IsPreparing && !card.IsPreparing, "a retired recommendation receipt cannot clear the newer card");
+        f.Module.CancelCatalog(); next.Release(); await nextStart;
+        Check(!successor.IsPreparing);
+    }
+    private static async Task SongCardLoading()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.HomeActions = [new { id = "101", name = "歌曲", action = new { type = "song", id = "101" } }];
+        await f.Module.NavigateAsync("catalog-home", default);
+        var card = f.Module.CatalogSections.Single().Items.Single();
+        var read = f.App.HoldNext("music.catalog.song", before: true);
+        var starting = f.Module.OpenCatalogCardAsync(card);
+        await read.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(card.IsPreparing && f.Module.Status == "", "a song awaiting metadata uses the originating card instead of a page message");
+        f.Module.CancelCatalog();
+        Check(!card.IsPreparing);
+        read.Release(); await starting;
+        Check(!card.IsPreparing && f.Output.Opens == 0);
     }
     private static async Task ChartNavigation()
     {

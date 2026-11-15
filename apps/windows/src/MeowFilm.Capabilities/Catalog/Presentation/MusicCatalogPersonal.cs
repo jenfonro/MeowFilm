@@ -212,22 +212,22 @@ public sealed partial class MusicCapability
             if (!action.TryGetProperty("sourceIds", out var ids) || ids.ValueKind != JsonValueKind.Array)
                 return CatalogBusinessError("INVALID_REQUEST");
             return StartRecommendation(Target("similar", card.Platform, card.Title,
-                new { sourceIds = ids.Clone(), sourceType = MusicCatalogDto.Text(action, "sourceType") }));
+                new { sourceIds = ids.Clone(), sourceType = MusicCatalogDto.Text(action, "sourceType") }), card);
         }
         if (card.Kind == "heartbeat")
             return StartRecommendation(Target("heartbeat", card.Platform, card.Title,
-                new { entry = "favorites", songId = MusicCatalogDto.Text(action, "songId") }));
+                new { entry = "favorites", songId = MusicCatalogDto.Text(action, "songId") }), card);
         if (card.Kind == "fm")
         {
             if (IsCatalogHome && MusicCatalogDto.Text(action, "ruleId").Length == 0 &&
                 MusicCatalogDto.Text(action, "tabTagId").Length == 0)
-                return StartRecommendation(Target("fm", card.Platform, card.Title, new { }));
+                return StartRecommendation(Target("fm", card.Platform, card.Title, new { }), card);
             var mode = MusicCatalogDto.Text(action, "mode").ToLowerInvariant();
             mode = mode switch { "" => "default", "scene_rcmd" => "scene", "puzzle_mode_rcmd" => "puzzle", _ => mode };
             var p = new Dictionary<string, object?> { ["mode"] = mode, ["submode"] = MusicCatalogDto.Text(action, "submode") };
             foreach (var name in new[] { "ruleId", "tabTagId" })
                 if (MusicCatalogDto.Text(action, name) is { Length: > 0 } value) p[name] = value;
-            return StartRecommendation(Target("fm", card.Platform, card.Title, p));
+            return StartRecommendation(Target("fm", card.Platform, card.Title, p), card);
         }
         return Task.CompletedTask;
     }

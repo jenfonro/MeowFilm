@@ -18,6 +18,10 @@ public sealed partial class MusicCapability
         {
             active.Cancel();
         }
+        ClearPreparingCatalogCard();
+    }
+    private void ClearPreparingCatalogCard()
+    {
         if (preparingCatalogCard is { } card) card.IsPreparing = false;
         preparingCatalogCard = null;
     }
@@ -217,11 +221,11 @@ public sealed partial class MusicCapability
         long navigation = navigationSubmission;
         return PlayCatalogSongAsync(card.Platform, card.ActionId,
             () => fromHome ? IsCatalogHome && navigation == navigationSubmission && card.Platform == catalogSourcePlatform :
-                ContainsCatalogCard(card), requireCatalogContent: true);
+                ContainsCatalogCard(card), requireCatalogContent: true, card: card);
     }
 
     private Task PlayCatalogSongAsync(string platform, string id, Func<bool> sourceCurrent,
-        bool requireCatalogContent = false) => TrackCatalogAction(async (signal, currentAction) =>
+        bool requireCatalogContent = false, MusicCatalogCard? card = null) => TrackCatalogAction(async (signal, currentAction) =>
     {
         if (requireCatalogContent) RequireCatalogContent();
         if (!sourceCurrent()) return;
@@ -240,7 +244,7 @@ public sealed partial class MusicCapability
                 await StartCurrent(signal);
             }
         });
-    }, "正在加载歌曲");
+    }, card is null ? "正在加载歌曲" : null, card);
     private void PublishCatalogActionError(Exception error)
     {
         string code = error is MusicOperationException e ? e.Code : error is OperationCanceledException ? "CANCELLED" : "INVALID_RESPONSE";
@@ -302,8 +306,7 @@ public sealed partial class MusicCapability
                 {
                     catalogActionCancellation = null;
                     catalogActionAuthority = null;
-                    if (preparingCatalogCard is { } source) source.IsPreparing = false;
-                    preparingCatalogCard = null;
+                    if (generation == catalogActionGeneration) ClearPreparingCatalogCard();
                 }
                 request.Dispose(); loadDrains.Remove(drained.Task); drained.TrySetResult();
                 if (!disposed) { RefreshBindings(); CatalogBindings(); }
