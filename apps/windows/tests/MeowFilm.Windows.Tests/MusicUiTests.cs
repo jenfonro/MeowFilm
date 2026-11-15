@@ -20,6 +20,7 @@ using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
@@ -443,7 +444,7 @@ public static partial class MusicUiTests
             await module.ReadAccountsAsync(); Equal("none", module.Accounts[0].State);
             await module.ChangeModeAsync(2); await module.PrepareShutdownAsync();
             Equal(0, runtime.Calls.Count); True(!runtime.HasStarted, "ordinary business never starts the script runtime");
-            True((await store.ReadAsync("music.library.v1")).Fingerprint.Exists, "native CAS persisted");
+            True((await store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint.Exists, "native CAS persisted");
             Equal(0, runtime.DisposeCalls);
         });
         yield return Case("local playlist creation uses the sidebar action and an in-view modal", async () =>
@@ -524,10 +525,11 @@ public static partial class MusicUiTests
             await f.Module.ImportFilesAsync(); Equal(2, f.Module.Songs.Count);
             var song = f.Module.Songs[0];
             True(f.Calls.Log.All(call => !call.Parameters.GetRawText().Contains("file_path", StringComparison.Ordinal)), "no file_path in RPC");
-            True(f.Calls.Log.All(call => !call.Parameters.GetRawText().Contains("music.files.v1", StringComparison.Ordinal)), "grant namespace native-only");
+            True(f.Calls.Log.All(call => !call.Parameters.GetRawText().Contains("music.files.v2", StringComparison.Ordinal)), "grant namespace native-only");
             True(f.Calls.Log.All(call => !call.Parameters.GetRawText().Contains(JsonSerializer.Serialize(paths[0]).Trim('"'), StringComparison.Ordinal)), "native path never in RPC");
-            var grants = new GrantedMediaFiles(f.Store, "music.files.v1", [".wav"]);
-            Equal(2, (await grants.ListAsync()).Count); Equal(new Uri(paths[0]), await grants.ResolveAsync(song.Id));
+            var grants = new GrantedMediaFiles(f.Store, "music.files.v2", [".wav"]);
+            Equal(2, (await grants.ListAsync()).Count);
+            Equal(new Uri(paths[0]), await grants.ResolveAsync(song.Raw.GetProperty("localFileId").GetString()!));
             await f.Module.SearchAsync(song.Title, default); Equal("曲库搜索", f.Module.Heading);
             f.Module.SelectedSong = f.Module.Songs[0]; await f.Module.FavoriteAsync();
             await f.Module.NavigateAsync("favorites", default); Equal(1, f.Module.Songs.Count);
@@ -941,7 +943,7 @@ public static partial class MusicUiTests
             Equal(2, f.Calls.Count("music.queue.playCollection"));
             Equal(1, f.Playback.Opens.Count); True(f.Module.CanPlay, "successful retry restores the current queue");
         });
-        yield return Case("playlist navigation rejects totals beyond the DTO resource boundary without request expansion", async () =>
+        yield return Case("playlist navigation accepts a larger unused total without request expansion", async () =>
         {
             await using var f = await Fixture.Create();
             var before = f.Module.Playlists.ToArray();
@@ -954,8 +956,9 @@ public static partial class MusicUiTests
             });
             await f.Module.RefreshAsync();
             Equal(start + 1, f.Calls.Count("music.library.list"));
-            True(before.SequenceEqual(f.Module.Playlists), "invalid total must preserve the current navigation");
-            Equal("操作失败，请重试", f.Module.Status);
+            True(before.Select(row => row.Id).SequenceEqual(f.Module.Playlists.Select(row => row.Id)),
+                "a larger total does not discard the actual returned navigation rows");
+            Equal("", f.Module.Status);
         });
         yield return Case("malformed success preserves old page; failed runtime shutdown is asserted", async () =>
         {
@@ -966,7 +969,7 @@ public static partial class MusicUiTests
                 await f.Module.RefreshAsync(); Equal(1, f.Module.Songs.Count); Equal("操作失败，请重试", f.Module.Status);
                 Equal(0, f.Playback.Opens.Count);
             }
-            var root = NewRoot(); await using var store = new LocalDocumentStore(root, ["music.files.v1"]);
+            var root = NewRoot(); await using var store = new LocalDocumentStore(root, ["music.files.v2"]);
             await using var native = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
             var runtime = new FailedApplication(); var module = new MusicCapability(runtime, store, native);
             await Failure(() => module.InitializeAsync(default), "STORAGE_UNAVAILABLE");
@@ -1007,7 +1010,7 @@ public static partial class MusicUiTests
             Equal(1, f.Calls.Count("application.prepare")); True(token.IsCancellationRequested, "final disposal cancels lifetime");
             Equal(1, f.Calls.DisposeCalls); Equal(0, f.Runtime.DisposeCalls);
             Equal(3, await f.SavedMode());
-            True((await f.Store.ReadAsync("music.library.v1")).Fingerprint.Exists, "product still owns the store");
+            True((await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint.Exists, "product still owns the store");
         });
         yield return Case("failed prepare preserves runtime/store and final disposal observes its cached failure", async () =>
         {
@@ -1017,7 +1020,7 @@ public static partial class MusicUiTests
             {
                 await f.Module.ChangeModeAsync(2);
                 var token = f.Calls.Log.Last(call => call.Method == "music.queue.mode").Token;
-                var before = (await f.Store.ReadAsync("music.library.v1")).Fingerprint;
+                var before = (await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint;
                 var preparation = f.Module.PrepareShutdownAsync();
                 await Failure(() => preparation, "STORAGE_UNAVAILABLE");
                 await Failure(() => f.Module.PrepareShutdownAsync(), "STORAGE_UNAVAILABLE");
@@ -1030,7 +1033,7 @@ public static partial class MusicUiTests
                 await f.Module.InitializeAsync(default); await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("ignored", default);
                 await f.Module.OpenPlayQueueAsync(); f.Playback.Start(); f.Playback.End();
                 Equal(count, f.Calls.Log.Count);
-                Equal(before, (await f.Store.ReadAsync("music.library.v1")).Fingerprint);
+                Equal(before, (await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint);
                 Equal(2, await f.SavedMode());
                 // The host may now offer explicit force-exit. Final cleanup must
                 // observe the same failed task and still release module resources.
@@ -1038,7 +1041,7 @@ public static partial class MusicUiTests
                 await Failure(() => f.Module.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE");
                 True(token.IsCancellationRequested, "failed finalization still cleans up lifetime");
                 Equal(1, f.Calls.Count("application.prepare")); Equal(1, f.Calls.DisposeCalls); Equal(0, f.Runtime.DisposeCalls);
-                Equal(before, (await f.Store.ReadAsync("music.library.v1")).Fingerprint);
+                Equal(before, (await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint);
                 Equal(2, await f.SavedMode());
             }
             finally { await Failure(() => f.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE"); }
@@ -1284,8 +1287,10 @@ public static partial class MusicUiTests
     {
         public TaskCompletionSource Arrived { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Func<JsonElement, JsonElement>? Transform;
         public void Release() => release.TrySetResult();
-        public async Task<JsonElement> Hold(JsonElement reply) { Arrived.TrySetResult(); await release.Task; return reply; }
+        public async Task<JsonElement> Hold(JsonElement reply)
+        { Arrived.TrySetResult(); await release.Task; return Transform?.Invoke(reply) ?? reply; }
     }
     private sealed class ObservedApplication(IMusicApplication inner, IMusicPlaybackFeedback? feedback = null) : MusicApplicationForwarder(inner)
     {
@@ -1399,7 +1404,7 @@ public static partial class MusicUiTests
                 : new DocumentProbe();
             var cache = new CacheDocumentStore(cacheBacking);
             var runtime = new NativeMusicScriptTestRuntime(); MusicCapability? module = null;
-            var application = new MusicNativeApplication(store, runtime, cache, new NoUpstream());
+            var application = new MusicNativeApplication(store, runtime, cache);
             try
             {
                 var calls = new ObservedApplication(application, feedback); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
@@ -1430,7 +1435,7 @@ public static partial class MusicUiTests
         }
         public async Task<int> SavedMode()
         {
-            var saved = await Store.ReadAsync("music.library.v1");
+            var saved = await Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
             using var document = JsonDocument.Parse(saved.Data!);
             foreach (var entry in document.RootElement.GetProperty("entries").EnumerateArray())
             {
@@ -1451,7 +1456,7 @@ public static partial class MusicUiTests
         }).ToArray(); // File grants only; deliberately not decoded by the probe.
         public async Task<string> PlayableCollection()
         {
-            var grants = new GrantedMediaFiles(Store, "music.files.v1", [".wav"]);
+            var grants = new GrantedMediaFiles(Store, "music.files.v2", [".wav"]);
             var files = await grants.GrantAsync(MakeFiles(3));
             var songs = files.Select(file =>
                 MusicSongFixture.Local(file.Id, file.Title, "测试歌手", "测试专辑", 180)).ToArray();
@@ -1465,11 +1470,6 @@ public static partial class MusicUiTests
             try { await Module.DisposeAsync(); }
             finally { try { await Cache.DisposeAsync(); await CacheBacking.DisposeAsync(); await Runtime.DisposeAsync(); } finally { await Store.DisposeAsync(); } }
         }
-    }
-    private sealed class NoUpstream : System.Net.Http.HttpMessageHandler
-    {
-        protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken cancellationToken)
-            => throw new InvalidOperationException("No upstream request allowed in local UI fixture");
     }
     private sealed class DocumentProbe : IDocumentStore
     {

@@ -7,7 +7,7 @@ namespace MeowFilm.Capabilities.Recommendations;
 /// <summary>Device-only FM choices, keyed by the actual NetEase account. No live session is persisted.</summary>
 internal sealed class MusicFmPreferences(IDocumentStore store)
 {
-    internal const string DocumentNamespace = "music.fm-selection.v1";
+    internal const string DocumentNamespace = "music.fm-selection.v2";
     private readonly SemaphoreSlim gate = new(1, 1);
     internal async Task<JsonObject> ReadAsync(string accountId, CancellationToken token)
     {
@@ -50,7 +50,7 @@ internal sealed class MusicFmPreferences(IDocumentStore store)
                 value["accounts"] is JsonObject, "CORRUPT_STORAGE");
             foreach (var account in value["accounts"]!.AsObject())
             {
-                RecommendationJson.Require(RecommendationJson.ValidId(account.Key), "CORRUPT_STORAGE");
+                RecommendationJson.Require(account.Key.Length > 0, "CORRUPT_STORAGE");
                 Validate(account.Value!.AsObject());
             }
             return (value, saved.Fingerprint);
@@ -61,9 +61,9 @@ internal sealed class MusicFmPreferences(IDocumentStore store)
     private static void Validate(JsonObject value)
     {
         var json = JsonSerializer.SerializeToElement(value);
-        RecommendationJson.Fields(json, "mode submode ruleId tabTagId", "mode submode ruleId tabTagId");
+        RecommendationJson.Fields(json, "mode submode ruleId tabTagId");
         RecommendationJson.Require(RecommendationJson.Text(json, "mode") is "default" or "familiar" or "explore" or "puzzle" or "scene",
             "CORRUPT_STORAGE");
-        foreach (string key in new[] { "submode", "ruleId", "tabTagId" }) _ = RecommendationJson.Text(json, key, "", 64);
+        foreach (string key in new[] { "submode", "ruleId", "tabTagId" }) _ = RecommendationJson.Text(json, key);
     }
 }

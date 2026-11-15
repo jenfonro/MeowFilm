@@ -488,6 +488,11 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             JsonArray? items = null; string error = "";
             try
             {
+                if (query.Kind == MusicSearchKind.Songs && SongFactsProjection is { } project)
+                {
+                    var songs = LJ.Array(project(LJ.Obj(("items", LJ.Arr(candidates.Select(candidate => candidate.Item)))))["items"]);
+                    candidates = candidates.Select((candidate, index) => candidate with { Item = LJ.Object(songs[index]) }).ToArray();
+                }
                 items = MusicRankFusion.Fuse(candidates, query.Kind, query.Order, query.Lifetime.Token,
                     plan == FusionPlan.Merge ? displayed : null);
             }

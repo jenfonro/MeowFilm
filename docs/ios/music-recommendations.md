@@ -1,13 +1,13 @@
 # 网易云来源、推荐与续播的 iOS 实现
 
-业务语义以[播放来源、队列与自动续播](../common/music/playback-sessions.md)为准；本文记录本端类型、存储、协议和 UIKit 消费关系。音乐所有权见[音乐能力](music.md)，平台身份见[平台客户端上下文](../common/music/platform-client-context.md)。推荐不经过 Node/LX；LX 仅承担已声明的音源能力。
+业务语义以[播放来源、队列与自动续播](../common/music/playback-sessions.md)为准；本文记录本端类型、存储和 UIKit 消费关系。音乐所有权见[音乐能力](music.md)，平台配方见[共同 Node 请求](../common/music/platform-client-context.md)。推荐通过 Node 取得规范批次，原生仍拥有会话、队列与反馈事实；LX 只承担已声明音源能力。
 
 ## 所有权与入口
 
 - `NativeMusicService` 统一持有队列 CAS、真实播放事件、FM、搜索候选、主动推荐／相似／心动会话和返回 checkpoint，没有第二个播放器或队列。
 - `MusicSimilarModeServing` 提供 `.recommendations(occurrenceID:expectedRevision:)`、`.currentHeartbeat`、`.heartbeatSong(songID:)`、`.heartbeat`、`.songRoaming` 与 `.artistRoaming`。`MusicQueueRecommendationServing` 负责搜索单曲候选；`MusicFMPlaybackServing` 负责 FM 记忆、会话投影和续播开关。
 - `MusicSearchBatchPlaying.replaceSearchBatch` 只在直接播放一个搜索目标时写入 `sourceType=search-song` 和固定 `seedEntryId`；搜索批量播放、首页已展示列表及普通单曲不借队列长度取得搜索推荐身份。搜索“下一首播放”解析真实录音后走既有插队事务。
-- 入口资格读取已共享的网易 ID，不补搜。普通网络歌单和普通本地歌单没有心动资格；本地收藏当前 occurrence 具有有效网易 ID 时可发起，由平台核实真实喜欢歌单及种子成员。其他当前曲心动按 occurrence 的官方喜欢来源校验，不把整队列资格授予插队歌曲。官方账号喜欢来源使用实际账号歌单。仅缺登录的单曲推荐及有效首页相似／心动入口保留，由执行时统一提示登录。
+- 入口资格读取仓库已有网易定位，不为菜单补搜。普通网络／本地歌单不据名称取得心动来源资格；当前 occurrence 和真实入口来源由原生区分，Node 负责实际喜欢歌单定位及请求，不验证旧完整成员快照。仅缺登录的有效入口由执行时统一提示登录。
 - `NativeMusicAccountService` 与平台适配器使用原始账号 lease，挂起前后校验账号、访问代次和授权，不刷新后换账号接着提交。FM 使用独立的当前首页 binding。
 
 ## UIKit
@@ -26,27 +26,15 @@
 
 `MusicRemoteQueueSource.homeAction` 携带真实入口动作，包括 FM 配置、相似种子和日推分支。已在 FM 内切频道先取得新批，再追加旧队列并选择新批首项，保留当前播放方式；新进入 FM 由 owner 一致设置列表顺序和续播开启。预览仍按既有缓存转移首批，不重复请求已转移批次。
 
-私人 FM 走 `/api/v1/radio/get`：`mode/subMode/limit="3"/unplaySongIds="[]"/openAidj="false"/aidjReqTimes="0"`；频道预览请求 `limit="1"`。规则频道使用其既有 recommends／cover 路径，批次参数 5。相似歌曲／艺人走同一 radio 路径，但为 `mode=SIMILAR`、真实 `sourceType/sourceIds`、`limit="3"` 和少一个 g 的 `unplaySonIds`。这些是请求参数，不是客户端队列长度上限。日推／风格日推仍为歌单来源。
+`MusicNodeAccountProvider.fm/homeAction/similarMode` 把实际 FM 配置、preview、歌曲／艺人定位交给共同 Node 操作。Swift 消费返回的歌曲、封面、continuation 和逐曲反馈来源，不重建 radio／规则频道的路径、签名或批次配方。日推／风格日推仍为歌单来源，平台批次参数不是客户端队列长度上限。
 
 播放反馈的来源值与取曲路由分开：仅普通 FM 在缺少逐曲上游来源时默认 `userfm`，规则频道（`ruleFM`）无上游来源时省略；心动使用真实 `play_scene=heartbeat`，逐曲上游 `source/sourceId/alg` 独立保留；心动收藏歌单 ID 仅描述本地入口，不借作上游反馈来源。推荐 `sourceMap` 缺失、空或 null 时不填 `moreRcmd`，相似模式也不生成猜测标签。反馈协议与有限待发见[音乐能力](music.md#网易协议与有限待发)。
 
-网易反馈 outbox 使用 Application Support 下 `documents/music.netease-feedback-outbox.v1` 的独立业务 `DocumentStore`，由账号服务通过惰性工厂注入，不与 URL／副歌缓存共用存储，也不读取或导入其它存储的数据。普通清缓存不删除待发事实；存储不可用只限制反馈，不阻断账号准备、启动或播放。发送前仍须成功落盘 inflight，ACK、账号身份和未知发送结果不重放规则不变。
+网易反馈 outbox 的当前 namespace、key 和 Node 交接见[音乐能力](music.md#网易协议与有限待发)；它与 URL／副歌缓存分离，不读取或导入历史数据。普通清缓存不删除待发事实；存储不可用只限制反馈，不阻断账号准备、启动或播放。发送前仍须成功落盘 inflight，真实账号和未知发送不重放边界不变。
 
 ## 固定单曲推荐
 
-搜索自动候选和主动单曲推荐复用同一平台请求：
-
-```text
-POST EAPI /api/homepage/scene/more/rcmd/song
-currentPlaySongId="<固定 seed>"
-songIds="[<固定 seed 数值>]"
-songCount="1"
-offset="<响应 offset，首次 0>"
-source="curlist_more_rcmd"
-extJson="{}"
-```
-
-完整消费 `data.songList/algMap/sourceMap/offset/hasMore`；有后页时响应 offset 必须前进，后续不按条数推算。种子不随当前推荐曲、插队或当前队列变化。不制造 `searchTransmissionInfo`／搜索意图，不保留旧推荐路由 fallback。实网证据只支持接受这些参数与分页，不保证算法仅依赖 seed 或永不耗尽。
+搜索自动候选和主动单曲推荐复用 Node `queueRecommendations`；`MusicNodeAccountProvider.similarMode` 传 `seedSongId/offset`，消费规范歌曲、逐曲来源及真实 `hasMore/offset`，不按返回条数推算结束。种子不随当前推荐曲、插队或队列变化；不制造搜索 wire 上下文或保留旧路由。请求成功也不保证上游算法仅依赖 seed 或永不耗尽，本轮没有新的实网验证。
 
 搜索首批在种子真实开播后异步准备，不阻塞首曲，也不打开续播；尚未开播或无推荐平台能力时不自动请求。普通方式只准备候选，不自动并入或继续请求后批。首批保存在候选区，选择时通过快照与每批候选 token 一次追加整批并选中目标。显式下一首优先；未激活时普通尾部追加撤销候选和请求，插队不撤销。激活后插队／追加均保留固定种子。搜索候选不保存原队列；主动推荐在 `queue.similar` 保存 checkpoint，当前 seed 的 occurrence、音频、进度及暂停状态保留。
 
@@ -54,9 +42,9 @@ extJson="{}"
 
 ## 心动与恢复
 
-平台先完整读取当前账号本人、`specialType=5` 且 owner 相符的喜欢歌单并复核详情；缺元数据按详情协议补齐。心动使用 `/api/playmode/intelligence/list`，`playlistId` 为真实歌单，首批 `songId/startMusicId` 同为实际进入种子，当前曲使用 `fromPlayOne`，首页使用 `fromPlayAll`。展示 H 的卡片传 `.heartbeatSong(H)`，不因 H 不在喜欢成员中就替换它，由上游决定是否接受；无展示种子的账号入口才从有效喜欢成员选择。当前曲入口仍校验真实成员，不开放普通网络歌单。`count` 使用实际完整成员数，不当返回硬上限；`songInfo=null` 时按顶层 id 补详情。种子缺于响应时优先复用已读取详情，确实缺失再按种子 ID 补齐首项，不伪造反馈归属。
+`MusicHomeAction` 和当前 occurrence 提供本次实际种子；Node 执行 `heartbeat.seed/heartbeat`，返回真实喜欢歌单定位、成员和 context。原生不完整重读喜欢歌单或复核种子仍在旧成员快照中；展示 H 不因推荐变化被替成另一首。缺少真实请求定位仍按共同字段消费规则失败，不扩大普通歌单的来源资格。
 
-心动续批沿用原账号喜欢歌单、进入种子 `startMusicId` 和 `fromPlayAll/fromPlayOne`，仅将 `songId` 推进到实际尾曲。当前曲入口仍核实原种子的喜欢成员身份，不要求推荐尾曲属于喜欢列表。推荐／心动的返回由原生 owner 一次 CAS 恢复 checkpoint，并把当前实际 occurrence 插回原锚点之后且选中它：`ABC/B → E → ABEC`。同 occurrence 不重复插入，同录音不同 occurrence 不合并；保留原行上下文与 E 的内容、音频实例、进度和暂停状态，不重新 resolve、play、pause 或 seek，不恢复旧循环值。来源标签读取唯一 `queue.source` 的 `queueSourceTitle` 派生投影，不把保留的 E 条目上下文误当成队列来源。相似来源没有返回 checkpoint。
+心动续批沿用共同返回 context 和原账号，以实际尾曲推进；不再验证旧喜欢成员证明。推荐／心动的返回由原生 owner 一次 CAS 恢复 checkpoint，并把当前实际 occurrence 插回原锚点之后且选中它：`ABC/B → E → ABEC`。同 occurrence 不重复插入，同录音不同 occurrence 不合并；保留原上下文、歌曲引用、音频实例、进度和暂停状态，不重新 resolve、play、pause 或 seek，不恢复旧循环值。来源标签读取唯一 `queue.source` 投影，不把 E 的条目上下文冒充队列来源。相似来源没有返回 checkpoint。
 
 `queue.similar` 的 schema 2 包含 provider、sourceIds、providerContext、continue、offset、exhausted、batches、attempted、scope 和可选 returnQueue；缺少必需状态拒绝读取，不保留旧格式 fallback。冷恢复重新获取同 scope lease，不恢复 live 推荐反馈资格。搜索推荐 runtime 不冷恢复，已追加歌曲仍按普通队列持久化。
 

@@ -9,171 +9,298 @@ public static class MusicSongIdentityTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("Song recording owner rejects non-transitive sets without mutating either input", Pairwise);
-        yield return new("Song recording groups prefer exact source bindings over ambiguous duration matches", ExactSource);
-        yield return new("Song recording updates replace same-key evidence and update the shared fingerprint index", Updates);
-        yield return new("Song recording groups distinguish conflicting sets with the same representative", QualifiedSets);
-        yield return new("Song recording groups retain local identity and only match known online evidence", LocalAndUnknown);
-        yield return new("Song display updates without a primary recording preserve the bound primary", LocalDisplayUpdate);
-        yield return new("Song recording owner canonical output is detached from inputs and other snapshots", Detached);
-        yield return new("Song recording grouping handles many same-fingerprint variants across retained groups", Variants);
+        yield return new("Song repository compares every new source to the fixed representative duration", FixedBaseline);
+        yield return new("Song repository prefers registered sources and keeps ambiguous new sources independent", ExactSource);
+        yield return new("Song repository corrections retain UUID and update searchable metadata", Updates);
+        yield return new("Song repository replaces optional structured artists without changing queue references", ArtistMetadataUpdates);
+        yield return new("Song repository observations of the same source never split its permanent identity", RegisteredSets);
+        yield return new("Song repository keeps local files independent and fixes the first valid duration", LocalAndUnknown);
+        yield return new("Song repository partial observations preserve known metadata and the bound primary", PartialObservation);
+        yield return new("Song repository returned projections are detached from inputs and other snapshots", Detached);
+        yield return new("Song repository retains many sources and current-format UUIDs after cold reload", Variants);
         yield return new("Song recording operations honor cancellation including empty local sets", Cancellation);
+        yield return new("Song repository normalizes complete title and artist without stripping versions", Normalization);
+        yield return new("Song repository structured artists ignore order and duplicates without guessing text", StructuredArtists);
+        yield return new("Song repository does not discard incomplete structured artist items to match known artists", IncompleteStructuredArtists);
+        yield return new("Song repository excludes exact unknown placeholders from cross-source matching", UnknownMetadata);
+        yield return new("Song repository completing unknown metadata retains each registered source UUID", CompletedMetadata);
+        yield return new("Song repository UUID belongs to its database rather than metadata or source keys", IndependentDatabases);
     }
     private static void Check(bool condition, string message = "Assertion failed")
     { if (!condition) throw new InvalidOperationException(message); }
     private static JsonObject Song(string platform, string id, double duration = 180, string title = "Song", string artist = "Artist") =>
         MusicSongFixture.Online(platform, id, title, artist, duration: duration);
-    private static JsonObject Combine(JsonObject main, params JsonObject[] other)
+    private static JsonObject Structured(string platform, string id, params string[] names) =>
+        MusicSongFixture.Online(platform, id, "Duet", string.Join(" / ", names), duration: 180,
+            native: new JsonObject { ["artistNames"] = LJ.Arr(names) });
+    private static async Task<JsonObject> Adopt(MusicLibraryOwner owner, JsonObject song, bool authoritative = true)
     {
-        var result = main.DeepClone().AsObject();
-        foreach (var song in other) result["sources"]!.AsArray().Add(song["sources"]![0]!.DeepClone());
-        return NativeMusicSong.Normalize(result);
+        var result = await owner.AdoptPlatformResultAsync(JsonSerializer.SerializeToElement(song), default, authoritative,
+            shape: MusicLibraryOwner.PlatformSongShape.Song);
+        var adopted = JsonNode.Parse(result.GetRawText())!.AsObject();
+        Check(Guid.TryParseExact(LJ.S(adopted["songId"]), "D", out _));
+        _ = SongRow.Read(result);
+        return adopted;
     }
-    private static void Canonical(JsonObject song)
+    private static string Id(JsonObject song) => LJ.S(song["songId"]);
+    private static async Task FixedBaseline()
     {
-        Check(JsonNode.DeepEquals(song, NativeMusicSong.Normalize(song)));
-        _ = SongRow.Read(JsonSerializer.SerializeToElement(song));
-    }
-    private static Task Pairwise()
-    {
-        var a = Combine(Song("wy", "one", 103), Song("tx", "one", 100));
-        var b = Combine(Song("wy", "two", 103), Song("tx", "two", 106));
-        var left = new NativeMusicSong.Recordings(a); var right = new NativeMusicSong.Recordings(b);
-        Check(!left.CanMerge(right) && !right.CanMerge(left) && !left.TryMerge(right));
-        Check(!left.TryAddSource(b["sources"]![1]!.AsObject()));
-        Check(JsonNode.DeepEquals(a, left.ToSong()) && JsonNode.DeepEquals(b, right.ToSong()));
-        return Task.CompletedTask;
-    }
-    private static Task ExactSource()
-    {
-        var groups = new NativeMusicSongGroups();
-        var first = groups.Add(new(Song("wy", "short", 100)));
-        var second = groups.Add(new(Song("tx", "long", 106)));
-        var ambiguous = new NativeMusicSong.Recordings(Song("tx", "long", 103));
-        Check(first.CanMerge(ambiguous) && second.CanMerge(ambiguous));
-        Check(ReferenceEquals(groups.Find(ambiguous), second));
-        Check(ReferenceEquals(groups.Add(ambiguous), second));
-        Check(first.Id != second.Id);
-        Canonical(second.ToSong());
-        return Task.CompletedTask;
-    }
-    private static Task Updates()
-    {
-        var groups = new NativeMusicSongGroups();
-        var original = groups.Add(new(Song("wy", "same", title: "Before")));
-        string id = original.Id;
-        var updated = groups.Add(new(Song("wy", "same", 181, "After")), preferIncoming: true);
-        Check(ReferenceEquals(original, updated) && updated.Id == id);
-        Check(updated.ToSong()["title"]!.GetValue<string>() == "After");
-        Check(MusicSongFixture.Info(updated.ToSong())["duration"]!.GetValue<double>() == 181);
-        var current = groups.Add(new(Song("tx", "current", 181, "After")), preferIncoming: true);
-        Check(ReferenceEquals(updated, current) && current.Id == id);
-        Check(MusicSongFixture.Info(current.ToSong())["source"]!.GetValue<string>() == "tx");
-        Check(current.Sources.Count() == 2);
-        var oldTitle = groups.Add(new(Song("kw", "old", title: "Before")));
-        Check(!ReferenceEquals(oldTitle, current), "replaced metadata remained in the grouping index");
-        Canonical(current.ToSong()); Canonical(oldTitle.ToSong());
-        return Task.CompletedTask;
-    }
-    private static Task QualifiedSets()
-    {
-        // Complete snapshots can share a representative while disagreeing in their other recordings.
-        var root = Song("wy", "shared", 103);
-        JsonObject[] songs =
-        [
-            Combine(root, Song("tx", "low", 100)),
-            Combine(root, Song("tx", "high", 106)),
-            Combine(root, Song("kw", "middle-low", 100.5), Song("mg", "middle-high", 103.5))
-        ];
-        var groups = new NativeMusicSongGroups();
-        var added = songs.Select(song => groups.Add(new(song))).ToArray();
-        Check(added.Select(group => group.Id).Distinct().Count() == 3);
-        for (int i = 0; i < songs.Length; i++)
+        foreach (var pair in new[] { (240d, 245d, true), (240d, 245.1d, false), (239d, 240d, true), (181d, 239d, false) })
         {
-            Check(ReferenceEquals(added[i], groups.Add(new(songs[i]))));
-            Canonical(added[i].ToSong());
+            await using var store = new MusicOfficialAudioTests.MemoryStore();
+            await using var owner = new MusicLibraryOwner(store);
+            var first = await Adopt(owner, Song("wy", "base", pair.Item1));
+            var next = await Adopt(owner, Song("tx", "next", pair.Item2));
+            Check((Id(first) == Id(next)) == pair.Item3);
         }
-        var retained = new NativeMusicSongGroups();
-        foreach (var group in added) retained.Import(group.ToSong());
-        Check(songs.Select(song => retained.Add(new(song)).Id).SequenceEqual(added.Select(group => group.Id)));
-        return Task.CompletedTask;
+        await using var retainedStore = new MusicOfficialAudioTests.MemoryStore();
+        await using var retained = new MusicLibraryOwner(retainedStore);
+        var baseline = await Adopt(retained, Song("wy", "base", 240));
+        Check(Id(await Adopt(retained, Song("tx", "edge", 245))) == Id(baseline));
+        Check(Id(await Adopt(retained, Song("kg", "chain", 250))) != Id(baseline), "later sources must not extend the fixed baseline");
+        Check(Id(await Adopt(retained, Song("wy", "base", 300))) == Id(baseline));
+        Check(Id(await Adopt(retained, Song("kw", "original-range", 241))) == Id(baseline), "correction must not move the baseline");
     }
-    private static Task LocalAndUnknown()
+    private static async Task ExactSource()
     {
-        var groups = new NativeMusicSongGroups();
-        var local = MusicSongFixture.Local("local:first", "Song", "Artist", duration: 180);
-        var first = groups.Add(new(local));
-        var second = groups.Add(new(MusicSongFixture.Local("local:second", "Song", "Artist", duration: 180)));
-        Check(!ReferenceEquals(first, second));
-        var online = groups.Add(new(Song("wy", "unbound")));
-        Check(!ReferenceEquals(first, online) && !ReferenceEquals(second, online), "local membership cannot be guessed from metadata");
-        var corrected = groups.Add(new(MusicSongFixture.Local("local:first", "Corrected", duration: 400)), preferIncoming: true);
-        Check(ReferenceEquals(first, corrected) && corrected.ToSong()["title"]!.GetValue<string>() == "Corrected");
-        var binding = Song("tx", "explicit");
-        binding["songId"] = second.Id;
-        var bound = groups.Add(new(binding), preferIncoming: true);
-        Check(ReferenceEquals(bound, second) && !bound.IsLocal && bound.Id == "local:second");
-        Canonical(bound.ToSong());
-
-        var unknown = new NativeMusicSongGroups();
-        var zero = unknown.Add(new(Song("wy", "zero", 0)));
-        Check(!ReferenceEquals(zero, unknown.Add(new(Song("tx", "zero", 0)))));
-        Check(ReferenceEquals(zero, unknown.Add(new(Song("wy", "zero", 180)), preferIncoming: true)));
-        Check(ReferenceEquals(zero, unknown.Add(new(Song("kw", "known", 180)))));
-        var absent = unknown.Add(new(Song("wy", "absent", artist: "Unknown")));
-        Check(!ReferenceEquals(absent, unknown.Add(new(Song("tx", "absent", artist: "Unknown")))));
-        Canonical(zero.ToSong());
-        return Task.CompletedTask;
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var first = await Adopt(owner, Song("wy", "short", 100));
+        var second = await Adopt(owner, Song("tx", "long", 106));
+        var ambiguous = await Adopt(owner, Song("kw", "middle", 103));
+        Check(Id(first) != Id(second) && Id(ambiguous) != Id(first) && Id(ambiguous) != Id(second));
+        Check(Id(await Adopt(owner, Song("tx", "long", 103))) == Id(second));
+        Check(Id(await Adopt(owner, Song("kw", "middle", 500, "Corrected"))) == Id(ambiguous));
+        var observation = first.DeepClone().AsObject();
+        observation["sources"]!.AsArray().Add(second["sources"]![0]!.DeepClone());
+        Check(Id(await Adopt(owner, observation)) == Id(first));
+        Check(Id(await Adopt(owner, Song("tx", "long", 103))) == Id(second), "an observation cannot rebind another record's source");
     }
-    private static Task Detached()
+    private static async Task Updates()
     {
-        var original = Song("wy", "1"); var incoming = Song("tx", "2");
-        string before = original.ToJsonString(), nextBefore = incoming.ToJsonString();
-        var groups = new NativeMusicSongGroups();
-        var group = groups.Import(original); groups.Add(new(incoming));
-        var result = group.ToSong(); result["title"] = "modified output";
-        MusicSongFixture.Info(result)["singer"] = "modified source";
-        Check(original.ToJsonString() == before && incoming.ToJsonString() == nextBefore);
-        Canonical(group.ToSong());
-        return Task.CompletedTask;
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var original = await Adopt(owner, Song("wy", "same", title: "Before"));
+        var updated = await Adopt(owner, Song("wy", "same", 181, "After"));
+        Check(Id(original) == Id(updated) && LJ.S(updated["title"]) == "After");
+        Check(MusicSongFixture.Info(updated)["duration"]!.GetValue<double>() == 181);
+        var current = await Adopt(owner, Song("tx", "current", 181, "After"));
+        Check(Id(current) == Id(original) && current["sources"]!.AsArray().Count == 2);
+        Check(MusicSongFixture.Info(current)["source"]!.GetValue<string>() == "wy", "a discovered source cannot replace the selected primary");
+        Check(Id(await Adopt(owner, Song("kw", "old", title: "Before"))) != Id(original));
     }
-    private static Task LocalDisplayUpdate()
+    private static async Task ArtistMetadataUpdates()
     {
-        var song = Combine(Song("tx", "primary"), Song("kg", "other"));
-        var recordings = new NativeMusicSong.Recordings(song);
-        var local = MusicSongFixture.Local(recordings.Id, "Song", "Artist", "New album", 180);
-        Check(recordings.TryMerge(new(local), preferIncoming: true));
-        var result = recordings.ToSong();
-        Check(result["album"]!.GetValue<string>() == "New album" &&
-            MusicSongFixture.Info(result)["source"]!.GetValue<string>() == "tx");
-        Canonical(result);
-        var discovered = new NativeMusicSong.Recordings(local);
-        Check(discovered.TryAddSource(Song("tx", "first")["sources"]![0]!.AsObject()));
-        Check(discovered.TryAddSource(Song("kg", "second")["sources"]![0]!.AsObject()));
-        Check(MusicSongFixture.Info(discovered.ToSong())["source"]!.GetValue<string>() == "tx");
-        Canonical(discovered.ToSong());
-        return Task.CompletedTask;
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var original = await Adopt(owner, Song("wy", "artists"));
+        Check((await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { original, original }, index = 1 }))
+            .GetProperty("ok").GetBoolean());
+        var before = await owner.ExecuteAsync("music.queue.get");
+        Check(before.GetProperty("ok").GetBoolean());
+        var text = await Adopt(owner, Song("wy", "artists", 181, "Corrected", "Complete artist"));
+        Check(Id(text) == Id(original) && !text.ContainsKey("artistNames") &&
+            LJ.S(text["title"]) == "Corrected" && LJ.S(text["artist"]) == "Complete artist");
+        var structured = await Adopt(owner, Structured("wy", "artists", "B", "A"));
+        Check(Id(structured) == Id(original) && structured["artistNames"]!.ToJsonString() == "[\"B\",\"A\"]");
+        var withoutList = await Adopt(owner, Song("wy", "artists", 250, "Duet", "B / A"));
+        Check(Id(withoutList) == Id(original) && !withoutList.ContainsKey("artistNames") &&
+            LJ.N(withoutList["baselineDuration"]) == 180 && LJ.N(withoutList["duration"]) == 250);
+        Check(structured["artistNames"]!.AsArray().Count == 2, "an update must not mutate an earlier projection");
+        var after = await owner.ExecuteAsync("music.queue.get");
+        Check(after.GetProperty("ok").GetBoolean() &&
+            after.GetProperty("version").GetInt64() == before.GetProperty("version").GetInt64() &&
+            after.GetProperty("current").GetProperty("id").GetString() == before.GetProperty("current").GetProperty("id").GetString() &&
+            after.GetProperty("entries").EnumerateArray().Select(entry => entry.GetProperty("id").GetString())
+                .SequenceEqual(before.GetProperty("entries").EnumerateArray().Select(entry => entry.GetProperty("id").GetString())) &&
+            after.GetProperty("entries").EnumerateArray().All(entry =>
+                entry.GetProperty("song").GetProperty("songId").GetString() == Id(original) &&
+                !entry.GetProperty("song").TryGetProperty("artistNames", out _) &&
+                entry.GetProperty("song").GetProperty("duration").GetDouble() == 250));
+        await owner.DisposeAsync();
+        await using var reopened = new MusicLibraryOwner(store);
+        var restored = await reopened.ExecuteAsync("music.queue.get");
+        Check(restored.GetProperty("ok").GetBoolean() &&
+            restored.GetProperty("entries").GetRawText() == after.GetProperty("entries").GetRawText());
+        var restoredList = await Adopt(reopened, Structured("wy", "artists", "A", "B"));
+        Check(Id(restoredList) == Id(original) && LJ.N(restoredList["baselineDuration"]) == 180 &&
+            restoredList["artistNames"]!.ToJsonString() == "[\"A\",\"B\"]");
     }
-    private static Task Variants()
+    private static async Task RegisteredSets()
     {
-        var groups = new NativeMusicSongGroups();
-        var distinct = new HashSet<NativeMusicSong.Recordings>();
-        for (int i = 0; i < 160; i++) distinct.Add(groups.Add(new(Song("mg", "variant-" + i, i % 2 == 0 ? 100 : 200))));
-        Check(distinct.Count == 2 && distinct.All(group => group.Sources.Count() == 80));
-        var retained = new NativeMusicSongGroups();
-        foreach (var group in distinct) { var song = group.ToSong(); Canonical(song); retained.Import(song); }
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var first = await Adopt(owner, Song("wy", "shared", 103));
+        foreach (var extra in new[] { Song("tx", "low", 100), Song("tx", "high", 106), Song("kw", "middle", 100.5) })
+        {
+            var observation = Song("wy", "shared", 103);
+            observation["sources"]!.AsArray().Add(extra["sources"]![0]!.DeepClone());
+            Check(Id(await Adopt(owner, observation)) == Id(first));
+        }
+        Check(owner.SongSnapshot(Id(first))!.Value.GetProperty("sources").GetArrayLength() == 4);
+    }
+    private static async Task LocalAndUnknown()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var first = await Adopt(owner, MusicSongFixture.Local("file:first", "Song", "Artist", duration: 180));
+        var second = await Adopt(owner, MusicSongFixture.Local("file:second", "Song", "Artist", duration: 180));
+        Check(Id(first) != Id(second) && Id(first) != Id(await Adopt(owner, Song("wy", "unbound"))));
+        Check(Id(await Adopt(owner, MusicSongFixture.Local("file:first", "Corrected", duration: 400))) == Id(first));
+        const string recoveredTitle = "First valid duration";
+        var zero = await Adopt(owner, Song("wy", "zero", 0, recoveredTitle));
+        Check(zero["baselineDuration"] is null);
+        Check(Id(zero) != Id(await Adopt(owner, Song("tx", "zero", 0, recoveredTitle))));
+        var recovered = await Adopt(owner, Song("wy", "zero", 180, recoveredTitle));
+        Check(Id(recovered) == Id(zero) && LJ.N(recovered["baselineDuration"]) == 180);
+        Check(Id(await Adopt(owner, Song("kw", "known", 185, recoveredTitle))) == Id(zero));
+        Check(Id(await Adopt(owner, Song("kg", "beyond", 185.1, recoveredTitle))) != Id(zero));
+        var missing = await Adopt(owner, Song("wy", "missing", artist: ""));
+        Check(Id(missing) != Id(await Adopt(owner, Song("tx", "missing", artist: ""))));
+        Check(Id(await Adopt(owner, Song("wy", "missing", title: "Corrected", artist: "Known"))) == Id(missing));
+    }
+    private static async Task PartialObservation()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var first = await Adopt(owner, Song("wy", "primary"));
+        var partial = Song("wy", "primary", 0, "", "");
+        var result = await Adopt(owner, partial, authoritative: false);
+        Check(Id(result) == Id(first) && LJ.S(result["title"]) == "Song" && LJ.S(result["artist"]) == "Artist");
+        Check(result["duration"]!.GetValue<double>() == 180);
+        var corrected = await Adopt(owner, partial);
+        Check(Id(corrected) == Id(first) && LJ.S(corrected["title"]) == "" && corrected["duration"] is null);
+        Check(corrected["baselineDuration"]!.GetValue<double>() == 180);
+    }
+    private static async Task Detached()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var input = Song("wy", "1"); string before = input.ToJsonString();
+        var adopted = await Adopt(owner, input); string id = Id(adopted);
+        adopted["title"] = "modified output"; MusicSongFixture.Info(adopted)["singer"] = "modified source";
+        Check(input.ToJsonString() == before);
+        var current = await Adopt(owner, input, authoritative: false);
+        Check(Id(current) == id && LJ.S(current["title"]) == "Song" && LJ.S(MusicSongFixture.Info(current)["singer"]) == "Artist");
+    }
+    private static async Task Variants()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        var owner = new MusicLibraryOwner(store); var ids = new HashSet<string>();
+        for (int i = 0; i < 160; i++) ids.Add(Id(await Adopt(owner, Song("mg", "variant-" + i, i % 2 == 0 ? 100 : 200))));
+        Check(ids.Count == 2 && ids.All(id => owner.SongSnapshot(id)!.Value.GetProperty("sources").GetArrayLength() == 80));
+        await owner.DisposeAsync();
+        await using var reopened = new MusicLibraryOwner(store);
         for (int i = 0; i < 80; i++)
         {
-            var result = retained.Add(new(Song("tx", "later-" + i, i % 2 == 0 ? 100 : 200)));
-            Check(distinct.Any(group => group.Id == result.Id));
-            if (i >= 78) { Check(result.Sources.Count() == 120); Canonical(result.ToSong()); }
+            var result = await Adopt(reopened, Song("tx", "later-" + i, i % 2 == 0 ? 100 : 200));
+            Check(ids.Contains(Id(result)));
+            if (i >= 78) Check(result["sources"]!.AsArray().Count == 120);
         }
-        return Task.CompletedTask;
+    }
+    private static async Task Normalization()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var original = await Adopt(owner, Song("wy", "one", 180, "  ＳＯＮＧ\u3000 (Live) ", " ＡＲＴＩＳＴ  "));
+        var matched = await Adopt(owner, Song("tx", "two", 180, "song (live)", "artist"));
+        Check(Id(original) == Id(matched) && LJ.S(matched["title"]) == "  ＳＯＮＧ\u3000 (Live) ");
+        var nextLine = await Adopt(owner, Song("kg", "next-line", 180, "\u0085song\u0085\u0085(live)\u0085", "\u0085artist\u0085"));
+        Check(Id(nextLine) == Id(original), "Unicode NEXT LINE is whitespace in both title and artist lookup");
+        var titleBom = await Adopt(owner, Song("kw", "title-bom", 180, "\uFEFFsong (live)", "artist"));
+        Check(Id(titleBom) != Id(original) && LJ.S(titleBom["title"]) == "\uFEFFsong (live)", "FEFF is title content, not whitespace");
+        var artistBom = await Adopt(owner, Song("mg", "artist-bom", 180, "song (live)", "\uFEFFartist"));
+        Check(Id(artistBom) != Id(original) && LJ.S(artistBom["artist"]) == "\uFEFFartist", "FEFF is artist content, not whitespace");
+        foreach (string title in new[] { "Song", "Song (Remix)", "Song (伴奏)" })
+            Check(Id(await Adopt(owner, Song("kg", title, title: title))) != Id(original));
+        var boundary = await Adopt(owner, Song("wy", "boundary", title: "ab", artist: "c"));
+        Check(Id(await Adopt(owner, Song("tx", "boundary", title: "a", artist: "bc"))) != Id(boundary));
+    }
+    private static async Task StructuredArtists()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var first = await Adopt(owner, Structured("wy", "one", "Ａ", " B "));
+        var reordered = await Adopt(owner, Structured("tx", "two", "b", "a", "a"));
+        Check(Id(first) == Id(reordered) && LJ.S(reordered["artist"]) == "Ａ /  B ");
+        Check(reordered["artistNames"]![0]!.GetValue<string>() == "Ａ");
+        Check(Id(await Adopt(owner, Song("kg", "text", title: "Duet", artist: "A / B"))) != Id(first));
+        var single = await Adopt(owner, Structured("wy", "single", "A / B"));
+        Check(Id(await Adopt(owner, Song("kw", "text-single", title: "Duet", artist: "a / b"))) == Id(single));
+    }
+    private static async Task IncompleteStructuredArtists()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var known = await Adopt(owner, Structured("wy", "known", "Artist"));
+        string[] missing = ["", " \t\u3000", "未知歌手", "未知歌曲", "Unknown", " UNKNOWN\tARTIST ", "Ｕｎｋｎｏｗｎ　Ｔｉｔｌｅ"];
+        for (int i = 0; i < missing.Length; i++)
+        {
+            string sourceId = "incomplete-" + i;
+            var first = await Adopt(owner, Structured("wy", sourceId, "Artist", missing[i]));
+            var second = await Adopt(owner, Structured("tx", sourceId, missing[i], "Artist"));
+            Check(Id(first) != Id(known) && Id(second) != Id(known), "an incomplete list cannot be reduced to the known artist");
+            Check(Id(first) != Id(second), "an unknown artist item is not a shared matching fact");
+            Check(first["artistNames"]!.AsArray().Count == 2 && LJ.S(first["artistNames"]![1]) == missing[i]);
+            Check(LJ.S(MusicSongFixture.Info(first)["songmid"]) == sourceId, "incomplete matching facts must not lose the usable locator");
+        }
+    }
+    private static async Task UnknownMetadata()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        string[] placeholders = ["未知歌手", "未知歌曲", "Unknown", " UNKNOWN\tARTIST ", "Ｕｎｋｎｏｗｎ　Ｔｉｔｌｅ"];
+        for (int i = 0; i < placeholders.Length; i++)
+        {
+            var title = await Adopt(owner, Song("wy", "title-" + i, title: placeholders[i]));
+            Check(Id(title) != Id(await Adopt(owner, Song("tx", "title-" + i, title: placeholders[i]))),
+                "an unknown title is not a shared matching fact");
+            var artist = await Adopt(owner, Song("wy", "artist-" + i, artist: placeholders[i]));
+            Check(Id(artist) != Id(await Adopt(owner, Song("tx", "artist-" + i, artist: placeholders[i]))),
+                "an unknown complete artist text is not a shared matching fact");
+        }
+        foreach (string known in new[] { "Unknown Soldiers", "未知之名" })
+        {
+            var first = await Adopt(owner, Song("wy", known, title: known, artist: known));
+            Check(Id(first) == Id(await Adopt(owner, Song("tx", known, title: known, artist: known))),
+                "only the exact placeholders are unknown, not every title or artist with that prefix");
+        }
+    }
+    private static async Task CompletedMetadata()
+    {
+        await using var store = new MusicOfficialAudioTests.MemoryStore();
+        await using var owner = new MusicLibraryOwner(store);
+        var known = await Adopt(owner, Structured("tx", "known", "Artist"));
+        var incomplete = await Adopt(owner, Structured("wy", "incomplete", "Artist", " "));
+        var unknown = await Adopt(owner, Song("kg", "unknown", title: "Unknown", artist: "未知歌手"));
+        Check(Id(incomplete) != Id(known) && Id(unknown) != Id(known) && Id(incomplete) != Id(unknown));
+        Check(Id(await Adopt(owner, Structured("wy", "incomplete", "Artist", " "))) == Id(incomplete));
+        Check(Id(await Adopt(owner, Song("kg", "unknown", title: "Unknown", artist: "未知歌手"))) == Id(unknown));
+        var completedList = await Adopt(owner, Structured("wy", "incomplete", "Artist"));
+        var completedText = await Adopt(owner, Song("kg", "unknown", title: "Duet", artist: "Artist"));
+        Check(Id(completedList) == Id(incomplete) && Id(completedText) == Id(unknown),
+            "completion reuses the source owner instead of rebinding to an existing metadata match");
+        Check(LJ.S(completedList["artist"]) == "Artist" && completedList["artistNames"]!.AsArray().Count == 1);
+        Check(LJ.S(completedText["title"]) == "Duet" && LJ.S(completedText["artist"]) == "Artist");
+        Check(completedList["sources"]!.AsArray().Count == 1 && completedText["sources"]!.AsArray().Count == 1);
+        Check(LJ.S(MusicSongFixture.Info(completedList)["songmid"]) == "incomplete" &&
+            LJ.S(MusicSongFixture.Info(completedText)["songmid"]) == "unknown");
+        Check(Id(await Adopt(owner, Structured("tx", "known", "Artist"))) == Id(known));
+        Check(Id(await Adopt(owner, Structured("wy", "incomplete", "Artist"))) == Id(incomplete));
+        Check(Id(await Adopt(owner, Song("kg", "unknown", title: "Duet", artist: "Artist"))) == Id(unknown));
+    }
+    private static async Task IndependentDatabases()
+    {
+        await using var firstStore = new MusicOfficialAudioTests.MemoryStore();
+        await using var secondStore = new MusicOfficialAudioTests.MemoryStore();
+        await using var first = new MusicLibraryOwner(firstStore);
+        await using var second = new MusicLibraryOwner(secondStore);
+        Check(Id(await Adopt(first, Song("wy", "same"))) != Id(await Adopt(second, Song("wy", "same"))));
     }
     private static Task Cancellation()
     {
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
-        var song = MusicSongFixture.Local("local:cancel");
+        var song = MusicSongFixture.Local("file:cancel");
         var group = new NativeMusicSong.Recordings(song);
         var groups = new NativeMusicSongGroups(cancelled.Token);
         Action[] actions =

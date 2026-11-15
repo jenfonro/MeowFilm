@@ -1,226 +1,205 @@
+import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicPlatform
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
+private actor RepositorySongPeer: MusicPlatformFixtureResponding {
+    private var rows: [MusicNativeTrackData] = []
+    private var count = 0
+    func set(_ rows: [MusicNativeTrackData]) { self.rows = rows }
+    func calls() -> Int { count }
+    func respond(_ request: MusicPlatformFixture.Request) throws -> RuntimeValue {
+        guard request.operation == "search" else { throw MusicPlatformFixture.Failure.remote("UNSUPPORTED") }
+        count += 1
+        return try MusicPlatformFixture.page(rows, platform: request.platform)
+    }
+}
+
+/// Identity is tested through the actual native repository, not a removed
+/// pairwise merge helper or a hash of a test DTO.
 final class MusicNativeCandidateDiscoveryMergeTests: XCTestCase {
-    func testStrictRecordingIdentityRejectsSingerVersionMissingDurationAndTimingMismatch() throws {
-        let seed = try MusicNativeCandidateDiscoveryFixture.song()
-        let values = [
-            MusicNativeCandidateDiscoveryFixture.track("wy", id: "1"),
-            MusicNativeCandidateDiscoveryFixture.track("wy", id: "2", artist: "Another"),
-            MusicNativeCandidateDiscoveryFixture.track("wy", id: "3", title: "Synthetic recording (Live)"),
-            MusicNativeCandidateDiscoveryFixture.track("wy", id: "4", duration: 0),
-            MusicNativeCandidateDiscoveryFixture.track("wy", id: "5", duration: 190),
-            MusicNativeCandidateDiscoveryFixture.track("wy", id: "6", title: "Synthetic recording (Remix)")
-        ]
-        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed,
-            observations: [.init(platform: "wy", page: .init(items: values), failure: nil)])
-        let sources = try MusicModel.sources(result.song)
-        XCTAssertEqual(sources.filter { $0.platform == "wy" }.map(\.nativeId), ["1"])
-        XCTAssertEqual(result.song["songId"], seed["songId"])
-        XCTAssertTrue(result.issues.isEmpty)
+    private func row(_ id: String, platform: String = "tx", title: String = "Synthetic recording",
+                     artist: String = "Fixture", duration: Double = 240,
+                     artists: [String]? = nil, album: String? = "Album") -> MusicNativeTrackData {
+        var info = MJ.obj([("source", .string(platform)), ("songmid", .string(id)),
+            ("name", .string(title)), ("singer", .string(artist)), ("duration", .number(duration)),
+            ("types", .array([.obj([("type", .string("128k"))])]))])
+        if let album { info["albumName"] = .string(album) }
+        if let artists { info["artistNames"] = .strings(artists) }
+        if platform == "kg" { info["hash"] = .string(id) }
+        return .init(platform: platform, data: info.bytes)
     }
-    func testAllPairsAvoidsTransitiveDurationMergeAndPlatformEditionsAreBoundedFairly() throws {
-        let seed = try MusicNativeCandidateDiscoveryFixture.song()
-        let a = MusicNativeCandidateDiscoveryFixture.track("wy", id: "1", duration: 177)
-        let b = MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "B", count: 32), duration: 183)
-        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: [
-            .init(platform: "wy", page: .init(items: [a]), failure: nil),
-            .init(platform: "kg", page: .init(items: [b]), failure: nil)
-        ])
-        XCTAssertEqual(try MusicModel.sources(result.song).count, 2)
-        let editions = (1...30).map { MusicNativeCandidateDiscoveryFixture.track("wy", id: String($0)) }
-        let fair = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: [
-            .init(platform: "wy", page: .init(items: editions), failure: nil),
-            .init(platform: "kg", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "C", count: 32))]), failure: nil)
-        ])
-        let sources = try MusicModel.sources(fair.song)
-        XCTAssertEqual(sources.count, 16)
-        XCTAssertTrue(sources.contains { $0.platform == "kg" })
-        XCTAssertTrue(sources.contains { $0.platform == "tx" })
+    private func observe(_ rows: [MusicNativeTrackData], peer: RepositorySongPeer,
+                         service: NativeMusicService) async throws -> [MusicRemoteTrack] {
+        await peer.set(rows)
+        return try await service.search(platform: rows.first?.platform ?? "tx", query: "fixture", page: 1, limit: 30).items
     }
-    func testContradictoryKnownNativeIDIsRejectedWithoutDurableQuarantineTable() throws {
-        let seed = try MusicNativeCandidateDiscoveryFixture.song()
-        let reused = MusicNativeCandidateDiscoveryFixture.track(artist: "Different recording")
-        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed,
-            observations: [.init(platform: "tx", page: .init(items: [reused]), failure: nil)])
-        XCTAssertTrue(result.song["sources"].array.isEmpty)
-        XCTAssertTrue(try MusicModel.sources(MusicModel.cleanSong(result.song)).isEmpty)
-        XCTAssertEqual(result.song["songId"], seed["songId"])
-        XCTAssertTrue(result.issues.contains { $0.failure == .nativeIDConflict })
-    }
-    func testMetadataCleaningNeverCopiesSignedURLAccountFieldsOrPlaybackFacts() throws {
-        var raw = try MJ.parse(MusicNativeCandidateDiscoveryFixture.track("wy", id: "123").data)
-        raw["url"] = .string("https://media.invalid/a?signature=synthetic")
-        raw["token"] = .string("synthetic-not-a-credential")
-        raw["headers"] = .obj([("Cookie", .string("synthetic-not-a-cookie"))])
-        let seed = try MusicNativeCandidateDiscoveryFixture.song()
-        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: [
-            .init(platform: "wy", page: .init(items: [.init(platform: "wy", data: raw.bytes)]), failure: nil)
-        ])
-        XCTAssertFalse(result.song.json.contains("signature"))
-        XCTAssertFalse(result.song.json.contains("synthetic-not"))
-        XCTAssertFalse(result.song.json.contains("qualityVerified"))
-        try MusicModel.rejectSecrets(result.song)
-    }
-    func testMissingPlatformsKeepDiscoveryEligibleAndForceNeverMarksUnobservedPlatforms() throws {
-        let original = try MusicNativeCandidateDiscoveryFixture.song()
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsDiscovery(original, force: false))
-        let partial = try MusicNativeCandidateDiscoveryMerge.merge(original,
-            observations: [.init(platform: "wy", page: nil, failure: .timeout)]).song
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsDiscovery(partial, force: false))
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsDiscovery(partial, force: true))
-        XCTAssertEqual(partial["sources"], original["sources"])
-    }
-    func testCompleteSourceSkipsOnlyItsPlatformAndForceAllowsRefresh() throws {
-        let result = try MusicNativeCandidateDiscoveryMerge.merge(MusicNativeCandidateDiscoveryFixture.song(), observations: [
-            .init(platform: "wy", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("wy", id: "123")]), failure: nil)
-        ]).song
-        XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsPlatform("wy", song: result, force: false))
-        XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: result, force: false))
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("mg", song: result, force: false))
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("wy", song: result, force: true))
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: result, force: true))
-        let cached = MusicSourceDiscoveryEntry(checkedAt: NativeMusicFixture.date.timeIntervalSince1970 * 1000, sources: [])
-        XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsPlatform("mg", song: result, force: false, cache: cached))
+    private func setup(_ store: NativeMusicMemoryDocument = .init()) async throws -> (RepositorySongPeer, NativeMusicService) {
+        let peer = RepositorySongPeer()
+        return (peer, try await NativeMusicFixture.service(store, platform: peer))
     }
 
-    func testIncompleteMetadataNeedsSearchOnlyWithoutASuccessfulCacheCheck() throws {
-        let original = try MusicNativeCandidateDiscoveryFixture.song()
-        let cached = MusicSourceDiscoveryEntry(checkedAt: NativeMusicFixture.date.timeIntervalSince1970 * 1000, sources: [])
-        for (field, value) in [
-            ("name", MJ.string("")), ("name", .string("未知歌曲")), ("name", .string(" UNKNOWN ")),
-            ("singer", .string("")), ("singer", .string("未知歌手")), ("singer", .string("Unknown artist")),
-            ("duration", .n(0))
-        ] {
-            var song = original, rows = original["sources"].array
-            rows[0]["musicInfo"][field] = value
-            song["sources"] = .array(rows)
-            XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: song, force: false))
-            XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: song, force: false, cache: cached))
-            XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: song, force: true, cache: cached))
+    func testNormalizedFullNamesMatchWithoutChangingDisplayOrPlatformLocators() async throws {
+        let (peer, service) = try await setup()
+        let first = try await observe([row("original", title: "Ｓｏｎｇ  名", artist: " A ")], peer: peer, service: service)[0]
+        let second = try await observe([row("9007199254740993", platform: "wy", title: " song\n名 ", artist: "a")], peer: peer, service: service)[0]
+        XCTAssertNotNil(UUID(uuidString: first.songId)); XCTAssertEqual(second.songId, first.songId)
+        XCTAssertEqual(second.title, "Ｓｏｎｇ  名")
+        XCTAssertEqual(Set(second.sources.map(\.nativeId)), ["original", "9007199254740993"])
+        for (index, title) in ["Song 名 (Live)", "Song 名 (Remix)", "Song 名 (伴奏)"].enumerated() {
+            let distinct = try await observe([row("variant\(index)", title: title, artist: "a")], peer: peer, service: service)[0]
+            XCTAssertNotEqual(distinct.songId, first.songId)
         }
+        let a = try await observe([row("boundary-a", title: "ab", artist: "c")], peer: peer, service: service)[0]
+        let b = try await observe([row("boundary-b", title: "a", artist: "bc")], peer: peer, service: service)[0]
+        XCTAssertNotEqual(a.songId, b.songId)
+        let unicodeSpace = try await observe([row("unicode-space", platform: "kw",
+            title: "song\u{0085}名", artist: "\u{0085}a\u{0085}")], peer: peer, service: service)[0]
+        XCTAssertEqual(unicodeSpace.songId, first.songId)
+        let byteOrderMark = try await observe([row("byte-order-mark", platform: "mg",
+            title: "song\u{FEFF} 名", artist: "a")], peer: peer, service: service)[0]
+        XCTAssertNotEqual(byteOrderMark.songId, first.songId, "FEFF is not Unicode White_Space")
+        await service.close()
     }
 
-    func testEmptySuccessNeverInventsAnIDAndOnlyCacheCanSuppressMissingPlatformDiscovery() throws {
-        let observations: [MusicNativeCandidateDiscoveryObservation] = MusicNativeSearchProtocol.platforms.map { platform in
-            .init(platform: platform, page: .init(items: platform == "tx" ? [MusicNativeCandidateDiscoveryFixture.track()] : []), failure: nil)
+    func testFiveSecondBoundaryUsesSecondsNotMinuteOrBucketAndBaselineNeverDrifts() async throws {
+        for (left, right, matches) in [(240.0, 244.9, true), (240, 245, true), (240, 245.1, false),
+                                       (239, 240, true), (181, 239, false)] {
+            let (peer, service) = try await setup()
+            let first = try await observe([row("first", duration: left)], peer: peer, service: service)[0]
+            let next = try await observe([row("next", platform: "wy", duration: right)], peer: peer, service: service)[0]
+            XCTAssertEqual(first.songId == next.songId, matches, "\(left), \(right)")
+            await service.close()
         }
-        let first = try MusicNativeCandidateDiscoveryMerge.merge(MusicNativeCandidateDiscoveryFixture.song(), observations: observations)
-        XCTAssertTrue(first.issues.isEmpty)
-        for platform in MusicNativeSearchProtocol.platforms {
-            XCTAssertEqual(MusicNativeCandidateDiscoveryMerge.needsPlatform(platform, song: first.song, force: false),
-                platform != "tx")
-            XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform(platform, song: first.song, force: true))
-        }
-        let cache = Dictionary(uniqueKeysWithValues: MusicNativeSearchProtocol.platforms.map {
-            ($0, MusicSourceDiscoveryEntry(checkedAt: NativeMusicFixture.date.timeIntervalSince1970 * 1000, sources: []))
-        })
-        XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsDiscovery(first.song, force: false, cache: cache))
-        let second = try MusicNativeCandidateDiscoveryMerge.merge(first.song, observations: observations)
-        XCTAssertEqual(second.song["songId"], first.song["songId"])
+        let (peer, service) = try await setup()
+        let first = try await observe([row("base", duration: 240)], peer: peer, service: service)[0]
+        let edge = try await observe([row("edge", platform: "wy", duration: 245)], peer: peer, service: service)[0]
+        let outside = try await observe([row("outside", platform: "mg", duration: 250)], peer: peer, service: service)[0]
+        XCTAssertEqual(first.songId, edge.songId); XCTAssertNotEqual(outside.songId, first.songId)
+        await service.close()
     }
 
-    func testFailureMissingObservationAndEmptyPagePreserveKnownIDsAndMissingPlatformEligibility() throws {
-        let complete: [MusicNativeCandidateDiscoveryObservation] = MusicNativeSearchProtocol.platforms.map {
-            .init(platform: $0, page: .init(items: $0 == "tx" ? [MusicNativeCandidateDiscoveryFixture.track()] : []), failure: nil)
-        }
-        let healthy = try MusicNativeCandidateDiscoveryMerge.merge(MusicNativeCandidateDiscoveryFixture.song(), observations: complete).song
-        let failed = complete.map { row -> MusicNativeCandidateDiscoveryObservation in
-            row.platform == "mg" ? .init(platform: "mg", page: nil, failure: .rateLimited) : row
-        }
-        let failure = try MusicNativeCandidateDiscoveryMerge.merge(healthy, observations: failed)
-        XCTAssertTrue(failure.issues.contains { $0.platform == "mg" && $0.failure == .rateLimited })
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsDiscovery(failure.song, force: false))
-        let missing = try MusicNativeCandidateDiscoveryMerge.merge(healthy, observations: complete.filter { $0.platform != "kw" })
-        XCTAssertTrue(missing.issues.isEmpty)
-        let empty = complete.map { MusicNativeCandidateDiscoveryObservation(platform: $0.platform, page: .init(items: []), failure: nil) }
-        let absent = try MusicNativeCandidateDiscoveryMerge.merge(healthy, observations: empty)
-        XCTAssertEqual(try MusicModel.sources(absent.song).map(\.nativeId), ["SeedMID"], "old mapping is not silently deleted")
-        XCTAssertThrowsError(try MusicNativeCandidateDiscoveryMerge.merge(healthy, observations: complete + [complete[0]]))
-        XCTAssertThrowsError(try MusicNativeCandidateDiscoveryMerge.merge(healthy,
-            observations: [.init(platform: "unknown", page: .init(items: []), failure: nil)]))
+    func testMissingEvidenceAndAmbiguousCandidatesRemainIndependentButKnownSourcesNeverRebind() async throws {
+        let (peer, service) = try await setup()
+        let missing = try await observe([row("missing", duration: 0)], peer: peer, service: service)[0]
+        let complete = try await observe([row("complete", platform: "wy")], peer: peer, service: service)[0]
+        XCTAssertNotEqual(missing.songId, complete.songId)
+        let corrected = try await observe([row("missing", title: "Corrected", artist: "Other", duration: 260)], peer: peer, service: service)[0]
+        XCTAssertEqual(corrected.songId, missing.songId)
+        let firstValid = try await observe([row("same-valid", platform: "kw", title: "Corrected", artist: "Other", duration: 265)], peer: peer, service: service)[0]
+        XCTAssertEqual(firstValid.songId, missing.songId)
+        let unknown = try await observe([row("unknown", title: "", artist: "")], peer: peer, service: service)[0]
+        XCTAssertNotEqual(unknown.songId, complete.songId)
+        let left = try await observe([row("left", title: "Ambiguous", duration: 240)], peer: peer, service: service)[0]
+        let right = try await observe([row("right", title: "Ambiguous", duration: 248)], peer: peer, service: service)[0]
+        let middle = try await observe([row("middle", platform: "mg", title: "Ambiguous", duration: 244)], peer: peer, service: service)[0]
+        XCTAssertEqual(Set([left.songId, right.songId, middle.songId]).count, 3)
+        let repeatMiddle = try await observe([row("middle", platform: "mg", title: "Changed again", duration: 244)], peer: peer, service: service)[0]
+        XCTAssertEqual(repeatMiddle.songId, middle.songId)
+        await service.close()
     }
 
-    func testFivePlatformsKeepFairSourceBudgetAndMiguGroupExpansionDoesNotHideMatchesAfterThirty() throws {
-        let seed = try MusicNativeCandidateDiscoveryFixture.song()
-        var mg: [MusicNativeTrackData] = (0..<40).map {
-            MusicNativeCandidateDiscoveryFixture.track("mg", id: String(1000 + $0), title: "Unrelated \($0)")
+    func testStructuredArtistsAreOrderIndependentButPlainTextIsNotGuessedOrSplit() async throws {
+        let (peer, service) = try await setup()
+        let first = try await observe([row("first", artist: "B、A", artists: ["B", "A"])], peer: peer, service: service)[0]
+        let reordered = try await observe([row("reordered", platform: "wy", artist: "a、b", artists: [" a ", "Ｂ", "A"])], peer: peer, service: service)[0]
+        XCTAssertEqual(first.songId, reordered.songId); XCTAssertEqual(first.artistNames, ["B", "A"])
+        let text = try await observe([row("text", platform: "mg", artist: "A/B")], peer: peer, service: service)[0]
+        XCTAssertNotEqual(text.songId, first.songId)
+        let single = try await observe([row("single", title: "Single", artist: "A", artists: [" A "])], peer: peer, service: service)[0]
+        let singleText = try await observe([row("single-text", platform: "kw", title: "Single", artist: "a")], peer: peer, service: service)[0]
+        XCTAssertEqual(single.songId, singleText.songId)
+        await service.close()
+    }
+
+    func testAllAcquiredEditionsAreRetainedAndDoNotPretendOtherPlatformsWereDiscovered() async throws {
+        let (peer, service) = try await setup()
+        let items = try await observe((0..<40).map { row("edition-\($0)") }, peer: peer, service: service)
+        XCTAssertEqual(items.count, 40); XCTAssertEqual(Set(items.map(\.songId)).count, 1)
+        let currentRows = try await service.repositoryTracks(songIDs: [items[0].songId])
+        let current = try XCTUnwrap(currentRows[items[0].songId])
+        XCTAssertEqual(current.sources.count, 40); XCTAssertEqual(Set(current.sources.map(\.platform)), ["tx"])
+        for (platform, id) in [("wy", "1"), ("kg", String(repeating: "A", count: 32)), ("kw", "3"), ("mg", "4")] {
+            let added = try await observe([row(id, platform: platform)], peer: peer, service: service)[0]
+            XCTAssertEqual(added.songId, current.songId)
         }
-        mg.append(MusicNativeCandidateDiscoveryFixture.track("mg", id: "9999"))
-        let observations: [MusicNativeCandidateDiscoveryObservation] = [
-            .init(platform: "tx", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track()]), failure: nil),
-            .init(platform: "wy", page: .init(items: (1...30).map { MusicNativeCandidateDiscoveryFixture.track("wy", id: String($0)) }), failure: nil),
-            .init(platform: "kg", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "A", count: 32))]), failure: nil),
-            .init(platform: "kw", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("kw", id: "123")]), failure: nil),
-            .init(platform: "mg", page: .init(items: mg), failure: nil)
-        ]
-        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: observations)
-        let sources = try MusicModel.sources(result.song)
-        XCTAssertEqual(sources.count, 16)
-        XCTAssertEqual(Set(sources.map(\.platform)), ["wy", "tx", "kg", "kw", "mg"])
-        XCTAssertTrue(sources.contains { $0.platform == "mg" && $0.nativeId == "9999" })
-        XCTAssertTrue(result.issues.contains { $0.failure == .limit })
+        let finalRows = try await service.repositoryTracks(songIDs: [current.songId])
+        let final = try XCTUnwrap(finalRows[current.songId])
+        XCTAssertEqual(final.sources.count, 44)
+        await service.close()
     }
-    func testManyEditionsOfOnePlatformDoNotCountAsOtherPlatforms() throws {
-        var seed = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "1"))
-        for id in 2...16 {
-            let variant = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: String(id)))
-            seed = try MusicModel.mergeSources(seed, adding: variant["sources"].array)
+
+    func testRepositoryUpdatesProjectIntoReferencesWithoutChangingOccurrenceQueueOrColdIdentity() async throws {
+        let store = NativeMusicMemoryDocument(), (peer, service) = try await setup(store)
+        let original = try await observe([row("original")], peer: peer, service: service)[0]
+        let collection = try await service.createPlaylist(name: "References", refs: [original.ref])
+        _ = try await service.changeQueue(.replace([original.ref, original.ref], index: 1), expectedRevision: 0)
+        let before = try await service.queue()
+        _ = try await observe([row("original", title: "Updated title", album: nil)], peer: peer, service: service)
+        let after = try await service.queue(), members = try await service.tracks(in: collection)
+        XCTAssertEqual(after.revision, before.revision); XCTAssertEqual(after.currentId, before.currentId)
+        XCTAssertEqual(after.entries.map(\.id), before.entries.map(\.id)); XCTAssertNotEqual(after.entries[0].id, after.entries[1].id)
+        XCTAssertEqual(after.entries.map { $0.track.songId }, [original.songId, original.songId])
+        XCTAssertEqual(after.entries.map { $0.track.title }, ["Updated title", "Updated title"])
+        XCTAssertEqual(members[0].title, "Updated title"); XCTAssertEqual(members[0].album, "")
+        let saved = try MusicDocument(store.read(), runID: "fixture")
+        XCTAssertEqual(saved.queue["entries"].array.map { $0["songId"].string }, [original.songId, original.songId])
+        XCTAssertTrue(saved.queue["entries"].array.allSatisfy { !$0.contains("song") })
+        XCTAssertEqual(saved.library["library"]["songs"].fields.count, 1)
+        await service.close()
+        let (coldPeer, cold) = try await setup(store)
+        let restored = try await cold.queue()
+        XCTAssertEqual(restored.entries.map { $0.track.songId }, [original.songId, original.songId])
+        XCTAssertEqual(restored.entries.map { $0.track.title }, ["Updated title", "Updated title"])
+        let network = await coldPeer.calls(); XCTAssertEqual(network, 0)
+        await cold.close()
+    }
+
+    func testFailedMetadataCASCannotPublishOrReplaceTheSavedRepository() async throws {
+        let store = NativeMusicMemoryDocument(), (peer, service) = try await setup(store)
+        let original = try await observe([row("original")], peer: peer, service: service)[0]
+        _ = try await service.changeQueue(.replace([original.ref], index: 0), expectedRevision: 0)
+        let before = store.snapshot().0
+        store.fail(.storageConflict)
+        do { _ = try await observe([row("original", title: "Late")], peer: peer, service: service); XCTFail("CAS") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .storageConflict) }
+        XCTAssertEqual(store.snapshot().0, before)
+        store.fail(nil)
+        let queue = try await service.queue(); XCTAssertEqual(queue.entries[0].track.title, original.title)
+        let success = try await observe([row("original", title: "Current")], peer: peer, service: service)[0]
+        XCTAssertEqual(success.songId, original.songId); XCTAssertEqual(success.title, "Current")
+        await service.close()
+    }
+
+    func testNativeProjectionDoesNotPersistPlayableURLsOrCredentialFields() async throws {
+        let store = NativeMusicMemoryDocument(), (peer, service) = try await setup(store)
+        var info = try MJ.parse(row("safe").data)
+        info["url"] = .string("https://media.invalid/private?signature=synthetic")
+        info["token"] = .string("synthetic-not-a-credential"); info["headers"] = .obj([("Cookie", .string("synthetic-not-a-cookie"))])
+        _ = try await observe([.init(platform: "tx", data: info.bytes)], peer: peer, service: service)
+        let saved = String(decoding: try XCTUnwrap(store.snapshot().0), as: UTF8.self)
+        XCTAssertFalse(saved.contains("signature=")); XCTAssertFalse(saved.contains("synthetic-not"))
+        await service.close()
+    }
+
+    func testMissingPlatformsStayEligibleAndOnlyExplicitChecksSuppressTheirOwnSearch() throws {
+        let song = try MusicNativeCandidateDiscoveryFixture.song()
+        XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: song, force: false))
+        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("mg", song: song, force: false))
+        let check = MusicSourceDiscoveryEntry(checkedAt: 1, sourceKeys: [])
+        XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsPlatform("mg", song: song, force: false, cache: check))
+        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("mg", song: song, force: true, cache: check))
+        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsDiscovery(song, force: false))
+        for (field, value) in [("name", MJ.string("")), ("singer", .string("未知歌手")), ("duration", .n(0))] {
+            var incomplete = song
+            var sources = incomplete["sources"].array
+            sources[0]["musicInfo"][field] = value
+            incomplete["sources"] = .array(sources)
+            XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: incomplete, force: false))
+            XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: incomplete, force: false, cache: check))
         }
-        XCTAssertEqual(try MusicModel.sources(seed).count, 16)
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsDiscovery(seed, force: false))
-        XCTAssertFalse(MusicNativeCandidateDiscoveryMerge.needsPlatform("wy", song: seed, force: false))
-        XCTAssertTrue(MusicNativeCandidateDiscoveryMerge.needsPlatform("tx", song: seed, force: false))
-    }
-    func testPrimarySourceStaysFirstAndRemainingSourcesUseOrdinalKeyOrder() throws {
-        let seed = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "primary"))
-        let wy = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "9"))
-        let mg = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("mg", id: "1"))
-        let kg = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "B", count: 32)))
-        let merged = try MusicModel.mergeSources(seed, adding: wy["sources"].array + mg["sources"].array + kg["sources"].array)
-        XCTAssertEqual(merged["sources"].array.first?["source"].string, "tx")
-        let keys = merged["sources"].array.dropFirst().map { $0["sourceKey"].string }
-        XCTAssertEqual(keys, keys.sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) })
-    }
-    func testIncompleteSameIDRefreshKeepsSingerAndDurationEvidenceForFutureConflicts() throws {
-        let seed = try MusicNativeCandidateDiscoveryFixture.song()
-        let incomplete = MusicNativeCandidateDiscoveryFixture.track(artist: "未知歌手", duration: 0)
-        let updated = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: [
-            .init(platform: "tx", page: .init(items: [incomplete]), failure: nil)
-        ]).song
-        let data = try XCTUnwrap(updated["sources"].array.first)["musicInfo"]
-        XCTAssertEqual(data["singer"], seed["sources"].array.first?["musicInfo"]["singer"])
-        XCTAssertEqual(data["duration"].number, 180)
-        let conflict = try MusicNativeCandidateDiscoveryMerge.merge(updated, observations: [
-            .init(platform: "tx", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track(artist: "Other artist")]), failure: nil)
-        ])
-        XCTAssertTrue(conflict.song["sources"].array.isEmpty)
-        XCTAssertTrue(conflict.issues.contains { $0.failure == .nativeIDConflict })
-    }
-    func testDiscoveryMergeKeepsTheSeedPrimaryRecordingFirst() throws {
-        let seed = try MusicNativeCandidateDiscoveryFixture.song()
-        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: [
-            .init(platform: "kg", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("kg", id: String(repeating: "B", count: 32))]), failure: nil),
-            .init(platform: "wy", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("wy", id: "9")]), failure: nil)
-        ])
-        let rows = result.song["sources"].array
-        XCTAssertEqual(rows.count, 3)
-        XCTAssertEqual(rows.first?["sourceKey"], seed["sources"].array.first?["sourceKey"], "sources[0] defines the song")
-        let rest = rows.dropFirst().map { $0["sourceKey"].string }
-        XCTAssertEqual(rest, rest.sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) })
-    }
-    func testExcludedSourceIsNeverProposedAgain() throws {
-        let seed = try MusicNativeCandidateDiscoveryFixture.song()
-        let rejected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "9"))
-        let key = try XCTUnwrap(rejected["sources"].array.first)["sourceKey"].string
-        let result = try MusicNativeCandidateDiscoveryMerge.merge(seed, observations: [
-            .init(platform: "wy", page: .init(items: [MusicNativeCandidateDiscoveryFixture.track("wy", id: "9"),
-                                                     MusicNativeCandidateDiscoveryFixture.track("wy", id: "10")]), failure: nil)
-        ], excluded: [key])
-        let keys = result.song["sources"].array.map { $0["sourceKey"].string }
-        XCTAssertFalse(keys.contains(key))
-        XCTAssertEqual(try MusicModel.sources(result.song).filter { $0.platform == "wy" }.map(\.nativeId), ["10"],
-                       "only the confirmed mismatch is excluded, not the platform")
     }
 }

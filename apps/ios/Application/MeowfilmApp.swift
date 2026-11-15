@@ -60,6 +60,16 @@ final class MeowfilmSceneDelegate: UIResponder, UIWindowSceneDelegate {
         self.window = window
         launchObservation = app.launch.$phase.receive(on: RunLoop.main).sink { [weak self, weak app] phase in
             guard let self, let app else { return }
+            #if DEBUG
+            // The opt-in acceptance test checks its isolated sandbox before it
+            // starts the real assembly or admits an automatic home-page read.
+            if phase == .ready, NSClassFromString("XCTestCase") != nil,
+               ProcessInfo.processInfo.environment["MEOWFILM_LIVE_MUSIC_IOS"] == "1" {
+                window.rootViewController = UIViewController()
+                window.makeKeyAndVisible()
+                return
+            }
+            #endif
             if phase == .ready, let assembly = app.readyAssembly() {
                 guard self.coordinator == nil else { return }
                 let coordinator = MeowfilmCoordinator(window: window, assembly: assembly,

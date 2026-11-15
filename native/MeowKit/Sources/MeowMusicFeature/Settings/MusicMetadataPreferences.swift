@@ -41,8 +41,7 @@ public struct MusicMetadataCandidate: Equatable, Sendable, Identifiable {
     }
 }
 
-/// One read-only snapshot of the current occurrence and exact recording
-/// mappings. At most two candidates per platform, ten across the five platforms.
+/// Current permanent record and its policy-enabled source mappings.
 /// Callers must fence publication by their own access/session generation and
 /// re-read on queue, mapping or metadata-policy changes.
 public struct MusicMetadataCandidates: Equatable, Sendable {
@@ -50,23 +49,24 @@ public struct MusicMetadataCandidates: Equatable, Sendable {
     public let queueRevision: Int
     public let preferences: MusicMetadataPreferences
     public let track: MusicRemoteTrack
-    /// The song's revision when it is present in the stored record.
-    /// Never replace it with queueRevision or preferences.revision in cache keys.
-    public let contentRevision: Int?
-    /// Opaque, credential-free content identity, excluding occurrence, audio
-    /// delivery and preference revisions. It also covers the source locator and
-    /// that MusicRemoteTrack cannot express. Invalidate a cached song if it changes.
-    public let contentFingerprint: String
     public let candidates: [MusicMetadataCandidate]
 
     public init(occurrenceID: String, queueRevision: Int, preferences: MusicMetadataPreferences,
-                track: MusicRemoteTrack, contentRevision: Int?, contentFingerprint: String,
+                track: MusicRemoteTrack,
                 candidates: [MusicMetadataCandidate]) {
         self.occurrenceID = occurrenceID; self.queueRevision = queueRevision
         self.preferences = preferences; self.track = track
-        self.contentRevision = contentRevision; self.contentFingerprint = contentFingerprint
         self.candidates = candidates
     }
+}
+
+/// Optional image failure selects only already-known repository candidates.
+/// It neither searches platforms nor resolves audio.
+public protocol MusicArtworkSelecting: Sendable {
+    func failedArtwork(songID: String, url: URL, attempted: Set<URL>) async throws -> URL?
+    /// The actual bytes may be the existing bounded network rendition. Only
+    /// its real URL is cached/referenced, never an alias under the requested URL.
+    func succeededArtwork(songID: String, url: URL, replacing requested: URL) async throws -> URL?
 }
 
 /// Metadata responsibilities required by MusicServing.

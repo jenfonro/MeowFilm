@@ -16,6 +16,42 @@ public static partial class MusicUiTests
 {
     private static IEnumerable<TestCase> OnlineCases()
     {
+        yield return Case("online locator without optional matching metadata enters the real repository and ignores unrelated nested input", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var song = (await f.Rpc("music.online.song", new
+            {
+                platform = "wy", musicInfo = new { songmid = "locator-only",
+                    unrelated = new { nested = new[] { 1, 2, 3 } } },
+                extra = new { nested = new { value = true } }
+            })).GetProperty("song");
+            await f.Rpc("music.queue.replace", new { songs = new[] { song }, index = 0 });
+            var current = (await f.Rpc("music.queue.get")).GetProperty("current").GetProperty("song");
+            True(Guid.TryParse(current.GetProperty("songId").GetString(), out _), "online locator receives a permanent song id");
+            Equal("locator-only", MusicSongFixture.NativeId(current));
+            Equal("", current.GetProperty("title").GetString());
+            Equal("", current.GetProperty("artist").GetString());
+            Equal(JsonValueKind.Null, current.GetProperty("duration").ValueKind);
+            True(!current.TryGetProperty("extra", out _) &&
+                !MusicSongFixture.Info(current).TryGetProperty("unrelated", out _),
+                "unconsumed nested input is not persisted or forwarded as song facts");
+            Equal(0, f.Playback.Opens.Count);
+        });
+        yield return Case("online long display title and musicInfo cover remain intact through real queue adoption", async () =>
+        {
+            await using var f = await Fixture.Create();
+            string title = new string('歌', 600);
+            const string cover = "https://images.example.test/cover.png?size=large";
+            var song = (await f.Rpc("music.online.song", new { platform = "wy", title,
+                musicInfo = new { songmid = "long-title", img = cover } })).GetProperty("song");
+            Equal(title, song.GetProperty("title").GetString());
+            Equal(cover, song.GetProperty("cover_url").GetString());
+            await f.Rpc("music.queue.replace", new { songs = new[] { song }, index = 0 });
+            var current = (await f.Rpc("music.queue.get")).GetProperty("current").GetProperty("song");
+            Equal(title, current.GetProperty("title").GetString());
+            Equal(cover, current.GetProperty("cover_url").GetString());
+            Equal(cover, MusicSongFixture.Info(current).GetProperty("img").GetString());
+        });
         yield return Case("online metadata keeps precise source duration and derives LX interval at dispatch", async () =>
         {
             await using var f = await Fixture.Create();
@@ -361,6 +397,7 @@ public static partial class MusicUiTests
 /// </summary>
 internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDisposable
 {
+    internal MusicPlatformRuntimeFixture Platform { get; } = new();
     private readonly AppRuntimeClient runtime;
     private readonly object gate = new();
     private readonly string dataRoot = Path.Combine(Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT")
@@ -371,6 +408,8 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
     public NativeMusicScriptTestRuntime() => runtime = new(StartAsync);
     public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
+        if (method.StartsWith("music.platform.", StringComparison.Ordinal))
+            return Platform.CallAsync(method, parameters, cancellationToken);
         if (!method.StartsWith("music.script.", StringComparison.Ordinal))
             throw new InvalidOperationException("Ordinary music business must remain native");
         lock (gate) if (!runtime.HasStarted) runtime.Start();
@@ -399,5 +438,10 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
             RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules),
             modules, dataRoot, token).ConfigureAwait(false);
     }
-    public async ValueTask DisposeAsync() { DisposeCalls++; await runtime.DisposeAsync(); }
+    public async ValueTask DisposeAsync()
+    {
+        DisposeCalls++;
+        await runtime.DisposeAsync();
+        await Platform.DisposeAsync();
+    }
 }

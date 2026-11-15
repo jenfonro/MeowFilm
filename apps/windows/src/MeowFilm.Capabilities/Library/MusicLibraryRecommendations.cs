@@ -164,7 +164,7 @@ public sealed partial class MusicLibraryOwner
         }
         else if (action == "enter")
         {
-            var songs = Songs(p, false, true);
+            var songs = RegisterSongs(doc, Songs(p, false));
             var context = Context(p["context"]); var old = Queue(doc);
             string seed = p["seedEntryId"] is null ? "" : LJ.Text(p["seedEntryId"]);
             var retained = seed.Length == 0 ? null : LJ.Array(old["entries"]).OfType<JsonObject>()
@@ -207,7 +207,7 @@ public sealed partial class MusicLibraryOwner
                 }
                 Select(restored, current, false, shuffleHistory);
             }
-            ValidateQueue(restored, true);
+            ValidateQueue(restored, true, Repository(doc));
             Archive(currentQueue, doc);
             Set(doc, "queue", restored);
             shuffleHistory = saved.History.ToList(); failedEntries.Clear(); failedEntries.UnionWith(saved.Failed);

@@ -27,7 +27,22 @@ private actor MusicSearchTestPages {
     var playlistErrors: [String: MusicServiceError] = [:]
     var gates: [String: MusicCollectionGate] = [:]
     var calls: [Call] = []
-    func song(_ key: String, _ value: SongStep) { songs[key] = value }
+    var recordings: [String: MusicRemoteTrack] = [:]
+    var recordingGate: MusicCollectionGate?
+    var recordingReads: [MusicReference] = []
+    func song(_ key: String, _ value: SongStep) {
+        songs[key] = value
+        for track in value.tracks {
+            let sources = (recordings[track.songId]?.sources ?? []) + track.sources
+            var seen = Set<String>()
+            recordings[track.songId] = .init(ref: .init(kind: .library, id: track.songId),
+                songId: track.songId, title: track.title, artist: track.artist, album: track.album,
+                duration: track.duration, sources: sources.filter { seen.insert($0.sourceKey).inserted },
+                artwork: track.artwork, artistNames: track.artistNames)
+        }
+    }
+    func blockRecording(_ gate: MusicCollectionGate) { recordingGate = gate }
+    func recordingLog() -> [MusicReference] { recordingReads }
     func playlist(_ key: String, _ value: PlaylistStep) {
         playlists[key, default: []].append(value)
     }
@@ -59,24 +74,20 @@ private actor MusicSearchTestPages {
                      total: result.total, nextPage: result.next, items: result.items)
     }
     func readRecording(_ request: MusicSearchBatchRequest) async throws -> MusicRemoteTrack {
-        try request.validate()
         guard request.targets.count == 1 else { throw MusicServiceError.invalidRequest }
-        var tracks: [MusicRemoteTrack] = []
-        for origin in request.targets[0].origins {
-            let page = try await readSongs(origin.platform, query: request.query, page: origin.page, limit: origin.limit)
-            guard let track = page.items.first(where: origin.matches) else { throw MusicServiceError.targetChanged }
-            tracks.append(track)
-        }
-        let first = tracks[0]
-        return .init(ref: first.ref, songId: first.songId, title: first.title, artist: first.artist,
-            album: first.album, duration: first.duration, sources: tracks.flatMap(\.sources), artwork: first.artwork)
+        let selected = request.targets[0].track
+        recordingReads.append(selected.ref)
+        let gate = recordingGate; recordingGate = nil
+        if let gate { await gate.wait() }
+        guard let current = recordings[selected.songId] else { throw MusicServiceError.notFound }
+        return current
     }
 }
 
 @MainActor final class MusicSearchResultsTests: XCTestCase {
-    private func track(_ id: String, platform: String = "wy", songID: String? = nil, handle: String? = nil,
+    private func track(_ id: String, platform: String = "wy", songID: String? = nil,
                        title: String? = nil, artist: String = "Artist", duration: Double = 180) -> MusicRemoteTrack {
-        .init(ref: .init(kind: .handle, id: handle ?? id), songId: songID ?? id,
+        .init(ref: .init(kind: .library, id: songID ?? id, occurrence: platform + ":" + id), songId: songID ?? id,
               title: title ?? songID ?? id, artist: artist, duration: duration,
               sources: [.init(sourceKey: platform + ":" + id, platform: platform, nativeId: id)])
     }
@@ -228,10 +239,10 @@ private actor MusicSearchTestPages {
         XCTAssertTrue(model.songFailures.isEmpty)
     }
 
-    func testRepeatedNativeSourceRetainsEnrichmentAndRejectsLaterContradiction() async throws {
+    func testRepeatedNativeSourceRetainsPermanentIDThroughEnrichmentAndCorrection() async throws {
         let pages = MusicSearchTestPages(), model = session(pages)
-        let incomplete = track("one", handle: "old-one", artist: "", duration: 0)
-        let complete = track("one", handle: "new-one", artist: "Artist")
+        let incomplete = track("one", artist: "", duration: 0)
+        let complete = track("one", artist: "Artist")
         let conflicting = track("one", artist: "Other artist")
         await pages.song("q|wy|1", .init(tracks: [incomplete], next: 2))
         await pages.song("q|wy|2", .init(tracks: [complete], next: 3))
@@ -246,14 +257,13 @@ private actor MusicSearchTestPages {
         XCTAssertTrue(enriched.variants.contains(incomplete)); XCTAssertTrue(enriched.variants.contains(complete))
         XCTAssertEqual(model.songs.count, 1)
         let request = try model.makeBatchRequest()
-        XCTAssertEqual(request.targets[0].origins.count, 1)
-        XCTAssertEqual(request.targets[0].origins[0].page, 2)
-        XCTAssertEqual(request.targets[0].origins[0].track, complete)
+        XCTAssertEqual(request.targets[0].track.songId, incomplete.songId)
         model.more(.songs); await model.finishPendingReads()
-        XCTAssertEqual(model.songFailures.first?.error, .nativeIDConflict)
-        XCTAssertTrue(model.moreSongs)
-        XCTAssertEqual(model.songs.first?.variants.count, 2)
-        XCTAssertFalse(model.songs.first?.variants.contains(conflicting) == true)
+        XCTAssertTrue(model.songFailures.isEmpty)
+        XCTAssertFalse(model.moreSongs)
+        XCTAssertEqual(model.songs.first?.id, original.id)
+        XCTAssertEqual(model.songs.first?.variants.count, 3)
+        XCTAssertTrue(model.songs.first?.variants.contains(conflicting) == true)
         model.disappear()
     }
     func testSongAndPlaylistRoundsAdvanceIndependently() async {
@@ -382,7 +392,7 @@ private actor MusicSearchTestPages {
         let pages = MusicSearchTestPages(), model = session(pages)
         let first = track("a"), second = track("b")
         await pages.song("q|wy|1", .init(tracks: [first], next: 2))
-        await pages.song("q|wy|2", .init(tracks: [track("a", handle: "new-handle"), second]))
+        await pages.song("q|wy|2", .init(tracks: [track("a"), second]))
         model.submit("q", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
         await model.finishPendingReads()
         model.more(.songs); await model.finishPendingReads()
@@ -391,6 +401,31 @@ private actor MusicSearchTestPages {
         XCTAssertEqual(model.songs.last?.score ?? 0, 1.0 / 37, accuracy: 0.000001)
         XCTAssertFalse(model.moreSongs)
         XCTAssertTrue(model.songFailures.isEmpty)
+    }
+    func testLargeProviderContinuationConsumesSongsAndPlaylistsWithoutRankOverflow() async {
+        let pages = MusicSearchTestPages(), model = session(pages)
+        let first = MusicPublicBrowseCollection(platform: .netease, nativeID: "first", title: "First")
+        let last = MusicPublicBrowseCollection(platform: .netease, nativeID: "last", title: "Last")
+        await pages.song("q|wy|1", .init(tracks: [track("first")], next: Int.max))
+        await pages.song("q|wy|\(Int.max)", .init(tracks: [track("last")]))
+        await pages.playlist("lists|q|wy|1", .init(items: [first], total: 2, next: Int.max))
+        await pages.playlist("lists|q|wy|\(Int.max)", .init(items: [last], total: 2))
+        model.submit("q", preferences: .init(songPlatforms: [.netease], playlistPlatforms: [.netease]))
+        await model.finishPendingReads()
+        model.more(.songs); model.more(.playlists); await model.finishPendingReads()
+        XCTAssertEqual(model.songs.map(\.id), ["first", "last"])
+        XCTAssertEqual(model.playlists.map(\.id), [first.id, last.id])
+        XCTAssertTrue(model.songFailures.isEmpty); XCTAssertTrue(model.playlistFailures.isEmpty)
+        XCTAssertFalse(model.moreSongs); XCTAssertFalse(model.morePlaylists)
+        XCTAssertEqual(model.songs.first?.score ?? 0, 1.0 / 6, accuracy: 0.000001)
+        XCTAssertTrue(model.songs.last?.score.isFinite == true)
+        XCTAssertGreaterThan(model.songs.last?.score ?? 0, 0)
+        XCTAssertLessThan(model.songs.last?.score ?? 1, 1e-18)
+        let reads = await pages.log()
+        XCTAssertEqual(Set(reads), Set(["q|wy|1", "q|wy|\(Int.max)",
+                                       "lists|q|wy|1", "lists|q|wy|\(Int.max)"]))
+        XCTAssertEqual(reads.count, 4)
+        model.disappear()
     }
     func testPartialFailureRetainsSuccessfulRowsAndRetryTargetsOnlyFailedPlatform() async {
         let pages = MusicSearchTestPages(), model = session(pages)
@@ -511,7 +546,7 @@ private actor MusicSearchTestPages {
         let calls = await pages.log()
         XCTAssertTrue(calls.contains("q|wy|6"))
     }
-    func testMismatchedResponseIsNotAdoptedUnderRequestedPlatform() async {
+    func testResponseEchoDoesNotCreateASecondBusinessAdmissionCheck() async {
         let model = MusicSearchResultsModel(readSongs: { _, query, page, _ in
             .init(platform: "tx", query: query, page: page, limit: 30, total: 0, nextPage: nil, items: [])
         }, readPlaylists: { platform, query, page, limit in
@@ -521,11 +556,11 @@ private actor MusicSearchTestPages {
         model.submit("q", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
         await model.finishPendingReads()
         XCTAssertTrue(model.songs.isEmpty)
-        XCTAssertEqual(model.songFailures.first?.error, .invalidResponse)
+        XCTAssertTrue(model.songFailures.isEmpty)
     }
-    func testHandleRenewalUsesExactOriginPageAndKeepsAllAccumulatedRowsAndRanks() async throws {
+    func testPermanentRecordingReadKeepsAccumulatedRowsAndRanksWithoutRepeatingSearchPages() async throws {
         let pages = MusicSearchTestPages(), model = session(pages)
-        let old = track("second", handle: "expired"), fresh = track("second", handle: "renewed")
+        let old = track("second"), fresh = track("second", title: "Current title")
         await pages.song("q|wy|1", .init(tracks: [track("first")], next: 2))
         await pages.song("q|wy|2", .init(tracks: [old]))
         await pages.song("q|tx|1", .init(tracks: [track("other-platform", platform: "tx")]))
@@ -535,36 +570,33 @@ private actor MusicSearchTestPages {
         let row = try XCTUnwrap(model.songs.first { $0.id == "second" })
         let identities = model.songs.map(\.id), scores = model.songs.map(\.score)
         await pages.song("q|wy|2", .init(tracks: [fresh]))
-        let renewed = try await model.refreshTrack(row)
-        XCTAssertEqual(renewed, fresh)
+        let current = try await model.refreshTrack(row)
+        XCTAssertEqual(current.songId, fresh.songId)
+        XCTAssertEqual(current.title, fresh.title)
         XCTAssertEqual(model.songs.map(\.id), identities)
         XCTAssertEqual(model.songs.map(\.score), scores)
         XCTAssertEqual(model.songs.first { $0.id == "second" }?.track.ref, old.ref)
         let calls = await pages.log()
         XCTAssertEqual(calls.filter { $0 == "q|wy|1" }.count, 1)
-        XCTAssertEqual(calls.filter { $0 == "q|wy|2" }.count, 2)
+        XCTAssertEqual(calls.filter { $0 == "q|wy|2" }.count, 1)
         XCTAssertEqual(calls.filter { $0 == "q|tx|1" }.count, 1)
         XCTAssertTrue(model.automaticPaginationHeld)
     }
-    func testHandleRenewalRejectsMissingOrChangedRecordingWithoutSubstitutingOrRemovingRow() async throws {
+    func testChangedSearchResultsDoNotInvalidateTheSelectedPermanentRecording() async throws {
         let pages = MusicSearchTestPages(), model = session(pages)
-        let original = track("a", songID: "recording", handle: "expired")
+        let original = track("a", songID: "recording")
         await pages.song("q|wy|1", .init(tracks: [original]))
         model.submit("q", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
         await model.finishPendingReads()
         let row = try XCTUnwrap(model.songs.first)
         for replacement in [
-            track("different-native-id", songID: "recording"),
-            track("a", songID: "recording", handle: "live", title: "recording (Live)"),
-            track("a", songID: "recording", handle: "long", duration: 240)
+            track("different-native-id", songID: "different-recording"),
+            track("a", songID: "recording", title: "Corrected full title"),
+            track("a", songID: "recording", duration: 240)
         ] {
             await pages.song("q|wy|1", .init(tracks: [replacement]))
-            do {
-                _ = try await model.refreshTrack(row)
-                XCTFail("A displayed recording must never silently become a replacement")
-            } catch {
-                XCTAssertEqual(error as? MusicServiceError, .targetChanged)
-            }
+            let current = try await model.refreshTrack(row)
+            XCTAssertEqual(current.songId, original.songId)
             XCTAssertEqual(model.songs.first?.track, original)
             XCTAssertEqual(model.songs.count, 1)
         }
@@ -595,25 +627,25 @@ private actor MusicSearchTestPages {
         let calls = await pages.log()
         XCTAssertEqual(calls.filter { $0 == "q|tx|1" }.count, 1)
     }
-    func testHandleRenewalCannotPublishAfterAccessRevocation() async throws {
+    func testPermanentRecordingReadCannotPublishAfterAccessRevocation() async throws {
         let pages = MusicSearchTestPages(), model = session(pages)
         await pages.song("q|wy|1", .init(tracks: [track("a")]))
         model.submit("q", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
         await model.finishPendingReads()
         let row = try XCTUnwrap(model.songs.first)
-        let entered = expectation(description: "renewal pending")
+        let entered = expectation(description: "permanent recording read pending")
         let gate = MusicCollectionGate { entered.fulfill() }
-        await pages.gate("q|wy|1", gate)
-        let renewal = Task { try await model.refreshTrack(row) }
+        await pages.blockRecording(gate)
+        let read = Task { try await model.refreshTrack(row) }
         await fulfillment(of: [entered], timeout: 2)
         model.setAccess(available: false, generation: UUID())
         await gate.release()
-        do { _ = try await renewal.value; XCTFail("Revoked renewal was accepted") }
+        do { _ = try await read.value; XCTFail("Revoked recording read was accepted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
         XCTAssertTrue(model.songs.isEmpty)
         XCTAssertTrue(model.query.isEmpty)
     }
-    func testBatchSnapshotRetainsExactOriginsAndSelectedOrderWithoutReadingAgain() async throws {
+    func testBatchRetainsPermanentReferencesAndSelectedOrderWithoutReadingAgain() async throws {
         let pages = MusicSearchTestPages(), model = session(pages)
         await pages.song("q|wy|1", .init(tracks: [track("first")], next: 2))
         await pages.song("q|wy|2", .init(tracks: [track("second")]))
@@ -626,8 +658,7 @@ private actor MusicSearchTestPages {
         XCTAssertEqual(request.query, "q")
         XCTAssertEqual(request.startIndex, 1)
         XCTAssertEqual(request.targets.map(\.track.ref), model.songs.map(\.track.ref))
-        XCTAssertEqual(request.targets.first { $0.track.songId == "second" }?.page, 2)
-        XCTAssertEqual(request.targets.first { $0.track.songId == "qq" }?.platform, .qq)
+        XCTAssertEqual(request.targets.map(\.track.songId), model.songs.map(\.id))
         let after = await pages.log()
         XCTAssertEqual(after, before)
     }
@@ -691,7 +722,7 @@ private actor MusicSearchTestPages {
     func testLaterRoundRemainsStableUntilEveryPlatformsRequestSettles() async throws {
         let pages = MusicSearchTestPages(), model = session(pages)
         await pages.song("q|wy|1", .init(tracks: [track("first")], next: 2))
-        await pages.song("q|tx|1", .init(tracks: [track("first-qq", platform: "tx", title: "first")], next: 2))
+        await pages.song("q|tx|1", .init(tracks: [track("first-qq", platform: "tx", songID: "first", title: "first")], next: 2))
         model.submit("q", preferences: .init(songPlatforms: [.netease, .qq], searchPlaylists: false))
         await model.finishPendingReads()
         let before = model.songs.map(\.id), score = model.songs.map(\.score)
@@ -699,7 +730,7 @@ private actor MusicSearchTestPages {
         let wyGate = MusicCollectionGate { wyEntered.fulfill() }, qqGate = MusicCollectionGate { qqEntered.fulfill() }
         await wyGate.release()
         await pages.song("q|wy|2", .init(tracks: [track("new")]))
-        await pages.song("q|tx|2", .init(tracks: [track("new-qq", platform: "tx", title: "new")]))
+        await pages.song("q|tx|2", .init(tracks: [track("new-qq", platform: "tx", songID: "new", title: "new")]))
         await pages.gate("q|wy|2", wyGate); await pages.gate("q|tx|2", qqGate)
         model.more(.songs)
         await fulfillment(of: [wyEntered, qqEntered], timeout: 2)
@@ -747,7 +778,7 @@ private actor MusicSearchTestPages {
         model.submit("q", preferences: settings); await model.finishPendingReads()
         let expiredShort = await pages.log(); XCTAssertEqual(expiredShort.count, 3)
     }
-    func testNeteaseBatchCapturesOnePageOriginsForRenewal() async throws {
+    func testNeteaseBatchContainsReferencesFromEveryConsumedPage() async throws {
         let pages = MusicSearchTestPages(), model = session(pages)
         await pages.song("q|wy|1", .init(tracks: [track("a")], next: 2))
         await pages.song("q|wy|2", .init(tracks: [track("b")]))
@@ -756,8 +787,7 @@ private actor MusicSearchTestPages {
         let calls = await pages.ranges()
         XCTAssertEqual(calls.map(\.limit), [30, 30])
         let request = try model.makeBatchRequest()
-        XCTAssertEqual(request.targets.map { $0.origins[0].limit }, [30, 30])
-        XCTAssertEqual(request.targets.map(\.page), [1, 2])
+        XCTAssertEqual(request.targets.map(\.track.songId), ["a", "b"])
         XCTAssertEqual(model.songs.map(\.id), ["a", "b"])
     }
     func testTerminalSongAndPlaylistPagesNeverLoadAnotherPageForAnyPlatform() async throws {
@@ -771,13 +801,11 @@ private actor MusicSearchTestPages {
                 let model = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
                     songCalls.append(page)
                     return .init(platform: platform.rawValue, query: query, page: page, limit: limit,
-                        total: total, nextPage: try MusicSearchPagination.nextPage(page: page,
-                            limit: limit, count: tracks.count, total: total), items: tracks)
+                        total: total, nextPage: nil, items: tracks)
                 }, readPlaylists: { platform, query, page, limit in
                     playlistCalls.append(page)
                     return .init(platform: platform, query: query, page: page, limit: limit,
-                        total: total, nextPage: try MusicSearchPagination.nextPage(page: page,
-                            limit: limit, count: lists.count, total: total), items: lists)
+                        total: total, nextPage: nil, items: lists)
                 }, readRecording: { _ in throw MusicServiceError.unsupported })
                 model.setAccess(available: true, generation: UUID()); model.appear()
                 model.submit("q", preferences: .init(songPlatforms: [platform], playlistPlatforms: [platform],
@@ -795,7 +823,7 @@ private actor MusicSearchTestPages {
             }
         }
     }
-    func testOverfullSongAndPlaylistPagesAreRejectedWithoutAdvancingTheirCursors() async {
+    func testMoreRowsThanRequestedAreConsumedAndTheirRealCursorRemainsAvailable() async {
         let tracks = (0..<31).map { track("s\($0)") }
         let lists = (0..<31).map {
             MusicPublicBrowseCollection(platform: .netease, nativeID: "p\($0)", title: "Playlist \($0)")
@@ -810,18 +838,19 @@ private actor MusicSearchTestPages {
         model.setAccess(available: true, generation: UUID()); model.appear()
         model.submit("q", preferences: .init(songPlatforms: [.netease], playlistPlatforms: [.netease]))
         await model.finishPendingReads()
-        XCTAssertTrue(model.songs.isEmpty); XCTAssertTrue(model.playlists.isEmpty)
-        XCTAssertEqual(model.songFailures.first?.error, .invalidResponse)
-        XCTAssertEqual(model.playlistFailures.first?.error, .invalidResponse)
+        XCTAssertEqual(model.songs.count, 31); XCTAssertEqual(model.playlists.count, 31)
+        XCTAssertTrue(model.songFailures.isEmpty)
+        XCTAssertTrue(model.playlistFailures.isEmpty)
         XCTAssertTrue(model.moreSongs); XCTAssertTrue(model.morePlaylists)
         model.disappear()
     }
-    func testMiguAdapterCursorSurvivesExpandedOrDeduplicatedEditionsAndKeepsOnePageOrigins() async throws {
+    func testMiguCursorSurvivesExpandedOrDeduplicatedEditionsAndBatchKeepsEveryRecording() async throws {
         for count in [1, 60] {
             let pages = MusicSearchTestPages(), model = session(pages)
             let first = (0..<count).map { track("mg-\($0)", platform: "mg") }
+            let tail = track("tail", platform: "mg")
             await pages.song("q|mg|1", .init(tracks: first, next: 2, total: 31))
-            await pages.song("q|mg|2", .init(tracks: [track("tail", platform: "mg")], total: 31))
+            await pages.song("q|mg|2", .init(tracks: [tail], total: 31))
             model.submit("q", preferences: .init(songPlatforms: [.migu], searchPlaylists: false,
                                                  pages: 10, concurrency: 1))
             await model.finishPendingReads()
@@ -830,13 +859,30 @@ private actor MusicSearchTestPages {
             XCTAssertEqual(calls.map(\.limit), [30, 30])
             XCTAssertEqual(model.songs.count, count + 1)
             XCTAssertTrue(model.songFailures.isEmpty); XCTAssertFalse(model.moreSongs)
-            XCTAssertEqual(request.targets.filter { $0.page == 1 }.count, count)
-            XCTAssertEqual(request.targets.filter { $0.page == 2 }.count, 1)
-            XCTAssertTrue(request.targets.allSatisfy { $0.origins[0].limit == 30 })
+            XCTAssertEqual(request.targets.map(\.track.songId), first.map(\.songId) + ["tail"])
+            XCTAssertEqual(request.targets.map(\.track.ref), first.map(\.ref) + [tail.ref])
+            XCTAssertEqual(Set(request.targets.map(\.track.songId)).count, count + 1)
             model.disappear()
         }
     }
-    func testBatchIncludesEachMatchedPlatformsRealOriginInUserPreferenceOrder() async throws {
+    func testExpandedPlaylistPageKeepsContinuationAfterEveryPreviouslyReturnedItem() async {
+        let pages = MusicSearchTestPages(), model = session(pages)
+        let first = (0..<60).map {
+            MusicPublicBrowseCollection(platform: .migu, nativeID: "p-\($0)", title: "Playlist \($0)")
+        }
+        let tail = MusicPublicBrowseCollection(platform: .migu, nativeID: "tail", title: "Tail")
+        await pages.playlist("lists|q|mg|1", .init(items: first, total: 31, next: 2))
+        await pages.playlist("lists|q|mg|2", .init(items: [tail], total: 31))
+        model.submit("q", preferences: .init(songPlatforms: [], playlistPlatforms: [.migu], pages: 10, concurrency: 1))
+        await model.finishPendingReads()
+        let calls = await pages.ranges()
+        XCTAssertEqual(calls.map(\.key), ["lists|q|mg|1", "lists|q|mg|2"])
+        XCTAssertEqual(calls.map(\.limit), [30, 30])
+        XCTAssertEqual(model.playlists.map(\.id), first.map(\.id) + [tail.id])
+        XCTAssertTrue(model.playlistFailures.isEmpty); XCTAssertFalse(model.morePlaylists)
+        model.disappear()
+    }
+    func testBatchUsesPreferredPermanentReferenceAndRecordingReadKeepsAllKnownSources() async throws {
         let pages = MusicSearchTestPages(), model = session(pages)
         for platform in MusicPublicBrowsePlatform.allCases {
             await pages.song("q|\(platform.rawValue)|1",
@@ -847,7 +893,8 @@ private actor MusicSearchTestPages {
         await model.finishPendingReads()
         let request = try model.makeBatchRequest()
         XCTAssertEqual(request.targets.count, 1)
-        XCTAssertEqual(request.targets[0].origins.map(\.platform), order)
+        XCTAssertEqual(request.targets[0].track.sources.first?.platform, "mg")
+        XCTAssertEqual(request.targets[0].track.songId, "recording")
         let restored = try await model.refreshTrack(XCTUnwrap(model.songs.first))
         XCTAssertEqual(Set(restored.sources.map(\.platform)), Set(order.map(\.rawValue)))
     }
@@ -860,7 +907,8 @@ private actor MusicSearchTestPages {
         let row = try XCTUnwrap(model.songs.first)
         XCTAssertEqual(model.songs.count, 1)
         let request = try model.makeBatchRequest(for: row)
-        XCTAssertEqual(request.targets[0].origins.map(\.track), [first, second])
+        XCTAssertEqual(Set(row.variants.map(\.ref)), Set([first.ref, second.ref]))
+        XCTAssertEqual(request.targets[0].track.songId, first.songId)
         let restored = try await model.refreshTrack(row)
         XCTAssertEqual(restored.sources, first.sources + second.sources)
         model.disappear()

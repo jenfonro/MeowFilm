@@ -27,7 +27,7 @@
 
 `scripts/windows/build.ps1` 调用 `scripts/windows/package-licenses.mjs`，按固定清单把 Windows 使用的文件逐字节复制到 `build/windows/licenses`，并写入 `licenses-manifest.json`（源路径、输出路径、字节数、SHA-256）；`build-result.json` 记录该清单的哈希。Node 许可另随 `runtime/node.exe` 放在 `runtime/node-LICENSE.txt`。仅 iOS 使用的 Node Mobile 许可由 Xcode 资源阶段随 App 携带，不加入 Windows 清单；其哈希由 `scripts/ios-node-mobile.json` 固定并在准备构建输入时校验。
 
-影视搜索的纯计算程序改编来源记录在 `NOTICE.md`，随运行器业务闭包打包，不携带参考服务器程序。iOS 同样在资源阶段携带现有 `NOTICE.md` 与项目 `GPL-3.0-only.txt`，不新增重复许可正文。来源声明不等于对没有独立许可声明的参考树另授分发许可。
+影视搜索的纯计算程序改编来源记录在 `NOTICE.md`，随运行器业务闭包打包，不携带参考服务器程序。共同音乐平台的 Node 改编路径同样归入 `NOTICE.md`；公共打包器携带现有 `NOTICE.md`、Apache-2.0、GPL-3.0、api-enhanced／KuGou MIT 正文及 iWebPlus／MeowMusic 原始 NOTICE，两端 wrapper 复用该清单产物。iOS 工程资源继续携带项目许可，Windows App 中央清单继续逐字节复制原有必要正文；不新建重复许可文件。来源声明不等于对没有独立许可声明的参考树另授分发许可。
 
 runtime-bridge／script-host 及其运行依赖的原始声明由公共打包器保留。当前 Windows 使用受信原生 QuickJS-NG／OpenSSL／zlib 与 source SDK，来源、补丁、构建输入、ABI／架构、产物和中央许可哈希按 `scripts/script-host-native.json` 复核；不复制旧 QuickJS WASM/asm.js。普通 npm 依赖按根 lock 解析并保留各包许可，中央归属及 catpawrunner 改编范围见 `NOTICE.md`。
 

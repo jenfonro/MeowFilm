@@ -175,12 +175,12 @@ import Combine
         XCTAssertEqual(actions.favorites.map(\.songId), ["kept", "external"])
         actions.suspend(); await model.close()
     }
-    func testSingleRowActionPassesRenewedHandleToExistingQueueOwner() async throws {
+    func testSingleRowActionPassesCurrentPermanentReferenceToExistingQueueOwner() async throws {
         let (service, model, actions, player) = await setup()
         var reads = 0
         let session = MusicSearchResultsModel(readSongs: { platform, query, page, _ in
             reads += 1
-            let track = MusicRemoteTrack(ref: .init(kind: .handle, id: "expired"),
+            let track = MusicRemoteTrack(ref: .init(kind: .library, id: "recording"),
                 songId: "recording", title: "Song", artist: "Artist", duration: 180,
                 sources: [.init(sourceKey: "wy:a", platform: "wy", nativeId: "a")])
             return .init(platform: platform.rawValue, query: query, page: page, limit: 30, total: 1, nextPage: nil, items: [track])
@@ -189,7 +189,7 @@ import Combine
         }, readRecording: { request in
             reads += 1
             let track = request.targets[0].track
-            return .init(ref: .init(kind: .handle, id: "renewed"), songId: track.songId,
+            return .init(ref: .init(kind: .library, id: track.songId), songId: track.songId,
                 title: track.title, artist: track.artist, duration: track.duration, sources: track.sources)
         })
         session.setAccess(available: true, generation: model.accountAccessGeneration); session.appear()
@@ -198,14 +198,14 @@ import Combine
         let row = try XCTUnwrap(session.songs.first)
         await actions.perform(song: row, session: session) { await model.append($0) }?.value
         let queue = await service.queue(), counts = await service.statistics()
-        XCTAssertEqual(queue.entries.first?.track.ref, .init(kind: .handle, id: "renewed"))
+        XCTAssertEqual(queue.entries.first?.track.songId, "recording")
         XCTAssertEqual(counts.queueWrites, 1)
         XCTAssertEqual(reads, 2)
         XCTAssertNil(actions.actionError)
         XCTAssertTrue(player.resources.isEmpty)
         actions.suspend(); session.disappear(); await model.close()
     }
-    func testFavoriteRenewalFailureDoesNotWriteOrChangeDisplayedMembership() async throws {
+    func testFavoriteRecordingReadFailureDoesNotWriteOrChangeDisplayedMembership() async throws {
         let (service, model, actions, player) = await setup(songs: ["kept"])
         await actions.toggleFavorite(try song("new"), refresh: { throw MusicServiceError.staleResult })?.value
         let counts = await service.statistics()
@@ -216,14 +216,14 @@ import Combine
         XCTAssertTrue(player.resources.isEmpty)
         actions.suspend(); await model.close()
     }
-    func testSearchActionCannotWriteAfterLeavingDuringHandleRenewal() async throws {
+    func testSearchActionCannotWriteAfterLeavingDuringPermanentRecordingRead() async throws {
         let (service, model, actions, player) = await setup()
-        let entered = expectation(description: "exact-page renewal entered")
+        let entered = expectation(description: "permanent recording read entered")
         let gate = MusicCollectionGate { entered.fulfill() }
         var reads = 0
         let session = MusicSearchResultsModel(readSongs: { platform, query, page, _ in
             reads += 1
-            let track = MusicRemoteTrack(ref: .init(kind: .handle, id: "handle-\(reads)"),
+            let track = MusicRemoteTrack(ref: .init(kind: .library, id: "recording"),
                 songId: "recording", title: "Song", artist: "Artist", duration: 180,
                 sources: [.init(sourceKey: "wy:a", platform: "wy", nativeId: "a")])
             return .init(platform: platform.rawValue, query: query, page: page, limit: 30, total: 1, nextPage: nil, items: [track])
@@ -252,7 +252,7 @@ import Combine
         let session = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
             let tracks = (0..<limit).map { index -> MusicRemoteTrack in
                 let id = "\(platform.rawValue)-\((page - 1) * limit + index)"
-                return .init(ref: .init(kind: .handle, id: id), songId: id, title: id,
+                return .init(ref: .init(kind: .library, id: id), songId: id, title: id,
                     artist: "Fixture", duration: 180,
                     sources: [.init(sourceKey: id, platform: platform.rawValue, nativeId: id)])
             }
@@ -268,7 +268,7 @@ import Combine
         XCTAssertEqual(session.songs.count, 2040)
         let request = try session.makeBatchRequest()
         XCTAssertEqual(request.targets.count, 2040)
-        XCTAssertNoThrow(try request.validate())
+        XCTAssertEqual(request.targets.map(\.track.songId), session.songs.map(\.id))
         let playback = actions.playAll(session: session)
         XCTAssertNotNil(playback)
         await playback?.value

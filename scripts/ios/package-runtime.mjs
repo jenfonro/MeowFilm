@@ -154,7 +154,7 @@ export async function packageIOSRuntime({
       && manifest.trustedNative[0].package === '@meowfilm/script-host',
     'INVALID_NATIVE_RECEIPT', 'The iOS runtime requires the reviewed embedded framework');
     manifest.entry = `${IOS_OUTPUT}/entries/${product}.mjs`;
-    manifest.modules = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease'];
+    manifest.modules = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform'];
     manifest.platform = 'ios';
     manifest.transport = TRANSPORT;
     manifest.target = target;
@@ -237,7 +237,7 @@ export async function packageIOSRuntime({
       appendFile(path, bytes);
       manifest.relocations.push({ source, path, imports: [...imports].map(([from, to]) => ({ from, to })) });
     }
-    for (const name of ['NOTICE.md', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt']) {
+    for (const name of ['npm-node-compat-ISC.txt']) {
       const source = `LICENSES/${name}`, bytes = readStable(root, source);
       sourceInputs.push({ path: source, sha256: digest(bytes) });
       appendFile(`licenses/${name}`, bytes);

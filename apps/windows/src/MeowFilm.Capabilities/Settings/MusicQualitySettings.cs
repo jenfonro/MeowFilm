@@ -25,7 +25,8 @@ public sealed partial class MusicCapability
 {
     private JsonObject? savedQualityPolicy;
     private string savedQualitySignature = "", qualityStatus = "";
-    private bool qualityLoaded, qualityBusy;
+    private bool qualityLoaded, qualityBusy, qualitySaving;
+    private long qualityGeneration;
     private CancellationTokenSource? qualityCancellation;
     private Task qualityWork = Task.CompletedTask;
     public ObservableCollection<MusicQualityRow> QualityCategories { get; } = [];
@@ -43,14 +44,8 @@ public sealed partial class MusicCapability
 
     // Unlike the general UI Call helper, this awaits the physical owner task.
     // In particular a successful admitted CAS is not changed into cancellation.
-    private async Task<JsonElement> QualityCall(string method, object? parameters, CancellationToken token)
-    {
-        var result = await application.ExecuteAsync(method, parameters, token);
-        MusicDto.Require(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("ok", out var ok) &&
-            ok.ValueKind is JsonValueKind.True or JsonValueKind.False);
-        if (!result.GetProperty("ok").GetBoolean()) throw new MusicOperationException(MusicDto.Text(result, "code"));
-        return result;
-    }
+    private Task<JsonElement> QualityCall(string method, object? parameters, CancellationToken token) =>
+        CallSettledReceipt(method, parameters, token);
     private void AcceptQuality(JsonElement reply)
     {
         var priorSignature = savedQualitySignature;
@@ -142,16 +137,25 @@ public sealed partial class MusicCapability
     }
     public async Task DeactivateQualityAsync()
     {
-        qualityCancellation?.Cancel();
+        RetireQualitySettings();
         await qualityWork;
     }
+    private void RetireQualitySettings()
+    {
+        qualityGeneration++;
+        qualityLoaded = false;
+        if (!qualitySaving) qualityCancellation?.Cancel();
+        QualityBindings();
+    }
+    private bool QualityCurrent(long generation) => generation == qualityGeneration && !stopping && !disposed;
     public Task ActivateQualitySettingsAsync() => qualityLoaded
         ? Task.CompletedTask
         : EnsureQualitySettingsAsync();
-    private Task EnsureQualitySettingsAsync() => BeginQuality(async token =>
+    private Task EnsureQualitySettingsAsync() => BeginQuality(async (token, generation) =>
     {
         var reply = await QualityCall("music.quality.settings.get", null, token);
         token.ThrowIfCancellationRequested();
+        if (!QualityCurrent(generation)) return;
         AcceptQuality(reply);
         qualityStatus = "";
     });
@@ -173,7 +177,7 @@ public sealed partial class MusicCapability
     {
         // Seal the complete desired policy before scheduling; the settings surface
         // never owns an unsaved draft distinct from the native owner.
-        return BeginQuality(async token =>
+        return BeginQuality(async (token, generation) =>
         {
             try
             {
@@ -182,17 +186,19 @@ public sealed partial class MusicCapability
                 // AcceptQuality. The already opened media keeps its playback token.
                 onlineCancellation?.Cancel();
                 var reply = await QualityCall("music.quality.settings.save", request, token);
+                if (!QualityCurrent(generation)) return;
                 AcceptQuality(reply); qualityStatus = "";
                 PublishOnlineSettings(reply.GetProperty("onlineSettings"));
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
             {
+                if (!QualityCurrent(generation)) return;
                 bool matches;
                 try
                 {
-                    var current = await QualityCall("music.quality.settings.get", null, token);
-                    token.ThrowIfCancellationRequested();
+                    var current = await QualityCall("music.quality.settings.get", null, lifetime.Token);
+                    if (!QualityCurrent(generation)) return;
                     AcceptQuality(current);
                     PublishOnlineSettings(current.GetProperty("onlineSettings"));
                     matches = QualitySettingsMatch(request);
@@ -209,20 +215,24 @@ public sealed partial class MusicCapability
                 else
                     throw;
             }
-        });
+        }, saving: true);
     }
-    private Task BeginQuality(Func<CancellationToken, Task> action)
+    private Task BeginQuality(Func<CancellationToken, long, Task> action, bool saving = false)
     {
         if (!CanEdit || qualityBusy || stopping) return Task.CompletedTask;
         var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        long generation = qualityGeneration;
+        qualitySaving = saving;
         qualityCancellation = request; qualityBusy = true; qualityStatus = ""; QualityBindings();
         return qualityWork = RunAsync(async () =>
         {
-            try { await action(request.Token); }
-            catch (OperationCanceledException) { qualityStatus = "已取消"; }
-            catch (MusicOperationException error) when (error.Code == "CANCELLED") { qualityStatus = "已取消"; }
+            try { await action(request.Token, generation); }
+            catch (OperationCanceledException) { if (QualityCurrent(generation)) qualityStatus = "已取消"; }
+            catch (MusicOperationException error) when (error.Code == "CANCELLED")
+            { if (QualityCurrent(generation)) qualityStatus = "已取消"; }
             catch (MusicOperationException error)
             {
+                if (!QualityCurrent(generation)) return;
                 qualityStatus = error.Code switch
                 {
                     "QUALITY_REQUIRED" => "请至少保留一种可用音质",
@@ -231,10 +241,13 @@ public sealed partial class MusicCapability
                     _ => "音质设置操作失败"
                 };
             }
+            catch when (!QualityCurrent(generation)) { }
             finally
             {
                 if (ReferenceEquals(qualityCancellation, request)) qualityCancellation = null;
-                request.Dispose(); qualityBusy = false; QualityBindings();
+                request.Dispose(); qualityBusy = false; qualitySaving = false;
+                if (QualityCurrent(generation)) QualityBindings();
+                else qualityLoaded = false;
             }
         });
     }

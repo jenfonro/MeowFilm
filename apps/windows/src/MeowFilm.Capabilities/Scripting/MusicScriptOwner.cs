@@ -140,11 +140,10 @@ public sealed class MusicScriptOwner : IAsyncDisposable
 
     private static JsonObject Song(JsonObject p)
     {
-        LJ.Fields(p, "platform musicInfo title artist album duration", "platform musicInfo title");
         string platform = LJ.Text(p["platform"]); LJ.Require(NativeMusicSong.Platforms.Contains(platform));
         var info = LJ.Object(p["musicInfo"]).DeepClone().AsObject();
-        var song = NativeMusicSong.CreateOnline(platform, info, LJ.Text(p["title"], 512),
-            LJ.S(p["artist"]), LJ.S(p["album"]), LJ.N(p["duration"]));
+        var song = NativeMusicSong.CreateOnline(platform, info, LJ.S(p["title"]),
+            LJ.S(p["artist"]), LJ.S(p["album"]), LJ.N(p["duration"]), LJ.S(info["img"]));
         return LJ.Obj(("song", song));
     }
 
@@ -161,10 +160,6 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         string quality = LJ.Text(p["quality"]);
         LJ.Require(MusicQualityPolicy.LxTypes.Contains(quality), "QUALITY_UNAVAILABLE");
         var song = NativeMusicSong.Normalize(p["song"]);
-        var selected = SelectRecording(song, platform, p["sourceKey"]);
-        bool unknown = !selected.Data.ContainsKey("types") && !LJ.B(selected.Data["qualityKnown"]);
-        LJ.Require(unknown || (selected.Data["types"] as JsonArray ?? []).OfType<JsonObject>()
-            .Any(type => LJ.S(type["type"]) == quality), "RECORDING_QUALITY_UNAVAILABLE");
         using var policy = await library.AcquireQualityAsync(external).ConfigureAwait(false);
         if (p.ContainsKey("qualityPolicySignature"))
             LJ.Require(LJ.Text(p["qualityPolicySignature"], 64) == policy.Signature, "QUALITY_POLICY_CHANGED");
@@ -174,6 +169,12 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         var token = timed.Token;
         try
         {
+            if (library.SongSnapshot(LJ.S(song["songId"])) is { } current)
+                song = NativeMusicSong.Normalize(JsonNode.Parse(current.GetRawText()));
+            var selected = SelectRecording(song, platform, p["sourceKey"]);
+            bool unknown = !selected.Data.ContainsKey("types") && !LJ.B(selected.Data["qualityKnown"]);
+            LJ.Require(unknown || (selected.Data["types"] as JsonArray ?? []).OfType<JsonObject>()
+                .Any(type => LJ.S(type["type"]) == quality), "RECORDING_QUALITY_UNAVAILABLE");
             var result = await ScriptAsync("resolve", new { installationId = id, platform, quality,
                 musicInfo = ScriptInfo(selected.Data) }, token).ConfigureAwait(false);
             await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
@@ -242,10 +243,16 @@ public sealed class MusicScriptOwner : IAsyncDisposable
             LJ.Require(!NativeMusicSong.IsOnline(song), "TARGET_CHANGED");
             return (LJ.Text(song["songId"]), new JsonObject());
         }
+        string? selectedKey = null;
+        if (key is not null)
+        {
+            LJ.Require(key is JsonValue value && value.TryGetValue<string>(out _));
+            selectedKey = key.GetValue<string>();
+        }
         var records = LJ.Array(song["sources"]).OfType<JsonObject>()
-            .Where(s => LJ.S(s["source"]) == platform && (key is null || LJ.S(s["sourceKey"]) == LJ.Text(key))).ToArray();
+            .Where(s => LJ.S(s["source"]) == platform && (selectedKey is null || LJ.S(s["sourceKey"]) == selectedKey)).ToArray();
         LJ.Require(records.Length == 1, records.Length > 0 ? "TARGET_REQUIRED" : "RECORDING_UNAVAILABLE");
-        return (LJ.Text(records[0]["sourceKey"]), NativeMusicSong.SourceData(records[0]).DeepClone().AsObject());
+        return (LJ.S(records[0]["sourceKey"]), NativeMusicSong.SourceData(records[0]).DeepClone().AsObject());
     }
 
     private async Task<JsonObject> ScriptAsync(string operation, object parameters, CancellationToken token)

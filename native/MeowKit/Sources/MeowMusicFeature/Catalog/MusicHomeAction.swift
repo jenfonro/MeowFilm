@@ -2,8 +2,7 @@
 import Foundation
 
 /// v1 data-only NetEase home actions. These are not URLs, playable tracks,
-/// account grants, or queue sessions. Executors must validate the descriptor
-/// and resolve it in the current account scope before mutating playback.
+/// account grants, or queue sessions. Executors use the current platform or account scope before mutating playback.
 public enum MusicHomeAction: Codable, Hashable, Sendable {
     public enum FMMode: String, Codable, Hashable, Sendable {
         case `default` = "DEFAULT", familiar = "FAMILIAR", explore = "EXPLORE"
@@ -13,9 +12,9 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
     public enum DailyBranch: String, Codable, Hashable, Sendable { case `default`, style }
 
     case fm(mode: FMMode, submode: String, entry: FMEntry?)
-    /// Exactly one selector: a positive safe rule ID, or a numeric/official tab.
+    /// The platform recipe consumes the supplied rule or tab selector.
     case ruleFM(ruleID: String, tabTagID: String, sourceName: String)
-    /// Verified song or artist seeds retain their actual provider identity.
+    /// Song or artist seeds retain their actual provider identity.
     case similar(sourceIDs: [String], sourceName: String)
     case similarArtist(sourceIDs: [String], sourceName: String)
     case daily(branch: DailyBranch)
@@ -34,58 +33,12 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
         switch self { case .heartbeat, .heartbeatSong: return true; default: return false }
     }
 
-    public static let maximumSimilarSeeds = 20
-
-    /// Reading capability, not execution authorization. FM has an anonymous
-    /// provider path; personal recommendations require the account owner.
+    /// Reading capability, not execution authorization. FM and similar actions
+    /// have anonymous provider paths; daily and heartbeat use the account owner.
     public var requiresAccount: Bool {
         switch self {
-        case .daily, .heartbeat, .heartbeatSong, .similar, .similarArtist: return true
-        case .fm, .ruleFM, .songCollection: return false
-        }
-    }
-
-    /// Structural validation only. A syntactically valid submode still needs
-    /// the executor's supported-mode check; it must never fall back to DEFAULT.
-    public func validate() throws {
-        switch self {
-        case .fm(_, let submode, _):
-            guard submode.utf8.count <= 64, submode.utf8.allSatisfy({
-                (65...90).contains($0) || (48...57).contains($0) || $0 == 95
-            }) else { throw MusicServiceError.invalidRequest }
-        case .ruleFM(let ruleID, let tabTagID, let sourceName):
-            let tabs = ["rap", "electronic", "sleep", "chinese", "occident", "korea", "classical"]
-            let validSelector = ruleID.isEmpty
-                ? Self.safeID(tabTagID) || tabs.contains(tabTagID)
-                : Self.safeID(ruleID) && tabTagID.isEmpty
-            guard validSelector else { throw MusicServiceError.invalidRequest }
-            try Self.validateName(sourceName)
-        case .similar(let sourceIDs, let sourceName), .similarArtist(let sourceIDs, let sourceName):
-            guard sourceIDs.count <= Self.maximumSimilarSeeds else { throw MusicServiceError.limit }
-            guard !sourceIDs.isEmpty, sourceIDs.allSatisfy(Self.safeID) else { throw MusicServiceError.invalidRequest }
-            try Self.validateName(sourceName)
-        case .songCollection(let ids):
-            guard !ids.isEmpty, ids.allSatisfy({ Self.positiveID($0, digits: 18) }) else {
-                throw MusicServiceError.invalidRequest
-            }
-        case .heartbeatSong(let id):
-            guard Self.safeID(id) else { throw MusicServiceError.invalidRequest }
-        case .daily, .heartbeat: break
-        }
-    }
-
-    private static func positiveID(_ value: String, digits: Int) -> Bool {
-        let bytes = value.utf8
-        return (1...digits).contains(bytes.count) && bytes.first.map { (49...57).contains($0) } == true &&
-            bytes.allSatisfy { (48...57).contains($0) }
-    }
-    private static func safeID(_ value: String) -> Bool {
-        positiveID(value, digits: 16) && (UInt64(value) ?? UInt64.max) <= 9_007_199_254_740_991
-    }
-    private static func validateName(_ value: String) throws {
-        guard value.utf8.count <= 8192 else { throw MusicServiceError.limit }
-        guard !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
-            throw MusicServiceError.invalidRequest
+        case .daily, .heartbeat, .heartbeatSong: return true
+        case .fm, .ruleFM, .similar, .similarArtist, .songCollection: return false
         }
     }
 
@@ -114,7 +67,7 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
             }
         case "similar":
             let type = try data.decode(String.self, forKey: .sourceType)
-            let ids = try Self.decodeIDs(data, key: .sourceIds, maximum: Self.maximumSimilarSeeds)
+            let ids = try data.decode([String].self, forKey: .sourceIds)
             let name = try data.decodeIfPresent(String.self, forKey: .sourceName) ?? ""
             switch type {
             case "song": self = .similar(sourceIDs: ids, sourceName: name)
@@ -126,24 +79,12 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
             if let id = try data.decodeIfPresent(String.self, forKey: .songId) { self = .heartbeatSong(songID: id) }
             else { self = .heartbeat }
         case "song-collection":
-            self = .songCollection(ids: try Self.decodeIDs(data, key: .ids, maximum: nil))
+            self = .songCollection(ids: try data.decode([String].self, forKey: .ids))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: data, debugDescription: "Unknown home action")
         }
-        try validate()
-    }
-    private static func decodeIDs(_ data: KeyedDecodingContainer<CodingKeys>, key: CodingKeys,
-                                  maximum: Int?) throws -> [String] {
-        var array = try data.nestedUnkeyedContainer(forKey: key), result: [String] = []
-        if let maximum, let count = array.count, count > maximum { throw MusicServiceError.limit }
-        while !array.isAtEnd {
-            if let maximum, result.count >= maximum { throw MusicServiceError.limit }
-            result.append(try array.decode(String.self))
-        }
-        return result
     }
     public func encode(to encoder: Encoder) throws {
-        try validate()
         var data = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .fm(let mode, let submode, let entry):

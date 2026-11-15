@@ -7,6 +7,7 @@ import MeowMusicFeature
 @MainActor final class MusicAccountFeedbackOwnerTests: XCTestCase {
     func testExistingBytesCannotImplicitlyRestoreAndLeasesBindExactScopeTokenAndCredential() async throws {
         let f = try MusicAccountFeedbackOwnerFixture()
+        let firstCredential = try XCTUnwrap(f.store.peek(f.identity)).credential
         _ = try await f.service.setAccess(available: true, generation: 1)
         let before = f.store.counts()
         do {
@@ -18,6 +19,8 @@ import MeowMusicFeature
         XCTAssertEqual(f.store.counts().writes, before.writes)
 
         _ = try await f.service.validate(platform: .qq)
+        let firstSaved = try XCTUnwrap(f.store.peek(f.identity))
+        XCTAssertEqual(firstSaved.credential, firstCredential)
         let otherID = try MusicAccountFixture.identity()
         let otherCredential = try MusicUpdateProvider.credential("other", uid: "99")
         f.store.seed(otherCredential, for: otherID)
@@ -25,6 +28,8 @@ import MeowMusicFeature
         let other = NativeMusicAccountService(accounts: f.accounts, scopes: [.qq: otherID], providers: [.qq: otherProvider])
         _ = try await other.setAccess(available: true, generation: 1)
         _ = try await other.validate(platform: .qq)
+        let secondSaved = try XCTUnwrap(f.store.peek(otherID))
+        XCTAssertEqual(secondSaved.credential, otherCredential)
         let first = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init())
         let second = try await other.beginPlaybackFeedback(platform: .qq, authorization: .init())
         let firstSnapshot = await f.accounts.snapshot(for: f.identity)
@@ -40,8 +45,12 @@ import MeowMusicFeature
         let b = try await second.report(MusicAccountFeedbackFixture.report(.start, instance: UUID()))
         XCTAssertEqual(a, .registered); XCTAssertEqual(b, .registered)
         let firstCredentials = await f.provider.credentials(), secondCredentials = await otherProvider.credentials()
-        XCTAssertEqual(firstCredentials, [try MusicUpdateProvider.credential()])
-        XCTAssertEqual(secondCredentials, [otherCredential])
+        XCTAssertEqual(firstCredentials, [firstSaved.credential])
+        XCTAssertEqual(secondCredentials, [secondSaved.credential])
+        XCTAssertEqual(try MusicAccountCredential.read(XCTUnwrap(firstCredentials.first)),
+            .object(["platform": .string("tx"), "userId": .string("42"), "cookie": .string("musickey=synthetic-old")]))
+        XCTAssertEqual(try MusicAccountCredential.read(XCTUnwrap(secondCredentials.first)),
+            .object(["platform": .string("tx"), "userId": .string("99"), "cookie": .string("musickey=synthetic-other")]))
         do {
             _ = try await first.report(MusicAccountFeedbackFixture.report(.start, platform: .netease, instance: UUID()))
             XCTFail("A QQ lease must not authorize WY")
@@ -50,6 +59,7 @@ import MeowMusicFeature
         XCTAssertEqual(firstCounts.verifies, 1); XCTAssertEqual(secondCounts.verifies, 1)
         XCTAssertEqual(firstCounts.logins + firstCounts.refreshes + secondCounts.logins + secondCounts.refreshes, 0)
         XCTAssertEqual(f.store.counts().writes, writes)
+        XCTAssertEqual(f.store.peek(f.identity), firstSaved); XCTAssertEqual(f.store.peek(otherID), secondSaved)
         _ = await f.service.close(); _ = await other.close()
     }
 
@@ -62,7 +72,11 @@ import MeowMusicFeature
             switch change {
             case "revision":
                 // Same bytes, new disk revision: no bytes-only equality shortcut.
-                f.store.seed(try MusicUpdateProvider.credential(), for: f.identity)
+                let before = try XCTUnwrap(f.store.peek(f.identity))
+                f.store.seed(before.credential, for: f.identity)
+                let after = try XCTUnwrap(f.store.peek(f.identity))
+                XCTAssertEqual(after.credential, before.credential)
+                XCTAssertNotEqual(after.revision, before.revision)
                 expected = .credentialsUnavailable
             case "token":
                 let token = try await f.accounts.beginLogin(for: f.identity)
@@ -87,7 +101,7 @@ import MeowMusicFeature
         }
     }
 
-    func testSettingsConsentRevocationAndCallerCancellationRejectNoncooperativeLateAcknowledgement() async throws {
+    func testSettingsConsentAndCancellationRetainDispatchedReceiptWithoutNewAutomaticWrites() async throws {
         for change in ["consent", "cancel"] {
             let f = try MusicAccountFeedbackOwnerFixture()
             try await f.enableAndValidate()
@@ -104,8 +118,8 @@ import MeowMusicFeature
             let counts = await f.provider.counts()
             if change == "consent" { consent.revoke() } else { task.cancel() }
             await gate.release()
-            do { _ = try await task.value; XCTFail("Late acknowledgement") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
+            let settled = try await task.value
+            XCTAssertEqual(settled, .registered)
             XCTAssertEqual(lease.authorization.inFlight, 0)
             if change == "consent" {
                 do {
@@ -116,8 +130,7 @@ import MeowMusicFeature
                 catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
             } else {
                 let duplicate = try await lease.report(start)
-                let end = try await lease.report(MusicAccountFeedbackFixture.report(.end, instance: instance))
-                XCTAssertEqual(duplicate, .unconfirmed); XCTAssertEqual(end, .unconfirmed)
+                XCTAssertEqual(duplicate, .registered, "A duplicate observes the receipt; it never replays the send")
             }
             let reports = await f.provider.received(), after = await f.provider.counts()
             XCTAssertEqual(reports, [start]); XCTAssertEqual(after, counts)
@@ -162,8 +175,8 @@ import MeowMusicFeature
             let record = f.store.peek(f.identity), snapshot = await f.accounts.snapshot(for: f.identity)
             let counts = await f.provider.counts()
             await feedback.release()
-            do { _ = try await task.value; XCTFail("Obsolete callback") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
+            let settled = try await task.value
+            XCTAssertEqual(settled, .registered, "The old scope cannot erase a write that really settled")
             do {
                 _ = try await lease.report(MusicAccountFeedbackFixture.report(.end, instance: instance))
                 XCTFail("Revoked lease cannot finish")
@@ -177,5 +190,42 @@ import MeowMusicFeature
             let drained = await f.service.close()
             XCTAssertTrue(drained.cleanupComplete); XCTAssertEqual(drained.inFlight, 0)
         }
+    }
+
+    func testRepeatedCloseKeepsLateReceiptAndWaitsForActualTransientSessionRelease() async throws {
+        let f = try MusicAccountFeedbackOwnerFixture()
+        try await f.enableAndValidate()
+        let lease = try await f.service.beginPlaybackFeedback(platform: .qq, authorization: .init())
+        let send = MusicAccountFeedbackGate(expectation(description: "start dispatched"))
+        let release = MusicAccountFeedbackGate(expectation(description: "late session release dispatched"))
+        await f.provider.setSession("synthetic-late-session")
+        await f.provider.holdFeedback(send)
+        await f.provider.holdRelease(release)
+        let report = MusicAccountFeedbackFixture.report(.start, instance: UUID())
+        let pending = MusicAccountQueueOwnerCall("dispatched receipt settles after close") { try await lease.report(report) }
+        defer { pending.cancel(); Task { await send.release(); await release.release(); _ = await f.service.close() } }
+        await fulfillment(of: [send.entered], timeout: 3)
+        let first = await f.service.close()
+        XCTAssertFalse(first.cleanupComplete); XCTAssertEqual(first.inFlight, 1)
+        await send.release()
+        await fulfillment(of: [release.entered], timeout: 3)
+        XCTAssertEqual(lease.authorization.inFlight, 1, "A receipt does not finish held transient cleanup")
+        let whileHeld = await f.provider.releasedSessions()
+        XCTAssertEqual(whileHeld, ["synthetic-late-session"])
+        let repeated = await f.service.close()
+        XCTAssertFalse(repeated.cleanupComplete); XCTAssertEqual(repeated.inFlight, 1)
+        await release.release()
+        await fulfillment(of: [pending.finished], timeout: 3)
+        XCTAssertEqual(try pending.value(), .registered, "Closing admission cannot erase a dispatched receipt")
+        let cleanup = MusicAccountQueueOwnerCall("late transient cleanup completes") { await lease.drain() }
+        defer { cleanup.cancel() }
+        await fulfillment(of: [cleanup.finished], timeout: 3)
+        try cleanup.value()
+        let final = await f.service.close()
+        XCTAssertTrue(final.cleanupComplete); XCTAssertEqual(final.inFlight, 0)
+        XCTAssertEqual(lease.authorization.inFlight, 0)
+        let released = await f.provider.releasedSessions(), reports = await f.provider.received()
+        XCTAssertEqual(released, ["synthetic-late-session"], "A retired session is never published or released twice")
+        XCTAssertEqual(reports, [report])
     }
 }

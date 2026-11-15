@@ -74,7 +74,12 @@ public sealed class MusicLyricApplication(
             cancellationToken.ThrowIfCancellationRequested();
             lock (gate) LJ.Require(!closed, "CLOSED");
             var rows = LJ.Array(song["sources"]).OfType<JsonObject>().ToArray();
-            var selectedKey = p.ContainsKey("sourceKey") ? LJ.Text(p["sourceKey"], 8192) : null;
+            string? selectedKey = null;
+            if (p.ContainsKey("sourceKey"))
+            {
+                LJ.Require(p["sourceKey"] is JsonValue key && key.TryGetValue<string>(out _));
+                selectedKey = p["sourceKey"]!.GetValue<string>();
+            }
             if (selectedKey is not null)
             {
                 rows = rows.Where(row => LJ.S(row["sourceKey"]) == selectedKey).ToArray();
@@ -100,7 +105,7 @@ public sealed class MusicLyricApplication(
             foreach (var row in rows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                string platform = LJ.Text(row["source"]), sourceKey = LJ.Text(row["sourceKey"]);
+                string platform = LJ.Text(row["source"]), sourceKey = LJ.S(row["sourceKey"]);
                 long epoch;
                 lock (gate) { CheckPolicy(policy); epoch = epochs.GetValueOrDefault(platform); }
                 var data = NativeMusicSong.SourceData(row);
@@ -138,9 +143,9 @@ public sealed class MusicLyricApplication(
                     string id = installation.GetProperty("installationId").GetString()!;
                     // Known declarations skip a platform without lyric; an undeclared
                     // installation is loaded by the actual lyric request itself.
-                    var sites = installation.GetProperty("sites");
-                    if (sites.ValueKind == JsonValueKind.Object &&
-                        !(sites.TryGetProperty(platform, out var site) &&
+                    var capabilities = installation.GetProperty("capabilities");
+                    if (capabilities.ValueKind != JsonValueKind.Null &&
+                        !(capabilities.TryGetProperty(platform, out var site) &&
                             site.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "lyric")))
                         continue;
                     var result = await ReadScriptAsync(platform, new {
@@ -272,8 +277,6 @@ public sealed class MusicLyricApplication(
             JsonElement? result = null;
             if (payload is not null)
             {
-                LJ.Require(payload.Platform == entry.Request.Platform &&
-                    payload.RecordingId == entry.Request.RecordingId, "LYRIC_IDENTITY_MISMATCH");
                 var lines = JsonNode.Parse(MusicLyricTiming.Parse(payload.Text, payload.Translation,
                     entry.Request.DurationSeconds).GetRawText())!.AsArray();
                 var romanized = MusicLyricTiming.Parse(payload.Romanization, duration: entry.Request.DurationSeconds)
@@ -284,8 +287,7 @@ public sealed class MusicLyricApplication(
                     if (romanized.TryGetValue(LJ.N(line["time"]), out var text) && text != LJ.S(line["text"]))
                         line["romanization"] = text;
                 if (lines.Count > 0)
-                    result = LJ.Element(LJ.Obj(("ok", true), ("state", "ready"), ("platform", payload.Platform),
-                        ("recordingId", payload.RecordingId), ("lines", lines)));
+                    result = LJ.Element(LJ.Obj(("ok", true), ("state", "ready"), ("lines", lines)));
             }
             lock (gate)
             {
@@ -338,7 +340,6 @@ public sealed class MusicLyricApplication(
             foreach (var item in scriptReads.Where(pair => platform is null || pair.Value.Platform == platform).ToArray())
             { scriptReads.Remove(item.Key); item.Value.Cancel(); }
         }
-        if (platform is null or "wy" or "tx" or "kg") official.Invalidate(platform);
     }
     public ValueTask DisposeAsync()
     {

@@ -66,13 +66,43 @@ import MeowJSON
              .similar(sourceIDs: ["2", "1", "1"], sourceName: "A")),
             (.songCollection(ids: ["1", "2", "1"]), .songCollection(ids: ["1", "1", "2"])),
             (.ruleFM(ruleID: "", tabTagID: "rap", sourceName: "A"),
-             .ruleFM(ruleID: "", tabTagID: "rap", sourceName: "B"))
+             .ruleFM(ruleID: "", tabTagID: "pop", sourceName: "A"))
         ]
         for (original, different) in cases {
             let page = try await f.owner.homeActionPage(lease, action: original, cursor: nil)
             await denied(.staleResult) { _ = try await f.owner.homeActionPage(lease, action: different, cursor: page.cursor) }
         }
         let calls = await f.provider.calls(); XCTAssertEqual(calls.actions.count, 3)
+        XCTAssertTrue(lease.authorization.isActive)
+        _ = await f.owner.close()
+    }
+
+    func testUnconsumedActionDisplayFieldsDoNotInvalidateTheSameCursorOrRefetch() async throws {
+        let f = try MusicHomeActionOwnerFixture(); try await f.enable()
+        let lease = try await f.owner.beginAccountQueue(platform: .netease)
+        let before = f.store.peek(f.identity), initialCalls = await f.provider.calls()
+        let cases: [(MusicHomeAction, MusicHomeAction)] = [
+            (fm, .fm(mode: .default, submode: "", entry: .channel)),
+            (.ruleFM(ruleID: "", tabTagID: "rap", sourceName: "A"),
+             .ruleFM(ruleID: "", tabTagID: "rap", sourceName: "B")),
+            (.similar(sourceIDs: ["1", "2", "1"], sourceName: "A"),
+             .similar(sourceIDs: ["1", "2", "1"], sourceName: "B")),
+            (.similarArtist(sourceIDs: ["1", "2", "1"], sourceName: "A"),
+             .similarArtist(sourceIDs: ["1", "2", "1"], sourceName: "B"))
+        ]
+        for (original, displayChanged) in cases {
+            let first = try await f.owner.homeActionPage(lease, action: original, cursor: nil)
+            let cursor = try XCTUnwrap(first.cursor)
+            let current = try await f.owner.homeActionPage(lease, action: displayChanged, cursor: cursor)
+            let repeated = try await f.owner.homeActionPage(lease, action: original, cursor: cursor)
+            XCTAssertEqual(current.items.count, 30)
+            XCTAssertEqual(current.items.map(\.data), repeated.items.map(\.data))
+            XCTAssertEqual(current.cursor, repeated.cursor)
+        }
+        let calls = await f.provider.calls()
+        XCTAssertEqual(calls.actions, cases.map { $0.0 })
+        XCTAssertEqual(calls.verifies, initialCalls.verifies)
+        XCTAssertEqual(f.store.peek(f.identity), before)
         XCTAssertTrue(lease.authorization.isActive)
         _ = await f.owner.close()
     }
@@ -94,14 +124,25 @@ import MeowJSON
         _ = await f.owner.close()
     }
 
-    func testInvalidDescriptorsAndUnissuedLeaseNeverReachProvider() async throws {
+    func testNativeCursorCacheByteBudgetDoesNotDiscardAnExistingUsableBatch() async throws {
+        let f = try MusicHomeActionOwnerFixture(); try await f.enable()
+        let lease = try await f.owner.beginAccountQueue(platform: .netease)
+        let first = try await f.owner.homeActionPage(lease, action: fm, cursor: nil)
+        let cursor = try XCTUnwrap(first.cursor)
+        await f.provider.setNameLength(70_000)
+        await denied(.limit) { _ = try await f.owner.homeActionPage(lease, action: self.fm, cursor: nil) }
+        let continued = try await f.owner.homeActionPage(lease, action: fm, cursor: cursor)
+        XCTAssertEqual(continued.items.count, 30)
+        XCTAssertTrue(lease.authorization.isActive)
+        let calls = await f.provider.calls(); XCTAssertEqual(calls.actions.count, 2)
+        _ = await f.owner.close()
+    }
+
+    func testUnissuedAndCopiedLeaseNeverReachProvider() async throws {
         let f = try MusicHomeActionOwnerFixture(); try await f.enable()
         let unissued = MusicAccountQueueLease(platform: .netease)
         await denied(.staleResult) { _ = try await f.owner.homeActionPage(unissued, action: self.fm, cursor: nil) }
         let lease = try await f.owner.beginAccountQueue(platform: .netease)
-        await denied(.invalidRequest) {
-            _ = try await f.owner.homeActionPage(lease, action: .similar(sourceIDs: [], sourceName: ""), cursor: nil)
-        }
         let copied = MusicAccountQueueLease(id: lease.id, platform: .netease)
         await denied(.staleResult) { _ = try await f.owner.homeActionPage(copied, action: self.fm, cursor: nil) }
         XCTAssertTrue(lease.authorization.isActive)
@@ -180,45 +221,48 @@ private actor MusicHomeActionOwnerProvider: MusicAccountProvider, MusicAccountHo
     private var actions: [MusicHomeAction] = [], verifies = 0
     private var gate: MusicAccountQueueOwnerGate?
     private var next: Int?, failure: MusicServiceError?
+    private var nameLength = 0
     func calls() -> Calls { .init(actions: actions, verifies: verifies) }
     func hold(_ value: MusicAccountQueueOwnerGate) { gate = value }
     func reply(next: Int?, failure: MusicServiceError?) { self.next = next; self.failure = failure }
+    func setNameLength(_ value: Int) { nameLength = value }
     func nativeID(_ credential: AccountCredential) async throws -> String { try await account.nativeID(credential) }
-    func verify(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         verifies += 1; return try await account.verify(credential)
     }
-    func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified { try await account.refresh(credential) }
+    func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await account.refresh(credential) }
     private func rows(batch: Int) -> [JSONValue] {
         (0..<65).map { i in .object([
-            "songmid": .string(String(batch * 1000 + i + 1)), "name": .string("Synthetic \(batch) \(i)"),
+            "songmid": .string(String(batch * 1000 + i + 1)),
+            "name": .string(nameLength > 0 ? String(repeating: "x", count: nameLength) : "Synthetic \(batch) \(i)"),
             "singer": .string("Synthetic"), "album": .string("Synthetic"), "duration": .number(180),
             "types": .array([.string("128k")])
         ]) }
     }
-    func homeAction(_ action: MusicHomeAction, credential: AccountCredential,
-                    authorize: @escaping @Sendable () async throws -> Void) async throws -> MusicQQRecommendation {
+    func homeAction(_ action: MusicHomeAction,
+                    authorize: @escaping @Sendable () async throws -> Void) async throws -> MusicAccountRecommendation {
         try await authorize()
         actions.append(action)
-        let result = MusicQQRecommendation(rows: rows(batch: actions.count), nextPage: next)
+        let result = MusicAccountRecommendation(rows: rows(batch: actions.count), nextPage: next)
         if let value = gate { gate = nil; await value.wait() } // Deliberately ignores cancellation after dispatch.
         if let failure { throw failure }
         return result
     }
-    func homePayload(_ request: MusicNativeHomeRequest, credential: AccountCredential,
+    func homePayload(_ request: MusicNativeHomeRequest,
                      authorize: @escaping @Sendable () async throws -> Void) async throws -> Data {
-        try await authorize(); return Data(#"{"code":200,"data":{"blocks":[]}}"#.utf8)
+        try await authorize(); return Data(#"{"sections":[]}"#.utf8)
     }
-    func recommendations(kind: String, page: Int, credential: AccountCredential) -> MusicQQRecommendation {
+    func recommendations(kind: String, page: Int) -> MusicAccountRecommendation {
         .init(rows: rows(batch: 0), nextPage: nil)
     }
     func createQR(id: UUID) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
-    func pollQR(id: UUID) throws -> MusicQQLoginResult { throw MusicServiceError.unsupported }
+    func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func collectionRows(credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String, credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func capabilities(mid: String, credential: AccountCredential) throws -> [String] { throw MusicServiceError.unsupported }
-    func resolve(mid: String, quality: String, credential: AccountCredential) throws -> JSONValue { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func capabilities(mid: String) throws -> [String] { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> JSONValue { throw MusicServiceError.unsupported }
 }
 
 private struct MusicHomeActionOwnerFixture {
@@ -233,7 +277,7 @@ private struct MusicHomeActionOwnerFixture {
         accounts = AccountSessionCoordinator(store: store)
         owner = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],
             providers: [.netease: provider], clock: { [clock] in clock.now() })
-        try store.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+        try store.write(.init(credential: MusicAccountFixture.credential(platform: .netease)), for: identity)
     }
     func enable() async throws { _ = try await owner.setAccess(available: true, generation: 1) }
 }

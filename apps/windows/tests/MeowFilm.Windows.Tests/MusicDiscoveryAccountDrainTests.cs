@@ -82,28 +82,33 @@ public static class MusicDiscoveryAccountDrainTests
     }
     private static JsonElement Row(JsonElement list) => list.GetProperty("items").EnumerateArray()
         .Single(row => row.GetProperty("platform").GetString() == "wy");
-    private static byte[] Document(long generation = 1, bool anonymous = false) => JsonSerializer.SerializeToUtf8Bytes(
-        new JsonObject { ["version"] = 1, ["entries"] = new JsonArray(new JsonObject
+    private static byte[] Document(long generation = 1, bool anonymous = false)
+    {
+        // Generate the current protected-document payload through the actual owner.
+        // The read/drain probe below never performs authentication or writes.
+        return Current().GetAwaiter().GetResult();
+        async Task<byte[]> Current()
         {
-            ["key"] = "[\"meowfilm\",\"music\",1,\"platform-account\",\"wy\"]",
-            ["value"] = new JsonObject
+            await using var store = new MusicPlatformRuntimeFixture.MemoryStore();
+            await using var runtime = new MusicPlatformRuntimeFixture();
+            runtime.OnRequest = (call, _) =>
             {
-                ["version"] = 1, ["generation"] = generation,
-                ["cookie"] = anonymous ? null : "MUSIC_U=synthetic-secret-" + generation,
-                ["scope"] = anonymous ? null : "synthetic-scope-" + generation,
-                ["validatedAt"] = anonymous ? null : 1000,
-                ["profile"] = anonymous ? null : new JsonObject
-                    { ["platform"] = "wy", ["userId"] = "123", ["displayName"] = "Saved fixture" }
-            }
-        }, new JsonObject
-        {
-            ["key"] = "[\"meowfilm\",\"music\",1,\"platform-account\",\"tx\"]",
-            ["value"] = new JsonObject
+                if (call.Operation == "qr.cancel") return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { cancelled = true }));
+                Check(call.Operation == "account.verify");
+                var verified = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation("wy", "123").GetRawText())!.AsObject();
+                verified["cookie"] = call.Payload.GetProperty("candidate").GetProperty("cookie").GetString();
+                return Task.FromResult(MusicPlatformRuntimeFixture.Json(verified));
+            };
+            await using var owner = runtime.CreateAccountOwner(store);
+            for (int i = 0; i < generation; i++)
             {
-                ["version"] = 1, ["generation"] = 1, ["cookie"] = null,
-                ["profile"] = null, ["scope"] = null, ["validatedAt"] = null
+                var result = await owner.CallAsync(anonymous && i == generation - 1 ? "music.accounts.logout" : "music.accounts.import",
+                    new { platform = "wy", cookie = "MUSIC_U=synthetic-secret-" + generation });
+                Check(result.GetProperty("ok").GetBoolean());
             }
-        }) });
+            return (await store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Data!;
+        }
+    }
 
     private sealed class Hold
     {
@@ -180,8 +185,8 @@ public static class MusicDiscoveryAccountDrainTests
             NetworkCalls++;
             return Task.FromException(new InvalidOperationException(operation + " is outside this read-only fixture"));
         }
-        public Task<MusicAccountDetailsObservation> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
-            => Reject<MusicAccountDetailsObservation>("Authentication");
+        public Task<MusicAccountVerifiedCredential> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
+            => Reject<MusicAccountVerifiedCredential>("Authentication");
         public Task<MusicAccountChallenge> BeginAsync(string platform, CancellationToken cancellationToken = default)
             => Reject<MusicAccountChallenge>("QR login");
         public Task<MusicAccountPoll> PollAsync(string platform, string challengeId, MusicAccountSessionHandoff handoff, CancellationToken cancellationToken = default)
@@ -194,10 +199,7 @@ public static class MusicDiscoveryAccountDrainTests
         public Task<MusicAccountDetailsObservation> ReadAccountDetailsAsync(
             MusicPlatformSession account, CancellationToken token = default)
             => Reject<MusicAccountDetailsObservation>("Account details");
-        public Task<MusicAccountProfile> VerifyQqFeedbackAccountAsync(
-            MusicPlatformSession account, CancellationToken token)
-            => Reject<MusicAccountProfile>("QQ feedback account verification");
-        public void Cancel(string platform) { Cancels++; }
+        public Task CancelAsync(string platform) { Cancels++; return Task.CompletedTask; }
         public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
     }
     private sealed class Fixture : IAsyncDisposable
@@ -205,12 +207,11 @@ public static class MusicDiscoveryAccountDrainTests
         internal readonly Store Store = new();
         internal readonly Protocol Protocol = new();
         internal readonly MusicAccountOwner Owner;
-        internal readonly MusicClientContextFixture Clients = new();
-        internal Fixture() => Owner = Clients.CreateAccountOwner(Store, Protocol);
+        internal Fixture() => Owner = new(Store, Protocol);
         public async ValueTask DisposeAsync()
         {
             foreach (var hold in Store.Holds.Values) hold.Release.TrySetResult();
-            await Owner.DisposeAsync(); await Clients.DisposeAsync();
+            await Owner.DisposeAsync();
             Check(Store.Writes == 0 && Store.Disposals == 0 && Protocol.NetworkCalls == 0, "Borrowed store or no-network boundary");
             await Store.DisposeAsync();
         }

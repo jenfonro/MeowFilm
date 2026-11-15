@@ -46,8 +46,8 @@ enum MusicAccountQueueFixture {
         return try await service.queue()
     }
     static func start(_ service: NativeMusicService, _ source: MusicRemoteQueueSource, index: Int = 0) async throws -> MusicRemoteQueueStart {
-        let page = try await service.remoteQueuePage(source, cursor: nil)
-        return .init(index: index, track: page.items[index])
+        _ = try await service.remoteQueuePage(source, cursor: nil)
+        return .init(index: index)
     }
 }
 

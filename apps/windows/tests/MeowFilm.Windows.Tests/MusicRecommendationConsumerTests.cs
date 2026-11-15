@@ -1,11 +1,9 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.IO;
-using System.Net;
-using System.Net.Http;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
@@ -29,6 +27,41 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> RecommendationConsumerCases()
     {
+        foreach (string kind in new[] { "fm", "similar" })
+        {
+            string action = kind;
+            yield return Case("guest home " + action + " action reaches native recommendation queue and real playback consumer", async () =>
+            {
+                await using var f = await RecommendationScene.Create(account: false);
+                await f.EnableScript();
+                await f.Module.NavigateAsync("catalog-home", default);
+                await f.Module.HomeRefresh;
+                var card = f.Module.HomeSections.SelectMany(section => section.Items).Single(item => item.Kind == action);
+                True(!card.RequiresAccount && card.CanOpen, "the canonical home action is public");
+                await f.Module.OpenCatalogCardAsync(card);
+                await RecommendationUntil(() => f.Module.HasActiveRecommendation && !f.Module.RecommendationLoading);
+                Equal(3, (await f.Queue()).GetProperty("total").GetInt32());
+                Equal(1, f.Playback.Opens.Count);
+                Equal((await f.Queue()).GetProperty("currentId").GetString(), f.Playback.Identity);
+                await f.CheckLxTarget();
+                Equal("none", f.Module.Accounts.Single(account => account.Platform == "wy").State);
+                Equal(1, f.Runtime.Platform.Requests.Count(call => call.Operation == action));
+                True(f.Runtime.Platform.Requests.All(call => call.Operation is not ("account.verify" or "account.profile")),
+                    "public recommendation never authenticates a fabricated guest account");
+            });
+        }
+        yield return Case("guest heartbeat home action retains its real account requirement without queue or media mutation", async () =>
+        {
+            await using var f = await RecommendationScene.Create(account: false);
+            await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeRefresh;
+            var card = f.Module.HomeSections.SelectMany(section => section.Items).Single(item => item.Kind == "heartbeat");
+            await f.Module.OpenCatalogCardAsync(card);
+            Equal(0, (await f.Queue()).GetProperty("total").GetInt32());
+            Equal(0, f.Playback.Opens.Count);
+            True(!f.Module.HasActiveRecommendation &&
+                f.Runtime.Platform.Requests.All(call => call.Operation != "heartbeat"), "heartbeat remains account-bound");
+        });
         yield return Case("recommendation native FM preview starts no session and explicit play consumes same queue and LX port", async () =>
         {
             await using var f = await RecommendationScene.Create();
@@ -43,10 +76,12 @@ public static partial class MusicUiTests
             True(f.Runtime.Calls.All(m => m.StartsWith("music.script.", StringComparison.Ordinal)), "only actual LX uses Node");
             string id = (await f.Queue()).GetProperty("currentId").GetString()!;
             Equal(id, f.Playback.Identity);
+            await f.CheckLxTarget();
             f.Playback.Start(); await Drain();
             await f.Module.StepAsync(true);
             Equal(2, f.Playback.Opens.Count);
             True((await f.Queue()).GetProperty("currentId").GetString() != id, "same native queue advances");
+            await f.CheckLxTarget();
         });
         yield return Case("recommendation actual natural end appends at native tail once and opens next occurrence", async () =>
         {
@@ -78,6 +113,7 @@ public static partial class MusicUiTests
             await RecommendationUntil(() => f.Playback.Opens.Count == 4);
             Equal(4, f.Playback.Opens.Count);
             Equal(before + 1, f.Http.Batches);
+            await f.CheckLxTarget();
         });
         yield return Case("recommendation similar replaces the FM queue and never exposes an invented return", async () =>
         {
@@ -88,6 +124,7 @@ public static partial class MusicUiTests
             await RecommendationUntil(() => f.Module.RecommendationTitle == "相似歌曲" && !f.Module.RecommendationLoading);
             True((await f.Queue()).GetProperty("currentId").GetString() != original, "new source replaces occurrences");
             Equal(opens + 1, f.Playback.Opens.Count);
+            await f.CheckLxTarget();
             True(f.Module.RecommendationContinue && !f.Module.CanReturnRecommendation && !f.Module.HasPlaybackFm, "similar owns continuation but no FM channel or checkpoint");
             await f.Module.ReturnRecommendationAsync();
             Equal(opens + 1, f.Playback.Opens.Count);
@@ -252,9 +289,10 @@ public static partial class MusicUiTests
             {
                 await using var f = await RecommendationScene.Create();
                 await f.Module.NavigateAsync("catalog-fm", default);
-                f.Store.UnknownNextLibraryWrite = persisted;
+                f.Store.UnknownNextQueueWrite = persisted;
                 await f.Module.PlayCatalogPlaylistAsync();
                 await RecommendationUntil(() => f.Module.CanReconcileRecommendation);
+                Equal(1, f.Store.QueueWrites);
                 int batches = f.Http.Batches, writes = f.Store.LibraryWrites;
                 Exception? closeError = null;
                 try { await f.Module.PrepareShutdownAsync(); } catch (Exception error) { closeError = error; }
@@ -325,21 +363,18 @@ public static partial class MusicUiTests
         internal readonly MusicCapability Module;
         private RecommendationScene()
         {
-            App = new(Store, Runtime, Http, (_, _) => Reports);
+            Runtime.Platform.OnRequest = Http.Read;
+            App = new(Store, Runtime, _ => Reports, null);
             Module = new(App, Store, Playback, Dialog);
         }
-        internal static async Task<RecommendationScene> Create()
+        internal static async Task<RecommendationScene> Create(bool account = true)
         {
             var f = new RecommendationScene();
             try
             {
-                byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, entries = new[] {
-                    new { key = "[\"meowfilm\",\"music\",1,\"platform-account\",\"wy\"]", value = new {
-                        version = 1, generation = 1, cookie = "MUSIC_U=SYNTHETIC_RECOMMENDATION; __csrf=SYNTHETIC_CSRF",
-                        profile = new { platform = "wy", userId = "900", displayName = "合成账号" },
-                        scope = "synthetic-recommendation", validatedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() } } } });
-                try { await f.Store.WriteAsync(MusicAccountOwner.DocumentNamespace, bytes, DocumentFingerprint.Missing); }
-                finally { CryptographicOperations.ZeroMemory(bytes); }
+                if (account)
+                    await f.Call("music.accounts.import", new { platform = "wy",
+                        cookie = "MUSIC_U=SYNTHETIC_RECOMMENDATION; __csrf=SYNTHETIC_CSRF" });
                 await f.Module.InitializeAsync(default); await f.Module.ReadAccountsAsync(); await Drain();
                 return f;
             }
@@ -358,6 +393,29 @@ public static partial class MusicUiTests
             var response = await Call("music.recommendations.start", input);
             Equal("", response.GetProperty("error").GetString());
             await RecommendationUntil(() => Module.HasActiveRecommendation && !Module.RecommendationLoading);
+            await CheckLxTarget();
+        }
+        internal async Task CheckLxTarget()
+        {
+            var entry = (await Queue()).GetProperty("current");
+            var song = entry.GetProperty("song");
+            string songId = song.GetProperty("songId").GetString()!;
+            True(Guid.TryParse(songId, out _) && entry.GetProperty("key").GetString() == songId,
+                "queue occurrence references its actual permanent repository song");
+            var locator = song.GetProperty("sources").EnumerateArray().Single(source =>
+                source.GetProperty("source").GetString() == "wy").GetProperty("musicInfo");
+            var request = Runtime.Requests.Last(call => call.Method == "music.script.resolve").Parameters;
+            Equal(Module.Sources.Single(row => !row.IsBuiltIn).InstallationId, request.GetProperty("installationId").GetString());
+            Equal("wy", request.GetProperty("platform").GetString());
+            Equal("flac", request.GetProperty("quality").GetString());
+            var target = request.GetProperty("musicInfo");
+            Equal(locator.GetProperty("songmid").GetString(), target.GetProperty("songmid").GetString());
+            Equal("wy", target.GetProperty("source").GetString());
+            Equal(locator.GetProperty("duration").GetDouble(), target.GetProperty("duration").GetDouble());
+            var opened = Playback.Opens.Last();
+            Equal(entry.GetProperty("id").GetString(), opened.Entry);
+            Equal("media.invalid", opened.Uri.Host);
+            Equal("/" + locator.GetProperty("songmid").GetString(), opened.Uri.AbsolutePath);
         }
         internal async Task EnableScript()
         {
@@ -366,11 +424,16 @@ public static partial class MusicUiTests
             File.WriteAllText(Dialog.ScriptPath, TestScript(), new UTF8Encoding(false));
             await Module.ImportSourceAsync(); Equal(1, Module.Sources.Count(row => !row.IsBuiltIn));
             await Module.SetSourceEnabledAsync(Module.Sources.Single(row => !row.IsBuiltIn), true);
+            var official = (await Call("music.officialSources.settings.get")).GetProperty("settings");
+            await Call("music.officialSources.settings.save", new {
+                ifRevision = official.GetProperty("revision").GetInt64(), enabled = Array.Empty<string>() });
             await Module.RefreshSourceManagementAsync();
             True(Module.CanEditQuality, "recommendation setup loaded native quality policy");
             var installed = (await Call("music.sources.list")).GetProperty("items").EnumerateArray().Single();
             Equal(Module.Sources.Single(row => !row.IsBuiltIn).InstallationId, installed.GetProperty("installationId").GetString());
             True(installed.GetProperty("enabled").GetBoolean(), "enabled script participates in recommendation playback");
+            Equal(0, (await Call("music.officialSources.settings.get")).GetProperty("settings")
+                .GetProperty("enabled").GetArrayLength());
             True(Module.Status.Length == 0, "script enable accepted");
             var saved = await Call("music.quality.settings.get");
             Equal(before.GetProperty("settings").GetRawText(), saved.GetProperty("settings").GetRawText());
@@ -386,31 +449,49 @@ public static partial class MusicUiTests
         {
             Http.Release.TrySetResult();
             try { await Module.DisposeAsync(); }
-            finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
+            finally
+            {
+                try { await Runtime.DisposeAsync(); }
+                finally { await Store.DisposeAsync(); }
+            }
         }
     }
     private sealed class RecommendationStore : IDocumentStore
     {
         private readonly LocalDocumentStore inner = ServiceStore();
-        internal bool? UnknownNextLibraryWrite;
-        internal int LibraryWrites;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default) =>
-            inner.ReadAsync(ns, cancellationToken);
+        private readonly ConcurrentDictionary<DocumentFingerprint, string> queueSnapshots = new();
+        internal bool? UnknownNextQueueWrite;
+        internal int LibraryWrites, QueueWrites;
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
+        {
+            var document = await inner.ReadAsync(ns, cancellationToken);
+            if (ns == MusicLibraryOwner.DocumentNamespace)
+                queueSnapshots[document.Fingerprint] = document.Data is null ? "" : MusicNativeRecommendationTests.PersistedQueue(document.Data);
+            return document;
+        }
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value,
             DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
             if (ns != MusicLibraryOwner.DocumentNamespace)
                 return await inner.WriteAsync(ns, value, expected, cancellationToken);
-            LibraryWrites++;
-            bool? unknown = UnknownNextLibraryWrite; UnknownNextLibraryWrite = null;
+            Interlocked.Increment(ref LibraryWrites);
+            True(queueSnapshots.TryGetValue(expected, out var before), "queue CAS must use an observed document");
+            string queue = MusicNativeRecommendationTests.PersistedQueue(value);
+            bool? unknown = null;
+            if (queue != before)
+            {
+                Interlocked.Increment(ref QueueWrites);
+                unknown = UnknownNextQueueWrite; UnknownNextQueueWrite = null;
+            }
             if (unknown == false) throw new DocumentStoreException(DocumentStoreError.Storage);
             var receipt = await inner.WriteAsync(ns, value, expected, cancellationToken);
+            queueSnapshots[receipt] = queue;
             if (unknown == true) throw new DocumentStoreException(DocumentStoreError.Storage);
             return receipt;
         }
         public ValueTask DisposeAsync() => inner.DisposeAsync();
     }
-    private sealed class RecommendationHttp : HttpMessageHandler
+    private sealed class RecommendationHttp
     {
         internal int Batches;
         internal bool Hold;
@@ -418,28 +499,43 @@ public static partial class MusicUiTests
         internal readonly TaskCompletionSource Cancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
-            var uri = request.RequestUri!;
-            True(uri.Scheme == "https" && uri.Host is "music.163.com" or "interfacepc.music.163.com", "fixed native platform");
             bool held = false;
             try
             {
                 object response;
-                if (uri.AbsolutePath.EndsWith("/w/nuser/account/get", StringComparison.Ordinal))
-                    response = new { code = 200, account = new { id = "900" }, profile = new { userId = "900", nickname = "合成账号" } };
+                if (call.Operation is "account.verify" or "account.profile")
+                {
+                    var observation = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation("wy", "900").GetRawText())!.AsObject();
+                    if (call.Operation == "account.verify")
+                        observation["cookie"] = call.Payload.GetProperty("candidate").GetProperty("cookie").GetString();
+                    return MusicPlatformRuntimeFixture.Json(observation);
+                }
+                else if (call.Operation == "home")
+                    return MusicPlatformRuntimeFixture.Json(new { platform = "wy", more = false, items = new object[]
+                    {
+                        new { id = "fm", name = "游客漫游", requiresAccount = false, action = new { type = "fm" } },
+                        new { id = "similar", name = "相似推荐", requiresAccount = false,
+                            action = new { type = "similar", sourceIds = new[] { "77" }, sourceType = "song" } },
+                        new { id = "heartbeat", name = "心动模式", requiresAccount = true,
+                            action = new { type = "heartbeat" } }
+                    } });
                 else
                 {
-                    True(uri.AbsolutePath.EndsWith("/v1/radio/get", StringComparison.Ordinal), "exact recommendation API");
+                    True(call.Operation is "fm" or "similar", "canonical recommendation operation");
                     int batch = Interlocked.Increment(ref Batches);
                     using var registration = token.Register(() => Cancelled.TrySetResult());
                     held = Hold;
                     if (held) { Entered.TrySetResult(); await Release.Task; }
-                    response = new { code = 200, data = Enumerable.Range(batch * 1000 + 1, 3).Select(id => new {
-                        id, name = "推荐歌曲" + id, ar = new[] { new { id = 1, name = "合成歌手" } },
-                        al = new { id = 2, name = "合成专辑", picUrl = "" }, dt = 180000, fee = 0, alg = "native-recommendation-alg" }) };
+                    response = new { platform = "wy", kind = call.Operation, count = 3,
+                        context = call.Operation == "fm" ? (object)new { mode = "DEFAULT", submode = "", preview = false } :
+                            new { sourceIds = new[] { "77" }, sourceType = "song" },
+                        items = Enumerable.Range(batch * 1000 + 1, 3).Select(id => RecommendationSong(id.ToString())).ToArray(),
+                        recommendations = Enumerable.Range(batch * 1000 + 1, 3).Select(id => new {
+                            id = id.ToString(), source = call.Operation, alg = "native-recommendation-alg", feedbackSource = "" }).ToArray() };
                 }
-                return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(response), Encoding.UTF8, "application/json") };
+                return MusicPlatformRuntimeFixture.Json(response);
             }
             finally { if (held) Settled.TrySetResult(); }
         }

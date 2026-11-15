@@ -37,7 +37,6 @@ public sealed partial class MusicNativeApplication
         try
         {
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
-            LJ.Fields(input, "platform", "platform");
             string platform = LJ.S(input["platform"]);
             LJ.Require(platform is "wy" or "tx" or "kg");
             JsonElement Result(string state, string? code) => JsonSerializer.SerializeToElement(new { ok = true, platform,
@@ -51,7 +50,7 @@ public sealed partial class MusicNativeApplication
             }
             try
             {
-                _ = await officialAudio.ResolveAsync(session, MusicSourceCheckSamples.Recording(platform), ["128k"],
+                _ = await officialAudio.ResolveAsync(session, () => MusicSourceCheckSamples.Recording(platform), ["128k"],
                     token, Current).ConfigureAwait(false);
                 return Result("ok", null);
             }
@@ -75,9 +74,6 @@ public sealed partial class MusicNativeApplication
             LJ.Require(method is "music.official.resolve" or "music.official.cacheContext" or
                 "music.official.confirm", "CAPABILITY_UNAVAILABLE");
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
-            LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
-            LJ.Fields(input, "platform song originSong sourceKey quality scope generation qualityPolicySignature refresh cacheOnly manualSource",
-                "platform song quality");
             LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
             bool manualSource = LJ.B(input["manualSource"]);
             LJ.Require(input["cacheOnly"] is null || LJ.IsBool(input["cacheOnly"]), "INVALID_REQUEST");
@@ -106,16 +102,20 @@ public sealed partial class MusicNativeApplication
             if (input["qualityPolicySignature"] is not null)
                 LJ.Require(LJ.S(input["qualityPolicySignature"]) == policy.Signature, "QUALITY_POLICY_CHANGED");
             var song = NativeMusicSong.Normalize(input["song"]);
-            var originSong = input["originSong"] is null ? song : NativeMusicSong.Normalize(input["originSong"]);
-            LJ.Require(LJ.S(originSong["songId"]) == LJ.S(song["songId"]) &&
-                new NativeMusicSong.Recordings(originSong).CanMerge(new(song)), "RECORDING_MISMATCH");
             string songId = LJ.S(song["songId"]), sourceKey = LJ.S(input["sourceKey"]);
-            var recordings = (song["sources"] as JsonArray ?? []).OfType<JsonObject>()
-                .Where(s => LJ.S(s["source"]) == platform && (sourceKey.Length == 0 || LJ.S(s["sourceKey"]) == sourceKey)).ToArray();
-            LJ.Require(recordings.Length == 1, recordings.Length == 0 ? "RECORDING_UNAVAILABLE" : "RECORDING_REQUIRED");
-            var recording = recordings[0];
+            JsonObject CurrentRecording()
+            {
+                Current();
+                if (library.SongSnapshot(songId) is { } current)
+                    song = NativeMusicSong.Normalize(JsonNode.Parse(current.GetRawText()));
+                var recordings = (song["sources"] as JsonArray ?? []).OfType<JsonObject>()
+                    .Where(s => LJ.S(s["source"]) == platform && (sourceKey.Length == 0 || LJ.S(s["sourceKey"]) == sourceKey)).ToArray();
+                LJ.Require(recordings.Length == 1, recordings.Length == 0 ? "RECORDING_UNAVAILABLE" : "RECORDING_REQUIRED");
+                LJ.Require(!songMatcher.IsExcluded(song, LJ.S(recordings[0]["sourceKey"])), "RECORDING_MISMATCH");
+                return recordings[0];
+            }
+            var recording = CurrentRecording();
             sourceKey = LJ.S(recording["sourceKey"]);
-            LJ.Require(!songMatcher.IsExcluded(originSong, sourceKey), "RECORDING_MISMATCH");
             LJ.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
             string[] qualities = request == "auto"
                 ? MusicQualityPolicy.RequestTypes.Concat(new[] { "jyeffect", "dolby", "sky", "vivid" })
@@ -150,7 +150,7 @@ public sealed partial class MusicNativeApplication
                 confirmed ??= LJ.Obj(("platform", platform), ("sourceKey", sourceKey), ("quality", request),
                     ("requestedQuality", request), ("qualityPolicySignature", policy.Signature),
                     ("generation", session.Generation), ("qualityVerified", false));
-                confirmed["recording"] = recording.DeepClone();
+                confirmed["recording"] = CurrentRecording().DeepClone();
                 await sourceCache.ConfirmAsync(session.Scope, songId, signature, confirmed, token).ConfigureAwait(false);
                 return officialPolicy.Publish(platform, () =>
                 {
@@ -165,23 +165,12 @@ public sealed partial class MusicNativeApplication
             if (result is not null && !qualities.Contains(LJ.S(result["quality"]))) result = null;
             LJ.Require(result is not null || !LJ.B(input["cacheOnly"]), "CACHE_MISS");
             LJ.Require(method == "music.official.resolve", "CAPABILITY_UNAVAILABLE");
-            Current();
-            if (result is not null && !qualities.Contains(LJ.S(result["quality"]))) result = null;
-            LJ.Require(result is not null || !LJ.B(input["cacheOnly"]), "CACHE_MISS");
             if (result is null)
             {
                 await sourceCache.InvalidateAsync(session.Scope, songId, token).ConfigureAwait(false);
-                var media = await officialAudio.ResolveAsync(session, NativeMusicSong.SourceData(recording),
+                var media = await officialAudio.ResolveAsync(session, () => NativeMusicSong.SourceData(CurrentRecording()),
                     qualities, token, Current).ConfigureAwait(false);
                 Current();
-                double expected = LJ.N(song["duration"]);
-                if (expected > 0 && media.Duration > 0 &&
-                    Math.Abs(expected - media.Duration) > 10)
-                {
-                    await songMatcher.ExcludeAsync(originSong, sourceKey, token).ConfigureAwait(false);
-                    await sourceCache.RejectRecordingAsync(session.Scope, songId, sourceKey, token).ConfigureAwait(false);
-                    throw new MusicLibraryException("RECORDING_MISMATCH");
-                }
                 result = LJ.Obj(("ok", true), ("kind", "official"), ("platform", platform), ("songId", songId),
                     ("sourceKey", sourceKey), ("scope", session.Scope), ("generation", session.Generation),
                     ("quality", media.RequestQuality), ("requestedQuality", request), ("actualQuality", media.ActualQuality),

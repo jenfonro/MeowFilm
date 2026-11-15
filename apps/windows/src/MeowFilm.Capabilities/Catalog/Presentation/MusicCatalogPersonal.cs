@@ -80,8 +80,6 @@ public sealed partial class MusicCapability
         }
         if (catalogLoadedPlatform.Length == 0 || catalogAccountStamp != CatalogAccountKey(catalogLoadedPlatform))
             throw new MusicOperationException("STALE_SESSION");
-        if (catalogExpiresAt is { } expires && expires <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
-            throw new MusicOperationException("CATALOG_CONTENT_EXPIRED");
     }
     private bool RestoreCatalogPage(CatalogPageState state, string platform) =>
         state.AccountStamp == CatalogAccountKey(platform) &&
@@ -280,8 +278,6 @@ public sealed partial class MusicCapability
         await EnsureAccountsForRequestAsync(token);
         token.ThrowIfCancellationRequested();
         if (stopping || generation != loadGeneration || epoch != accountEpoch) throw new OperationCanceledException(token);
-        var currentAccount = Accounts.Single(a => a.Platform == platform);
-        if (currentAccount.State is not ("saved" or "verified")) throw new MusicOperationException("AUTH_REQUIRED");
     }
     private static void ApplyCatalogTarget(CatalogTarget target, Dictionary<string, object?> parameters, int number,
         JsonElement? continuation, bool refresh)
@@ -290,9 +286,10 @@ public sealed partial class MusicCapability
         parameters["platform"] = target.Platform;
         if (target.Operation is "fm" or "similar" or "heartbeat") parameters.Remove("refresh");
         else parameters["refresh"] = refresh;
-        if (target.Operation == "personalPlaylists")
+        if (target.Operation is "personalPlaylists" or "playlist")
         {
-            parameters["page"] = number; parameters["limit"] = 30;
+            parameters["page"] = number;
+            parameters["limit"] = target.Operation == "personalPlaylists" ? 30 : 100;
             if (continuation is not null) parameters["continuation"] = continuation.Value;
         }
     }
@@ -320,27 +317,5 @@ public sealed partial class MusicCapability
         if (!reply.TryGetProperty("expiresAt", out var expires) || expires.ValueKind == JsonValueKind.Null) return null;
         MusicDto.Require(expires.ValueKind == JsonValueKind.Number && expires.TryGetInt64(out var value) && value >= 0);
         return expires.GetInt64();
-    }
-    private void ValidatePersonalCatalog(JsonElement reply, CatalogTarget? target, int count)
-    {
-        if (target is null) return;
-        if (target.Operation == "personalPlaylists")
-        {
-            var account = Accounts.Single(a => a.Platform == target.Platform);
-            if (account.UserId.Length > 0 && MusicCatalogDto.Text(reply, "accountId") != account.UserId)
-                throw new MusicOperationException("STALE_SESSION");
-            MusicDto.Require(MusicCatalogDto.Text(reply, "collection") == MusicCatalogDto.Text(target.Parameters, "kind"));
-        }
-        else if (target.Operation is not "playlist")
-        {
-            MusicDto.Require(!reply.TryGetProperty("more", out var more) || more.ValueKind == JsonValueKind.False);
-            MusicDto.Require(!reply.TryGetProperty("count", out _) || MusicDto.Count(reply, "count") == count);
-            if (target.Operation == "album")
-                MusicDto.Require(MusicCatalogDto.Text(reply, "id") == MusicCatalogDto.Text(target.Parameters, "id") &&
-                    MusicDto.Count(reply, "total") == count);
-            if (target.Operation == "artist")
-                MusicDto.Require(MusicCatalogDto.Text(reply, "id") == MusicCatalogDto.Text(target.Parameters, "id") &&
-                    MusicDto.Count(reply, "total") == count);
-        }
     }
 }

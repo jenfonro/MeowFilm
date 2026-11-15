@@ -58,7 +58,7 @@ public static class MusicScriptIntegrationTests
         internal Fixture(string path)
         {
             Path = path;
-            Store = new(path, ["music.library.v1"], []);
+            Store = new(path, [MusicLibraryOwner.DocumentNamespace], []);
             Library = new(Store);
             Runtime = new(async token =>
             {
@@ -161,8 +161,10 @@ public static class MusicScriptIntegrationTests
     private static async Task Lyrics()
     {
         await using var f = new Fixture(Data()); string id = await InstallSource(f, Source("lyrics"));
+        var song = await MusicSongFixture.AdoptAsync(f.Library,
+            MusicSongFixture.Local("local-test", "Fixture local", "Fixture", duration: 120));
         var result = await Ok(f, "music.online.lyrics", new { installationId = id, platform = "local",
-            song = MusicSongFixture.Local("local-test", "Fixture local", "Fixture", duration: 120) });
+            song });
         Check(result.GetProperty("state").GetString() == "ready");
         Check(result.GetProperty("lines")[0].GetProperty("time").GetDouble() == 1);
         Check(result.GetProperty("lines")[0].GetProperty("translation").GetString() == "原生时间轴");

@@ -166,7 +166,7 @@ public static partial class MusicUiTests
             await Drain(); True(!show.IsCompleted, "reactivation intent waits for actual retired work");
             f.Http.Release.TrySetResult(); await Task.WhenAll(read, hide, show);
             True(f.Module.CanUseDiscovery, "same visible page automatically restored after real drain");
-            Equal(1, f.Http.Requests.Count(p => p.Contains("hotsearchlist", StringComparison.Ordinal)));
+            Equal(1, f.Http.Requests.Count(p => p == "searchDiscovery"));
         });
         yield return Case("native discovery second unload cancels pending reactivation without background refetch", async () =>
         {
@@ -177,7 +177,7 @@ public static partial class MusicUiTests
             var hideAgain = f.Module.DeactivateDiscoveryViewAsync();
             f.Http.Release.TrySetResult(); await Task.WhenAll(read, hide, show, hideAgain);
             True(!f.Module.CanUseDiscovery, "hidden view cannot publish");
-            Equal(1, f.Http.Requests.Count(p => p.Contains("hotsearchlist", StringComparison.Ordinal)));
+            Equal(1, f.Http.Requests.Count(p => p == "searchDiscovery"));
         });
         yield return Case("native discovery initial Loaded waits without automatically retrying a failed first request", async () =>
         {
@@ -186,7 +186,7 @@ public static partial class MusicUiTests
             var visible = f.Module.ActivateDiscoveryViewAsync();
             f.Http.Release.TrySetResult(); await Task.WhenAll(read, visible);
             True(!f.Module.CanUseDiscovery && f.Module.DiscoveryStatus.Length > 0, "failure remains an explicit state");
-            Equal(1, f.Http.Requests.Count(p => p.Contains("hotsearchlist", StringComparison.Ordinal)));
+            Equal(1, f.Http.Requests.Count(p => p == "searchDiscovery"));
         });
         yield return Case("native discovery WPF controls render business content and route a real button to search", async () =>
         {
@@ -220,7 +220,7 @@ public static partial class MusicUiTests
             await using var store = ServiceStore();
             await using var runtime = new NativeMusicScriptTestRuntime();
             var service = new PausedInvalidationDiscovery();
-            await using var app = new MusicNativeApplication(store, runtime, new NoUpstream(), null, (_, _) => service);
+            await using var app = new MusicNativeApplication(store, runtime, null, _ => service);
             var old = await app.ReadDiscoveryAsync(false);
             True(app.IsDiscoveryCurrent(old.Generation), "anonymous result initially current");
             service.Block = true;
@@ -277,7 +277,8 @@ public static partial class MusicUiTests
         private DiscoveryScene(IDocumentStore? selectedStore = null)
         {
             store = selectedStore ?? ServiceStore();
-            App = new(store, Runtime, Http);
+            Runtime.Platform.OnRequest = Http.Read;
+            App = new(store, Runtime);
             Module = new(App, store, Playback, Dialog);
         }
         internal static async Task<DiscoveryScene> Create(IDocumentStore? store = null)
@@ -332,7 +333,8 @@ public static partial class MusicUiTests
         internal void Arm(int number) { reads = 0; target = number; }
         public async Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
-            if (documentNamespace == "music.accounts.v1" && target > 0 && Interlocked.Increment(ref reads) == target)
+            if (documentNamespace == MeowFilm.Capabilities.Accounts.MusicAccountOwner.DocumentNamespace &&
+                target > 0 && Interlocked.Increment(ref reads) == target)
             {
                 Interlocked.Increment(ref active); Entered.TrySetResult();
                 try
@@ -349,7 +351,7 @@ public static partial class MusicUiTests
             inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
         public ValueTask DisposeAsync() { Release.TrySetResult(); return inner.DisposeAsync(); }
     }
-    private sealed class DiscoveryHttp : HttpMessageHandler
+    private sealed class DiscoveryHttp
     {
         internal readonly ConcurrentQueue<string> Requests = new();
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -358,47 +360,37 @@ public static partial class MusicUiTests
         internal readonly TaskCompletionSource DisposeRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool HoldHot, HoldDisposal, FailHot, FailTop;
         internal int Searches;
-        private static object Track(int id) => new { id, name = "发现歌曲" + id, dt = 180000, fee = 0,
-            ar = new[] { new { id = 1, name = "发现歌手" } }, al = new { id = 2, name = "发现专辑", picUrl = "" } };
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        private static object Track(int id) => MusicSongFixture.Online("wy", id.ToString(),
+            "发现歌曲" + id, "发现歌手", "发现专辑", 180);
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
-            var uri = request.RequestUri!;
-            True(uri.Host is "music.163.com" or "interfacepc.music.163.com", "fixed native WY transport");
-            Requests.Enqueue(uri.AbsolutePath); object body;
-            if (uri.AbsolutePath.Contains("hotsearchlist", StringComparison.Ordinal))
+            True(call.Platform == "wy", "discovery consumes the selected canonical platform");
+            Requests.Enqueue(call.Operation); object body;
+            if (call.Operation == "searchDiscovery")
             {
                 Entered.TrySetResult(); if (HoldHot) await Release.Task; // actual native physical-drain test
-                if (FailHot) return new(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{}") };
-                body = new { code = 200, data = Enumerable.Range(1, 8).Select(i => new { searchWord = "热搜" + i, score = i * 100 }) };
+                if (FailHot && FailTop) throw new MeowFilm.Capabilities.Platforms.MusicPlatformException("UPSTREAM_ERROR");
+                body = new {
+                    hot = FailHot ? [] : Enumerable.Range(1, 8).Select(i => new MusicSearchDiscoveryHot("热搜" + i, i * 100)).ToArray(),
+                    suggestions = Enumerable.Range(1, 8).Select(i => "热搜" + i).ToArray(),
+                    charts = FailTop ? [] : new[] { new MusicSearchDiscoveryChart("500", "发现榜单", "", 3, "榜单作者",
+                        Enumerable.Range(1001, 3).Select(id => MusicPlatformRuntimeFixture.Json(Track(id))).ToArray()) },
+                    failures = new[] { FailHot ? new MusicSearchDiscoveryFailure("hot", null, "UPSTREAM_ERROR") : null,
+                        FailTop ? new MusicSearchDiscoveryFailure("toplist", null, "UPSTREAM_ERROR") : null }
+                        .OfType<MusicSearchDiscoveryFailure>().ToArray() };
             }
-            else if (uri.AbsolutePath.Contains("defaultkeyword", StringComparison.Ordinal))
-                body = new { code = 200, data = new { realkeyword = "发现推荐" } };
-            else if (uri.AbsolutePath.Contains("toplist", StringComparison.Ordinal))
-            {
-                if (FailTop) return new(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{}") };
-                body = new { code = 200, list = new[] { new { id = 500, name = "发现榜单", trackCount = 3, coverImgUrl = "", creator = new { nickname = "榜单作者" } } } };
-            }
-            else if (uri.AbsolutePath.Contains("/playlist/detail", StringComparison.Ordinal))
-                body = new { code = 200, playlist = new { id = 500, name = "发现榜单", trackCount = 3, updateTime = 1,
-                    trackIds = Enumerable.Range(1001, 3).Select(id => new { id }) } };
-            else if (uri.AbsolutePath.Contains("/song/detail", StringComparison.Ordinal))
-                body = new { code = 200, songs = Enumerable.Range(1001, 3).Select(Track) };
-            else if (uri.AbsolutePath.Contains("/cloudsearch/", StringComparison.Ordinal))
+            else if (call.Operation is "playlist" or "playlist.complete")
+                body = new { platform = "wy", id = "500", name = "发现榜单", count = 3,
+                    items = Enumerable.Range(1001, 3).Select(Track), more = false };
+            else if (call.Operation == "search")
             {
                 Interlocked.Increment(ref Searches);
-                body = new { code = 200, result = new { songCount = 3, songs = Enumerable.Range(1001, 3).Select(Track) } };
+                body = new { items = Enumerable.Range(1001, 3).Select(Track), more = false };
             }
             else throw new InvalidOperationException("Unexpected discovery transport route");
-            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(body);
-            HttpContent content = HoldDisposal ? new StreamContent(new DiscoveryDisposal(bytes, Disposing, DisposeRelease)) : new ByteArrayContent(bytes);
-            content.Headers.ContentType = new("application/json");
-            return new(HttpStatusCode.OK) { Content = content };
+            if (HoldDisposal) { Disposing.TrySetResult(); await DisposeRelease.Task; }
+            return MusicPlatformRuntimeFixture.Json(body);
         }
-    }
-    private sealed class DiscoveryDisposal(byte[] bytes, TaskCompletionSource entered, TaskCompletionSource release) : MemoryStream(bytes)
-    {
-        public override async ValueTask DisposeAsync()
-        { entered.TrySetResult(); await release.Task; await base.DisposeAsync(); }
     }
     private sealed class PausedInvalidationDiscovery : IMusicSearchDiscovery
     {

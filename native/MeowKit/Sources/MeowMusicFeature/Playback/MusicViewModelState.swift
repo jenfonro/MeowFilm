@@ -21,12 +21,11 @@ public extension MusicViewModel {
     var lyricState: String { metadataState.lyricState }
     var lyricLines: [MusicLyricLine] { metadataState.lyricLines }
     var metadataArtworkURL: URL? { metadataState.artworkURL }
-    var metadataArtworkData: Data? { metadataState.artworkData }
     var phase: PlaybackPhase { playbackState.phase }
     var playedSongs: [MusicPlayedSong] { libraryState.playedSongs }
     var playedPlaylists: [MusicPlayedPlaylist] { libraryState.playedPlaylists }
     var error: String? {
-        get { notices.error }
+        get { notices.error ?? settingsReceipts.unknown.first?.message }
         set { notices.error = newValue }
     }
     var queueNotice: String? { notices.queueNotice }

@@ -19,8 +19,10 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: management forwards and selected bytes use one exact source candidate", Forwarding);
         yield return new("Native LX: a closed runtime is an unavailable script service, not missing sources", Unavailable);
         yield return new("Native LX: resolve asks one exact quality of one recording and proves refreshes", ExactResolve);
+        yield return new("Native LX: quality authorization waits for current repository recording without changing queue identity", CurrentRecording);
         yield return new("Native LX: receipt duration survives projection without claiming measured quality", ReceiptDuration);
         yield return new("Native LX: lyric parsing remains native and respects persisted setting", Lyrics);
+        yield return new("Native LX: long source locators reach resolve and lyrics unchanged", LongLocator);
         yield return new("Native LX: shutdown cancels owned calls and never disposes borrowed owners", Shutdown);
         yield return new("Native LX: original complete bytes and basename reach the runtime", CompleteSource);
         yield return new("Native LX: failed cancelled and timed out imports never replay or publish a later candidate", ImportFailure);
@@ -53,7 +55,7 @@ public static class MusicNativeScriptTests
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicScriptOwner Owner;
         internal Fixture() { Library = new(Store); Owner = new(Library, Runtime); }
-        public async ValueTask DisposeAsync() { await Owner.DisposeAsync(); await Library.DisposeAsync(); }
+        public async ValueTask DisposeAsync() { Store.Release.TrySetResult(); await Owner.DisposeAsync(); await Library.DisposeAsync(); }
     }
     private static async Task Forwarding()
     {
@@ -199,7 +201,7 @@ public static class MusicNativeScriptTests
         var store = new QualityFixture.DocumentStore();
         await using var port = new AppRuntimeClient(_ => Task.FromResult<IRuntimeSession>(runtime));
         port.Start();
-        await using var application = new MusicNativeApplication(store, port, new QualityFixture.RejectHttp());
+        await using var application = new MusicNativeApplication(store, port);
         async Task<JsonElement> Import()
         {
             try { return await application.ImportSourceAsync(source, "source.js"); }
@@ -332,6 +334,89 @@ public static class MusicNativeScriptTests
                 "duration does not turn the request into a measured quality");
         }
     }
+    private static async Task CurrentRecording()
+    {
+        await using var f = new Fixture();
+        async Task<JsonElement> Library(string method, object? p = null)
+        {
+            var result = await f.Library.ExecuteAsync(method, p);
+            Check(result.GetProperty("ok").GetBoolean(), method + ":" + result.GetRawText());
+            return result;
+        }
+        var original = Song();
+        MusicSongFixture.Info(original)["types"] = new JsonArray(new JsonObject { ["type"] = "128k" });
+        original = await MusicSongFixture.AdoptAsync(f.Library, original);
+        string songId = original["songId"]!.GetValue<string>(), sourceKey = original["sources"]![0]!["sourceKey"]!.GetValue<string>();
+        await Library("music.queue.replace", new { songs = new[] { original, original }, index = 0 });
+        var queue = await Library("music.queue.get");
+        Check(queue.GetProperty("entries").GetArrayLength() == 2 &&
+            queue.GetProperty("entries")[0].GetProperty("id").GetString() != queue.GetProperty("entries")[1].GetProperty("id").GetString());
+        string entryId = queue.GetProperty("current").GetProperty("id").GetString()!;
+        await Library("music.history.recordPlayed", new { entryId, at = DateTimeOffset.Now.ToUnixTimeMilliseconds() });
+        var before = f.Store.Control();
+        f.Runtime.Business = (method, p) =>
+        {
+            Check(method == "music.script.resolve" && p["installationId"]!.GetValue<string>() == Installation &&
+                p["platform"]!.GetValue<string>() == "wy" && p["quality"]!.GetValue<string>() == "320k");
+            var info = p["musicInfo"]!;
+            Check(info["songmid"]!.GetValue<string>() == "11" && info["name"]!.GetValue<string>() == "Corrected track" &&
+                info["duration"]!.GetValue<double>() == 124 && info["size"]!.GetValue<long>() == 4096 &&
+                info["types"]!.AsArray().Single()!["type"]!.GetValue<string>() == "320k",
+                "the actual script request must use the correction committed while authorization waited");
+            return new { installationId = Installation, generation = 4, contentHash = new string('a', 64),
+                platform = "wy", quality = "320k", url = "https://media.invalid/current.mp3",
+                headers = new { }, expiresAt = (long?)null };
+        };
+        var corrected = MusicSongFixture.Online("wy", "11", "Corrected track", "Test artist", duration: 124,
+            native: new JsonObject { ["size"] = 4096L, ["types"] = new JsonArray(new JsonObject { ["type"] = "320k" }) });
+        f.Store.Hold = true;
+        var adoption = MusicSongFixture.AdoptAsync(f.Library, corrected);
+        Task<JsonElement>? resolve = null;
+        try
+        {
+            await f.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            resolve = f.Owner.ExecuteAsync("music.online.resolve", new { installationId = Installation, platform = "wy",
+                song = original, sourceKey, quality = "320k" });
+            Check(!resolve.IsCompleted && f.Runtime.Requests.Count == 0,
+                "old types cannot reject or dispatch before the real repository write settles");
+        }
+        finally { f.Store.Release.TrySetResult(); }
+        var adopted = await adoption;
+        var media = await resolve!;
+        Check(media.GetProperty("ok").GetBoolean(), media.GetRawText());
+        Check(media.GetProperty("songId").GetString() == songId && media.GetProperty("sourceKey").GetString() == sourceKey &&
+            adopted["songId"]!.GetValue<string>() == songId && adopted["baselineDuration"]!.GetValue<double>() == 120);
+        var after = await Library("music.queue.get");
+        Check(JsonNode.DeepEquals(before, f.Store.Control()) && f.Runtime.Requests.Count == 1,
+            "metadata adoption and exact resolve preserve independent occurrences, queue revision and history");
+        Check(after.GetProperty("version").GetInt64() == queue.GetProperty("version").GetInt64() &&
+            after.GetProperty("current").GetProperty("id").GetString() == entryId);
+    }
+    private static async Task LongLocator()
+    {
+        await using var f = new Fixture();
+        string id = "canonical/" + new string('x', 9000);
+        var song = Song(id);
+        string key = song["sources"]![0]!["sourceKey"]!.GetValue<string>();
+        f.Runtime.Business = (method, p) =>
+        {
+            if (method == "music.script.invoke")
+            {
+                Check(p["payload"]!["musicInfo"]!["songmid"]!.GetValue<string>() == id);
+                return new { lyric = "[00:01]long locator" };
+            }
+            Check(method == "music.script.resolve" && p["musicInfo"]!["songmid"]!.GetValue<string>() == id);
+            return new { installationId = Installation, generation = 1, contentHash = new string('a', 64),
+                platform = "wy", quality = "320k", url = "https://media.invalid/long.mp3", headers = new { }, expiresAt = (long?)null };
+        };
+        var media = await Ok(f.Owner, "music.online.resolve",
+            new { installationId = Installation, platform = "wy", song, sourceKey = key, quality = "320k" });
+        Check(media.GetProperty("sourceKey").GetString() == key);
+        var lyrics = await Ok(f.Owner, "music.online.lyrics",
+            new { installationId = Installation, platform = "wy", song, sourceKey = key });
+        Check(lyrics.GetProperty("lines")[0].GetProperty("text").GetString() == "long locator");
+        Check(f.Runtime.Requests.Count == 2);
+    }
     private static async Task Lyrics()
     {
         await using var f = new Fixture();
@@ -373,8 +458,17 @@ public static class MusicNativeScriptTests
     {
         private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
         internal int Writes;
-        internal bool FailAfter, Disposed;
+        internal bool FailAfter, Disposed, Hold;
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly HashSet<string> Namespaces = [];
+        internal JsonObject Control()
+        {
+            var root = JsonNode.Parse(documents[MusicLibraryOwner.DocumentNamespace])!.AsObject();
+            JsonNode Area(string name) => root["entries"]!.AsArray().OfType<JsonObject>().Single(entry =>
+                entry["key"]!.GetValue<string>() == new JsonArray("meowfilm", "music", 1, "local", name).ToJsonString())["value"]!;
+            return new JsonObject { ["queue"] = Area("queue").DeepClone(), ["history"] = Area("history").DeepClone() };
+        }
         // Script sources and their data belong to the shared module, never to native documents.
         private static void Namespace(string value) =>
             Check(value == MusicLibraryOwner.DocumentNamespace, "Unexpected document namespace");
@@ -385,16 +479,17 @@ public static class MusicNativeScriptTests
             return Task.FromResult(new DocumentSnapshot(bytes,
                 bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
         }
-        public Task<DocumentFingerprint> WriteAsync(string name, ReadOnlyMemory<byte> data, DocumentFingerprint expected,
+        public async Task<DocumentFingerprint> WriteAsync(string name, ReadOnlyMemory<byte> data, DocumentFingerprint expected,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested(); Namespace(name); Namespaces.Add(name);
+            if (Hold) { Hold = false; Entered.TrySetResult(); await Release.Task.WaitAsync(cancellationToken); }
             byte[]? prior = documents.TryGetValue(name, out var value) ? value : null;
             var before = prior is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(prior);
             if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
             documents[name] = data.ToArray(); Writes++;
             if (FailAfter) { FailAfter = false; throw new InvalidOperationException("synthetic commit receipt loss"); }
-            return Task.FromResult(DocumentFingerprint.FromBytes(documents[name]));
+            return DocumentFingerprint.FromBytes(documents[name]);
         }
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }

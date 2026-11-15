@@ -4,12 +4,17 @@ import MeowMusicFeature
 @testable import MeowMusicPlatform
 
 @MainActor final class MusicAccountFeedbackChannelTests: XCTestCase {
+    private func makeProvider(_ platform: MusicAccountPlatform = .netease) async throws -> MusicAccountFeedbackProviderFixture {
+        let provider = MusicAccountFeedbackProviderFixture()
+        try await provider.publish(MusicAccountCredential.make(platform: platform, userID: "42",
+            cookie: "synthetic=feedback"), scope: "synthetic-feedback", generation: 1, authorization: .init())
+        return provider
+    }
     func testStartMustRegisterOrConfirmBeforeEndAndExactDuplicatesNeverSendTwice() async throws {
         for platform in MusicAccountPlatform.allCases {
-            let provider = MusicAccountFeedbackProviderFixture(), clock = MusicAccountTestClock()
+            let provider = try await makeProvider(platform), clock = MusicAccountTestClock()
             let channel = MusicAccountFeedbackChannel(platform: platform, provider: provider,
-                credential: try MusicUpdateProvider.credential(), authorization: .init(),
-                clock: { clock.now().timeIntervalSince1970 })
+                authorization: .init(), clock: { clock.now().timeIntervalSince1970 })
             let instance = UUID()
             let start = MusicAccountFeedbackFixture.report(.start, platform: platform, instance: instance)
             let end = MusicAccountFeedbackFixture.report(.end, platform: platform, instance: instance)
@@ -54,10 +59,10 @@ import MeowMusicFeature
     func testAmbiguousStartAndEndAreReservedBeforeSendAndNeverAutomaticallyReplay() async throws {
         for event in [MusicPlaybackFeedbackReport.Event.start, .end] {
             for throwing in [false, true] {
-                let provider = MusicAccountFeedbackProviderFixture()
+                let provider = try await makeProvider()
                 if throwing { await provider.fail(event) } else { await provider.unconfirmed(event) }
                 let channel = MusicAccountFeedbackChannel(platform: .netease, provider: provider,
-                    credential: try MusicUpdateProvider.credential(), authorization: .init(), clock: { 100 })
+                    authorization: .init(), clock: { 100 })
                 let instance = UUID()
                 let start = MusicAccountFeedbackFixture.report(.start, platform: .netease, instance: instance)
                 let end = MusicAccountFeedbackFixture.report(.end, platform: .netease, instance: instance)
@@ -81,9 +86,9 @@ import MeowMusicFeature
     }
 
     func testNeteaseUsesOriginalListeningTotalsWithoutDispatchClockOrDurationAndRateCaps() async throws {
-        let provider = MusicAccountFeedbackProviderFixture()
+        let provider = try await makeProvider()
         let channel = MusicAccountFeedbackChannel(platform: .netease, provider: provider,
-            credential: try MusicUpdateProvider.credential(), authorization: .init(), clock: { 100 })
+            authorization: .init(), clock: { 100 })
         let instance = UUID(), target = MusicAccountFeedbackFixture.target(.netease)
         let start = MusicPlaybackFeedbackReport(instanceID: instance, target: target, event: .start,
             duration: 0, listened: 0, mediaListened: 0, position: 0, rate: 32,
@@ -96,7 +101,7 @@ import MeowMusicFeature
         let sent = await provider.received(); XCTAssertEqual(sent, [start, end])
     }
 
-    func testNonfiniteNegativeAndZeroRatesRemainInvalidWhileQQAndKugouKeepExistingWireBounds() throws {
+    func testNonfiniteNegativeAndZeroRateFactsCannotEnterFeedback() throws {
         for platform in MusicAccountPlatform.allCases {
             func value(listened: Double = 1, rate: Double = 1, duration: Double = 180) -> MusicPlaybackFeedbackReport {
                 .init(instanceID: UUID(), target: MusicAccountFeedbackFixture.target(platform), event: .end,
@@ -104,31 +109,23 @@ import MeowMusicFeature
                     rate: rate, reason: .ui, startedAt: 1_800_000_000, occurredAt: 1_800_000_001)
             }
             for invalid in [Double.nan, .infinity, -1] {
-                XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(value(listened: invalid)))
-                XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(value(rate: invalid)))
+                XCTAssertThrowsError(try MusicAccountFeedbackFacts.consume(value(listened: invalid)))
+                XCTAssertThrowsError(try MusicAccountFeedbackFacts.consume(value(rate: invalid)))
             }
-            XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(value(rate: 0)))
-            if platform != .netease {
-                XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(value(listened: 86_401)))
-                XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(value(rate: 17)))
-            }
-            if platform == .kugou {
-                XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(value(duration: 0)))
-                XCTAssertThrowsError(try MusicAccountFeedbackWire.validate(value(rate: 0.2)))
-            }
+            XCTAssertThrowsError(try MusicAccountFeedbackFacts.consume(value(rate: 0)))
         }
     }
 
-    func testSourceRetirementKeepsPhysicalFeedbackAndFrozenEndButRealAuthorizationRevocationRejectsLateACK() async throws {
+    func testSourceRetirementKeepsFrozenEndAndRevocationDoesNotEraseDispatchedReceipt() async throws {
         for revokeConsent in [false, true] {
-            let provider = MusicAccountFeedbackProviderFixture()
+            let provider = try await makeProvider()
             let queue = MusicQueueAuthorization(), authorization = MusicPlaybackFeedbackAuthorization()
             let proof = MusicPlaybackRecommendationProof(occurrenceID: "entry-1", nativeID: "101",
                 source: "moreRcmd", sourceID: "", algorithm: "synthetic-alg", authorization: queue)
             let target = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
                 source: "moreRcmd", algorithm: "synthetic-alg", recommendationProof: proof)
             let channel = MusicAccountFeedbackChannel(platform: .netease, provider: provider,
-                credential: try MusicUpdateProvider.credential(), authorization: authorization)
+                authorization: authorization)
             let gate = MusicAccountFeedbackGate(expectation(description: "recommendation feedback in flight"))
             await provider.holdFeedback(gate)
             let report = MusicPlaybackFeedbackReport(instanceID: UUID(), target: target, event: .start,
@@ -141,15 +138,12 @@ import MeowMusicFeature
             XCTAssertEqual(authorization.inFlight, 1, "cancel is not physical completion")
             if revokeConsent { authorization.revoke() }
             await gate.release()
+            let receipt = try await task.value
+            XCTAssertEqual(receipt, .confirmed, "Revocation is not rollback of a dispatched write")
             if revokeConsent {
-                do { _ = try await task.value; XCTFail("Revoked account/settings cannot confirm a late ACK") }
-                catch {
-                    let failure = error as? MusicServiceError
-                    XCTAssertTrue(failure == .staleAccess || failure == .cancelled)
-                }
+                do { _ = try await channel.report(report); XCTFail("Revoked consent cannot dispatch again") }
+                catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
             } else {
-                let start = try await task.value
-                XCTAssertEqual(start, .confirmed)
                 let end = MusicPlaybackFeedbackReport(instanceID: report.instanceID, target: target, event: .end,
                     duration: 0, listened: 4, mediaListened: 8, position: 8, rate: 2, reason: .ui,
                     startedAt: report.startedAt, occurredAt: report.occurredAt + 4)

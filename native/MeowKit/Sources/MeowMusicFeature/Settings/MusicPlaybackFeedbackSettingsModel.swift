@@ -17,6 +17,7 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var confirmation: MusicPlaybackFeedbackConfirmation?
     private let service: any MusicPlaybackFeedbackSettingsServing
+    private let receipts: MusicSettingsReceiptOwner
     private let onChanged: @MainActor (UUID?) async throws -> Void
     private var available = false
     private var accessGeneration: UUID?
@@ -24,10 +25,12 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     private var work: Task<Void, Never>?
     private var reread = false
     private var requestedRevision: Int?
+    private var writing = false
 
     init(service: any MusicPlaybackFeedbackSettingsServing,
+         receipts: MusicSettingsReceiptOwner,
          onChanged: @escaping @MainActor (UUID?) async throws -> Void = { _ in }) {
-        self.service = service; self.onChanged = onChanged
+        self.service = service; self.receipts = receipts; self.onChanged = onChanged
     }
 
     func setAccess(available: Bool, generation: UUID?) {
@@ -37,7 +40,7 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     }
 
     func cancel() {
-        epoch = UUID(); work?.cancel(); busy = false; confirmation = nil
+        epoch = UUID(); if !writing { work?.cancel() }; busy = false; confirmation = nil
         value = nil; error = nil; reread = false; requestedRevision = nil
         // Cancellation does not free the physical request slot.
     }
@@ -106,37 +109,47 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
         // automatically replayed, even if the next read has the same revision.
         confirmation = nil; busy = true; error = nil
         let own = epoch, generation = accessGeneration, revision = requestedRevision
+        writing = true
+        let submitted = receipts.submit(settings: ["playback/feedback/" + platform.rawValue],
+                                        operation: "保存播放反馈设置") { [service] in
+            try await service.setPlaybackFeedback(platform: platform, enabled: enabled,
+                                                   expectedRevision: expected.revision)
+        }
         work = Task {
             var result: MusicPlaybackFeedbackSettings?
             var failure: MusicServiceError?
             do {
-                try Task.checkCancellation()
-                result = try await service.setPlaybackFeedback(platform: platform, enabled: enabled,
-                                                               expectedRevision: expected.revision)
+                result = try await submitted.value
             } catch {
                 // Preserve an unconfirmed commit even when its UI task was cancelled.
                 let problem = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
                 failure = problem
-                if [MusicServiceError.staleRevision, .storageConflict, .commitUnconfirmed].contains(problem),
-                   accessGeneration == generation {
-                    do {
-                        result = try await Task { [service] in
-                            try await service.playbackFeedbackSettings()
-                        }.value
-                    } catch { failure = MusicServiceError.sanitized(error) }
+                if [MusicServiceError.staleRevision, .storageConflict, .commitUnconfirmed].contains(problem) {
+                    if accessGeneration == generation {
+                        do {
+                            result = try await Task { [service] in
+                                try await service.playbackFeedbackSettings()
+                            }.value
+                        } catch { failure = MusicServiceError.sanitized(error) }
+                    }
+                } else {
+                    finish(expected, error: problem.localizedDescription,
+                           epoch: own, requestedAtStart: revision)
+                    return
                 }
             }
             if result != nil, accessGeneration == generation {
                 do { try await onChanged(generation) }
                 catch { result = nil; failure = MusicServiceError.sanitized(error) }
             }
-            finish(result, error: failure?.localizedDescription, epoch: own, requestedAtStart: revision)
+            finish(result, error: failure == .commitUnconfirmed ? nil : failure?.localizedDescription,
+                   epoch: own, requestedAtStart: revision)
         }
     }
 
     private func finish(_ value: MusicPlaybackFeedbackSettings?, error: String?,
                         epoch own: UUID, requestedAtStart revision: Int?) {
-        work = nil
+        work = nil; writing = false
         guard own == epoch, available, !Task.isCancelled else {
             if available, reread || requestedRevision != nil { reread = false; startRead() }
             return
@@ -160,5 +173,5 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
     }
 
     func flush() async { while let pending = work { await pending.value } }
-    deinit { work?.cancel() }
+    deinit { if !writing { work?.cancel() } }
 }

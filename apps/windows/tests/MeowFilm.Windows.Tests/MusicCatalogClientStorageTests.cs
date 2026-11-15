@@ -1,281 +1,174 @@
 using System.IO;
-using System.Net;
-using System.Net.Http;
-using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
-using MeowFilm.Capabilities.Platforms;
-using MeowFilm.Core.Runtime;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-// Real product-configured DPAPI storage with synthetic HTTP, never product data or live accounts.
+// Real native DPAPI/CAS and canonical platform results. Device identity and
+// response-cookie persistence belong to the Node lifecycle tests.
 public static class MusicCatalogClientStorageTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("catalog client home initialization and response update survive DPAPI reopen", Reopen);
-        yield return new("catalog client cancelled home leaves owned CAS running and warms the next home", CancelHome);
-        yield return new("catalog client cancellation before admission leaves durable state unchanged", CancelBeforeAdmission);
-        yield return new("catalog client shutdown drains admitted CAS without an unknown receipt", Shutdown);
-        yield return new("catalog client lost receipt still fences home until authoritative read without replay", LostReceipt);
-        yield return new("catalog application departed home is shared and cached with real product storage", () => ApplicationRead(false));
-        yield return new("catalog application closes and drains a home with no remaining subscribers", () => ApplicationRead(true));
+        yield return new("catalog current repository and queue references survive DPAPI reopen", Reopen);
+        yield return new("catalog cancelled home keeps admitted native metadata CAS owned", CancelHome);
+        yield return new("catalog cancellation before admission leaves durable state unchanged", CancelBeforeAdmission);
+        yield return new("catalog shutdown drains admitted native metadata CAS", Shutdown);
+        yield return new("catalog lost native CAS receipt reconciles without replay", LostReceipt);
+        yield return new("catalog departed home cannot publish and fresh read remains usable", () => ApplicationRead(false));
+        yield return new("catalog closes and drains a home with no remaining subscribers", () => ApplicationRead(true));
     }
-
-    private static async Task ApplicationRead(bool close)
+    private static string CreateRoot()
     {
-        await using var store = new Store(CreateRoot());
-        var handler = new HomeHandler { Arrived = Signal(), Release = Signal() };
-        await using var app = new MusicNativeApplication(store, new NoRuntime(), handler);
-        using var cancellation = new CancellationTokenSource();
-        var home = app.ExecuteAsync("music.catalog.home", new { platform = "wy" }, cancellation.Token);
-        await handler.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        try
-        {
-            cancellation.Cancel();
-            var cancelled = await home.WaitAsync(TimeSpan.FromSeconds(2));
-            Check(cancelled.GetProperty("code").GetString() == "CANCELLED", "departed page was published");
-            Check(!handler.Cancelled, "page token reached the owned transport");
-            if (close)
-            {
-                var closing = app.PrepareShutdownAsync();
-                try
-                {
-                    await Task.Delay(30);
-                    Check(!closing.IsCompleted, "app released an unsubscribed physical read");
-                }
-                finally { handler.Release.TrySetResult(); }
-                await closing.WaitAsync(TimeSpan.FromSeconds(5));
-            }
-            else
-            {
-                var joined = app.ExecuteAsync("music.catalog.home", new { platform = "wy" });
-                handler.Release.TrySetResult();
-                var result = await joined.WaitAsync(TimeSpan.FromSeconds(5));
-                Check(result.GetProperty("ok").GetBoolean(), "current subscriber did not receive the home");
-                CheckHome(result);
-                CheckHome(await app.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
-                Check(handler.Requests == 1, "same home was fetched again after unsubscribe");
-            }
-        }
-        finally { handler.Release.TrySetResult(); }
+        string root = TestWorkspace.DataPath("catalog-storage", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root); return root;
     }
-
+    private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static void Check(bool value, string reason) { if (!value) throw new InvalidOperationException(reason); }
+    private static JsonElement Ok(JsonElement value)
+    {
+        Check(value.GetProperty("ok").GetBoolean(), value.TryGetProperty("code", out var code) ? code.GetString()! : "Missing receipt");
+        return value;
+    }
+    private static void Error(JsonElement value, params string[] codes) =>
+        Check(!value.GetProperty("ok").GetBoolean() && codes.Contains(value.GetProperty("code").GetString()), "Expected actual failure receipt");
+    private static JsonElement Song => MusicSongFixture.Element(MusicSongFixture.Online("wy", "123", "Synthetic track"));
     private static async Task Reopen()
     {
-        string root = CreateRoot();
-        string? device = null;
-        for (int pass = 0; pass < 2; pass++)
+        string root = CreateRoot(), id;
+        await using (var store = new Store(root))
+        await using (var runtime = Runtime())
+        await using (var app = new MusicNativeApplication(store, runtime))
         {
-            await using var store = new Store(root);
-            await using var clients = new MusicPlatformClientContextOwner(store);
-            using var handler = new HomeHandler();
-            using var catalog = MusicPlatformCatalog.CreateWithHandler(new Anonymous(), handler, clients);
-            CheckHome(await catalog.HomeAsync(new("wy")));
-            var current = await clients.AcquireWyAsync();
-            Check(current.Nmtid == HomeHandler.ClientCookie && current.Generation == 2, "response update not retained");
-            Check(pass == 0 || device == current.DeviceId, "restart replaced the client identity");
-            device = current.DeviceId;
-            Check(store.Writes == (pass == 0 ? 2 : 0) && handler.Requests == 1, "unexpected persistence or HTTP replay");
-            Check(!clients.NeedsReconciliation, "successful home left an unknown receipt");
+            var home = Ok(await app.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
+            var song = home.GetProperty("sections")[0].GetProperty("items")[0];
+            id = song.GetProperty("songId").GetString()!;
+            Check(Guid.TryParse(id, out _), "Catalog did not adopt a permanent identity");
+            Ok(await app.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
+            Check(runtime.Requests.Count == 1, "Repository write repeated a provider request");
         }
+        await using var coldStore = new Store(root);
+        await using var coldRuntime = Runtime();
+        await using var cold = new MusicNativeApplication(coldStore, coldRuntime);
+        var queue = Ok(await cold.ExecuteAsync("music.queue.get"));
+        Check(queue.GetProperty("current").GetProperty("song").GetProperty("songId").GetString() == id &&
+            queue.GetProperty("current").GetProperty("song").GetProperty("title").GetString() == "Synthetic track" &&
+            coldStore.Writes == 0 && coldRuntime.Requests.Count == 0, "Current references were not restored locally");
     }
-
     private static async Task CancelHome()
     {
-        string root = CreateRoot();
-        await using var store = new Store(root);
-        await using var clients = new MusicPlatformClientContextOwner(store);
-        await clients.InitializeAsync();
-        using var handler = new HomeHandler();
-        using var catalog = MusicPlatformCatalog.CreateWithHandler(new Anonymous(), handler, clients);
+        await using var store = new Store(CreateRoot()) { Hold = true };
+        await using var runtime = Runtime();
+        await using var app = new MusicNativeApplication(store, runtime);
         using var cancellation = new CancellationTokenSource();
-        store.WriteArrived = Signal();
-        Task<JsonElement> home;
-        using (HoldRoot(root))
-        {
-            home = catalog.HomeAsync(new("wy"), cancellation.Token);
-            await store.WriteArrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            cancellation.Cancel();
-            await Error(() => home.WaitAsync(TimeSpan.FromSeconds(2)), "CANCELLED");
-            Check(!catalog.DrainAsync().IsCompleted, "service lost ownership of the pending write");
-        }
-        await Error(() => home, "CANCELLED");
-        await catalog.DrainAsync();
-        Check(!clients.NeedsReconciliation, "cancelling a read poisoned later catalog requests");
-        Check((await clients.AcquireWyAsync()).Nmtid == HomeHandler.ClientCookie, "admitted update did not settle");
-        CheckHome(await catalog.HomeAsync(new("wy")));
-        Check(store.Writes == 2 && handler.Requests == 1, "completed retired home was not reused from cache");
+        var home = app.ExecuteAsync("music.catalog.home", new { platform = "wy" }, cancellation.Token);
+        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
+        Check(!home.IsCompleted, "Admitted CAS lost physical ownership");
+        store.Release.TrySetResult(); Error(await home, "CANCELLED");
+        Check(store.Writes == 1, "Cancellation retried or rolled back metadata");
+        Ok(await app.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
+        Check(store.Writes == 1, "Readback repeated the durable write");
     }
-
     private static async Task CancelBeforeAdmission()
     {
-        string root = CreateRoot();
-        await using var store = new Store(root);
-        await using var clients = new MusicPlatformClientContextOwner(store);
-        var before = await clients.AcquireWyAsync();
-        using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
-        try
-        {
-            await clients.AcceptWyAsync(before, null, [HomeHandler.SetCookie], () => { }, cancellation.Token);
-            throw new InvalidOperationException("cancelled response was admitted");
-        }
-        catch (OperationCanceledException) { }
-        Check(store.Writes == 1 && !clients.NeedsReconciliation && clients.IsCurrent(before),
-            "pre-admission cancellation changed client state");
-        await clients.ReloadAsync();
-        var current = await clients.AcquireWyAsync();
-        Check(current.Generation == before.Generation && current.Nmtid is null && current.DeviceId == before.DeviceId,
-            "pre-admission cancellation changed durable state");
+        await using var store = new Store(CreateRoot());
+        await using var runtime = Runtime();
+        await using var app = new MusicNativeApplication(store, runtime);
+        using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+        Error(await app.ExecuteAsync("music.catalog.home", new { platform = "wy" }, cancellation.Token), "CANCELLED");
+        var saved = await store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
+        try { Check(saved.Data is null && store.Writes == 0 && runtime.Requests.Count == 0, "Pre-admission cancellation changed durable state"); }
+        finally { if (saved.Data is { } bytes) CryptographicOperations.ZeroMemory(bytes); }
     }
-
     private static async Task Shutdown()
     {
         string root = CreateRoot();
-        await using (var store = new Store(root))
-        await using (var clients = new MusicPlatformClientContextOwner(store))
+        await using (var store = new Store(root) { Hold = true })
+        await using (var runtime = Runtime())
+        await using (var app = new MusicNativeApplication(store, runtime))
         {
-            var before = await clients.AcquireWyAsync();
-            store.WriteArrived = Signal();
-            Task<MusicWyClientContext> update;
-            Task preparation;
-            using (HoldRoot(root))
-            {
-                update = clients.AcceptWyAsync(before, null, [HomeHandler.SetCookie], () => { }, default);
-                await store.WriteArrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                preparation = clients.PrepareShutdownAsync();
-                Check(!preparation.IsCompleted, "shutdown did not wait for admitted persistence");
-            }
-            await Error(() => update, "CLOSED");
-            await preparation.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(!clients.NeedsReconciliation && store.Writes == 2, "shutdown cancelled an admitted client write");
+            var home = app.ExecuteAsync("music.catalog.home", new { platform = "wy" });
+            await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var close = app.PrepareShutdownAsync(); Check(!close.IsCompleted, "Shutdown released admitted persistence");
+            store.Release.TrySetResult(); await home; await close.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(store.Writes == 1 && store.Disposals == 0 && runtime.Disposals == 0, "Shutdown cancelled CAS or disposed borrowed owners");
         }
-        await using var reopenedStore = new Store(root);
-        await using var reopened = new MusicPlatformClientContextOwner(reopenedStore);
-        var restored = await reopened.AcquireWyAsync();
-        Check(restored.Nmtid == HomeHandler.ClientCookie && restored.Generation == 2 && reopenedStore.Writes == 0,
-            "shutdown lost or replayed a confirmed update");
+        await using var reopened = new Store(root);
+        await using var peer = Runtime();
+        await using var owner = new MusicNativeApplication(reopened, peer);
+        Ok(await owner.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
+        Check(reopened.Writes == 0, "Reopen lost or replayed confirmed metadata");
     }
-
     private static async Task LostReceipt()
     {
-        string root = CreateRoot();
-        await using var store = new Store(root);
-        await using var clients = new MusicPlatformClientContextOwner(store);
-        await clients.InitializeAsync();
-        using var handler = new HomeHandler();
-        using var catalog = MusicPlatformCatalog.CreateWithHandler(new Anonymous(), handler, clients);
-        store.LoseReceipt = true;
-        await Error(() => catalog.HomeAsync(new("wy")), "COMMIT_UNKNOWN");
-        Check(clients.NeedsReconciliation, "genuinely lost receipt was hidden");
-        await Error(() => catalog.HomeAsync(new("wy")), "COMMIT_UNKNOWN");
-        Check(store.Writes == 2 && handler.Requests == 1, "unknown receipt replayed a request or write");
-        await clients.ReloadAsync();
-        CheckHome(await catalog.HomeAsync(new("wy")));
-        Check(!clients.NeedsReconciliation && store.Writes == 2 && handler.Requests == 2,
-            "authority read did not settle the receipt without replay");
+        await using var store = new Store(CreateRoot()) { LoseReceipt = true };
+        await using var runtime = Runtime();
+        await using var library = new MusicLibraryOwner(store);
+        await using var catalog = new MusicNativeCatalogOwner(runtime.Catalog, library);
+        Error(await catalog.ExecuteAsync("music.catalog.home", new { platform = "wy" }), "COMMIT_UNKNOWN");
+        Error(await catalog.ExecuteAsync("music.catalog.home", new { platform = "wy" }), "PENDING_WRITE");
+        Check(store.Writes == 1, "Unknown CAS was automatically replayed");
+        await library.ReconcileAsync();
+        Ok(await catalog.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
+        Check(store.Writes == 1, "Authoritative reconciliation rewrote confirmed metadata");
     }
-
-    private static string CreateRoot()
+    private static async Task ApplicationRead(bool close)
     {
-        string root = TestWorkspace.DataPath("catalog-client-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        return root;
-    }
-
-    private static FileStream HoldRoot(string root) =>
-        new(Path.Combine(root, ".documents.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-    private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private static void Check(bool condition, string message)
-    { if (!condition) throw new InvalidOperationException(message); }
-    private static void CheckHome(JsonElement home)
-    {
-        Check(home.GetProperty("platform").GetString() == "wy", "wrong home source");
-        var item = home.GetProperty("sections").EnumerateArray()
-            .SelectMany(section => section.GetProperty("items").EnumerateArray()).Single();
-        Check(item.GetProperty("id").GetString() == "123" && item.GetProperty("name").GetString() == "Synthetic playlist",
-            "home did not publish the response content");
-    }
-    private static async Task Error(Func<Task> action, string code)
-    {
-        try { await action().WaitAsync(TimeSpan.FromSeconds(5)); }
-        catch (MusicPlatformException error)
+        await using var store = new Store(CreateRoot());
+        await using var runtime = Runtime();
+        var entered = Signal(); var release = Signal(); var cancelled = Signal();
+        runtime.OnRequest = async (call, token) =>
         {
-            Check(error.Code == code, "Expected " + code + ", got " + error.Code);
-            return;
-        }
-        throw new InvalidOperationException("Expected " + code);
-    }
-
-    private sealed class Anonymous : IMusicPlatformSessionSource
-    {
-        public ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken cancellationToken) =>
-            ValueTask.FromResult<MusicPlatformSession?>(null);
-        public bool IsCurrent(MusicPlatformSession session) => false;
-    }
-
-    private sealed class HomeHandler : HttpMessageHandler
-    {
-        internal const string ClientCookie = "SYNTHETIC_HOME";
-        internal const string SetCookie = "NMTID=" + ClientCookie + "; Domain=music.163.com";
-        internal int Requests;
-        internal TaskCompletionSource? Arrived, Release;
-        internal bool Cancelled;
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+            using var registration = token.Register(() => cancelled.TrySetResult());
+            entered.TrySetResult(); await release.Task; return Home();
+        };
+        await using var app = new MusicNativeApplication(store, runtime);
+        using var cancellation = new CancellationTokenSource();
+        var home = app.ExecuteAsync("music.catalog.home", new { platform = "wy" }, cancellation.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
+        try
         {
-            Requests++;
-            using var registration = token.Register(() => Cancelled = true);
-            Arrived?.TrySetResult();
-            if (Release is not null) await Release.Task;
-            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var closing = close ? app.PrepareShutdownAsync() : Task.CompletedTask;
+            if (close) Check(!closing.IsCompleted, "Unsubscribed physical read was not drained");
+            release.TrySetResult(); Error(await home, "CANCELLED", "STALE_SESSION", "CLOSED"); await closing;
+            Check(store.Writes == 0, "Retired home adopted late metadata");
+            if (!close)
             {
-                Content = new StringContent("""
-                    {"code":200,"data":{"hasMore":false,"blocks":[{"positionCode":"PLAYLIST",
-                    "dslData":{"blockResource":{"header":{"title":"Synthetic recommendations"},
-                    "items":[{"resourceType":"playlist","resourceId":"123","name":"Synthetic playlist"}]}}}]}}
-                    """, Encoding.UTF8, "application/json")
-            };
-            response.Headers.TryAddWithoutValidation("Set-Cookie", SetCookie);
-            return response;
+                runtime.OnRequest = (_, _) => Task.FromResult(Home());
+                Ok(await app.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
+                Check(runtime.Requests.Count == 2 && store.Writes == 1, "Fresh home did not use current operation");
+            }
         }
+        finally { release.TrySetResult(); }
     }
-
-    private sealed class NoRuntime : IRuntimeClient
+    private static MusicPlatformRuntimeFixture Runtime()
     {
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
-        { throw new InvalidOperationException("Native business must not upload script sources"); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("Native home must not start Node");
+        var runtime = new MusicPlatformRuntimeFixture();
+        runtime.OnRequest = (call, _) => call.Operation == "home" ? Task.FromResult(Home()) : throw new InvalidOperationException(call.Operation);
+        return runtime;
     }
-
+    private static JsonElement Home() => MusicPlatformRuntimeFixture.Json(new {
+        platform = "wy", sections = new[] { new { id = "tracks", title = "Synthetic", type = "songs", items = new[] { Song } } },
+        more = false, continuation = (object?)null });
     private sealed class Store(string root) : IDocumentStore
     {
-        private readonly LocalDocumentStore inner = new(root, AppIdentity.NativeNamespaces,
-            protectedNamespaces: AppIdentity.ProtectedNamespaces);
-        internal int Writes;
-        internal bool LoseReceipt;
-        internal TaskCompletionSource? WriteArrived;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default) =>
-            inner.ReadAsync(ns, cancellationToken);
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
+        private readonly LocalDocumentStore inner = new(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces);
+        internal int Writes, Disposals;
+        internal bool Hold, LoseReceipt;
+        internal readonly TaskCompletionSource Entered = Signal(), Release = Signal();
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
+        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
         {
-            Writes++;
-            var write = inner.WriteAsync(ns, data, expected, cancellationToken);
-            WriteArrived?.TrySetResult();
-            var receipt = await write;
-            if (LoseReceipt)
-            {
-                LoseReceipt = false;
-                throw new DocumentStoreException(DocumentStoreError.Storage);
-            }
+            Writes++; Entered.TrySetResult(); if (Hold) await Release.Task;
+            var receipt = await inner.WriteAsync(ns, data, expected, token);
+            if (LoseReceipt) { LoseReceipt = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
             return receipt;
         }
-        public ValueTask DisposeAsync() => inner.DisposeAsync();
+        public async ValueTask DisposeAsync() { Release.TrySetResult(); Disposals++; await inner.DisposeAsync(); }
     }
 }

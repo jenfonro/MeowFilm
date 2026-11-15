@@ -145,13 +145,14 @@ public static partial class MusicRecommendationTests
         yield return new("Recommendation new start waits old physical read no overlap", Replacement);
         yield return new("Recommendation commit unknown only explicit reconcile no duplicate write", Unknown);
         yield return new("Recommendation cancelled reconciliation keeps its result replayable until the next commit", ReconcileCancellation);
-        yield return new("Recommendation preview malformed identity and unsupported platform do not replace", Invalid);
+        yield return new("Recommendation missing consumed items and unsupported platform do not replace", Invalid);
+        yield return new("Recommendation consumes dynamic canonical results without identity count or metadata completeness gates", CanonicalResults);
         yield return new("Recommendation observers repeating cancel produce no notification loop", ObserverCancel);
         yield return new("Recommendation Changed synchronous dispose does not await itself", ObserverDispose);
         yield return new("Recommendation independent dispose waits active observer", ObserverBarrier);
         yield return new("Recommendation inactive advance skips cold owner and preserves cancellation without leaking the queue lane", InactiveAdvanceResponsiveness);
         yield return new("Recommendation hot queue next dispatches during synchronous durable write and selects the exact occurrence", () => OnRecommendationSta(HotQueueNextResponsiveness));
-        yield return new("Recommendation active advance reads off dispatcher and preserves preview admission and next selection", () => OnRecommendationSta(ActiveAdvanceResponsiveness));
+        yield return new("Recommendation active advance admits preview off dispatcher and preserves next selection", () => OnRecommendationSta(ActiveAdvanceResponsiveness));
         yield return new("Recommendation real native Catalog HTTP to Library and ephemeral feedback", NativeCatalog);
         yield return new("Recommendation real native Catalog read settles before retired session drains", NativeHttpDrain);
         yield return new("Recommendation initial FM request does not block ordinary next", InitialNext);
@@ -671,10 +672,18 @@ public static partial class MusicRecommendationTests
         }
         await f.Rec.OnPlaybackAsync(new(tail, true, true, true));
         var state = await f.State();
+        if (outcome == "identity")
+        {
+            Check(N(await f.Q(), "total") == N(before, "total") + 1 && Current(await f.Q()) == tail &&
+                S(state, "error") == "" && f.Selections.IsEmpty,
+                "ordinary continuation uses the returned current context without proving the old start id");
+            await f.Rec.ExecuteAsync("music.recommendations.cancel", new { id });
+            return;
+        }
         Check(f.Store.Writes == writes && N(await f.Q(), "total") == N(before, "total") && Current(await f.Q()) == tail &&
             f.Selections.IsEmpty && state.GetProperty("canReturn").GetBoolean());
         if (outcome is "empty" or "duplicate") Check(state.GetProperty("exhausted").GetBoolean() && S(state, "error") == "");
-        else Check(S(state, "error") == (outcome == "failure" ? "NETWORK" : "IDENTITY_MISMATCH") && state.GetProperty("canRetry").GetBoolean());
+        else Check(S(state, "error") == "NETWORK" && state.GetProperty("canRetry").GetBoolean());
         await f.Rec.OnPlaybackAsync(new(tail, true, true, true, PlaybackEvent: 2));
         Check(f.Catalog.Calls.Count == 2);
         if (outcome == "failure")
@@ -1362,9 +1371,29 @@ public static partial class MusicRecommendationTests
         var unsupported = await f.Rec.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "mg" });
         Check(S(unsupported, "code") == "UNSUPPORTED" && f.Catalog.Calls.IsEmpty);
         f.Catalog.Handle = (_, _) => Task.FromResult(J(new { platform = "wy", kind = "fm-preview", cover = "" }));
-        Check(S(await f.Start("fm"), "error") == "IDENTITY_MISMATCH" && f.Store.Writes == writes);
+        Check(S(await f.Start("fm"), "error") == "INVALID_RESPONSE" && f.Store.Writes == writes);
         var remote = await f.Rec.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy", local = false });
         Check(S(remote, "code") == "REMOTE_NOT_SUPPORTED");
+    }
+    private static async Task CanonicalResults()
+    {
+        await using var f = new Fixture();
+        string[] ids = ["9007199254740993123", "provider:alias", "12", "13", "14", "15", "16"];
+        var value = JsonNode.Parse(Batch("fm", ids).GetRawText())!.AsObject();
+        value["platform"] = "unused-platform";
+        value["kind"] = new JsonObject { ["unused"] = true };
+        value["count"] = -9;
+        value["recommendations"] = new JsonArray(
+            new JsonObject { ["id"] = ids[0], ["alg"] = "actual-alg", ["source"] = "current" },
+            new JsonObject { ["id"] = "unused", ["alg"] = new JsonArray(1, 2) });
+        value["unused"] = new string('x', 513 * 1024);
+        f.Catalog.Handle = (_, _) => Task.FromResult(J(value));
+        var result = await f.Rec.ExecuteAsync("music.recommendations.start",
+            new { kind = "fm", platform = "wy", extra = new { nested = true } });
+        Check(S(result, "error") == "" &&
+            (await f.Q()).GetProperty("entries").EnumerateArray().Select(row => SongId(row.GetProperty("song"))).SequenceEqual(ids),
+            "native consumes all canonical songs and exact string locators without reapplying an upstream hop budget");
+        Check(f.Rec.GetFeedback(Current(await f.Q()))?.Algorithm == "actual-alg");
     }
     private static async Task ReconcileCancellation()
     {
@@ -1410,19 +1439,21 @@ public static partial class MusicRecommendationTests
     }
     private static async Task NativeCatalog()
     {
-        using var handler = new HttpFixture();
-        await using var clients = new MusicClientContextFixture();
-        using var catalog = MusicPlatformCatalog.CreateWithHandler(new Sessions(), handler, clients.Owner);
-        await using var f = new Fixture(catalog);
+        var handler = new CatalogReply();
+        await using var runtime = new MusicPlatformRuntimeFixture();
+        runtime.Client.BindSessions(new Sessions());
+        runtime.OnRequest = handler.Read;
+        await using var f = new Fixture(runtime.Catalog);
         var result = await f.Start("fm"); Check(S(result, "status") == "ready" && handler.Calls == 1);
         Check(N(await f.Q(), "total") == 2 && f.Rec.GetFeedback(Current(await f.Q())) is { Algorithm: "native-alg" });
     }
     private static async Task NativeHttpDrain()
     {
-        using var handler = new HttpFixture { Release = NewSignal() };
-        await using var clients = new MusicClientContextFixture();
-        using var catalog = MusicPlatformCatalog.CreateWithHandler(new Sessions(), handler, clients.Owner);
-        await using var f = new Fixture(catalog);
+        var handler = new CatalogReply { Release = NewSignal() };
+        await using var runtime = new MusicPlatformRuntimeFixture();
+        runtime.Client.BindSessions(new Sessions());
+        runtime.OnRequest = handler.Read;
+        await using var f = new Fixture(runtime.Catalog);
         var start = f.Start("fm"); await handler.Entered.Task;
         var close = f.Rec.PrepareCloseAsync();
         try
@@ -1604,19 +1635,20 @@ public static partial class MusicRecommendationTests
         public ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken ct) => ValueTask.FromResult<MusicPlatformSession?>(value);
         public bool IsCurrent(MusicPlatformSession session) => ReferenceEquals(session, value);
     }
-    private sealed class HttpFixture : HttpMessageHandler
+    private sealed class CatalogReply
     {
         internal int Calls;
         internal readonly TaskCompletionSource Entered = NewSignal(), Cancelled = NewSignal();
         internal TaskCompletionSource? Release;
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken ct)
         {
-            Calls++; Check(request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath.EndsWith("/v1/radio/get", StringComparison.Ordinal));
+            Calls++; Check(call.Platform == "wy" && call.Operation == "fm");
             using var registration = ct.Register(() => Cancelled.TrySetResult());
             Entered.TrySetResult(); if (Release is { } signal) await signal.Task;
-            var rows = new[] { "10", "11" }.Select(id => new { id = int.Parse(id), name = "Same title",
-                ar = new[] { new { name = "Artist" } }, al = new { id = 1, name = "Album" }, dt = 180000, alg = "native-alg" });
-            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { code = 200, data = rows }), Encoding.UTF8, "application/json") };
+            return J(new { platform = "wy", kind = "fm", items = new[] { Song("10"), Song("11") },
+                count = 2, empty = false, context = new { },
+                recommendations = new[] { new { id = "10", alg = "native-alg", source = "fm" },
+                    new { id = "11", alg = "native-alg", source = "fm" } } });
         }
     }
 }
@@ -1630,8 +1662,8 @@ internal static class RecommendationTest
     internal static string Current(JsonElement q) => q.GetProperty("currentId").ValueKind == JsonValueKind.Null ? "" : S(q, "currentId");
     internal static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal static JsonElement Song(string id) => MusicSongFixture.Element(MusicSongFixture.Online(
-        "wy", id, "Same title", "Artist", "Album", 180,
-        native: JsonSerializer.SerializeToNode(new { name = "Same title", singer = "Artist", duration = 180 })!.AsObject()));
+        "wy", id, "Track " + id, "Artist", "Album", 180,
+        native: JsonSerializer.SerializeToNode(new { name = "Track " + id, singer = "Artist", duration = 180 })!.AsObject()));
     internal static string SongId(JsonElement song) => MusicSongFixture.NativeId(song);
     internal static JsonElement Batch(string kind, params string[] ids) => J(new { platform = "wy", kind,
         items = ids.Select(Song).ToArray(), count = ids.Length, empty = ids.Length == 0, context = new { },
@@ -1684,7 +1716,7 @@ internal static class RecommendationTest
         private readonly object gate = new();
         internal byte[]? Bytes;
         internal int Writes, Failure;
-        internal Action? AfterRead;
+        internal Action? AfterRead, BeforeWrite;
         internal TaskCompletionSource? Entered, Release;
         public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken ct = default)
         {
@@ -1697,6 +1729,7 @@ internal static class RecommendationTest
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken ct = default)
         {
             Check(ns == MusicLibraryOwner.DocumentNamespace);
+            BeforeWrite?.Invoke();
             if (Release is { } signal) { Entered!.TrySetResult(); await signal.Task; }
             lock (gate)
             {
@@ -1805,6 +1838,7 @@ internal static class RecommendationTest
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken ct = default) => throw new NotSupportedException();

@@ -15,7 +15,7 @@ final class MusicMetadataSettingsViewController: MusicSettingsPageViewController
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         owner = model
         state = model.metadataPreferencesService.map { service in
-            MusicMetadataSettingsModel(service: service) { [weak model] _ in
+            MusicMetadataSettingsModel(service: service, receipts: model.settingsReceipts) { [weak model] _ in
                 model?.scheduleMetadataPreferencesRefresh()
             }
         }

@@ -339,31 +339,51 @@ public static class ArtworkTests
         yield return new("Native artwork last consumer cancels old flight and close awaits its physical completion", () => Sta(async () =>
         {
             var entered = Signal(); var cancelled = Signal(); int calls = 0;
+            var closingEntered = Signal();
             var response = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var closingResponse = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
             byte[] current = Encode("png", 3, 2), stale = Encode("png", 1, 1);
             var handler = new Handler(async (_, token) =>
             {
-                if (Interlocked.Increment(ref calls) != 1) return Reply(current);
+                int call = Interlocked.Increment(ref calls);
+                if (call == 2) return Reply(current);
                 using var registration = token.Register(() => cancelled.TrySetResult());
+                if (call > 2)
+                {
+                    closingEntered.TrySetResult();
+                    return await closingResponse.Task;
+                }
                 entered.TrySetResult();
                 return await response.Task; // Deliberately ignores physical cancellation.
             });
             await using var service = new ArtworkService(handler);
             using var cancellation = new CancellationTokenSource();
             var first = service.AcquireAsync("https://art.example.test/shared", cancellation.Token);
-            await entered.Task; cancellation.Cancel();
-            try { using var unexpected = await first; throw new InvalidOperationException("Expected consumer cancellation"); }
-            catch (OperationCanceledException) { }
-            await cancelled.Task;
-            using var replacement = await service.AcquireAsync("https://art.example.test/shared");
-            using var cached = await service.AcquireAsync("https://art.example.test/shared");
-            Equal(2, handler.Count); Equal(3, replacement.Image.PixelWidth);
-            Check(ReferenceEquals(replacement.Image, cached.Image));
-            var close = service.DisposeAsync().AsTask();
-            Check(!close.IsCompleted && !handler.Disposed);
-            response.SetResult(Reply(stale));
-            await close;
-            Check(handler.Disposed); Equal(3, replacement.Image.PixelWidth);
+            try
+            {
+                await entered.Task; cancellation.Cancel();
+                try { using var unexpected = await first; throw new InvalidOperationException("Expected consumer cancellation"); }
+                catch (OperationCanceledException) { }
+                await cancelled.Task;
+                var replacing = service.AcquireAsync("https://art.example.test/shared");
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Equal(1, handler.Count); Check(!replacing.IsCompleted);
+                response.SetResult(Reply(stale));
+                using var replacement = await replacing;
+                using var cached = await service.AcquireAsync("https://art.example.test/shared");
+                Equal(2, handler.Count); Equal(3, replacement.Image.PixelWidth);
+                Check(ReferenceEquals(replacement.Image, cached.Image));
+                var unfinished = service.AcquireAsync("https://art.example.test/closing");
+                await closingEntered.Task;
+                var close = service.DisposeAsync().AsTask();
+                Check(!close.IsCompleted && !handler.Disposed);
+                closingResponse.SetResult(Reply(stale));
+                await close;
+                try { using var unexpected = await unfinished; throw new InvalidOperationException("Expected close cancellation"); }
+                catch (OperationCanceledException) { }
+                Check(handler.Disposed); Equal(3, replacement.Image.PixelWidth);
+            }
+            finally { response.TrySetResult(Reply(stale)); closingResponse.TrySetResult(Reply(stale)); }
         }));
         yield return new("Native artwork cache eviction preserves pinned visuals and admits fresh images", () => Sta(async () =>
         {

@@ -5,56 +5,54 @@ import MeowJSON
 @testable import MeowMusicPlatform
 
 final class MusicNativeAccountAudioTests: XCTestCase {
-    private func candidate(expiry: JSONValue? = .null) -> [String: JSONValue] {
-        var value: [String: JSONValue] = [
-            "url": .string("https://media.example.invalid/synthetic.flac"),
-            "qualityVerified": .bool(false)
-        ]
+    private func candidate(expiry: JSONValue? = .null) -> JSONValue {
+        var value: [String: JSONValue] = ["url": .string("https://media.example.invalid/synthetic.flac")]
         value["expiresAt"] = expiry
-        return value
+        return .object(value)
     }
 
-    func testExplicitNullPreservesUnknownURLLifetimeWithoutInventingTTL() throws {
-        let audio = try MusicPlatformJSON.nativeAccountAudio(candidate())
-        XCTAssertNil(audio.expiresAt)
-        XCTAssertTrue(audio.headers.isEmpty)
-        XCTAssertEqual(audio.url.absoluteString, "https://media.example.invalid/synthetic.flac")
+    func testAbsentAndNullLifetimeStayUnknownWithoutInventingTTL() throws {
+        for expiry: JSONValue? in [nil, .null] {
+            let audio = try MusicNativeAccountURLCache.audio(candidate(expiry: expiry))
+            XCTAssertNil(audio.expiresAt); XCTAssertTrue(audio.headers.isEmpty)
+            XCTAssertEqual(audio.url.absoluteString, "https://media.example.invalid/synthetic.flac")
+        }
     }
 
-    func testQQAndNeteaseNumericMillisecondsKeepExistingDecoding() throws {
-        for milliseconds in [0.0, 1_700_000_000_250.0, Double(MusicPlatformJSON.maximumInteger)] {
-            let audio = try MusicPlatformJSON.nativeAccountAudio(candidate(expiry: .number(milliseconds)))
+    func testCanonicalMillisecondsRemainExactAtTheConsumer() throws {
+        for milliseconds in [1_700_000_000_250.0, 1_800_000_000_125.0] {
+            let audio = try MusicNativeAccountURLCache.audio(candidate(expiry: .number(milliseconds)))
             XCTAssertEqual(try XCTUnwrap(audio.expiresAt).timeIntervalSince1970, milliseconds / 1000)
         }
     }
 
-    func testMissingAndMalformedExpiryRemainErrorsNotUnknownLifetime() {
-        let invalid: [JSONValue?] = [
-            nil, .string("1700000000000"), .bool(false), .array([]), .object([:]),
-            .number(-1), .number(.nan), .number(.infinity), .number(-.infinity),
-            .number(Double(MusicPlatformJSON.maximumInteger) + 1)
-        ]
-        for value in invalid {
-            XCTAssertThrowsError(try MusicPlatformJSON.nativeAccountAudio(candidate(expiry: value))) {
-                XCTAssertEqual($0 as? MusicServiceError, .invalidResponse)
-            }
+    func testUnconsumedFieldsDoNotBecomeMediaGatesOrTransportHeaders() throws {
+        for extra: JSONValue in [.null, .bool(true), .object(["Cookie": .string("synthetic-secret")])] {
+            guard case .object(var fields) = candidate() else { return XCTFail("Fixture") }
+            fields["headers"] = extra; fields["qualityVerified"] = extra; fields["unused"] = extra
+            let audio = try MusicNativeAccountURLCache.audio(.object(fields))
+            XCTAssertTrue(audio.headers.isEmpty)
+            XCTAssertFalse(audio.fileCachePolicy.allowed)
         }
     }
 
-    func testNullableExpiryDoesNotAllowMediaHeadersOrVerificationClaims() {
-        let headers: [JSONValue] = [.null, .object([:]), .object(["X-Synthetic": .string("safe")])]
-        for header in headers {
-            var value = candidate()
-            value["headers"] = header
-            XCTAssertThrowsError(try MusicPlatformJSON.nativeAccountAudio(value)) {
-                XCTAssertEqual($0 as? MusicServiceError, .invalidMediaCandidate)
-            }
+    func testActualQualityAndFullResourceFactsControlDeliveryWithoutMembershipRequests() throws {
+        let value: JSONValue = .object(["url": .string("https://media.example.invalid/full.flac"),
+            "expiresAt": .null, "full": .bool(true), "actualQuality": .string("flac"),
+            "bitrate": .number(900_000), "sampleRate": .number(44_100), "duration": .number(180)])
+        let audio = try MusicNativeAccountURLCache.audio(value)
+        XCTAssertTrue(audio.fileCachePolicy.allowed)
+        XCTAssertEqual(audio.delivery?.quality, "flac"); XCTAssertEqual(audio.duration, 180)
+    }
+
+    func testMissingURLAndCredentialBearingOrNonMediaLocationsRemainFailures() {
+        for value: JSONValue in [.object([:]), .object(["url": .number(123)])] {
+            XCTAssertThrowsError(try MusicNativeAccountURLCache.audio(value))
         }
-        let invalid: [JSONValue?] = [nil, .null, .bool(true), .string("false"), .number(0)]
-        for verified in invalid {
-            var value = candidate()
-            value["qualityVerified"] = verified
-            XCTAssertThrowsError(try MusicPlatformJSON.nativeAccountAudio(value)) {
+        for address in ["file:///private/file.mp3", "https://user:secret@media.invalid/a",
+                        "https://media.invalid/a#fragment", "https://media.invalid/a?MUSIC_U=synthetic",
+                        "https://media.invalid/a?refresh_token=synthetic"] {
+            XCTAssertThrowsError(try MusicNativeAccountURLCache.audio(.object(["url": .string(address)]))) {
                 XCTAssertEqual($0 as? MusicServiceError, .invalidMediaCandidate)
             }
         }

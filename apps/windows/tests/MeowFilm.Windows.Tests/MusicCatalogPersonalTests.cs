@@ -46,17 +46,18 @@ public static partial class MusicCatalogPersonalTests
         foreach (string platform in new[] { "wy", "tx", "kg" })
             yield return Case("personal directory explicit account and complete cursor " + platform, () => DirectoryPages(platform));
         yield return Case("directory filters nullable totals empty intermediate page and failed refresh", DirectoryFilters);
-        yield return Case("KG locator 30-page membership selection survives global sorting", KgMembers);
+        yield return Case("KG repeated source keeps independent member occurrences through full playback", KgMembers);
         yield return Case("owned QQ favorites cannot be saved as a network playlist", QqOwnedFavoritesCannotSaveNetworkReference);
         yield return Case("public QQ playlist saves only a network reference after its first page", QqPublicPlaylistSavesNetworkReference);
-        yield return Case("KG UI navigates past one hundred pages by platform total", LongKg);
+        yield return Case("KG UI consumes a large collection through canonical continuation", LongKg);
         yield return Case("updated private locator cannot restore an old cached revision", LocatorRefresh);
-        yield return Case("private tail failure preserves display and durable queue", TailFailure);
-        yield return Case("duplicate member and changed snapshot cannot publish second page", PageDefects);
+        yield return Case("private complete-read failure preserves display and durable queue", TailFailure);
+        yield return Case("unconsumed membership metadata cannot block a canonical page", PageDefects);
         yield return Case("empty remote playlist saves a network reference and cannot play", EmptyRemotePlaylistReference);
         yield return Case("daily detail style draft readback and native visual frames", DailyStyleDetail);
         yield return Case("daily style admitted save survives editor dismissal", DailyStyleSaveDismissal);
-        yield return Case("daily style save settlement retires pages read during navigation", DailyStyleSaveNavigation);
+        yield return Case("daily style save receipt cannot cancel or overwrite a replacement page", DailyStyleSaveNavigation);
+        yield return Case("daily style retired unknown survives other-account success and clears only on same-account confirmation", DailyStyleUnknownScope);
         yield return Case("daily style full batch saves and replaces only on explicit actions", DailyActions);
         yield return Case("daily entry initialization shares each branch and never changes playback", DailyEntrySummaries);
         yield return Case("channel daily entries initialize songs without hover", ChannelDailySummaries);
@@ -96,7 +97,7 @@ public static partial class MusicCatalogPersonalTests
                     (failed ? "failure" : "success"), () => RecommendationAccountWaitRetirement(restore, failed));
         yield return Case("WPF footer switches only live WY FM and retires old popup buttons", PlaybackFmPopup);
         yield return Case("WPF queue keeps candidates and recovery without an independent continuation switch", QueueCandidateSurface);
-        yield return Case("expired batch blocks actions and navigation rereads instead of stale restore", Expiry);
+        yield return Case("display expiry cannot block an otherwise usable batch action", Expiry);
         yield return Case("account invalidation rejects late response and stale cards", AccountInvalidation);
         yield return Case("private paging reuses first account observation and explicit read is authoritative", AccountReadReuse);
         yield return Case("duplicate private navigation shares one request and isolates caller cancellation", DuplicateNavigation);
@@ -109,7 +110,7 @@ public static partial class MusicCatalogPersonalTests
         yield return Case("unknown batch save retains actual persistence without automatic retry", UnknownSave);
         yield return Case("unsupported routes leave content status and requests untouched", UnsupportedRoutes);
         yield return Case("missing account and device errors remain business states", Errors);
-        yield return Case("partial recommendation batch cannot replace successful content", PartialBatch);
+        yield return Case("unconsumed batch count cannot reject current songs", PartialBatch);
         yield return Case("cached navigation detaches a retired noncooperative catalog read", CachedNavigationRetiresRead);
         yield return Case("ordinary channel cursor cache refresh and cancellation remain intact", LegacyPaging);
         yield return Case("closing while personal read is delayed cannot revive content", CloseRead);
@@ -152,8 +153,8 @@ public static partial class MusicCatalogPersonalTests
         Equal(8L, N(queue, "total"));
         Equal(card.Song!.Id, S(queue.GetProperty("current").GetProperty("song"), "songId"));
         Equal(4, f.App.Last("music.queue.replace").GetProperty("index").GetInt32());
-        Check(queue.GetProperty("entries").EnumerateArray().Select(row => S(row.GetProperty("song"), "songId"))
-            .SequenceEqual(Enumerable.Range(0, 8).Select(i => S(Song("wy", i), "songId"))));
+        Check(queue.GetProperty("entries").EnumerateArray().Select(row => MusicSongFixture.NativeId(row.GetProperty("song")))
+            .SequenceEqual(Enumerable.Range(0, 8).Select(i => Id("wy", i))));
         Equal(1, f.Output.Opens); Check(!card.IsPreparing);
     }
     private static async Task SectionPlaylistQueue()
@@ -175,7 +176,7 @@ public static partial class MusicCatalogPersonalTests
         await using var f = await Fixture.Create(); f.Platform.Total = 5;
         await f.Module.NavigateAsync("catalog-playlist/wy/500", default); await f.Module.PlayCatalogPlaylistAsync();
         var before = await f.Queue();
-        Equal(5L, N(before, "total")); Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(5L, N(before, "total")); Equal(2, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
         Check(!f.Module.HasQueueRecommendations && f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count() == 0);
         await f.Module.NavigateAsync("catalog-search", default);
         Check(!f.Module.HasQueueRecommendations, "browsing search never changes an existing source");
@@ -227,7 +228,7 @@ public static partial class MusicCatalogPersonalTests
             .SequenceEqual(new[] { "action", "expectedVersion", "token" }));
         Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Equal(requests, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
-        Equal(writes + 1, f.Store.LibraryWrites); Equal(opens, f.Output.Opens);
+        Equal(writes + 2, f.Store.LibraryWrites); Equal(opens, f.Output.Opens);
     }
     private static async Task CardLoading()
     {
@@ -684,7 +685,7 @@ public static partial class MusicCatalogPersonalTests
         foreach (string route in new[] { "catalog-home", "catalog-channels", "catalog-personal", "catalog-daily", "catalog-fm" })
             Check(f.Module.Navigation.Any(n => n.Route == route), "navigation " + route);
         await f.Module.NavigateAsync("catalog-daily", default); Layout(f.Module.View);
-        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
         var buttons = Visuals<Button>(f.Module.View).ToArray();
         var more = buttons.Single(b => AutomationProperties.GetName(b) == "每日推荐更多操作");
         Check(more.IsEnabled, "daily batch actions live in the compact more menu");
@@ -743,18 +744,19 @@ public static partial class MusicCatalogPersonalTests
     {
         await using var f = await Fixture.Create(); f.Select("kg");
         await f.OpenPersonalPlaylist();
-        Equal(30, f.Module.Songs.Count); Equal(30, f.Platform.Last<MusicPlaylistRequest>().Limit);
-        await f.Module.CatalogPageAsync(1);
-        var member = f.Module.CatalogSections.Single().Items.Single(c => c.MemberId == "1031");
+        Equal(65, f.Module.Songs.Count); Equal(100, f.Platform.Last<MusicPlaylistRequest>().Limit);
+        var member = f.Module.CatalogSections.Single().Items[31];
         Check(member.ActionId == FirstId("kg"), "equal hash is a distinct member");
         await f.Module.OpenCatalogCardAsync(member);
         var commit = f.App.Last("music.catalog.playlist.commit");
-        Equal("1031", S(commit, "memberId")); Check(!commit.TryGetProperty("index", out _));
+        Equal(FirstId("kg"), S(commit, "memberId")); Equal(1L, N(commit, "memberOccurrence"));
+        Check(!commit.TryGetProperty("index", out _));
         var queue = await f.Queue();
-        Equal(65L, N(queue, "total")); Equal("1031", S(MusicSongFixture.Info(queue.GetProperty("current").GetProperty("song")), "fileid"));
-        var ids = queue.GetProperty("entries").EnumerateArray().Select(e => S(MusicSongFixture.Info(e.GetProperty("song")), "fileid")).ToArray();
-        Equal("1064", ids[0]); Check(ids.Contains("1000") && ids.Contains("1031"));
-        Check(f.Platform.Requests.OfType<MusicPlaylistRequest>().All(r => r.Limit == 30 && r.Personal?.ListId == "42"), "every page keeps locator");
+        var entries = queue.GetProperty("entries").EnumerateArray().ToArray();
+        Equal(65L, N(queue, "total")); Equal(S(entries[31], "id"), S(queue, "currentId"));
+        Equal(S(entries[0].GetProperty("song"), "songId"), S(entries[31].GetProperty("song"), "songId"));
+        Check(S(entries[0], "id") != S(entries[31], "id"), "one repository song, independent queue occurrences");
+        Check(f.Platform.Requests.OfType<MusicPlaylistRequest>().All(r => S(r.Personal!.Value, "listId") == "42"), "every read keeps its opaque locator");
         Equal(1, f.Output.Opens);
     }
     private static async Task QqOwnedFavoritesCannotSaveNetworkReference()
@@ -762,7 +764,7 @@ public static partial class MusicCatalogPersonalTests
         await using var f = await Fixture.Create(); f.Select("tx"); f.Platform.Total = 235;
         await f.OpenPersonalPlaylist(); Equal(100, f.Module.Songs.Count);
         var page = f.Platform.Last<MusicPlaylistRequest>();
-        Equal("favorites", page.Id); Equal("201", page.Personal!.ListId);
+        Equal("favorites", page.Id); Equal("201", S(page.Personal!.Value, "listId"));
         Check(!f.Module.ShowsNetworkPlaylistAction && !f.Module.CanSaveNetworkPlaylist,
             "owned QQ favorites cannot be collected as a network playlist");
         int requests = f.Platform.Requests.Count;
@@ -772,8 +774,8 @@ public static partial class MusicCatalogPersonalTests
         var snapshot = await f.App.Library.ReadLibrarySyncAsync();
         Equal(0, snapshot.Library.GetProperty("networkPlaylists").GetArrayLength());
         Equal(0, snapshot.Library.GetProperty("collections").EnumerateArray().Count(c => S(c, "kind") == "playlist"));
-        Equal(0, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
-        Equal(0, f.Store.LibraryWrites);
+        Equal(100, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
+        Equal(1, f.Store.LibraryWrites);
     }
     private static async Task QqPublicPlaylistSavesNetworkReference()
     {
@@ -787,20 +789,20 @@ public static partial class MusicCatalogPersonalTests
         var reference = f.Module.NetworkPlaylists.Single();
         Equal("network", reference.Kind); Equal("tx", reference.Platform); Equal("201", reference.RemoteId);
         Equal(235, reference.Count); Check(f.Module.NetworkPlaylistSaved);
-        Equal("已收藏歌单", f.Module.Status); Equal(1, f.Store.LibraryWrites);
+        Equal("已收藏歌单", f.Module.Status); Equal(2, f.Store.LibraryWrites);
         Equal(requests, f.Platform.Requests.Count); Equal(reads, Calls(f, "music.catalog.playlist"));
         Equal(0, Calls(f, "music.catalog.playlist.prepare")); Equal(0, Calls(f, "music.catalog.playlist.commit"));
         var snapshot = await f.App.Library.ReadLibrarySyncAsync();
         Equal(0, snapshot.Library.GetProperty("collections").EnumerateArray().Count(c => S(c, "kind") == "playlist"));
-        Equal(0, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
+        Equal(100, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
     }
     private static async Task LongKg()
     {
         await using var f = await Fixture.Create(); f.Select("kg"); f.Platform.Total = 3001;
         await f.OpenPersonalPlaylist();
-        for (int i = 1; i <= 100; i++) { Check(f.Module.CanCatalogNext, "KG next at page " + i); await f.Module.CatalogPageAsync(1); }
-        Equal("第 101 页", f.Module.CatalogPageText); Equal(3001, f.Module.Songs.Count); Check(!f.Module.CanCatalogNext);
-        Equal(0, f.Store.LibraryWrites);
+        for (int i = 1; i <= 30; i++) { Check(f.Module.CanCatalogNext, "KG next at page " + i); await f.Module.CatalogPageAsync(1); }
+        Equal("第 31 页", f.Module.CatalogPageText); Equal(3001, f.Module.Songs.Count); Check(!f.Module.CanCatalogNext);
+        Equal(31, f.Store.LibraryWrites);
     }
     private static async Task LocatorRefresh()
     {
@@ -809,8 +811,8 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.NavigateAsync("catalog-personal", default);
         f.Platform.LocatorVersion = "8"; await f.Module.RefreshCatalogAsync();
         await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections.Single().Items.Single());
-        Equal("8", f.Platform.Last<MusicPlaylistRequest>().Personal!.Version);
-        Check(f.Module.IsCatalogPlaylist && f.Module.Songs.Count == 30, f.Module.Status);
+        Equal("8", S(f.Platform.Last<MusicPlaylistRequest>().Personal!.Value, "version"));
+        Check(f.Module.IsCatalogPlaylist && f.Module.Songs.Count == 65, f.Module.Status);
     }
     private static async Task TailFailure()
     {
@@ -818,7 +820,7 @@ public static partial class MusicCatalogPersonalTests
         await f.OpenPersonalPlaylist(); var first = f.Module.Songs[0];
         await f.App.Library.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("kg", 90) }, index = 0 });
         int writes = f.Store.LibraryWrites;
-        f.Platform.PlaylistChange = r => r.Page == 3 ? Edit(Page(r, f.Platform.Total), n => n["items"] = new JsonArray()) : Page(r, f.Platform.Total);
+        f.Platform.CompleteFailure = "NETWORK_ERROR";
         await f.Module.PlayCatalogPlaylistAsync();
         Equal(writes, f.Store.LibraryWrites); Equal(1L, N(await f.Queue(), "total"));
         Check(ReferenceEquals(first, f.Module.Songs[0])); Equal(0, f.Output.Opens);
@@ -828,16 +830,17 @@ public static partial class MusicCatalogPersonalTests
     {
         foreach (string defect in new[] { "snapshot", "duplicate" })
         {
-            await using var f = await Fixture.Create(); f.Select("kg"); await f.OpenPersonalPlaylist();
-            var before = f.Module.Songs.ToArray();
+            await using var f = await Fixture.Create(); f.Select("kg"); f.Platform.Total = 165; await f.OpenPersonalPlaylist();
+            var before = f.Module.Songs.ToArray(); int writes = f.Store.LibraryWrites;
             f.Platform.PlaylistChange = r => Edit(Page(r, f.Platform.Total), n =>
             {
                 if (defect == "snapshot") n["snapshot"] = new string('c', 64);
-                else n["memberIds"]![0] = "1000";
+                else n["memberIds"] = new JsonArray("same", "same");
             });
             await f.Module.CatalogPageAsync(1);
-            Equal("第 1 页", f.Module.CatalogPageText); Check(before.SequenceEqual(f.Module.Songs));
-            Check(f.Module.Status.Length > 0); Equal(0, f.Store.LibraryWrites);
+            Equal("第 2 页", f.Module.CatalogPageText); Equal(165, f.Module.Songs.Count);
+            Check(before.SequenceEqual(f.Module.Songs.Take(before.Length)), "existing displayed members remain");
+            Equal("", f.Module.Status); Equal(writes + 1, f.Store.LibraryWrites);
         }
     }
     private static async Task EmptyRemotePlaylistReference()
@@ -1070,26 +1073,27 @@ public static partial class MusicCatalogPersonalTests
                     Equal("流行", f.Module.DailyStyleSelectionText);
                     Equal(3, f.Module.Songs.Count);
                 }
+                string currentStatus = f.Module.Status;
                 // The server still returned the pre-write batch above. Settlement now changes it.
                 f.Platform.DailyCount = 5;
                 hold.Release(); await save;
                 if (readHold is not null) { readHold.Release(); await returning; }
                 Equal(1, f.Platform.StyleWrites);
-                if (missingReadback)
+                if (!pendingRead)
                 {
-                    Check(!f.Module.CanCatalogAction && f.Module.Songs.Count == 0,
-                        "settlement revokes old members loaded while the write was pending");
-                    Equal("选择风格", f.Module.DailyStyleSelectionText);
-                    await f.Module.OpenDailyStyleEditorAsync();
-                    Check(!f.Module.CanConfirmDailyStyle, "navigation cannot restore write authority without a real read");
-                    await f.Module.ConfirmDailyStyleAsync(); Equal(1, f.Platform.StyleWrites);
+                    Equal("流行", f.Module.DailyStyleSelectionText);
+                    Equal(3, f.Module.Songs.Count);
+                    Equal(currentStatus, f.Module.Status);
+                    Check(f.Module.CanCatalogAction, "An older save cannot overwrite the replacement page's actual read");
                 }
                 else
                 {
                     Equal("专注", f.Module.DailyStyleSelectionText);
                     Equal(5, f.Module.Songs.Count);
-                    Check(f.Module.CanCatalogAction, "real readback replaces the page read before settlement");
+                    Check(!readHold!.Cancelled.Task.IsCompleted && f.Module.CanCatalogAction,
+                        "The replacement page's physical read completes independently of the retired save");
                 }
+                Check(f.Module.OwnedNotices.Count == 0, "Missing optional readback cannot turn a confirmed write into unknown");
                 await f.Module.NavigateAsync("catalog-daily", default);
                 await f.Module.NavigateAsync("catalog-daily/wy/style", default);
                 Equal("专注", f.Module.DailyStyleSelectionText);
@@ -1106,6 +1110,48 @@ public static partial class MusicCatalogPersonalTests
         }
     }
 
+    private static async Task DailyStyleUnknownScope()
+    {
+        await using var f = await Fixture.Create();
+        f.App.TransformNext("music.device.settings.save", _ => E(new { ok = false, code = "COMMIT_UNKNOWN" }));
+        f.Module.Volume = 32; await f.Module.SaveVolumeAsync();
+        Equal(1, f.Module.OwnedNotices.Count);
+        await f.Module.NavigateAsync("catalog-daily/wy/style", default);
+        await f.Module.OpenDailyStyleEditorAsync();
+        f.Module.ToggleDailyStyleTag(f.Module.DailyStyleGroups.Last().Items.First());
+        var hold = f.Platform.StyleSaveHold = new Held();
+        f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.Unknown;
+        f.Platform.StyleReadbackMissing = true;
+        var saving = f.Module.ConfirmDailyStyleAsync();
+        try
+        {
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await f.Module.NavigateAsync("catalog-daily", default);
+            string status = f.Module.Status;
+            hold.Release(); await saving;
+            Equal(status, f.Module.Status);
+            Equal(2, f.Module.OwnedNotices.Count);
+            Equal(1, f.Platform.StyleWrites);
+            f.Platform.StyleSaveHold = null;
+            f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.Confirmed;
+            foreach (string account in new[] { "43", "42" })
+            {
+                f.App.AccountUserId = account; f.App.AccountGeneration++;
+                f.Platform.EditorUserId = account;
+                await f.Module.ReadAccountsAsync();
+                await f.Module.NavigateAsync("catalog-daily/wy/style", default);
+                Check(f.Module.OwnedNotices.Count == 2, "A current read cannot acknowledge either unknown");
+                await f.Module.OpenDailyStyleEditorAsync();
+                await f.Module.ConfirmDailyStyleAsync();
+                Equal(account == "43" ? 2 : 1, f.Module.OwnedNotices.Count);
+            }
+            Check(f.Platform.StyleWrites == 3, "Unknown writes are never replayed automatically");
+            f.Module.Volume = 33; await f.Module.SaveVolumeAsync();
+            Equal(0, f.Module.OwnedNotices.Count);
+        }
+        finally { hold.Release(); await saving; }
+    }
+
     private static async Task DailyActions()
     {
         await using var f = await Fixture.Create();
@@ -1113,7 +1159,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(MusicDailyBranch.Default, f.Platform.Last<MusicDailyRequest>().Branch);
         f.Module.CatalogDailyBranch = "style"; await f.Module.CatalogOptionsChangedAsync();
         Equal(MusicDailyBranch.Style, f.Platform.Last<MusicDailyRequest>().Branch);
-        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
         await f.Module.SaveCatalogPlaylistAsync(); Equal(3L, N(await f.Detail(), "total"));
         await f.Module.PlayCatalogPlaylistAsync();
         Equal(3L, N(await f.Queue(), "total")); Equal(1, f.Output.Opens);
@@ -1158,7 +1204,7 @@ public static partial class MusicCatalogPersonalTests
             .ToHashSet().SetEquals([MusicDailyBranch.Default, MusicDailyBranch.Style]));
         Check(!f.Platform.Requests.OfType<MusicPlaylistRequest>().Any(), "ordinary playlists stay lazy");
         Check(!f.Platform.Requests.OfType<MusicFmRequest>().Any(), "summary does not start a radio session");
-        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens); Equal(0L, N(await f.Queue(), "total"));
+        Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens); Equal(0L, N(await f.Queue(), "total"));
         CheckNoDisplayEnrichment(f);
         int calls = f.Platform.Requests.Count;
         await f.Module.NavigateAsync("favorites", default);
@@ -1178,7 +1224,7 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.CatalogEntryInitialization;
         Equal(3, card.PreviewSongs.Count);
         Equal(1, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
-        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
         CheckNoDisplayEnrichment(f);
     }
     private static async Task SuppliedDailySummaries()
@@ -1219,7 +1265,7 @@ public static partial class MusicCatalogPersonalTests
             await f.Module.CatalogEntryInitialization;
             Equal(3, f.Module.CatalogSections.Single().Items.First().PreviewTitles.Count);
             Equal(2, f.App.Log.Count(call => call.Method == "music.catalog.daily"));
-            Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+            Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
         }
     }
     private static async Task RetiredDailySummary()
@@ -1241,7 +1287,7 @@ public static partial class MusicCatalogPersonalTests
         Check(!closing.IsCompleted && !old.IsCompleted, "close retains the noncooperative physical summary receipt");
         held.Release(); await old; await closing;
         Check(ReferenceEquals(published, f.Module.CatalogSections.Single()), "late summary must not replace the new page");
-        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
     }
     private static async Task DailySummaryExpiry()
     {
@@ -1258,7 +1304,7 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.NavigateAsync("catalog-home", default);
         Equal(1, f.Platform.Requests.OfType<MusicHomeRequest>().Count());
         Equal(1, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
-        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
     }
     private static void CheckNoDisplayEnrichment(Fixture f) =>
         Check(!f.App.Log.Any(call => call.Method.StartsWith("music.official.", StringComparison.Ordinal) ||
@@ -1270,7 +1316,7 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.NavigateAsync("catalog-fm", default);
         f.Module.CatalogFmMode = "scene"; f.Module.CatalogFmScene = "FOCUS"; await f.Module.CatalogOptionsChangedAsync();
         var fm = f.Platform.Last<MusicFmRequest>(); Equal(MusicFmMode.Scene, fm.Mode); Equal("FOCUS", fm.Submode);
-        await f.Module.RefreshCatalogAsync(); Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        await f.Module.RefreshCatalogAsync(); Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
         f.Platform.HomeActions = [new { id = "rule", name = "规则 FM", available = true, action = new { type = "fm", ruleId = "71" } }];
         await f.Module.NavigateAsync("catalog-home", default);
         await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections.Single().Items.Single());
@@ -1284,7 +1330,7 @@ public static partial class MusicCatalogPersonalTests
         var first = FirstSong(f); Check(first.CanSimilar && first.CanAlbum && first.ActionId != first.Id);
         await f.Module.SimilarCatalogCardAsync(first);
         Equal(first.ActionId, f.Platform.Last<MusicSimilarRequest>().SourceIds.Single());
-        Equal(1, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(2, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
         var similarQueue = await f.Queue();
         Equal(3L, N(similarQueue, "total"));
         Equal(FirstId("wy"), MusicSongFixture.NativeId(
@@ -1317,7 +1363,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(0, request.Offset);
         var input = f.App.Last("music.recommendations.start");
         Equal("queue", S(input, "kind")); Check(input.GetProperty("restore").GetBoolean());
-        Equal(2, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(4, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
         Equal(S(original, "currentId"), S(await f.Queue(), "currentId"));
     }
 
@@ -1516,7 +1562,7 @@ public static partial class MusicCatalogPersonalTests
         await PlaySearch(f);
         await Until(() => f.Module.HasQueueRecommendations && !f.Module.RecommendationLoading);
         var before = await f.Queue();
-        Equal(1L, N(before, "total")); Equal(writes + 2, f.Store.LibraryWrites);
+        Equal(1L, N(before, "total")); Equal(writes + 3, f.Store.LibraryWrites);
         Equal(1, f.App.Log.Count(call => call.Method == "music.history.recordPlayed"));
         Check(f.Module.HasQueueRecommendations && f.Module.RecommendationContinue);
         Equal(3, f.Module.RecommendationCandidates.Count);
@@ -1538,7 +1584,7 @@ public static partial class MusicCatalogPersonalTests
         var stale = f.Module.RecommendationCandidates[0];
         await f.Module.ChooseRecommendationAsync(candidate);
         var chosen = await f.Queue();
-        Equal(4L, N(chosen, "total")); Equal(writes + 3, f.Store.LibraryWrites); Equal(2, f.Output.Opens);
+        Equal(4L, N(chosen, "total")); Equal(writes + 4, f.Store.LibraryWrites); Equal(2, f.Output.Opens);
         Equal(candidate.Song.Id, S(chosen.GetProperty("current").GetProperty("song"), "songId"));
         Check(chosen.GetProperty("entries").EnumerateArray().Take(1).Select(row => row.GetRawText())
             .SequenceEqual(before.GetProperty("entries").EnumerateArray().Select(row => row.GetRawText())),
@@ -1585,7 +1631,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(1, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Equal("queue", S(f.App.Last("music.recommendations.start"), "kind"));
         var queue = await f.Queue();
-        Equal(1L, N(queue, "total")); Equal(writes + 2, f.Store.LibraryWrites);
+        Equal(1L, N(queue, "total")); Equal(writes + 3, f.Store.LibraryWrites);
         Equal(1, queue.GetProperty("entries").GetArrayLength()); Equal(1, f.Output.Opens);
         Equal(clicked, MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")));
         Equal("search", S(queue.GetProperty("current").GetProperty("context"), "sourceType"));
@@ -1649,7 +1695,7 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.CatalogQueueRecommendationsAsync();
         Check(f.Module.HasQueueRecommendations && f.Module.CanReturnRecommendation,
             "explicit recommendation can enter after admission failure and has its own checkpoint");
-        Equal(4L, N(await f.Queue(), "total")); Equal(writes + 3, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(4L, N(await f.Queue(), "total")); Equal(writes + 4, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
         surface.RootVisual = null;
     }
     private static async Task PausedQueuePreview()
@@ -1668,7 +1714,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(1, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Equal(3, f.Module.RecommendationCandidates.Count);
         Equal(before.GetRawText(), (await f.Queue()).GetRawText());
-        Equal(writes + 2, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
+        Equal(writes + 3, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
         Equal(1, f.App.Log.Count(call => call.Method == "music.history.recordPlayed"));
         Equal(0, f.Output.Resumes);
         Check(!f.Output.IsPlaying, "read-only preview does not resume paused playback");
@@ -2005,11 +2051,11 @@ public static partial class MusicCatalogPersonalTests
     {
         await using var f = await Fixture.Create(); f.Platform.Expired = true;
         await f.Module.NavigateAsync("catalog-daily", default);
-        await f.Module.PlayCatalogPlaylistAsync(); Equal(0, f.Store.LibraryWrites); Equal("内容已过期，请刷新", f.Module.Status);
+        await f.Module.PlayCatalogPlaylistAsync(); Equal(2, f.Store.LibraryWrites); Equal(1, f.Output.Opens);
         int requests = f.Platform.Requests.Count;
         await f.Module.NavigateAsync("favorites", default); f.Platform.Expired = false;
         await f.Module.NavigateAsync("catalog-daily", default);
-        Check(f.Platform.Requests.Count > requests); await f.Module.PlayCatalogPlaylistAsync(); Equal(1, f.Output.Opens);
+        Check(f.Platform.Requests.Count > requests); await f.Module.PlayCatalogPlaylistAsync(); Equal(2, f.Output.Opens);
     }
     private static async Task AccountInvalidation()
     {
@@ -2021,7 +2067,7 @@ public static partial class MusicCatalogPersonalTests
         held.Release(); await loading;
         Equal(0, f.Module.CatalogSections.Count); Equal(0, f.Module.Songs.Count);
         int calls = f.App.Log.Count; await f.Module.OpenCatalogCardAsync(stale);
-        Equal(calls, f.App.Log.Count); Equal(0, f.Store.LibraryWrites);
+        Equal(calls, f.App.Log.Count); Equal(1, f.Store.LibraryWrites);
     }
     private static async Task AccountReadReuse()
     {
@@ -2142,7 +2188,7 @@ public static partial class MusicCatalogPersonalTests
         Equal("保存结果未确认", f.Module.Status);
         Equal(1, f.App.Log.Count(c => c.Method == "music.library.create"));
         await f.App.Library.ReconcileAsync();
-        Equal(3L, N(await f.Detail(), "total")); Equal(1, f.Store.LibraryWrites);
+        Equal(3L, N(await f.Detail(), "total")); Equal(2, f.Store.LibraryWrites);
     }
     private static async Task UnsupportedRoutes()
     {
@@ -2175,7 +2221,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(location, f.Module.CaptureNavigationLocation());
         Check(songs.SequenceEqual(f.Module.Songs), "ignored content keeps the current displayed batch");
         Equal("平台客户端状态不可用", f.Module.Status);
-        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
         f.Select("wy");
         await f.Module.RefreshCatalogAsync();
         Equal("", f.Module.Status);
@@ -2195,10 +2241,10 @@ public static partial class MusicCatalogPersonalTests
     private static async Task PartialBatch()
     {
         await using var f = await Fixture.Create(); await f.Module.NavigateAsync("catalog-daily", default);
-        var first = f.Module.Songs[0];
+        var before = f.Module.Songs.Select(song => song.Id).ToArray();
         f.App.TransformNext("music.catalog.daily", reply => Edit(reply, o => o["count"] = 9));
         await f.Module.RefreshCatalogAsync();
-        Check(ReferenceEquals(first, f.Module.Songs[0])); Equal("平台内容格式无效", f.Module.Status);
+        Check(before.SequenceEqual(f.Module.Songs.Select(song => song.Id))); Equal("", f.Module.Status);
     }
     private static async Task CachedNavigationRetiresRead()
     {
@@ -2263,7 +2309,7 @@ public static partial class MusicCatalogPersonalTests
     private static JsonElement Page(MusicPlaylistRequest r, int total)
     {
         int offset = (r.Page - 1) * r.Limit, count = Math.Max(0, Math.Min(r.Limit, total - offset));
-        bool kg = r.Personal?.Kind == MusicPersonalPlaylistKind.KugouOwned;
+        bool kg = r.Personal is { } personal && S(personal, "kind") == "kugou-owned";
         var p = E(new { platform = r.Platform, id = r.Id, name = "完整歌单", page = r.Page, limit = r.Limit, total,
             snapshot = new string('a', 64), snapshotStrength = r.Platform == "wy" ? "ordered-membership" : "metadata-only",
             more = offset + count < total, continuation = offset + count < total ? new { page = r.Page + 1 } : null,
@@ -2280,12 +2326,13 @@ public static partial class MusicCatalogPersonalTests
             foreach (var item in row["items"]!.AsArray().OfType<JsonObject>()) item["cover_url"] = SampleCover;
         });
         public int StyleWrites;
+        public string EditorUserId = "42";
         public MusicDailyStyleSelection StyleSelection = new("1", new[] { "11" });
         public bool StyleReadbackMissing;
         public Held? StyleSaveHold;
         public Held? StyleReadHold;
         public MusicDailyStyleWriteStatus StyleWriteStatus = MusicDailyStyleWriteStatus.Confirmed;
-        public Task<MusicDailyStyleEditor> OpenDailyStyleEditorAsync(CancellationToken cancellationToken = default) => Task.FromResult(new MusicDailyStyleEditor("fixture-account", 1, "42",
+        public Task<MusicDailyStyleEditor> OpenDailyStyleEditorAsync(CancellationToken cancellationToken = default) => Task.FromResult(new MusicDailyStyleEditor("fixture-account:" + EditorUserId, 1, EditorUserId,
             new[] { new MusicDailyStyleCategory("1", "曲风", new[] { new MusicDailyStyleTag("11", "流行"), new MusicDailyStyleTag("12", "爵士") }),
                 new MusicDailyStyleCategory("2", "场景", new[] { new MusicDailyStyleTag("21", "专注"), new MusicDailyStyleTag("22", "夜晚") }) }));
         private JsonElement StyleBatch() => Edit(Batch("daily", "风格推荐"), row => {
@@ -2311,6 +2358,7 @@ public static partial class MusicCatalogPersonalTests
         public object[]? ChannelDescriptors;
         public bool ChannelTags;
         public Func<MusicPlaylistRequest, JsonElement>? PlaylistChange;
+        public string? CompleteFailure;
         private int fmBatch, queueBatch;
         private FmHold? nextFm;
         private readonly List<FmHold> fmHolds = [];
@@ -2334,6 +2382,12 @@ public static partial class MusicCatalogPersonalTests
         { token.ThrowIfCancellationRequested(); Requests.Enqueue(request); return Task.FromResult(result); }
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) =>
             Result(r, WithSampleArtwork(PlaylistChange?.Invoke(r) ?? Page(r, Total)), t);
+        public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default)
+        {
+            t.ThrowIfCancellationRequested();
+            if (CompleteFailure is { } code) { Requests.Enqueue(r); throw new MusicPlatformException(code); }
+            return Result(r, WithSampleArtwork(Page(r with { Page = 1, Limit = Math.Max(1, Total) }, Total)), t);
+        }
         private static object Cursor(int page) => new { page, provider = new { opaque = "retained", cursor = 42 }, scope = new string('b', 64) };
         public Task<JsonElement> PersonalPlaylistsAsync(MusicPersonalPlaylistsRequest r, CancellationToken t = default)
         {
@@ -2483,8 +2537,20 @@ public static partial class MusicCatalogPersonalTests
             Library = new(store, cacheStore: cache);
             Catalog = new(platform, Library);
             recommendationQueue = new(Library);
-            recommendations = new(platform, recommendationQueue, SelectRecommendationAsync);
-            search = new(platform);
+            recommendations = new(platform, recommendationQueue, SelectRecommendationAsync, readAsync: async (request, token) =>
+            {
+                long observation = Library.BeginSongObservation();
+                var result = await request.ReadAsync(platform, token);
+                token.ThrowIfCancellationRequested();
+                return await Library.AdoptPlatformResultAsync(result, token, observation: observation);
+            });
+            search = new(platform, searchAsync: async (request, token) =>
+            {
+                long observation = Library.BeginSongObservation();
+                var result = await platform.SearchAsync(request, token);
+                token.ThrowIfCancellationRequested();
+                return await Library.AdoptPlatformResultAsync(result, token, observation: observation);
+            }) { SongFactsProjection = value => Library.ProjectRepository(value, MusicLibraryOwner.PlatformSongShape.Page) };
         }
         public override event Action<JsonElement>? SearchChanged
         {
@@ -2603,6 +2669,7 @@ public static partial class MusicCatalogPersonalTests
         }
         public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
+            long observation = Library.BeginSongObservation();
             var p = E(parameters ?? new { }); Log.Enqueue(new(method, p, Authenticated, AccountGeneration));
             holds.Remove(method, out var held); transforms.Remove(method, out var transform);
             if (held.Hold is not null && held.Before) await held.Hold.Wait(cancellationToken);
@@ -2686,6 +2753,17 @@ public static partial class MusicCatalogPersonalTests
             else result = await recommendationQueue.ExecuteAsync(method, p, cancellationToken);
             if (held.Hold is not null && !held.Before) await held.Hold.Wait(cancellationToken);
             var reply = transform is null ? result : transform(result);
+            if (transform is not null && method.StartsWith("music.catalog.", StringComparison.Ordinal) &&
+                reply.TryGetProperty("ok", out var okay) && okay.ValueKind == JsonValueKind.True)
+                reply = await Library.AdoptPlatformResultAsync(reply, cancellationToken, observation: observation,
+                    shape: method switch
+                    {
+                        "music.catalog.song" => MusicLibraryOwner.PlatformSongShape.SongDetail,
+                        "music.catalog.search" => MusicLibraryOwner.PlatformSongShape.Page,
+                        "music.catalog.describe" or "music.catalog.channels" or "music.catalog.chorus" =>
+                            MusicLibraryOwner.PlatformSongShape.None,
+                        _ => MusicLibraryOwner.PlatformSongShape.Catalog
+                    });
             held.Hold?.Delivered.TrySetResult();
             return reply;
         }
@@ -2721,7 +2799,7 @@ public static partial class MusicCatalogPersonalTests
         private Store? cacheBacking;
         public Store CacheBacking => cacheBacking ??= new();
         public ConcurrentQueue<string> Reads { get; } = new();
-        public int LibraryWrites;
+        public int LibraryWrites, QueueWrites;
         public bool UnknownAfterNextLibraryWrite;
         public bool FailReads, FailWrites, HoldWrites;
         public readonly TaskCompletionSource WriteEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2744,6 +2822,13 @@ public static partial class MusicCatalogPersonalTests
             {
                 var previous = data.TryGetValue(ns, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
                 if (previous != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
+                if (ns == MusicLibraryOwner.DocumentNamespace)
+                {
+                    static JsonNode? Queue(byte[]? document) => document is null ? null :
+                        JsonNode.Parse(document)!["entries"]!.AsArray().Select(entry => entry!["value"])
+                            .FirstOrDefault(area => area is JsonObject obj && obj.ContainsKey("currentId") && obj.ContainsKey("priority"));
+                    if (!JsonNode.DeepEquals(Queue(bytes), Queue(value.ToArray()))) QueueWrites++;
+                }
                 data[ns] = value.ToArray();
                 if (ns == MusicLibraryOwner.DocumentNamespace)
                 {

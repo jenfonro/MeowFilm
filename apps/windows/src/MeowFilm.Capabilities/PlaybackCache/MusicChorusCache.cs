@@ -8,7 +8,7 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 
 internal sealed class MusicChorusCache(CacheDocumentStore store, TimeProvider? time = null)
 {
-    internal const string Namespace = "music.chorus.v1";
+    internal const string Namespace = "music.chorus.v2";
     private const int MaximumBytes = 65536, MaximumEntries = 100;
     private const long Ttl = 30L * 86400000;
     private readonly SemaphoreSlim gate = new(1, 1);

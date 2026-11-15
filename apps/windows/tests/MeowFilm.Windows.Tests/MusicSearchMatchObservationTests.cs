@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Search;
 using MeowFilm.Platform.Storage;
@@ -80,9 +81,9 @@ public static class MusicSearchMatchObservationTests
             Check(State(first, "tx").GetProperty("page").GetInt32() == 0 &&
                 Text(State(first, "tx"), "error") == "" && CheckedAt(first, "tx") == 0 && Loading(State(first, "tx")),
                 "UNCHECKED_PLATFORM_LOOKED_SUCCESSFUL");
-            Check(first.GetProperty("items")[0].EnumerateObject().Select(field => field.Name).ToHashSet()
-                .SetEquals(["songId", "title", "artist", "album", "duration", "cover_url", "sources"]),
-                "OBSERVATION_CHANGED_SONG_CONTRACT");
+            Check(Guid.TryParseExact(Text(first.GetProperty("items")[0], "songId"), "D", out _) &&
+                f.Library.SongSnapshot(Text(first.GetProperty("items")[0], "songId")) is not null,
+                "OBSERVATION_DID_NOT_REFERENCE_THE_REPOSITORY");
             f.Clock.Advance(TimeSpan.FromMilliseconds(100));
             long emptyCheck = f.Clock.GetUtcNow().ToUnixTimeMilliseconds();
             tx.TrySetResult();
@@ -214,15 +215,13 @@ public static class MusicSearchMatchObservationTests
 
     private static async Task KnownEmpty()
     {
-        await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var cacheStore = new CacheDocumentStore(store);
-        await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(store);
         await using var f = new Fixture();
+        await using var cacheStore = new CacheDocumentStore(f.Store);
         int supplements = 0;
-        var facts = new MeowFilm.Capabilities.Library.MusicSongMatcher(library, new(cacheStore), (request, _) =>
+        var facts = new MusicSongMatcher(f.Library, new(cacheStore), (request, _) =>
         { supplements++; return Task.FromResult(Page(request, [])); }, f.Clock);
         var song = MusicSongFixture.Online("wy", "known", "Focused", "Artist", duration: 180);
-        await facts.KnownAsync(song, default);
+        song = await facts.KnownAsync(song, default);
         f.Catalog.Handler = (request, _) => Task.FromResult(Page(request, []));
         f.Search.MatchingObserved += value => facts.ObserveSearch(value,
             platform => MeowFilm.Capabilities.Library.NativeMusicSong.Hash("observation:" + platform));
@@ -236,15 +235,13 @@ public static class MusicSearchMatchObservationTests
 
     private static async Task KnownProjection()
     {
-        await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var cacheStore = new CacheDocumentStore(store);
-        await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(store);
         await using var f = new Fixture();
-        var facts = new MeowFilm.Capabilities.Library.MusicSongMatcher(library, new(cacheStore), (_, _) =>
+        await using var cacheStore = new CacheDocumentStore(f.Store);
+        var facts = new MusicSongMatcher(f.Library, new(cacheStore), (_, _) =>
             throw new InvalidOperationException("search projection cannot supplement"), f.Clock);
         var wy = MusicSongFixture.Online("wy", "original", "Synthetic recording", "Artist", duration: 180);
         var tx = MusicSongFixture.Online("tx", "known-mapping", "Synthetic recording", "Artist", duration: 180);
-        await facts.KnownAsync(wy, default); await facts.KnownAsync(tx, default);
+        wy = await facts.KnownAsync(wy, default); await facts.KnownAsync(tx, default);
         f.Search.SongFactsProjection = facts.ProjectKnownFacts;
         f.Catalog.Handler = (request, _) => Task.FromResult(Page(request, [wy]));
         string id = Id(await f.Start(["wy"]));
@@ -276,15 +273,26 @@ public static class MusicSearchMatchObservationTests
             f.Clock.Advance(TimeSpan.FromMilliseconds(100));
             await f.Call("next", id);
             var pending = await f.Until(id, value => State(value, "wy").GetProperty("page").GetInt32() == 2);
-            Check(HasSource(pending, "tx") && !HasSource(pending, "wy") && Loading(State(pending, "tx")),
-                "OBSERVATION_CHANGED_THE_PUBLIC_ROUND_BARRIER");
+            Check(HasSource(pending, "tx") && HasSource(pending, "wy") &&
+                pending.GetProperty("items").GetArrayLength() == 1 && Loading(State(pending, "tx")),
+                "REPOSITORY_PROJECTION_MUST_UPDATE_FACTS_WITHOUT_INSERTING_OR_REORDERING_ROWS");
             release.TrySetResult();
             var settled = await observed.Until(value => Id(value) == id && !Loading(value) &&
                 value.GetProperty("round").GetInt32() == 2);
+            var published = await f.Call("get", id);
             await f.Search.PrepareShutdownAsync().WaitAsync(TimeSpan.FromSeconds(10));
-            Check(HasSource(settled, "tx") && HasSource(settled, "wy") &&
-                observed.Values.All(value => State(value, "wy").GetProperty("page").GetInt32() < 2 || HasSource(value, "wy")) &&
+            var wy = Observation(settled, "wy", 2);
+            Check(HasSource(Observation(settled, "tx", 1), "tx") && HasSource(wy, "wy") &&
+                Text(wy, "error") == "" &&
+                wy.GetProperty("generation").GetInt64() == Observation(settled, "wy", 1).GetProperty("generation").GetInt64() &&
+                wy.GetProperty("order").GetInt64() > Observation(settled, "wy", 1).GetProperty("order").GetInt64() &&
+                observed.Values.All(value => State(value, "wy").GetProperty("page").GetInt32() < 2 ||
+                    HasSource(Observation(value, "wy", 2), "wy")) &&
                 f.Catalog.Calls.Count == 4, "UNFUSED_SOURCE_CHECK_WAS_PUBLISHED_AS_NO_MATCH");
+            Check(HasSource(published, "tx") && HasSource(published, "wy") &&
+                published.GetProperty("items").GetArrayLength() == 1 &&
+                Text(published.GetProperty("items")[0], "songId") == Text(pending.GetProperty("items")[0], "songId"),
+                "SETTLED_SEARCH_CHANGED_PERMANENT_ID_OR_LOST_CURRENT_REPOSITORY_FACTS");
         }
         finally { release.TrySetResult(); }
     }
@@ -313,9 +321,19 @@ public static class MusicSearchMatchObservationTests
             f.Clock.Advance(TimeSpan.FromMilliseconds(100));
             long checkedAt = f.Clock.GetUtcNow().ToUnixTimeMilliseconds();
             await f.Call("next", id);
-            var fresh = await observed.Until(value => Id(value) == id && !Loading(value) && HasSource(value, "wy"));
+            var fresh = await observed.Until(value => Id(value) == id && !Loading(value) &&
+                value.GetProperty("observations").EnumerateArray().Any(row => Text(row, "platform") == "wy" &&
+                    row.GetProperty("generation").GetInt64() == 1 && Text(row, "error") == "" && HasSource(row, "wy")));
+            var wy = Observation(fresh, "wy", 1);
             Check(CheckedAt(fresh, "wy") == checkedAt && Text(State(fresh, "wy"), "error") == "" &&
+                wy.GetProperty("checkedAt").GetInt64() == checkedAt &&
+                wy.GetProperty("order").GetInt64() > Observation(invalidated, "tx", 1).GetProperty("order").GetInt64() &&
                 f.Catalog.Calls.Count == 3, "FRESH_ACCOUNT_CHECK_WAS_DROPPED_OR_REUSED_INVALID_CACHE");
+            var published = await f.Call("get", id);
+            Check(HasSource(published, "tx") && HasSource(published, "wy") &&
+                published.GetProperty("items").GetArrayLength() == 1 &&
+                Text(published.GetProperty("items")[0], "songId") == Text(invalidated.GetProperty("items")[0], "songId"),
+                "FRESH_ACCOUNT_SEARCH_LOST_CURRENT_FACTS_OR_CHANGED_THE_RETAINED_RECORDING");
         }
         finally { release.TrySetResult(); }
     }
@@ -503,8 +521,20 @@ public static class MusicSearchMatchObservationTests
     {
         internal readonly Clock Clock = new();
         internal readonly Catalog Catalog = new();
+        internal readonly MusicOfficialAudioTests.MemoryStore Store = new();
+        internal readonly MusicLibraryOwner Library;
         internal readonly MusicSearchCoordinator Search;
-        internal Fixture() => Search = new(Catalog, Clock);
+        internal Fixture()
+        {
+            Library = new(Store);
+            Search = new(Catalog, Clock, async (request, token) =>
+            {
+                long observation = Library.BeginSongObservation();
+                var page = await Catalog.SearchAsync(request, token);
+                token.ThrowIfCancellationRequested();
+                return await Library.AdoptPlatformResultAsync(page, token, observation: observation);
+            }) { SongFactsProjection = value => Library.ProjectRepository(value, MusicLibraryOwner.PlatformSongShape.Page) };
+        }
         internal Task<JsonElement> Start(string[] platforms, string kind = "songs", string keyword = "matching", int pages = 1) =>
             Search.ExecuteAsync("music.search.start", new { keyword, kind, platforms, pages, concurrency = 1, cacheMinutes = 60 });
         internal Task<JsonElement> Call(string method, string id) => Search.ExecuteAsync("music.search." + method, new { id });
@@ -521,7 +551,8 @@ public static class MusicSearchMatchObservationTests
             }
             finally { Search.Changed -= Updated; }
         }
-        public ValueTask DisposeAsync() => Search.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        { await Search.DisposeAsync(); await Library.DisposeAsync(); await Store.DisposeAsync(); }
     }
 
     private sealed class Clock : TimeProvider
@@ -548,6 +579,7 @@ public static class MusicSearchMatchObservationTests
         private static Task<JsonElement> Unused() => throw new InvalidOperationException("UNEXPECTED_NON_SEARCH_CALL");
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Unused();
+        public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default) => Unused();

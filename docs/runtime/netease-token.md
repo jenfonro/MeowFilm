@@ -1,13 +1,13 @@
 # 网易订阅实时 token
 
-`netease@0.1.0`／`netease.token.v1` 只提供 Watchman Web SDK 的实时 token。账号 Cookie、订阅／退订的远端 ID、平台 HTTP 请求及未知写结果围栏仍由原生账号和曲库同步所有者管理。
+`netease@0.1.0`／`netease.token.v1` 只提供 Watchman Web SDK 的实时 token。平台 wire／HTTP 请求由共同 `music-platform` 执行；原生账号和曲库同步所有者仍负责账号安全保存、最终授权发布、本地同步计划及未知写结果围栏。
 
 ## 契约
 
 - `netease.token.get` → `POST /v1/netease/get`，输入严格为 `{}`。
 - 成功：`{ok:true,contract:"netease.token.v1",value:{token}}`。token 非空且为合法 cookie-octet；不接受 Cookie、账号标识、SDK URL 或脚本输入。
 - 失败码：`INVALID_REQUEST`、`CLOSED`、`CANCELLED`、`TIMEOUT`、`NETWORK_ERROR`、`UPSTREAM_HTTP`、`UPSTREAM_FORMAT`、`SDK_FAILURE`、`SDK_CLEANUP`。不返回 SDK 异常文本或原始响应。
-- iOS／Windows App 按 `music,cat,source,pan,tmdb,douban,film,netease` 顺序精确装配八模块；`connectFilmPlayback` 完成后追加本模块。通用 `createRuntime()` 默认仍为原三个脚本模块，受信装配可使用导出的 `createNeteaseTokenModule()`；不隐式启用 token，也不接受旧 App 清单回退。
+- iOS／Windows App 按 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 顺序精确装配九模块；`connectFilmPlayback` 完成后追加本模块，再供[音乐平台](music-platform.md)借用 token 能力。通用 `createRuntime()` 默认仍为原三个脚本模块，受信装配可使用导出的 `createNeteaseTokenModule()`；不隐式启用 token，也不接受旧 App 清单回退。
 
 ## 生命周期与信任边界
 
@@ -17,8 +17,8 @@
 
 同一运行器复用 SDK 实例，取 token 串行执行，但每次调用 SDK 生成新 token，不缓存 token、不落盘、不记录 SDK 控制台。排队取消只移除该请求；正在执行时取消、45 秒超时、SDK 失败或协议异常会终止所属 Worker，实际退出后才处理下一项。关闭拒绝未完成请求并等待 Worker 释放；清理失败不继续复用资源。下次合法请求可以重新初始化，原生不得自动重放已派发订阅。
 
-## 原生消费
+## 业务消费
 
-网易订阅／退订使用真实歌单 ID，token 进入 EAPI 加密 `header["X-antiCheatToken"]` 及对应 Cookie 头。原生获取 token 后重新核对账号、同步授权和取消；失败或过期授权不发送写请求。已派发写操作仍由完整账号目录读回确认，HTTP 成功不代替订阅状态确认。
+共同音乐模块在网易 `sync.prepare` 中借用本 owner，token 留在 Node，原生只取得短期 preparationId。订阅／退订使用真实歌单 ID，token 进入 EAPI 加密 `header["X-antiCheatToken"]` 及对应 Cookie 头。实际写入仍关联原账号、同步授权和取消；派发前失效不发送写请求，已派发写操作由事务 owner 读回目标状态，HTTP 成功不代替订阅确认。
 
 替身协议测试、真实无账号 SDK 获取和真实账号订阅是不同证据；不使用真实账号写入验证此模块。

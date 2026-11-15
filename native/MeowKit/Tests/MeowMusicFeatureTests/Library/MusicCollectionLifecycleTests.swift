@@ -29,14 +29,15 @@ final class MusicCollectionLifecycleTests: XCTestCase {
         XCTAssertEqual(try page.sourceTrack(track, presentationID: stamp), track)
         for wrong in [
             MusicRemoteTrack(ref: .init(kind: .library, id: "absent"), songId: track.songId, title: track.title),
-            MusicRemoteTrack(ref: track.ref, songId: "another", title: track.title),
-            MusicRemoteTrack(ref: track.ref, songId: track.songId, title: track.title,
-                sources: [.init(sourceKey: "wy", platform: "wy", nativeId: "another")])
+            MusicRemoteTrack(ref: track.ref, songId: "another", title: track.title)
         ] {
             XCTAssertThrowsError(try page.sourceTrack(wrong, presentationID: stamp)) {
                 XCTAssertEqual($0 as? MusicServiceError, .staleResult)
             }
         }
+        let sameReference = MusicRemoteTrack(ref: track.ref, songId: track.songId, title: track.title,
+            sources: [.init(sourceKey: "wy", platform: "wy", nativeId: "another")])
+        XCTAssertEqual(try page.sourceTrack(sameReference, presentationID: stamp), track)
         let counts = await service.statistics()
         XCTAssertEqual(counts.tracks, 1); XCTAssertEqual(counts.writes, 0); XCTAssertEqual(counts.queueWrites, 0)
         XCTAssertTrue(player.resources.isEmpty); XCTAssertTrue(model.queue.isEmpty)

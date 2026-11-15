@@ -18,9 +18,8 @@ public sealed class MusicPlatformSession
 {
     public MusicPlatformSession(string platform, string scope, long generation, string userId, string cookie)
     {
-        if (platform is not ("wy" or "tx" or "kg") || string.IsNullOrEmpty(scope) || scope.Length > 256 ||
-            generation < 0 || string.IsNullOrEmpty(userId) || userId.Length > 64 ||
-            string.IsNullOrEmpty(cookie) || cookie.Length > 16384)
+        if (platform is not ("wy" or "tx" or "kg") || string.IsNullOrEmpty(scope) ||
+            generation < 0 || string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(cookie))
             throw new ArgumentException("INVALID_SESSION");
         Platform = platform;
         Scope = scope;
@@ -41,23 +40,18 @@ public enum MusicPersonalListKind { All, Created, Subscribed }
 public enum MusicDailyBranch { Default, Style }
 public enum MusicFmMode { Default, Familiar, Explore, Puzzle, Scene }
 public enum MusicHeartbeatEntry { Favorites, CurrentSong }
-public enum MusicPersonalPlaylistKind { QqFavorites, KugouOwned }
-
-/// <summary>Account-bound directory locator, not credentials or a transferable authorization token.</summary>
-public sealed record MusicPersonalPlaylistLocator(string Scope, MusicPersonalPlaylistKind Kind, string ListId,
-    long? Total = null, string? Version = null, string? Name = null);
 
 /// <summary>
-/// Page is the first native page, Limit the platform page size. Pages &gt; 1 is a single
-/// offset request spanning several pages, allowed only where <see cref="MusicSearchPaging"/> says so.
+/// Page is the first native page, Limit the platform page size. Pages &gt; 1 lets
+/// an offset recipe span several pages; <see cref="MusicSearchPaging"/> supplies UI defaults.
 /// </summary>
 public sealed record MusicSearchRequest(string Platform, string Keyword,
     MusicSearchKind Kind = MusicSearchKind.Songs, int Page = 1, int Limit = 30, bool Refresh = false, int Pages = 1);
 
 /// <summary>
 /// Platform search adapter: what one "page" means for a platform. Page-numbered platforms
-/// send one request per page; offset platforms may cover several pages with one request
-/// of at most <see cref="MaxItemsPerRequest"/> items.
+/// send one request per page; offset platforms may cover several pages with one request.
+/// This selects the existing UI batch, not an admission limit on catalog requests.
 /// </summary>
 public sealed record MusicSearchPaging(int PageSize, int PagesPerRequest)
 {
@@ -70,7 +64,7 @@ public sealed record MusicSearchPaging(int PageSize, int PagesPerRequest)
 }
 public sealed record MusicSongRequest(string Platform, string Id, bool Refresh = false);
 public sealed record MusicPlaylistRequest(string Platform, string Id, int Page = 1, int Limit = 100,
-    string? Snapshot = null, bool Refresh = false, MusicPersonalPlaylistLocator? Personal = null);
+    bool Refresh = false, JsonElement? Personal = null, JsonElement? Continuation = null);
 public sealed record MusicHomeRequest(string Platform, JsonElement? Continuation = null, bool Refresh = false);
 public sealed record MusicChannelsRequest(string Platform, bool Refresh = false);
 public sealed record MusicChannelRequest(string Platform, string Id, string? PageCode = null,
@@ -94,10 +88,10 @@ public sealed record MusicAlbumRequest(string Platform, string Id, bool Refresh 
 public sealed record MusicArtistRequest(string Platform, string Id, bool Refresh = false);
 
 /// <summary>
-/// Native-built catalog JSON retains the existing UI's song/card/page shapes.
+/// Shared Node catalog JSON retains the existing UI's song/card/page shapes.
 /// Cookie/session objects never appear in results. Each call is explicitly targeted.
 /// Personal batches do not start playback, background polling or cloud writes.
-/// The native catalog owns admitted reads; caller cancellation only unsubscribes.
+/// The Node platform owner owns admitted reads; caller cancellation only unsubscribes.
 /// Timeout, account invalidation and service disposal retain physical cancellation.
 /// </summary>
 public interface IMusicPlatformCatalog : IDisposable
@@ -105,6 +99,7 @@ public interface IMusicPlatformCatalog : IDisposable
     Task<JsonElement> SearchAsync(MusicSearchRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> SongAsync(MusicSongRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> PlaylistAsync(MusicPlaylistRequest request, CancellationToken cancellationToken = default);
+    Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> HomeAsync(MusicHomeRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> ChannelsAsync(MusicChannelsRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> ChannelAsync(MusicChannelRequest request, CancellationToken cancellationToken = default);

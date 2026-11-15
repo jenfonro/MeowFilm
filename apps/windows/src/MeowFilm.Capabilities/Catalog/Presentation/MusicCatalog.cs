@@ -73,7 +73,7 @@ public sealed partial class MusicCapability
     private int catalogPage = 1;
     private JsonElement? catalogContinuation;
     private readonly List<JsonElement?> catalogCursors = [null];
-    private string catalogQuery = "", catalogLoadedPlatform = "", catalogSnapshot = "", catalogTag = "", catalogPageCode = "",
+    private string catalogQuery = "", catalogLoadedPlatform = "", catalogTag = "", catalogPageCode = "",
         catalogArtwork = "";
     private string catalogLoadedKind = "歌曲";
     private int? catalogSummaryCount;
@@ -85,12 +85,12 @@ public sealed partial class MusicCapability
     private readonly Dictionary<string, string> catalogChannelCodes = [];
     private readonly Dictionary<int, CatalogPageState> catalogPages = [];
     private sealed record CatalogPageState(MusicCatalogSection[] Sections, MusicCatalogTag[] Tags,
-        string Tag, string Snapshot, string Title, string Artwork, bool More, JsonElement? Next, int Total, double Scroll = 0,
+        string Tag, string Title, string Artwork, bool More, JsonElement? Next, int Total, double Scroll = 0,
         CatalogTarget? Target = null, string AccountStamp = "", long? ExpiresAt = null, JsonElement? DailySelection = null);
     private sealed record CatalogLocation(string Route, string Platform, string Query, string Kind, string PageCode,
         int Page, Dictionary<int, CatalogPageState> Pages, JsonElement?[] Cursors);
     private sealed record CatalogLoadKey(string Route, string Query, int Number, string Continuation,
-        bool Refresh, string Tag, string Platform, string Kind, string PageCode, string Snapshot, long AccountEpoch,
+        bool Refresh, string Tag, string Platform, string Kind, string PageCode, long AccountEpoch,
         long AccountObservation,
         string TargetOperation, string TargetPlatform, string TargetTitle, string TargetParameters);
     private sealed record CatalogLoadRequest(CatalogLoadKey Key, JsonElement? Continuation, CatalogTarget? Target);
@@ -209,9 +209,13 @@ public sealed partial class MusicCapability
         }
         if (card.Song is not null)
         {
-            if (IsCatalogPlaylist) return CatalogPlaylistActionAsync("play",
-                Songs.IndexOf(card.Song), card.Song.Id,
-                card.MemberId.Length > 0 ? card.MemberId : null);
+            if (IsCatalogPlaylist)
+            {
+                int index = Songs.IndexOf(card.Song);
+                int occurrence = Songs.Take(index).Count(song => SongJson.NativeId(song.Raw) == card.MemberId);
+                return CatalogPlaylistActionAsync("play", index, card.Song.Id,
+                    card.MemberId.Length > 0 ? card.MemberId : null, memberOccurrence: occurrence);
+            }
             if (IsCatalogBatch) return CatalogBatchActionAsync("play", Songs.IndexOf(card.Song));
             try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
             return PlayCatalogSectionAsync(card);
@@ -325,7 +329,7 @@ public sealed partial class MusicCapability
             InvalidateCatalogAction();
             location = new(IsCatalogHome ? "catalog-home" : "catalog-channels");
             catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
-            catalogLoadedPlatform = catalogSnapshot = catalogTag = catalogPageCode = catalogQuery = catalogArtwork = "";
+            catalogLoadedPlatform = catalogTag = catalogPageCode = catalogQuery = catalogArtwork = "";
             catalogAccountStamp = ""; catalogExpiresAt = null; catalogLoadedTarget = null;
             catalogContinuation = null; catalogMore = false; catalogPage = 1;
             catalogSongs.Clear(); selectedSong = null; total = 0;
@@ -377,7 +381,7 @@ public sealed partial class MusicCapability
             catalogLocations.Clear(); catalogChannelCodes.Clear(); catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
             catalogTargets.Clear(); catalogLoadedTarget = null;
             catalogArtwork = catalogSubtitle = ""; catalogSummaryCount = null; catalogMembersLoaded = false; catalogAccountStamp = ""; catalogExpiresAt = null;
-            catalogSnapshot = catalogTag = catalogPageCode = catalogQuery = ""; catalogContinuation = null; catalogMore = false; catalogPage = 1;
+            catalogTag = catalogPageCode = catalogQuery = ""; catalogContinuation = null; catalogMore = false; catalogPage = 1;
             channelTags.Clear(); utilityTags.Clear(); CatalogTagGroups = [];
             channelSections.Clear(); utilitySections.Clear();
             foreach (var sections in searchSections.Values) sections.Clear();
@@ -467,7 +471,7 @@ public sealed partial class MusicCapability
             catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
             catalogLoadedPlatform = request.Key.Platform; catalogLoadedTarget = request.Target;
             catalogPage = 1; catalogMore = false; catalogContinuation = null;
-            catalogSnapshot = catalogTag = catalogQuery = "";
+            catalogTag = catalogQuery = "";
             catalogArtwork = request.Target?.Artwork ?? "";
             catalogSubtitle = request.Target?.Subtitle ?? "";
             catalogSummaryCount = request.Target?.Count; catalogMembersLoaded = false;
@@ -493,7 +497,7 @@ public sealed partial class MusicCapability
         if (target is not null) platform = target.Platform;
         var cursor = continuation?.Clone();
         var key = new CatalogLoadKey(route, query, number, cursor?.GetRawText() ?? "", refresh, tag,
-            platform, kind, catalogPageCode, catalogSnapshot, accountEpoch, CatalogAccountObservation(platform),
+            platform, kind, catalogPageCode, accountEpoch, CatalogAccountObservation(platform),
             target?.Operation ?? "", target?.Platform ?? "", target?.Title ?? "",
             target?.Parameters.GetRawText() ?? "");
         return new(key, cursor, target);
@@ -601,11 +605,9 @@ public sealed partial class MusicCapability
                 if (operation == "playlist")
                 {
                     parameters["page"] = number; parameters["limit"] = target?.Limit ?? 100;
+                    if (continuation is not null) parameters["continuation"] = continuation.Value;
                     if (target is not null) ApplyCatalogTarget(target, parameters, number, continuation, refresh);
-                    // Target parameters are cloned JsonElements; keep the route identity
-                    // as the same string used by the response identity check below.
                     parameters["id"] = Uri.UnescapeDataString(parts[2]);
-                    if (number > 1) { MusicDto.Require(key.Snapshot.Length > 0); parameters["snapshot"] = key.Snapshot; }
                 }
                 else
                 {
@@ -635,49 +637,22 @@ public sealed partial class MusicCapability
             if (stopping || generation != loadGeneration || key.AccountObservation != CatalogAccountObservation(platform)) return;
             if (accountStamp != CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
             var sections = MusicCatalogDto.Read(reply, platform, operation, title, kind == "歌单" ? "playlists" : "songs").ToArray();
-            ValidatePersonalCatalog(reply, target, sections.Sum(section => section.Items.Count));
-            bool more = reply.TryGetProperty("more", out var hasMore) && hasMore.ValueKind == JsonValueKind.True;
+            bool more = reply.TryGetProperty("more", out var hasMore) && hasMore.GetBoolean();
             JsonElement? next = reply.TryGetProperty("continuation", out var c) && c.ValueKind == JsonValueKind.Object ? c.Clone() : null;
-            var snapshot = MusicCatalogDto.Text(reply, "snapshot");
-            int pageLimit = operation == "playlist" ? target?.Limit ?? 100 : 30;
-            if (operation is "playlist" or "search" or "personalPlaylists")
-            {
-                MusicDto.Require(MusicDto.Integer(reply, "page") == number && MusicDto.Integer(reply, "limit") == pageLimit &&
-                    sections.Sum(s => s.Items.Count) <= pageLimit);
-                if (more) MusicDto.Require(next is not null && MusicDto.Integer(next.Value, "page") == number + 1);
-            }
-            if (operation == "playlist")
-            {
-                MusicDto.Require(MusicCatalogDto.Text(reply, "id") == (string)parameters["id"]! &&
-                    snapshot.Length == 64 && snapshot.All(ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f'));
-                if (number > 1 && snapshot != key.Snapshot) throw new MusicOperationException("SNAPSHOT_CHANGED");
-                var members = sections.SelectMany(s => s.Items).ToArray();
-                if (target?.Limit == 30) MusicDto.Require(members.All(c => c.MemberId.Length > 0));
-                MusicDto.Require(members.Select(c => c.ContentKey).Distinct().Count() == members.Length);
-            }
-            if (operation == "channel" && reply.TryGetProperty("channel", out var descriptor))
-                MusicDto.Require(MusicCatalogDto.Text(descriptor, "id") == (string)parameters["id"]!);
-            if (more && (next is null || operation != "personalPlaylists" && sections.Sum(s => s.Items.Count) == 0 ||
-                number > 1 && catalogCursors.Take(number).Any(old => MusicCatalogDto.CursorKey(old) == MusicCatalogDto.CursorKey(next))))
+            if (more && (next is null ||
+                catalogCursors.Take(number).Any(old => MusicCatalogDto.CursorKey(old) == MusicCatalogDto.CursorKey(next))))
                 throw new MusicOperationException("PAGINATION_STALLED");
             if (number > 1)
             {
-                var oldKeys = catalogPages.Where(p => p.Key < number).SelectMany(p => p.Value.Sections)
-                    .SelectMany(s => s.Items).Select(i => i.ContentKey).ToHashSet();
-                if (operation == "playlist" && sections.SelectMany(s => s.Items).Any(i => oldKeys.Contains(i.ContentKey)))
-                    throw new MusicOperationException("PAGINATION_STALLED");
-                if (sections.SelectMany(s => s.Items).Any() && sections.SelectMany(s => s.Items).All(i => oldKeys.Contains(i.ContentKey)))
-                    throw new MusicOperationException("PAGINATION_STALLED");
                 if (operation is "home" or "channel" or "playlist")
                     sections = MergeCatalogSections(CatalogSections, sections);
             }
             var tags = target?.Operation == "daily" ? Array.Empty<MusicCatalogTag>() : MusicCatalogDto.Tags(reply).ToArray();
             var selected = reply.TryGetProperty("feed", out var feed) && feed.ValueKind == JsonValueKind.Object
                 ? MusicCatalogDto.Text(feed, "selectedTag") : MusicCatalogDto.Text(reply, "selectedTag");
-            if (tag.Length > 0 && selected != tag) throw new MusicOperationException("SNAPSHOT_CHANGED");
             var name = MusicCatalogDto.Text(reply, "name");
             if (name.Length == 0) name = MusicCatalogDto.Text(reply, "title");
-            var state = new CatalogPageState(sections, tags, selected, snapshot, name.Length > 0 ? name : title,
+            var state = new CatalogPageState(sections, tags, selected, name.Length > 0 ? name : title,
                 MusicCatalogDto.Text(reply, "cover"), more, next,
                 reply.TryGetProperty("total", out var sum) && sum.ValueKind != JsonValueKind.Null
                     ? MusicDto.Count(reply, "total") : sections.Sum(s => s.Items.Count),
@@ -790,7 +765,7 @@ public sealed partial class MusicCapability
             else
             {
                 var existing = result[index];
-                var merged = section with { Items = existing.Items.Concat(section.Items).DistinctBy(i => i.Key).ToArray() };
+                var merged = section with { Items = existing.Items.Concat(section.Items).ToArray() };
                 merged.HorizontalOffset = existing.HorizontalOffset;
                 result[index] = merged;
             }
@@ -812,12 +787,14 @@ public sealed partial class MusicCapability
         publishing = true;
         try
         {
+            RefreshCatalogSongs(state.Sections.SelectMany(section =>
+                section.Items.Concat(section.Action is { } action ? [action] : [])));
             location = new(route); heading = state.Title;
             if (route.StartsWith("catalog-channel/", StringComparison.Ordinal))
             { lastChannelRoute = route; channelEntryError = ""; }
             catalogQuery = query; catalogLoadedPlatform = platform; catalogLoadedKind = kind; CatalogSearchKind = kind;
             catalogPage = number; catalogMore = state.More; catalogContinuation = state.Next;
-            catalogSnapshot = state.Snapshot; catalogTag = state.Tag;
+            catalogTag = state.Tag;
             catalogArtwork = state.Artwork.Length > 0 ? state.Artwork : state.Target?.Artwork ?? "";
             catalogSubtitle = state.Target?.Subtitle ?? "";
             catalogSummaryCount = state.Total; catalogMembersLoaded = true;

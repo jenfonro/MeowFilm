@@ -15,13 +15,19 @@
 
 ## 通用外观
 
-- 通用分为“外观”“首页数据源”“缓存控制”三个独立内容区；`MusicHomeSourceSettingsView` 只激活数据源读写生命周期，隐藏时取消并排空源保存，App关闭同样排空。取消关闭会重新读取尚未加载的数据源；读取失败在当前页提供重试，不重放保存或阻断关闭取消。`MusicCacheSettingsView` 复用播放缓存owner与清空确认，不进入音乐账号/脚本管理页，不新增缓存策略。
+- 通用分为“外观”“首页数据源”“缓存控制”三个独立内容区；`MusicHomeSourceSettingsView` 只激活数据源读写生命周期，隐藏时退休页面等待／发布资格，已提交保存仍由稳定 owner 结算，App 关闭同样排空。取消关闭会重新读取尚未加载的数据源；读取失败在当前页提供重试，不重放保存或阻断关闭取消。`MusicCacheSettingsView` 复用播放缓存owner与清空确认，不进入音乐账号/脚本管理页，不新增缓存策略。
 - “通用”位于音乐之前，程序主题与播放器配色分别由 App 与音乐 owner 持有。`MusicAppearanceView` 通过 `IDesktopGeneralSettingsSource` 贡献到通用外观；只读取外观，不激活账号、来源或整页音乐设置。旧音乐外观栏目与选择处理器已移除，歌单网格／列表偏好一起迁移入口，原存储值不变。
 - 播放器保留跟随歌曲／固定配色、原预设及原生 CAS 语义，`colorPalette` 还可保存不透明 `#RRGGBB`。已确认不保证写入自定义色后降级旧版；不迁移、双写或清理音乐库。自定义值沿同一 `PlayerPalette` 路径影响原播放器背景与进度颜色。
 - `ColorSelection` 为主题和固定播放器色提供共用下拉框；自定义选项不写盘，同行 HEX 框显示保存色，输入失焦/回车提交，右侧笔形按钮打开锚点色盘。失败恢复权威选项与保存色。`ColorPicker` 是共用 WPF 色盘：饱和度/明度平面、色相、HEX 与草稿色块。拖动/键盘/输入只更新草稿，确认发布一次提交，取消/Esc/隐藏不写入；固定配色选项与歌单样式保持选择即保存。错误走 `NoticeOutlet`。
 - 设置页面和内部来源列表使用 `SettingsScrollChrome.xaml` 的常显滚动条，横竖支持、溢出才显示，不挂载空闲隐藏行为。首页／频道等仍用原 OverlayScrollChrome 自动隐藏。
 
 - 音质选择标签为“起播目标音质”，保留原 `request` 数据契约和优先级/回退算法，不把该值误称为不可降级的最低音质。
+
+## 设置回执
+
+共同规则以[设置保存与未知结果](../common/music/settings-receipts.md)为唯一来源。当前 `MusicCapability` 实现 `IDesktopOwnedNoticeSource`，在 `MusicSettingsReceipts.cs` 按 setting key 和 submission 顺序持有未知提示；Shell 通过 `OwnedNoticesChanged` 订阅稳定 owner，沿原 NoticeStack／样式呈现，不依赖设置视图存活。
+
+official、metadata、quality、search、appearance、首页来源、设备、桌面歌词与在线播放设置走同一回执入口；反馈等独立设置仍以其真实 owner 回执结算。页面关闭后不回填旧控件，未知不自动重试；同项后续明确成功只清对应较早提示，其他项及较新错误保留。普通读取／重开页面不是保存成功证据。本轮尚未运行这些回归。
 
 ## 参考布局与资源
 

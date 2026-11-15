@@ -14,6 +14,19 @@ public interface IArtworkLoader
     Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default);
 }
 
+/// <summary>Optional original-byte persistence, owned by the consuming domain.
+/// Epoch fences late writes; acquisition never prolongs persistence lifetime.</summary>
+public interface IArtworkByteCache
+{
+    long Epoch { get; }
+    TimeSpan Lifetime { get; }
+    Task<ArtworkBytes?> ReadAsync(string address, CancellationToken cancellationToken);
+    Task WriteAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken cancellationToken);
+    Task RemoveAsync(string address, long epoch, CancellationToken cancellationToken);
+}
+
+public sealed record ArtworkBytes(byte[] Content, DateTimeOffset ExpiresAt);
+
 public sealed class ArtworkException(string code) : Exception(code)
 {
     public string Code { get; } = code;
@@ -26,26 +39,32 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
     private readonly object gate = new();
     private readonly ArtworkHttp http;
     private readonly Func<string, int, CancellationToken, Task<byte[]>>? readTrusted;
+    private readonly IArtworkByteCache? byteCache;
+    private readonly Func<string, bool, Task>? loadCompleted;
+    private readonly TimeProvider time;
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<string, Flight> flights = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Entry> cache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Entry> leased = new(StringComparer.Ordinal);
     private TaskCompletionSource drained = Completed(), released = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int pending;
-    private long bytes, clock;
+    private long bytes, clock, epoch;
     private bool closed;
-    private sealed class Flight(CancellationToken lifetime)
+    private sealed class Flight(CancellationToken lifetime, long epoch, long diskEpoch)
     {
         internal readonly CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         internal Task<Entry> Work = null!;
         internal int Readers;
+        internal readonly long Epoch = epoch, DiskEpoch = diskEpoch;
     }
-    private sealed class Entry(BitmapSource image, long cost)
+    private sealed class Entry(BitmapSource image, long cost, long epoch, DateTimeOffset? expiresAt)
     {
         internal readonly BitmapSource Image = image;
         internal readonly long Cost = cost;
         internal long Used;
         internal int Leases;
+        internal readonly long Epoch = epoch;
+        internal readonly DateTimeOffset? ExpiresAt = expiresAt;
     }
     private sealed class Lease(ArtworkService owner, string key, Entry entry) : IArtworkLease
     {
@@ -59,8 +78,13 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         }
     }
     public ArtworkService(HttpMessageHandler? handler = null,
-        Func<string, int, CancellationToken, Task<byte[]>>? readTrusted = null)
-    { http = new(handler); this.readTrusted = readTrusted; }
+        Func<string, int, CancellationToken, Task<byte[]>>? readTrusted = null,
+        IArtworkByteCache? byteCache = null, TimeProvider? time = null,
+        Func<string, bool, Task>? loadCompleted = null)
+    {
+        http = new(handler); this.readTrusted = readTrusted; this.byteCache = byteCache;
+        this.time = time ?? TimeProvider.System; this.loadCompleted = loadCompleted;
+    }
 
     public async Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
     {
@@ -68,55 +92,113 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         bool trusted = address.StartsWith("/", StringComparison.Ordinal);
         if (trusted && readTrusted is null) throw new ArtworkException("ARTWORK_ADDRESS");
         var uri = trusted ? null : ArtworkHttp.Parse(address);
+        if (byteCache is not null && (uri is null || uri.UserInfo.Length > 0))
+            throw new ArtworkException("ARTWORK_ADDRESS");
         string key = uri?.AbsoluteUri ?? address;
-        Flight flight;
-        lock (gate)
+        for (;;)
         {
-            CheckOpen();
-            if (cache.TryGetValue(key, out var hit) || leased.TryGetValue(key, out hit)) return Own(key, hit);
-            if (!flights.TryGetValue(key, out flight!))
+            Flight flight;
+            bool retiring;
+            lock (gate)
             {
-                flight = new(lifetime.Token);
-                flights.Add(key, flight);
-                if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                flight.Work = LoadAsync(key, uri, flight);
-                _ = flight.Work.ContinueWith(t =>
+                CheckOpen();
+                if (cache.TryGetValue(key, out var hit) || leased.TryGetValue(key, out hit))
                 {
-                    _ = t.Exception;
-                    lock (gate)
-                    {
-                        if (flight.Readers == 0 && flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight))
-                            flights.Remove(key);
-                        flight.Cancellation.Dispose();
-                        if (--pending == 0) drained.TrySetResult();
-                    }
-                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-            }
-            flight.Readers++;
-        }
-        try
-        {
-            var entry = await flight.Work.WaitAsync(cancellationToken).ConfigureAwait(false);
-            lock (gate)
-            {
-                CheckOpen(); cancellationToken.ThrowIfCancellationRequested();
-                return Own(key, entry);
-            }
-        }
-        finally
-        {
-            bool cancel;
-            lock (gate)
-            {
-                cancel = --flight.Readers == 0 && !flight.Work.IsCompleted;
-                if (flight.Readers == 0 && flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight))
+                    if (hit.ExpiresAt is null || hit.ExpiresAt > time.GetUtcNow()) return Own(key, hit);
+                    if (cache.Remove(key, out var expired)) bytes -= expired.Cost;
+                    leased.Remove(key);
+                }
+                bool registered = flights.TryGetValue(key, out flight!);
+                retiring = registered && (flight.Readers == 0 || flight.Epoch != epoch ||
+                    byteCache is not null && flight.DiskEpoch != byteCache.Epoch);
+                if (retiring && flight.Work.IsCompleted)
+                {
                     flights.Remove(key);
+                    registered = retiring = false;
+                }
+                if (!retiring)
+                {
+                    if (!registered)
+                    {
+                        flight = new(lifetime.Token, epoch, byteCache?.Epoch ?? 0);
+                        flights.Add(key, flight);
+                        if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                        flight.Work = LoadAsync(key, uri, flight);
+                        _ = flight.Work.ContinueWith(t =>
+                        {
+                            _ = t.Exception;
+                            lock (gate)
+                            {
+                                if (flight.Readers == 0 && flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight))
+                                    flights.Remove(key);
+                                flight.Cancellation.Dispose();
+                                if (--pending == 0) drained.TrySetResult();
+                            }
+                        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    }
+                    flight.Readers++;
+                }
             }
-            if (cancel) Cancel(flight.Cancellation);
+            if (retiring)
+            {
+                // A successor owns neither the retired result nor its failure.
+                // It waits for the actual work to end before reading this key again.
+                try { await flight.Work.WaitAsync(cancellationToken).ConfigureAwait(false); }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested) { }
+                cancellationToken.ThrowIfCancellationRequested();
+                continue;
+            }
+            try
+            {
+                var entry = await flight.Work.WaitAsync(cancellationToken).ConfigureAwait(false);
+                lock (gate)
+                {
+                    CheckOpen(); cancellationToken.ThrowIfCancellationRequested();
+                    return Own(key, entry);
+                }
+            }
+            finally
+            {
+                bool cancel;
+                lock (gate)
+                {
+                    cancel = --flight.Readers == 0 && !flight.Work.IsCompleted;
+                    if (flight.Readers == 0 && flight.Work.IsCompleted &&
+                        flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight))
+                        flights.Remove(key);
+                }
+                if (cancel) Cancel(flight.Cancellation);
+            }
         }
     }
 
     private async Task<Entry> LoadAsync(string key, Uri? uri, Flight flight)
+    {
+        try
+        {
+            var result = await LoadCoreAsync(key, uri, flight).ConfigureAwait(false);
+            await CompleteAsync(true).ConfigureAwait(false);
+            return result;
+        }
+        catch (ArtworkException error) when (error.Code != "ARTWORK_CLOSED")
+        {
+            await CompleteAsync(false).ConfigureAwait(false);
+            throw;
+        }
+        async Task CompleteAsync(bool succeeded)
+        {
+            if (loadCompleted is null) return;
+            lock (gate)
+                if (closed || flight.Readers == 0 || flight.Epoch != epoch ||
+                    byteCache is not null && flight.DiskEpoch != byteCache.Epoch) return;
+            // Resource observation is optional. A metadata save cannot reverse
+            // successful decoding or change the real image-load failure.
+            try { await loadCompleted(key, succeeded).ConfigureAwait(false); }
+            catch { }
+        }
+    }
+
+    private async Task<Entry> LoadCoreAsync(string key, Uri? uri, Flight flight)
     {
         await Task.Yield(); // Register the flight and its first consumer before starting physical work.
         var request = flight.Cancellation;
@@ -124,16 +206,48 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         try
         {
             request.Token.ThrowIfCancellationRequested();
-            byte[] encoded = uri is null
-                ? await readTrusted!(key, MaximumBytes, request.Token).ConfigureAwait(false)
-                : await http.ReadAsync(uri, request.Token).ConfigureAwait(false);
-            BitmapSource image;
+            byte[]? encoded = null;
+            BitmapSource? image = null;
+            DateTimeOffset? expiresAt = null;
+            if (byteCache is not null)
+            {
+                try
+                {
+                    var stored = await byteCache.ReadAsync(key, request.Token).ConfigureAwait(false);
+                    encoded = stored?.Content;
+                    expiresAt = stored?.ExpiresAt;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch { /* Recoverable persistence miss; HTTP still owns the real load failure. */ }
+                if (encoded is not null)
+                {
+                    try { image = await Decode(encoded, request.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { throw; }
+                    catch
+                    {
+                        try { await byteCache.RemoveAsync(key, flight.DiskEpoch, request.Token).ConfigureAwait(false); }
+                        catch (OperationCanceledException) { throw; }
+                        catch { }
+                    }
+                    finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); encoded = null; }
+                }
+            }
+            if (image is null)
             try
             {
-                if (encoded.Length > MaximumBytes) throw new ArtworkException("ARTWORK_LIMIT");
-                image = await Task.Run(() => ArtworkRaster.Decode(encoded), request.Token).ConfigureAwait(false);
+                encoded = uri is null ? await readTrusted!(key, MaximumBytes, request.Token).ConfigureAwait(false)
+                    : await http.ReadAsync(uri, request.Token).ConfigureAwait(false);
+                image = await Decode(encoded, request.Token).ConfigureAwait(false);
+                request.Token.ThrowIfCancellationRequested();
+                if (byteCache is not null)
+                {
+                    expiresAt = time.GetUtcNow() + byteCache.Lifetime;
+                    try { await byteCache.WriteAsync(key, encoded, flight.DiskEpoch, request.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { throw; }
+                    catch { /* Decoded pixels remain usable even when persistence is unavailable. */ }
+                }
             }
-            finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); }
+            finally { if (encoded is not null) System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); }
             request.Token.ThrowIfCancellationRequested();
             long cost = checked((long)image.PixelWidth * image.PixelHeight * 4);
             lock (gate)
@@ -141,13 +255,16 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                 CheckOpen(); request.Token.ThrowIfCancellationRequested();
                 if (flight.Readers == 0) throw new OperationCanceledException(request.Token);
                 // Cache ownership and visible leases are independent. Eviction never invalidates an image.
-                foreach (var item in cache.OrderBy(pair => pair.Value.Used).ToArray())
+                var entry = new Entry(image, cost, flight.Epoch, expiresAt) { Used = ++clock };
+                if (flight.Epoch == epoch)
                 {
-                    if (bytes + cost <= CacheBytes && cache.Count < 64) break;
-                    cache.Remove(item.Key); bytes -= item.Value.Cost;
+                    foreach (var item in cache.OrderBy(pair => pair.Value.Used).ToArray())
+                    {
+                        if (bytes + cost <= CacheBytes && cache.Count < 64) break;
+                        cache.Remove(item.Key); bytes -= item.Value.Cost;
+                    }
+                    if (cost <= CacheBytes) { cache.Add(key, entry); bytes += cost; }
                 }
-                var entry = new Entry(image, cost) { Used = ++clock };
-                if (cost <= CacheBytes) { cache.Add(key, entry); bytes += cost; }
                 return entry;
             }
         }
@@ -161,11 +278,25 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         catch { throw new ArtworkException("ARTWORK_FAILED"); }
     }
 
+    private static Task<BitmapSource> Decode(byte[] bytes, CancellationToken token)
+    {
+        if (bytes.Length > MaximumBytes) throw new ArtworkException("ARTWORK_LIMIT");
+        return Task.Run(() => ArtworkRaster.Decode(bytes), token);
+    }
+    /// <summary>Visible leases survive explicit clearing; old work cannot refill memory.</summary>
+    public void ClearMemory()
+    {
+        lock (gate)
+        {
+            CheckOpen(); epoch++;
+            cache.Clear(); leased.Clear(); bytes = 0;
+        }
+    }
     private IArtworkLease Own(string key, Entry entry)
     {
         entry.Used = ++clock;
         entry.Leases++;
-        leased[key] = entry;
+        if (entry.Epoch == epoch) leased[key] = entry;
         return new Lease(this, key, entry);
     }
     private void Release(string key, Entry entry)

@@ -32,7 +32,15 @@ private actor MusicSearchDiscoveryModelGate {
 }
 
 private actor MusicSearchDiscoveryModelService: MusicSearchDiscoveryProviding, MusicPublicBrowsing,
-    MusicSearchHotPlaybackProviding {
+    MusicSearchHotPlaybackProviding, MusicSongRepositoryReading {
+    private var songs: [String: MusicRemoteTrack] = [:]
+    private var songObserver: AsyncStream<Void>.Continuation?
+    func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] { songs.filter { songIDs.contains($0.key) } }
+    func songChanges() -> AsyncStream<Void> {
+        let pair = AsyncStream<Void>.makeStream(); songObserver = pair.continuation
+        return pair.stream
+    }
+    func publishSong(_ track: MusicRemoteTrack) { songs[track.songId] = track; songObserver?.yield(()) }
     struct DiscoveryStep: Sendable {
         let components: Set<MusicSearchDiscoveryFailure.Component>
         let value: MusicSearchDiscoverySnapshot?
@@ -186,6 +194,33 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
     private typealias Component = MusicSearchDiscoveryFailure.Component
     private let allComponents: Set<Component> = [.hot, .charts]
 
+    func testVisibleChartConsumesCurrentRepositoryFactsWithoutRenewingMembers() async throws {
+        let chart = chart("current"), original = detail(chart.collection, positions: [0, 1], nativeIDs: ["one", "one"])
+        let service = MusicSearchDiscoveryModelService(discovery: [.success(allComponents, snapshot(charts: [chart]))],
+            details: [chart.id: [.success(original)]])
+        let model = makeModel(service)
+        await wait(model.$loadedComponents, description: "chart list") { $0 == self.allComponents }
+        model.setVisibleCharts([chart.id])
+        await wait(model.$chartContent, description: "chart members") {
+            if case .loaded? = $0[chart.id] { return true }; return false
+        }
+        let before = original.members[0].track
+        let current = MusicRemoteTrack(ref: .init(kind: .library, id: before.songId), songId: before.songId,
+            title: "Current chart title", artist: "Current chart artist", duration: 200, sources: before.sources)
+        await service.publishSong(current)
+        await wait(model.$chartContent, description: "current chart facts") {
+            if case .loaded(let detail)? = $0[chart.id] { return detail.members.allSatisfy { $0.track.title == current.title } }
+            return false
+        }
+        guard case .loaded(let updated)? = model.chartContent[chart.id] else { return XCTFail("Chart disappeared") }
+        XCTAssertEqual(updated.members.map(\.track.ref), original.members.map(\.track.ref))
+        XCTAssertEqual(updated.members.map(\.sourcePosition), [0, 1])
+        XCTAssertEqual(updated.members.map(\.track.songId), [before.songId, before.songId])
+        let calls = await service.calls(); XCTAssertEqual(calls.details, [chart.id])
+        XCTAssertEqual(calls.discovery.count, 1)
+        model.close()
+    }
+
     func testMembersAreReadOnlyForVisibleChartsAndRunSerially() async throws {
         let charts = [chart("one"), chart("two"), chart("three")]
         let firstGate = MusicSearchDiscoveryModelGate()
@@ -266,7 +301,22 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
         model.close()
     }
 
-    func testSuggestionRotationIsLocalAndPreviewUsesOnlyFirstTwentySourcePositions() async throws {
+    func testDiscoveryConsumesAllProviderRowsWithoutCountOrRankSchemaAdmission() async {
+        let words = (0..<25).map { MusicSearchHotKeyword(keyword: "词\($0)", rank: 100 - $0) }
+        let charts = (0..<4).map { chart("chart-\($0)") }
+        let service = MusicSearchDiscoveryModelService(discovery: [
+            .success(allComponents, snapshot(hot: words, charts: charts)),
+        ])
+        let model = makeModel(service)
+        await wait(model.$loadedComponents, description: "complete current discovery") { $0 == self.allComponents }
+        XCTAssertEqual(model.hot, words); XCTAssertEqual(model.charts.map(\.id), charts.map(\.id))
+        XCTAssertTrue(model.componentFailures.isEmpty)
+        let calls = await service.calls()
+        XCTAssertEqual(calls.discovery, [allComponents]); XCTAssertTrue(calls.details.isEmpty)
+        model.close()
+    }
+
+    func testSuggestionRotationIsLocalAndPreviewDoesNotDiscardSparseSourcePositions() async throws {
         let words = (1...8).map { MusicSearchHotKeyword(keyword: "词\($0)", rank: $0) }
         let chart = chart("chart")
         let page = detail(chart.collection, positions: [0, 1, 19, 20, 29])
@@ -290,8 +340,8 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
             if case .some(.loaded) = $0[chart.id] { return true }
             return false
         }
-        XCTAssertEqual(model.members(of: chart.id).map(\.sourcePosition), [0, 1, 19])
-        XCTAssertEqual(model.members(of: chart.id).map(\.nativeID), ["id-0", "id-1", "id-19"])
+        XCTAssertEqual(model.members(of: chart.id).map(\.sourcePosition), [0, 1, 19, 20, 29])
+        XCTAssertEqual(model.members(of: chart.id).map(\.nativeID), ["id-0", "id-1", "id-19", "id-20", "id-29"])
         calls = await service.calls()
         XCTAssertEqual(calls.details, [chart.id])
         model.close()
@@ -305,7 +355,7 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
                 hotCanPlay: true
             )),
         ], hotPlayback: [
-            .success(words, hotTracks(words, handle: "first")),
+            .success(words, hotTracks(words, occurrence: "first")),
             .failure(words, .networkOffline),
         ])
         let model = makeModel(service)
@@ -317,7 +367,7 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
         let playback = try await model.prepareHotPlayback()
         XCTAssertEqual(playback.index, 0)
         XCTAssertEqual(playback.tracks.map(\.title), words)
-        XCTAssertTrue(playback.tracks.allSatisfy { $0.ref.id.hasPrefix("first:") })
+        XCTAssertTrue(playback.tracks.allSatisfy { $0.ref.occurrence?.hasPrefix("first:") == true })
         do {
             _ = try await model.prepareHotPlayback()
             XCTFail("Provider failure was hidden")
@@ -343,8 +393,8 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
                 hotCanPlay: true
             )),
         ], hotPlayback: [
-            .success(oldWords, hotTracks(oldWords, handle: "old"), gate: gate),
-            .success(newWords, hotTracks(newWords, handle: "new")),
+            .success(oldWords, hotTracks(oldWords, occurrence: "old"), gate: gate),
+            .success(newWords, hotTracks(newWords, occurrence: "new")),
         ])
         let model = makeModel(service)
         await wait(model.$loadedComponents, description: "old hot chart") {
@@ -371,7 +421,7 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
         model.close()
     }
 
-    func testHotPlaybackRejectsMisalignedResponseAndHiddenPageCancellation() async throws {
+    func testHotPlaybackConsumesActualShortResultAndStillRejectsHiddenPageCancellation() async throws {
         let words = ["一", "二"]
         let gate = MusicSearchDiscoveryModelGate()
         let service = MusicSearchDiscoveryModelService(discovery: [
@@ -387,12 +437,8 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
         await wait(model.$loadedComponents, description: "hot chart") {
             $0 == self.allComponents
         }
-        do {
-            _ = try await model.prepareHotPlayback()
-            XCTFail("Short positional response was accepted")
-        } catch {
-            XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid)
-        }
+        let short = try await model.prepareHotPlayback()
+        XCTAssertEqual(short.tracks, [hotTracks(words)[0]]); XCTAssertEqual(short.index, 0)
 
         let pending = Task { try await model.prepareHotPlayback() }
         await gate.waitUntilStarted()
@@ -537,22 +583,14 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
         XCTAssertFalse(model.isPreparingPlayback)
     }
 
-    func testPlaybackReconsumesMembersUsesCompactIndexAndRejectsIdentityChangesAndCancellation() async throws {
+    func testPlaybackUsesVisiblePermanentMembersWithoutRereadingAndRetainsAccessAndCancellationFences() async throws {
         let chart = chart("chart")
-        let displayed = detail(chart.collection, positions: [0, 2, 4], handle: "display")
-        let refreshed = detail(chart.collection, positions: [0, 2, 4], handle: "fresh")
-        let changed = detail(chart.collection, positions: [0, 2, 4], handle: "changed",
-                             nativeIDs: ["id-0", "replacement", "id-4"])
-        let cancelGate = MusicSearchDiscoveryModelGate()
-        let cancelled = detail(chart.collection, positions: [0, 2, 4], handle: "cancelled")
+        let displayed = detail(chart.collection, positions: [0, 2, 4])
         let service = MusicSearchDiscoveryModelService(discovery: [
             .success(allComponents, snapshot(charts: [chart])),
         ], details: [
             chart.id: [
                 .success(displayed),
-                .success(refreshed),
-                .success(changed),
-                .success(cancelled, gate: cancelGate),
             ],
         ])
         let model = makeModel(service)
@@ -568,29 +606,29 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
         let playback = try await model.preparePlayback(chartID: chart.id, nativeID: "id-2")
         XCTAssertEqual(playback.index, 1)
         XCTAssertEqual(playback.tracks.map { $0.sources[0].nativeId }, ["id-0", "id-2", "id-4"])
-        XCTAssertTrue(playback.tracks.allSatisfy { $0.ref.id.hasPrefix("fresh:") })
+        XCTAssertEqual(playback.tracks.map(\.ref), displayed.tracks.map(\.ref))
 
         do {
-            _ = try await model.preparePlayback(chartID: chart.id, nativeID: "id-2")
-            XCTFail("Changed member identity was accepted")
+            _ = try await model.preparePlayback(chartID: chart.id, nativeID: "missing")
+            XCTFail("An absent selection must not play a different member")
         } catch {
-            XCTAssertEqual(error as? MusicServiceError, .targetChanged)
+            XCTAssertEqual(error as? MusicServiceError, .notFound)
         }
 
         let pending = Task { try await model.preparePlayback(chartID: chart.id, nativeID: "id-2") }
-        await cancelGate.waitUntilStarted()
+        pending.cancel()
+        do { _ = try await pending.value; XCTFail("Cancelled preparation succeeded") }
+        catch { XCTAssertTrue(error is CancellationError) }
         model.disappear()
-        await cancelGate.release()
-        await service.waitForDetailCompletions(4)
         do {
-            _ = try await pending.value
-            XCTFail("Hidden page published late playback preparation")
+            _ = try await model.preparePlayback(chartID: chart.id, nativeID: "id-2")
+            XCTFail("Hidden page prepared playback")
         } catch {
-            XCTAssertEqual(error as? MusicServiceError, .cancelled)
+            XCTAssertEqual(error as? MusicServiceError, .staleAccess)
         }
         XCTAssertFalse(model.isPreparingPlayback)
         let calls = await service.calls()
-        XCTAssertEqual(calls.details, Array(repeating: chart.id, count: 4))
+        XCTAssertEqual(calls.details, [chart.id])
         model.close()
     }
 
@@ -615,11 +653,11 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
               validUntil: Date().addingTimeInterval(600))
     }
 
-    private func hotTracks(_ keywords: [String], handle: String = "hot") -> [MusicRemoteTrack] {
+    private func hotTracks(_ keywords: [String], occurrence: String = "hot") -> [MusicRemoteTrack] {
         keywords.enumerated().map { index, keyword in
             let nativeID = String(index + 1)
             return MusicRemoteTrack(
-                ref: .init(kind: .handle, id: "\(handle):\(nativeID)"),
+                ref: .init(kind: .library, id: "wy:" + nativeID, occurrence: "\(occurrence):\(nativeID)"),
                 songId: "wy:" + nativeID,
                 title: keyword,
                 sources: [.init(sourceKey: "wy:" + nativeID, platform: "wy", nativeId: nativeID)]
@@ -628,19 +666,18 @@ final class MusicSearchDiscoveryModelTests: XCTestCase {
     }
 
     private func detail(_ collection: MusicPublicBrowseCollection, positions: [Int],
-                        handle: String = "display", nativeIDs: [String]? = nil) -> MusicPublicBrowseDetail {
+                        nativeIDs: [String]? = nil) -> MusicPublicBrowseDetail {
         let ids = nativeIDs ?? positions.map { "id-\($0)" }
         let members = zip(positions, ids).map { position, nativeID -> MusicPublicBrowseMember in
             let track = MusicRemoteTrack(
-                ref: .init(kind: .handle, id: "\(handle):\(position):\(nativeID)"),
+                ref: .init(kind: .library, id: "wy:" + nativeID, occurrence: "chart:\(position)"),
                 songId: "wy:" + nativeID,
                 title: "歌曲 " + nativeID,
-                sources: [.init(sourceKey: "wy:" + nativeID, platform: "wy", nativeId: nativeID)]
+                sources: [.init(sourceKey: "wy:" + nativeID, platform: "wy", nativeId: nativeID)], sourcePosition: position
             )
             return .init(nativeID: nativeID, sourcePosition: position, track: track)
         }
-        return .init(collection: collection, members: members, total: 30, cursor: nil,
-                     snapshot: String(repeating: "a", count: 64), consumed: 30)
+        return .init(collection: collection, members: members, total: 30, cursor: nil, consumed: 30)
     }
 
     private func wait<Value>(_ publisher: Published<Value>.Publisher, description: String,

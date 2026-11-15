@@ -1,616 +1,224 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Net;
-using System.Net.Http;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Platforms;
-using MeowFilm.Capabilities.Search;
-using MeowFilm.Platform.Storage;
-
+using static MeowFilm.Windows.Tests.MusicNativeHttpSeamTests;
 namespace MeowFilm.Windows.Tests;
-
 public static class MusicPlatformClientContextTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("constructor-and-invalid-platform-have-zero-IO", NoConstructorIo);
-        yield return Case("single-local-initialization-without-account-or-network", Local);
-        yield return Case("stable-identities-across-owner-reopen", Reopen);
-        yield return Case("cancelled-initialization-waiter-does-not-cancel-shared-load", CancelLoad);
-        yield return Case("client-creation-and-reopen-do-not-read-account-cookie-fields", () => AccountIndependent(false));
-        yield return Case("client-creation-and-reopen-do-not-read-invalid-account-document", () => AccountIndependent(true));
-        yield return Case("unexpected-storage-read-failure-is-finite-and-redacted", UnexpectedRead);
-        foreach (string fault in new[] { "json", "duplicate", "version", "field", "array", "size", "fingerprint",
-            "missing-fingerprint", "kg-seed", "qq-imei", "generation", "device-text", "session-binding" })
-        { var value = fault; yield return Case("corrupt-or-incompatible-" + value + "-never-regenerates", () => Corrupt(value)); }
-        foreach (var pair in new[] {
-            (DocumentStoreError.Unavailable, "STORAGE_UNAVAILABLE"), (DocumentStoreError.Storage, "STORAGE"),
-            (DocumentStoreError.Corrupt, "CORRUPT_STORAGE"), (DocumentStoreError.Protection, "CORRUPT_STORAGE"),
-            (DocumentStoreError.UnsupportedVersion, "CORRUPT_STORAGE"), (DocumentStoreError.Closed, "CLOSED") })
-        { var value = pair; yield return Case("unreadable-" + value.Item1 + "-no-account-read-or-write", () => Unreadable(value.Item1, value.Item2)); }
-        yield return Case("independent-platform-updates-retain-unaffected-snapshot-references", Independent);
-        yield return Case("real-client-CAS-conflict-preserves-competitor-no-write-replay", Conflict);
-        foreach (string fault in new[] { "lost-after", "lost-before", "wrong-receipt" })
-        { var value = fault; yield return Case("unknown-" + value + "-explicit-authority-read-no-replay", () => Unknown(value)); }
-        yield return Case("reload-fences-old-snapshot-and-shares-with-initialization", Reload);
-        yield return Case("queued-trusted-response-rechecks-account-before-client-write", AccountFence);
-        yield return Case("confirmed-client-write-outlives-cancelled-waiter-without-false-unknown", CancelWrite);
-        yield return Case("shutdown-awaits-physical-client-write-and-borrows-store", Close);
-        yield return Case("cancelled-shutdown-preparation-does-not-revive-old-snapshots", Resume);
-        yield return Case("WY-wire-composes-local-client-with-optional-account-no-credential-persistence", WyFields);
-        yield return Case("WY-concurrent-responses-merge-only-their-cookie-fields", ConcurrentWyFields);
-        yield return Case("WY-explicit-cookie-clear-is-ordered-after-an-inflight-write", ConcurrentWyClear);
-        yield return Case("WY-successful-parallel-search-is-not-invalidated-by-response-cookies", ParallelWySearch);
-        yield return Case("empty-WY-device-field-uses-local-client-and-optional-cookie-clearing-is-not-account-expiry", WyOptional);
-        yield return Case("foreign-WY-account-association-never-mixes-local-device-fields", ForeignWy);
-        yield return Case("KG-request-identity-binding-and-query-body-headers-agree", KgFields);
-        yield return Case("KG-invalid-credentials-and-conflicting-identity-reject-before-dispatch", KgInvalid);
-        foreach (var (name, body, code) in new (string, string, string?)[]
+        yield return new("Music platform publishes guest then current native account then guest without native device state", async () =>
         {
-            ("whole-decimal", """{"status":1.0}""", null),
-            ("empty-flags", """{"status":1,"error":"","ssaCode":"","ssa-code":null,"error_code":0}""", null),
-            ("string-status", """{"status":"1"}""", "INVALID_RESPONSE"),
-            ("boolean-status", """{"status":true}""", "INVALID_RESPONSE"),
-            ("failure-status", """{"status":0}""", "UPSTREAM_ERROR"),
-            ("string-error", """{"status":1,"error":"false"}""", "UPSTREAM_ERROR"),
-            ("string-verification", """{"status":1,"ssaCode":"false"}""", "VERIFICATION_REQUIRED")
-        })
+            await using var f = new MusicPlatformRuntimeFixture(); f.OnRequest = (_, _) => Task.FromResult(MusicPlatformRuntimeFixture.Json(new { entries = new object[] { } }));
+            await f.Catalog.HomeAsync(new("wy")); await f.Catalog.HomeAsync(new("wy"));
+            Check(f.Calls.Count(c => c.Method == "music.platform.session.update") == 1);
+            f.Sessions.Current = new("wy", "account-scope", 3, "9007199254740997", "MUSIC_U=SYNTHETIC_CURRENT");
+            await f.Catalog.HomeAsync(new("wy"));
+            var request = f.Requests.Last().Payload;
+            Check(request.GetProperty("expectedSession").GetProperty("generation").GetInt64() == 3 && !request.TryGetProperty("candidate", out _));
+            f.Sessions.Clear("wy"); f.Client.Invalidate("wy"); await f.Client.DrainAsync(); await f.Catalog.HomeAsync(new("wy"));
+            Check(f.Requests.Last().Payload.GetProperty("expectedSession").ValueKind == System.Text.Json.JsonValueKind.Null);
+            var publications = f.Calls.Where(c => c.Method == "music.platform.session.update").ToArray();
+            Check(publications.Length == 3 && publications[0].Payload.GetProperty("session").ValueKind == System.Text.Json.JsonValueKind.Null &&
+                publications[1].Payload.GetProperty("session").GetProperty("scope").GetString() == "account-scope");
+        });
+        yield return new("Music platform candidate authentication never publishes credentials as the active account", async () =>
         {
-            var b = body; var c = code;
-            yield return Case("KG-account-status-preserves-" + name, async () =>
+            await using var f = new MusicPlatformRuntimeFixture(); f.OnRequest = (call, _) =>
             {
-                Task Read()
-                { PlatformProtocols.KgAccountStatus(JsonNode.Parse(b)!.AsObject()); return Task.CompletedTask; }
-                if (c is null) await Read(); else await Error(Read, c);
+                Check(call.Payload.GetProperty("candidate").GetProperty("cookie").GetString() == "MUSIC_U=SYNTHETIC_CANDIDATE");
+                return Task.FromResult(Verified("MUSIC_U=SYNTHETIC_AUTHENTICATED"));
+            };
+            await using var protocol = f.CreateAccountProtocol();
+            var verified = await protocol.ValidateAsync("wy", "MUSIC_U=SYNTHETIC_CANDIDATE");
+            Check(verified.Cookie == "MUSIC_U=SYNTHETIC_AUTHENTICATED" && verified.Details.Profile.UserId == "42");
+            Check(f.Calls.All(call => call.Method == "music.platform.request") && f.Requests.Count == 1);
+        });
+        yield return new("Music account pre-cancelled candidates and QR creation do not call runtime", async () =>
+        {
+            await using var f = new MusicPlatformRuntimeFixture();
+            await using var protocol = f.CreateAccountProtocol();
+            using var cancel = new CancellationTokenSource(); cancel.Cancel();
+            await Failure("CANCELLED", () => protocol.ValidateAsync("wy", "MUSIC_U=SYNTHETIC_CANDIDATE", cancel.Token));
+            await Failure("CANCELLED", () => protocol.BeginAsync("wy", cancel.Token));
+            Check(f.Calls.Count == 0);
+            await protocol.DisposeAsync();
+            await f.DisposeAsync();
+            Check(f.Calls.Count == 0);
+        });
+        yield return new("Music untouched account owner closes without creating platform work", async () =>
+        {
+            await using var f = new MusicPlatformRuntimeFixture();
+            await using var store = new MusicPlatformRuntimeFixture.MemoryStore();
+            await using var owner = f.CreateAccountOwner(store);
+            await owner.DisposeAsync();
+            await f.DisposeAsync();
+            Check(f.Calls.Count == 0);
+        });
+        yield return new("Music pre-cancelled reads and writes leave no platform scope to reset on close", async () =>
+        {
+            await using var f = new MusicPlatformRuntimeFixture();
+            using var cancel = new CancellationTokenSource(); cancel.Cancel();
+            await Failure("CANCELLED", () => f.Client.RequestAsync("wy", "home", new { }, null, cancel.Token));
+            var receipt = await f.Client.RequestAsync("wy", "dailyStyle.save", new { }, null, cancel.Token);
+            Check(receipt.GetProperty("status").GetString() == "notSent" &&
+                receipt.GetProperty("errorCode").GetString() == "CANCELLED");
+            await f.DisposeAsync();
+            Check(f.Calls.Count == 0);
+        });
+        foreach (bool rejectCancel in new[] { false, true })
+        {
+            bool rejected = rejectCancel;
+            yield return new("Music QR cancel physically precedes new begin without replaying " + (rejected ? "old failure" : "old success"), async () =>
+            {
+                await using var f = new MusicPlatformRuntimeFixture();
+                var entered = Signal(); var release = Signal();
+                f.OnRequest = async (call, token) =>
+                {
+                    if (call.Operation == "qr.create") return Challenge(call);
+                    Check(call.Operation == "qr.cancel");
+                    entered.TrySetResult(); await release.Task;
+                    Check(!token.IsCancellationRequested);
+                    if (rejected) throw new MusicPlatformException("NETWORK_ERROR");
+                    return MusicPlatformRuntimeFixture.Json(new { cancelled = true });
+                };
+                await using var protocol = f.CreateAccountProtocol();
+                var first = await protocol.BeginAsync("wy");
+                var cancel = protocol.CancelAsync("wy");
+                Task<MusicAccountChallenge> next;
+                try
+                {
+                    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    f.Client.Invalidate("wy");
+                    next = protocol.BeginAsync("wy");
+                    Check(!cancel.IsCompleted && !next.IsCompleted &&
+                        f.Requests.Select(call => call.Operation).SequenceEqual(["qr.create", "qr.cancel"]));
+                }
+                finally { release.TrySetResult(); }
+                if (rejected) await AccountFailure("NETWORK_ERROR", () => cancel);
+                else await cancel;
+                Check((await next).ChallengeId != first.ChallengeId);
+                await f.Client.DrainAsync();
+                Check(f.Requests.Select(call => call.Operation).SequenceEqual(["qr.create", "qr.cancel", "qr.create"]));
             });
         }
-        foreach (string fault in new[] { "identity", "duplicate", "domain", "control", "expired-auth", "row-limit" })
-        { var value = fault; yield return Case("untrusted-WY-response-" + value + "-no-client-write", () => WyResponseFailure(value)); }
-        yield return Case("catalog-cache-uses-post-response-client-generation", CacheGeneration);
-        yield return Case("discovery-client-failures-retain-finite-code-without-HTTP", DiscoveryFailures);
-    }
-
-    private static TestCase Case(string name, Func<Task> run) => new("music.platform.client." + name, run);
-    private static void Check(bool condition, string message = "Client context invariant")
-    { if (!condition) throw new InvalidOperationException(message); }
-    private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private static bool SameWyValues(MusicWyClientContext a, MusicWyClientContext b) =>
-        (a.Generation, a.DeviceId, a.Nuid, a.Nnid, a.Wnmcid, a.Nmtid) ==
-        (b.Generation, b.DeviceId, b.Nuid, b.Nnid, b.Wnmcid, b.Nmtid);
-    private static async Task Error(Func<Task> action, string code)
-    {
-        try { await action().WaitAsync(TimeSpan.FromSeconds(5)); }
-        catch (MusicPlatformException error)
+        foreach (bool resetFailure in new[] { false, true })
         {
-            Check(error.Code == code, "Expected " + code + ", got " + error.Code);
-            Check(error.InnerException is null && error.Message == code && !error.ToString().Contains("SYNTHETIC"));
-            return;
-        }
-        throw new InvalidOperationException("Expected " + code);
-    }
-    private static async Task Cancelled(Task task)
-    {
-        try { await task.WaitAsync(TimeSpan.FromSeconds(5)); }
-        catch (OperationCanceledException) { return; }
-        throw new InvalidOperationException("Expected cancelled waiter");
-    }
-    private static Task<MusicWyClientContext> ChangeWy(Fixture f, MusicWyClientContext expected,
-        string value = "SYNTHETIC_NEXT", Action? guard = null, CancellationToken token = default) =>
-        f.Owner.AcceptWyAsync(expected, null, ["NMTID=" + value + "; Domain=music.163.com"], guard ?? (() => { }), token);
-
-    private static async Task NoConstructorIo()
-    {
-        await using var f = new Fixture();
-        Check(f.Store.ClientReads == 0 && f.Store.ClientWrites == 0);
-        await Error(async () => await f.Owner.AcquireAsync("kw"), "INVALID_PLATFORM");
-        Check(f.Store.ClientReads == 0 && f.Store.AccountReads == 0 && f.Store.ClientWrites == 0);
-    }
-    private static async Task Local()
-    {
-        await using var f = new Fixture();
-        await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => f.Owner.InitializeAsync()));
-        var wy = await f.Owner.AcquireWyAsync(); var kg = await f.Owner.AcquireKgAsync(); var qq = await f.Owner.AcquireQqAsync();
-        Check(f.Store.ClientReads == 1 && f.Store.ClientWrites == 1 && f.Store.AccountReads == 0 && f.Store.AccountWrites == 0);
-        Check(ReferenceEquals(wy, await f.Owner.AcquireWyAsync()) && ReferenceEquals(kg, await f.Owner.AcquireKgAsync()));
-        Check(wy.DeviceId.Length == 52 && wy.DeviceId.All(c => char.IsAsciiHexDigit(c) && !char.IsAsciiLetterLower(c)));
-        Check(wy.Nuid.Length == 64 && wy.Nnid.StartsWith(wy.Nuid + ",", StringComparison.Ordinal) &&
-            wy.Wnmcid.Split('.')[0].Length == 6);
-        Check(kg.Seed.Length == 32 && kg.Dfid is null && qq.Session is null && qq.Qimei is null);
-        Check(JsonSerializer.Serialize(wy) == "{}" && JsonSerializer.Serialize(kg) == "{}" && JsonSerializer.Serialize(qq) == "{}");
-        Check(!wy.ToString().Contains(wy.DeviceId) && !kg.ToString().Contains(kg.Seed));
-    }
-    private static async Task Reopen()
-    {
-        await using var f = new Fixture();
-        var wy = await f.Owner.AcquireWyAsync(); var kg = await f.Owner.AcquireKgAsync(); var qq = await f.Owner.AcquireQqAsync();
-        await f.Owner.DisposeAsync();
-        Check(!f.Owner.IsCurrent(wy) && f.Store.Disposals == 0);
-        await using var next = f.CreateOwner();
-        var w = await next.AcquireWyAsync(); var k = await next.AcquireKgAsync(); var q = await next.AcquireQqAsync();
-        Check(SameWyValues(w, wy) && k == kg && q == qq && !ReferenceEquals(wy, w) && !next.IsCurrent(wy));
-        Check(f.Store.ClientWrites == 1 && f.Store.ClientReads == 2);
-    }
-    private static async Task CancelLoad()
-    {
-        await using var f = new Fixture(); f.Store.HoldRead = true;
-        using var cancel = new CancellationTokenSource();
-        var cancelled = f.Owner.InitializeAsync(cancel.Token);
-        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var live = f.Owner.AcquireWyAsync().AsTask();
-        cancel.Cancel(); await Cancelled(cancelled);
-        Check(!live.IsCompleted && f.Store.ClientWrites == 0);
-        f.Store.Release.TrySetResult();
-        Check(f.Owner.IsCurrent(await live) && f.Store.ClientReads == 1 && f.Store.ClientWrites == 1);
-    }
-    private static async Task AccountIndependent(bool corrupt)
-    {
-        await using var f = new Fixture();
-        byte[] original = corrupt ? "not-json"u8.ToArray() : Encoding.UTF8.GetBytes(new JsonObject
-        {
-            ["version"] = 1, ["entries"] = new JsonArray(new JsonObject {
-                ["key"] = AccountDocument.Key("wy"), ["value"] = new JsonObject {
-                    ["version"] = 1, ["generation"] = 7,
-                    ["cookie"] = "MUSIC_U=SYNTHETIC_AUTH; deviceId=SYNTHETIC_ACCOUNT_ID; _ntes_nuid=SYNTHETIC_NUID; WNMCID=SYNTHETIC_WNMCID",
-                    ["scope"] = "synthetic-account-scope", ["validatedAt"] = 1000,
-                    ["profile"] = new JsonObject { ["platform"] = "wy", ["userId"] = "42", ["displayName"] = "Synthetic" }
-                } })
-        }.ToJsonString());
-        await f.Seed(MusicAccountOwner.DocumentNamespace, original.ToArray());
-        try
-        {
-            var first = await f.Owner.AcquireWyAsync();
-            Check(first.DeviceId.Length == 52 && first.Nuid.Length == 64 &&
-                first.Nnid.StartsWith(first.Nuid + ",", StringComparison.Ordinal) && first.Wnmcid.Split('.')[0].Length == 6);
-            await f.Owner.DisposeAsync();
-            await using var next = f.CreateOwner();
-            Check(SameWyValues(await next.AcquireWyAsync(), first));
-            Check(f.Store.AccountReads == 0 && f.Store.AccountWrites == 0 && f.Store.ClientWrites == 1);
-            var after = await f.Store.Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
-            try { Check(after.Data!.SequenceEqual(original)); }
-            finally { CryptographicOperations.ZeroMemory(after.Data!); }
-        }
-        finally { CryptographicOperations.ZeroMemory(original); }
-    }
-    private static async Task Corrupt(string fault)
-    {
-        await using var f = new Fixture();
-        byte[] bytes = MusicClientContextDocument.Create().Encode();
-        var json = JsonNode.Parse(bytes)!.AsObject();
-        switch (fault)
-        {
-            case "json": bytes = "not-json"u8.ToArray(); break;
-            case "duplicate": bytes = Encoding.UTF8.GetBytes("{\"version\":1," + Encoding.UTF8.GetString(bytes)[1..]); break;
-            case "version": json["version"] = 2; break;
-            case "field": json["wy"]!.AsObject().Remove("nnid"); break;
-            case "array": json["kg"] = new JsonArray(); break;
-            case "size": bytes = new byte[MusicClientContextDocument.MaximumBytes + 1]; break;
-            case "kg-seed": json["kg"]!["seed"] = "bad"; break;
-            case "qq-imei": json["tx"]!["imei"] = "123456789012345"; break;
-            case "generation": json["wy"]!["generation"] = 0; break;
-            case "device-text": json["wy"]!["deviceId"] = "bad;field"; break;
-            case "session-binding": json["tx"]!["session"] = new JsonObject { ["generation"] = 1, ["uid"] = "0",
-                ["sid"] = "SYNTHETIC_SESSION", ["savedAt"] = 1000, ["qimeiGeneration"] = 1 }; break;
-        }
-        if (fault is not ("json" or "duplicate" or "size")) bytes = Encoding.UTF8.GetBytes(json.ToJsonString());
-        if (fault == "fingerprint") f.Store.ReadOverride = new(bytes, DocumentFingerprint.FromBytes("other"u8));
-        else if (fault == "missing-fingerprint") f.Store.ReadOverride = new(null, DocumentFingerprint.FromBytes(bytes));
-        else await f.Seed(MusicPlatformClientContextOwner.DocumentNamespace, bytes);
-        await Error(() => f.Owner.InitializeAsync(), "CORRUPT_STORAGE");
-        Check(f.Store.ClientWrites == 0 && f.Store.AccountReads == 0);
-        await Error(() => f.Owner.ReloadAsync(), "CORRUPT_STORAGE");
-        Check(f.Store.ClientWrites == 0);
-    }
-    private static async Task Unreadable(DocumentStoreError error, string code)
-    {
-        await using var f = new Fixture(); f.Store.ReadError = error;
-        await Error(() => f.Owner.InitializeAsync(), code);
-        Check(f.Store.ClientWrites == 0 && f.Store.AccountReads == 0);
-    }
-    private static async Task Independent()
-    {
-        await using var f = new Fixture();
-        var wy = await f.Owner.AcquireWyAsync(); var kg = await f.Owner.AcquireKgAsync(); var qq = await f.Owner.AcquireQqAsync();
-        var events = new List<string>(); f.Owner.ContextChanged += events.Add;
-        var changed = await f.Owner.SaveKgAsync(kg, "SYNTHETIC_DFID");
-        Check(changed.Generation == 2 && !f.Owner.IsCurrent(kg) && f.Owner.IsCurrent(changed));
-        Check(ReferenceEquals(wy, await f.Owner.AcquireWyAsync()) && ReferenceEquals(qq, await f.Owner.AcquireQqAsync()));
-        Check(events.SequenceEqual(["kg"]));
-        var w = await ChangeWy(f, wy);
-        Check(w.Generation == 2 && f.Owner.IsCurrent(changed) && f.Owner.IsCurrent(qq) &&
-            events.SequenceEqual(["kg", "wy"]));
-    }
-    private static async Task UnexpectedRead()
-    {
-        await using var f = new Fixture(); f.Store.UnexpectedRead = true;
-        await Error(() => f.Owner.InitializeAsync(), "STORAGE");
-        Check(f.Store.ClientWrites == 0 && f.Store.AccountReads == 0);
-    }
-    private static async Task Conflict()
-    {
-        await using var f = new Fixture(); var wy = await f.Owner.AcquireWyAsync(); f.Store.ConflictAt = 2;
-        await Error(async () => await ChangeWy(f, wy), "STORAGE_CONFLICT");
-        Check(!f.Owner.IsCurrent(wy) && !f.Owner.NeedsReconciliation && f.Store.ClientWrites == 2);
-        var observed = await f.Owner.AcquireWyAsync();
-        Check(observed.Nmtid == "SYNTHETIC_CONCURRENT" && f.Store.ClientWrites == 2);
-    }
-    private static async Task Unknown(string fault)
-    {
-        await using var f = new Fixture();
-        if (fault == "lost-after") f.Store.DropReceiptAt = 1;
-        else if (fault == "lost-before") f.Store.FailWriteAt = 1;
-        else f.Store.WrongReceiptAt = 1;
-        await Error(() => f.Owner.InitializeAsync(), "COMMIT_UNKNOWN");
-        int reads = f.Store.ClientReads;
-        await Error(async () => await f.Owner.AcquireWyAsync(), "COMMIT_UNKNOWN");
-        Check(f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1 && f.Store.ClientReads == reads);
-        if (fault == "lost-before")
-        {
-            await Error(() => f.Owner.ReloadAsync(), "DEVICE_CONTEXT_REQUIRED");
-            Check(!f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1);
-            await Error(() => f.Owner.InitializeAsync(), "DEVICE_CONTEXT_REQUIRED");
-            Check(f.Store.ClientWrites == 1);
-        }
-        else
-        {
-            await f.Owner.ReloadAsync();
-            var value = await f.Owner.AcquireWyAsync();
-            Check(f.Owner.IsCurrent(value) && !f.Owner.NeedsReconciliation && f.Store.ClientWrites == 1);
-        }
-    }
-    private static async Task Reload()
-    {
-        await using var f = new Fixture(); var old = await f.Owner.AcquireWyAsync();
-        f.Store.HoldRead = true;
-        var reload = f.Owner.ReloadAsync();
-        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var initialize = f.Owner.InitializeAsync();
-        Check(!f.Owner.IsCurrent(old) && !initialize.IsCompleted);
-        f.Store.Release.TrySetResult(); await Task.WhenAll(reload, initialize);
-        var current = await f.Owner.AcquireWyAsync();
-        Check(SameWyValues(current, old) && !ReferenceEquals(current, old) && !f.Owner.IsCurrent(old) &&
-            f.Store.ClientReads == 2 && f.Store.ClientWrites == 1);
-        await Error(() => ChangeWy(f, old), "STORAGE_CONFLICT");
-        Check(f.Store.ClientWrites == 1);
-    }
-    private static async Task AccountFence()
-    {
-        await using var f = new Fixture();
-        var wy = await f.Owner.AcquireWyAsync(); var kg = await f.Owner.AcquireKgAsync();
-        f.Store.HoldWriteAt = 2;
-        var blocker = f.Owner.SaveKgAsync(kg, "SYNTHETIC_DFID");
-        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        bool accountCurrent = true;
-        void Guard() { if (!accountCurrent) throw new MusicPlatformException("STALE_SESSION"); }
-        var delayed = ChangeWy(f, wy, guard: Guard);
-        accountCurrent = false; f.Store.Release.TrySetResult();
-        await blocker; await Error(async () => await delayed, "STALE_SESSION");
-        Check(f.Owner.IsCurrent(wy) && (await f.Owner.AcquireWyAsync()).Nmtid is null && f.Store.ClientWrites == 2);
-    }
-    private static async Task CancelWrite()
-    {
-        await using var f = new Fixture(); var kg = await f.Owner.AcquireKgAsync();
-        f.Store.HoldWriteAt = 2;
-        using var cancel = new CancellationTokenSource();
-        var pending = f.Owner.SaveKgAsync(kg, "SYNTHETIC_DFID", cancel.Token);
-        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        cancel.Cancel(); Check(!pending.IsCompleted);
-        f.Store.Release.TrySetResult(); await Cancelled(pending);
-        var current = await f.Owner.AcquireKgAsync();
-        Check(current.Dfid == "SYNTHETIC_DFID" && current.Generation == 2 && !f.Owner.NeedsReconciliation &&
-            !f.Owner.IsCurrent(kg) && f.Store.ClientWrites == 2);
-    }
-    private static async Task Close()
-    {
-        await using var f = new Fixture(); f.Store.HoldWriteAt = 1;
-        var pending = f.Owner.AcquireWyAsync().AsTask();
-        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var close = f.Owner.DisposeAsync().AsTask();
-        Check(!close.IsCompleted && f.Store.Disposals == 0);
-        await Error(async () => await f.Owner.AcquireWyAsync(), "CLOSED");
-        f.Store.Release.TrySetResult();
-        await close.WaitAsync(TimeSpan.FromSeconds(5)); await Error(async () => await pending, "CLOSED");
-        await Error(() => f.Owner.PrepareShutdownAsync(), "CLOSED");
-        Check(f.Store.Disposals == 0 && f.Store.ClientWrites == 1);
-    }
-    private static async Task Resume()
-    {
-        await using var f = new Fixture(); var old = await f.Owner.AcquireWyAsync();
-        await f.Owner.PrepareShutdownAsync(); Check(!f.Owner.IsCurrent(old));
-        await f.Owner.CancelShutdownPreparationAsync();
-        var current = await f.Owner.AcquireWyAsync();
-        Check(SameWyValues(current, old) && !ReferenceEquals(current, old) && !f.Owner.IsCurrent(old) && f.Store.ClientWrites == 1);
-    }
-    private static async Task WyFields()
-    {
-        await using var f = new Fixture(); var wy = await f.Owner.AcquireWyAsync();
-        const string auth = "MUSIC_U=SYNTHETIC_AUTH; __csrf=SYNTHETIC_CSRF";
-        var cookies = MusicWyRequestContext.Cookies(wy, auth);
-        Check(cookies["deviceId"] == wy.DeviceId && cookies["MUSIC_U"] == "SYNTHETIC_AUTH" &&
-            cookies["_ntes_nuid"] == wy.Nuid);
-        var updated = await f.Owner.AcceptWyAsync(wy, auth,
-            ["NMTID=SYNTHETIC_NMTID; Domain=.music.163.com", "_ntes_nuid=SYNTHETIC_NEW_NUID; Domain=music.163.com"],
-            () => { }, default);
-        Check(updated.Generation == 2 && updated.Nmtid == "SYNTHETIC_NMTID" && updated.Nuid == "SYNTHETIC_NEW_NUID");
-        var root = await MusicClientContextFixture.ReadDocument(f.Store.Inner);
-        Check(!root.ToJsonString().Contains("SYNTHETIC_AUTH") && f.Store.AccountWrites == 0);
-        Check(ReferenceEquals(updated, await f.Owner.AcceptWyAsync(updated, auth, [], () => { }, default)) &&
-            f.Store.ClientWrites == 2);
-    }
-    private static async Task WyOptional()
-    {
-        await using var f = new Fixture(); var wy = await f.Owner.AcquireWyAsync();
-        var cookies = MusicWyRequestContext.Cookies(wy, "MUSIC_U=SYNTHETIC_AUTH; deviceId=");
-        Check(cookies["deviceId"] == wy.DeviceId && cookies["_ntes_nuid"] == wy.Nuid);
-        string[] cleared = ["MUSIC_A=; Max-Age=0", "__csrf=; Max-Age=0"];
-        Check(ReferenceEquals(wy, await f.Owner.AcceptWyAsync(wy, null, cleared, () => { }, default)) &&
-            MusicWyRequestContext.Authorization(["MUSIC_U=SYNTHETIC_AUTH", .. cleared], DateTimeOffset.UtcNow) == "MUSIC_U=SYNTHETIC_AUTH");
-        Check(f.Store.ClientWrites == 1 && f.Store.AccountWrites == 0);
-        await Error(() =>
-        {
-            _ = MusicWyRequestContext.Cookies(wy, "MUSIC_U=SYNTHETIC_AUTH; deviceId=" + new string('A', 257));
-            return Task.CompletedTask;
-        }, "INVALID_CREDENTIALS");
-    }
-    private static async Task ConcurrentWyFields()
-    {
-        await using var f = new Fixture();
-        var before = await f.Owner.AcquireWyAsync();
-        f.Store.HoldWriteAt = 2;
-        var first = ChangeWy(f, before, "SYNTHETIC_PARALLEL_NMTID");
-        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var second = f.Owner.AcceptWyAsync(before, null,
-            ["_ntes_nuid=SYNTHETIC_PARALLEL_NUID; Domain=.music.163.com"], () => { }, default);
-        f.Store.Release.TrySetResult();
-        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
-        var current = await f.Owner.AcquireWyAsync();
-        Check(current.Generation == before.Generation + 2 &&
-            current.Nmtid == "SYNTHETIC_PARALLEL_NMTID" && current.Nuid == "SYNTHETIC_PARALLEL_NUID");
-        Check(f.Owner.IsCurrent(before) && f.Store.ClientWrites == 3 && f.Store.AccountWrites == 0);
-        Check(!f.Owner.IsCurrent(current with { DeviceId = "SYNTHETIC_OTHER_DEVICE" }));
-        var noChange = await f.Owner.AcceptWyAsync(before, null, [], () => { }, default);
-        Check(ReferenceEquals(current, noChange) && f.Store.ClientWrites == 3);
-        await f.Owner.AcceptWyAsync(before, null, ["NMTID=; Max-Age=0"], () => { }, default);
-        current = await f.Owner.AcquireWyAsync();
-        Check(current.Nmtid is null && current.Nuid == "SYNTHETIC_PARALLEL_NUID" && f.Store.ClientWrites == 4);
-    }
-    private static async Task ParallelWySearch()
-    {
-        await using var f = new Fixture();
-        var before = await f.Owner.AcquireWyAsync();
-        var handler = new ParallelSearchHandler();
-        using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        using var catalog = new MusicPlatformCatalog(new Anonymous(), http, f.Owner);
-        try
-        {
-            var songs = catalog.SearchAsync(new("wy", "Synthetic", MusicSearchKind.Songs));
-            await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var playlists = catalog.SearchAsync(new("wy", "Synthetic", MusicSearchKind.Playlists));
-            await handler.Both.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            handler.First.TrySetResult();
-            Check((await songs.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("items").GetArrayLength() == 1);
-            handler.Second.TrySetResult();
-            Check((await playlists.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("items").GetArrayLength() == 1);
-            Check(f.Owner.IsCurrent(before) && handler.Calls == 2 &&
-                (await f.Owner.AcquireWyAsync()).Nmtid == "SYNTHETIC_PARALLEL_SEARCH");
-        }
-        finally { handler.First.TrySetResult(); handler.Second.TrySetResult(); }
-    }
-    private static async Task ConcurrentWyClear()
-    {
-        await using var f = new Fixture();
-        var before = await f.Owner.AcquireWyAsync();
-        f.Store.HoldWriteAt = 2;
-        var first = ChangeWy(f, before);
-        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var clear = f.Owner.AcceptWyAsync(before, null, ["NMTID=; Max-Age=0"], () => { }, default);
-        Check(!clear.IsCompleted, "an explicit clear must not be dropped as an early no-op");
-        f.Store.Release.TrySetResult();
-        await Task.WhenAll(first, clear).WaitAsync(TimeSpan.FromSeconds(5));
-        var current = await f.Owner.AcquireWyAsync();
-        Check(current.Nmtid is null && current.Generation == before.Generation + 2 && f.Store.ClientWrites == 3);
-    }
-    private static async Task ForeignWy()
-    {
-        await using var f = new Fixture(); var wy = await f.Owner.AcquireWyAsync();
-        const string auth = "MUSIC_U=SYNTHETIC_AUTH; deviceId=SYNTHETIC_FOREIGN_ID";
-        var cookies = MusicWyRequestContext.Cookies(wy, auth);
-        Check(cookies["deviceId"] == "SYNTHETIC_FOREIGN_ID" && !cookies.ContainsKey("_ntes_nuid") && !cookies.ContainsKey("NMTID"));
-        var after = await f.Owner.AcceptWyAsync(wy, auth, ["deviceId=SYNTHETIC_FOREIGN_ID", "NMTID=SYNTHETIC_FOREIGN_NMTID"], () => { }, default);
-        Check(ReferenceEquals(wy, after) && f.Store.ClientWrites == 1 && f.Store.AccountWrites == 0);
-    }
-    private static async Task KgFields()
-    {
-        var local = MusicClientContextFixture.Kg with { Dfid = "SYNTHETIC_LOCAL_DFID" };
-        foreach (var (client, cookie, mid, dfid) in new[] {
-            (local, (string?)null, local.Mid, local.Dfid!),
-            (local, "userid=42; token=SYNTHETIC_AUTH", local.Mid, local.Dfid!),
-            (local, "userid=42; token=SYNTHETIC_AUTH; dfid=SYNTHETIC_UNBOUND", local.Mid, local.Dfid!),
-            (local, $"userid=42; token=SYNTHETIC_AUTH; KUGOU_API_MID={local.Mid}; dfid=SYNTHETIC_OLD_DFID", local.Mid, local.Dfid!),
-            (MusicClientContextFixture.Kg, $"userid=42; token=SYNTHETIC_AUTH; KUGOU_API_MID={local.Mid}; dfid=SYNTHETIC_OLD_DFID", local.Mid, "SYNTHETIC_OLD_DFID"),
-            (local, "userid=42; token=SYNTHETIC_AUTH; KUGOU_API_MID=123456789; dfid=SYNTHETIC_ACCOUNT_DFID", "123456789", "SYNTHETIC_ACCOUNT_DFID"),
-            (local, "userid=42; token=SYNTHETIC_AUTH; KUGOU_API_MID=123456789", "123456789", "-") })
-        {
-            MusicPlatformSession? account = cookie is null ? null : new("kg", "synthetic", 1, "42", cookie);
-            using var request = PlatformProtocols.Kg("/v1/audio/audio", new() { ["mid"] = mid }, account, client,
-                body: new() { ["mid"] = mid, ["dfid"] = dfid });
-            var query = request.RequestUri!.Query.TrimStart('?').Split('&').Select(p => p.Split('=', 2))
-                .ToDictionary(p => Uri.UnescapeDataString(p[0]), p => Uri.UnescapeDataString(p[1]));
-            Check(query["mid"] == mid && query["dfid"] == dfid &&
-                request.Headers.GetValues("mid").Single() == mid && request.Headers.GetValues("dfid").Single() == dfid);
-            var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync())!.AsObject();
-            Check(body["mid"]!.GetValue<string>() == mid && body["dfid"]!.GetValue<string>() == dfid &&
-                !request.Headers.Contains("Cookie"));
-        }
-    }
-    private static async Task KgInvalid()
-    {
-        foreach (var (cookie, code) in new[] {
-            ("userid=42; token=SYNTHETIC_AUTH; KUGOU_API_MID=bad", "DEVICE_CONTEXT_REQUIRED"),
-            ("userid=42; token=SYNTHETIC_AUTH; KUGOU_API_MID=", "DEVICE_CONTEXT_REQUIRED"),
-            ("userid=42; token=SYNTHETIC_AUTH; KUGOU_API_MID=123; dfid=bad", "DEVICE_CONTEXT_REQUIRED"),
-            ("userid=77; token=SYNTHETIC_AUTH", "INVALID_CREDENTIALS"),
-            ("userid=42", "INVALID_CREDENTIALS") })
-            await Error(() =>
+            bool failed = resetFailure;
+            yield return new("Music delayed reset gates new candidates and QR creation " + (failed ? "without dispatch after failure" : "until its receipt"), async () =>
             {
-                using var request = PlatformProtocols.Kg("/v1/audio/audio", new(),
-                    new("kg", "synthetic", 1, "42", cookie), MusicClientContextFixture.Kg);
-                return Task.CompletedTask;
-            }, code);
-        foreach (bool body in new[] { false, true })
-            await Error(() =>
-            {
-                var fields = new JsonObject { ["mid"] = "123456789" };
-                using var request = PlatformProtocols.Kg("/v1/audio/audio", body ? new() : fields, null,
-                    MusicClientContextFixture.Kg, body: body ? fields : null);
-                return Task.CompletedTask;
-            }, "INVALID_REQUEST");
-    }
-    private static async Task WyResponseFailure(string fault)
-    {
-        await using var f = new Fixture(); var wy = await f.Owner.AcquireWyAsync();
-        string[] rows = fault switch
-        {
-            "identity" => ["deviceId=SYNTHETIC_OTHER_ID"],
-            "duplicate" => ["NMTID=SYNTHETIC_ONE", "NMTID=SYNTHETIC_TWO"],
-            "domain" => ["NMTID=SYNTHETIC_VALUE; Domain=untrusted.invalid"],
-            "control" => ["NMTID=SYNTHETIC_VALUE\r\n"],
-            "expired-auth" => ["MUSIC_U=; Max-Age=0"],
-            _ => Enumerable.Repeat("unrelated=value", 33).ToArray()
-        };
-        await Error(async () => await f.Owner.AcceptWyAsync(wy, null, rows, () => { }, default),
-            fault == "identity" ? "IDENTITY_MISMATCH" : fault == "expired-auth" ? "AUTH_EXPIRED" : "INVALID_RESPONSE");
-        Check(f.Owner.IsCurrent(wy) && f.Store.ClientWrites == 1);
-    }
-    private static async Task CacheGeneration()
-    {
-        await using var f = new Fixture(); var handler = new CacheHandler();
-        using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        using var catalog = new MusicPlatformCatalog(new Anonymous(), http, f.Owner);
-        var first = await catalog.HomeAsync(new("wy"));
-        var cached = await catalog.HomeAsync(new("wy"));
-        Check(handler.Calls == 1 && f.Store.ClientWrites == 2 && first.GetRawText() == cached.GetRawText());
-    }
-    private static async Task DiscoveryFailures()
-    {
-        foreach (var (error, unknown, code) in new[] {
-            ((DocumentStoreError?)DocumentStoreError.Unavailable, false, "STORAGE_UNAVAILABLE"),
-            ((DocumentStoreError?)DocumentStoreError.Corrupt, false, "CORRUPT_STORAGE"),
-            ((DocumentStoreError?)null, true, "COMMIT_UNKNOWN") })
-        {
-            await using var f = new Fixture(); f.Store.ReadError = error;
-            if (unknown)
-            {
-                f.Store.DropReceiptAt = 1;
-                await Error(() => f.Owner.InitializeAsync(), "COMMIT_UNKNOWN");
-            }
-            var handler = new CacheHandler();
-            using var http = MusicPlatformHttp.CreateWithHandler(handler);
-            await using var discovery = new NativeMusicSearchDiscovery(new Anonymous(), http, f.Owner);
-            await Error(async () => await discovery.ReadAsync(), code);
-            Check(handler.Calls == 0);
+                await using var f = new MusicPlatformRuntimeFixture();
+                f.OnRequest = (call, _) => Task.FromResult(call.Operation switch
+                {
+                    "qr.create" => Challenge(call),
+                    "account.verify" => Verified("MUSIC_U=SYNTHETIC_AUTHENTICATED"),
+                    _ => throw new InvalidOperationException(call.Operation)
+                });
+                await using var protocol = f.CreateAccountProtocol();
+                await protocol.BeginAsync("wy");
+                var entered = Signal(); var release = Signal();
+                int resets = 0;
+                f.OnSessionUpdate = async (_, _) =>
+                {
+                    if (Interlocked.Increment(ref resets) == 1)
+                    {
+                        entered.TrySetResult(); await release.Task;
+                        if (failed) throw new MusicPlatformException("NETWORK_ERROR");
+                    }
+                    return MusicPlatformRuntimeFixture.Json(new { published = true });
+                };
+                f.Client.Invalidate("wy");
+                Task<MusicAccountVerifiedCredential> verify;
+                Task<MusicAccountChallenge> begin;
+                try
+                {
+                    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    verify = protocol.ValidateAsync("wy", "MUSIC_U=SYNTHETIC_CANDIDATE");
+                    begin = protocol.BeginAsync("wy");
+                    Check(!verify.IsCompleted && !begin.IsCompleted && f.Requests.Count == 1);
+                }
+                finally { release.TrySetResult(); }
+                if (failed)
+                {
+                    await AccountFailure("NETWORK_ERROR", () => verify);
+                    await AccountFailure("NETWORK_ERROR", () => begin);
+                    await Failure("NETWORK_ERROR", f.Client.DrainAsync);
+                    Check(f.Requests.Count == 1);
+                }
+                else
+                {
+                    Check((await verify).Cookie == "MUSIC_U=SYNTHETIC_AUTHENTICATED");
+                    await begin; await f.Client.DrainAsync();
+                    Check(f.Requests.Count(call => call.Operation == "account.verify") == 1 &&
+                        f.Requests.Count(call => call.Operation == "qr.create") == 2);
+                }
+            });
         }
-    }
-    private sealed class Anonymous : IMusicPlatformSessionSource
-    {
-        public ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken token) =>
-            ValueTask.FromResult<MusicPlatformSession?>(null);
-        public bool IsCurrent(MusicPlatformSession session) => false;
-    }
-    private sealed class CacheHandler : HttpMessageHandler
-    {
-        internal int Calls;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        yield return new("Music existing client drain also awaits concurrently started final physical reset", async () =>
         {
-            Calls++; Check(request.RequestUri!.AbsolutePath == "/eapi/link/page/rcmd/resource/show");
-            var response = new HttpResponseMessage(HttpStatusCode.OK) {
-                Content = new StringContent("{\"code\":200,\"data\":{\"cursor\":\"0\",\"hasMore\":false,\"blocks\":[]}}", Encoding.UTF8, "application/json") };
-            response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_CACHE_CONTEXT; Domain=music.163.com");
-            return Task.FromResult(response);
-        }
-    }
-    private sealed class ParallelSearchHandler : HttpMessageHandler
-    {
-        internal readonly TaskCompletionSource Entered = Signal(), Both = Signal(), First = Signal(), Second = Signal();
-        internal int Calls;
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        {
-            int call = Interlocked.Increment(ref Calls);
-            Entered.TrySetResult();
-            if (call == 2) Both.TrySetResult();
-            Check(call <= 2);
-            await (call == 1 ? First.Task : Second.Task).WaitAsync(token);
-            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            await using var f = new MusicPlatformRuntimeFixture();
+            var entered = Signal(); var release = Signal(); var closingEntered = Signal(); var closingRelease = Signal();
+            f.OnRequest = async (_, _) =>
             {
-                Content = new StringContent("""
-                    {"code":200,"result":{"songCount":1,"songs":[{"id":1001,"name":"Synthetic","dt":180000,"ar":[{"name":"Synthetic artist"}]}],
-                    "playlistCount":1,"playlists":[{"id":2001,"name":"Synthetic playlist","trackCount":1}]}}
-                    """, Encoding.UTF8, "application/json")
+                entered.TrySetResult(); await release.Task;
+                return MusicPlatformRuntimeFixture.Json(new { entries = Array.Empty<object>() });
             };
-            if (call == 1) response.Headers.TryAddWithoutValidation("Set-Cookie",
-                "NMTID=SYNTHETIC_PARALLEL_SEARCH; Domain=.music.163.com");
-            return response;
-        }
-    }
-    private sealed class Fixture : IAsyncDisposable
-    {
-        internal readonly FaultStore Store = new();
-        internal readonly MusicPlatformClientContextOwner Owner;
-        internal Fixture() => Owner = CreateOwner();
-        internal MusicPlatformClientContextOwner CreateOwner() => new(Store);
-        internal async Task Seed(string ns, byte[] bytes)
-        {
-            var before = await Store.Inner.ReadAsync(ns);
-            try { await Store.Inner.WriteAsync(ns, bytes, before.Fingerprint); }
-            finally
+            var read = f.Catalog.HomeAsync(new("wy"));
+            Task drain, close;
+            try
             {
-                CryptographicOperations.ZeroMemory(bytes);
-                if (before.Data is not null) CryptographicOperations.ZeroMemory(before.Data);
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                drain = f.Client.DrainAsync();
+                f.OnSessionUpdate = async (_, _) =>
+                {
+                    closingEntered.TrySetResult(); await closingRelease.Task;
+                    return MusicPlatformRuntimeFixture.Json(new { published = true });
+                };
+                close = f.Client.DisposeAsync().AsTask();
+                await closingEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                release.TrySetResult();
+                await Failure("CLOSED", () => read);
+                await Task.Delay(30);
+                Check(!drain.IsCompleted && !close.IsCompleted);
             }
-        }
-        public async ValueTask DisposeAsync()
-        { Store.Release.TrySetResult(); await Owner.DisposeAsync(); await Store.DisposeAsync(); }
+            finally { release.TrySetResult(); closingRelease.TrySetResult(); }
+            await Task.WhenAll(drain, close);
+            Check(f.Requests.Count == 1);
+        });
+        yield return new("Music platform replacement fences a late old result and leaves another platform current", async () =>
+        {
+            await using var f = new MusicPlatformRuntimeFixture(); var entered = Signal(); var release = Signal();
+            f.Sessions.Set(new("wy", "old", 1, "42", "MUSIC_U=SYNTHETIC_OLD"));
+            f.Sessions.Set(new("tx", "qq", 1, "43", "musickey=SYNTHETIC_QQ"));
+            f.OnRequest = async (call, _) => { if (call.Platform == "wy") { entered.TrySetResult(); await release.Task; } return MusicPlatformRuntimeFixture.Json(new { }); };
+            var old = f.Catalog.HomeAsync(new("wy"));
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); f.Sessions.Set(new("wy", "new", 2, "44", "MUSIC_U=SYNTHETIC_NEW"));
+                f.Client.Invalidate("wy"); await f.Catalog.SongAsync(new("tx", "mid"));
+            }
+            finally { release.TrySetResult(); }
+            await Failure("STALE_SESSION", () => old); await f.Client.DrainAsync();
+            Check(f.Requests.Count == 2);
+        });
     }
-    private sealed class FaultStore : IDocumentStore
+    private static JsonElement Verified(string cookie)
     {
-        internal readonly MusicClientContextFixture.MemoryStore Inner = new();
-        internal readonly TaskCompletionSource Arrived = Signal(), Release = Signal();
-        internal int ClientReads, ClientWrites, AccountReads, AccountWrites, Disposals;
-        internal int HoldWriteAt, ConflictAt, DropReceiptAt, FailWriteAt, WrongReceiptAt;
-        internal bool HoldRead, UnexpectedRead;
-        internal DocumentStoreError? ReadError;
-        internal DocumentSnapshot? ReadOverride;
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        {
-            if (ns != MusicPlatformClientContextOwner.DocumentNamespace)
-            { AccountReads++; return await Inner.ReadAsync(ns, token); }
-            Interlocked.Increment(ref ClientReads);
-            if (HoldRead) { Arrived.TrySetResult(); await Release.Task; token = default; }
-            if (UnexpectedRead) throw new InvalidOperationException("SYNTHETIC_READ_SECRET");
-            if (ReadError is { } error) throw new DocumentStoreException(error);
-            if (ReadOverride is { } value) return new(value.Data?.ToArray(), value.Fingerprint);
-            return await Inner.ReadAsync(ns, token);
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes,
-            DocumentFingerprint expected, CancellationToken token = default)
-        {
-            if (ns != MusicPlatformClientContextOwner.DocumentNamespace)
-            { AccountWrites++; return await Inner.WriteAsync(ns, bytes, expected, token); }
-            int write = Interlocked.Increment(ref ClientWrites);
-            if (write == HoldWriteAt) { Arrived.TrySetResult(); await Release.Task; token = default; }
-            if (write == ConflictAt) await MusicClientContextFixture.ConcurrentClientWrite(Inner);
-            if (write == FailWriteAt) throw new DocumentStoreException(DocumentStoreError.Storage);
-            var receipt = await Inner.WriteAsync(ns, bytes, expected, token);
-            if (write == DropReceiptAt) throw new DocumentStoreException(DocumentStoreError.Storage);
-            return write == WrongReceiptAt ? DocumentFingerprint.Missing : receipt;
-        }
-        public async ValueTask DisposeAsync()
-        {
-            Disposals++;
-            if (ReadOverride?.Data is { } bytes) CryptographicOperations.ZeroMemory(bytes);
-            await Inner.DisposeAsync();
-        }
+        var result = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation().GetRawText())!.AsObject();
+        result["cookie"] = cookie;
+        return MusicPlatformRuntimeFixture.Json(result);
+    }
+    private static JsonElement Challenge(MusicPlatformRuntimeFixture.Call call) => MusicPlatformRuntimeFixture.Json(new
+    {
+        challengeId = call.Parameters.GetProperty("challengeId").GetString(), url = "https://qr.invalid/synthetic",
+        expiresAt = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeMilliseconds(), imageBase64 = (string?)null
+    });
+    private static async Task AccountFailure(string code, Func<Task> action)
+    {
+        try { await action(); }
+        catch (MusicAccountException error) { Check(error.Code == code && error.InnerException is null); return; }
+        throw new InvalidOperationException("Expected " + code);
     }
 }

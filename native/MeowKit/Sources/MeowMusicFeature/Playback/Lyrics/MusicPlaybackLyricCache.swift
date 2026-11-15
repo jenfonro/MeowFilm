@@ -25,42 +25,15 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     struct Key: Hashable, Sendable {
         private let identity: Data
 
-        /// The current DTO exposes recording/source identity and duration, but
-        /// not the original song revision, rejected source list or full source locator.
-        /// Pass the actual content revision when available; otherwise the owner
-        /// must be cleared on changes to those unexposed inputs. Do not substitute
-        /// the queue/settings revision or selectionID: ordinary navigation and
-        /// quality/display changes must not defeat the ten-minute content cache.
-        init(track: MusicRemoteTrack, source: MusicNativeSource, contentRevision: Int? = nil) throws {
-            guard Self.publicPlatforms.contains(source.platform) else { throw MusicServiceError.sourceRequired }
-            identity = try Self.encode(track: track, source: source, revision: contentRevision)
-        }
-
-        private static let publicPlatforms = ["wy", "tx", "kg", "kw", "mg"]
-        private static func encode(track: MusicRemoteTrack, source: MusicNativeSource,
-                                   revision: Int?) throws -> Data {
-            guard !track.songId.isEmpty, track.duration.isFinite, track.duration >= 0,
-                  track.sources.contains(source) else { throw MusicServiceError.sourceRequired }
+        init(track: MusicRemoteTrack, source: MusicNativeSource) throws {
             struct Identity: Encodable {
                 let songID: String
-                let revision: Int?
-                let title: String
-                let artist: String
-                let album: String
-                let duration: Double
-                let sources: [MusicNativeSource]
                 let sourceKey: String
-                let platform: String
             }
-            let value = Identity(songID: track.songId, revision: revision, title: track.title,
-                                 artist: track.artist, album: track.album, duration: track.duration,
-                                 sources: track.sources, sourceKey: source.sourceKey,
-                                 platform: source.platform)
+            let value = Identity(songID: track.songId, sourceKey: source.sourceKey)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            let data = try encoder.encode(value)
-            guard data.count <= 64 * 1_024 else { throw MusicServiceError.limit }
-            return data
+            identity = try encoder.encode(value)
         }
     }
 

@@ -66,7 +66,7 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertNotNil(valid)
         XCTAssertTrue(try XCTUnwrap(valid).matches(track()))
         XCTAssertFalse(try XCTUnwrap(valid).matches(track("another")))
-        XCTAssertFalse(try XCTUnwrap(valid).matches(track(cover: "changed")))
+        XCTAssertTrue(try XCTUnwrap(valid).matches(track(cover: "changed")), "Changing song facts does not revoke playback ownership")
         XCTAssertNil(MusicSystemMetadataBinding(entry: entry, attempt: attempt, activeAttemptID: UUID(),
             activeResourceID: "resource", activeOccurrenceID: entry.id, access: access, snapshot: snapshot))
         XCTAssertNil(MusicSystemMetadataBinding(entry: entry, attempt: attempt, activeAttemptID: attempt.id,
@@ -86,7 +86,7 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertNotEqual(valid, newAccess)
     }
 
-    @MainActor func testDisplayedArtworkWorksInFixedModeAndRejectsOtherSongCoverAndRevokedTicket() throws {
+    @MainActor func testDisplayedArtworkWorksInFixedModeRetainsSameSongCoverAndRejectsRevokedTicket() throws {
         let (appearance, defaults, name) = store()
         defer { defaults.removePersistentDomain(forName: name) }
         appearance.set(\.colorMode, .fixed)
@@ -99,7 +99,7 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertEqual(value.artwork?.data, Data([1]))
         let changed = MusicSystemMetadataCoordinator.metadata(track: track(cover: "changed"), lines: [],
             position: 0, preferences: appearance.preferences, favorite: false, artwork: appearance.displayedArtwork)
-        XCTAssertNil(changed.artwork)
+        XCTAssertEqual(changed.artwork?.data, Data([1]), "The same song keeps displayed artwork until the replacement is ready")
         appearance.setSystemArtworkEnabled(false)
         XCTAssertNil(appearance.displayedArtwork)
         XCTAssertFalse(appearance.applyDisplayedArtwork(Data([2]), ticket: ticket))
@@ -110,6 +110,26 @@ final class MusicSystemMetadataTests: XCTestCase {
         appearance.selectSystemArtwork(track("next"))
         XCTAssertNil(appearance.beginDisplayedArtwork(for: key, artworkID: song.artwork!.absoluteString))
         XCTAssertFalse(appearance.applyDisplayedArtwork(Data([5]), ticket: fresh))
+    }
+
+    @MainActor func testSameSongNewURLRetainsSystemImageButRevokesOldURLCallbacksAndSwitchingSongClearsIt() throws {
+        let (appearance, defaults, name) = store()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let first = track(), next = track(cover: "replacement")
+        let key = MusicAppearanceSongIdentity(track: first)
+        appearance.selectSystemArtwork(first)
+        let oldTicket = try XCTUnwrap(appearance.beginDisplayedArtwork(for: key, artworkID: first.artwork!.absoluteString))
+        XCTAssertTrue(appearance.applyDisplayedArtwork(Data([1]), ticket: oldTicket))
+        appearance.selectSystemArtwork(next)
+        XCTAssertEqual(appearance.displayedArtwork?.data, Data([1]))
+        XCTAssertFalse(appearance.applyDisplayedArtwork(Data([2]), ticket: oldTicket))
+        let newTicket = try XCTUnwrap(appearance.beginDisplayedArtwork(for: key, artworkID: next.artwork!.absoluteString))
+        XCTAssertEqual(appearance.displayedArtwork?.data, Data([1]))
+        XCTAssertTrue(appearance.applyDisplayedArtwork(Data([3]), ticket: newTicket))
+        XCTAssertEqual(appearance.displayedArtwork?.data, Data([3]))
+        appearance.selectSystemArtwork(track("another", cover: "replacement"))
+        XCTAssertNil(appearance.displayedArtwork)
+        XCTAssertFalse(appearance.applyDisplayedArtwork(Data([4]), ticket: newTicket))
     }
 
     @MainActor func testTwoSurfacesShareOneEncodingAndPaletteModeDoesNotRemoveMetadataImage() throws {
@@ -173,11 +193,9 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertEqual(state.artworkRevision, imageRevision)
         XCTAssertTrue(state.captureArtwork(revision: imageRevision) { Data([1]) })
         XCTAssertEqual(appearance.displayedArtwork?.data, Data([1]))
-        XCTAssertFalse(state.captureDisplay(revision: old, encode: { Data([1]) }) { _ in XCTFail("Old cache committed") })
         XCTAssertFalse(state.sample(revision: old) { XCTFail("Old pixels sampled"); return [255, 0, 0, 255] })
         let background = state.samplingRevision
         XCTAssertFalse(state.deliverImage(revision: background) { XCTFail("Background view delivered") })
-        XCTAssertFalse(state.captureDisplay(revision: background, encode: { Data([1]) }) { _ in XCTFail("Background display rendered") })
         XCTAssertFalse(state.sample(revision: background) { XCTFail("Background pixels sampled"); return [255, 0, 0, 255] })
         state.becameActive()
         let fresh = state.samplingRevision

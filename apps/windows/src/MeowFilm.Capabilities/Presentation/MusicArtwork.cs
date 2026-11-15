@@ -11,21 +11,23 @@ public static class MusicArtworkPolicy
         => Candidates(song, platforms, enabled).FirstOrDefault() ?? "";
 
     internal static string[] Candidates(JsonElement song, IReadOnlyList<string> platforms, IReadOnlySet<string> enabled)
+        => Sources(song, platforms, enabled).Select(value => value.Address).Distinct(StringComparer.Ordinal).ToArray();
+
+    internal static (string SourceKey, string Address)[] Sources(JsonElement song, IReadOnlyList<string> platforms, IReadOnlySet<string> enabled)
     {
         try
         {
-            if (song.ValueKind != JsonValueKind.Object || song.GetRawText().Length > 262144) return [];
             var current = NativeMusicSong.Normalize(JsonNode.Parse(song.GetRawText()));
             var sources = current["sources"]!.AsArray();
-            var addresses = new List<string>();
+            var addresses = new List<(string, string)>();
             foreach (string platform in platforms)
             {
                 if (!enabled.Contains(platform)) continue;
                 foreach (var node in sources.OfType<JsonObject>()
-                    .Where(row => LJ.S(row["source"]) == platform).Take(2))
+                    .Where(row => LJ.S(row["source"]) == platform))
                 {
                     string address = PublicUrl(NativeMusicSong.Display(node).Cover);
-                    if (address.Length != 0 && !addresses.Contains(address)) addresses.Add(address);
+                    if (address.Length != 0) addresses.Add((LJ.S(node["sourceKey"]), address));
                 }
             }
             return addresses.ToArray();
@@ -33,50 +35,61 @@ public static class MusicArtworkPolicy
         catch { return []; }
     }
 
-    internal static string PublicUrl(string value) => value.Length <= 8192 && Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
-        uri.Scheme is "http" or "https" && uri.UserInfo.Length == 0 && uri.Query.Length == 0 && uri.Fragment.Length == 0
+    internal static string PublicUrl(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+        uri.Scheme is "http" or "https" && uri.UserInfo.Length == 0 && uri.Fragment.Length == 0
         ? uri.AbsoluteUri : "";
 }
 
 public sealed partial class MusicCapability
 {
-    private string[] savedArtworkPlatforms = [];
-    private HashSet<string> savedArtworkEnabled = new(StringComparer.Ordinal);
-    private bool artworkPolicyKnown;
     private string currentArtwork = "";
-    private string? artworkEntryId, artworkSongId;
-    private readonly HashSet<string> failedArtworkAddresses = new(StringComparer.Ordinal);
-    public string CurrentArtwork => !stopping && artworkPolicyKnown ? currentArtwork : "";
+    private string? artworkSongId;
+    public string CurrentArtwork => !stopping ? current?.Cover ?? "" : "";
+    public string CurrentArtworkIdentity => current?.Id ?? "";
 
-    private void RefreshCurrentArtwork(bool force = false)
+    private void RefreshCurrentArtwork()
     {
-        if (!artworkPolicyKnown) return;
-        bool changedSong = artworkEntryId != current?.EntryId || artworkSongId != current?.Id;
-        if (changedSong || force) failedArtworkAddresses.Clear();
-        string[] addresses = current is null ? [] :
-            MusicArtworkPolicy.Candidates(PlaybackSong(current), savedArtworkPlatforms, savedArtworkEnabled);
-        string retained = changedSong || force ? "" : currentArtwork;
-        string next;
-        if (addresses.Contains(retained) && !failedArtworkAddresses.Contains(retained))
-            next = retained;
-        else
-        {
-            string initial = changedSong && !force && current is not null ? MusicArtworkPolicy.PublicUrl(current.Cover) : "";
-            next = addresses.Contains(initial) ? initial :
-                addresses.FirstOrDefault(address => !failedArtworkAddresses.Contains(address)) ??
-                // Keep an exhausted failure visible for the image's explicit retry action.
-                (addresses.Contains(retained) ? retained : "");
-        }
-        artworkEntryId = current?.EntryId; artworkSongId = current?.Id;
+        if (current is not null && application is MusicNativeApplication owner)
+            current.ApplyRepository(owner.SongSnapshot(current.Id));
+        bool changedSong = artworkSongId != current?.Id;
+        artworkSongId = current?.Id;
+        if (changedSong) Changed(nameof(CurrentArtworkIdentity));
+        string next = current?.Cover ?? "";
         if (currentArtwork == next) return;
         currentArtwork = next;
         Changed(nameof(CurrentArtwork));
     }
 
-    internal void ArtworkLoadCompleted(string address, bool succeeded)
+    private void RepositorySongsChanged()
     {
-        if (stopping || !artworkPolicyKnown || current is null || address != currentArtwork) return;
-        if (succeeded) failedArtworkAddresses.Remove(address);
-        else if (failedArtworkAddresses.Add(address)) RefreshCurrentArtwork();
+        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
+        _ = Presentation.Dispatcher.InvokeAsync(() =>
+        {
+            if (stopping || disposed || application is not MusicNativeApplication owner) return;
+            foreach (var song in searchSongs.Concat(catalogSongs).Append(current).Append(selectedSong).OfType<SongRow>())
+                song.ApplyRepository(owner.SongSnapshot(song.Id));
+            var cards = homeSections.Concat(homeDisplaySections).Concat(channelSections).Concat(utilitySections)
+                .Concat(searchSections.Values.SelectMany(value => value))
+                .SelectMany(section => section.Items.Concat(section.Action is { } action ? [action] : []))
+                .Concat(searchCardCache.Values.SelectMany(value => value.Cards)).Concat(ChannelTabs)
+                .Distinct<MusicCatalogCard>(ReferenceEqualityComparer.Instance);
+            RefreshCatalogSongs(cards);
+            foreach (var row in queueSurfaceRows) row.RefreshSong(owner.SongSnapshot(row.Song.Id));
+            foreach (var row in RecommendationCandidates) row.RefreshSong(owner.SongSnapshot(row.Song.Id));
+            foreach (var row in DiscoveryCharts.SelectMany(chart => chart.Songs))
+                row.RefreshSong(owner.SongSnapshot(row.Song.Id));
+            RefreshCurrentArtwork();
+            RefreshBindings();
+        });
+    }
+
+    private void RefreshCatalogSongs(IEnumerable<MusicCatalogCard> cards)
+    {
+        if (application is not MusicNativeApplication owner) return;
+        foreach (var card in cards)
+        {
+            if (card.Song is { } song) card.RefreshSong(owner.SongSnapshot(song.Id));
+            card.RefreshPreview(owner.SongSnapshot);
+        }
     }
 }

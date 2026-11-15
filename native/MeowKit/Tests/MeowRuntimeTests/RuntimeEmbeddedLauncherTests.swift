@@ -55,7 +55,7 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
     private func manifest(_ root: URL, changes: [String: Any] = [:]) throws {
         var value: [String: Any] = ["schemaVersion": 1, "status": "complete", "product": "aggregate",
             "entry": "app/ios/entries/aggregate.mjs", "platform": "ios", "transport": "runtime.http.v1",
-            "assemblyProfile": "common-native", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"]]
+            "assemblyProfile": "common-native", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"]]
         value.merge(changes) { $1 }
         try JSONSerialization.data(withJSONObject: value).write(to: root.appendingPathComponent("runtime-manifest.json"))
     }
@@ -253,7 +253,7 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
         await session.close()
     }
 
-    func testPayloadRequiresTheCompleteEightModuleHTTPAssembly() throws {
+    func testPayloadRequiresTheCompleteNineModuleHTTPAssembly() throws {
         let root = try payload()
         XCTAssertEqual(try RuntimePayload(root: root).entry.lastPathComponent, "aggregate.mjs")
         for fields: [String: Any] in [
@@ -265,6 +265,8 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
             ["modules": ["music", "cat", "source", "tmdb", "netease", "douban"]],
             ["modules": ["music", "cat", "source", "pan", "tmdb", "douban"]],
             ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film"]],
+            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"]],
+            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "music-platform", "netease"]],
             ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "unknown"]],
             ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "douban"]],
             ["modules": ["music", "cat", "source", "tmdb", "pan", "douban", "film"]],

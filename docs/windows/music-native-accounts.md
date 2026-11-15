@@ -1,14 +1,13 @@
 # 原生音乐账号契约
 
-客户端与授权的共同职责边界见[平台客户端上下文](../common/music/platform-client-context.md)，Windows 的设备初始化和登记见[客户端实现](music-platform-client-context.md)。本文件只记录账号授权、命令、交接和账号存储。
+共同的请求、匿名协议状态和授权交接规则见[平台请求](../common/music/platform-client-context.md)，Windows 适配见[平台客户端](music-platform-client-context.md)。本文件只记录原生账号 owner、命令、安全保存和展示事实；外部文件以[账号文件契约](../common/music/account-transfer.md)为准。
 
 ## 所有权与装配
 
-- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一 writer，拥有账号会话、登录交接、资料权益及账号绑定的 QQ 反馈 lease；不拥有安装标识、QIMEI 或匿名设备登记 writer。
-- 网易云、QQ、酷狗的固定平台请求由 `MeowFilm.Capabilities.Accounts` 与 `MeowFilm.Capabilities.Platforms` 原生实现；账号业务不经 Node、脚本 RPC 或本地服务。
-- `IDocumentStore` 由 App 持有并借给账号 owner。构造 owner 不读磁盘、不联网、不启动 Node。
-- `music.accounts.v1` 仍使用 DPAPI，原命名空间、存储路径和密文格式保持不变；普通本地数据的明文存储不改变应用账号 Cookie 的保护。
-- 账号 owner 与协议默认使用 `TimeProvider.System`；注入确定性时钟时装配须向两者传入同一时钟，资料取得时间校验与缓存新鲜度使用同一时间基准。
+- `MusicAccountOwner` 是 `music.accounts.v2` 的唯一 writer，拥有账号会话、登录交接和资料展示；不拥有安装标识、QIMEI 或匿名设备状态。
+- `MusicNativeApplication` 将唯一 `MusicPlatformClient` 注入 `MusicAccountProtocol`。后者以 `account.verify/account.profile/qr.create/qr.poll/qr.cancel/sms.send/sms.login` 消费共同 Node 结果，不保留原生平台 HTTP、签名或设备配方。
+- `IDocumentStore` 由 App 持有并借给账号 owner。构造 owner 不读磁盘或联网。
+- 当前 `music.accounts.v2` 使用 DPAPI；账号展示缓存为 `music.account-details.v2`。不读取、转换或清理旧账号／客户端文档。
 - 页面只调用原生能力接口，不读取 Cookie、设备材料或保护文档，也不拥有第二份账号状态。
 
 ## 唯一当前文档
@@ -24,14 +23,14 @@
 }
 ```
 
-当前最多三个 entry，分别为 `wy`、`tx`、`kg` 平台账号。
+当前最多三个 entry，分别为 `wy`、`tx`、`kg` 平台账号。这是本地安全文档契约，不是普通平台响应的数量门禁。
 
-账号 key 为 `["meowfilm","music",1,"platform-account","<platform>"]`。展示详情单独存于 `music.account-details.v1` 缓存，按平台直接读取/解码；设备状态仅存于独立客户端文档。凭据文档的根对象、entry、value、字段集合、类型、范围、规范整数、关系和 fingerprint 在业务读取前整文档校验。
+账号 key 为 `["meowfilm","music",1,"platform-account","<platform>"]`，值保存当前 version、generation、cookie、profile、scope、validatedAt。`AccountDocument` 校验当前保护文档和 fingerprint；平台私有设备材料不再形成原生第二 writer。namespace 的 `v2` 不等于 envelope 的 version。
 
 - 文档不存在时创建内存中的当前空结构。
 - 未知 key、额外或缺失字段、重复属性、损坏 value、错误 fingerprint、非规范整数或超过预算均以 `CORRUPT_STORAGE` 失败。
 - 失败不触发网络、写回、清理或局部修复，原字节保持不变。
-- 不兼容数据明确失败并保留；清理或重置需用户明确确认。
+- 当前文档无法解码时明确失败并保留；不探测或承接历史格式。
 
 完整存储事务规则见[账号存储](music-account-storage.md)。
 
@@ -49,11 +48,9 @@
 - `music.accounts.sms.send`
 - `music.accounts.sms.login`
 
-平台只允许 `wy`、`tx`、`kg`。短信链仅用于网易云；二维码按各平台当前原生协议执行。一次 poll 只完成一次查询，是否继续轮询由可见登录浮层的生命周期决定，关闭、切平台、隐藏或退出立即取消该代次。
+平台账号为 `wy`、`tx`、`kg`；具体认证／短信能力和冷却由共同 Node 操作执行。一次 poll 只消费一次规范结果，轮询由可见登录浮层拥有，关闭、切平台、隐藏或退出退休其代次。Node 的 QR/SMS 实际派发、冷却和未知结果不由页面重建重置。
 
-登录由自身维护请求生命周期，不受账号外层总并发或累计调用台账约束。短信同号码发送单飞并保留 60 秒冷却，取消或重新进入页面不能绕过冷却；冷却过期且无活动请求后由单个定时器回收记录，不保留十分钟发送次数或单号码登录次数台账。二维码保留创建冷却、180 秒有效期及平台轮询间隔，不额外计数 100 轮；只有二维码面板可见时才轮询，切换短信面板立即停止。
-
-显式导入／验证、扫码和短信登录必须先由对应平台协议验证精确身份，在同一登录请求生命周期中获取一次资料与权益，再由唯一 owner 对账号凭据执行一次严格 CAS；绑定新账号的展示详情独立发布到可选缓存，异步落盘不影响登录成功。二维码、短信或登录响应自身的会员字段不是权益依据；各平台复用与手动刷新相同的固定权益接口，不重复验证刚确认的登录身份。协议返回的资料、二维码和 handoff 都是短期内存对象，不能直接成为已保存账号。
+显式导入／验证、扫码和短信登录先完成 Node 的真实认证及资料读取，再由唯一原生 owner 对凭据执行 CAS，成功保存后才成为当前授权。展示详情独立发布到可选缓存，缓存落盘失败不逆转凭据提交。短期二维码、候选凭据和 handoff 不等于已保存账号。
 
 ## 会话与消费者
 
@@ -64,7 +61,7 @@
 - 登录、退出、账号替换、跨进程文档变化、可信认证失败和关闭都会推进或撤销当前代次；旧请求、旧失败和旧成功均无权覆盖新账号。
 - `Revoke` 只能撤销传入的精确当前会话，不能按平台名撤销后来签发的会话。
 - 无账号时仅允许显式定义的 guest 访问；设备缓存、会员资料和脚本均不能伪造登录。
-- WY／KG 登录在请求边界消费当前本地客户端；QQ 普通授权请求没有 QIMEI／匿名 session 依赖。QQ 反馈每次实时核对账号后组合客户端 owner 的设备状态，独立客户端变化不撤销普通账号授权。
+- 原生授权经同一 `MusicPlatformClient` 发布到 Node；平台设备关联由 Node 执行。普通响应不再触发原生客户端快照／Cookie 二次校验。
 
 ## 资料与权益
 
@@ -102,7 +99,7 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 
 ## 写入、取消与关闭
 
-- 客户端文档与账号文档各由其稳定 owner 的 FIFO 操作队列形成变更；共享存储再按准入次序完成 CAS。账号详情使用独立可选缓存，成功刷新直接发布内存并安排落盘；缓存写入不进入凭据的 pending/reconcile，写失败不会产生业务 `COMMIT_UNKNOWN`。
+- 账号文档由其稳定 owner 的队列形成变更，共享存储按准入次序完成 CAS。账号详情使用独立可选缓存，成功刷新直接发布内存并安排落盘；缓存写入不进入凭据的 pending/reconcile，写失败不会产生业务 `COMMIT_UNKNOWN`。
 - 账号详情/VIP读取不由最后一个等待者关闭；App 关闭准备显式退休并排空这些读取。VIP签到等用户写事务保持独立语义，不因本次读取调整而重放。
 
 
@@ -112,12 +109,12 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 - 页面取消已开始的账号核对读取属于取消结算；应用关闭准备等待它完成，不再次取消该确认读取或把正常离页改报为未知提交。
 - 显式重新观察账号状态只读取权威文档；失败 owner 不通过丢弃 pending、影子状态或额外 writer 恢复。
 - 关闭先停止新调用、撤销首次观察和全部已签发会话，再等待网络、协议、存储和通知真实结算；已发布但尚未进入物理存储计数的首次观察同样属于关闭排空范围。最后才释放协议，共享保护存储由 App 在全部 owner 排空后释放。
-- 共享匿名设备工作归属客户端 owner；账号取消／关闭撤销旧取得资格，应用再由客户端 owner 排空其真实任务。账号 list 本身不重读另一 writer 的未知客户端回执。
+- 原生账号读取／安全提交与 Node publication 分别排空；`MusicAccountProtocol.DisposeAsync` 阻止新调用、取消并等待其已登记工作。共同匿名工作随运行器模块关闭，不建立原生设备回执协调器。
 
 ## 安全边界
 
 - Cookie、Token、手机号、验证码、二维码私有材料、设备标识、请求体和原始平台响应不得进入日志、普通 DTO 或异常文本。
-- 平台 HTTP 使用固定 origin、方法、路径、操作截止、实际响应缓冲及重定向策略，不再附加总并发或步骤计数限额；不自动刷新凭据、不跨平台切换、不注册未要求的设备，也不执行远端注销。
+- 平台 HTTP、认证、动态携密目标和响应资源边界在共同 Node 层执行；原生保留最终账号授权和安全存储，不自动刷新凭据、跨平台切换或执行远端注销。
 - 对外错误只暴露有限 code 与可选冷却时间。上游 message、URI、header、body 和 cause 不透传。
 - 账号详情、播放上报、收藏同步和歌单同步共享同一账号 owner，但各自保留独立的请求、取消和权限边界。
 
@@ -126,11 +123,11 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 文件与批次行为以[共同账号文件契约](../common/music/account-transfer.md)为准。Windows 使用独立的 `IMusicAccountTransferSource` 原生接口，不新增 JSON／Node 命令；`MusicAccountTransferFile` 持有显式用户文件的有界字节，`MusicAccountTransferPlan` 持有 owner 捕获的完整账号值 fingerprint 与授权 epoch，普通序列化和调试字符串不包含凭据。界面只能取得平台冲突摘要及最终逐平台结果。
 
 - 准备先完整检查文件结构，再在账号磁盘队列中捕获各平台基线。跳过平台不调用网络、不写账号；计划只能消费一次，策略不跨批次保存。
-- 候选使用独立的短期 `MusicAccountProtocol` 执行状态，借用现有受限 HTTP 与客户端 owner。失败候选不会调用当前账号的 `Start`／`Fence`，也不会 replace/cancel 既有登录、资料读取或已签发 lease；网易响应设备 Cookie 检查格式与 deviceId 关联，不写安装文档。
+- 候选通过 `MusicAccountProtocol.ValidateTransferAsync` 进入共同 Node 认证，不先发布为当前账号；失败候选不替换已保存授权，不恢复原生设备 writer。
 - 候选身份与现有登录资料／权益读取完成后，仍由 `MusicAccountOwner` 在同一个物理队列中核对准备值和 epoch、执行文档 CAS 并读回。只有成功读回才推进账号资格，复用 `SessionChanged` 的目录、搜索、歌词、曲库同步、反馈、Chorus 和播放失效链。新账号得到本机生成的新 generation／scope。
 - 文件传输由 `MusicNativeApplication` 的同一 pending/lifetime 关闭边界管理；逐项未知回执会登记 `accountReceiptUnknown`，正常关闭失败，只有显式账号读取可以核对，不自动重试。已准入写入不传页面取消 token，等待真实写入与读回；取消停止后续平台。
 - 明文导出只读取已保存且未撤销的账号，不联网。正常账号文档继续使用 DPAPI。目的文件直接由用户选择，不建立应用自有凭据临时文件。
 
-Windows 仍以 Cookie 字符串承载协议凭据：合法网易 `_ntes_nnid` 逗号原样保留；QQ 可选空字符串和规范 snake_case 字段保留；酷狗文件 t1 按原始字符串处理，原生登录响应中的数字 t1 则无浮点损失地转为十进制字符串。包含 Cookie 分隔符、控制字符或非 ASCII 等现有通道无法安全表达的值作为该平台 `INVALID_CREDENTIALS` 失败，不进行 URL 编码、截断或替换。历史账号缺失且无法证明关联的酷狗 seed 不从无关安装补造，导出保留实际已知材料，导入按材料完整性逐项失败。
+Windows 以 Cookie 字符串承载当前协议凭据；外部文件的字段、别名、数字及字符串语义沿共同 B09 契约，不把它改成内部文档迁移入口。无法安全表达或缺少真实认证材料时逐平台失败，不从其他安装补造。
 
-QQ 的可选授权 token 可以保留空字符串，数值协议字段则不能：`expired_at`、`musickey_create_time`、`key_expires_in`、`login_type` 必须是无多余前导零的非负十进制整数，且不超过 `2^53-1`。登录交接、文件导入及旧存储导出均校验此契约；无效数值使该项导入失败或阻止导出成功，不补零、不丢弃字段。
+本轮只有静态接线核对，账号、文件传输和关闭竞态尚无运行通过结论。

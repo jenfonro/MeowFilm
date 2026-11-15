@@ -161,7 +161,6 @@ struct MusicSystemMetadataBinding: Equatable {
     let occurrenceID: String
     let access: UUID
     let songKey: String
-    let artworkID: String
 
     init?(entry: MusicQueueEntry, attempt: PlayAttempt, activeAttemptID: UUID?,
           activeResourceID: String?, activeOccurrenceID: String?, access: UUID,
@@ -172,12 +171,10 @@ struct MusicSystemMetadataBinding: Equatable {
               snapshot.phase != .idle, snapshot.phase != .failed else { return nil }
         self.attempt = attempt; occurrenceID = entry.id; self.access = access
         songKey = MusicAppearanceSongIdentity(track: entry.track).stableKey
-        artworkID = entry.track.artwork?.absoluteString ?? ""
     }
 
     func matches(_ track: MusicRemoteTrack) -> Bool {
-        songKey.utf16.elementsEqual(MusicAppearanceSongIdentity(track: track).stableKey.utf16) &&
-            artworkID.utf16.elementsEqual((track.artwork?.absoluteString ?? "").utf16)
+        songKey.utf16.elementsEqual(MusicAppearanceSongIdentity(track: track).stableKey.utf16)
     }
 }
 #endif

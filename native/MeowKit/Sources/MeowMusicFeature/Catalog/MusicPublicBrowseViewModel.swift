@@ -58,8 +58,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     public private(set) var trackOffset = 0
     public var canPrevious: Bool { !isHome && !back.isEmpty && !isLoading }
     public var queueRequest: MusicPublicBrowseQueueRequest? {
-        guard let collection, let snapshot, loaded, contentIsCurrent, !isLoading else { return nil }
-        return .init(collection: collection, snapshot: snapshot)
+        guard let collection, loaded, contentIsCurrent, !isLoading else { return nil }
+        return .init(collection: collection)
     }
     public var canPlayRemoteQueue: Bool { remoteSource != nil || queueRequest != nil }
     public var tracks: [MusicRemoteTrack] {
@@ -104,14 +104,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         default: return false
         }
     }
-    private var snapshot: String?
     private var currentCursor: String?
     private var cursorOffsets: [String: Int] = ["": 0]
-    private struct PageOccurrence {
-        let cursor: String
-        let sourcePosition: Int
-    }
-    private var trackPageOccurrences: [MusicReference: PageOccurrence] = [:]
     private var detailSourcePositions: [MusicReference: Int] = [:]
     private var requestPlatform: MusicPublicBrowsePlatform? {
         switch request {
@@ -132,16 +126,16 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     private var task: Task<Loaded, Error>?
     private var tabTask: Task<[MusicPublicBrowseItem], Error>?
     private var actionTask: Task<Void, Error>?
-    private var dailyStyleTask: Task<MusicDailyStyleSave, Error>?
     private var revocationTask: Task<Void, Never>?
     private var issuedIntent: UUID?
+    private var songObservation: Task<Void, Never>?
+    private var songProjectionID = UUID()
     private let queuePage: (@MainActor (MusicRemoteQueueSource, String?) async throws -> MusicBrowsePage)?
     private let releaseSource: @MainActor (MusicRemoteQueueSource) -> Void
     private struct Loaded: Sendable {
         var page: MusicPublicBrowsePage
         var collection: MusicPublicBrowseCollection?
         var total: Int?
-        var snapshot: String?
         var source: MusicRemoteQueueSource?
         var dailyStyle: MusicDailyStyleSelection?
         var consumed: Int?
@@ -163,7 +157,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     public func setAccess(available: Bool, generation: UUID) {
         guard self.available != available || self.generation != generation else { return }
         self.available = available; self.generation = generation
+        songObservation?.cancel(); songObservation = nil
         invalidate(clear: true)
+        observeSongs()
     }
     /// Personal queues use account leases. Public pages remain untouched;
     /// home/featured/channel account invalidation already has its native stream.
@@ -182,6 +178,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     public func appear() {
         if !visible, case .detail(let collection) = request, collection.kind == .playlist { playlistNeedsRefresh = true }
         visible = true; displayVisible = true
+        observeSongs()
     }
     /// Resource ownership and actual display demand are separate. A retained
     /// page may keep its owner active while a covered page must not refill
@@ -259,7 +256,40 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     }
     public func disappear() {
         visible = false; displayVisible = false
+        songObservation?.cancel(); songObservation = nil
         invalidate(clear: true)
+    }
+    private func observeSongs() {
+        guard available, visible, songObservation == nil,
+              let repository = service as? any MusicSongRepositoryReading else { return }
+        let access = generation
+        songObservation = Task { [weak self] in
+            let changes = await repository.songChanges()
+            await self?.refreshSongProjections(repository, access: access)
+            for await _ in changes {
+                guard !Task.isCancelled else { return }
+                await self?.refreshSongProjections(repository, access: access)
+            }
+        }
+    }
+    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID) async {
+        guard !Task.isCancelled, available, visible, generation == access else { return }
+        let projection = UUID(), page = pageEpoch
+        songProjectionID = projection
+        let songs: [String: MusicRemoteTrack]
+        let ids = sections.reduce(into: Set<String>()) { $0.formUnion($1.songIDs) }
+        do { songs = try await repository.repositoryTracks(songIDs: ids) }
+        catch { return } // A display read never reverses a committed mutation.
+        guard !Task.isCancelled, available, visible, generation == access,
+              pageEpoch == page, songProjectionID == projection else { return }
+        sections = sections.map { $0.projected(songs) }
+        for key in Array(loadedPages.keys) {
+            guard var value = loadedPages[key] else { continue }
+            value.page = .init(sections: value.page.sections.map { $0.projected(songs) },
+                cursor: value.page.cursor, filters: value.page.filters, selectedFilter: value.page.selectedFilter,
+                notice: value.page.notice, consumed: value.page.consumed)
+            loadedPages[key] = value
+        }
     }
     private func invalidate(clear: Bool) {
         pageEpoch = UUID(); actionEpoch = UUID(); loadEpoch = UUID()
@@ -267,7 +297,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         homeTask?.work.cancel(); homeTask = nil
         task?.cancel(); task = nil; actionTask?.cancel(); actionTask = nil
         tabTask?.cancel(); tabTask = nil
-        dailyStyleTask?.cancel(); dailyStyleTask = nil
         revocationTask?.cancel(); revocationTask = nil
         isLoading = false; isActing = false; error = nil; actionError = nil; notice = nil
         errorDiagnosticID = nil; actionDiagnosticID = nil
@@ -276,10 +305,10 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         if clear {
             loadedPages = [:]
             if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
-            sections = []; filters = []; selectedFilter = ""; collection = nil; total = nil; snapshot = nil
+            sections = []; filters = []; selectedFilter = ""; collection = nil; total = nil
             nextCursor = nil; currentCursor = nil; back = []; loaded = false; pageNumber = 1
             cursorOffsets = ["": 0]; trackOffset = 0
-            trackPageOccurrences = [:]; detailSourcePositions = [:]
+            detailSourcePositions = [:]
             requiresExplicitNext = false; usesPageNavigation = false
             dailyStyle = nil
             contentIsCurrent = false
@@ -301,7 +330,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         loadedPages = [:]
         currentCursor = nil; nextCursor = nil; back = []
         cursorOffsets = ["": 0]; trackOffset = 0
-        trackPageOccurrences = [:]; detailSourcePositions = [:]
+        detailSourcePositions = [:]
         pageNumber = 1; requiresExplicitNext = false; usesPageNavigation = false
     }
     public func selectFilter(_ id: String) async {
@@ -355,9 +384,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
             guard available, visible, generation == access, pageEpoch == own,
                   loadEpoch == readEpoch, !Task.isCancelled else { return }
-            guard items.count <= 600, Set(items.map(\.id)).count == items.count else {
-                throw MusicServiceError.invalidResponse
-            }
             let tabs = old.tabs.map { value in
                 value.id == id ? MusicPublicBrowseSectionTab(id: value.id, title: value.title, items: items) : value
             }
@@ -372,6 +398,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 loadedPages[key] = cached
             }
             sectionDiagnosticIDs[sectionID] = nil
+            if let repository = service as? any MusicSongRepositoryReading {
+                await refreshSongProjections(repository, access: access)
+            }
         } catch {
             guard available, visible, generation == access, pageEpoch == own,
                   loadEpoch == readEpoch, !Task.isCancelled else { return }
@@ -394,44 +423,46 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         loaded = false
         await refresh()
     }
-    public func saveDailyStyle(_ selection: MusicDailyStyleSelection) async throws -> MusicDailyStyleSave {
+    public func saveDailyStyle(_ selection: MusicDailyStyleSelection,
+                               receipts: MusicSettingsReceiptOwner) async throws -> MusicDailyStyleSave {
         guard available, visible, !isLoading, !isActing, let source = remoteSource,
-              source.dailyStyle != nil else { throw MusicServiceError.staleResult }
+              let editor = source.dailyStyle else { throw MusicServiceError.staleResult }
         let own = pageEpoch, access = generation
         let action = UUID(); actionEpoch = action
         isActing = true
-        defer { if actionEpoch == action { isActing = false; dailyStyleTask = nil } }
-        let work = Task { try await source.saveDailyStyle(selection) }
-        dailyStyleTask = work
+        defer { if actionEpoch == action { isActing = false } }
+        let work = receipts.submit(settings: ["daily-style/" + editor.scope + "/selection"],
+                                   operation: "保存推荐风格") {
+            let result = try await source.saveDailyStyle(selection)
+            guard result.saveConfirmed else { throw MusicServiceError.commitUnconfirmed }
+            return result
+        }
         let result: MusicDailyStyleSave
         do {
-            result = try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+            result = try await work.value
         } catch {
-            if available, visible, generation == access, pageEpoch == own, remoteSource?.id == source.id {
-                // The remote write may have happened. Old handles/cursors must
+            if !Task.isCancelled, available, visible, generation == access, pageEpoch == own, remoteSource?.id == source.id {
+                // The remote write may have happened. Pre-write cursors must
                 // not remain actionable while the sheet reports a failed read.
-                sections = []; nextCursor = nil; currentCursor = nil; snapshot = nil
+                sections = []; nextCursor = nil; currentCursor = nil
                 cursorOffsets = ["": 0]; back = []; pageNumber = 1; trackOffset = 0; dailyStyle = nil
-                trackPageOccurrences = [:]; detailSourcePositions = [:]
+                detailSourcePositions = [:]
                 loaded = false; failedPage = (cursor: nil, direction: 0)
-                self.error = Task.isCancelled ? .commitUnconfirmed : MusicServiceError.sanitized(error)
+                let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
+                self.error = failure == .commitUnconfirmed ? nil : failure
+                if failure == .commitUnconfirmed { await load(cursor: nil, direction: 0) }
             }
             throw error
         }
-        try Task.checkCancellation()
-        guard available, visible, generation == access, pageEpoch == own, remoteSource?.id == source.id else {
-            throw MusicServiceError.staleResult
-        }
-        // Re-render through the same source and normal display-handle path.
+        guard !Task.isCancelled, available, visible, generation == access,
+              pageEpoch == own, remoteSource?.id == source.id else { return result }
+        // Re-render through the same source and normal display projection.
         // Its first page is the exact readback already returned by save, not
         // another recommendation request or a second account mutation.
-        cursorOffsets = ["": 0]; back = []; currentCursor = nil; snapshot = nil
+        cursorOffsets = ["": 0]; back = []; currentCursor = nil
         await load(cursor: nil, direction: 0)
-        guard available, visible, generation == access, remoteSource?.id == source.id else {
-            throw MusicServiceError.staleResult
-        }
-        isActing = false
-        if let error { throw error }
+        // Projection failures belong to this page read, not to the settled
+        // write receipt. The load publishes its own current error.
         return result
     }
     public func refresh() async {
@@ -448,9 +479,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         loadedPages = [:]
         contentIsCurrent = false
         if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
-        snapshot = nil; currentCursor = nil; nextCursor = nil; back = []
+        currentCursor = nil; nextCursor = nil; back = []
         cursorOffsets = ["": 0]; trackOffset = 0
-        trackPageOccurrences = [:]; detailSourcePositions = [:]
+        detailSourcePositions = [:]
         pageNumber = 1; requiresExplicitNext = false; usesPageNavigation = false
         if case .detail(let collection) = request {
             playlistNeedsRefresh = false
@@ -496,7 +527,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         await load(cursor: nil, direction: 0)
     }
     /// Public detail reads do not load the complete queue. Only an explicit
-    /// playback action opens it, and resolves the selected stable recording.
+    /// playback action opens it, and resolves the selected occurrence.
     public func playbackSource(for track: MusicRemoteTrack? = nil) async throws -> (MusicRemoteQueueSource, Int) {
         guard available, visible, loaded, contentIsCurrent, !isLoading else { throw MusicServiceError.staleResult }
         let own = pageEpoch, access = generation
@@ -515,36 +546,48 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         if let availabilityNotice = source.context.availabilityNotice { notice = availabilityNotice }
         guard let track else { return (source, 0) }
         guard let queuePage else { throw MusicServiceError.unsupported }
-        // Only WY playlists omit inaccessible rows while retaining a raw-ID
-        // cursor; their IDs are proven unique by the provider. Every other
-        // source uses complete occurrence offsets, including repeated songs.
-        let expectedIndex: Int?
-        if case .detail(let collection) = request, collection.platform == .netease, collection.kind == .playlist {
-            expectedIndex = nil
-        } else {
-            guard let index = queueIndex(of: track) else { throw MusicServiceError.staleResult }
-            expectedIndex = index
+        let position = detailSourcePositions[track.ref]
+        var duplicate = 0
+        selectedOccurrence: for page in (back + [currentCursor]).compactMap({ loadedPages[$0 ?? ""] }) {
+            for section in page.page.sections {
+                for item in section.items {
+                    guard case .track(let row) = item.content else { continue }
+                    if row.ref == track.ref { break selectedOccurrence }
+                    if row.songId == track.songId { duplicate += 1 }
+                }
+            }
         }
+        var matchingOccurrence = 0
+        var fallback: Int?
         var cursor: String?, count = 0, seen = Set<String>()
         repeat {
             let page = try await queuePage(source, cursor)
             try Task.checkCancellation(); try source.authorization.check()
             guard available, visible, pageEpoch == own, generation == access else { throw MusicServiceError.staleResult }
-            if let index = page.items.indices.first(where: {
-                (expectedIndex == nil || count + $0 == expectedIndex) && Self.sameActionIdentity(page.items[$0], track)
-            }) {
-                return (source, count + index)
+            for (index, row) in page.items.enumerated() {
+                if let position, row.sourcePosition == position {
+                    return (source, count + index)
+                }
+                guard row.songId == track.songId else { continue }
+                if matchingOccurrence == duplicate, position == nil || row.sourcePosition == nil {
+                    fallback = count + index
+                }
+                if position == nil, matchingOccurrence == duplicate {
+                    return (source, count + index)
+                }
+                matchingOccurrence += 1
             }
             count += page.items.count
             cursor = page.cursor
             if let cursor { guard seen.insert(cursor).inserted else { throw MusicServiceError.staleResult } }
         } while cursor != nil
+        if let fallback { return (source, fallback) }
         throw MusicServiceError.notFound
     }
     /// Count matches in the full source prefix, not in the currently displayed
     /// (possibly paginated) rows. Duplicates keep their occurrence position.
     public func filteredQueueIndex(source: MusicRemoteQueueSource, index: Int,
-                                   track: MusicRemoteTrack, query: String) async throws -> Int {
+                                   query: String) async throws -> Int {
         guard let queuePage, remoteSource?.id == source.id, index >= 0 else {
             throw MusicServiceError.staleResult
         }
@@ -557,7 +600,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             for row in page.items {
                 let included = MusicRemoteCollectionFilter.matches(row, query: query)
                 if offset == index {
-                    guard included, Self.sameActionIdentity(row, track) else { throw MusicServiceError.targetChanged }
+                    guard included else { throw MusicServiceError.notFound }
                     return matches
                 }
                 if included { matches += 1 }
@@ -588,91 +631,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         guard !isHome, let cursor = nextCursor, !isLoading, sections.allSatisfy({ $0.error == nil }) else { return }
         if usesPageNavigation { await next(); return }
         await load(cursor: cursor, direction: 2)
-    }
-    public func queueIndex(of track: MusicRemoteTrack) -> Int? {
-        if let position = detailSourcePositions[track.ref] { return position }
-        return tracks.firstIndex(where: { $0.ref == track.ref }).map { trackOffset + $0 }
-    }
-    /// Visible rows may outlive the bounded native
-    /// handle cache. Reissue only the selected occurrence's original page; do
-    /// not replace display rows, alter pagination, or extend handle lifetimes.
-    public func refreshedActionTrack(_ track: MusicRemoteTrack) async throws -> MusicRemoteTrack {
-        var details: [String: MusicPublicBrowseDetail] = [:]
-        return try await refreshedActionTrack(track, details: &details)
-    }
-    /// Batch actions reuse each original detail page once while keeping every
-    /// selected occurrence's own identity checks.
-    public func refreshedActionTracks(_ tracks: [MusicRemoteTrack]) async throws -> [MusicRemoteTrack] {
-        var details: [String: MusicPublicBrowseDetail] = [:]
-        var renewed: [MusicRemoteTrack] = []
-        renewed.reserveCapacity(tracks.count)
-        for track in tracks { renewed.append(try await refreshedActionTrack(track, details: &details)) }
-        return renewed
-    }
-    private func refreshedActionTrack(
-        _ track: MusicRemoteTrack,
-        details: inout [String: MusicPublicBrowseDetail]
-    ) async throws -> MusicRemoteTrack {
-        try Task.checkCancellation()
-        guard available, visible, loaded, contentIsCurrent, !isLoading, let index = queueIndex(of: track),
-              let displayed = tracks.first(where: { $0.ref == track.ref }),
-              Self.sameActionIdentity(displayed, track) else { throw MusicServiceError.staleResult }
-        // Public-page cursors and queue cursors are different contracts, even
-        // after an explicit action has opened a queue for this collection.
-        if case .detail(let collection) = request, let occurrence = trackPageOccurrences[track.ref] {
-            let own = pageEpoch, access = generation
-            let source = remoteSource
-            try source?.authorization.check()
-            let result: MusicPublicBrowseDetail
-            if let cached = details[occurrence.cursor] {
-                result = cached
-            } else {
-                result = try await service.publicDetail(collection, cursor: occurrence.cursor.isEmpty ? nil : occurrence.cursor)
-                details[occurrence.cursor] = result
-            }
-            try Task.checkCancellation()
-            // The observer is asynchronous; a revoked queue must fence this
-            // result even before its observation task invalidates the page.
-            try source?.authorization.check()
-            guard available, visible, pageEpoch == own, generation == access, result.snapshot == snapshot else {
-                throw MusicServiceError.staleResult
-            }
-            guard let member = result.members.first(where: {
-                $0.sourcePosition == occurrence.sourcePosition
-            }) else {
-                if collection.platform == .netease, collection.kind == .playlist {
-                    throw MusicServiceError.notFound
-                }
-                throw MusicServiceError.targetChanged
-            }
-            guard Self.sameActionIdentity(member.track, track) else {
-                throw MusicServiceError.targetChanged
-            }
-            return member.track
-        }
-        guard let source = remoteSource else { return displayed }
-        guard let queuePage else { throw MusicServiceError.unsupported }
-        try source.authorization.check()
-        let own = pageEpoch, access = generation
-        guard let page = cursorOffsets.filter({ $0.value <= index }).max(by: { $0.value < $1.value }) else {
-            throw MusicServiceError.staleResult
-        }
-        let result = try await queuePage(source, page.key.isEmpty ? nil : page.key)
-        try Task.checkCancellation()
-        guard available, visible, loaded, !isLoading, generation == access, pageEpoch == own,
-              remoteSource?.id == source.id, queueIndex(of: track) == index else { throw MusicServiceError.staleResult }
-        try source.authorization.check()
-        let localIndex = index - page.value
-        guard result.items.count <= 300, result.items.indices.contains(localIndex) else {
-            throw MusicServiceError.invalidResponse
-        }
-        let renewed = result.items[localIndex]
-        guard Self.sameActionIdentity(track, renewed) else { throw MusicServiceError.targetChanged }
-        return renewed
-    }
-    static func sameActionIdentity(_ lhs: MusicRemoteTrack, _ rhs: MusicRemoteTrack) -> Bool {
-        lhs.songId.utf8.elementsEqual(rhs.songId.utf8) && lhs.sources.first != nil &&
-            lhs.sources.first == rhs.sources.first
     }
     public func previous() async {
         guard canPrevious else { return }
@@ -743,7 +701,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                             subtitle: track.artist, artwork: track.artwork, content: .track(track))
                     }
                     return .init(page: .init(sections: [.init(id: source.context.id, title: title, items: items)],
-                        cursor: result.cursor), snapshot: source.id.uuidString, source: source)
+                        cursor: result.cursor), source: source)
                 } catch {
                     if savedSource == nil { releaseSource(source) }; throw error
                 }
@@ -762,42 +720,27 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                             subtitle: track.artist, artwork: track.artwork, content: .track(track))
                     }
                     return .init(page: .init(sections: [.init(id: source.context.id, title: title, items: items)],
-                                            cursor: result.cursor), snapshot: source.id.uuidString, source: source,
+                                            cursor: result.cursor), source: source,
                                  dailyStyle: result.dailyStyle)
                 } catch {
                     if savedSource == nil { releaseSource(source) }; throw error
                 }
             case .playlists(let platform, let query):
                 let result = try await service.publicPlaylists(platform: platform, query: query, cursor: cursor)
-                guard result.items.count <= 30, result.total >= result.items.count,
-                      result.items.allSatisfy({ $0.platform == platform && $0.kind == .playlist }),
-                      Set(result.items.map(\.id)).count == result.items.count else { throw MusicServiceError.invalidResponse }
                 let items = result.items.map { value in
                     MusicPublicBrowseItem(id: value.id, title: value.title, subtitle: value.creator, artwork: value.artwork, content: .collection(value))
                 }
                 return .init(page: .init(sections: [.init(id: "playlists", title: platform.title, items: items)], cursor: result.cursor), total: result.total)
             case .detail(let collection):
                 let result = try await service.publicDetail(collection, cursor: cursor)
-                let positions = result.members.map(\.sourcePosition)
-                guard result.collection.id == collection.id, result.members.count <= 30,
-                      (result.members.count...30).contains(result.consumed),
-                      result.total >= offset + result.consumed, !result.snapshot.isEmpty,
-                      result.cursor == nil || result.consumed > 0,
-                      positions == positions.sorted(), Set(positions).count == positions.count,
-                      positions.allSatisfy({ (offset..<(offset + result.consumed)).contains($0) }),
-                      result.members.allSatisfy({ member in
-                          !member.nativeID.isEmpty && member.track.sources.contains {
-                              $0.platform == collection.platform.rawValue && $0.nativeId == member.nativeID
-                          }
-                      }) else { throw MusicServiceError.invalidResponse }
-                let items = result.members.map { member in
+                let items = result.members.enumerated().map { index, member in
                     let track = member.track
-                    return MusicPublicBrowseItem(id: "\(member.sourcePosition):\(track.songId)", title: track.title,
+                    return MusicPublicBrowseItem(id: "\(cursor ?? "first"):\(index):\(track.songId)", title: track.title,
                         subtitle: track.artist, artwork: track.artwork, content: .track(track))
                 }
                 return .init(page: .init(sections: [.init(id: collection.id, title: result.collection.title, items: items)],
                              cursor: result.cursor, notice: result.notice),
-                             collection: result.collection, total: result.total, snapshot: result.snapshot, source: savedSource,
+                             collection: result.collection, total: result.total, source: savedSource,
                              consumed: result.consumed, detailMembers: result.members)
             case .discovery(let destination):
                 if destination == .home, let home = service as? any MusicHomeBrowsing {
@@ -818,7 +761,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                                 subtitle: track.artist, artwork: track.artwork, content: .track(track))
                         }
                         return .init(page: .init(sections: [.init(id: "daily", title: "每日推荐", items: items)], cursor: result.cursor),
-                                     snapshot: source.id.uuidString, source: source)
+                                     source: source)
                     } catch {
                         if savedSource == nil { releaseSource(source) }; throw error
                     }
@@ -848,38 +791,20 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 }
             }
             let count = result.page.sections.reduce(0) { $0 + $1.items.count }
-            guard count <= (request == .discovery(.home) ? 600 : 300), result.page.filters.count <= 300,
-                  result.consumed == nil || result.consumed! >= 0,
-                  result.page.sections.reduce(0, { count, section in
-                      count + (section.tabs.isEmpty ? section.items.count : section.tabs.reduce(0) { $0 + $1.items.count })
-                  }) <= 600,
-                  Set(result.page.sections.map(\.id)).count == result.page.sections.count,
-                  result.page.sections.allSatisfy({ section in
-                      Set(section.items.map(\.id)).count == section.items.count && section.filters.count <= 201 &&
-                          Set(section.filters.map(\.id)).count == section.filters.count &&
-                          section.tabs.count <= 30 && Set(section.tabs.map(\.id)).count == section.tabs.count &&
-                          section.tabs.reduce(0, { $0 + $1.items.count }) <= 600 &&
-                          section.tabs.allSatisfy { Set($0.items.map(\.id)).count == $0.items.count } &&
-                          (section.tabs.isEmpty || section.tabs.first(where: { $0.id == section.selectedTab })?.items.map(\.id) == section.items.map(\.id))
-                  }),
-                  result.page.cursor == nil || result.page.cursor != cursor && (result.consumed ?? count) > 0 else {
+            if let next = result.page.cursor, next == cursor ||
+                direction > 0 && (next == currentCursor || back.contains(where: { $0 == next })) {
                 throw MusicServiceError.invalidResponse
             }
-            if direction > 0, let next = result.page.cursor,
-               next == currentCursor || back.contains(where: { $0 == next }) {
-                throw MusicServiceError.invalidResponse
-            }
-            if direction != 0, let old = snapshot, old != result.snapshot { throw MusicServiceError.staleResult }
             if isHome, direction == 2, let failure = result.page.sections.compactMap(\.error).first {
                 // The service has not committed this failed batch's cursor.
                 // Keep successful content and retry the same continuation.
                 throw failure
             }
-            sectionDiagnosticIDs = Dictionary(uniqueKeysWithValues: result.page.sections.compactMap { section in
+            sectionDiagnosticIDs = Dictionary(result.page.sections.compactMap { section in
                 guard let error = section.error else { return nil }
                 trace.record(.failed, failure: error)
                 return (section.id, trace.logicalID)
-            })
+            }, uniquingKeysWith: { _, newest in newest })
             var merged = result.page.sections
             if direction == 0, cursor == nil, result.page.sections.contains(where: { $0.error != nil }) {
                 // Preserve the displayed feed and its committed selection on
@@ -905,42 +830,30 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 merged = sections
                 for section in result.page.sections {
                     if let index = merged.firstIndex(where: { $0.id == section.id && $0.layout == section.layout }) {
-                        var ids = Set(merged[index].items.map(\.id))
-                        let items = merged[index].items + section.items.filter { ids.insert($0.id).inserted }
+                        var identifiers = Set(merged[index].items.map(\.id))
+                        let items = merged[index].items + section.items.filter { identifiers.insert($0.id).inserted }
                         merged[index] = .init(id: section.id, title: section.title, items: items, layout: section.layout,
                                               avatars: section.avatars, channel: section.channel,
                                               filters: section.filters, selectedFilter: section.selectedFilter, error: section.error,
                                               tabs: section.tabs, selectedTab: section.selectedTab)
                     } else { merged.append(section) }
                 }
-                if result.page.cursor != nil, result.consumed == nil,
-                   merged.reduce(0, { $0 + $1.items.count }) == sections.reduce(0, { $0 + $1.items.count }) {
-                    throw MusicServiceError.invalidResponse
-                }
             }
             let songCount = result.page.sections.flatMap(\.items).filter {
                 if case .track = $0.content { return true }; return false
             }.count
             let consumed = result.consumed ?? songCount
-            if requestOverride == nil, let next = result.page.cursor, let saved = cursorOffsets[next],
-               saved != offset + consumed { throw MusicServiceError.staleResult }
-            // Validate the complete next state before publishing any cursor,
-            // back-stack, or rows. A rejected append must remain retryable.
             if direction == 0 && cursor == nil { back = []; pageNumber = 1; cursorOffsets = ["": 0] }
             if direction > 0 { back.append(currentCursor); pageNumber += 1 }
             if direction == -1 { back.removeLast(); pageNumber -= 1 }
             if direction != 2 { trackOffset = offset }
             if let next = result.page.cursor { cursorOffsets[next] = offset + consumed }
             if direction != 2 {
-                trackPageOccurrences = [:]
                 detailSourcePositions = [:]
             }
             if let members = result.detailMembers {
                 for member in members {
                     detailSourcePositions[member.track.ref] = member.sourcePosition
-                    trackPageOccurrences[member.track.ref] = .init(
-                        cursor: cursor ?? "", sourcePosition: member.sourcePosition
-                    )
                 }
             }
             currentCursor = cursor; nextCursor = result.page.cursor; sections = merged
@@ -950,7 +863,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             self.request = request
             notice = result.page.notice
             filters = result.page.filters; selectedFilter = result.page.selectedFilter
-            collection = result.collection; total = result.total; snapshot = result.snapshot; remoteSource = result.source; loaded = true
+            collection = result.collection; total = result.total; remoteSource = result.source; loaded = true
             contentIsCurrent = true
             if case .discovery = request { requiresExplicitNext = false }
             else { requiresExplicitNext = count == 0 && result.page.cursor != nil }
@@ -958,6 +871,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             if cursor == nil || result.dailyStyle != nil { dailyStyle = result.dailyStyle }
             failedPage = nil; failedRequest = nil
             watchSource()
+            if let repository = service as? any MusicSongRepositoryReading {
+                await refreshSongProjections(repository, access: access)
+            }
             trace.record(.completed)
             return true
         } catch {
@@ -968,13 +884,13 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 self.error = safe; errorDiagnosticID = trace.logicalID
                 failedPage = (cursor, direction); failedRequest = requestOverride
             }
-            if !isHome, safe.isAuthenticationFailure || [.accessUnavailable, .staleAccess, .staleResult, .notFound, .handleExpired].contains(safe) {
+            if !isHome, safe.isAuthenticationFailure || [.accessUnavailable, .staleAccess, .staleResult, .notFound].contains(safe) {
                 loadedPages = [:]
                 if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
-                sections = []; notice = nil; nextCursor = nil; snapshot = nil; loaded = false
+                sections = []; notice = nil; nextCursor = nil; loaded = false
                 collection = nil; total = nil; currentCursor = nil; back = []; pageNumber = 1; failedPage = nil; failedRequest = nil
                 cursorOffsets = ["": 0]; trackOffset = 0
-                trackPageOccurrences = [:]; detailSourcePositions = [:]
+                detailSourcePositions = [:]
                 contentIsCurrent = false
             }
             return false
@@ -1034,6 +950,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
         }
     }
+    deinit { songObservation?.cancel() }
 }
 
 @MainActor public extension MusicViewModel {

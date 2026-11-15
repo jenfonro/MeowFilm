@@ -12,25 +12,22 @@ final class MusicAppearancePaletteTests: XCTestCase {
         groups.flatMap { color, count in Array(repeating: color, count: count).flatMap { $0 } }
     }
 
-    func testStableIdentityPriorityAndNativeQueueIndependence() {
-        XCTAssertEqual(MusicAppearanceSongIdentity(platform: "wy", musicID: "999", id: "1").stableKey, "wy:999")
-        XCTAssertEqual(MusicAppearanceSongIdentity(platform: "tx", musicID: "", songMID: "mid").stableKey, "tx:mid")
-        XCTAssertEqual(MusicAppearanceSongIdentity(webDAVConfiguration: "drive", webDAVPath: "/a", deduplicationKey: "d").stableKey, "dav:drive:/a")
-        XCTAssertEqual(MusicAppearanceSongIdentity(deduplicationKey: "d", id: "1").stableKey, "d")
-        XCTAssertEqual(MusicAppearanceSongIdentity(id: "1").stableKey, "local:1")
-        XCTAssertEqual(MusicAppearanceSongIdentity(id: "1", pluginEntryPath: "dav").stableKey, "dav:1")
-        XCTAssertEqual(MusicAppearanceSongIdentity(filePath: "/a").stableKey, "/a")
-        XCTAssertEqual(MusicAppearanceSongIdentity(title: "\u{feff} Song  名\n", artist: " ARTIST ", album: "  ").stableKey, "song 名|artist|")
+    func testPermanentSongIdentityIsIndependentOfOccurrenceMetadataAndAddedSources() {
         let track = MusicRemoteTrack(ref: .init(kind: .queue, id: "occurrence-a"), songId: "domain-id", title: "Title",
                                     sources: [.init(sourceKey: "source", platform: "wy", nativeId: "999")])
-        let enriched = MusicRemoteTrack(ref: .init(kind: .handle, id: "handle-b"), songId: "domain-id", title: "Enriched",
-                                       sources: track.sources)
+        let enriched = MusicRemoteTrack(ref: .init(kind: .queue, id: "occurrence-b"), songId: "domain-id",
+                                       title: "Enriched (Live)", artist: "当前歌手", album: "当前专辑",
+                                       duration: 181.5, sources: track.sources,
+                                       artwork: URL(string: "https://artwork.invalid/current"))
+        XCTAssertEqual(MusicAppearanceSongIdentity(track: track), MusicAppearanceSongIdentity(songID: "domain-id"))
         XCTAssertEqual(MusicAppearanceSongIdentity(track: track), MusicAppearanceSongIdentity(track: enriched))
-        XCTAssertEqual(MusicAppearanceSongIdentity(track: track, originalSource: track.sources[0]).stableKey, "wy:999")
         let fused = MusicRemoteTrack(ref: track.ref, songId: "domain-id", title: "Title",
                                     sources: track.sources + [.init(sourceKey: "other", platform: "tx", nativeId: "123")])
         XCTAssertEqual(MusicAppearanceSongIdentity(track: fused).stableKey, "domain-id")
         XCTAssertEqual(MusicAppearanceSongIdentity(track: track), MusicAppearanceSongIdentity(track: fused))
+        let independent = MusicRemoteTrack(ref: .init(kind: .library, id: "other-song"), songId: "other-song",
+                                          title: track.title, sources: track.sources)
+        XCTAssertNotEqual(MusicAppearanceSongIdentity(track: track), MusicAppearanceSongIdentity(track: independent))
     }
 
     func testFallbackUsesUTF16AndDoesNotFoldUnicodeOrOccurrence() {
@@ -40,10 +37,11 @@ final class MusicAppearancePaletteTests: XCTestCase {
         XCTAssertEqual(MusicSongPalette.fallback(for: "wy:\u{1f600}"), .mint)
         XCTAssertEqual(MusicSongPalette.fallback(for: "\u{e9}"), .coral)
         XCTAssertEqual(MusicSongPalette.fallback(for: "e\u{301}"), .silver)
-        XCTAssertNotEqual(MusicAppearanceSongIdentity(deduplicationKey: "\u{e9}"),
-                          MusicAppearanceSongIdentity(deduplicationKey: "e\u{301}"))
-        let first = MusicAppearanceSongIdentity(platform: "wy", musicID: "999", id: "1")
-        let second = MusicAppearanceSongIdentity(platform: "wy", musicID: "999", id: "400", title: "enriched")
+        XCTAssertNotEqual(MusicAppearanceSongIdentity(songID: "\u{e9}"),
+                          MusicAppearanceSongIdentity(songID: "e\u{301}"))
+        let first = MusicAppearanceSongIdentity(songID: "permanent-song")
+        let second = MusicAppearanceSongIdentity(track: .init(ref: .init(kind: .queue, id: "another-occurrence"),
+                                                             songId: "permanent-song", title: "enriched"))
         XCTAssertEqual(MusicSongPalette.fallback(for: first.stableKey), MusicSongPalette.fallback(for: second.stableKey))
     }
 

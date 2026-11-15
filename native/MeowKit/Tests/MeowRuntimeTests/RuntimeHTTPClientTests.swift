@@ -138,6 +138,133 @@ final class RuntimeHTTPClientTests: XCTestCase {
         .object(["ok": .bool(true), "contract": .string(contract), "value": value])
     }
 
+    func testDispatchAuthorizationRunsOnceBeforeHTTPAndRetainsItsActualFailure() async throws {
+        let client = try client(), authorization = RuntimeLaunchRecord()
+        let parameters: RuntimeValue = .object(["platform": .string("wy"),
+            "operation": .string("sync.write"), "params": .object(["id": .string("900")])])
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(authorization.get(), ["authorized"])
+            XCTAssertEqual(request.url?.path, "/v1/music-platform/request")
+            XCTAssertEqual(try? RuntimeJSON.decode(transport.body()), parameters)
+            transport.respond(.object(["ok": .bool(true), "contract": .string("music.platform.v1"),
+                "value": .object(["status": .string("confirmed")])]))
+        }
+        let receipt = try await client.call(module: .musicPlatform, operation: "request", parameters: parameters,
+            onDispatch: {
+                XCTAssertNil(authorization.get(), "One dispatch has one authorization boundary")
+                authorization.set(["authorized"])
+            })
+        XCTAssertEqual(receipt, .object(["status": .string("confirmed")]))
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            XCTFail("A rejected authorization must not create an HTTP request")
+            transport.fail(NSURLErrorCancelled)
+        }
+        let rejected = expectation(description: "rejected at the dispatch boundary")
+        do {
+            _ = try await client.call(module: .musicPlatform, operation: "request", parameters: parameters,
+                onDispatch: { rejected.fulfill(); throw RuntimeLaunchError.payloadUnavailable })
+            XCTFail("Authorization failure became a remote receipt")
+        } catch { XCTAssertEqual(error as? RuntimeLaunchError, .payloadUnavailable) }
+        await fulfillment(of: [rejected], timeout: 2)
+        await client.close()
+    }
+
+    func testPreCancelledAndClosedRequestsNeverReachDispatchAuthorization() async throws {
+        let client = try client(), gate = RuntimeSessionGate()
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            XCTFail("No HTTP is admitted for a cancelled or closed borrower")
+            transport.fail(NSURLErrorCancelled)
+        }
+        let pending = Task {
+            await gate.wait()
+            return try await client.call(module: .musicPlatform, operation: "request",
+                onDispatch: { XCTFail("Pre-cancelled request reached authorization") })
+        }
+        await gate.started()
+        pending.cancel()
+        await gate.release()
+        do { _ = try await pending.value; XCTFail("Pre-cancelled request succeeded") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .cancelled) }
+        await client.close()
+        do {
+            _ = try await client.call(module: .musicPlatform, operation: "request",
+                onDispatch: { XCTFail("Closed request reached authorization") })
+            XCTFail("Closed request succeeded")
+        } catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
+    }
+
+    func testRulesTransportUsesTheSameActualDispatchAuthorizationBoundary() async throws {
+        let client = try client()
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            XCTFail("The rules transport cannot bypass a rejected dispatch authorization")
+            transport.fail(NSURLErrorCancelled)
+        }
+        let authorized = expectation(description: "rules request reached its actual dispatch boundary")
+        do {
+            _ = try await client.call(module: .source, operation: "rules.process",
+                parameters: .object(["request": .object(["operation": .string("identity"), "book": .object([:])])]),
+                onDispatch: { authorized.fulfill(); throw RuntimeLaunchError.payloadUnavailable })
+            XCTFail("The special transport ignored authorization")
+        } catch { XCTAssertEqual(error as? RuntimeLaunchError, .payloadUnavailable) }
+        await fulfillment(of: [authorized], timeout: 2)
+        await client.close()
+    }
+
+    func testMusicPlatformReturnsOneCanonicalValueAndKeepsItsFiniteErrors() async throws {
+        let client = try client()
+        let value: RuntimeValue = .object(["sections": .array([
+            .object(["id": .string("changing-layout"), "items": .array([]), "extra": .null])
+        ]), "continuation": .object(["cursor": .string("next")])])
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.url?.path, "/v1/music-platform/request")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            transport.respond(.object(["ok": .bool(true), "contract": .string("music.platform.v1"), "value": value]))
+        }
+        let result = try await client.call(module: .musicPlatform, operation: "request",
+            parameters: .object(["platform": .string("wy"), "operation": .string("home"), "params": .object([:])]))
+        XCTAssertEqual(result, value, "The host consumes one envelope, not a second platform payload shell")
+        for code in ["AUTH_REQUIRED", "AUTH_EXPIRED", "COMMIT_UNKNOWN", "STORAGE_ERROR",
+                     "STORAGE_CONFLICT", "SMS_SEND_UNCONFIRMED", "INVALID_CODE", "INVALID_PHONE",
+                     "ACCOUNT_SELECTION_REQUIRED", "REDIRECT_DENIED"] {
+            RuntimeTestURLProtocol.fixture.set { _, transport in
+                transport.respond(.object(["ok": .bool(false), "contract": .string("music.platform.v1"), "code": .string(code)]))
+            }
+            do { _ = try await client.call(module: .musicPlatform, operation: "request"); XCTFail("Lost module failure") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote(code)) }
+        }
+        for response in [
+            reply(.null),
+            .object(["ok": .bool(false), "contract": .string("music.platform.v1"), "code": .string("SCRIPT_FAILURE")]),
+            .object(["ok": .bool(false), "contract": .string("music.platform.v1"),
+                     "code": .string("AUTH_REQUIRED"), "message": .string("unconsumed")])
+        ] {
+            RuntimeTestURLProtocol.fixture.set { _, transport in transport.respond(response) }
+            do { _ = try await client.call(module: .musicPlatform, operation: "request"); XCTFail("Invalid control envelope") }
+            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+        }
+        await client.close()
+    }
+
+    func testFailedShutdownReceiptIsNotRetriedOrReportedAsPhysicalTransportClose() async throws {
+        let client = try client()
+        let request = expectation(description: "one real close request")
+        RuntimeTestURLProtocol.fixture.set { outgoing, transport in
+            XCTAssertEqual(outgoing.url?.path, "/v1/close")
+            request.fulfill()
+            transport.respond(.object(["ok": .bool(false), "contract": .string("runtime.http.v1"),
+                "code": .string("INVALID_RESPONSE")]))
+        }
+        do { try await client.shutdown(); XCTFail("A failed business close cannot become a success receipt") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("INVALID_RESPONSE")) }
+        await fulfillment(of: [request], timeout: 2)
+        XCTAssertFalse(client.isClosed)
+        await client.close()
+        XCTAssertTrue(client.isClosed)
+        await client.close()
+    }
+
     func testSourceRulesHaveNoTransportDeadlineWithoutExtendingOtherCalls() async throws {
         let client = try client()
         let cases: [RuntimeValue] = [
@@ -316,7 +443,7 @@ final class RuntimeHTTPClientTests: XCTestCase {
         XCTAssertEqual(RuntimeModule.allCases.map { [$0.rawValue, $0.contract] }, [
             ["music", "music.script.v3"], ["cat", "cat.script.v2"], ["source", "source.runtime.v2"],
             ["pan", "pan.runtime.v1"], ["tmdb", "tmdb.data.v1"], ["douban", "douban.data.v1"],
-            ["film", "film.playback.v1"], ["netease", "netease.token.v1"]
+            ["film", "film.playback.v1"], ["netease", "netease.token.v1"], ["music-platform", "music.platform.v1"]
         ])
         let client = try client()
         for (module, operation, contract, code, foreignCode): (RuntimeModule, String, String, String, String) in [
@@ -324,7 +451,8 @@ final class RuntimeHTTPClientTests: XCTestCase {
             (.tmdb, "settings.get", "tmdb.data.v1", "NETWORK_ERROR", "PAN_FAILURE"),
             (.douban, "settings.get", "douban.data.v1", "WEB_INTERACTION_REQUIRED", "AUTH_REQUIRED"),
             (.film, "library.get", "film.playback.v1", "MEDIA_DRM_UNSUPPORTED", "SOURCE_CLEANUP"),
-            (.film, "rules.preview", "film.playback.v1", "RESOURCE_LIMIT", "SOURCE_CLEANUP")
+            (.film, "rules.preview", "film.playback.v1", "RESOURCE_LIMIT", "SOURCE_CLEANUP"),
+            (.musicPlatform, "request", "music.platform.v1", "AUTH_EXPIRED", "SCRIPT_CLEANUP")
         ] {
             RuntimeTestURLProtocol.fixture.set { request, transport in
                 XCTAssertEqual(request.url?.path, "/v1/\(module.rawValue)/\(operation)")
@@ -861,7 +989,7 @@ final class RuntimeHTTPClientTests: XCTestCase {
         await fulfillment(of: [stopped], timeout: 3); await client.close()
     }
 
-    func testAppDescribeRequiresExactEightModuleOrderVersionsContractsAndMethods() async throws {
+    func testAppDescribeRequiresExactNineModuleOrderVersionsContractsAndMethods() async throws {
         let client = try client()
         let modules: [RuntimeValue] = [
             .object(["id": .string("music"), "version": .string("0.8.0"), "contract": .string("music.script.v3")]),
@@ -873,14 +1001,16 @@ final class RuntimeHTTPClientTests: XCTestCase {
             .object(["id": .string("douban"), "version": .string("0.1.0"), "contract": .string("douban.data.v1")]),
             .object(["id": .string("film"), "version": .string("0.1.0"), "contract": .string("film.playback.v1")]),
             .object(["id": .string("netease"), "version": .string("0.1.0"), "contract": .string("netease.token.v1"),
-                "methods": .array([.string("netease.token.get")])])
+                "methods": .array([.string("netease.token.get")])]),
+            .object(["id": .string("music-platform"), "version": .string("0.1.0"), "contract": .string("music.platform.v1"),
+                "methods": .array(["cache.clear", "describe", "request", "session.update"].map { .string("music.platform." + $0) })])
         ]
         var reordered = modules
         reordered.swapAt(3, 4)
         var invalid = [
             Array(modules.prefix(3)), Array(modules.prefix(4)),
             [modules[0], modules[1], modules[2], modules[4], modules[7]],
-            Array(modules.prefix(7)), Array(modules.prefix(4)) + Array(modules.suffix(3)),
+            Array(modules.prefix(7)), Array(modules.prefix(8)), Array(modules.prefix(4)) + Array(modules.suffix(3)),
             modules + [modules[4]], reordered
         ]
         for index in modules.indices {
@@ -898,7 +1028,8 @@ final class RuntimeHTTPClientTests: XCTestCase {
             (4, "id", .string("music")),
             (7, "version", .string("0.2.0")), (7, "contract", .string("music.script.v3")),
             (7, "methods", .array([])), (7, "methods", .array([.string("netease.token.get"), .string("netease.token.get")])),
-            (7, "methods", .array([.string("netease.token.other")])), (7, "id", .string("music"))
+            (7, "methods", .array([.string("netease.token.other")])), (7, "id", .string("music")),
+            (8, "methods", .array([])), (8, "methods", .array([.string("music.platform.other")]))
         ] {
             var supplied = modules
             guard case .object(var fields) = supplied[index] else { return XCTFail("module fixture") }

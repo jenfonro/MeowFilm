@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
@@ -30,6 +31,278 @@ public static partial class MusicUiTests
             () => SettingsSourceShutdownRecovery(false));
         yield return Case("general source first read cancelled by failed shutdown exposes Retry after a fresh read failure without blocking shutdown cancellation",
             () => SettingsSourceShutdownRecovery(true));
+        foreach (bool quality in new[] { false, true })
+        {
+            bool selected = quality;
+            yield return Case($"settings {(quality ? "quality" : "metadata")} admitted unknown settles after close and only a later same-scope save clears it",
+                () => SettingsUnknownAfterClose(selected));
+        }
+        yield return Case("settings unknowns for independent policy fields survive unrelated and independent-store successes",
+            SettingsReceiptIsolation);
+        yield return Case("metadata unknown readback failing after retirement preserves its receipt without publishing the old error",
+            MetadataRetiredReadback);
+        foreach (bool failure in new[] { false, true })
+        {
+            bool fail = failure;
+            yield return Case($"source management retired read {(fail ? "error" : "value")} cannot publish or reload its replacement",
+                () => SourceRetiredRead(fail));
+        }
+        yield return Case("official source admitted unknown survives retirement and reopening until an actual same-setting success",
+            SourceUnknownAfterRetirement);
+        yield return Case("retired source checks release a reopened row without publishing the retired result",
+            SourceRetiredCheck);
+        foreach (string setting in new[] { "appearance", "catalogSource", "search" })
+        {
+            string selected = setting;
+            yield return Case($"settings {setting} unknown settles without publishing to a retired page and clears only after a confirmed save",
+                () => SettingsOtherUnknownAfterClose(selected));
+        }
+    }
+
+    private static async Task SourceRetiredCheck()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.RefreshSourceManagementAsync();
+        var row = f.Module.Sources.Single(item => item.Platform == "wy");
+        var held = f.Calls.HoldNext("music.official.check");
+        held.Transform = _ => JsonSerializer.SerializeToElement(new { ok = true, state = "ok" });
+        var checking = f.Module.CheckSourcesAsync([row]);
+        try
+        {
+            await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Module.RetireSourceManagement();
+            await f.Module.RefreshSourceManagementAsync();
+            var current = f.Module.Sources.Single(item => item.Platform == "wy");
+            True(!ReferenceEquals(row, current) && current.Checking,
+                "the replacement projection stays busy until the physical source check settles");
+            string summary = current.Summary, state = current.State, status = f.Module.Status;
+            var platforms = current.Platforms.ToArray();
+            int retiredChanges = 0;
+            row.PropertyChanged += (_, _) => retiredChanges++;
+            held.Release(); await checking.WaitAsync(TimeSpan.FromSeconds(5));
+            True(!current.Checking && current.Summary == summary && current.State == state &&
+                current.Platforms.SequenceEqual(platforms) && row.Checking && retiredChanges == 0,
+                "only the active projection releases the physical check; its retired result is not replayed");
+            Equal(status, f.Module.Status);
+            Equal("未检测", current.StatusText);
+        }
+        finally { held.Release(); await checking; }
+    }
+
+    private static async Task SettingsOtherUnknownAfterClose(string setting)
+    {
+        await using var f = await Fixture.Create();
+        string method;
+        Func<Task> save, retire, reopen, confirm;
+        Func<bool> original, committed;
+        switch (setting)
+        {
+            case "appearance":
+                await f.Module.EnsureAppearanceAsync();
+                method = "music.appearance.save";
+                save = () => f.Module.SetAppearanceAsync("playlistView", "list");
+                retire = () => { f.Module.RetireAppearanceSettings(); return Task.CompletedTask; };
+                reopen = () => f.Module.EnsureAppearanceAsync();
+                confirm = () => f.Module.SetAppearanceAsync("playlistView", "grid");
+                original = () => f.Module.AppearancePlaylistView == "grid";
+                committed = () => f.Module.AppearancePlaylistView == "list";
+                break;
+            case "catalogSource":
+                method = "music.catalogSource.settings.save";
+                save = () => f.Module.SetCatalogSourceAsync("kg");
+                retire = () => f.Module.DeactivateCatalogSourceSettingsAsync(retirePage: true);
+                reopen = () => f.Module.ReadCatalogSourceSettingsAsync();
+                confirm = () => f.Module.SetCatalogSourceAsync("wy");
+                original = () => f.Module.CatalogSourcePlatform == "wy";
+                committed = () => f.Module.CatalogSourcePlatform == "kg";
+                break;
+            default:
+                await f.Module.ActivateSettingsAsync();
+                int pages = f.Module.SongSearch.Pages, concurrency = f.Module.SongSearch.Concurrency,
+                    cache = f.Module.SongSearch.CacheMinutes;
+                int changedPages = pages == 1 ? 2 : 1;
+                method = "music.search.settings.save";
+                save = () => f.Module.SetSearchAdvancedAsync("songs", changedPages, concurrency, cache);
+                retire = () => f.Module.DeactivateSettingsAsync();
+                reopen = () => f.Module.ActivateSettingsAsync();
+                confirm = () => f.Module.SetSearchAdvancedAsync("songs", pages, concurrency, cache);
+                original = () => f.Module.SongSearch.Pages == pages;
+                committed = () => f.Module.SongSearch.Pages == changedPages;
+                break;
+        }
+        var held = f.Calls.HoldNext(method); held.Transform = UnknownSetting;
+        var saving = save();
+        Task retiring = Task.CompletedTask;
+        try
+        {
+            await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            retiring = retire();
+            held.Release();
+            await Task.WhenAll(saving, retiring).WaitAsync(TimeSpan.FromSeconds(5));
+            True(original() && f.Module.OwnedNotices.Count == 1,
+                "a physically submitted save settles without changing the retired projection");
+            await reopen();
+            True(committed() && f.Module.OwnedNotices.Count == 1 && f.Calls.Count(method) == 1,
+                "readback adopts the stored value without acknowledging or replaying the unknown save");
+            f.Module.Volume = 37;
+            await f.Module.SaveVolumeAsync();
+            Equal(1, f.Module.OwnedNotices.Count);
+            await confirm();
+            True(original() && f.Module.OwnedNotices.Count == 0 && f.Calls.Count(method) == 2,
+                "a confirmed same-setting save clears only its prior unknown");
+        }
+        finally { held.Release(); await Task.WhenAll(saving, retiring); }
+    }
+
+    private static async Task SourceRetiredRead(bool failure)
+    {
+        await using var f = await Fixture.Create();
+        var settings = (await f.Rpc("music.settings.get")).GetProperty("settings");
+        await f.Rpc("music.settings.save", new { ifRevision = settings.GetProperty("revision").GetInt64(), lyrics = false });
+        bool before = f.Module.LyricsEnabled;
+        var held = f.Calls.HoldNext("music.quality.settings.get");
+        if (failure) held.Transform = _ => JsonSerializer.SerializeToElement(new { ok = false, code = "NETWORK_ERROR" });
+        var reading = f.Module.RefreshSourceManagementAsync();
+        try
+        {
+            await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Module.RetireSourceManagement();
+            string status = f.Module.Status;
+            int reloads = f.Calls.Count("music.officialSources.settings.get");
+            held.Release(); await reading.WaitAsync(TimeSpan.FromSeconds(5));
+            Equal(before, f.Module.LyricsEnabled);
+            Equal(status, f.Module.Status);
+            Equal(reloads, f.Calls.Count("music.officialSources.settings.get"));
+            await f.Module.RefreshSourceManagementAsync();
+            True(!f.Module.LyricsEnabled && f.Module.CanEditOfficialSources,
+                "a new page reads the current owner instead of reviving the retired reply");
+        }
+        finally { held.Release(); await reading; }
+    }
+
+    private static async Task SourceUnknownAfterRetirement()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.RefreshSourceManagementAsync();
+        var row = f.Module.Sources.Single(item => item.Platform == "wy");
+        var held = f.Calls.HoldNext("music.officialSources.settings.save"); held.Transform = UnknownSetting;
+        var saving = f.Module.SetSourceEnabledAsync(row, false);
+        try
+        {
+            await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Module.RetireSourceManagement();
+            int reads = f.Calls.Count("music.officialSources.settings.get");
+            held.Release(); await saving.WaitAsync(TimeSpan.FromSeconds(5));
+            True(row.Enabled && f.Module.OwnedNotices.Count == 1,
+                "retired pages keep their projection while the submitted receipt still owns its unknown");
+            Equal(reads, f.Calls.Count("music.officialSources.settings.get"));
+            await f.Module.RefreshSourceManagementAsync();
+            True(!f.Module.Sources.Single(item => item.Platform == "wy").Enabled,
+                "the reopened page reads the committed official source setting");
+            Equal(1, f.Module.OwnedNotices.Count);
+            await f.Module.SetSourceEnabledAsync(f.Module.Sources.Single(item => item.Platform == "wy"), true);
+            Equal(0, f.Module.OwnedNotices.Count);
+            Equal(2, f.Calls.Count("music.officialSources.settings.save"));
+        }
+        finally { held.Release(); await saving; }
+    }
+
+    private static JsonElement UnknownSetting(JsonElement _) =>
+        JsonSerializer.SerializeToElement(new { ok = false, code = "COMMIT_UNKNOWN" });
+
+    private static async Task MetadataRetiredReadback()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.ActivateSettingsAsync();
+        var row = f.Module.MetadataPlatforms.Single(item => item.Platform == "mg");
+        f.Calls.TransformNext("music.metadata.settings.save", UnknownSetting);
+        var held = f.Calls.HoldNext("music.metadata.settings.get");
+        held.Transform = _ => JsonSerializer.SerializeToElement(new { ok = false, code = "NETWORK_ERROR" });
+        var saving = f.Module.SetMetadataEnabledAsync(row, false);
+        Task retiring = Task.CompletedTask;
+        try
+        {
+            await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            retiring = f.Module.DeactivateSettingsAsync();
+            string status = f.Module.Status;
+            held.Release();
+            await Task.WhenAll(saving, retiring).WaitAsync(TimeSpan.FromSeconds(5));
+            True(row.Enabled && f.Module.Status == status && f.Module.OwnedNotices.Count == 1,
+                "retired readback cannot publish either stored values or its late failure");
+            await f.Module.ActivateSettingsAsync();
+            True(!f.Module.MetadataPlatforms.Single(item => item.Platform == "mg").Enabled &&
+                f.Module.OwnedNotices.Count == 1 && f.Calls.Count("music.metadata.settings.save") == 1,
+                "reopening reads the actual commit without replaying or acknowledging the unknown save");
+        }
+        finally { held.Release(); await Task.WhenAll(saving, retiring); }
+    }
+
+    private static async Task SettingsUnknownAfterClose(bool quality)
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.ActivateSettingsAsync();
+        string method = quality ? "music.quality.settings.save" : "music.metadata.settings.save";
+        string before = f.Module.PlaybackQualityRequest;
+        var metadata = f.Module.MetadataPlatforms.Single(row => row.Platform == "mg");
+        var held = f.Calls.HoldNext(method); held.Transform = UnknownSetting;
+        Task saving = quality ? f.Module.SetPlaybackQualityRequestAsync("auto")
+            : f.Module.SetMetadataEnabledAsync(metadata, false);
+        await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Task leaving = f.Module.DeactivateSettingsAsync();
+        try
+        {
+            await Drain();
+            True(!saving.IsCompleted && !leaving.IsCompleted, "closing must retain the actual submitted owner task");
+            True(!f.Calls.Log.Last(call => call.Method == method).Token.IsCancellationRequested,
+                "closing a settings page must not cancel an admitted save");
+            held.Release();
+            await Task.WhenAll(saving, leaving).WaitAsync(TimeSpan.FromSeconds(5));
+            Equal(before, f.Module.PlaybackQualityRequest);
+            True(metadata.Enabled, "a retired metadata save cannot publish its late reply to the closed page");
+            Equal(1, f.Module.OwnedNotices.Count);
+            object notice = f.Module.OwnedNotices.Single().Owner;
+            Equal(1, f.Calls.Count(method));
+
+            await f.Module.ActivateSettingsAsync();
+            True(quality ? f.Module.PlaybackQualityRequest == "auto"
+                : !f.Module.MetadataPlatforms.Single(row => row.Platform == "mg").Enabled,
+                "reopening reads the owner's committed value, not a retained optimistic draft");
+            True(ReferenceEquals(notice, f.Module.OwnedNotices.Single().Owner),
+                "readback and reopening cannot acknowledge an unknown write");
+            Equal(1, f.Calls.Count(method));
+
+            f.Module.Volume = 37;
+            await f.Module.SaveVolumeAsync();
+            Equal(1, f.Module.OwnedNotices.Count);
+            if (quality) await f.Module.SetPlaybackQualityRequestAsync(before);
+            else await f.Module.SetMetadataEnabledAsync(f.Module.MetadataPlatforms.Single(row => row.Platform == "mg"), true);
+            Equal(0, f.Module.OwnedNotices.Count);
+            Equal(2, f.Calls.Count(method));
+        }
+        finally { held.Release(); await Task.WhenAll(saving, leaving); }
+    }
+
+    private static async Task SettingsReceiptIsolation()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.ActivateSettingsAsync();
+        f.Calls.TransformNext("music.metadata.settings.save", UnknownSetting);
+        await f.Module.SetMetadataEnabledAsync(f.Module.MetadataPlatforms.Single(row => row.Platform == "mg"), false);
+        f.Calls.TransformNext("music.quality.settings.save", UnknownSetting);
+        await f.Module.SetPlaybackQualityRequestAsync("auto");
+        Equal(2, f.Module.OwnedNotices.Count);
+        await using (var independent = await Fixture.Create())
+        {
+            await independent.Module.ActivateSettingsAsync();
+            await independent.Module.SetPlaybackQualityRequestAsync("auto");
+            Equal(2, f.Module.OwnedNotices.Count);
+        }
+        await f.Module.SetPlaybackQualityRequestAsync("128k");
+        True(f.Module.OwnedNotices.Count == 1 &&
+            f.Module.OwnedNotices.Single().Message.Contains("元数据"),
+            "a successful full quality policy write cannot acknowledge metadata fields");
+        await f.Module.SetMetadataEnabledAsync(f.Module.MetadataPlatforms.Single(row => row.Platform == "mg"), true);
+        Equal(0, f.Module.OwnedNotices.Count);
     }
 
     private static async Task SettingsSourceShutdownRecovery(bool failRecoveryRead)

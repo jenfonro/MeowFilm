@@ -318,7 +318,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                     [weak self] _ in
                     guard page.actionPageID == request else { return }
                     self?.perform(operation: "下一首播放", kind: .queue) {
-                        await self?.model.insertNext(try await page.refreshedActionTrack(track))
+                        await self?.model.insertNext(track)
                     }
                 },
                 UIAction(title: "音源", image: UIImage(systemName: "slider.horizontal.3")) { [weak self] _ in
@@ -329,7 +329,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                     [weak self] _ in
                     guard page.actionPageID == request else { return }
                     self?.perform(operation: "添加到播放队列", kind: .queue) {
-                        await self?.model.append(try await page.refreshedActionTrack(track))
+                        await self?.model.append(track)
                     }
                 },
             ]
@@ -339,7 +339,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 UIAction(title: target.title) { [weak self] _ in
                     guard page.actionPageID == request else { return }
                     self?.perform(operation: "添加到歌单", kind: .library) {
-                        await self?.model.add(try await page.refreshedActionTrack(track), to: target)
+                        await self?.model.add(track, to: target)
                     }
                 }
             }))
@@ -741,7 +741,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 case .track(let track):
                     if page.canPlayRemoteQueue {
                         let (source, index) = try await page.playbackSource(for: track)
-                        await self.model.playRemoteQueue(source, start: .init(index: index, track: track))
+                        await self.model.playRemoteQueue(source, start: .init(index: index))
                     } else {
                         let tracks = section.items.compactMap { item -> MusicRemoteTrack? in
                             if case .track(let value) = item.content { return value }; return nil
@@ -776,8 +776,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                         platform: value, kind: .recommendation(kind: "daily"), title: item.title)
                     defer { self.model.releaseRemoteQueueSource(source) }
                     let firstPage = try await self.model.remoteQueuePage(source, cursor: nil)
-                    guard let first = firstPage.items.first else { throw MusicServiceError.notFound }
-                    await self.model.playRemoteQueue(source, start: .init(index: 0, track: first))
+                    guard !firstPage.items.isEmpty else { throw MusicServiceError.notFound }
+                    await self.model.playRemoteQueue(source, start: .init(index: 0))
                 default: break
                 }
             }
@@ -811,15 +811,15 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             let page = try await model.remoteQueuePage(source, cursor: cursor)
             try Task.checkCancellation()
             let index = selected.flatMap { selected in page.items.firstIndex {
-                MusicPublicBrowseViewModel.sameActionIdentity($0, selected)
+                $0.songId == selected.songId
             } } ?? (selected == nil && !page.items.isEmpty ? 0 : nil)
             if let index {
-                await model.playRemoteQueue(source, start: .init(index: offset + index, track: page.items[index]))
+                await model.playRemoteQueue(source, start: .init(index: offset + index))
                 return
             }
             offset += page.items.count
             guard let next = page.cursor else { throw MusicServiceError.notFound }
-            guard !page.items.isEmpty, seen.insert(next).inserted else { throw MusicServiceError.invalidResponse }
+            guard seen.insert(next).inserted else { throw MusicServiceError.invalidResponse }
             cursor = next
         }
     }
@@ -828,11 +828,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         guard let page, canPresentPageAlert else { return }
         let request = page.actionPageID
         let sources = MusicSourcesViewController(model: model, tracks: [track], appearance: appearance,
-            originIsCurrent: { [weak page] in page?.actionPageID == request },
-            refresh: { [weak page] in
-                guard let page, page.actionPageID == request else { throw MusicServiceError.staleResult }
-                return try await page.refreshedActionTrack($0)
-            })
+            originIsCurrent: { [weak page] in page?.actionPageID == request })
         let wrapper = PageNavigationController(themeProvider: appearance)
         wrapper.setViewControllers([sources], animated: false)
         wrapper.modalPresentationStyle = .pageSheet

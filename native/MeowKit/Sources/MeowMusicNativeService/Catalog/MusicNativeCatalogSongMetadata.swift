@@ -15,10 +15,10 @@ extension NativeMusicService {
             let items = section.tabs.isEmpty ? section.items : section.tabs.flatMap(\.items)
             for item in items {
                 if case .song(let track) = item.content { tracks.append(track) }
-                tracks += item.previewSongs.prefix(3)
+                tracks += item.previewSongs
             }
         }
-        let songs = try await sharedSongMetadata(tracks.map(MusicModel.normalize))
+        let songs = try adoptSongs(tracks.map(MusicModel.normalize), authoritative: true)
         var result: [Data: MJ] = [:]
         for (track, song) in zip(tracks, songs) { result[publicSongMetadataKey(track)] = song }
         return result

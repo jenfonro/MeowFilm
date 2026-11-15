@@ -141,12 +141,15 @@ public static partial class MusicUiTests
         });
         True(created.GetProperty("ok").GetBoolean(), "playlist creation succeeds");
         string id = created.GetProperty("collection").GetProperty("id").GetString()!;
+        var initial = await library.ExecuteAsync("music.library.detail", new { id });
+        var ids = initial.GetProperty("songs").EnumerateArray().Select(song => song.GetProperty("songId").GetString()!).ToArray();
+        True(ids.All(songId => Guid.TryParse(songId, out _)), "the reorder consumes permanent repository IDs");
         var moved = await library.ExecuteAsync("music.library.reorderSong", new
         {
             id,
             ifRevision = 1,
-            songId = "library:local:c",
-            targetId = "library:local:a",
+            songId = ids[2],
+            targetId = ids[0],
             after = false
         });
         True(moved.GetProperty("ok").GetBoolean(), "playlist reorder succeeds");
@@ -154,7 +157,7 @@ public static partial class MusicUiTests
         var detail = await library.ExecuteAsync("music.library.detail", new { id, offset = 0, limit = 100 });
         True(detail.GetProperty("songs").EnumerateArray()
             .Select(row => row.GetProperty("songId").GetString())
-            .SequenceEqual(new[] { "library:local:c", "library:local:a", "library:local:b" }),
+            .SequenceEqual(new[] { ids[2], ids[0], ids[1] }),
             "one owner persists the exact order");
     }
 

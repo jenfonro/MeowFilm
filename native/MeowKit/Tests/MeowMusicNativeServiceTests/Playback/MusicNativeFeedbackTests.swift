@@ -3,6 +3,44 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeFeedbackTests: XCTestCase {
+    @MainActor
+    func testConfirmedSettingsReceiptSurvivesUnrelatedRevisionOrAccessRevocationAndClearsOnlyItsUnknown() async throws {
+        for revoke in [false, true] {
+            let entered = expectation(description: "Confirmed settings reached physical configuration")
+            let store = NativeMusicMemoryDocument(), accounts = FeedbackSettingsAccounts(entered: entered), gate = NativeMusicGate()
+            let service = try await NativeMusicFixture.service(store, accounts: accounts)
+            addTeardownBlock { await gate.release(); await service.close() }
+            let receipts = MusicSettingsReceiptOwner(), key = "playback/feedback/tx"
+            receipts.settle(receipts.begin(settings: [key], operation: "播放上报"), failure: .commitUnconfirmed)
+            receipts.settle(receipts.begin(settings: ["playback/feedback/wy"], operation: "播放上报"), failure: .commitUnconfirmed)
+            await accounts.hold(gate)
+            let saving = receipts.submit(settings: [key], operation: "播放上报") {
+                try await service.setPlaybackFeedback(platform: .qq, enabled: true, expectedRevision: 0)
+            }
+            await fulfillment(of: [entered], timeout: 3)
+            let committed = try MJ.parse(XCTUnwrap(store.snapshot().0))["records"][MusicModel.key("playback")]
+            XCTAssertEqual(committed["feedback"]["platforms"]["tx"]["enabled"], .bool(true))
+            if revoke { service.revokeAccess(generation: 2) }
+            else {
+                _ = try await service.updateSettings(.init(ifRevision: 1, showTranslation: false))
+            }
+            await gate.release()
+            let result = try await saving.value
+            await receipts.flush()
+            XCTAssertEqual(result.revision, 1)
+            XCTAssertEqual(result.platforms[.qq], .init(enabled: true, generation: 1))
+            XCTAssertEqual(receipts.unknown.map(\.setting), ["playback/feedback/wy"])
+            let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))["records"][MusicModel.key("playback")]
+            XCTAssertEqual(saved["feedback"], committed["feedback"])
+            XCTAssertEqual(store.snapshot().2, revoke ? 1 : 2, "The confirmed write is never replayed")
+            if revoke {
+                do { _ = try await service.playbackFeedbackSettings(); XCTFail("Revoked reads must stay fenced") }
+                catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
+            }
+            await service.close()
+        }
+    }
+
     func testOptionalSettingsDefaultOffPreserveLibraryUnknownPlaybackFieldsAndColdReadTrue() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
@@ -181,7 +219,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
         XCTAssertEqual(accounts.releases.count(), 1)
     }
 
-    func testCloseDoesNotWaitForNetworkAndRevocationStillRejectsLateReceipt() async throws {
+    func testCloseWaitsForPhysicalFeedbackCompletionAndRevocationRejectsLateReceipt() async throws {
         let accounts = NativeFeedbackAccounts(), gate = NativeMusicGate()
         let service = try await NativeMusicFixture.service(scripts: NativeMusicScriptFixture(), accounts: accounts)
         _ = try await service.setPlaybackFeedback(platform: .qq, enabled: true, expectedRevision: 0)
@@ -190,10 +228,14 @@ final class MusicNativeFeedbackTests: XCTestCase {
         await service.consumePlaybackFeedback(NativeFeedbackFixture.sample(1, at: 0, position: 0, kind: .playing,
             attempt: candidate.attemptId))
         await gate.started()
-        let closed = expectation(description: "Service close does not drain a remote receipt")
-        let closing = Task { await service.close(); closed.fulfill() }
+        let prematureClose = expectation(description: "Close remains pending until the worker physically returns")
+        prematureClose.isInverted = true
+        let closed = expectation(description: "Close finishes after the worker physically returns")
+        let closing = Task { await service.close(); prematureClose.fulfill(); closed.fulfill() }
+        await fulfillment(of: [prematureClose], timeout: 0.05)
+        await gate.release()
         await fulfillment(of: [closed], timeout: 3)
-        await gate.release(); await closing.value; await controller.flush()
+        await closing.value; await controller.flush()
         let rows = await accounts.recorded(), active = await accounts.activeCount()
         XCTAssertEqual(rows.map(\.event), [.start]); XCTAssertEqual(active, 0)
         do { _ = try await service.state(); XCTFail("The product owner is closed") }
@@ -201,7 +243,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
         XCTAssertEqual(accounts.releases.count(), 1)
     }
 
-    func testMappingRespectsAuthoritativeEmptySourcesAndExactKGIdentity() throws {
+    func testMappingUsesAuthoritativeSourcesAndOnlyCanonicalKGFields() throws {
         var song = try NativeMusicFixture.song()
         XCTAssertEqual(try MusicNativeFeedbackMapping.targets(song: song, context: .obj()), NativeFeedbackFixture.targets)
         let automatic = try MusicNativeFeedbackMapping.targets(song: song, context: .obj([("automatic", .bool(true))]))
@@ -215,18 +257,23 @@ final class MusicNativeFeedbackTests: XCTestCase {
             ("source", .string("kg")), ("musicInfo", info)])
         XCTAssertEqual(MusicNativeFeedbackMapping.recording(kg, platform: .kugou)?.mixsongID, "22")
         kg["musicInfo"]["mixsongid"] = .string("23")
-        XCTAssertNil(MusicNativeFeedbackMapping.recording(kg, platform: .kugou))
+        XCTAssertEqual(MusicNativeFeedbackMapping.recording(kg, platform: .kugou)?.mixsongID, "22")
         var changed = kg["musicInfo"]
         changed.remove("mixsongid")
         kg["musicInfo"] = changed
         kg["musicInfo"]["hash"] = .string(String(repeating: "B", count: 32))
         kg["sourceKey"] = .string(try MusicModel.sourceKey(kg["musicInfo"]))
-        XCTAssertNil(MusicNativeFeedbackMapping.recording(kg, platform: .kugou))
+        XCTAssertEqual(MusicNativeFeedbackMapping.recording(kg, platform: .kugou)?.nativeID,
+                       String(repeating: "B", count: 32))
+        XCTAssertEqual(MusicNativeFeedbackMapping.recording(kg, platform: .kugou)?.mixsongID, "22")
         kg["musicInfo"]["hash"] = .string(hash)
         kg["sourceKey"] = .string(try MusicModel.sourceKey(kg["musicInfo"]))
         kg["musicInfo"]["albumAudioId"] = .string("0")
         kg["musicInfo"]["mixsongid"] = .string("22")
-        XCTAssertEqual(MusicNativeFeedbackMapping.recording(kg, platform: .kugou)?.mixsongID, "22")
+        XCTAssertEqual(MusicNativeFeedbackMapping.recording(kg, platform: .kugou)?.mixsongID, "0")
+        kg["musicInfo"]["hash"] = .string("")
+        XCTAssertNil(MusicNativeFeedbackMapping.recording(kg, platform: .kugou),
+                     "The required recording locator cannot be invented from an unconsumed field")
     }
 
     func testMergedSearchKeepsKeywordButExternalCollectionsNeverBecomeNeteaseIDs() throws {
@@ -323,7 +370,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
         let accounts = NativeFeedbackAccounts()
         await accounts.configure(platform: .netease, result: .confirmed)
         let owner = SimilarModeAccountFixture([["301"]], metadata: true, feedback: accounts)
-        let song = try MusicModel.normalize(SimilarModeAccountFixture.track("100"))
+        let song = try NativeMusicFixture.storedSong(SimilarModeAccountFixture.track("100"))
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
                                                           accounts: owner)
         _ = try await service.setPlaybackFeedback(platform: .netease, enabled: true, expectedRevision: 0)
@@ -378,5 +425,35 @@ final class MusicNativeFeedbackTests: XCTestCase {
         XCTAssertEqual(starts.count, 2)
         XCTAssertNotEqual(starts.first?.instanceID, starts.last?.instanceID)
         await service.close()
+    }
+}
+
+private actor FeedbackSettingsAccounts: MusicNativeAccountProviding, MusicNativeFeedbackLifecycleProviding {
+    private let base = NativeMusicAccountFixture()
+    private let entered: XCTestExpectation
+    private var gate: NativeMusicGate?
+    init(entered: XCTestExpectation) { self.entered = entered }
+    func hold(_ gate: NativeMusicGate) { self.gate = gate }
+    func configurePlaybackFeedback(_ settings: MusicPlaybackFeedbackSettings) async {
+        if let gate { self.gate = nil; entered.fulfill(); await gate.wait() }
+    }
+    nonisolated func cancelPendingPlaybackFeedback(platform: MusicAccountPlatform?) {}
+    nonisolated func stopPlaybackFeedbackDispatchForClose() {}
+    func preparePlaybackFeedbackForClose() {}
+    func flushPendingPlaybackFeedback() {}
+    func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) async throws -> MusicNativeTrackPage {
+        try await base.nativeRecommendations(platform: platform, kind: kind, cursor: cursor)
+    }
+    func nativeCollections(platform: MusicAccountPlatform, cursor: String?) async throws -> MusicAccountCollectionPage {
+        await base.nativeCollections(platform: platform, cursor: cursor)
+    }
+    func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) async throws -> MusicNativeTrackPage {
+        await base.nativeTracks(platform: platform, collectionID: collectionID, cursor: cursor)
+    }
+    func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) async throws -> [MusicPlaybackOption] {
+        await base.nativeOptions(platform: platform, nativeID: nativeID, sourceKey: sourceKey)
+    }
+    func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) async throws -> MusicNativeAudio {
+        try await base.nativeResolve(platform: platform, nativeID: nativeID, selection: selection)
     }
 }

@@ -23,8 +23,7 @@ public sealed partial class MusicNativeApplication
             LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
             bool manualSource = LJ.B(input["manualSource"]);
             var song = NativeMusicSong.Normalize(input["song"]);
-            var originalSong = song;
-            string songId = LJ.S(song["songId"]), request = LJ.S(input["quality"]);
+            string request = LJ.S(input["quality"]);
             LJ.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
             using var officialPolicy = await library.AcquireOfficialSourcesAsync(token).ConfigureAwait(false);
             using var policy = await library.AcquireQualityAsync(token).ConfigureAwait(false);
@@ -46,6 +45,8 @@ public sealed partial class MusicNativeApplication
                     LJ.Require(accounts.IsOfficialCurrent(owner), "AUTH_CHANGED");
             }
             song = await songMatcher.KnownAsync(song, token).ConfigureAwait(false);
+            var originalSong = song;
+            string songId = LJ.S(song["songId"]);
             Current();
             var plan = new MusicOfficialCandidates(song);
             foreach (var (platform, owner) in owners)

@@ -41,6 +41,7 @@ public sealed partial class MusicLibraryOwner
             ("platforms", p["platforms"]), ("enabled", p["enabled"]));
         ValidateMetadataPolicy(next);
         Set(doc, MetadataPolicyArea, next);
+        ApplyArtworkPolicy(doc, force: true);
         return (LJ.Obj(("settings", next)), true);
     }
 

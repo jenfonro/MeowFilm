@@ -14,7 +14,7 @@ fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留
 保存前比对已提交文档内容，外部改写返回 `STORAGE_CHANGED`；格式损坏与真实 I/O 失败
 分别返回 `CORRUPT_STORAGE`、`STORAGE_ERROR`，失败不发布新快照。
 
-双端 aggregate entry 显式装配八个模块；通用 `createRuntime` 未显式启用
+双端 aggregate entry 显式装配九个模块（顺序见[音乐平台运行器](music-platform.md)）；通用 `createRuntime` 未显式启用
 pan／metadata／film 时保持原默认三个模块。`connectFilmPlayback` 在 provider
 变更前后比较真实 generation／revision，再通知数据、会话及媒体 owner 撤权。
 失败回执不证明磁盘变更回滚；仅展示名称变化不使有效媒体失效。

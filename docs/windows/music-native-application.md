@@ -10,8 +10,7 @@
 MusicLibraryOwner
 MusicLibrarySyncService
 MusicAccountOwner
-MusicPlatformClientContextOwner
-MusicPlatformHttp
+MusicPlatformClient
 MusicPlatformCatalog
 MusicNativeCatalogOwner
 MusicRecommendationCoordinator
@@ -32,9 +31,9 @@ IRuntimeClient
 播放内核
 ```
 
-`IRuntimeClient` 只用于确有必要的原始 JS 音源执行；普通账号、平台、搜索、曲库、推荐、同步、歌词编排和设置都在 .NET 内完成。
+`IRuntimeClient` 同时用于原始 JS 音源和共同 `music-platform` 模块。平台请求、认证、私有响应转换及匿名协议状态归 Node；曲库、永久身份、引用队列、设置、账号安全保存和原生播放归 .NET owner。共同边界见[平台请求](../common/music/platform-client-context.md)。
 
-`InitializeAsync` 先初始化独立本地客户端状态，再恢复同步调度；不因启动而登记平台或协商全部动态密钥。账号、客户端、目录及播放按显式依赖接入，具体边界见[客户端上下文](music-platform-client-context.md)。
+`InitializeAsync` 依次初始化反馈本地状态、恢复歌曲资料并启动同步调度；不初始化原生设备文档或主动登记全部平台。单个 `MusicPlatformClient` 在构造时绑定账号 sessions，具体边界见[平台客户端](music-platform-client-context.md)。
 
 ## 公开 seam
 
@@ -90,11 +89,10 @@ public interface IMusicApplication : IAsyncDisposable
 - 账号未知写入回执会封闭依赖账号的推荐和关闭成功路径。
 - 只有显式成功读取当前账号文档，且期间没有更新的未知回执，才解除该 fence。
 - 不通过旧 Cookie、其他客户端数据或回退目录恢复账号。
-- 客户端未知回执由客户端 owner 单独封闭；应用显式初始化重试或账号 list 路径可进行权威客户端重读，不重放写入或设备登记。单独账号 owner 的 list 不承担这项协调。
+- Node publication 由同一 client 管理实际 `session.update` 及物理排空，不保留独立原生客户端文档／未知设备回执路径。
 
 ## 请求准入
 
-- application 总准入上限为 32。
 - 关闭准备开始后新调用返回 `CLOSED`。
 - 调用方取消会取消尚未完成的读取和脚本工作；已经进入持久 CAS 的写入必须取得真实结果。
 - 页面、账号、筛选和搜索各自由其 owner 管理 generation；旧结果不能覆盖新状态。
@@ -104,21 +102,23 @@ public interface IMusicApplication : IAsyncDisposable
 准备顺序以真实依赖为准：
 
 1. 封闭新请求并取消当前 generation。
-2. 排空推荐启动读取、选择 callback 和协调器工作。
-3. 取消发现、搜索和目录临时状态，并取消排空跨平台匹配请求。
-4. 排空曲库同步、反馈和脚本工作。
-5. 排空所有已准入 application 请求，再保存一次本地成员的匹配状态（可选派生数据，失败不阻塞关闭）。
-6. 准备唯一 `MusicLibraryOwner`，再由客户端 owner 取消并排空共享匿名登记及客户端写入。
+2. 同步围住推荐 callback，并启动账号读取退休；排空推荐、VIP 和账号读取。
+3. 退休目录／歌词／发现／搜索，等待歌词、发现、匹配、目录和同步工作。
+4. 排空已准入 application 请求，再保存可选来源匹配状态。
+5. 准备反馈、脚本和唯一 `MusicLibraryOwner`。
+6. 等待 `MusicPlatformClient.DrainAsync` 与缓存存储排空；已知账号未知回执仍使关闭准备失败。
 
 准备失败不会释放借用的 App store/runtime/playback。取消关闭会恢复原 owners，但不会自动重放写入、登录、远端同步、脚本调用或播放。
 
-最终 dispose/abort 才释放 application 自己拥有的协调器；客户端 owner 在共享 HTTP 之前释放，App 的 store 在全部能力排空后释放。取消关闭准备使用新生命周期／客户端快照，不复活旧 lease；未知持久写入不会被描述成回滚。
+最终 dispose/abort 才释放 application 自己拥有的协调器、账号协议和 platform client；借用的 App runtime/store 由 App 在能力排空后释放。取消关闭准备使用新生命周期，不复活旧 lease、不重放写入或平台请求；未知持久写入不会被描述成回滚。
 
 ## 数据格式
 
 - 当前 App 保持现有 `aggregate` 数据身份。
-- App 通过 `LocalDocumentStore` 的精确命名空间配置，仅对 `music.accounts.v1` 和 `music.platform-context.v1` 使用 DPAPI；应用账号 Cookie 与设备会话保留原命名空间、存储路径及密文格式。
+- App 通过 `LocalDocumentStore` 的精确命名空间配置，仅对当前 `music.accounts.v2` 使用 DPAPI；匿名平台状态归 Node 私有文档。
 - 曲库、偏好和缓存等普通本地文档直接保存 JSON 字节；存储提供当前文件指纹、原子写入、CAS 与文件隔离。开发阶段不迁移旧普通加密文档，也不自动清理旧数据。
 - 脚本自行保存的 Cookie 等运行产物不由运行器特殊加密；运行器继续提供文件与实例隔离。
 - 每个原生 owner 只支持唯一当前格式。
-- 不兼容数据保持原样并明确失败。
+- 全新空数据及当前格式正常重载遵循[共同歌曲仓库](../common/music/smart-playback.md)；不读取、识别、迁移或清理历史 namespace。
+
+本轮文档对应静态接线，无运行、构建或关闭竞态通过结论。

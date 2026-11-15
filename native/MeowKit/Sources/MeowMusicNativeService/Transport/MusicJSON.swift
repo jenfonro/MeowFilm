@@ -5,6 +5,7 @@ import MeowMusicFeature
 /// Ordered JSON keeps locator hashes stable. Foundation Dictionary and
 /// sortedKeys must not reorder an existing platform locator object.
 indirect enum MJ: Sendable, Equatable {
+    static let maximumBytes = 8 * 1024 * 1024
     case object([(String, MJ)]), array([MJ]), string(String), number(Double), bool(Bool), null
     /// Numeric lexeme that cannot be represented exactly as a Double.
     /// Unconsumed metadata can remain opaque; ID consumers use exact decimal text.
@@ -50,7 +51,8 @@ indirect enum MJ: Sendable, Equatable {
         return isString ? string : isInteger ? String(int) : ""
     }
     /// Called only for syntax-checked JSON numbers. Expands integer exponents
-    /// without floating point, bounded by the existing 64-digit ID contract.
+    /// without floating point. Expanded numeric text uses the document's byte
+    /// budget so a small exponent token cannot allocate an unbounded string.
     /// Fractional values (including those Double rounds to an integer) fail.
     private static func exactIntegerID(_ token: String) -> String? {
         let negative = token.hasPrefix("-")
@@ -64,12 +66,12 @@ indirect enum MJ: Sendable, Equatable {
         let (shift, overflow) = exponent.subtractingReportingOverflow(fraction)
         guard !overflow else { return nil }
         if shift >= 0 {
-            guard digits.count <= 64, shift <= 64 - digits.count else { return nil }
+            guard digits.count <= maximumBytes, shift <= maximumBytes - digits.count else { return nil }
             return String(digits) + String(repeating: "0", count: shift)
         }
         guard shift > -digits.count, digits.suffix(-shift).allSatisfy({ $0 == "0" }) else { return nil }
         let integer = digits.dropLast(-shift)
-        return integer.count <= 64 ? String(integer) : nil
+        return String(integer)
     }
     subscript(_ key: String) -> MJ {
         get { fields.first { $0.0.utf8.elementsEqual(key.utf8) }?.1 ?? .null }
@@ -155,16 +157,16 @@ indirect enum MJ: Sendable, Equatable {
         case .object(let v): return "{" + Self.enumeration(v).map { Self.quote($0.0) + ":" + $0.1.json }.joined(separator: ",") + "}"
         }
     }
-    static func parse(_ data: Data, maximum: Int = 8 * 1024 * 1024) throws -> MJ {
+    static func parse(_ data: Data, maximum: Int = maximumBytes) throws -> MJ {
         guard data.count <= maximum, String(data: data, encoding: .utf8) != nil else { throw MusicServiceError.limit }
         var parser = Parser(bytes: Array(data))
-        let value = try parser.value(0)
+        let value = try parser.value()
         parser.space(); guard parser.i == parser.bytes.count else { throw MusicServiceError.corruptDocument }
         return value
     }
     private struct Parser {
         let bytes: [UInt8]
-        var i = 0, nodes = 0
+        var i = 0
         mutating func space() { while i < bytes.count && [9, 10, 13, 32].contains(bytes[i]) { i += 1 } }
         mutating func take(_ c: UInt8) -> Bool { space(); if i < bytes.count && bytes[i] == c { i += 1; return true }; return false }
         mutating func string() throws -> String {
@@ -181,9 +183,9 @@ indirect enum MJ: Sendable, Equatable {
             }
             throw MusicServiceError.corruptDocument
         }
-        mutating func value(_ depth: Int) throws -> MJ {
-            space(); nodes += 1
-            guard depth <= 40, nodes <= 600_000, i < bytes.count else { throw MusicServiceError.limit }
+        mutating func value() throws -> MJ {
+            space()
+            guard i < bytes.count else { throw MusicServiceError.corruptDocument }
             switch bytes[i] {
             case 34: return .string(try string())
             case 123:
@@ -192,7 +194,7 @@ indirect enum MJ: Sendable, Equatable {
                 repeat {
                     let key = try string()
                     guard take(58) else { throw MusicServiceError.corruptDocument }
-                    let child = try value(depth + 1)
+                    let child = try value()
                     // Keep insertion order and byte-exact Unicode keys while
                     // using the last value of a repeated JSON member.
                     let identity = Data(key.utf8)
@@ -203,7 +205,7 @@ indirect enum MJ: Sendable, Equatable {
             case 91:
                 i += 1; var rows: [MJ] = []
                 if take(93) { return .array([]) }
-                repeat { rows.append(try value(depth + 1)) } while take(44)
+                repeat { rows.append(try value()) } while take(44)
                 guard take(93) else { throw MusicServiceError.corruptDocument }; return .array(rows)
             default:
                 let start = i

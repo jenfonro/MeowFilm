@@ -44,10 +44,8 @@ public static class MusicMetadataPolicyTests
         });
         yield return Case("disabled cached source does not suppress an enabled exact alternative", async (owner, _) =>
         {
-            var qq = Ok(await owner.ExecuteAsync("music.online.song", new {
-                platform = "tx", musicInfo = new { songmid = "qq42" },
-                title = "same", artist = "same", duration = 120
-            })).GetProperty("song");
+            var qq = MusicSongFixture.Element(await MusicSongFixture.AdoptAsync(owner,
+                MusicSongFixture.Online("tx", "qq42", "same", "same", duration: 120)));
             var song = MusicSongFixture.Online("wy", "42", "same", "same", duration: 120);
             song["sources"]!.AsArray().Add(JsonNode.Parse(qq.GetProperty("sources")[0].GetRawText()));
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
@@ -58,6 +56,28 @@ public static class MusicMetadataPolicyTests
             Ok(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = Platforms, enabled = new[] { "tx" } }));
             Equal("none", Ok(await owner.ExecuteAsync("music.lyrics.display.get", new { song = normalized })).GetProperty("state").GetString());
             Equal("disabled", Ok(await owner.ExecuteAsync("music.lyrics.display.get", new { song = normalized, sourceKey = key })).GetProperty("state").GetString());
+        });
+        yield return Case("new collection songs apply the saved artwork policy and share the queue repository after cold read", async (owner, store) =>
+        {
+            const string selected = "https://images.example.test/enabled.png";
+            Ok(await owner.ExecuteAsync("music.metadata.settings.save",
+                new { ifRevision = 0, platforms = Platforms, enabled = new[] { "tx" } }));
+            var song = MusicSongFixture.Online("wy", "listed", "Same", "Artist", duration: 120,
+                cover: "https://images.example.test/disabled.png");
+            song["sources"]!.AsArray().Add(MusicSongFixture.Online("tx", "alternative", "Same", "Artist",
+                duration: 120, cover: selected)["sources"]![0]!.DeepClone());
+            var created = Ok(await owner.ExecuteAsync("music.library.create", new { name = "Covers", songs = new[] { song } }));
+            string collection = created.GetProperty("collection").GetProperty("id").GetString()!;
+            var detail = Ok(await owner.ExecuteAsync("music.library.detail", new { id = collection }));
+            var listed = detail.GetProperty("songs")[0];
+            Equal(selected, listed.GetProperty("cover_url").GetString());
+            Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { listed }, index = 0 }));
+            await using var cold = new MusicLibraryOwner(store);
+            var current = Ok(await cold.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song");
+            Equal(listed.GetProperty("songId").GetString(), current.GetProperty("songId").GetString());
+            Equal(selected, current.GetProperty("cover_url").GetString());
+            Equal(selected, Ok(await cold.ExecuteAsync("music.library.detail", new { id = collection }))
+                .GetProperty("songs")[0].GetProperty("cover_url").GetString());
         });
         yield return Case("unknown policy CAS reconciles on its current read and blocks unrelated consumers until then", async (owner, store) =>
         {
@@ -82,6 +102,7 @@ public static class MusicMetadataPolicyTests
         {
             var song = LocalSong();
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
+            song = Ok(await owner.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song");
             Ok(await owner.ExecuteAsync("music.lyrics.local.save", new { song, text = "[00:01]first\n[00:05]second" }));
             var result = Ok(await owner.ExecuteAsync("music.lyrics.local.get", new { song }));
             Equal("local", result.GetProperty("state").GetString()); Equal(2, result.GetProperty("lines").GetArrayLength());
@@ -92,6 +113,7 @@ public static class MusicMetadataPolicyTests
         {
             var song = LocalSong();
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
+            song = Ok(await owner.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song");
             int writes = store.Writes;
             Code(await owner.ExecuteAsync("music.lyrics.local.save", new { song = LocalSong("other"), text = "[00:01]x" }), "TARGET_CHANGED");
             foreach (var text in new[] { "no timing", "[00:01]bad\0", new string('x', 65537) })
@@ -102,6 +124,7 @@ public static class MusicMetadataPolicyTests
         {
             var song = LocalSong();
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
+            song = Ok(await owner.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song");
             Ok(await owner.ExecuteAsync("music.lyrics.local.save", new { song, text = "[00:01]old" }));
             Ok(await owner.ExecuteAsync("music.lyrics.local.save", new { song, text = "[00:01]new" }));
             Equal("new", Ok(await owner.ExecuteAsync("music.lyrics.local.get", new { song })).GetProperty("lines")[0].GetProperty("text").GetString());
@@ -115,6 +138,7 @@ public static class MusicMetadataPolicyTests
         {
             var song = LocalSong();
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
+            song = Ok(await owner.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song");
             store.FailAfterWrite = true;
             Code(await owner.ExecuteAsync("music.lyrics.local.save", new { song, text = "[00:01]saved" }), "COMMIT_UNKNOWN");
             int writes = store.Writes;
@@ -127,6 +151,7 @@ public static class MusicMetadataPolicyTests
         {
             var song = LocalSong();
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
+            song = Ok(await owner.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song");
             Ok(await owner.ExecuteAsync("music.lyrics.local.save", new { song, text = "[00:01]saved" }));
             Ok(await owner.ExecuteAsync("music.settings.save", new { ifRevision = 0, lyrics = false }));
             var result = Ok(await owner.ExecuteAsync("music.lyrics.local.get", new { song }));

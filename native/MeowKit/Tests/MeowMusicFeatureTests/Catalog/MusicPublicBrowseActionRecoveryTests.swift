@@ -20,14 +20,11 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) async throws -> MusicPublicBrowseDetail {
         guard let readPage else { throw MusicServiceError.invalidResponse }
         let page = try await readPage(cursor)
-        let members = try page.items.map { track -> MusicPublicBrowseMember in
-            guard let position = Int(track.ref.id.split(separator: ":").last ?? "") else {
-                throw MusicServiceError.invalidResponse
-            }
-            return .init(nativeID: track.sources[0].nativeId, sourcePosition: position, track: track)
+        let members = page.items.map { track -> MusicPublicBrowseMember in
+            .init(nativeID: track.sources[0].nativeId, sourcePosition: track.sourcePosition, track: track)
         }
         return .init(collection: collection, members: members, total: 900,
-                     cursor: page.cursor, snapshot: "synthetic-snapshot")
+                     cursor: page.cursor)
     }
     func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) -> MusicRemoteQueueSource {
         opens += 1
@@ -49,7 +46,7 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
     init(_ sizes: [Int]) { self.sizes = sizes }
     func page(cursor: String?) async throws -> MusicBrowsePage {
         cursors.append(cursor)
-        let visit = cursors.count, page = cursor.flatMap(Int.init) ?? 0
+        let page = cursor.flatMap(Int.init) ?? 0
         guard sizes.indices.contains(page) else { throw MusicServiceError.invalidRequest }
         if let gate { await gate.wait() }
         if let failureCursor, cursor == failureCursor { throw MusicServiceError.unavailable }
@@ -58,11 +55,11 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
             // The same recording at two positions must retain its occurrence.
             let id = index == 9 ? 0 : index
             let song = id == 0 ? "song:\u{e9}" : "song:\(id)"
-            return .init(ref: .init(kind: .handle, id: "\(visit):row:\(index)"),
+            return .init(ref: .init(kind: .library, id: song, occurrence: "row:\(index)"),
                 songId: mutation == 1 ? "song:e\u{301}" : song, title: "Synthetic \(index)",
                 sources: [.init(sourceKey: mutation == 2 ? "wrong-key" : "tx:\(id)",
                                 platform: mutation == 3 ? "wy" : "tx",
-                                nativeId: mutation == 4 ? "wrong-id" : String(id))])
+                                nativeId: mutation == 4 ? "wrong-id" : String(id))], sourcePosition: index)
         }
         return .init(items: rows, cursor: page + 1 < sizes.count ? String(page + 1) : nil)
     }
@@ -76,21 +73,22 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
         model.setAccess(available: true, generation: UUID()); model.appear(); await model.refresh()
         return model
     }
-    func testOver600VisibleRowsRenewOnlySelectedPageWithoutReopeningOrMutatingDisplay() async throws {
+    func testOver600VisibleRowsUsePermanentActionWithoutReopeningOrMutatingDisplay() async throws {
         let service = BrowseActionService(), pages = BrowseActionPages(Array(repeating: 30, count: 22))
         let model = await model(service, pages)
         for _ in 1..<22 { await model.appendNext() }
         let rows = model.tracks
         XCTAssertEqual(rows.count, 660)
         let selected = try XCTUnwrap(rows.first)
-        let renewed = try await model.refreshedActionTrack(selected)
-        XCTAssertNotEqual(renewed.ref, selected.ref)
-        XCTAssertEqual(renewed.songId, selected.songId)
-        XCTAssertEqual(pages.cursors.count, 23); XCTAssertNil(pages.cursors.last ?? nil)
+        var reference: MusicReference?
+        let intent = try XCTUnwrap(model.makeActionIntent())
+        await model.perform(intent: intent) { reference = selected.ref }
+        XCTAssertEqual(reference, selected.ref)
+        XCTAssertEqual(pages.cursors.count, 22)
         XCTAssertEqual(model.tracks, rows); XCTAssertEqual(model.pageNumber, 22)
         XCTAssertEqual(model.trackOffset, 0); XCTAssertNil(model.nextCursor)
         let opens = await service.opens
-        XCTAssertEqual(opens, 0, "Reading/renewing visible pages never opens a complete playback queue")
+        XCTAssertEqual(opens, 0, "Reading visible pages never opens a complete playback queue")
         model.disappear()
     }
     func testVariablePageLengthsAndDuplicateSongsRecoverExactGlobalOccurrence() async throws {
@@ -98,41 +96,45 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
         let model = await model(service, pages)
         await model.appendNext(); await model.appendNext()
         let selected = try XCTUnwrap(model.tracks.indices.contains(9) ? model.tracks[9] : nil)
-        XCTAssertEqual(model.queueIndex(of: selected), 9)
-        let renewed = try await model.refreshedActionTrack(selected)
+        let (source, index) = try await model.playbackSource(for: selected)
         XCTAssertEqual(pages.cursors.last ?? nil, "1")
-        XCTAssertTrue(renewed.ref.id.hasSuffix("row:9"))
-        XCTAssertEqual(model.queueIndex(of: selected), 9)
-        model.disappear()
+        XCTAssertEqual(selected.ref.occurrence, "row:9")
+        XCTAssertEqual(index, 9)
+        model.disappear(); await source.close()
     }
-    func testRenewalPreservesFailedAppendCursorAndAtomicRetryState() async throws {
+    func testPermanentActionPreservesFailedAppendCursorAndAtomicRetryState() async throws {
         let service = BrowseActionService(), pages = BrowseActionPages([7, 19, 5])
         let model = await model(service, pages)
         await model.appendNext()
         pages.failureCursor = "2"; await model.appendNext()
         let before = model.tracks
         XCTAssertEqual(model.error, .unavailable); XCTAssertEqual(model.pageNumber, 2)
-        _ = try await model.refreshedActionTrack(XCTUnwrap(before.first))
+        let selected = try XCTUnwrap(before.first), intent = try XCTUnwrap(model.makeActionIntent())
+        await model.perform(intent: intent) { XCTAssertEqual(selected.ref.kind, .library) }
         XCTAssertEqual(model.tracks, before); XCTAssertEqual(model.error, .unavailable)
         XCTAssertEqual(model.nextCursor, "2"); XCTAssertEqual(model.pageNumber, 2)
         pages.failureCursor = nil; await model.retry()
-        XCTAssertEqual(pages.cursors, [nil, "1", "2", nil, "2"])
+        XCTAssertEqual(pages.cursors, [nil, "1", "2", "2"])
         XCTAssertEqual(model.tracks.count, 31); XCTAssertEqual(model.pageNumber, 3)
         XCTAssertNil(model.error)
         model.disappear()
     }
-    func testRenewalRejectsChangedUTF8SongKeyPlatformAndNativeIdentity() async throws {
+    func testLaterContentChangesDoNotRequireProofBeforeUsingTheDisplayedPermanentReference() async throws {
         let service = BrowseActionService(), pages = BrowseActionPages([3])
         let model = await model(service, pages), selected = try XCTUnwrap(model.tracks.first)
         for mutation in 1...4 {
             pages.mutation = mutation
-            do { _ = try await model.refreshedActionTrack(selected); XCTFail("changed identity accepted") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
+            let intent = try XCTUnwrap(model.makeActionIntent())
+            var reference: MusicReference?
+            await model.perform(intent: intent) { reference = selected.ref }
+            XCTAssertEqual(reference, selected.ref)
+            XCTAssertNil(model.actionError)
         }
         XCTAssertEqual(model.tracks.first, selected)
+        XCTAssertEqual(pages.cursors.count, 1)
         model.disappear()
     }
-    func testSuspendedRenewalCannotSurviveDepartureGenerationRevocationOrCancellation() async throws {
+    func testSuspendedPlaybackReadCannotSurviveDepartureGenerationRevocationOrCancellation() async throws {
         for mode in 0..<4 {
             let service = BrowseActionService(), pages = BrowseActionPages([3]), gate = BrowseActionGate()
             let model = await model(service, pages), selected = try XCTUnwrap(model.tracks.first)
@@ -141,7 +143,7 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
                 XCTAssertNotNil(model.remoteSource, "Revocation requires an explicitly opened source")
             }
             pages.gate = gate
-            let action = Task { try await model.refreshedActionTrack(selected) }
+            let action = Task { try await model.playbackSource(for: selected) }
             await gate.started()
             switch mode {
             case 0: model.disappear()
@@ -150,7 +152,7 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
             default: action.cancel()
             }
             await gate.release()
-            do { _ = try await action.value; XCTFail("stale renewal accepted") }
+            do { _ = try await action.value; XCTFail("stale playback preparation accepted") }
             catch {
                 XCTAssertTrue([MusicServiceError.staleAccess, .staleResult, .cancelled].contains(MusicServiceError.sanitized(error)))
             }

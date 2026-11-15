@@ -203,7 +203,7 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
         await model.close(); await service.close()
     }
     func testRejectingPlayingNonPrimaryRecordingStopsBeforeSameTierReplacement() async throws {
-        let primary = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
+        let primary = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(id: "primary"))
         let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "peer"))
         let song = try MusicModel.mergeSources(primary, adding: peer["sources"].array)
         let service = try await NativeMusicFixture.service(

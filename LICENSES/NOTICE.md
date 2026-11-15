@@ -88,25 +88,28 @@ Adapted portions:
   and `src/kugou.ts::{accountProfile,kugouMembershipSnapshot,membershipDeadline,accountMembership,cachedAccount}`;
   QR lifecycles from `src/qq.ts`, `static/{qq-client,kugou-client,browse-settings}.js`,
   `src/kugou.ts::{anonymous,login,setupKugouRoutes}` and `src/kugou-module.ts`.
-- Platforms: `PlatformDiscovery.cs` translates `static/discovery-normalize.js` and
-  remains Apache-2.0. Metadata, content dispatch and personal reads adapt
+- Platforms: `packages/music-platform/src/providers/{wy,tx,kg,wy-discovery,kg-discovery}.mjs`
+  adapt `static/discovery-normalize.js`, metadata, content dispatch and personal reads from
   `static/netease-client.js`, `src/netease.ts`, `src/qq-library.ts`, `src/qq-music.ts`,
-  `src/kugou.ts` and `src/kugou-play.ts`; song identity adapts `static/song-identity.js`;
-  chorus metadata (`PlatformChorus.cs`) adapts `static/chorus-marker.js`, `src/kugou-media.ts`
-  and `src/qq-music.ts`.
+  `src/kugou.ts` and `src/kugou-play.ts`. Adapted Apache-2.0 portions retain that
+  license within the GPL-3.0-only application. Native song repository and playback
+  behavior refer to `static/song-identity.js`; the current permanent-ID and fixed-baseline
+  matching policy is application code. Chorus recipes in the same Node providers
+  adapt `static/chorus-marker.js`, `src/kugou-media.ts` and `src/qq-music.ts`.
 - PlaybackCache: `static/source-cache.js`, `static/audio-file-cache.js` and
   `static/chorus-marker.js`.
-- Lyrics: `src/{qq-music,kugou-media,netease}.ts` and
-  `static/{netease-client,kugou-lyrics,lyric-timing,player}.js`. `KrcLyrics.cs`
-  remains Apache-2.0.
+- Lyrics: `packages/music-platform/src/lyrics.mjs` adapts the platform text conversion
+  from `src/{qq-music,kugou-media,netease}.ts` and
+  `static/{netease-client,kugou-lyrics,lyric-timing,player}.js`; adapted KRC portions
+  remain Apache-2.0. Generic native timing and presentation remain in the clients.
 - Library: queue, song identity, quality, history, file-cache policy, lyric timing,
   decoded-KRC translation, display positioning and lyric client/cache policy, from
   `static/{lyric-timing,kugou-lyrics,lyrics,player}.js` and the Netease/QQ/KuGou lyric
   client methods. The timing and decoded-KRC algorithm bodies are unchanged.
-- Feedback: `NativeMusicFeedbackProtocol.cs`, `FeedbackProtocolRules.cs` and
-  `FeedbackProtocolRequests.cs` adapt the lifecycle guards and WY Weblog mapping from
+- Feedback: Node `packages/music-platform/src/{feedback,playback-log}.mjs` and native
+  feedback owners adapt the lifecycle guards and WY Weblog mapping from
   `static/playback-feedback.js`, the feedback route in `src/netease.ts`, `src/qq-feedback.ts`
-  and `src/kugou-feedback.ts`; `MusicFeedbackProtocolTests.cs` uses synthetic vectors from
+  and `src/kugou-feedback.ts`; common Node transaction fixtures use synthetic vectors from
   `tests/{netease,qq-feedback,kugou-feedback}.test.cjs`.
 - Sync: `MusicSyncAdapter.cs`.
 - Windows: `MusicPlaybackIcon.cs` adapts the heart/FM SVGs in `static/index.html`
@@ -147,7 +150,8 @@ Adapted portions:
 - Platforms (Kuwo/Migu public catalog cross-checks):
   `backend/internal/platform/kuwo/{client,catalog,playlist,detail_page}.go` and
   `backend/internal/platform/migu/{client,catalog,playlist}.go`; the data-envelope parser
-  is rewritten as a bounded native literal reader without expression evaluation.
+  is rewritten in `packages/music-platform/src/literal.mjs` as a data-only literal
+  reader without expression evaluation; current KW/MG recipes are in `src/providers/{kw,mg}.mjs`.
 
 ## NeteaseCloudMusicApiEnhanced/api-enhanced — MIT
 
@@ -161,14 +165,14 @@ Adapted portions:
   `module/{captcha_sent,login_cellphone,login_status}.js`, `util/{option,request}.js` and
   `util/config.json` (captcha branch only; no password login or verification bypass);
   profile/entitlement via `module/vip_info_v2.js`.
-- Platforms: `PlatformProtocols.cs` translates the WEAPI/EAPI recipes from `util/crypto.js`,
+- Platforms: `packages/music-platform/src/protocols.mjs` translates the WEAPI/EAPI recipes from `util/crypto.js`,
   checked against `util/request.js` and `util/config.json`, with endpoint fields from the
-  corresponding `module/*.js`; `PlatformArtist.cs` uses `module/artists.js`
-  (blob `e403fe8512f85565d4113e0fc54584bf4b17f33e`); `PlatformXeapi.cs` translates
+  corresponding `module/*.js`; `src/providers/wy.mjs` uses `module/artists.js`
+  (blob `e403fe8512f85565d4113e0fc54584bf4b17f33e`); `src/xeapi.mjs` translates
   `module/register_xeapikey.js`, `util/xeapiKey.js`, `util/crypto.js` and `util/request.js`
-  using system cryptography; `OfficialMusicAudio.cs` adapts `module/song_music_detail.js` and
+  using Node cryptography; `src/providers/wy.mjs` adapts `module/song_music_detail.js` and
   `module/song_url_v1.js`; chorus metadata uses `module/song_chorus.js`.
-- Lyrics: `module/lyric_new.js`.
+- Lyrics: `src/providers/wy.mjs` adapts `module/lyric_new.js`.
 - Feedback reuses the WY request encryption above.
 - Subscription/token integration additionally follows the inspected `v4.41.1`
   reference's `module/playlist_subscribe.js`, `module/register_checktoken_v2.js`
@@ -185,7 +189,7 @@ Adapted portions:
   (used by iWebPlus for its report adapter; not asserted to be bundled by iWebPlus).
 - Upstream authors and contributors retain ownership. License: `GPL-3.0-only.txt`.
 - `algorithms/tripledes.py` is separately GPL-3.0-only,
-  SPDX-FileCopyrightText: Copyright (c) 2024 沉默の金 <cmzj@cmzj.org>. `QrcCipher.cs`
+  SPDX-FileCopyrightText: Copyright (c) 2024 沉默の金 <cmzj@cmzj.org>. `packages/music-platform/src/qrc.mjs`
   retains that attribution and license. Its source comments cite WXRIW/QQMusicDecoder
   `0837a3a1281e58f6db3e3e1dcb1d5441fb0ac268`, which is not copied.
 
@@ -199,14 +203,14 @@ Adapted portions:
   `qqmusic_api/models/user.py::{UserVipInfoResponse,VipIdentity,VipUserInfo}`.
 - Platforms: read-only recipes from `qqmusic_api/modules/{search,song,songlist,user}.py`,
   `models/{base,search,songlist,user}.py`, `utils/common.py::get_searchID` and the response/versioning envelope;
-  `user.get_fav_song`; `song.get_song_urls`; `ClientContexts/MusicQqClientProtocol.cs`
-  and `ClientContexts/MusicQqQimeiRecipe.cs` adapt `qqmusic_api/utils/{device,qimei,android_session}.py`,
+  `user.get_fav_song`; `song.get_song_urls`; `packages/music-platform/src/{clients,protocols}.mjs`
+  and `src/providers/tx.mjs` adapt `qqmusic_api/utils/{device,qimei,android_session}.py`,
   `qqmusic_api/core/versioning.py`, `qqmusic_api/models/request.py`,
   `qqmusic_api/modules/{login,user,song}.py` and `tests/test_qimei.py` vectors.
 - Lyrics: `modules/lyric.py`, `models/lyric.py`, `algorithms/__init__.py` and
   `algorithms/tripledes.py`.
-- Feedback: `FeedbackProtocolQqRequests.cs`, `FeedbackProtocolQqReceipt.cs` and
-  `NativeMusicFeedbackQq.cs` adapt `web/src/routes/report.py`, `qqmusic_api/modules/song.py`,
+- Feedback: `packages/music-platform/src/feedback.mjs` adapts
+  `web/src/routes/report.py`, `qqmusic_api/modules/song.py`,
   `qqmusic_api/core/versioning.py`, `qqmusic_api/utils/common.py` and vectors in
   `iwebplus/tests/test_routes.py`.
 
@@ -226,17 +230,18 @@ Adapted portions:
   profile/entitlement via `module/user_vip_detail.js`.
 - Platforms: `module/{search,audio,playlist_track_all,playlist_track_all_new,user_playlist}.js`,
   `util/{helper,request}.js`, `util/config.json`; `module/song_url.js`; the `song_climax`
-  chorus recipe; `ClientContexts/MusicKgClientProtocol.cs` adapts `module/register_dev.js`
+  chorus recipe; `packages/music-platform/src/{clients,protocols}.mjs` adapts `module/register_dev.js`
   and its fixed crypto/request helpers with the same retained MIT notice.
-- Discovery: `Platforms/PlatformKgDiscovery*.cs` and
-  `native/MeowKit/Sources/MeowMusicNativeService/Catalog/MusicNativePublicBrowseKugou.swift` adapt
+- Discovery: `packages/music-platform/src/providers/kg-discovery.mjs` adapts
   `module/{top_playlist,top_song,playlist_tags,rank_list,rank_audio}.js` and the fixed
-  signing helpers above; the directory, tags and rank-audio recipes remain data-only
-  native calls, without a generic upstream module dispatcher.
-- Lyrics: `module/{search_lyric,lyric}.js` and `util/{request,util}.js`; system ZLibStream
-  replaces pako.
-- Feedback: the KG send path was audited but is unavailable; the position-contract patch over
-  `e19a52a91b9ceb78d9acce768c357b61be9586d5` is not represented.
+  signing helpers above; native clients consume the common directory, tags and rank-audio results.
+- Lyrics: `src/providers/kg.mjs` and `src/lyrics.mjs` adapt
+  `module/{search_lyric,lyric}.js` and `util/{request,util}.js`; Node zlib replaces pako.
+- Feedback: `packages/music-platform/src/feedback.mjs` contains the current KG recipe,
+  with the iWebPlus `src/kugou-feedback.ts` attribution above. Reference pin
+  `e19a52a91b9ceb78d9acce768c357b61be9586d5` remains a separately inspected API source,
+  not a bundled dependency. Node implementation does not imply native integration or
+  verified upstream availability; the Windows adapter currently refuses KG feedback.
 
 ## SkiaSharp and Skia — MIT and bundled third-party notices
 
@@ -256,8 +261,8 @@ Adapted portions:
 - Source: `lyswhut/lx-music-desktop` `ad95d5091c9ed689fa72b5e5c849df65f5a679ce`.
 - Copyright lyswhut and LX Music contributors. License: `Apache-2.0.txt`.
 
-Adapted portions (Kuwo/Migu public catalog, `MusicPlatformHttp.PublicCatalog.cs` and the
-public song metadata mapper):
+Adapted portions (Kuwo/Migu public catalog in `packages/music-platform/src/providers/{kw,mg}.mjs`,
+`src/lyrics.mjs` and the common song metadata mapper):
 
 - `src/renderer/utils/musicSdk/kw/{musicSearch,songList,util,index,lyric}.js`
 - `src/renderer/utils/musicSdk/mg/{musicSearch,songList,musicInfo}.js` and `utils/index.js`

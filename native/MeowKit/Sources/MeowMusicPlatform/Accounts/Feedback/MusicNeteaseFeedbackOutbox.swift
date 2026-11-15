@@ -1,23 +1,19 @@
 import Foundation
 import MeowMusicFeature
 import MeowStorage
+import MeowRuntime
 
 /// Only a proven connection-before-send failure may return an inflight event to
 /// pending. Timeout, connection loss, cancellation and bad ACK are ambiguous.
 enum MusicAccountFeedbackNotSent: Error {
     case connectionUnavailable
-    static func matches(_ error: NSError, url: URL, bytesSent: Int64, responseReceived: Bool) -> Bool {
-        url == MusicAccountFeedbackNeteaseWire.uploadURL && !responseReceived && bytesSent == 0 &&
-            error.domain == NSURLErrorDomain &&
-            [NSURLErrorNotConnectedToInternet, NSURLErrorCannotFindHost,
-             NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed].contains(error.code)
-    }
+
 }
 
 /// The existing account owner drives this queue. The lock also lets explicit
 /// revocation fence persistence and cancel I/O without waiting for its actor.
 final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
-    static let key = "music.netease-playback-pending.v1"
+    static let key = "music.platform-playback-pending"
     static let retention: TimeInterval = 7 * 86_400
     static let capacity = 256
 
@@ -45,18 +41,20 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             occurredAt = report.occurredAt; reason = report.reason?.rawValue
             self.startConfirmed = startConfirmed
         }
-        func records() throws -> Data {
-            // These are already admitted source facts, not restored live proof.
+        func eventBody() throws -> Data {
             guard [listened, media, rate, occurredAt].allSatisfy({ $0.isFinite && $0 >= 0 }), rate > 0,
-                  source.utf16.count <= 2000, sourceID.utf16.count <= 2048, algorithm.utf16.count <= 2000,
                   phase == .start ? listened == 0 && media == 0 && reason == nil :
                     reason.flatMap(MusicPlaybackFeedbackReport.Reason.init(rawValue:)) != nil else {
                 throw MusicServiceError.invalidRequest
             }
-            return try MusicAccountFeedbackNeteaseWire.records(nativeID: nativeID, source: source,
-                sourceID: sourceID, algorithm: algorithm, start: phase == .start, listened: listened,
-                media: media, rate: rate, reason: reason.flatMap(MusicPlaybackFeedbackReport.Reason.init(rawValue:)),
-                occurredAt: occurredAt, heartbeat: heartbeat)
+            return try RuntimeJSON.encode(.object([
+                "event": .string(phase.rawValue), "occurredAt": .number(occurredAt),
+                "listened": .number(listened), "mediaListened": .number(media), "rate": .number(rate),
+                "reason": reason.map(RuntimeValue.string) ?? .null,
+                "target": .object(["nativeId": .string(nativeID), "source": .string(source), "sourceId": .string(sourceID),
+                                    "algorithm": .string(algorithm), "origin": .object(["kind": .string(heartbeat ? "heartbeat" : "")])])
+            ]))
+
         }
     }
     private struct Document: Codable {
@@ -114,7 +112,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
                       Set(document.entries.map(\.id)).count == document.entries.count,
                       document.entries.allSatisfy({
                           !$0.scope.isEmpty && $0.generation >= 0 &&
-                          (try? $0.records()) != nil
+                          (try? $0.eventBody()) != nil
                       }) else { throw MusicServiceError.storageFailed }
                 entries = document.entries
                 // A process may have died after sending but before saving ACK.
@@ -175,7 +173,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             }
             let entry = Entry(value, scope: expected, generation: setting.generation, startConfirmed: admission?.confirmed == true)
             // Verify representable original times/payload before admitting it.
-            _ = try MusicAccountFeedbackNeteaseWire.records(value)
+            _ = try entry.eventBody()
             let draft = pruned(entries + [entry], at: now)
             guard draft.contains(where: { $0.id == entry.id }) else { return .unconfirmed }
             try save(draft)

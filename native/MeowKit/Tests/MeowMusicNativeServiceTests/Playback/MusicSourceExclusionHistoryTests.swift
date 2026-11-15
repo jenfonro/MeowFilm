@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 private actor ExclusionHistoryScripts: MusicScriptResolving {
@@ -72,8 +73,8 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
         let song = try MusicModel.mergeSources(tx, adding: wy["sources"].array)
         let store = try ExclusionTestFixture.store(song: song)
         let scripts = ExclusionTestScripts(["a": ["flac"], "b": ["flac"]], sites: ["tx", "wy"])
-        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
-        let service = try await NativeMusicFixture.service(store, scripts: scripts, qq: qq, http: http)
+        let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts, platform: NativeMusicFixture.routes(primary: qq, others: http))
         let queue = try await service.queue()
         XCTAssertNotEqual(queue.entries[0].track.songId, queue.entries[1].track.songId)
         let sources = queue.entries[0].track.sources
@@ -183,9 +184,11 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
     }
     private func inFlight(_ entry: Entry, otherScope: String? = nil) async throws {
         let gate = MusicNativeCandidateDiscoveryBarrier(), scripts = ExclusionHistoryScripts(gate: gate)
-        let service = NativeMusicService(document: try ExclusionTestFixture.store(), scripts: scripts,
-            qq: MusicNativeCandidateDiscoveryQQ(), enabledPlatforms: [.qq],
-            transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: try ExclusionTestFixture.store(),
+            scripts: scripts,
+            platformClient: try MusicNativeCandidateDiscoveryQQ().makeClient(),
+            enabledPlatforms: [.qq],
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let queue = try await service.queue()
         XCTAssertNotEqual(queue.entries[0].track.songId, queue.entries[1].track.songId)
@@ -285,9 +288,11 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
         let document = ExclusionPublicationDocument(try ExclusionTestFixture.store())
         let notification = MusicNativeCandidateDiscoveryBarrier()
         let scripts = ExclusionHistoryScripts(gate: notification)
-        let service = NativeMusicService(document: document, scripts: scripts,
-            qq: MusicNativeCandidateDiscoveryQQ(), enabledPlatforms: [.qq],
-            transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: document,
+            scripts: scripts,
+            platformClient: try MusicNativeCandidateDiscoveryQQ().makeClient(),
+            enabledPlatforms: [.qq],
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let queue = try await service.queue(), source = try XCTUnwrap(queue.entries[0].track.sources.first)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: queue.revision)

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Search;
 
@@ -25,6 +26,7 @@ public sealed partial class MusicNativeApplication
         // The coordinator fetches after its admission receipt has returned.
         // Capture the actual lease inside each physical request, not in start().
         using var frame = sessions.Begin();
+        long observation = library.BeginSongObservation();
         try
         {
             token.ThrowIfCancellationRequested();
@@ -32,6 +34,9 @@ public sealed partial class MusicNativeApplication
             // slot drain; catalog owns its deadline and account/shutdown invalidation.
             var result = await catalog.SearchAsync(request).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
+            result = await library.AdoptPlatformResultAsync(result, token, observation: observation,
+                shape: request.Kind == MusicSearchKind.Songs ? MusicLibraryOwner.PlatformSongShape.Page
+                    : MusicLibraryOwner.PlatformSongShape.None).ConfigureAwait(false);
             // Remembers the search authority for observed recording evidence; a retired session
             // leaves no context, so its late page cannot suppress a later matching request.
             if (frame.Session is not { } current || accounts.IsCurrent(current))
@@ -50,9 +55,13 @@ public sealed partial class MusicNativeApplication
         await PrepareSongFactsAsync(token).ConfigureAwait(false);
         using var frame = sessions.Begin();
         var observation = songMatcher.BeginSearch(request.Platform);
+        long metadataObservation = library.BeginSongObservation();
         try
         {
             var reply = await catalog.SearchAsync(request, token).ConfigureAwait(false);
+            reply = await library.AdoptPlatformResultAsync(reply, token, observation: metadataObservation,
+                shape: request.Kind == MusicSearchKind.Songs ? MusicLibraryOwner.PlatformSongShape.Page
+                    : MusicLibraryOwner.PlatformSongShape.None).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             if (frame.Session is { } session && !accounts.IsCurrent(session))
                 throw new MusicPlatformException("AUTH_CHANGED");

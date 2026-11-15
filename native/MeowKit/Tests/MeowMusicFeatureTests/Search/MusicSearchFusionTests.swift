@@ -4,7 +4,7 @@ import XCTest
 final class MusicSearchFusionTests: XCTestCase {
     private func track(_ platform: String, _ native: String, songID: String = "same", title: String = "Song",
                        artist: String = "Artist", duration: Double = 180) -> MusicRemoteTrack {
-        .init(ref: .init(kind: .handle, id: platform + native), songId: songID, title: title,
+        .init(ref: .init(kind: .library, id: songID, occurrence: platform + ":" + native), songId: songID, title: title,
               artist: artist, album: "Album", duration: duration,
               sources: [.init(sourceKey: platform + ":" + native, platform: platform, nativeId: native)])
     }
@@ -24,11 +24,11 @@ final class MusicSearchFusionTests: XCTestCase {
         XCTAssertEqual(winner.matchedPlatforms, ["tx", "wy"])
         XCTAssertTrue(winner.variants.contains(winner.track))
     }
-    func testDifferentRecordingAndMissingDurationNeverFuseJustBecauseSongIDMatches() {
+    func testDistinctRepositoryRecordsStaySeparateIncludingInsufficientMatchingData() {
         let original = track("wy", "a")
-        let live = track("tx", "b", title: "Song (Live)")
-        let longer = track("kg", "c", duration: 220)
-        let unknown = track("tx", "d", duration: 0)
+        let live = track("tx", "b", songID: "live", title: "Song (Live)")
+        let longer = track("kg", "c", songID: "longer", duration: 220)
+        let unknown = track("tx", "d", songID: "unknown", duration: 0)
         let rows = MusicSearchFusion.songs([
             .init(platform: .netease, items: [original]), .init(platform: .qq, items: [live, unknown]),
             .init(platform: .kugou, items: [longer])
@@ -50,6 +50,18 @@ final class MusicSearchFusionTests: XCTestCase {
         let merged = try XCTUnwrap(rows.first { $0.id == "same" })
         XCTAssertEqual(merged.matchedPlatforms, ["wy"])
         XCTAssertEqual(merged.score, 1.0 / 36, accuracy: 0.000001)
+    }
+    func testLargeExplicitRankKeepsAFinitePositiveReciprocalScore() throws {
+        let first = track("wy", "first", songID: "first"), last = track("tx", "last", songID: "last")
+        let rows = MusicSearchFusion.songs([
+            .init(platform: .netease, items: [first]),
+            .init(platform: .qq, items: [last], ranks: ["tx:last": Double(Int.max)])
+        ])
+        XCTAssertEqual(rows.map(\.id), ["first", "last"])
+        let score = try XCTUnwrap(rows.last?.score)
+        XCTAssertTrue(score.isFinite)
+        XCTAssertGreaterThan(score, 0)
+        XCTAssertLessThan(score, 1e-18)
     }
     func testPlaylistsKeepPlatformIdentityAndFavoritesUseStableRecordingIdentity() throws {
         let a = MusicPublicBrowseCollection(platform: .netease, nativeID: "1", title: "Same title")
@@ -94,9 +106,9 @@ final class MusicSearchFusionTests: XCTestCase {
         XCTAssertNotEqual(appended[position], displayed[position], "来源变化也是歌曲行的内容变化")
         XCTAssertEqual(MusicSearchFusion.appendSongs(displayed: appended, adding: []), appended)
     }
-    func testLaterRoundDoesNotFoldIncompatibleRecordingIntoShownSongID() {
+    func testLaterRoundKeepsSeparatelyAdoptedFullTitleVariantSeparate() {
         let shown = track("wy", "a", title: "Song")
-        let live = track("tx", "b", title: "Song (Live)")
+        let live = track("tx", "b", songID: "live", title: "Song (Live)")
         let displayed = MusicSearchFusion.songs([.init(platform: .netease, items: [shown])])
         let appended = MusicSearchFusion.appendSongs(displayed: displayed, adding: [
             .init(platform: .qq, items: [live])
@@ -106,18 +118,18 @@ final class MusicSearchFusionTests: XCTestCase {
         XCTAssertTrue(appended.contains { $0.variants.contains(live) })
         XCTAssertEqual(Set(appended.map(\.id)).count, 2)
     }
-    func testCrossRoundAllPairsRuleRejectsNonTransitiveTimingMatch() throws {
-        let middle = track("wy", "middle", duration: 180)
-        let lower = track("tx", "lower", duration: 177)
-        let upper = track("kg", "upper", duration: 183)
+    func testCrossRoundFusionUsesRepositoryOwnershipWithoutPairwiseDurationRechecking() throws {
+        let middle = track("wy", "middle", duration: 240)
+        let lower = track("tx", "lower", duration: 235)
+        let upper = track("kg", "upper", duration: 245)
         let shown = MusicSearchFusion.songs([.init(platform: .netease, items: [middle]),
                                              .init(platform: .qq, items: [lower])])
         XCTAssertEqual(shown.count, 1)
         let later = MusicSearchFusion.appendSongs(displayed: shown, adding: [.init(platform: .kugou, items: [upper])])
-        XCTAssertEqual(later.count, 2)
-        XCTAssertEqual(later.first?.variants.count, 2)
+        XCTAssertEqual(later.count, 1)
+        XCTAssertEqual(later.first?.variants.count, 3)
         XCTAssertEqual(later.first?.id, shown.first?.id)
-        XCTAssertTrue(later.last?.variants.contains(upper) == true)
+        XCTAssertTrue(later.first?.variants.contains(upper) == true)
     }
     func testExplicitPlatformOrderControlsDisplayAndEqualScoreButNotRecordingEvidence() throws {
         let wy = track("wy", "wy"), qq = track("tx", "qq")
@@ -130,44 +142,44 @@ final class MusicSearchFusionTests: XCTestCase {
                                                 .init(platform: .qq, items: [b])], platformOrder: order)
         XCTAssertEqual(separate.map(\.id), ["b", "a"])
     }
-    func testNativeMetadataEnrichmentWithDifferentDerivedSongIDStillUsesTheOneRecordingRule() {
-        let original = track("wy", "same-native", songID: "old-id", title: "Song", artist: "未知歌手")
-        let enriched = track("wy", "same-native", songID: "new-id", title: "Song", artist: "Artist")
+    func testEnrichmentAndCorrectionRetainThePermanentRepositoryID() {
+        let original = track("wy", "same-native", title: "Song", artist: "未知歌手")
+        let enriched = track("wy", "same-native", title: "Song", artist: "Artist")
         let shown = MusicSearchFusion.songs([.init(platform: .netease, items: [original])])
         let result = MusicSearchFusion.appendSongs(displayed: shown, adding: [.init(platform: .netease, items: [enriched])])
         XCTAssertEqual(result.count, 1)
-        XCTAssertEqual(result.first?.id, "old-id")
+        XCTAssertEqual(result.first?.id, original.songId)
         XCTAssertTrue(result.first?.variants.contains(enriched) == true)
-        XCTAssertTrue(MusicSearchFusion.sameSearchTarget(original, enriched, platform: .netease))
-        let conflict = track("wy", "same-native", songID: "conflicting-id", artist: "Different artist")
-        let later = MusicSearchFusion.appendSongs(displayed: result, adding: [.init(platform: .netease, items: [conflict])])
-        XCTAssertEqual(later.count, 2)
+        let corrected = track("wy", "same-native", artist: "Different artist")
+        let later = MusicSearchFusion.appendSongs(displayed: result, adding: [.init(platform: .netease, items: [corrected])])
+        XCTAssertEqual(later.count, 1)
+        XCTAssertEqual(later.first?.id, original.songId)
+        XCTAssertTrue(later.first?.variants.contains(corrected) == true)
     }
-    func testSameNativeIDComparesVersionArtistAndTimingButNotTitle() {
+    func testCurrentFactsDoNotRecomputeAnAlreadyAssignedPermanentID() {
         let original = track("wy", "same-native")
         let retitled = track("wy", "same-native", title: "Different song")
         XCTAssertTrue(MusicSearchFusion.sameRecording(original, retitled))
-        XCTAssertTrue(MusicSearchFusion.sameSearchTarget(original, retitled, platform: .netease))
         let live = track("wy", "same-native", title: "Song (Live)")
-        XCTAssertFalse(MusicSearchFusion.sameRecording(original, live))
+        XCTAssertTrue(MusicSearchFusion.sameRecording(original, live))
         let otherArtist = track("wy", "same-native", artist: "Different artist")
-        XCTAssertFalse(MusicSearchFusion.sameRecording(original, otherArtist))
+        XCTAssertTrue(MusicSearchFusion.sameRecording(original, otherArtist))
         let longer = track("wy", "same-native", duration: 240)
-        XCTAssertFalse(MusicSearchFusion.sameRecording(original, longer))
+        XCTAssertTrue(MusicSearchFusion.sameRecording(original, longer))
     }
-    func testLiveVersionTagsMatchWhenAdjacentToChineseText() {
-        XCTAssertEqual(MusicRecordingIdentity(title: "现场live", artist: "A", duration: 180).version, "live")
-        XCTAssertEqual(MusicRecordingIdentity(title: "Live版", artist: "A", duration: 180).version, "live")
-        XCTAssertEqual(MusicRecordingIdentity(title: "现场", artist: "A", duration: 180).version, "live")
-        XCTAssertEqual(MusicRecordingIdentity(title: "delivery", artist: "A", duration: 180).version, "")
-        XCTAssertEqual(MusicRecordingIdentity(title: "lived", artist: "A", duration: 180).version, "")
-        XCTAssertEqual(MusicRecordingIdentity(title: "Song (DJ版)", artist: "A", duration: 180).version, "remix")
-        XCTAssertEqual(MusicRecordingIdentity(title: "Song (Cover版)", artist: "A", duration: 180).version, "cover")
-        XCTAssertEqual(MusicRecordingIdentity(title: "discover", artist: "A", duration: 180).version, "")
+    func testFusionPreservesFullTitlesAndDoesNotInventVersionIdentity() {
+        let titles = ["现场live", "Live版", "现场", "delivery", "lived", "Song (DJ版)", "Song (Cover版)", "discover"]
+        let tracks = titles.enumerated().map { track("wy", String($0.offset), songID: "record-\($0.offset)", title: $0.element) }
+        let rows = MusicSearchFusion.songs([.init(platform: .netease, items: tracks)])
+        XCTAssertEqual(rows.map(\.track.title), titles)
+        XCTAssertEqual(rows.map(\.id), tracks.map(\.songId))
+        XCTAssertTrue(rows.allSatisfy { $0.variants.count == 1 })
     }
-    func testFavoriteRequiresRecordingEvidenceEvenWhenSongIDMatches() throws {
-        let original = track("wy", "a"), live = track("tx", "b", title: "Song (Live)")
+    func testFavoriteUsesPermanentIdentityAcrossChangedDisplayFacts() throws {
+        let original = track("wy", "a"), corrected = track("tx", "b", title: "Song (Live)")
         let row = try XCTUnwrap(MusicSearchFusion.songs([.init(platform: .netease, items: [original])]).first)
-        XCTAssertFalse(MusicSearchFusion.isFavorite(row, members: [live]))
+        XCTAssertTrue(MusicSearchFusion.isFavorite(row, members: [corrected]))
+        let separate = track("tx", "other", songID: "separate", title: original.title)
+        XCTAssertFalse(MusicSearchFusion.isFavorite(row, members: [separate]))
     }
 }

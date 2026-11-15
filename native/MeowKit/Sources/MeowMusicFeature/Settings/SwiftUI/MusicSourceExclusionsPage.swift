@@ -106,7 +106,7 @@ struct MusicSourceExclusionsContent: View {
         let platform = MusicPublicBrowsePlatform(rawValue: row.platform)?.title ?? row.platform
         switch row.scope {
         case .providerPlatform: return providerName(row) + " · " + platform + " · 全部录音"
-        case .recording(_, _, let key): return "录音来源 · " + platform + " · " + key
+        case .recording(let key): return "录音来源 · " + platform + " · " + key
         }
     }
     private func providerName(_ row: MusicSourceExclusion) -> String {

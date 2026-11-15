@@ -38,9 +38,7 @@ public sealed partial class MusicCapability
     {
         bool login = captcha is not null;
         if (!(login ? CanLoginAccountSms : CanSendAccountSms)) return Task.CompletedTask;
-        MusicAccountSmsInput input;
-        try { input = new MusicAccountSmsInput("wy", phone, countryCode, captcha).Normalize(login); }
-        catch { accountStatus = "手机号、区号或验证码格式无效"; AccountBindings(); return Task.CompletedTask; }
+        var input = new MusicAccountSmsInput("wy", phone, countryCode, captcha);
         accountSmsPending = true;
         return ChangeAccountAsync("wy", login ? "sms.login" : "sms.send", login
             ? new { platform = "wy", phone = input.Phone, countryCode = input.CountryCode, captcha = input.Captcha }
@@ -49,9 +47,12 @@ public sealed partial class MusicCapability
     private async Task<JsonElement> CallAccountSms(string operation, object parameters, CancellationToken token)
     {
         string method = "music.accounts." + operation;
-        if (operation == "sms.send") SmsCooldown(60); // Conservatively reserve before dispatch.
-        var reply = await application.ExecuteAsync(method, parameters, token).WaitAsync(token);
         token.ThrowIfCancellationRequested();
+        var work = application.ExecuteAsync(method, parameters, token);
+        // Sending owns a real dispatched/unknown result and cooldown. A page
+        // cancellation cannot replace its receipt with a guessed local reserve.
+        var reply = operation == "sms.send" ? await work : await work.WaitAsync(token);
+        if (operation != "sms.send") token.ThrowIfCancellationRequested();
         MusicDto.Require(reply.ValueKind == JsonValueKind.Object && reply.TryGetProperty("ok", out _));
         if (reply.TryGetProperty("retryAfter", out var retry))
         {

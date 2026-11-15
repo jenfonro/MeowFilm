@@ -34,19 +34,8 @@ public static class MusicAccountQrImage
         catch (MusicAccountException e) { throw new MusicOperationException(e.Code); }
         catch { throw new MusicOperationException("INVALID_RESPONSE"); }
     }
-    public static BitmapSource Create(string address) => Create(address, "wy");
-    public static BitmapSource Create(string address, string platform)
+    public static BitmapSource Create(string address)
     {
-        string prefix = platform == "wy" ? "?codekey=" : "?qrcode=";
-        if (address.Length is < 1 or > 2048 || !Uri.TryCreate(address, UriKind.Absolute, out var uri) ||
-            uri.Scheme != "https" || !uri.IsDefaultPort || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0 ||
-            !(platform == "wy" && uri.Host == "music.163.com" && uri.AbsolutePath == "/login" ||
-              platform == "kg" && uri.Host == "h5.kugou.com" && uri.AbsolutePath == "/apps/loginQRCode/html/index.html") ||
-            !uri.Query.StartsWith(prefix, StringComparison.Ordinal) ||
-            uri.Query.Length <= prefix.Length || uri.Query.Length > prefix.Length + 256 ||
-            uri.Query[prefix.Length..].Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('_' or '-')) ||
-            address.Any(character => char.IsControl(character)))
-            throw new MusicOperationException("INVALID_RESPONSE");
         var bitmap = QrCodeImage.Create(address);
         if (bitmap.PixelWidth > 1024) throw new MusicOperationException("LIMIT");
         return bitmap;
@@ -81,23 +70,18 @@ public sealed partial class MusicCapability
         var challenge = reply.GetProperty("challenge");
         MusicDto.Require(MusicDto.Text(challenge, "platform") == platform);
         string id = MusicDto.Text(challenge, "challengeId");
-        MusicDto.Require(Guid.TryParseExact(id, "D", out _));
-        long expires = MusicDto.Integer(challenge, "expiresAt"), now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        MusicDto.Require(expires > now && expires - now <= 180000);
+        long expires = MusicDto.Integer(challenge, "expiresAt");
         BitmapSource image;
-        if (platform == "tx")
+        if (MusicDto.Text(challenge, "displayKind") == "png")
         {
-            MusicDto.Require(MusicDto.Text(challenge, "displayKind") == "png" &&
-                MusicDto.Text(challenge, "imageMimeType") == "image/png" && !challenge.TryGetProperty("url", out _));
             var content = challenge.GetProperty("imageBase64");
             MusicDto.Require(content.ValueKind == JsonValueKind.String);
             image = MusicAccountQrImage.DecodePng(content.GetString()!);
         }
         else
         {
-            MusicDto.Require(platform is "wy" or "kg" && !challenge.TryGetProperty("imageBase64", out _) &&
-                MusicDto.Text(challenge, "displayKind") == "url");
-            image = MusicAccountQrImage.Create(MusicDto.Text(challenge, "url"), platform);
+            MusicDto.Require(MusicDto.Text(challenge, "displayKind") == "url");
+            image = MusicAccountQrImage.Create(MusicDto.Text(challenge, "url"));
         }
         accountQr = new(platform, id, expires); accountQrImage = image;
         accountStatus = "等待扫码"; AccountQrBindings();
@@ -112,8 +96,6 @@ public sealed partial class MusicCapability
     {
         var challenge = accountQr;
         if (!CanCheckAccountQr || challenge is null) return Task.CompletedTask;
-        if (challenge.ExpiresAt <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
-        { ClearAccountQr(); accountStatus = "二维码已过期"; AccountBindings(); return Task.CompletedTask; }
         return ChangeAccountAsync(challenge.Platform, "qr.poll",
             new { platform = challenge.Platform, challengeId = challenge.Id }, token: token);
     }

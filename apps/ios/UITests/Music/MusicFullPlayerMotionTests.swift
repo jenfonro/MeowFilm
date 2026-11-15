@@ -164,15 +164,21 @@ final class MusicFullPlayerMotionTests: XCTestCase {
     }
 
     private func withPlayer(_ body: (Fixture) async throws -> Void) async throws {
-        let firstURL = try XCTUnwrap(URL(string: "motion-component://artwork/first"))
-        let secondURL = try XCTUnwrap(URL(string: "motion-component://artwork/second"))
+        let firstURL = try XCTUnwrap(URL(string: "https://motion-component.invalid/artwork/first"))
+        let secondURL = try XCTUnwrap(URL(string: "https://motion-component.invalid/artwork/second"))
         let images = MusicArtworkImages()
+        var bytes: [URL: Data] = [:]
         for (url, color) in [(firstURL, UIColor.red), (secondURL, UIColor.blue)] {
-            let png = UIGraphicsImageRenderer(size: CGSize(width: 20, height: 20)).pngData {
+            bytes[url] = UIGraphicsImageRenderer(size: CGSize(width: 20, height: 20)).pngData {
                 color.setFill()
                 $0.fill(CGRect(x: 0, y: 0, width: 20, height: 20))
             }
-            _ = try await images.read(url, cachedData: png)
+        }
+        images.configure(cache: MusicUIKitArtworkCache(bytes), selector: nil)
+        for url in [firstURL, secondURL] {
+            let value = try await images.read(url)
+            XCTAssertEqual(value.1, bytes[url])
+            XCTAssertEqual(value.2, url)
         }
         let playback = PlaybackController()
         let model = MusicViewModel(service: FullPlayerMotionService(), playback: playback)
@@ -220,10 +226,12 @@ final class MusicFullPlayerMotionTests: XCTestCase {
         } catch {
             page.setRendering(false)
             await model.close()
+            await images.close()
             throw error
         }
         page.setRendering(false)
         await model.close()
+        await images.close()
     }
 
     private func initialState(revision: Int = 1) -> MusicPlaybackState {

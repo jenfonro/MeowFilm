@@ -9,7 +9,7 @@
 
 ## 当前持久格式
 
-两项数据都位于 `music.library.v1` 当前 scope 中。
+两项数据都位于 `music.library.v2` 当前 scope 中。
 
 ### `native-search-policy`
 

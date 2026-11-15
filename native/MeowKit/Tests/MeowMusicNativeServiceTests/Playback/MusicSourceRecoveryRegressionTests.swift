@@ -133,7 +133,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         let store = try recommendationStore()
         let scripts = ReviewScripts(sites: ["a": ["wy"], "b": ["wy"]])
         let service = NativeMusicService(document: store, scripts: scripts, accounts: SimilarModeAccountFixture([["301"]]),
-            qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+            platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let initial = try await service.state()
         _ = try await service.updateSettings(.init(ifRevision: initial.settingsRevision,
@@ -185,7 +185,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     }
 
     private func recommendationStore() throws -> NativeMusicMemoryDocument {
-        let song = try MusicModel.normalize(SimilarModeAccountFixture.track("100"))
+        let song = try NativeMusicFixture.storedSong(SimilarModeAccountFixture.track("100"))
         var document = try MusicDocument(MusicNativeCandidateDiscoveryFixture.store(song: song).read(), runID: "fixture")
         document.queue["source"] = .obj([("sourceType", .string("search-song")), ("seedEntryId", .string("entry-1"))])
         return NativeMusicMemoryDocument(try document.encode(changed: ["queue", "playback"]))
@@ -196,7 +196,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         let scripts = ReviewScripts(sites: ["a": ["wy"], "b": ["wy"]])
         let accounts = SimilarModeAccountFixture([[], ["301"]])
         let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts,
-            qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+            platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let initial = try await service.state()
         _ = try await service.updateSettings(.init(ifRevision: initial.settingsRevision,
@@ -313,8 +313,8 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let scripts = ReviewScripts(), qq = MusicNativeCandidateDiscoveryQQ()
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        let service = try await NativeMusicFixture.service(store, scripts: scripts, qq: qq, sourceDiscovery: cache)
+        let cache = MusicNativeMemorySourceDiscoveryCache()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts, platform: qq, sourceDiscovery: cache)
         try await defaults(service, quality: "128k")
         let player = ReviewPlayer(), model = MusicViewModel(service: service, player: player)
         await model.load(); await model.prepareCurrent(); try await fact(model, .playing)
@@ -340,8 +340,9 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         XCTAssertTrue(originalRows.contains { $0.selection == donorSelection })
         let requestsBefore = await scripts.calls().count
         let searchesBefore = await qq.calls()
-        let discoveryBefore = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
-        XCTAssertFalse(discoveryBefore.values.flatMap(\.sources).isEmpty)
+        let discoveryBefore = await cache.entries(songID: song["songId"].string)
+        let repositoryBefore = try await service.repositorySong(song["songId"].string, service.read())
+        XCTAssertFalse(repositoryBefore["sources"].array.isEmpty)
         player.preparationDuration = { [weak model, weak player] resource in
             XCTAssertEqual(model?.activeResourceID, donorResource, "Rejected media cannot retire the healthy donor")
             XCTAssertEqual(model?.activeNativeAttemptID, donorNative)
@@ -392,12 +393,14 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         XCTAssertEqual(try MusicDocument(store.read(), runID: "review").history, historyBefore)
         let exclusions = try await service.sourceExclusions()
         let recordingExclusions = try await service.recordingSourceExclusions(song)
-        let discovery = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
+        let discovery = await cache.entries(songID: song["songId"].string)
         XCTAssertTrue(exclusions.isEmpty)
         XCTAssertTrue(recordingExclusions.isEmpty)
         XCTAssertEqual(discovery.mapValues(\.checkedAt), discoveryBefore.mapValues(\.checkedAt))
         XCTAssertEqual(discovery.mapValues(\.observations), discoveryBefore.mapValues(\.observations))
-        XCTAssertEqual(discovery.mapValues(\.sources), discoveryBefore.mapValues(\.sources),
+        XCTAssertEqual(discovery.mapValues(\.sourceKeys), discoveryBefore.mapValues(\.sourceKeys))
+        let repositoryAfter = try await service.repositorySong(song["songId"].string, service.read())
+        XCTAssertEqual(repositoryAfter["sources"], repositoryBefore["sources"],
                        "Media preparation must preserve acquired positive metadata")
         XCTAssertFalse(discovery.values.flatMap(\.observations).contains { $0.outcome == .notFound },
                        "Media and network preparation failures cannot create content negative records")
@@ -435,13 +438,14 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         var document = try MusicDocument(nil, runID: "fixture")
         let first = try NativeMusicFixture.song("First"), second = try NativeMusicFixture.song("Second")
         XCTAssertNotEqual(first["songId"].string, second["songId"].string)
+        document.library["library"]["songs"] = .obj([(first["songId"].string, first), (second["songId"].string, second)])
         document.queue["entries"] = .array([
-            .obj([("id", .string("entry-1")), ("song", first)]),
-            .obj([("id", .string("entry-2")), ("song", second)]),
+            .obj([("id", .string("entry-1")), ("songId", first["songId"])]),
+            .obj([("id", .string("entry-2")), ("songId", second["songId"])]),
         ])
         document.queue["currentId"] = .string("entry-1")
         document.queue["serial"] = .n(2); document.queue["revision"] = .n(1)
-        let store = NativeMusicMemoryDocument(try document.encode(changed: ["queue"]))
+        let store = NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue"]))
         let scripts = ReviewScripts()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let player = ReviewPlayer(), model = MusicViewModel(service: service, player: player)
@@ -581,10 +585,11 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     func testOtherSongExclusionPreservesArmedFactOwner() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store()
         var document = try MusicDocument(store.read(), runID: "review")
-        let other = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "OtherMID", title: "Other song"))
-        document.queue["entries"] = .array(document.queue["entries"].array + [.obj([("id", .string("entry-2")), ("song", other)])])
+        let other = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(id: "OtherMID", title: "Other song"))
+        document.library["library"]["songs"][other["songId"].string] = other
+        document.queue["entries"] = .array(document.queue["entries"].array + [.obj([("id", .string("entry-2")), ("songId", other["songId"])])])
         document.queue["serial"] = .n(2)
-        store.replace(try document.encode(changed: ["queue"]))
+        store.replace(try document.encode(changed: ["library", "queue"]))
         let service = try await NativeMusicFixture.service(store, scripts: ReviewScripts(["a"]))
         let state = try await service.state()
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: state.revision)

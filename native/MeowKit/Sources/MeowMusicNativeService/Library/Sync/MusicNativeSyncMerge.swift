@@ -6,6 +6,7 @@ import MeowMusicFeature
 
 extension NativeMusicService {
     func syncMerge(_ round: inout MusicNativeSyncRound) throws {
+        round.library["songs"] = try read().library["library"]["songs"]
         var lib = round.library, collections = lib["collections"].array
         var firstBindings = Set<String>()
         for selection in round.request.selections {
@@ -47,7 +48,6 @@ extension NativeMusicService {
                     if matches.count == 1 { index = matches[0] }
                 }
                 if index == nil {
-                    try musicRequire(collections.count + lib["networkReferences"].array.count < 2000, .limit)
                     collections.append(MusicModel.freshCollection("playlist:\(lib["nextId"].int)", remote.name))
                     lib["nextId"] = .n(lib["nextId"].int + 1); index = collections.count - 1
                 }
@@ -73,8 +73,7 @@ extension NativeMusicService {
                 let oldMap = b["map"]
                 var mapping = oldMap, sequence: [String] = [], actualSongs = Set<String>()
                 for member in remote.members {
-                    let normalized = try MusicModel.normalize(.init(platform: selection.platform.rawValue, data: member.track))
-                    let id = try upsert([normalized], library: &lib)[0]
+                    let id = try registeredSongID(.init(platform: selection.platform.rawValue, data: member.track), library: lib)
                     mapping[member.occurrenceID] = .string(id); sequence.append(id); actualSongs.insert(id)
                 }
                 if firstBindings.contains(MusicNativeSyncLogic.bindingKey(b)) { firstImported.formUnion(actualSongs) }
@@ -122,55 +121,29 @@ extension NativeMusicService {
     }
 
     func syncMapMissing(_ round: inout MusicNativeSyncRound) async throws {
-        // Import the complete, already acquired round before asking which
-        // platforms are missing for any one member.
-        try await retainSongMetadata(round.library["songs"].fields.map(\.1))
         try await syncCurrent(round)
         var attempted = Set<String>(), stopped = Set<String>()
         for c in round.library["collections"].array where !c["deleted"].bool {
             for selection in round.request.selections where selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!) {
                 let platform = selection.platform.rawValue
                 for id in c["order"].strings {
-                    let original = round.library["songs"][id]
-                    let projected = try await projectSongMetadata([original])
-                    try await syncCurrent(round)
-                    let song = projected[0]
-                    if song != original {
-                        do { _ = try upsert([song], library: &round.library) }
-                        catch {
-                            round.issue("unmapped", platform: selection.platform, collection: c["id"].string)
-                            continue
-                        }
-                    }
+                    let song = try repositorySong(id, read())
+                    let excluded = try recordingSourceExclusions(song)
                     let existing = song["sources"].array.filter { $0["source"].string == platform }
-                    if !existing.isEmpty && existing.allSatisfy(MusicNativeCandidateDiscoveryMerge.metadataComplete) {
+                    if existing.contains(where: { !excluded.contains($0["sourceKey"].string) }) { continue }
+                    guard MusicNativeCandidateDiscoveryMerge.searchable(song) else {
+                        round.issue("unmapped", platform: selection.platform, collection: c["id"].string)
                         continue
                     }
                     // Sync rechecks an empty platform after 30 days, not every round.
                     let state = try await sourceDiscoveryState(song)
                     let cache = state.current(window: MusicSourceDiscoveryWindow.librarySync)
                     try await syncCurrent(round)
-                    if let cached = cache[platform], !cached.sources.isEmpty {
-                        do {
-                            let merged = mergeSourceDiscoveryCache(song, platform: platform, entry: cached)
-                            if merged != song {
-                                var match = merged
-                                match["songId"] = .string(id)
-                                _ = try upsert([match], library: &round.library)
-                            }
-                            if merged["sources"].array.contains(where: { $0["source"].string == platform }) { continue }
-                        } catch {
-                            // A conflicting cached locator has the same per-song
-                            // outcome as a conflicting search result, not a blocked round.
-                            round.issue("unmapped", platform: selection.platform, collection: c["id"].string)
-                            continue
-                        }
-                    }
                     if !MusicNativeCandidateDiscoveryMerge.needsPlatform(platform, song: song,
                         force: false, cache: cache[platform]) ||
                         state.hasCurrentCheck(platform, window: MusicSourceDiscoveryWindow.librarySync) { continue }
-                    // A platform failure stops network searches, not safe local
-                    // mapping from already-known or compatible cached sources.
+                    // A platform failure stops new searches, not use of sources
+                    // already registered in the unique song repository.
                     if stopped.contains(platform) { continue }
                     guard attempted.insert(platform + ":" + id).inserted else { continue }
                     try await syncCurrent(round)
@@ -182,26 +155,20 @@ extension NativeMusicService {
                             try await port.search(platform: platform, query: query, page: 1, limit: 30)
                         }
                         try await syncCurrent(round)
-                        try musicRequire(result.total >= 0 && result.items.allSatisfy({ $0.platform == platform }), .upstreamInvalid)
-                        let excluded = try recordingSourceExclusions(song)
-                        let matches = try result.items.map(MusicModel.normalize).filter { candidate in
-                            !excluded.contains(candidate["sources"].array.first?["sourceKey"].string ?? "") &&
-                                MusicModel.compatible(song, candidate) && song["sources"].array.allSatisfy { MusicModel.compatible($0, candidate) }
-                        }
-                        await recordSourceDiscovery(song, platform: platform, page: result,
+                        try await recordSourceDiscovery(song, platform: platform, page: result,
                             observation: finishSourceDiscoveryObservation(observation))
                         try await syncCurrent(round)
-                        if matches.count == 1 {
-                            var match = matches[0]; match["songId"] = .string(id)
-                            _ = try upsert([match], library: &round.library)
-                        } else {
+                        let current = try repositorySong(id, read())
+                        if !current["sources"].array.contains(where: {
+                            $0["source"].string == platform && !excluded.contains($0["sourceKey"].string)
+                        }) {
                             round.issue("unmapped", platform: selection.platform, collection: c["id"].string)
                         }
                     } catch {
                         try await syncCurrent(round)
                         let failure = MusicServiceError.sanitized(error)
                         if failure != .cancelled {
-                            await recordSourceDiscovery(song, platform: platform, rows: [],
+                            try await recordSourceDiscovery(song, platform: platform, rows: [],
                                 observation: finishSourceDiscoveryObservation(observation, failure: failure))
                         }
                         if failure.isAuthenticationFailure || failure == .verificationRequired { throw error }

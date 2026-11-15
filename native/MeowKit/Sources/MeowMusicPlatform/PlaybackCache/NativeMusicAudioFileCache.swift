@@ -16,8 +16,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private let capacity: Int64
     private let requiresCachesDirectory: Bool
     private let timing: NativeMusicAudioCacheTiming
-    private let displayCache: MusicNativePlaybackDisplayCache?
-    private var evictedSongs: Set<String> = []
+    private let presentationCache: (any MusicPresentationCaching)?
     private var directory: NativeMusicAudioCacheDirectory?
     private var entries: [String: NativeMusicAudioCacheEntry] = [:]
     private var pending: [UUID: Pending] = [:]
@@ -38,9 +37,9 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     }
 
     public init(rootURL: URL, clock: @escaping @Sendable () -> Date = { Date() },
-                displayCache: MusicNativePlaybackDisplayCache? = nil) {
+                presentationCache: (any MusicPresentationCaching)? = nil) {
         self.rootURL = rootURL; self.clock = clock
-        self.displayCache = displayCache
+        self.presentationCache = presentationCache
         transport = URLSessionNativeMusicAudioCacheTransport()
         inspector = NativeMusicAudioCacheInspector()
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
@@ -51,9 +50,9 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     /// Trusted in-process test/platform dependencies, never script-provided.
     public init(rootURL: URL, clock: @escaping @Sendable () -> Date = { Date() },
                 transport: any NativeMusicAudioCacheTransport, inspector: any NativeMusicAudioCacheInspecting,
-                displayCache: MusicNativePlaybackDisplayCache? = nil) {
+                presentationCache: (any MusicPresentationCaching)? = nil) {
         self.rootURL = rootURL; self.clock = clock; self.transport = transport; self.inspector = inspector
-        self.displayCache = displayCache
+        self.presentationCache = presentationCache
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
         requiresCachesDirectory = true
         timing = .init()
@@ -63,12 +62,12 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     // enlarge the reference's 256 MiB limit through public configuration.
     init(rootURL: URL, clock: @escaping @Sendable () -> Date,
          transport: any NativeMusicAudioCacheTransport, inspector: any NativeMusicAudioCacheInspecting,
-         capacity: Int64, timing: NativeMusicAudioCacheTiming = .init(), displayCache: MusicNativePlaybackDisplayCache? = nil) {
+         capacity: Int64, timing: NativeMusicAudioCacheTiming = .init(), presentationCache: (any MusicPresentationCaching)? = nil) {
         self.rootURL = rootURL; self.clock = clock; self.transport = transport; self.inspector = inspector
         self.capacity = max(0, min(capacity, NativeMusicAudioCacheHTTPPolicy.maximumBytes))
         requiresCachesDirectory = false
         self.timing = timing
-        self.displayCache = displayCache
+        self.presentationCache = presentationCache
     }
 
     public func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
@@ -88,7 +87,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                              duration: entry.inspection.duration, measuredQuality: entry.quality,
                              expiresAt: entry.expiresAt)
             }
-            await flushDisplayEvictions()
             return authorization.isActive ? result : nil
         } catch { return nil }
     }
@@ -157,7 +155,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         let key = Self.key(request.identity)
         let directory = try request.authorization.perform { try open() }
         try prune(directory)
-        await flushDisplayEvictions()
         try request.authorization.check(); try request.playbackAuthorization.check()
         let id = UUID(), fence = NativeMusicAudioCacheFence(authorization: request.authorization, timing: timing)
         let sink = try NativeMusicAudioCacheSink(id: id, directory: directory, fence: fence,
@@ -240,8 +237,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 var next = entries; next[key] = entry
                 try commitIndex(next, directory: directory)
             }
-            await displayCache?.touch(songID: identity.songID, confirmedAt: confirmedAt)
-            await flushDisplayEvictions()
         } catch {}
     }
 
@@ -274,7 +269,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             try commitIndex([:], directory: directory)
             try directory.recover(keeping: [], activeTemporaries: Set(pending.values.map(\.sink.name)))
         } catch {}
-        await displayCache?.clear()
+        await presentationCache?.clear()
     }
 
     public func clearOfficial() async {
@@ -336,7 +331,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 pending.values.reduce(Int64(0)) { $0 + $1.reserved }
             for victim in next.values.sorted(by: Self.oldest) where total > capacity && !protectedKeys.contains(victim.key) {
                 next.removeValue(forKey: victim.key); total -= victim.stamp.size
-                evictedSongs.insert(victim.identity.songID)
             }
             guard total <= capacity else { throw NativeMusicAudioCacheFailure.miss }
             try commitIndex(next, directory: directory)
@@ -346,7 +340,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                                   activeTemporaries: Set(pending.values.map(\.sink.name)))
             pending[id]?.reserved = bytes
         }
-        await flushDisplayEvictions()
     }
 
     private func publish(id: UUID, request: MusicAudioFileCacheRequest,
@@ -435,7 +428,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         var total = loaded.values.reduce(Int64(0)) { $0 + $1.stamp.size }
         for entry in loaded.values.sorted(by: Self.oldest) where total > capacity {
             loaded.removeValue(forKey: entry.key); total -= entry.stamp.size
-            evictedSongs.insert(entry.identity.songID)
         }
         try value.writeIndex(Self.encode(loaded))
         try value.recover(keeping: Set(loaded.values.map(\.file)), activeTemporaries: [])
@@ -447,18 +439,12 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         let now = clock()
         let next = entries.filter { _, entry in
             guard entry.expiresAt > now, Self.licenseValid(entry.licenseExpiresAt, now: now) else {
-                evictedSongs.insert(entry.identity.songID); return false
+                return false
             }
             return (try? directory.matches(entry.file, stamp: entry.stamp)) == true
         }
         if next.count != entries.count { try commitIndex(next, directory: directory) }
     }
-    private func flushDisplayEvictions() async {
-        let songs = evictedSongs.subtracting(entries.values.map { $0.identity.songID })
-        evictedSongs.removeAll()
-        if !songs.isEmpty { await displayCache?.remove(songIDs: songs, through: clock()) }
-    }
-
     private func commitIndex(_ next: [String: NativeMusicAudioCacheEntry],
                              directory: NativeMusicAudioCacheDirectory,
                              validate: () throws -> Void = {}) throws {
@@ -492,8 +478,8 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
     }
     private static func valid(_ value: MusicAudioFileCacheIdentity) -> Bool {
-        [value.scope, value.songID, value.sourceKey, value.nativeID, value.requestedQuality,
-         value.playbackSignature, value.provider].allSatisfy(text) && value.generation > 0 &&
+        !value.sourceKey.isEmpty && !value.nativeID.isEmpty &&
+            [value.scope, value.songID, value.requestedQuality, value.provider].allSatisfy(text) && value.generation > 0 &&
             (value.isOfficial ? ["wy", "tx", "kg"] : ["wy", "tx", "kg", "kw", "mg"]).contains(value.platform)
     }
     private static func confirmed(_ date: Date, now: Date) -> Bool {

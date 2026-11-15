@@ -45,7 +45,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 `AppIdentity` 集中定义产品名称、当前数据/运行时身份和当前原生命名空间：
 
 - 名称：`meowfilm`。
-- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；仅应用账号与设备会话的敏感文档使用绑定目录身份的 DPAPI；普通文档和脚本源码以明文文件保存，原子写入、CAS 和文件隔离独立保留，见[本地文档存储](protected-storage.md)。
+- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；当前 `music.accounts.v2` 与独立缓存根的 `music.account-details.v2` 使用绑定目录身份的 CurrentUser DPAPI，匿名平台状态由 Node 维护而非原生设备会话文档；普通文档和脚本源码以明文文件保存，原子写入、CAS 和文件隔离独立保留，见[本地文档存储](protected-storage.md)。
 - 脚本协议/清单字段 `product` 等于 `aggregate`，是当前 wire 身份。
 - 活动产品只读取和写入 `AppIdentity.NativeNamespaces` 列出的当前格式。
 - 当前提供可淘汰的播放缓存，未提供用户下载管理。
@@ -57,17 +57,17 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 `AppLauncher` 在创建首个启动窗口前安装 Desktop 的唯一排版默认，再完成模块装配、外观和窗口关闭偏好读取，依次等待实现 `IDesktopStartupParticipant` 的模块完成 `PrepareStartupAsync`，随后才构造 `ShellWindow` 并调用 `Show()`。现有启动窗口承载等待、失败和重试；模块完整的 `InitializeAsync` 仍由桌面壳的选中模块生命周期负责。外观与关闭偏好作为 App 共享参与者加入两阶段关闭；主窗口拥有原生托盘，隐藏到托盘不进入 App 关闭流程，具体行为见[桌面壳](desktop-shell.md#系统托盘与关闭选择)。
 
-音乐参与者只完成最小本地准备：通过 `music.accounts.list` 恢复账号状态，读取 `music.catalogSource.settings.get` 和 `music.home.v1`。账号与来源恢复失败不能冒充游客或默认来源；不等待网络登录验证、账号资料或首页 HTTP。快照缺失、不可读取或不能解码为可用展示时均视为未命中，允许正常首载；不把缓存错误变成启动门槛，也不把真实首页请求失败改写为成功空结果。
+音乐参与者只完成最小本地准备：通过 `music.accounts.list` 恢复账号状态，读取 `music.catalogSource.settings.get` 和 `music.home.v2`。账号与来源恢复失败不能冒充游客或默认来源；不等待网络登录验证、账号资料或首页 HTTP。快照缺失、不可读取或不能解码为可用展示时均视为未命中，允许正常首载；不把缓存错误变成启动门槛，也不把真实首页请求失败改写为成功空结果。
 
-`music.home.v1` 是全应用唯一的最近成功首页展示，带平台身份，不按账号分仓、无 TTL，也不携带执行权限；显示相符快照后的网络更新由首页 owner 负责。持久化、失败保留与认证失效恢复见[首页启动与展示快照](music-catalog.md#首页启动与展示快照)。
+`music.home.v2` 是全应用唯一的最近成功首页展示，带平台身份，不按账号分仓、无 TTL，也不携带执行权限；显示相符快照后的网络更新由首页 owner 负责。持久化、失败保留与认证失效恢复见[首页启动与展示快照](music-catalog.md#首页启动与展示快照)。
 
 ## 原生和脚本边界
 
-网易云、QQ、酷狗官方业务独立于 LX。账号、平台目录、搜索、曲库、缓存和官方播放在 .NET 内执行，不以 Node 连接为前置条件。网易订阅／退订的 token 准备按需借用公共 Node，失败保留本地意图，订阅请求及 Cookie 仍归原生 owner。公共宿主随 App 启动，影视随后恢复启用猫源，不因此执行音乐或停用的猫源脚本，也不加载 Watchman SDK。
+五平台官方联网配方独立于 LX 音源脚本，由共同 Node `music-platform` owner 执行账号认证、平台目录、搜索、歌词、官方音频、同步和反馈协议。原生 .NET 保留安全账号保存／授权发布、永久歌曲仓库、引用队列、共享图片、播放器和真实本地事务／journal；凭据只在当前授权交接中借给 Node，不建第二账号库。网易订阅／退订的 token 由该模块按需借用既有 token owner，失败保留原生本地意图。单个音源脚本失败不使本地功能或官方入口失效；共同运行器不可用时联网操作报告真实失败，不回退原生 HTTP。公共宿主随 App 启动，影视随后恢复启用猫源，不因此执行音乐或停用的猫源脚本，也不加载 Watchman SDK。
 
-Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/entry.mjs` 按序装配 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.3.0`／`source.runtime.v2`、`pan@0.1.0`／`pan.runtime.v1`、`tmdb@0.1.0`／`tmdb.data.v1`、`douban@0.1.0`／`douban.data.v1`、`film@0.1.0`／`film.playback.v1`、`netease@0.1.0`／`netease.token.v1` 八模块。公共层管理 LX/source 原生 QuickJS 线程、Cat Node Worker 和按需网易 token Worker；Windows 目录只有私密启动／存活管道 bootstrap 与薄 entry，业务使用完整 HTTP，没有业务 module 副本或第二套 runner。
+Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/entry.mjs` 按序装配 `music@0.8.0`／`music.script.v3`、`cat@0.2.0`／`cat.script.v2`、`source@0.3.0`／`source.runtime.v2`、`pan@0.1.0`／`pan.runtime.v1`、`tmdb@0.1.0`／`tmdb.data.v1`、`douban@0.1.0`／`douban.data.v1`、`film@0.1.0`／`film.playback.v1`、`netease@0.1.0`／`netease.token.v1`、`music-platform@0.1.0`／`music.platform.v1` 九模块。公共层管理 LX/source 原生 QuickJS 线程、Cat Node Worker 和按需网易 token Worker；Windows 目录只有私密启动／存活管道 bootstrap 与薄 entry，业务使用完整 HTTP，没有业务 module 副本或第二套 runner。
 
-载荷包含公共 entry/bootstrap/client/contracts、共享八模块及 `source-rules.mjs`、Windows 两个入口文件、runtime-bridge、script-host、source-runtime／novel-rules、pan-runtime、film-playback／film-rules／film-search、netease-token／锁定 jsdom、Node 兼容及规则解析依赖、锁定的原生 QuickJS-NG addon/source SDK 和必要许可，没有普通业务文档桥授权。CatNode 设置、源码和私有卷位于 App 固定 `script-runtime` 数据根，source 的 Reader/CatVod 不继承该私有卷或服务能力。film 复用同一批 provider，独占影视规则存储／执行、搜索投影、元数据与业务缓存、新增历史／人工匹配／屏蔽／偏好；原生 `FilmLibrary` 收藏仍为 `film.library.v1`。小说纯规则统一由 source 的 Node owner 执行，书架／历史／阅读偏好／净化配置仍由原生 `novel.library.v1` 唯一持有。公共执行、存储与网络边界见[共用运行时](../runtime/script-runtime.md)；source 平台能力以[capability ABI](../runtime/source-capability-abi.md)为唯一来源。Node 无关仅指 source-runtime 规则包，不表示 Node 兼容层无需 Node；Windows 原生小说页面及阅读器见[小说接入](novel.md)。
+载荷包含公共 entry/bootstrap/client/contracts、共享九模块及 `source-rules.mjs`、Windows 两个入口文件、runtime-bridge、script-host、source-runtime／novel-rules、pan-runtime、film-playback／film-rules／film-search、netease-token／锁定 jsdom、music-platform、Node 兼容及规则解析依赖、锁定的原生 QuickJS-NG addon/source SDK 和必要许可，没有普通业务文档桥授权。CatNode 设置、源码和私有卷位于 App 固定 `script-runtime` 数据根，source 的 Reader/CatVod 不继承该私有卷或服务能力。film 复用同一批 provider，独占影视规则存储／执行、搜索投影、元数据与业务缓存、新增历史／人工匹配／屏蔽／偏好；原生 `FilmLibrary` 收藏仍为 `film.library.v1`。小说纯规则统一由 source 的 Node owner 执行，书架／历史／阅读偏好／净化配置仍由原生 `novel.library.v1` 唯一持有。公共执行、存储与网络边界见[共用运行时](../runtime/script-runtime.md)；source 平台能力以[capability ABI](../runtime/source-capability-abi.md)为唯一来源。Node 无关仅指 source-runtime 规则包，不表示 Node 兼容层无需 Node；Windows 原生小说页面及阅读器见[小说接入](novel.md)。
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定 App 启动时的 JS 载荷与协议版本。
 

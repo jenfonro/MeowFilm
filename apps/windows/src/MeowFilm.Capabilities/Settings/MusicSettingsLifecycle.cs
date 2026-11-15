@@ -27,6 +27,10 @@ public sealed partial class MusicCapability
             }
             else
             {
+                RetireMetadataSettings();
+                RetireQualitySettings();
+                RetireSearchPreferencesSettings();
+                RetireFeedbackSettings();
                 retirement = settingsActivation;
                 settingsActivation = null;
                 try { retirement?.Cancel(); } catch (ObjectDisposedException) { }
@@ -72,13 +76,13 @@ public sealed partial class MusicCapability
 
         if (!searchPreferencesLoaded)
         {
-            try { await ReadSearchPreferences(lifetime.Token); }
+            try { await ReadSearchPreferences(token); }
             catch { }
             token.ThrowIfCancellationRequested();
         }
         if (!metadataLoaded)
         {
-            try { await ReadMetadataSettings(lifetime.Token); }
+            try { await ReadMetadataSettings(token); }
             catch { }
             token.ThrowIfCancellationRequested();
         }
@@ -98,6 +102,8 @@ public sealed partial class MusicCapability
         {
             RetireAccountTransferAsync,
             () => DeactivateSearchHistoryAsync(SearchHistorySurface.Settings),
+            () => metadataWork,
+            () => searchPreferencesWork,
             DeactivateQualityAsync,
             () => LibrarySync.DeactivateAsync(),
             DeactivateAccountDetailsAsync

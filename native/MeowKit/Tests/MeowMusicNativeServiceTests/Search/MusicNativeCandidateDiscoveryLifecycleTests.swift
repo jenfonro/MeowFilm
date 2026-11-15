@@ -3,19 +3,69 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
+    func testClosedCapabilityCallbacksDoNotDispatchAndRegisteredScriptsPhysicallyDrain() async throws {
+        let barrier = MusicNativeCandidateDiscoveryBarrier(), completed = MusicNativeCandidateDiscoveryBarrier()
+        await completed.release()
+        let scripts = MusicNativeCandidateDiscoveryScripts()
+        await scripts.holdSources(barrier)
+        let store = try MusicNativeCandidateDiscoveryFixture.store()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts)
+        let session = try await service.candidateDiscoverySession(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let before = store.snapshot().0
+        let snapshot = Task { try await session.snapshot(discover: false, force: false) }
+        await barrier.started(1)
+        let closing = Task { await session.close(retainingAttemptID: nil); await completed.enter() }
+        do {
+            try await MusicCandidateDiscoveryDeadline.run(seconds: 3) {
+                while true {
+                    do { try await session.check() }
+                    catch MusicServiceError.closed { return }
+                    await Task.yield()
+                }
+            }
+        } catch {
+            XCTFail("The closed capability owner remained readable")
+            await barrier.release()
+            await closing.value
+            _ = try? await snapshot.value
+            await service.close()
+            return
+        }
+        do { _ = try await session.snapshot(discover: false, force: false); XCTFail("Closed capability read started") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
+        let pendingClose = await completed.count(), calls = await scripts.sourcesCalls()
+        XCTAssertEqual(pendingClose, 0, "Close must await the registered noncooperative script callback")
+        XCTAssertEqual(calls, 1, "A callback requested after close cannot start another sources read")
+        await barrier.release()
+        await closing.value
+        do { _ = try await snapshot.value; XCTFail("A closed capability result was published") }
+        catch { XCTAssertTrue([MusicServiceError.closed, .cancelled].contains(MusicServiceError.sanitized(error))) }
+        let finalCalls = await scripts.sourcesCalls()
+        XCTAssertEqual(finalCalls, 1)
+        XCTAssertEqual(store.snapshot().0, before)
+
+        let current = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let value = try await current.snapshot(discover: false, force: false)
+        XCTAssertFalse(value.options.isEmpty, "Closing one session cannot revoke a different candidate owner")
+        let currentCalls = await scripts.sourcesCalls()
+        XCTAssertEqual(currentCalls, 2)
+        await current.close(retainingAttemptID: nil)
+        await service.close()
+    }
+
     func testPlaylistEnqueueDoesNotDiscoverEveryTrackAndOnlyCurrentOccurrenceCanSearch() async throws {
         let tracks = (0..<40).map {
             MusicNativeCandidateDiscoveryFixture.track("tx", id: "Queued\($0)",
                 title: $0 == 7 ? "Synthetic recording" : "Unplayed recording \($0)")
         }
         let pages = MusicAccountQueuePages(roots: [tracks]), source = MusicAccountQueueFixture.source(pages)
-        let store = NativeMusicMemoryDocument(), http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
+        let store = NativeMusicMemoryDocument(), http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
         let scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["wy"])
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        let service = try await NativeMusicFixture.service(store, scripts: scripts, qq: qq, http: http, sourceDiscovery: cache)
-        let page = try await service.remoteQueuePage(source, cursor: nil)
-        let state = try await service.replaceRemoteQueue(source, start: .init(index: 7, track: page.items[7]),
+        let cache = MusicNativeMemorySourceDiscoveryCache()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts, platform: NativeMusicFixture.routes(primary: qq, others: http), sourceDiscovery: cache)
+        _ = try await service.remoteQueuePage(source, cursor: nil)
+        let state = try await service.replaceRemoteQueue(source, start: .init(index: 7),
             expectedRevision: 0, intent: .init())
         let queued = try await service.queue()
         let original = try await service.read(), writes = store.snapshot().2
@@ -43,16 +93,11 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
         let prepared = try await service.read()
         XCTAssertEqual(prepared.queue, original.queue)
         XCTAssertEqual(prepared.playback, original.playback)
-        XCTAssertEqual(store.snapshot().2, writes)
+        XCTAssertGreaterThan(store.snapshot().2, writes, "new source facts are saved in the repository, not the queue")
         for index in discovered.entries.indices where index != 7 {
             XCTAssertEqual(discovered.entries[index].track.sources, queued.entries[index].track.sources)
-            let song = try MusicModel.normalize(tracks[index])
-            let entries = await cache.entries(fingerprint: MusicModel.fingerprint(song), duration: 180)
-            XCTAssertEqual(Set(entries.keys), ["tx"])
-            let acquired = try XCTUnwrap(entries["tx"])
-            XCTAssertEqual(acquired.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
-            XCTAssertEqual(acquired.checkedAt, 0, "Acquired playlist metadata is not an executed query")
-            XCTAssertTrue(acquired.observations.isEmpty, "An unplayed recording acquired search evidence")
+            let entries = await cache.entries(songID: discovered.entries[index].track.songId)
+            XCTAssertTrue(entries.isEmpty, "an unplayed recording has repository facts, not synthetic search evidence")
         }
         let history = try await service.playedSongs()
         XCTAssertTrue(history.isEmpty)
@@ -62,8 +107,9 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
     func testQueueAndSettingsRevisionChangesRejectStagedDiscovery() async throws {
         for settings in [true, false] {
             let store = try MusicNativeCandidateDiscoveryFixture.store()
-            let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
-                qq: MusicNativeCandidateDiscoveryQQ(), http: MusicNativeCandidateDiscoveryHTTP())
+            let service = try await NativeMusicFixture.service(store,
+            scripts: MusicNativeCandidateDiscoveryScripts(),
+            platform: NativeMusicFixture.routes(primary: MusicNativeCandidateDiscoveryQQ(), others: MusicNativeDiscoveryPlatforms()))
             let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
             _ = try await session.snapshot(discover: true, force: false)
             if settings { _ = try await service.updateSettings(.init(ifRevision: 0, mode: .shuffle)) }
@@ -77,8 +123,9 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
     }
     func testLockCancelsConcurrentNoncooperativeSearchWithoutWritingLateMatches() async throws {
         let barrier = MusicNativeCandidateDiscoveryBarrier(), store = try MusicNativeCandidateDiscoveryFixture.store()
-        let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
-            qq: MusicNativeCandidateDiscoveryQQ(barrier: barrier), http: MusicNativeCandidateDiscoveryHTTP(barrier: barrier))
+        let service = try await NativeMusicFixture.service(store,
+            scripts: MusicNativeCandidateDiscoveryScripts(),
+            platform: NativeMusicFixture.routes(primary: MusicNativeCandidateDiscoveryQQ(barrier: barrier), others: MusicNativeDiscoveryPlatforms(barrier: barrier)))
         let before = store.snapshot().0
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let task = Task { try await session.snapshot(discover: true, force: false) }
@@ -94,14 +141,17 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
     }
     func testClosedSessionCannotReadOrResolveEvenIfItsCallbacksArriveLater() async throws {
         let barrier = MusicNativeCandidateDiscoveryBarrier(), store = try MusicNativeCandidateDiscoveryFixture.store()
-        let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
-            qq: MusicNativeCandidateDiscoveryQQ(barrier: barrier), http: MusicNativeCandidateDiscoveryHTTP(barrier: barrier))
+        let service = try await NativeMusicFixture.service(store,
+            scripts: MusicNativeCandidateDiscoveryScripts(),
+            platform: NativeMusicFixture.routes(primary: MusicNativeCandidateDiscoveryQQ(barrier: barrier), others: MusicNativeDiscoveryPlatforms(barrier: barrier)))
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let before = store.snapshot().0
         let task = Task { try await session.snapshot(discover: true, force: false) }
-        await barrier.started(4); await session.close(retainingAttemptID: nil)
+        await barrier.started(4)
+        let closing = Task { await session.close(retainingAttemptID: nil) }
         do { _ = try await task.value; XCTFail("closed") } catch {}
         await barrier.release()
+        await closing.value
         do { _ = try await session.snapshot(discover: false, force: false); XCTFail("closed session") }
         catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
         XCTAssertEqual(store.snapshot().0, before); await service.close()

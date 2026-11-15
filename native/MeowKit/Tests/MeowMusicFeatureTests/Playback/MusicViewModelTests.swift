@@ -17,15 +17,26 @@ private let musicOfficialSelection = MusicPlaybackSelection(installationId: "off
 
 /// Business-port fixture, not a real platform, document or media engine.
 private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
-    MusicCachedPlaybackRecoveryServing, MusicResolvedSourcesServing, MusicAccountBrowsing {
+    MusicCachedPlaybackRecoveryServing, MusicResolvedSourcesServing, MusicAccountBrowsing, MusicArtworkSelecting,
+    MusicSongRepositoryReading, MusicPublicBrowsing, MusicPublicPlaylistSearching {
+    static let songID = "D0000000-0000-4000-8000-000000000001"
     var entries: [MusicQueueEntry] = (1...3).map { index in
         MusicQueueEntry(id: "entry-\(index)", track: MusicRemoteTrack(
-            ref: MusicReference(kind: .queue, id: "entry-\(index)"), songId: "same-song",
+            ref: MusicReference(kind: .queue, id: "entry-\(index)"), songId: MusicModelService.songID,
             title: "合成歌曲", artist: "合成歌手", duration: 180,
             sources: [MusicNativeSource(sourceKey: musicSourceKey, platform: "wy", nativeId: "123")]))
     }
     var current = "entry-1", revision = 1, settingsRevision = 0
     var mode = MusicPlaybackMode.loop
+    private var requestQuality = "flac"
+    private var officialSources = MusicAccountPlatform.allCases
+    private var settingsFailure: MusicServiceError?
+    private var settingsGate: MusicCollectionGate?
+    private var settingsWrites = 0
+    func configureSettings(failure: MusicServiceError? = nil, gate: MusicCollectionGate? = nil) {
+        settingsFailure = failure; settingsGate = gate
+    }
+    func settingsWriteCount() -> Int { settingsWrites }
     var headers: [String: String] = [:]
     var facts: [MusicPlaybackFact] = []
     var moves: [(MusicDirection, MusicAdvanceReason)] = []
@@ -36,6 +47,35 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var searchBegan: (@Sendable () -> Void)?
     var heldSearch: CheckedContinuation<MusicSearchPage, Never>?
     var searchReads = 0
+    var searchItems: [MusicRemoteTrack] = []
+    private var searchResult: MusicSearchPage?
+    private var playlistSearchResult: MusicPlaylistSearchPage?
+    func returnSearchResults(_ songs: MusicSearchPage, playlists: MusicPlaylistSearchPage) {
+        searchResult = songs; playlistSearchResult = playlists
+    }
+    var historyItems: [MusicPlayedSong] = []
+    private var repositoryRecords: [String: MusicRemoteTrack] = [:]
+    private var repositoryObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var repositoryGate: MusicCollectionGate?
+    func setSearchItems(_ items: [MusicRemoteTrack]) { searchItems = items }
+    func setHistoryItems(_ items: [MusicPlayedSong]) { historyItems = items }
+    func publishRepository(_ tracks: [MusicRemoteTrack]) {
+        for track in tracks { repositoryRecords[track.songId] = track }
+        for observer in repositoryObservers.values { observer.yield(()) }
+    }
+    func blockRepository(_ gate: MusicCollectionGate) { repositoryGate = gate }
+    func repositoryTracks(songIDs: Set<String>) async -> [String: MusicRemoteTrack] {
+        let result = repositoryRecords.filter { songIDs.contains($0.key) }
+        if let gate = repositoryGate { repositoryGate = nil; await gate.wait() }
+        return result
+    }
+    func songChanges() -> AsyncStream<Void> {
+        let id = UUID(), pair = AsyncStream<Void>.makeStream()
+        repositoryObservers[id] = pair.continuation
+        pair.continuation.onTermination = { [weak self] _ in Task { await self?.removeRepositoryObserver(id) } }
+        return pair.stream
+    }
+    private func removeRepositoryObserver(_ id: UUID) { repositoryObservers[id] = nil }
     var stateBegan: (@Sendable () -> Void)?
     var heldState: CheckedContinuation<MusicPlaybackState, Never>?
     var stateReads = 0
@@ -50,6 +90,7 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var metadataFailure: MusicServiceError?
     var metadataCandidatesOverride: [MusicMetadataCandidate]?
     var metadataGate: MusicCollectionGate?
+    var artworkFallbacks: [URL: URL] = [:]
     var lyricSourceKeys: [String] = []
     var cacheLookups = 0, cacheDiscards = 0, resolveCalls = 0, lyricCalls = 0
     var resultSelection: @Sendable (MusicPlaybackSelection) -> MusicPlaybackSelection = { $0 }
@@ -88,8 +129,9 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
 
     func snapshot() -> MusicPlaybackState {
         MusicPlaybackState(revision: revision, settingsRevision: settingsRevision, mode: mode,
+                           officialSources: officialSources,
                            currentId: current, total: entries.count, position: 17,
-                           canNext: !entries.isEmpty, canPrevious: !entries.isEmpty)
+                           canNext: !entries.isEmpty, canPrevious: !entries.isEmpty, requestQuality: requestQuality)
     }
     func state() async throws -> MusicPlaybackState {
         stateReads += 1
@@ -102,17 +144,38 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         }
         return snapshot()
     }
-    func queue() async throws -> MusicQueueSnapshot { MusicQueueSnapshot(revision: revision, currentId: current, entries: entries) }
+    func queue() async throws -> MusicQueueSnapshot {
+        .init(revision: revision, currentId: current, entries: entries.map {
+            .init(id: $0.id, track: $0.track.projected(repositoryRecords), sourceTitle: $0.sourceTitle,
+                  remoteSessionID: $0.remoteSessionID, displayIdentity: $0.displayIdentity)
+        })
+    }
     func platforms() async throws -> [MusicPlatform] { [MusicPlatform(id: "wy", title: "网易云音乐")] }
-    func collections() async throws -> [MusicCollection] { [MusicCollection(id: "favorites", title: "收藏", kind: "favorites")] }
+    func collections() async throws -> [MusicCollection] {
+        [.init(id: "favorites", title: "收藏", kind: "favorites", count: Set(entries.map { $0.track.songId }).count)]
+    }
     func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage {
         searchReads += 1
         if let searchBegan {
             self.searchBegan = nil
             return await withCheckedContinuation { value in heldSearch = value; searchBegan() }
         }
-        return MusicSearchPage(platform: platform, query: query, page: page, limit: limit, total: 0,
-                               nextPage: nil, items: [])
+        if let searchResult { return searchResult }
+        return MusicSearchPage(platform: platform, query: query, page: page, limit: limit, total: searchItems.count,
+                               nextPage: nil, items: searchItems)
+    }
+    func searchPublicPlaylists(platform: MusicPublicBrowsePlatform, query: String,
+                               page: Int, limit: Int) throws -> MusicPlaylistSearchPage {
+        guard let playlistSearchResult else { throw MusicServiceError.unsupported }
+        return playlistSearchResult
+    }
+    func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String,
+                         cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
+    func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) throws -> MusicPublicBrowseDetail {
+        throw MusicServiceError.unsupported
+    }
+    func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) throws -> MusicPublicBrowsePage {
+        throw MusicServiceError.unsupported
     }
     // Search admission casts the injected owner to MusicAccountBrowsing before
     // reaching MusicServing.search. These account reads are not used here.
@@ -122,7 +185,16 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
                             cursor: String?) async throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
     func accountTracks(platform: MusicAccountPlatform, collectionID: String,
                        cursor: String?) async throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
-    func tracks(in collection: MusicCollection) async throws -> [MusicRemoteTrack] { entries.map(\.track) }
+    func tracks(in collection: MusicCollection) async throws -> [MusicRemoteTrack] {
+        var seen = Set<String>()
+        return entries.map(\.track).filter { seen.insert($0.songId).inserted }.map {
+            let track = $0.projected(repositoryRecords)
+            return .init(ref: .init(kind: .library, id: track.songId), songId: track.songId,
+                         title: track.title, artist: track.artist, album: track.album, duration: track.duration,
+                         sources: track.sources, artwork: track.artwork, artistNames: track.artistNames,
+                         sourcePosition: track.sourcePosition)
+        }
+    }
     func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection { throw MusicServiceError.unsupported }
     func removePlaylist(_ collection: MusicCollection) async throws { throw MusicServiceError.unsupported }
@@ -165,7 +237,19 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         return MusicAdvanceResult(state: snapshot(), selectedId: current)
     }
     func updateSettings(_ change: MusicSettingsChange) async throws -> MusicPlaybackState {
-        if let value = change.mode { mode = value }; settingsRevision += 1; return snapshot()
+        settingsWrites += 1
+        let failure = settingsFailure, gate = settingsGate
+        settingsFailure = nil; settingsGate = nil
+        if failure == nil || failure == .commitUnconfirmed {
+            if let value = change.mode { mode = value }
+            if let value = change.requestQuality { requestQuality = value }
+            if let value = change.officialSources { officialSources = value }
+            settingsRevision += 1
+        }
+        let result = snapshot()
+        if let gate { await gate.wait() }
+        if let failure { throw failure }
+        return result
     }
     func sourceAvailability(for ref: MusicReference) async -> MusicSourceAvailability {
         let value = availability
@@ -193,11 +277,12 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         guard current == occurrenceID, let entry = entries.first(where: { $0.id == occurrenceID }) else {
             throw MusicServiceError.targetChanged
         }
-        let candidates = metadataCandidatesOverride ?? entry.track.sources.map {
-            MusicMetadataCandidate(source: $0, artwork: entry.track.artwork)
+        let track = entry.track.projected(repositoryRecords)
+        let candidates = metadataCandidatesOverride ?? track.sources.map {
+            MusicMetadataCandidate(source: $0, artwork: track.artwork)
         }
         let result = MusicMetadataCandidates(occurrenceID: occurrenceID, queueRevision: revision, preferences: metadataPreferences(),
-            track: entry.track, contentRevision: nil, contentFingerprint: entry.track.songId,
+            track: track,
             candidates: candidates.filter {
                 MusicPublicBrowsePlatform(rawValue: $0.source.platform).map(metadataEnabled.contains) == true
             })
@@ -205,6 +290,24 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         return result
     }
     func failMetadata(_ error: MusicServiceError) { metadataFailure = error }
+    func setArtworkFallback(_ next: URL, for failed: URL) { artworkFallbacks[failed] = next }
+    func setMetadataArtwork(_ url: URL?) {
+        entries = entries.map { entry in
+            let track = entry.track
+            return .init(id: entry.id, track: .init(ref: track.ref, songId: track.songId,
+                title: track.title, artist: track.artist, album: track.album, duration: track.duration,
+                sources: track.sources, artwork: url, artistNames: track.artistNames))
+        }
+    }
+    func failedArtwork(songID: String, url: URL, attempted: Set<URL>) -> URL? {
+        let next = artworkFallbacks[url].flatMap { attempted.contains($0) ? nil : $0 }
+        setMetadataArtwork(next)
+        return next
+    }
+    func succeededArtwork(songID: String, url: URL, replacing requested: URL) -> URL? {
+        setMetadataArtwork(url)
+        return url
+    }
     func replaceMetadataEntry(_ entry: MusicQueueEntry, candidates: [MusicMetadataCandidate],
                               gate: MusicCollectionGate? = nil) {
         entries = [entry]; current = entry.id
@@ -253,7 +356,7 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         return MusicLyricsSnapshot(occurrenceId: occurrenceId, state: hasLyrics ? .ready : .none,
             lines: hasLyrics ? [.init(index: 0, time: 0, end: 180, text: "合成歌词")] : [])
     }
-    func playedSongs() async throws -> [MusicPlayedSong] { [] }
+    func playedSongs() async throws -> [MusicPlayedSong] { historyItems }
     func playedPlaylists() async throws -> [MusicPlayedPlaylist] { [] }
     func restoreHistory(id: String, expectedRevision: Int) async throws -> MusicPlaybackState {
         current = "entry-1"; revision += 1; return snapshot()
@@ -310,25 +413,6 @@ private struct MusicMetadataCacheAccounts: MusicAccountsServing, MusicNativeCach
     func logout(platform: MusicAccountPlatform) throws { throw MusicServiceError.unsupported }
 }
 
-private actor MusicMetadataDisplayCache: MusicPlaybackDisplayCaching {
-    private var snapshot: MusicPlaybackDisplaySnapshot?
-    let stored: @Sendable () -> Void
-    init(stored: @escaping @Sendable () -> Void) { self.stored = stored }
-    func read(_ identity: MusicPlaybackDisplayIdentity,
-              authorization: MusicQueueAuthorization) -> MusicPlaybackDisplaySnapshot? {
-        authorization.isActive && snapshot?.identity == identity ? snapshot : nil
-    }
-    func storeArtwork(_ data: Data, sourceKey: String, identity: MusicPlaybackDisplayIdentity,
-                      authorization: MusicQueueAuthorization) {
-        guard authorization.isActive else { return }
-        snapshot = .init(identity: identity, artworkSourceKey: sourceKey, artwork: data)
-        stored()
-    }
-    func storeLyrics(_ lines: [MusicLyricLine], sourceKey: String,
-                     identity: MusicPlaybackDisplayIdentity, authorization: MusicQueueAuthorization) {}
-    func clear() { snapshot = nil }
-}
-
 @MainActor private final class MusicModelPlayer: MusicPlaybackDriving {
     var onStop: (() -> Void)?
     var resources: [PlaybackResource] = []
@@ -350,7 +434,362 @@ private actor MusicMetadataDisplayCache: MusicPlaybackDisplayCaching {
     func stop(_ attempt: MusicPlayerAttempt) { stopped.append(attempt); onStop?() }
 }
 
+/// Management-port facts only; no script execution or second settings writer.
+private actor MusicScriptSettingsService: MusicScriptSourceManaging {
+    static func item(_ id: String = "script-a", enabled: Bool = false, name: String = "音源", version: String = "1") -> MusicScriptSourceItem {
+        .init(id: id, name: name, version: version, origin: .network(host: "scripts.invalid"),
+              platforms: [.netease], enabled: enabled, state: enabled ? .ready : .disabled)
+    }
+    private var values = ["script-a": MusicScriptSettingsService.item(), "script-b": MusicScriptSettingsService.item("script-b")]
+    private var gate: MusicCollectionGate?
+    private var failure: MusicServiceError?
+    private var writes = 0
+    private var checkGate: MusicCollectionGate?
+    private var checkCancelled: (@Sendable () -> Void)?
+    func configure(_ failure: MusicServiceError? = nil, gate: MusicCollectionGate? = nil) {
+        self.failure = failure; self.gate = gate
+    }
+    func blockCheck(_ gate: MusicCollectionGate, cancelled: @escaping @Sendable () -> Void) {
+        checkGate = gate; checkCancelled = cancelled
+    }
+    func writeCount() -> Int { writes }
+    func scriptSources() -> [MusicScriptSourceItem] { values.values.sorted { $0.id < $1.id } }
+    private func save(_ value: MusicScriptSourceItem?, id: String) async throws {
+        writes += 1
+        let gate = gate, failure = failure; self.gate = nil; self.failure = nil
+        if let failure, failure != .commitUnconfirmed { throw failure }
+        values[id] = value
+        if let gate { await gate.wait() } // Committed receipt deliberately ignores page cancellation.
+        if let failure { throw failure }
+    }
+    func setScriptSourceEnabled(_ id: String, enabled: Bool) async throws -> MusicScriptSourceItem {
+        let value = Self.item(id, enabled: enabled)
+        try await save(value, id: id); return value
+    }
+    func removeScriptSource(_ id: String) async throws { try await save(nil, id: id) }
+    func scriptSourceDetail(_ id: String) throws -> MusicScriptSourceDetail {
+        guard let value = values[id] else { throw MusicServiceError.notFound }
+        return .init(item: value, networkURL: "https://scripts.invalid/source.js", rollbackAvailable: true)
+    }
+    func editScriptSource(_ id: String, name: String, networkURL: String?) async throws -> MusicScriptSourceItem {
+        let value = Self.item(id, enabled: values[id]?.enabled ?? false, name: name)
+        try await save(value, id: id); return value
+    }
+    func updateScriptSource(_ id: String) async throws -> MusicScriptSourceItem {
+        let value = Self.item(id, enabled: values[id]?.enabled ?? false, version: "2")
+        try await save(value, id: id); return value
+    }
+    func updateScriptSource(_ id: String, data: Data, fileName: String) async throws -> MusicScriptSourceItem {
+        try await updateScriptSource(id)
+    }
+    func rollbackScriptSource(_ id: String) async throws -> MusicScriptSourceItem {
+        let value = Self.item(id, enabled: values[id]?.enabled ?? false, version: "0")
+        try await save(value, id: id); return value
+    }
+    func importScriptSource(_ data: Data, fileName: String) async throws -> MusicScriptSourceItem {
+        let value = Self.item("imported", name: fileName)
+        try await save(value, id: value.id); return value
+    }
+    func downloadScriptSource(from url: URL) async throws -> MusicScriptSourceItem {
+        try await importScriptSource(Data(), fileName: url.lastPathComponent)
+    }
+    func checkScriptSource(_ id: String) async throws -> MusicScriptSourceItem {
+        let gate = checkGate, cancelled = checkCancelled; checkGate = nil; checkCancelled = nil
+        if let gate { await withTaskCancellationHandler { await gate.wait() } onCancel: { cancelled?() } }
+        try Task.checkCancellation()
+        guard let value = values[id] else { throw MusicServiceError.notFound }
+        return value
+    }
+}
+
 final class MusicViewModelTests: XCTestCase {
+    @MainActor func testSubmittedScriptManagementReceiptsSurviveClosedPageAndOnlyMatchingSaveClearsUnknown() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("music-settings-\(UUID().uuidString).js")
+        try Data("current script source".utf8).write(to: temporary)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let download = URL(string: "https://scripts.invalid/current.js")!
+        for operation in ["enabled", "metadata", "update", "file-update", "rollback", "download", "import", "remove"] {
+            let service = MusicModelService(), scripts = MusicScriptSettingsService()
+            let model = MusicViewModel(service: service, player: MusicModelPlayer(), scriptSources: scripts)
+            await model.load()
+            let page = MusicSourceManagementState(model: model)
+            page.start(); await page.flush()
+            let before = page.scripts
+            let entered = expectation(description: "\(operation) committed"), gate = MusicCollectionGate { entered.fulfill() }
+            await scripts.configure(.commitUnconfirmed, gate: gate)
+            switch operation {
+            case "enabled": page.setScript("script-a", enabled: true)
+            case "metadata": page.edit("script-a", name: "新音源", url: nil)
+            case "update": page.update("script-a")
+            case "file-update": page.update("script-a", file: temporary)
+            case "rollback": page.rollback("script-a")
+            case "download": page.download(download.absoluteString)
+            case "import": page.importFiles([temporary])
+            default: page.remove("script-a")
+            }
+            await fulfillment(of: [entered], timeout: 3)
+            page.close()
+            await gate.release(); await page.flush(); await model.settingsReceipts.flush()
+            let key: String
+            switch operation {
+            case "enabled": key = "scripts/script-a/enabled"
+            case "metadata": key = "scripts/script-a/metadata"
+            case "download": key = "scripts/import/" + download.absoluteString
+            case "import": key = "scripts/import/" + temporary.absoluteString
+            case "remove": key = "scripts/script-a/installation"
+            default: key = "scripts/script-a/source"
+            }
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), [key])
+            XCTAssertNotNil(model.error); XCTAssertNil(page.error)
+            XCTAssertEqual(page.scripts, before, "A settled receipt must not refill the closed page")
+            var writes = await scripts.writeCount(); XCTAssertEqual(writes, 1, "Unknown writes are not retried")
+            let reopened = MusicSourceManagementState(model: model)
+            reopened.start(); await reopened.flush()
+            let authority = await scripts.scriptSources()
+            XCTAssertEqual(reopened.scripts, authority)
+            XCTAssertEqual(model.settingsReceipts.unknown.count, 1, "Reopening only reads facts")
+            reopened.setScript("script-b", enabled: true); await reopened.flush()
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), [key], "Another installation cannot acknowledge this setting")
+            model.notices.error = "另一操作的错误"
+            switch operation {
+            case "enabled": reopened.setScript("script-a", enabled: false)
+            case "metadata": reopened.edit("script-a", name: "再次保存", url: nil)
+            case "update", "file-update", "rollback": reopened.update("script-a")
+            case "download": reopened.download(download.absoluteString)
+            case "import": reopened.importFiles([temporary])
+            default:
+                // A deleted installation no longer has a page action. Its
+                // definitive receipt belongs to the same stable store owner.
+                try await model.settingsReceipts.submit(settings: [key], operation: "删除音源") {
+                    try await scripts.removeScriptSource("script-a")
+                }.value
+            }
+            await reopened.flush(); await model.settingsReceipts.flush()
+            XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+            XCTAssertEqual(model.notices.error, "另一操作的错误")
+            writes = await scripts.writeCount(); XCTAssertEqual(writes, 3)
+            reopened.close(); await model.close()
+        }
+    }
+
+    @MainActor func testScriptHealthCheckStillCancelsOnPageDepartureWithoutCreatingASettingsReceipt() async {
+        let scripts = MusicScriptSettingsService()
+        let model = MusicViewModel(service: MusicModelService(), player: MusicModelPlayer(), scriptSources: scripts)
+        await model.load()
+        let page = MusicSourceManagementState(model: model), visible = NSObject()
+        page.start(); page.show(visible); await page.flush()
+        let entered = expectation(description: "health read entered"), cancelled = expectation(description: "health read cancelled")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await scripts.blockCheck(gate, cancelled: { cancelled.fulfill() })
+        page.checkScript("script-a")
+        await fulfillment(of: [entered], timeout: 2)
+        page.hide(visible)
+        await fulfillment(of: [cancelled], timeout: 2)
+        await gate.release(); await page.flush()
+        XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+        XCTAssertNil(page.error); XCTAssertTrue(page.checking.isEmpty)
+        let writes = await scripts.writeCount(); XCTAssertEqual(writes, 0)
+        page.close(); await model.close()
+    }
+
+    @MainActor func testQualityAndOfficialSubmittedReceiptsOutliveClosedPagesAndOnlyMatchingSuccessClearsUnknown() async {
+        for official in [false, true] {
+            let (service, _, model) = setup()
+            await model.load()
+            let quality = MusicQualitySettingsState(model: model), sources = MusicSourceManagementState(model: model)
+            quality.start(); sources.start()
+            let entered = expectation(description: "setting submitted"), gate = MusicCollectionGate { entered.fulfill() }
+            await service.configureSettings(failure: .commitUnconfirmed, gate: gate)
+            if official { sources.setOfficial(.qq, enabled: false) }
+            else { quality.setRequestQuality("320k") }
+            await fulfillment(of: [entered], timeout: 2)
+            quality.close(); sources.close()
+            let queued = model.queue.map(\.id), revision = model.state.revision, position = model.position
+            await gate.release(); await quality.flush(); await sources.flush(); await model.settingsReceipts.flush()
+            let key = official ? "playback/officialSources" : "playback/requestQuality"
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), [key])
+            XCTAssertNotNil(model.error, "The stable owner's unknown remains globally visible after page close")
+            XCTAssertNil(model.notices.error, "It is not replayed as a closed page's ordinary failure")
+            XCTAssertEqual(quality.value.requestQuality, "flac"); XCTAssertTrue(sources.official.contains(.qq))
+            XCTAssertEqual(model.queue.map(\.id), queued); XCTAssertEqual(model.state.revision, revision)
+            XCTAssertEqual(model.position, position)
+            var writes = await service.settingsWriteCount(); XCTAssertEqual(writes, 1)
+            let reopenedQuality = MusicQualitySettingsState(model: model), reopenedSources = MusicSourceManagementState(model: model)
+            reopenedQuality.start(); reopenedSources.start()
+            if official { XCTAssertFalse(reopenedSources.official.contains(.qq)) }
+            else { XCTAssertEqual(reopenedQuality.value.requestQuality, "320k") }
+            await model.updateSettings(.init(ifRevision: model.state.settingsRevision, mode: .single))
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), [key])
+            model.notices.error = "另一操作的错误"
+            if official { reopenedSources.setOfficial(.qq, enabled: true); await reopenedSources.flush() }
+            else { reopenedQuality.setRequestQuality("128k"); await reopenedQuality.flush() }
+            XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+            XCTAssertEqual(model.notices.error, "另一操作的错误")
+            writes = await service.settingsWriteCount(); XCTAssertEqual(writes, 3)
+            reopenedQuality.close(); reopenedSources.close(); await model.close()
+        }
+    }
+
+    @MainActor func testReopenedSharedSourcePageReconcilesActualFactsAndReleasesOldWriteBusyState() async {
+        for official in [false, true] {
+            let service = MusicModelService(), scripts = MusicScriptSettingsService()
+            let model = MusicViewModel(service: service, player: MusicModelPlayer(), scriptSources: scripts)
+            await model.load()
+            let page = MusicSourceManagementState(model: model), first = NSObject(), reopened = NSObject()
+            page.start(); page.show(first); await page.flush()
+            let entered = expectation(description: "source setting committed")
+            let gate = MusicCollectionGate { entered.fulfill() }
+            if official {
+                await service.configureSettings(failure: .commitUnconfirmed, gate: gate)
+                page.setOfficial(.qq, enabled: false)
+            } else {
+                await scripts.configure(.commitUnconfirmed, gate: gate)
+                page.setScript("script-a", enabled: true)
+            }
+            await fulfillment(of: [entered], timeout: 2)
+            page.hide(first); page.show(reopened)
+            await gate.release(); await page.flush(); await model.settingsReceipts.flush()
+            XCTAssertFalse(page.savingOfficial); XCTAssertTrue(page.pending.isEmpty)
+            XCTAssertNil(page.error)
+            if official { XCTAssertFalse(page.officialEnabled(.qq)) }
+            else { XCTAssertEqual(page.item("script-a")?.enabled, true) }
+            let key = official ? "playback/officialSources" : "scripts/script-a/enabled"
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), [key])
+            page.close(); await model.close()
+        }
+    }
+
+    @MainActor func testReopenedQualityPageReconcilesActualFactsAndReleasesOldWriteBusyState() async {
+        let (service, _, model) = setup()
+        await model.load()
+        let page = MusicQualitySettingsState(model: model)
+        page.start()
+        let entered = expectation(description: "quality setting committed")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.configureSettings(failure: .commitUnconfirmed, gate: gate)
+        page.setRequestQuality("320k"); await fulfillment(of: [entered], timeout: 2)
+        page.close(); page.start()
+        await gate.release(); await page.flush(); await model.settingsReceipts.flush()
+        XCTAssertFalse(page.busy); XCTAssertEqual(page.value.requestQuality, "320k")
+        XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), ["playback/requestQuality"])
+        page.setRequestQuality("128k"); await page.flush()
+        XCTAssertFalse(page.busy); XCTAssertEqual(page.value.requestQuality, "128k")
+        XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+        let writes = await service.settingsWriteCount(); XCTAssertEqual(writes, 2)
+        page.close(); await model.close()
+    }
+
+    @MainActor func testRepositoryChangesReachPlaybackSearchAndCollectionWithoutQueueOrMediaMutation() async throws {
+        let (service, player, model) = setup()
+        await model.load(); await model.choose(musicSelection); await model.playbackMetadata.flush()
+        let initial = try XCTUnwrap(model.current?.track)
+        await service.setHistoryItems([.init(date: "2026-11-14", at: 10, track: initial)])
+        await model.loadHistory()
+        await service.setSearchItems([initial])
+        let search = MusicSearchResultsModel(owner: model)
+        search.setAccess(available: true, generation: model.accountAccessGeneration); search.appear()
+        search.submit("合成歌曲", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
+        await search.finishPendingReads()
+        let collection = MusicCollectionViewModel(model: model, collectionID: "favorites")
+        await collection.appear()?.value
+        XCTAssertNil(collection.error); XCTAssertFalse(collection.isMissing); XCTAssertFalse(collection.isLoading)
+        XCTAssertEqual(collection.collection?.count, 1)
+        XCTAssertEqual(collection.tracks.map(\.ref), [.init(kind: .library, id: initial.songId)])
+        XCTAssertNotNil(UUID(uuidString: initial.songId))
+        let queueIDs = model.queue.map(\.id), queueRefs = model.queue.map(\.track.ref)
+        let collectionRefs = collection.tracks.map(\.ref), searchIDs = search.songs.map(\.id)
+        let revision = model.state.revision, position = model.position, current = model.current?.id
+        let attempt = model.activeNativeAttemptID, resources = player.resources.count
+        let stateReads = await service.stateReadCount(), searchReads = await service.searchReadCount()
+        let cacheCounts = await service.cacheCounts()
+        let cover = URL(string: "https://artwork.invalid/current")!
+        let currentTrack = MusicRemoteTrack(ref: .init(kind: .library, id: initial.songId), songId: initial.songId,
+            title: "当前完整标题 (Live)", artist: "当前歌手", album: "当前专辑", duration: 181.5,
+            sources: initial.sources + [.init(sourceKey: "qq:new", platform: "tx", nativeId: "new")],
+            artwork: cover, artistNames: ["当前歌手"])
+        let played = expectation(description: "player projection updated")
+        let listed = expectation(description: "collection projection updated")
+        let found = expectation(description: "search projection updated")
+        let observations = [
+            model.playbackState.$queue.filter { $0.first?.track.title == currentTrack.title }.prefix(1).sink { _ in played.fulfill() },
+            collection.$tracks.filter { $0.first?.title == currentTrack.title }.prefix(1).sink { _ in listed.fulfill() },
+            search.$songs.filter { $0.first?.track.title == currentTrack.title }.prefix(1).sink { _ in found.fulfill() }
+        ]
+        await service.publishRepository([currentTrack])
+        await fulfillment(of: [played, listed, found], timeout: 2)
+        observations.forEach { $0.cancel() }
+        XCTAssertEqual(model.queue.map(\.id), queueIDs); XCTAssertEqual(Set(queueIDs).count, 3)
+        XCTAssertEqual(model.queue.map(\.track.songId), Array(repeating: initial.songId, count: 3))
+        XCTAssertEqual(model.queue.map(\.track.ref), queueRefs)
+        XCTAssertEqual(collection.tracks.map(\.ref), collectionRefs); XCTAssertEqual(search.songs.map(\.id), searchIDs)
+        XCTAssertEqual(model.state.revision, revision); XCTAssertEqual(model.current?.id, current)
+        XCTAssertEqual(model.position, position); XCTAssertEqual(model.activeNativeAttemptID, attempt)
+        XCTAssertEqual(player.resources.count, resources); XCTAssertEqual(model.metadataState.track?.title, currentTrack.title)
+        XCTAssertEqual(model.metadataArtworkURL, cover)
+        XCTAssertEqual(model.playedSongs.first?.track.title, currentTrack.title)
+        XCTAssertEqual(model.playedSongs.first?.track.songId, initial.songId)
+        XCTAssertEqual(model.playedSongs.first?.at, 10)
+        let afterStateReads = await service.stateReadCount(), afterSearchReads = await service.searchReadCount()
+        let afterCacheCounts = await service.cacheCounts()
+        XCTAssertEqual(afterStateReads, stateReads); XCTAssertEqual(afterSearchReads, searchReads)
+        XCTAssertEqual(afterCacheCounts, cacheCounts, "Projection must not fetch audio, candidates or lyrics")
+        collection.disappear(); search.disappear(); await model.close()
+    }
+
+    @MainActor func testRepositoryReadFromRevokedAccessCannotRefillQueueOrMetadata() async {
+        let (service, _, model) = setup()
+        await model.load(); await model.playbackMetadata.flush()
+        let entered = expectation(description: "repository display read delayed")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockRepository(gate)
+        let changed = MusicRemoteTrack(ref: .init(kind: .library, id: MusicModelService.songID),
+                                       songId: MusicModelService.songID, title: "迟到资料")
+        await service.publishRepository([changed])
+        await fulfillment(of: [entered], timeout: 2)
+        let pending = model.songRepositoryObservation
+        model.setAvailable(false)
+        await gate.release(); await pending?.value
+        XCTAssertTrue(model.queue.isEmpty); XCTAssertNil(model.metadataState.track); XCTAssertNil(model.metadataArtworkURL)
+        await model.close()
+    }
+
+    @MainActor func testLateRepositoryProjectionCannotOverwriteNewerFactsWithinTheSameAccess() async throws {
+        let (service, _, model) = setup()
+        await model.load(); await model.playbackMetadata.flush()
+        let initial = try XCTUnwrap(model.current?.track)
+        func record(_ title: String) -> MusicRemoteTrack {
+            .init(ref: .init(kind: .library, id: initial.songId), songId: initial.songId,
+                  title: title, sources: initial.sources)
+        }
+        let old = record("Earlier facts"), latest = record("Current facts")
+        let firstUpdate = expectation(description: "repository observation ready")
+        let firstObservation = model.playbackState.$queue
+            .filter { $0.first?.track.title == old.title }.prefix(1).sink { _ in firstUpdate.fulfill() }
+        await service.publishRepository([old])
+        await fulfillment(of: [firstUpdate], timeout: 2)
+        firstObservation.cancel()
+        let entered = expectation(description: "reload captured earlier repository facts")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockRepository(gate)
+        let reload = Task { await model.load() }
+        await fulfillment(of: [entered], timeout: 2)
+        let changed = expectation(description: "newer repository facts displayed")
+        let observation = model.playbackState.$queue
+            .filter { $0.first?.track.title == latest.title }.prefix(1).sink { _ in changed.fulfill() }
+        await service.publishRepository([latest])
+        await fulfillment(of: [changed], timeout: 2)
+        observation.cancel()
+        var emittedTitles: [String] = []
+        let lateChanges = model.playbackState.$queue.sink { emittedTitles.append($0.first?.track.title ?? "") }
+        await gate.release(); await reload.value; await model.playbackMetadata.flush()
+        XCTAssertEqual(model.current?.track.title, latest.title)
+        XCTAssertEqual(model.displayTrack?.title, latest.title)
+        XCTAssertFalse(emittedTitles.contains(old.title))
+        XCTAssertEqual(model.queue.map(\.id), ["entry-1", "entry-2", "entry-3"])
+        XCTAssertEqual(model.state.revision, 1)
+        lateChanges.cancel(); await model.close()
+    }
+
     @MainActor func testPinnedResolutionRejectsMismatchedResultSelectionBeforePlayingAndCancelsTheExactAttempt() async throws {
         let selections: [MusicPlaybackSelection] = [
             .init(installationId: "different-lx", generation: 1, siteId: "wy", sourceKey: musicSourceKey,
@@ -690,7 +1129,31 @@ final class MusicViewModelTests: XCTestCase {
         metadata.select(enriched, lyricsEnabled: false)
         await metadata.flush()
         XCTAssertTrue(covers.allSatisfy { $0 == original }, "Candidate discovery must not clear or replace an existing cover")
-        metadata.close()
+        await metadata.close()
+    }
+
+    @MainActor func testRepositoryProjectionWinsOverOlderMetadataReadEvenWhenArtworkMatchesInitialEntry() async {
+        let service = MusicModelService(), metadata = MusicPlaybackMetadata()
+        let currentURL = URL(string: "https://artwork.invalid/current.png")!
+        let oldURL = URL(string: "https://artwork.invalid/old.png")!
+        let source = MusicNativeSource(sourceKey: "wy-cover", platform: "wy", nativeId: "cover")
+        let entry = MusicQueueEntry(id: "entry", track: .init(ref: .init(kind: .queue, id: "entry"),
+            songId: "song", title: "Current title", sources: [source], artwork: currentURL))
+        let old = MusicQueueEntry(id: entry.id, track: .init(ref: entry.track.ref, songId: entry.track.songId,
+            title: "Older title", sources: [source], artwork: oldURL))
+        let started = expectation(description: "older metadata read held")
+        let gate = MusicCollectionGate { started.fulfill() }
+        await service.replaceMetadataEntry(old, candidates: [.init(source: source, artwork: oldURL)], gate: gate)
+        var displayed: MusicRemoteTrack?, cover: URL?
+        metadata.configure(service: service, accounts: nil) { displayed = $0.track; cover = $0.artwork }
+        metadata.setAccess(available: true, generation: UUID())
+        metadata.select(entry, lyricsEnabled: false)
+        await fulfillment(of: [started], timeout: 2)
+        metadata.project(entry.track)
+        await gate.release(); await metadata.flush()
+        XCTAssertEqual(displayed, entry.track)
+        XCTAssertEqual(cover, currentURL, "A late read cannot replace the repository's latest adopted resource")
+        await metadata.close()
     }
 
     @MainActor func testArtworkFailureBeforeMetadataLoadSkipsDuplicateURLsAndLateFailures() async {
@@ -705,6 +1168,7 @@ final class MusicViewModelTests: XCTestCase {
         await service.replaceMetadataEntry(entry, candidates: [
             .init(source: sources[0], artwork: failed), .init(source: sources[1], artwork: failed),
             .init(source: sources[2], artwork: fallback)], gate: gate)
+        await service.setArtworkFallback(fallback, for: failed)
         var cover: URL?
         metadata.configure(service: service, accounts: nil) { cover = $0.artwork }
         metadata.setAccess(available: true, generation: UUID())
@@ -716,37 +1180,33 @@ final class MusicViewModelTests: XCTestCase {
         metadata.artworkFailed(failed)
         XCTAssertEqual(cover, fallback, "A late failure for the previous URL cannot advance the current cover")
         metadata.artworkFailed(fallback)
+        await metadata.flush()
         XCTAssertNil(cover, "All failed URLs must settle instead of cycling")
-        metadata.close()
+        await metadata.close()
     }
 
-    @MainActor func testEarlyArtworkBytesPersistAfterAdmissionAndRestoreForTheRetainedURL() async {
+    @MainActor func testArtworkReferenceSurvivesAdmissionAndRestoreWithoutPlayerOwnedBytes() async {
         let service = MusicModelService(), metadata = MusicPlaybackMetadata()
         let url = URL(string: "https://artwork.invalid/cached.png")!
         let source = MusicNativeSource(sourceKey: "wy-cover", platform: "wy", nativeId: "cover")
         let entry = MusicQueueEntry(id: "entry", track: .init(ref: .init(kind: .queue, id: "entry"),
             songId: "song", title: "Song", sources: [source], artwork: url))
         let started = expectation(description: "metadata candidates held")
-        let stored = expectation(description: "early image persisted after source admission")
         let gate = MusicCollectionGate { started.fulfill() }
-        let cache = MusicMetadataDisplayCache { stored.fulfill() }
-        let data = Data([1, 2, 3])
-        var bytes: Data?
-        metadata.configure(service: service, accounts: MusicMetadataCacheAccounts()) { bytes = $0.cachedArtwork }
-        metadata.setDisplayCache(cache)
+        var artwork: URL?
+        metadata.configure(service: service, accounts: MusicMetadataCacheAccounts()) { artwork = $0.artwork }
         metadata.setAccess(available: true, generation: UUID())
         await service.replaceMetadataEntry(entry, candidates: [.init(source: source, artwork: url)], gate: gate)
         metadata.select(entry, lyricsEnabled: false)
         await fulfillment(of: [started], timeout: 2)
-        metadata.capturedArtwork(data, url: url)
-        XCTAssertEqual(bytes, data)
+        XCTAssertEqual(artwork, url)
         await gate.release(); await metadata.flush()
-        await fulfillment(of: [stored], timeout: 2)
+        XCTAssertEqual(artwork, url)
         metadata.clearSelection()
         metadata.select(entry, lyricsEnabled: false, restoreOnly: true)
         await metadata.flush()
-        XCTAssertEqual(bytes, data, "Selecting the entry URL must still consume the persisted image bytes")
-        metadata.close()
+        XCTAssertEqual(artwork, url, "Restoring playback keeps a resource reference for the shared loader")
+        await metadata.close()
     }
 
     @MainActor func testMissingArtworkUsesCandidatesAndExplicitPolicyChangesReplaceTheCover() async throws {
@@ -759,18 +1219,21 @@ final class MusicViewModelTests: XCTestCase {
             songId: "song", title: "Song", sources: sources))
         await service.replaceMetadataEntry(entry, candidates: [
             .init(source: sources[0], artwork: first), .init(source: sources[1], artwork: second)])
+        await service.setMetadataArtwork(first)
         var cover: URL?
         metadata.configure(service: service, accounts: nil) { cover = $0.artwork }
         metadata.setAccess(available: true, generation: UUID())
         metadata.select(entry, lyricsEnabled: false); await metadata.flush()
         XCTAssertEqual(cover, first)
         _ = try await service.updateMetadataPreferences(.init(ifRevision: 0, enabledPlatforms: [.qq]))
+        await service.setMetadataArtwork(second)
         metadata.select(entry, lyricsEnabled: false, force: true); await metadata.flush()
         XCTAssertEqual(cover, second)
         _ = try await service.updateMetadataPreferences(.init(ifRevision: 1, enabledPlatforms: []))
+        await service.setMetadataArtwork(nil)
         metadata.select(entry, lyricsEnabled: false, force: true); await metadata.flush()
         XCTAssertNil(cover, "Explicitly disabled metadata cannot be recovered from the previous display")
-        metadata.close()
+        await metadata.close()
     }
 
     @MainActor func testArtworkSelectionRejectsOldMetadataAfterTrackChangeAndAccessRevocation() async {
@@ -797,7 +1260,7 @@ final class MusicViewModelTests: XCTestCase {
         XCTAssertEqual(cover, next.track.artwork); XCTAssertEqual(occurrence, next.id)
         metadata.setAccess(available: false, generation: UUID())
         XCTAssertNil(cover); XCTAssertNil(occurrence)
-        metadata.close()
+        await metadata.close()
     }
 
     @MainActor func testProgressDoesNotInvalidateLibrarySettingsOrQueueContent() async {
@@ -1034,6 +1497,27 @@ final class MusicViewModelTests: XCTestCase {
         let facts = await service.recordedFacts(); XCTAssertTrue(facts.isEmpty)
         model.setAvailable(true); await model.load()
         XCTAssertEqual(player.resources.count, 1); XCTAssertNil(model.activeResourceID)
+        await model.close()
+    }
+
+    @MainActor func testSearchAccessConsumesProviderEchoFactsWithoutIdentityReadmission() async throws {
+        let (service, _, model) = setup()
+        await model.load()
+        let track = try XCTUnwrap(model.current?.track)
+        let collection = MusicPublicBrowseCollection(platform: .qq, nativeID: "canonical", title: "当前集合")
+        await service.returnSearchResults(
+            .init(platform: "tx", query: "canonical keyword", page: 2, limit: 60, total: 1,
+                  nextPage: 7, items: [track]),
+            playlists: .init(platform: .qq, query: "canonical keyword", page: 3, limit: 60,
+                             total: 1, nextPage: 8, items: [collection]))
+        let songs = try await model.searchPage(platform: "wy", query: "submitted keyword", page: 1, limit: 30)
+        XCTAssertEqual(songs.platform, "tx"); XCTAssertEqual(songs.query, "canonical keyword")
+        XCTAssertEqual(songs.page, 2); XCTAssertEqual(songs.limit, 60)
+        XCTAssertEqual(songs.items, [track]); XCTAssertEqual(songs.nextPage, 7)
+        let playlists = try await model.searchPlaylistPage(platform: .netease, query: "submitted keyword", page: 1, limit: 30)
+        XCTAssertEqual(playlists.platform, .qq); XCTAssertEqual(playlists.query, "canonical keyword")
+        XCTAssertEqual(playlists.page, 3); XCTAssertEqual(playlists.limit, 60)
+        XCTAssertEqual(playlists.items, [collection]); XCTAssertEqual(playlists.nextPage, 8)
         await model.close()
     }
 

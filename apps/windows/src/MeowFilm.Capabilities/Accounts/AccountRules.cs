@@ -14,11 +14,12 @@ internal static class AccountRules
     {
         "INVALID_REQUEST", "INVALID_CREDENTIALS", "AUTH_REQUIRED", "AUTH_EXPIRED", "FORBIDDEN",
         "VERIFICATION_REQUIRED", "SIGNATURE_REQUIRED", "DEVICE_CONTEXT_REQUIRED", "UNSUPPORTED",
-        "NETWORK_ERROR", "UPSTREAM_ERROR", "INVALID_RESPONSE", "REDIRECT_DENIED", "RATE_LIMITED",
+        "NETWORK_ERROR", "UPSTREAM_HTTP", "STORAGE_ERROR", "NOT_FOUND", "MEDIA_UNAVAILABLE", "TRIAL_ONLY", "QUALITY_UNAVAILABLE", "UPSTREAM_ERROR", "INVALID_RESPONSE", "REDIRECT_DENIED", "RATE_LIMITED",
         "CANCELLED", "TIMEOUT", "CLOSED", "LIMIT", "STORAGE", "STORAGE_CONFLICT", "STORAGE_UNAVAILABLE",
         "CORRUPT_STORAGE", "COMMIT_UNKNOWN", "STALE_SESSION", "IDENTITY_MISMATCH", "ORIGIN_DENIED",
         "SESSION_CHANGED", "SUPERSEDED", "BUSY", "QR_EXPIRED", "HANDOFF_REJECTED", "HANDOFF_UNCONFIRMED",
-        "ACCOUNT_FAILED", "DEVICE_LIMIT", "INVALID_CODE", "SMS_SEND_UNCONFIRMED", "TRANSFER_FILE", "TRANSFER_FORMAT"
+        "ACCOUNT_FAILED", "DEVICE_LIMIT", "INVALID_CODE", "INVALID_PHONE", "ACCOUNT_SELECTION_REQUIRED",
+        "SMS_SEND_UNCONFIRMED", "TRANSFER_FILE", "TRANSFER_FORMAT"
     };
     internal static string SafeCode(string? code) => code is not null && Codes.Contains(code) ? code : "ACCOUNT_FAILED";
     internal static string Error(Exception error) => error switch
@@ -109,68 +110,9 @@ internal static class AccountRules
         }
         return result;
     }
-    internal static MusicAccountProfile Profile(MusicAccountProfile profile, string platform, string? cookie = null)
-    {
-        Require(profile is not null && profile.Platform == platform, "IDENTITY_MISMATCH");
-        Text(profile!.UserId, 256);
-        Require(profile.UserId.Trim() == profile.UserId, "INVALID_RESPONSE");
-        Text(profile.DisplayName, 200, empty: true);
-        if (profile.Avatar is not null)
-        {
-            Text(profile.Avatar, 2048, empty: true);
-            Require(profile.Avatar.Length == 0 || Uri.TryCreate(profile.Avatar, UriKind.Absolute, out var uri) &&
-                uri.Scheme == "https" && uri.UserInfo.Length == 0, "INVALID_RESPONSE");
-        }
-        if (cookie is not null)
-        {
-            string[] published = [profile.Platform, profile.UserId, profile.DisplayName, profile.Avatar ?? ""];
-            foreach (var (key, secret) in Cookies(cookie))
-            {
-                if (key is "musicid" or "str_musicid" or "userid" or "login_type" or "loginType" or
-                    "os" or "appver" or "versioncode" or "__remember_me" or "vip_type" or
-                    "expired_at" or "expiredAt" or "musickey_create_time" or "musickeyCreateTime" or
-                    "key_expires_in" or "keyExpiresIn" || secret is "" or "-") continue;
-                Require(!published.Any(value => value.Contains(secret, StringComparison.Ordinal) ||
-                    value.Contains(Uri.EscapeDataString(secret), StringComparison.Ordinal)), "INVALID_RESPONSE");
-            }
-        }
-        return profile;
-    }
-    internal static string? Avatar(string? value)
-    {
-        if (value is null || value.Length > 2048) return null;
-        value = value.Replace("{size}", "480", StringComparison.Ordinal);
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != "https" ||
-            uri.UserInfo.Length > 0 || uri.Fragment.Length > 0 ||
-            Match(uri.Host, @"^(localhost|127\.|0\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|\[)") ||
-            Regex.IsMatch(uri.Query, @"\b(cookie|token|authst|musickey|MUSIC_U)=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
-                TimeSpan.FromMilliseconds(100))) return null;
-        return uri.AbsoluteUri;
-    }
     internal static void Challenge(MusicAccountChallenge value, string platform)
     {
-        Require(value is not null && value.Platform == platform && platform is "wy" or "tx" or "kg", "INVALID_RESPONSE");
-        Text(value!.ChallengeId, 80);
-        Require(Guid.TryParseExact(value.ChallengeId, "D", out _), "INVALID_RESPONSE");
-        Require(value.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() &&
-            value.ExpiresAt - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() <= 180000, "INVALID_RESPONSE");
-        if (platform == "tx")
-        {
-            Require(value.Url.Length == 0 && value.ImageBase64 is { Length: > 0 and <= 699052 }, "INVALID_RESPONSE");
-            byte[] bytes;
-            try { bytes = Convert.FromBase64String(value.ImageBase64!); }
-            catch { throw new MusicAccountException("INVALID_RESPONSE"); }
-            AccountQrPng.Validate(bytes);
-            return;
-        }
-        Require(value.ImageBase64 is null, "INVALID_RESPONSE");
-        Text(value.Url, 2048);
-        Require(Uri.TryCreate(value.Url, UriKind.Absolute, out var uri) &&
-            uri.Scheme == "https" && uri.IsDefaultPort && uri.UserInfo.Length == 0 && uri.Fragment.Length == 0 &&
-            (platform == "wy" ? uri.Host == "music.163.com" && uri.AbsolutePath == "/login" &&
-                Match(uri.Query, @"^\?codekey=[A-Za-z0-9_-]{1,256}$")
-                : uri.Host == "h5.kugou.com" && uri.AbsolutePath == "/apps/loginQRCode/html/index.html" &&
-                Match(uri.Query, @"^\?qrcode=[A-Za-z0-9_-]{1,256}$")) &&
-            value.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), "ORIGIN_DENIED");
+        // The native owner associates the challenge with its live operation; Node owns the QR protocol and expiry.
+        Require(value.Platform == platform && !string.IsNullOrEmpty(value.ChallengeId), "INVALID_RESPONSE");
     }
 }

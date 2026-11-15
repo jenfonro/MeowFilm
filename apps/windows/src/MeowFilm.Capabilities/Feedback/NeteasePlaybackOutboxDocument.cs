@@ -28,7 +28,7 @@ internal sealed record NeteasePlaybackPending(Guid PlaybackId, NeteasePlaybackAc
 
 internal static class NeteasePlaybackOutboxDocument
 {
-    internal const string Namespace = "music.playback-outbox.v1";
+    internal const string Namespace = "music.playback-outbox.v2";
     // Retention/capacity/byte bounds are local resource and privacy boundaries,
     // not minimum listening time, counting thresholds or a retry allowance.
     internal const int MaximumEvents = 256;
@@ -80,12 +80,12 @@ internal static class NeteasePlaybackOutboxDocument
     {
         FeedbackProtocolRules.Require(entry is not null && entry.PlaybackId != Guid.Empty && entry.Account is not null &&
             entry.ConsentRevision >= 0 &&
-            FeedbackProtocolRules.Text(entry.Account.Scope, 256) && entry.Account.Generation >= 0 &&
+            FeedbackProtocolRules.Text(entry.Account.Scope) && entry.Account.Generation >= 0 &&
             FeedbackProtocolRules.Id(entry.Account.UserId) && FeedbackProtocolRules.Id(entry.RecordingId) &&
             entry.Count > 0 && (entry.Start is null ? entry.StartConfirmed && entry.End is not null : !entry.StartConfirmed) &&
-            (entry.Source is null || FeedbackProtocolRules.Text(entry.Source, MaximumEventBytes)) &&
-            (entry.SourceId is null || entry.Source is not null && FeedbackProtocolRules.Text(entry.SourceId, MaximumEventBytes, true)) &&
-            (entry.Algorithm is null || FeedbackProtocolRules.Text(entry.Algorithm, MaximumEventBytes)) &&
+            (entry.Source is null || FeedbackProtocolRules.Text(entry.Source)) &&
+            (entry.SourceId is null || entry.Source is not null && FeedbackProtocolRules.Text(entry.SourceId, true)) &&
+            (entry.Algorithm is null || FeedbackProtocolRules.Text(entry.Algorithm)) &&
             (entry.PlayScene is null or "heartbeat"), "CORRUPT_STORAGE");
         if (entry.Start is { } start)
             FeedbackProtocolRules.Require(Valid(start) && start.Time == 0 && start.Realtime == 0 &&

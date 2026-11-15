@@ -11,6 +11,30 @@ public static partial class DesktopTests
 {
     private static IEnumerable<TestCase> PresentationCases()
     {
+        yield return Case("owned setting notices survive page retirement ordinary notices and expiry until their own receipt clears", async () =>
+        {
+            var module = new OwnedNoticeProbe();
+            var first = new object(); var second = new object();
+            const string message = "保存结果未确认";
+            module.Set(new(first, message), new(second, message));
+            await using var f = new Fixture([module]);
+            await f.LoadAsync(); await DrainAsync();
+            var stack = f.Element<NoticeStack>("Notices");
+            Equal(2, stack.Children.Count, "same-message independent owners remain visible");
+            True(LogicalDescendants(stack).OfType<Button>().All(button => button.Visibility == Visibility.Collapsed),
+                "unknown receipts cannot be dismissed as if they were settled");
+            stack.Show(new object(), message);
+            for (int index = 0; index < 5; index++) stack.Show(new object(), "普通通知" + index);
+            Equal(5, stack.Children.Count, "ordinary bounded queue does not evict owned notices");
+            Click(f.Element<Button>("SettingsButton")); await DrainAsync();
+            Click(f.Back); await DrainAsync();
+            await Task.Delay(TimeSpan.FromMilliseconds(8500));
+            Equal(2, stack.Children.Count, "page retirement and normal expiry leave unknown receipts");
+            module.Set(new DesktopOwnedNotice(second, message)); await DrainAsync();
+            Equal(1, stack.Children.Count, "one successful receipt clears only its owner");
+            module.Set(); await DrainAsync();
+            Equal(0, stack.Children.Count, "last successful receipt withdraws its notice");
+        }, TimeSpan.FromSeconds(12));
         yield return Case("window notices update deduplicate dismiss and never occupy page layout", async () =>
         {
             var root = new Grid();
@@ -155,5 +179,16 @@ public static partial class DesktopTests
             var clip = (RectangleGeometry)f.Element<Grid>("PresentationSurface").Clip;
             Equal(0d, clip.RadiusX, "no duplicate WPF corner");
         });
+    }
+
+    private sealed class OwnedNoticeProbe() : ProbeModule("owned-notices"), IDesktopOwnedNoticeSource
+    {
+        public IReadOnlyList<DesktopOwnedNotice> OwnedNotices { get; private set; } = [];
+        public event EventHandler? OwnedNoticesChanged;
+        internal void Set(params DesktopOwnedNotice[] notices)
+        {
+            OwnedNotices = notices;
+            OwnedNoticesChanged?.Invoke(this, EventArgs.Empty);
+        }
     }
 }

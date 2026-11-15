@@ -29,8 +29,8 @@ public sealed class MusicAccountDetailsViewModel(IMusicAccountDetailsSource sour
     public string DisplayName => snapshot?.Profile?.DisplayName ?? "";
     public string UserId => snapshot?.Profile?.UserId ?? "";
     public string Avatar => snapshot?.Profile?.Avatar is { } address &&
-        Uri.TryCreate(address, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&
-        uri.IsDefaultPort && uri.UserInfo.Length == 0 && uri.Fragment.Length == 0 ? address : "";
+        Uri.TryCreate(address, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http" &&
+        uri.UserInfo.Length == 0 ? address : "";
     public string Status => status;
     public string ProfileState => snapshot?.ProfileFreshness switch
     {
@@ -146,19 +146,8 @@ public sealed class MusicAccountDetailsViewModel(IMusicAccountDetailsSource sour
                     result.Generation > 9_007_199_254_740_991L ||
                     refresh && result.Generation != selected.Generation ||
                     result.State is not ("none" or "saved" or "verified" or "revoked") ||
-                    refresh && selected.State is not ("saved" or "verified") ||
-                    result.Profile is { } profile &&
-                    (profile.Platform != selected.Platform ||
-                     result.Generation == selected.Generation && selected.UserId.Length > 0 &&
-                     profile.UserId != selected.UserId))
+                    refresh && selected.State is not ("saved" or "verified"))
                     throw new MusicOperationException("STALE_SESSION");
-                if (result.Membership is null || result.Membership.Tier is null || result.Membership.Tier.Length > 64 ||
-                    result.Membership.Tier.Any(char.IsControl) || result.AudioLevels is null || result.AudioLevels.Count > 32 ||
-                    !Enum.IsDefined(result.ProfileFreshness) || !Enum.IsDefined(result.MembershipFreshness) ||
-                    result.State is "none" or "revoked" && (result.Profile is not null ||
-                        result.MembershipFreshness == MusicAccountDetailsFreshness.Fresh) ||
-                    result.AudioLevels.Any(s => s is null || s.Length > 64 || s.Any(char.IsControl)))
-                    throw new MusicOperationException("INVALID_RESPONSE");
                 snapshot = result;
                 status = result.ErrorCode is { Length: > 0 } code ? Error(code) :
                     result.VerificationDeferred ? "等待平台验证" : "";
@@ -180,7 +169,7 @@ public sealed class MusicAccountDetailsViewModel(IMusicAccountDetailsSource sour
                 };
                 // Never retain another account's display after a generation/credential fence.
                 if (code is "STALE_SESSION" or "SESSION_CHANGED" or "IDENTITY_MISMATCH" or
-                    "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" or "VERIFICATION_REQUIRED" or
+                    "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or
                     "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" or "CLOSED")
                     snapshot = null;
                 status = Error(code);
@@ -268,7 +257,7 @@ public sealed class MusicAccountDetailsViewModel(IMusicAccountDetailsSource sour
     }
     private static string Error(string code) => code switch
     {
-        "AUTH_REQUIRED" or "AUTH_EXPIRED" => "账号会话无效或已过期",
+        "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" => "账号会话无效或已过期",
         "STALE_SESSION" or "SESSION_CHANGED" or "IDENTITY_MISMATCH" => "账号会话已变更",
         "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" => "账号写入待核对",
         "RATE_LIMITED" => "请求过于频繁",

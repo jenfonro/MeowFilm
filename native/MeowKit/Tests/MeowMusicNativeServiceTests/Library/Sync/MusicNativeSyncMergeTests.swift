@@ -1,12 +1,12 @@
 import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 @MainActor final class MusicNativeSyncMergeTests: XCTestCase {
-    private func mappingStore(_ tracks: [MusicNativeTrackData]) throws -> NativeMusicMemoryDocument {
+    private func mappingStore(_ songs: [MJ]) throws -> NativeMusicMemoryDocument {
         var document = try MusicDocument(nil, runID: "mapping")
-        let songs = try tracks.map(MusicModel.normalize)
         document.library["library"]["songs"] = .obj(songs.map { ($0["songId"].string, $0) })
         var favorites = document.library["library"]["collections"].array[0]
         favorites["order"] = .strings(songs.map { $0["songId"].string })
@@ -15,12 +15,10 @@ import MeowMusicFeature
     }
 
     private func missingMappings(failure: MusicServiceError) async throws ->
-        (service: NativeMusicService, http: MusicNativeCandidateDiscoveryHTTP, search: MusicNativeCandidateDiscoveryQQ) {
+        (service: NativeMusicService, http: MusicNativeDiscoveryPlatforms, search: MusicNativeCandidateDiscoveryQQ) {
         var document = try MusicDocument(nil, runID: "mapping")
-        var first = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kg", id: "A", title: "First recording")),
-            second = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("kg", id: "B", title: "Second recording"))
-        first["songId"] = .string("song:first")
-        second["songId"] = .string("song:second")
+        let first = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kg", id: "A", title: "First recording")),
+            second = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kg", id: "B", title: "Second recording"))
         document.library["library"]["songs"] = .obj([
             (first["songId"].string, first), (second["songId"].string, second)
         ])
@@ -31,10 +29,19 @@ import MeowMusicFeature
         let wy = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)]),
             qq = NativeSyncPeer(platform: .qq, rows: [NativeSyncFixture.collection("600", name: "Favorites", kind: .favorites)])
         let accounts = MultiPlatformSyncPeer([.netease: wy, .qq: qq])
-        let http = MusicNativeCandidateDiscoveryHTTP(failures: ["wy": failure])
+        let http = MusicNativeDiscoveryPlatforms(failures: ["wy": failure])
         let search = MusicNativeCandidateDiscoveryQQ()
-        let service = NativeMusicService(document: store, accounts: accounts,
-            qq: search, transport: http, clock: { NativeMusicFixture.date })
+        let routes = NativeMusicFixture.routes(primary: search, others: http)
+        let platform = try MusicPlatformFixture { request in
+            do { return try await routes.respond(request) }
+            catch let error as MusicServiceError where error == .connectionFailed {
+                throw MusicPlatformFixture.Failure.remote("NETWORK_ERROR")
+            }
+        }
+        let service = NativeMusicService(document: store,
+            accounts: accounts,
+            platformClient: platform.makeClient(),
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         await wy.clearCalls(); await qq.clearCalls()
         return (service, http, search)
@@ -91,22 +98,23 @@ import MeowMusicFeature
     }
 
     private func record(_ cache: any MusicSourceDiscoveryCaching, song: MJ, source: MJ? = nil) async {
-        let rows: [MusicSourceDiscoverySource] = source.map {
-            [.init(sourceKey: $0["sourceKey"].string, source: "wy", musicInfo: $0["musicInfo"].json)]
-        } ?? []
-        await cache.record(fingerprint: MusicModel.fingerprint(song), duration: song["duration"].number,
-            platform: "wy", checkedAt: NativeMusicFixture.date.timeIntervalSince1970 * 1000, sources: rows)
+        let at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+        await cache.observe(songID: song["songId"].string,
+            observation: .init(startedAt: at, checkedAt: at, platform: "wy",
+                query: song["title"].string + " " + song["artist"].string, scope: .recording,
+                outcome: source == nil ? .notFound : .found),
+            sourceKeys: source.map { [$0["sourceKey"].string] } ?? [])
     }
 
     func testCachedMappingSourcesAreUpsertedAndPushedWithoutSearching() async throws {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let source = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321"))["sources"].array[0]
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
         await record(cache, song: song, source: source)
-        let store = try mappingStore([MusicNativeCandidateDiscoveryFixture.track()])
+        let store = try mappingStore([MusicModel.mergeSources(song, adding: [source])])
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-        let http = MusicNativeCandidateDiscoveryHTTP()
-        let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+        let http = MusicNativeDiscoveryPlatforms()
+        let service = try await NativeMusicFixture.service(store, accounts: peer, platform: http, sourceDiscovery: cache)
         let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
         XCTAssertEqual(state.phase, .synced)
         let calls = await http.calls(), writes = await peer.calls()
@@ -124,14 +132,14 @@ import MeowMusicFeature
             MusicNativeCandidateDiscoveryFixture.track(id: "FirstMID", title: "First recording"),
             MusicNativeCandidateDiscoveryFixture.track(id: "SecondMID", title: "Second recording")
         ]
-        let second = try MusicModel.normalize(tracks[1])
+        let first = try NativeMusicFixture.storedSong(tracks[0]), second = try NativeMusicFixture.storedSong(tracks[1])
         let cached = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321", title: "Second recording"))
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
         await record(cache, song: second, source: cached["sources"].array[0])
-        let store = try mappingStore(tracks)
+        let store = try mappingStore([first, MusicModel.mergeSources(second, adding: cached["sources"].array)])
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-        let http = MusicNativeCandidateDiscoveryHTTP(failures: ["wy": .rateLimited])
-        let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+        let http = MusicNativeDiscoveryPlatforms(failures: ["wy": .rateLimited])
+        let service = try await NativeMusicFixture.service(store, accounts: peer, platform: http, sourceDiscovery: cache)
         let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
         XCTAssertEqual(state.phase, .partial)
         let calls = await http.calls(), writes = await peer.calls()
@@ -145,20 +153,23 @@ import MeowMusicFeature
     func testConflictingCachedNativeIDDoesNotOverwriteAnotherSongOrBlockOtherMappings() async throws {
         let first = MusicNativeCandidateDiscoveryFixture.track()
         let other = MusicNativeCandidateDiscoveryFixture.track("wy", id: "321", title: "Other recording")
-        let song = try MusicModel.normalize(first), known = try MusicModel.normalize(other)
+        let song = try NativeMusicFixture.storedSong(first), known = try NativeMusicFixture.storedSong(other)
         let cached = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321"))
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
         await record(cache, song: song, source: cached["sources"].array[0])
-        let store = try mappingStore([first, other])
+        let store = try mappingStore([song, known])
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-        let http = MusicNativeCandidateDiscoveryHTTP()
-        let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+        let http = MusicNativeDiscoveryPlatforms()
+        let service = try await NativeMusicFixture.service(store, accounts: peer, platform: http, sourceDiscovery: cache)
+        let registered = try await service.adoptSongs([try MusicModel.normalize(first), try MusicModel.normalize(other)], authoritative: true)
+        XCTAssertEqual(registered.map { $0["songId"].string }, [song["songId"].string, known["songId"].string])
+        let before = try NativeSyncFixture.document(store).library["library"]["songs"]
         let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
         XCTAssertEqual(state.phase, .partial)
         XCTAssertTrue(state.issues.contains { $0.code == "unmapped" })
         let saved = try NativeSyncFixture.document(store).library["library"]["songs"]
-        XCTAssertEqual(saved[song["songId"].string], song)
-        XCTAssertEqual(saved[known["songId"].string], known)
+        XCTAssertEqual(saved[song["songId"].string], before[song["songId"].string])
+        XCTAssertEqual(saved[known["songId"].string], before[known["songId"].string])
         let calls = await http.calls(), writes = await peer.calls()
         XCTAssertTrue(calls.isEmpty)
         XCTAssertEqual(writes.flatMap(\.members).map(\.nativeID), ["321"])
@@ -167,12 +178,14 @@ import MeowMusicFeature
 
     func testCachedEmptyMappingAvoidsNetworkAndKeepsUnmappedPartial() async throws {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
         await record(cache, song: song)
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-        let http = MusicNativeCandidateDiscoveryHTTP()
-        let service = try await NativeMusicFixture.service(mappingStore([MusicNativeCandidateDiscoveryFixture.track()]),
-            accounts: peer, http: http, sourceDiscovery: cache)
+        let http = MusicNativeDiscoveryPlatforms()
+        let service = try await NativeMusicFixture.service(mappingStore([song]),
+            accounts: peer,
+            platform: http,
+            sourceDiscovery: cache)
         let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
         XCTAssertEqual(state.phase, .partial)
         XCTAssertTrue(state.issues.contains { $0.code == "unmapped" })
@@ -183,14 +196,17 @@ import MeowMusicFeature
 
     func testEmptyMappingCheckIsReusedForThirtyDays() async throws {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
         await record(cache, song: song)
         let day: TimeInterval = 24 * 60 * 60
         for (age, searches) in [(25 * day, 0), (31 * day, 1)] {
             let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-            let http = MusicNativeCandidateDiscoveryHTTP(empty: ["wy"]), at = NativeMusicFixture.date.addingTimeInterval(age)
-            let service = try await NativeMusicFixture.service(mappingStore([MusicNativeCandidateDiscoveryFixture.track()]),
-                accounts: peer, http: http, sourceDiscovery: cache, clock: { at })
+            let http = MusicNativeDiscoveryPlatforms(empty: ["wy"]), at = NativeMusicFixture.date.addingTimeInterval(age)
+            let service = try await NativeMusicFixture.service(mappingStore([song]),
+            accounts: peer,
+            platform: http,
+            sourceDiscovery: cache,
+            clock: { at })
             _ = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
             let calls = await http.calls()
             XCTAssertEqual(calls.count, searches, "sync rechecks an empty platform only after 30 days")
@@ -202,62 +218,64 @@ import MeowMusicFeature
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let source = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321"))["sources"].array[0]
         for cached in [true, false] {
-            let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+            let cache = MusicNativeMemorySourceDiscoveryCache()
             if cached { await record(cache, song: song, source: source) }
-            let store = try mappingStore([MusicNativeCandidateDiscoveryFixture.track()])
+            let store = try mappingStore([MusicModel.mergeSources(song, adding: cached ? [source] : [])])
             let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-            let http = MusicNativeCandidateDiscoveryHTTP()
-            let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+            let http = MusicNativeDiscoveryPlatforms()
+            let service = try await NativeMusicFixture.service(store, accounts: peer, platform: http, sourceDiscovery: cache)
             try await service.excludeRecordingSource(song, sourceKey: source["sourceKey"].string)
             let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
             XCTAssertEqual(state.phase, .partial)
             let saved = try NativeSyncFixture.document(store).library["library"]["songs"][song["songId"].string]
-            XCTAssertEqual(try MusicModel.sources(saved).map(\.platform), ["tx"])
+            XCTAssertEqual(try MusicModel.sources(saved).map(\.platform), ["tx", "wy"])
             let calls = await http.calls(), writes = await peer.calls()
             XCTAssertEqual(calls.count, cached ? 0 : 1); XCTAssertTrue(writes.isEmpty)
             await service.close()
         }
     }
 
-    func testMappingCheckpointFiltersDecisionsCommittedAfterCacheOrNetworkMappingAcrossSongIDs() async throws {
+    func testMappingCheckpointKeepsFactsAndCurrentDecisionsAfterCacheOrNetworkMapping() async throws {
         for cached in [true, false] {
             let primary = try MusicNativeCandidateDiscoveryFixture.song()
             let existing = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(id: "existing"))
             let song = try MusicModel.mergeSources(primary, adding: existing["sources"].array)
             let source = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321"))["sources"].array[0]
-            let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+            let cache = MusicNativeMemorySourceDiscoveryCache()
             if cached { await record(cache, song: song, source: source) }
-            let store = try mappingStore([MusicNativeCandidateDiscoveryFixture.track()])
+            let stored = try MusicModel.mergeSources(song, adding: cached ? [source] : [])
+            let store = try mappingStore([stored])
             var initial = try NativeSyncFixture.document(store)
-            initial.library["library"]["songs"][song["songId"].string] = song
+            initial.library["library"]["songs"][song["songId"].string] = stored
             store.replace(try initial.encode(changed: ["library"]))
             let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-            let http = MusicNativeCandidateDiscoveryHTTP()
-            let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+            let http = MusicNativeDiscoveryPlatforms()
+            let service = try await NativeMusicFixture.service(store, accounts: peer, platform: http, sourceDiscovery: cache)
             let document = try await service.read(), epoch = await service.epoch
             let request = NativeSyncFixture.request(favorites: true, playlists: false)
             var round = MusicNativeSyncRound(request: request, epoch: epoch, port: peer,
                 library: document.library["library"], ledger: try MusicNativeSyncLedger.load(document.library),
                 revision: document.library["revision"].int)
             round.sessions["wy"] = try await peer.beginLibrarySync(platform: .netease)
-            let baseline = round.library
             try await service.syncMapMissing(&round)
             let id = song["songId"].string, key = source["sourceKey"].string
-            XCTAssertTrue(round.library["songs"][id]["sources"].array.contains { $0["sourceKey"].string == key })
+            let mapped = try await service.read().library["library"]["songs"][id]
+            XCTAssertTrue(mapped["sources"].array.contains { $0["sourceKey"].string == key })
             let calls = await http.calls()
             XCTAssertEqual(calls, cached ? [] : ["wy"])
 
             // Mapping has completed, but its business transaction is still pending.
-            var otherEntrance = primary
-            otherEntrance["songId"] = .string("song:other-entrance")
-            try await service.excludeRecordingSource(otherEntrance, sourceKey: key)
-            try await service.excludeRecordingSource(otherEntrance, sourceKey: existing["sources"].array[0]["sourceKey"].string)
-            try await service.syncCheckpoint(&round, mappingBaseline: baseline)
+            try await service.excludeRecordingSource(primary, sourceKey: key)
+            try await service.excludeRecordingSource(primary, sourceKey: existing["sources"].array[0]["sourceKey"].string)
+            try await service.syncCheckpoint(&round)
             let saved = try NativeSyncFixture.document(store).library["library"]["songs"][id]
-            XCTAssertEqual(saved["sources"], song["sources"])
-            XCTAssertEqual(round.library["songs"][id]["sources"], song["sources"],
-                "The subsequent push must consume the filtered committed library")
+            XCTAssertTrue(saved["sources"].array.contains { $0["sourceKey"].string == key })
+            XCTAssertEqual(round.library["songs"][id]["sources"], saved["sources"],
+                "Checkpoint preserves current repository facts; exclusions filter the push, not source ownership")
             XCTAssertEqual(saved["songId"], song["songId"])
+            let exclusions = try await service.recordingSourceExclusions(saved)
+            XCTAssertEqual(exclusions, Set([key, existing["sources"].array[0]["sourceKey"].string]))
+            await peer.endLibrarySync(try XCTUnwrap(round.sessions["wy"]))
             await service.close()
         }
     }
@@ -265,12 +283,12 @@ import MeowMusicFeature
     func testIncompatibleCachedMappingSourcesAreIgnoredWithoutRequeryingSuccessfulPlatform() async throws {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let unrelated = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "321", artist: "Other artist"))
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
         await record(cache, song: song, source: unrelated["sources"].array[0])
-        let store = try mappingStore([MusicNativeCandidateDiscoveryFixture.track()])
+        let store = try mappingStore([song])
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-        let http = MusicNativeCandidateDiscoveryHTTP()
-        let service = try await NativeMusicFixture.service(store, accounts: peer, http: http, sourceDiscovery: cache)
+        let http = MusicNativeDiscoveryPlatforms()
+        let service = try await NativeMusicFixture.service(store, accounts: peer, platform: http, sourceDiscovery: cache)
         let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
         XCTAssertEqual(state.phase, .partial)
         let saved = try NativeSyncFixture.document(store).library["library"]["songs"][song["songId"].string]
@@ -282,13 +300,17 @@ import MeowMusicFeature
 
     func testSuccessfulEmptyMappingSearchFeedsThePlaybackDiscoveryCache() async throws {
         let track = MusicNativeCandidateDiscoveryFixture.track(title: "Unmatched recording")
-        let store = try mappingStore([track]), peer = NativeSyncPeer(rows: [
+        let store = try mappingStore([NativeMusicFixture.storedSong(track)]), peer = NativeSyncPeer(rows: [
             NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)
         ])
-        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
-        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
-        let service = NativeMusicService(document: store, accounts: peer, qq: qq, sourceDiscovery: cache,
-            enabledPlatforms: [.netease, .qq], transport: http, clock: { NativeMusicFixture.date })
+        let cache = MusicNativeMemorySourceDiscoveryCache()
+        let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = NativeMusicService(document: store,
+            accounts: peer,
+            platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),
+            sourceDiscovery: cache,
+            enabledPlatforms: [.netease, .qq],
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
         XCTAssertEqual(state.phase, .partial)
@@ -308,8 +330,8 @@ import MeowMusicFeature
     func testMissingMappingSearchHasNoFormerSixtySongCutoff() async throws {
         let tracks = (0..<65).map { MusicNativeCandidateDiscoveryFixture.track(id: "Missing\($0)", title: "Unmatched \($0)") }
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
-        let http = MusicNativeCandidateDiscoveryHTTP()
-        let service = try await NativeMusicFixture.service(mappingStore(tracks), accounts: peer, http: http)
+        let http = MusicNativeDiscoveryPlatforms()
+        let service = try await NativeMusicFixture.service(mappingStore(tracks.map(NativeMusicFixture.storedSong)), accounts: peer, platform: http)
         let state = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
         let calls = await http.calls()
         XCTAssertEqual(calls.filter { $0 == "wy" }.count, 65)
@@ -326,9 +348,9 @@ import MeowMusicFeature
 
     private func validFence(members: [MusicLibrarySyncMember]) -> MusicNativeSyncFence {
         .init(platform: .netease, accountID: "42", scope: "synthetic-install:local-account", localID: "favorites",
-              localRevision: 0, mutation: .init(action: .order, collectionID: "501",
+              localRevision: 0, mutation: .init(.init(action: .order, collectionID: "501",
                                                before: NativeSyncFixture.collection("501", members: members),
-                                               members: members))
+                                               members: members)))
     }
 
     private func syncSnapshotFixture(peer: NativeSyncPeer,
@@ -359,7 +381,7 @@ import MeowMusicFeature
 
     private func validTrack(_ track: Data) throws {
         let raw = try MJ.parse(track, maximum: 16 * 1024)
-        try MusicModel.rejectSecrets(raw)
+        XCTAssertTrue(raw.isObject)
         _ = try MusicModel.normalize(.init(platform: "wy", data: track))
     }
 
@@ -421,7 +443,7 @@ import MeowMusicFeature
         await fixture.service.close()
     }
 
-    func testSnapshotMembersBeyondByteBudgetStillFail() async throws {
+    func testSnapshotDoesNotRepeatPerHopBudgetAcrossAcquiredTracksOrRetainUnusedPadding() async throws {
         let members = try verifiedOversizeTrackMembers(count: 350)
         let selection = MusicLibrarySyncSelection(platform: .netease, favorites: true, playlists: false)
         let peer = NativeSyncPeer(platform: .netease, rows: [
@@ -429,11 +451,12 @@ import MeowMusicFeature
         ])
         let fixture = try await syncSnapshotFixture(peer: peer, selection: selection)
         let round = fixture.round
-        do {
-            _ = try await fixture.service.syncSnapshot(
-                try XCTUnwrap(round.sessions[MusicAccountPlatform.netease.rawValue]), selection: selection, round: round)
-            XCTFail("The real snapshot byte budget was removed")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+        let snapshot = try await fixture.service.syncSnapshot(
+            try XCTUnwrap(round.sessions[MusicAccountPlatform.netease.rawValue]), selection: selection, round: round)
+        XCTAssertEqual(snapshot.collections.first?.members.count, 350)
+        let document = try await fixture.service.read()
+        XCTAssertEqual(document.library["library"]["songs"].fields.count, 1)
+        XCTAssertFalse(document.library.json.contains("padding"))
         await peer.endLibrarySync(try XCTUnwrap(round.sessions[MusicAccountPlatform.netease.rawValue]))
         await fixture.service.close()
     }
@@ -456,7 +479,11 @@ import MeowMusicFeature
     }
 
     func testFenceMembersAndBeforeBeyondRealBudgetStillFail() throws {
-        let members = try verifiedOversizeTrackMembers(count: 350)
+        let padding = String(repeating: "o", count: 8192)
+        let members = (0..<350).map {
+            MusicLibrarySyncMember(nativeID: "101", occurrenceID: "o-\($0)-" + padding,
+                                   track: NativeSyncFixture.member("101").track)
+        }
         var ledger = MusicNativeSyncLedger()
         ledger.scopes["wy"] = "synthetic-install:local-account"
         ledger.fences = [validFence(members: members)]
@@ -465,7 +492,7 @@ import MeowMusicFeature
         }
     }
 
-    func testFenceDuplicateOccurrencesAndInvalidMemberIdentityStillFail() throws {
+    func testFenceDuplicateOccurrencesAndMissingWriteIdentityStillFail() throws {
         let duplicate = (0..<2).map { _ in NativeSyncFixture.member("101", occurrence: "same") }
         var duplicateLedger = MusicNativeSyncLedger()
         duplicateLedger.scopes["wy"] = "synthetic-install:local-account"
@@ -475,14 +502,14 @@ import MeowMusicFeature
         }
 
         let valid = NativeSyncFixture.member("101", occurrence: "Invalid")
-        let invalid = MusicLibrarySyncMember(nativeID: "other", occurrenceID: "Invalid", track: valid.track)
+        let invalid = MusicLibrarySyncMember(nativeID: "", occurrenceID: "Invalid", track: valid.track)
         var invalidLedger = MusicNativeSyncLedger()
         invalidLedger.scopes["wy"] = "synthetic-install:local-account"
         invalidLedger.fences = [
             .init(platform: .netease, accountID: "42", scope: "synthetic-install:local-account", localID: "favorites",
-                  localRevision: 0, mutation: .init(action: .order, collectionID: "501",
+                  localRevision: 0, mutation: .init(.init(action: .order, collectionID: "501",
                                                    before: NativeSyncFixture.collection("501", members: [invalid]),
-                                                   members: [invalid]))
+                                                   members: [invalid])))
         ]
         XCTAssertThrowsError(try MusicNativeSyncLedger.load(try libraryWrapper(ledger: invalidLedger))) {
             XCTAssertEqual($0 as? MusicServiceError, .corruptDocument)
@@ -536,7 +563,7 @@ import MeowMusicFeature
         _ = try await service.synchronizeLibrary(NativeSyncFixture.request())
         var lists = try await service.collections()
         let writable = try XCTUnwrap(lists.first { $0.title == "Remote" })
-        _ = try await service.editPlaylist(writable, name: nil, refs: NativeSyncFixture.refs([a, b]), order: nil)
+        _ = try await service.editPlaylist(writable, name: nil, refs: try await NativeSyncFixture.refs([a, b], service: service), order: nil)
         await peer.replace([])
         let removed = try await service.synchronizeLibrary(NativeSyncFixture.request())
         XCTAssertEqual(removed.phase, .synced)
@@ -557,6 +584,53 @@ import MeowMusicFeature
         XCTAssertFalse(managed.contains { $0["id"].string == readonly.id })
         let subscriptions = await peer.subscriptionContents()
         XCTAssertEqual(subscriptions.map(\.remoteID), ["502"])
+    }
+
+    func testRemoteLongPlaylistNameAndLocatorCanBeImportedUpdatedAndColdReadWithoutRemoteWrites() async throws {
+        let member = NativeSyncFixture.member("101")
+        let remoteID = "remote-" + String(repeating: "定", count: 800)
+        let name = "Remote " + String(repeating: "长", count: 800)
+        let renamed = name + " updated"
+        let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection(remoteID, name: name, members: [member])])
+        let store = try NativeSyncFixture.store(), service = try await NativeMusicFixture.service(store, accounts: peer)
+        let imported = try await service.synchronizeLibrary(NativeSyncFixture.request())
+        XCTAssertEqual(imported.phase, .synced)
+        let firstLists = try await service.collections()
+        let first = try XCTUnwrap(firstLists.first { $0.kind == "playlist" })
+        XCTAssertEqual(first.title, name)
+        let firstDocument = try NativeSyncFixture.document(store)
+        let firstBinding = try XCTUnwrap(firstDocument.library["library"]["collections"].array
+            .first { $0["id"].string == first.id }?["bindings"].array.first)
+        XCTAssertEqual(firstBinding["id"].string, remoteID)
+        let firstTracks = try await service.tracks(in: first)
+        let songID = try XCTUnwrap(firstTracks.first?.songId)
+
+        await peer.replace([NativeSyncFixture.collection(remoteID, name: renamed, members: [member])])
+        let updated = try await service.synchronizeLibrary(NativeSyncFixture.request())
+        XCTAssertEqual(updated.phase, .synced)
+        let updatedLists = try await service.collections()
+        let current = try XCTUnwrap(updatedLists.first { $0.id == first.id })
+        XCTAssertEqual(current.title, renamed)
+        let currentTracks = try await service.tracks(in: current)
+        XCTAssertEqual(currentTracks.map(\.songId), [songID])
+        let writes = await peer.calls()
+        XCTAssertTrue(writes.isEmpty)
+        await service.close()
+
+        let before = await peer.counts()
+        let cold = try await NativeMusicFixture.service(store, accounts: peer)
+        let coldLists = try await cold.collections()
+        let restored = try XCTUnwrap(coldLists.first { $0.id == first.id })
+        XCTAssertEqual(restored.title, renamed)
+        let restoredTracks = try await cold.tracks(in: restored)
+        XCTAssertEqual(restoredTracks.map(\.songId), [songID])
+        let coldDocument = try NativeSyncFixture.document(store)
+        let coldBinding = try XCTUnwrap(coldDocument.library["library"]["collections"].array
+            .first { $0["id"].string == first.id }?["bindings"].array.first)
+        XCTAssertEqual(coldBinding["id"].string, remoteID)
+        let after = await peer.counts()
+        XCTAssertEqual(after.0, before.0); XCTAssertEqual(after.1, before.1)
+        await cold.close()
     }
 
     func testPendingLocalRemovalWinsRemotePresenceAndQQOrderNeverDeletesAndReadds() async throws {
@@ -581,10 +655,10 @@ import MeowMusicFeature
 
     func testCurrentReferenceMapRetainsIdentityAndReverseMapIsRejectedWithoutWrites() async throws {
         for reversed in [false, true] {
-            let member = NativeSyncFixture.member("101"), normalized = try MusicModel.normalize(.init(platform: "wy", data: member.track))
-            let songID = normalized["songId"].string
+            let member = NativeSyncFixture.member("101")
             let store = try NativeSyncFixture.store([member])
             var doc = try NativeSyncFixture.document(store), lib = doc.library["library"]
+            let songID = try XCTUnwrap(lib["songs"].fields.first?.0)
             lib["accounts"]["wy"] = .string("42")
             var favorites = lib["collections"].array[0]
             favorites["order"] = .strings([songID])
@@ -618,17 +692,17 @@ import MeowMusicFeature
         }
     }
 
-    func testUnknownEnvelopeCannotDispatchSyncOrRewriteTheOriginalDocument() async throws {
+    func testMalformedCurrentEnvelopeCannotDispatchSyncOrRewriteTheOriginalDocument() async throws {
         let valid = try NativeSyncFixture.store([NativeSyncFixture.member("101")])
         var raw = try MJ.parse(XCTUnwrap(valid.snapshot().0))
-        raw["version"] = .n(2)
+        raw["records"] = .array([])
         let original = raw.bytes, store = NativeMusicMemoryDocument(original)
         let peer = NativeSyncPeer()
         do {
             let service = try await NativeMusicFixture.service(store, accounts: peer)
             defer { Task { await service.close() } }
             _ = try await service.synchronizeLibrary(NativeSyncFixture.request())
-            XCTFail("Unknown App document version was accepted")
+            XCTFail("A malformed current document was accepted")
         } catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
         XCTAssertEqual(store.snapshot().0, original); XCTAssertEqual(store.snapshot().2, 0)
         let counts = await peer.counts(), calls = await peer.calls()
@@ -659,7 +733,7 @@ import MeowMusicFeature
         var wrapper = MusicModel.library, ledger = MusicNativeSyncLedger()
         wrapper["library"]["accounts"]["wy"] = .string("42"); ledger.scopes["wy"] = "s"
         ledger.fences = [.init(platform: .netease, accountID: "42", scope: "s", localID: "favorites",
-            localRevision: 0, mutation: .init(action: .delete))]
+            localRevision: 0, mutation: .init(.init(action: .delete)))]
         wrapper["sync"] = try ledger.json()
         XCTAssertThrowsError(try MusicNativeSyncLedger.load(wrapper)) { XCTAssertEqual($0 as? MusicServiceError, .corruptDocument) }
     }

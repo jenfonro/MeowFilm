@@ -1,12 +1,8 @@
-using System.Net;
-using System.Net.Http;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
-using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 using static MeowFilm.Windows.Tests.MusicOfficialAudioTests;
 
@@ -20,10 +16,10 @@ public static class MusicSongFactsTests
         yield return new("Song facts share same-source metadata updates without changing presentation identity", Metadata);
         yield return new("Song facts old rows cannot replace newer search metadata through collections or catalog", SnapshotAcquisition);
         yield return new("Song facts snapshot acquisition cannot fence an in-flight real search", SnapshotDuringSearch);
-        yield return new("Song facts retain local identity version and all-pair duration boundaries", Boundaries);
+        yield return new("Song facts retain local UUIDs full titles and fixed duration baselines", Boundaries);
         yield return new("Song facts library first read loads saved knowledge before any completion", LibraryFirstRead);
         yield return new("Song facts library imports and queue reads contribute known metadata without requests", LibraryAcquisition);
-        yield return new("Song facts persist one shared recording only while a local collection retains it", SinglePersistentOwner);
+        yield return new("Song facts persist one repository record independently of collection membership", SinglePersistentOwner);
         yield return new("Song facts a real empty search updates an already known recording without displayed hits", EmptySearch);
         yield return new("Song facts an empty platform settled before the first hit keeps its own negative evidence", EmptyBeforeHit);
         yield return new("Song facts broad page absence never creates a negative recording fact", BroadAbsence);
@@ -78,11 +74,11 @@ public static class MusicSongFactsTests
         {
             CacheStore = new(Store);
             Library = new(Store);
-            Facts = new(Library, new(CacheStore), (request, _) =>
-            { Searches++; return Task.FromResult(Page(request, Song(request.Platform, "matched-" + request.Platform))); }, Clock);
-            Library.SongsObserved = Facts.ObserveSongs;
-            Library.SongFactsProjection = Facts.ProjectKnownFacts;
-            Library.PrepareSongFacts = Facts.InitializeAsync;
+            Facts = new(Library, new(CacheStore), async (request, token) =>
+            {
+                Searches++;
+                return await Library.AdoptPlatformResultAsync(Page(request, Song(request.Platform, "matched-" + request.Platform)), token);
+            }, Clock);
         }
         internal Task<MusicSongMatcher.MatchResult> Match(JsonObject song, string platform) =>
             Facts.MatchAsync(song, platform, Context(platform), default);
@@ -98,9 +94,8 @@ public static class MusicSongFactsTests
     private static async Task Bidirectional()
     {
         await using var f = new Fixture();
-        var a = Song(); var b = Song("kg", "other-entry");
-        b["songId"] = "song:other-entry"; b["album"] = "Other display album";
-        await f.Facts.KnownAsync(a, default); await f.Facts.KnownAsync(b, default);
+        var a = await f.Facts.KnownAsync(Song(), default);
+        var b = await f.Facts.KnownAsync(Song("kg", "other-entry"), default);
         await f.Match(a, "tx");
         Check(Has(await f.Facts.KnownAsync(b, default), "tx"), "A's update must be visible to an existing B alias");
         await f.Match(b, "kw");
@@ -108,20 +103,20 @@ public static class MusicSongFactsTests
         var fromB = await f.Facts.KnownAsync(b, default);
         Check(Has(fromA, "kw") && Has(fromB, "tx") && Has(fromA, "kg") && f.Searches == 2,
             "B's later update must return through A's original alias");
-        Check(LJ.S(fromA["songId"]) == LJ.S(a["songId"]) && LJ.S(fromB["songId"]) == "song:other-entry" &&
-            LJ.S(fromB["album"]) == "Other display album" && NativeMusicSong.SourceKey(fromB) == NativeMusicSong.SourceKey(b),
-            "shared facts cannot replace display/queue identity or primary recording");
+        Check(LJ.S(fromA["songId"]) == LJ.S(a["songId"]) && LJ.S(fromB["songId"]) == LJ.S(a["songId"]) &&
+            JsonNode.DeepEquals(fromA, fromB),
+            "all entry points project the single repository identity and current metadata");
     }
     private static async Task Metadata()
     {
         await using var f = new Fixture();
-        var original = Song();
-        await f.Facts.KnownAsync(original, default);
+        var original = await f.Facts.KnownAsync(Song(), default);
         var matched = await f.Match(original, "tx");
         var tx = matched.Song["sources"]!.AsArray().OfType<JsonObject>().Single(source => LJ.S(source["source"]) == "tx");
         var refreshed = Song("tx", NativeMusicSong.NativeId(tx));
         NativeMusicSong.SourceData(refreshed)["size"] = "4096";
         var request = new MusicSearchRequest("tx", "Track Artist");
+        await f.Library.AdoptPlatformResultAsync(Page(request, refreshed), default);
         f.Facts.ObservePage(request, Page(request, refreshed), "", Context("tx"), f.Facts.BeginSearch("tx"));
         var result = await f.Facts.KnownAsync(original, default);
         Check(LJ.S(result["title"]) == LJ.S(original["title"]) && LJ.S(result["songId"]) == LJ.S(original["songId"]) &&
@@ -131,7 +126,7 @@ public static class MusicSongFactsTests
         long checkedAt = f.Clock.Now;
         f.Clock.Now++;
         var detail = refreshed.DeepClone().AsObject(); NativeMusicSong.SourceData(detail)["size"] = "8192";
-        f.Facts.ProjectFacts(LJ.Obj(("song", detail)));
+        f.Facts.ProjectKnownFacts(LJ.Obj(("song", detail)));
         f.Clock.Now++;
         var imported = refreshed.DeepClone().AsObject(); NativeMusicSong.SourceData(imported)["size"] = "16384";
         await f.Favorite(imported);
@@ -149,7 +144,7 @@ public static class MusicSongFactsTests
     private static async Task SnapshotAcquisition()
     {
         await using var f = new Fixture();
-        var original = Song(); await f.Facts.KnownAsync(original, default);
+        var original = await f.Facts.KnownAsync(Song(), default);
         var old = Song("tx", "same-id"); NativeMusicSong.SourceData(old)["size"] = "1024";
         var newer = old.DeepClone().AsObject(); NativeMusicSong.SourceData(newer)["size"] = "4096";
         int searches = 0;
@@ -159,13 +154,12 @@ public static class MusicSongFactsTests
         };
         await using var owner = new MusicNativeCatalogOwner(catalog, f.Library)
         {
-            PrepareSongFacts = f.Facts.InitializeAsync,
-            SongFactsProjection = f.Facts.ProjectFacts,
-            KnownSongFactsProjection = f.Facts.ProjectKnownFacts,
             SearchSongs = async (request, token) =>
             {
                 var observation = f.Facts.BeginSearch(request.Platform);
+                long metadataObservation = f.Library.BeginSongObservation();
                 var reply = await catalog.SearchAsync(request, token);
+                reply = await f.Library.AdoptPlatformResultAsync(reply, token, observation: metadataObservation);
                 f.Facts.ObservePage(request, reply, "", Context(request.Platform), observation);
                 return reply;
             }
@@ -199,7 +193,7 @@ public static class MusicSongFactsTests
         f.Clock.Now++;
         await f.Favorite(oldRow);
         await Unchanged("library.addSongs");
-        catalog.Detail = _ => oldRow;
+        catalog.Detail = _ => f.Library.ProjectRepository(oldRow, MusicLibraryOwner.PlatformSongShape.Song);
         for (int read = 0; read < 2; read++)
         {
             f.Clock.Now++;
@@ -221,17 +215,18 @@ public static class MusicSongFactsTests
     private static async Task SnapshotDuringSearch()
     {
         await using var f = new Fixture();
-        var original = Song(); await f.Facts.KnownAsync(original, default);
+        var original = await f.Facts.KnownAsync(Song(), default);
         var old = Song("tx", "same-id"); NativeMusicSong.SourceData(old)["size"] = "1024";
         var newer = old.DeepClone().AsObject(); NativeMusicSong.SourceData(newer)["size"] = "4096";
         var request = new MusicSearchRequest("tx", "Track Artist");
+        await f.Library.AdoptPlatformResultAsync(Page(request, old), default);
         f.Facts.ObservePage(request, Page(request, old), "", Context("tx"), f.Facts.BeginSearch("tx"));
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         int searches = 0;
         var catalog = new Catalog
         {
-            Detail = _ => old,
+            Detail = _ => newer,
             Search = async query =>
             {
                 searches++; entered.TrySetResult(); await release.Task;
@@ -240,13 +235,12 @@ public static class MusicSongFactsTests
         };
         await using var owner = new MusicNativeCatalogOwner(catalog, f.Library)
         {
-            PrepareSongFacts = f.Facts.InitializeAsync,
-            SongFactsProjection = f.Facts.ProjectFacts,
-            KnownSongFactsProjection = f.Facts.ProjectKnownFacts,
             SearchSongs = async (query, token) =>
             {
                 var observation = f.Facts.BeginSearch(query.Platform);
+                long metadataObservation = f.Library.BeginSongObservation();
                 var reply = await catalog.SearchAsync(query, token);
+                reply = await f.Library.AdoptPlatformResultAsync(reply, token, observation: metadataObservation);
                 f.Facts.ObservePage(query, reply, "", Context(query.Platform), observation);
                 return reply;
             }
@@ -270,7 +264,7 @@ public static class MusicSongFactsTests
                 .Single(source => LJ.S(source["source"]) == "tx"))["size"]) == "4096" &&
                 LJ.I(state["checkedAt"]) == checkedAt && LJ.I(state["matchedAt"]) == checkedAt &&
                 searches == 1 && f.Searches == 0,
-                "collection and catalog snapshots cannot manufacture a newer order and reject an in-flight search");
+                "historical imports cannot downgrade current detail metadata or reject an in-flight physical search check");
         }
         finally { release.TrySetResult(); await pending.WaitAsync(TimeSpan.FromSeconds(3)); }
     }
@@ -285,12 +279,12 @@ public static class MusicSongFactsTests
         a["sources"]!.AsArray().Add(Song("kw", "short", duration: 100)["sources"]![0]!.DeepClone());
         var b = Song("tx", "long-chain", duration: 106);
         await f.Facts.KnownAsync(NativeMusicSong.Normalize(a), default);
-        Check(!Has(await f.Facts.KnownAsync(b, default), "kw"), "all pairs, rather than a transitive duration chain, must agree");
+        Check(Has(await f.Facts.KnownAsync(b, default), "kw"), "106 seconds is within the fixed 103-second baseline despite the retained 100-second source");
         var samePrimary = Song("wy", "duration-chain", duration: 103);
         samePrimary["sources"]!.AsArray().Add(b["sources"]![0]!.DeepClone());
         var separate = await f.Facts.KnownAsync(NativeMusicSong.Normalize(samePrimary), default);
-        Check(!Has(separate, "kw") && Has(separate, "tx"),
-            "the same primary recording cannot force incompatible secondary evidence into one owner");
+        Check(Has(separate, "kw") && Has(separate, "tx"),
+            "an already registered primary retains its one repository record");
     }
     private static async Task LibraryFirstRead()
     {
@@ -302,9 +296,7 @@ public static class MusicSongFactsTests
         await using var restartedLibrary = new MusicLibraryOwner(f.Store);
         var restartedFacts = new MusicSongMatcher(restartedLibrary, new(restartedCache), (_, _) =>
             throw new InvalidOperationException("first library read cannot search"), f.Clock);
-        restartedLibrary.SongsObserved = restartedFacts.ObserveSongs;
-        restartedLibrary.SongFactsProjection = restartedFacts.ProjectKnownFacts;
-        restartedLibrary.PrepareSongFacts = restartedFacts.InitializeAsync;
+        await restartedFacts.InitializeAsync(default);
         string before = Convert.ToHexString(f.Store.Data[MusicLibraryOwner.DocumentNamespace]);
         int writes = f.Store.Writes;
         var first = await Ok(restartedLibrary, "music.library.detail", new { id = "favorites" });
@@ -334,14 +326,16 @@ public static class MusicSongFactsTests
     private static async Task SinglePersistentOwner()
     {
         await using var f = new Fixture();
-        var a = Song(); var b = Song("kg", "alias");
+        var a = await f.Facts.KnownAsync(Song(), default); var b = Song("kg", "alias");
         await f.Favorite(a);
         await Ok(f.Library, "music.library.create", new { name = "Other collection", songs = new[] { b } });
         await f.Match(a, "tx"); await f.Match(b, "kw");
         await f.Facts.PersistAsync(default);
         await f.CacheStore.DrainAsync();
-        Check(Saved(f.Store).Count == 1 && Has(Saved(f.Store)[0]!["song"]!.AsObject(), "tx") &&
-            Has(Saved(f.Store)[0]!["song"]!.AsObject(), "kw"), "membership aliases cannot create duplicate mutable rows");
+        var known = await f.Facts.KnownAsync(a, default);
+        Check(Saved(f.Store).Count == 1 && Saved(f.Store)[0]!["song"] is null &&
+            LJ.S(Saved(f.Store)[0]!["songId"]) == LJ.S(a["songId"]) && Has(known, "tx") && Has(known, "kw"),
+            "discovery persistence only references the one mutable repository record");
         await Ok(f.Library, "music.library.removeSong", new { id = "favorites", ifRevision = 1, songId = LJ.S(a["songId"]) });
         await f.Facts.PersistAsync(default);
         await f.CacheStore.DrainAsync();
@@ -349,12 +343,13 @@ public static class MusicSongFactsTests
         await Ok(f.Library, "music.library.remove", new { id = "playlist:1", ifRevision = 1 });
         await f.Facts.PersistAsync(default);
         await f.CacheStore.DrainAsync();
-        Check(Saved(f.Store).Count == 0, "no local membership means no persisted matching fact");
+        Check(Saved(f.Store).Count == 1 && Has(await f.Facts.KnownAsync(a, default), "tx"),
+            "collection membership does not own or delete the permanent song record");
     }
     private static async Task EmptySearch()
     {
         await using var f = new Fixture();
-        var song = Song(); await f.Facts.KnownAsync(song, default);
+        var song = await f.Facts.KnownAsync(Song(), default);
         var request = new MusicSearchRequest("tx", "Track Artist");
         f.Facts.ObservePage(request, Page(request), "", Context("tx"), f.Facts.BeginSearch("tx"));
         await f.Match(song, "tx");
@@ -366,7 +361,7 @@ public static class MusicSongFactsTests
     private static async Task EmptyBeforeHit()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Facts.KnownAsync(Song(), default);
         long emptyAt = f.Clock.Now, emptyOrder = f.Facts.NextObservation(), hitOrder = f.Facts.NextObservation();
         f.Clock.Now++;
         var snapshot = JsonSerializer.SerializeToElement(new
@@ -397,7 +392,7 @@ public static class MusicSongFactsTests
         f.Facts.ObservePage(request, Page(request), "", Context("tx"), f.Facts.BeginSearch("tx"));
         await f.Facts.PersistAsync(default);
         await f.CacheStore.DrainAsync();
-        Check(Saved(f.Store).Single()!["platforms"]!["tx"] is null,
+        Check(Saved(f.Store).All(entry => entry!["platforms"]!["tx"] is null),
             "a broad page must not label an omitted recording notFound");
         await f.Match(a, "tx");
         Check(f.Searches == 1, "focused supplementary discovery remains eligible");
@@ -408,9 +403,11 @@ public static class MusicSongFactsTests
         var original = Song(); await f.Favorite(original);
         var oldRequest = new MusicSearchRequest("tx", "Track Artist");
         var old = f.Facts.BeginSearch("tx");
+        await f.Library.AdoptPlatformResultAsync(Page(oldRequest, Song("tx", "same-id")), default);
         f.Facts.ObservePage(oldRequest, Page(oldRequest, Song("tx", "same-id")), "", Context("tx"), old);
         f.Clock.Now++;
         var newer = Song("tx", "same-id"); NativeMusicSong.SourceData(newer)["size"] = "8192";
+        await f.Library.AdoptPlatformResultAsync(Page(oldRequest, newer), default);
         f.Facts.ObservePage(oldRequest, Page(oldRequest, newer), "", Context("tx"), f.Facts.BeginSearch("tx"));
         long checkedAt = f.Clock.Now;
         f.Clock.Now++;
@@ -431,7 +428,7 @@ public static class MusicSongFactsTests
     private static async Task RetiredObservation()
     {
         await using var f = new Fixture();
-        var song = Song(); await f.Facts.KnownAsync(song, default);
+        var song = await f.Facts.KnownAsync(Song(), default);
         var retired = f.Facts.BeginSearch("tx");
         f.Facts.Invalidate("tx");
         var stale = JsonSerializer.SerializeToElement(new
@@ -458,7 +455,7 @@ public static class MusicSongFactsTests
         await using var owner = new MusicNativeCatalogOwner(catalog, f.Library);
         var restarted = new MusicSongMatcher(f.Library, new(restartedCache), (_, _) =>
             throw new InvalidOperationException("catalog projection cannot supplement"), f.Clock);
-        owner.PrepareSongFacts = restarted.InitializeAsync; owner.SongFactsProjection = restarted.ProjectFacts;
+        await restarted.InitializeAsync(default);
         var result = await owner.ExecuteAsync("music.catalog.song", new { platform = "wy", id = "original" });
         Check(result.GetProperty("ok").GetBoolean() && Has(result.GetProperty("song"), "tx") && catalog.Calls == 1,
             "the first catalog result must query shared facts, performing only the requested acquisition");
@@ -466,7 +463,7 @@ public static class MusicSongFactsTests
     private static async Task CatalogLateSearch()
     {
         await using var f = new Fixture();
-        var song = Song(); await f.Facts.KnownAsync(song, default);
+        var song = await f.Facts.KnownAsync(Song(), default);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var catalog = new Catalog(); int calls = 0;
@@ -478,13 +475,12 @@ public static class MusicSongFactsTests
         };
         await using var owner = new MusicNativeCatalogOwner(catalog, f.Library)
         {
-            PrepareSongFacts = f.Facts.InitializeAsync,
-            SongFactsProjection = f.Facts.ProjectFacts,
-            KnownSongFactsProjection = f.Facts.ProjectKnownFacts,
             SearchSongs = async (request, token) =>
             {
                 var observation = f.Facts.BeginSearch(request.Platform);
+                long metadataObservation = f.Library.BeginSongObservation();
                 var reply = await catalog.SearchAsync(request, token);
+                reply = await f.Library.AdoptPlatformResultAsync(reply, token, observation: metadataObservation);
                 f.Facts.ObservePage(request, reply, "", Context(request.Platform), observation);
                 return reply;
             }
@@ -507,69 +503,51 @@ public static class MusicSongFactsTests
     private static async Task CompletionContract()
     {
         await using var store = new MemoryStore();
-        await MusicClientContextFixture.SeedQqAsync(store);
-        var clock = new Clock(); var handler = new Transport(); var runtime = new NoRuntime();
-        await using var app = new MusicNativeApplication(store, runtime, handler, null, null, clock);
+        var clock = new Clock();
+        await using var runtime = new MusicPlatformRuntimeFixture();
+        string mid = "FixtureMID";
+        runtime.OnRequest = (call, _) =>
+        {
+            if (call.Operation == "account.verify")
+            {
+                var verified = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation("tx", "123").GetRawText())!.AsObject();
+                verified["cookie"] = call.Payload.GetProperty("candidate").GetProperty("cookie").GetString();
+                return Task.FromResult(MusicPlatformRuntimeFixture.Json(verified));
+            }
+            return Task.FromResult(call.Operation switch
+            {
+                "search" => MusicPlatformRuntimeFixture.Json(new { platform = "tx", page = 1, limit = 30,
+                    items = new[] { Song("tx", mid, "Same Song", 100) }, more = false }),
+                _ => throw new InvalidOperationException(call.Operation)
+            });
+        };
+        runtime.OnOtherCall = (call, _) => call.Method == "music.script.sources.list"
+            ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new {
+                ok = true, contract = "music.script.v3", value = new { items = Array.Empty<object>() }
+            }))
+            : throw new InvalidOperationException(call.Method);
+        int Searches() => runtime.Requests.Count(call => call.Operation == "search");
+        await using var app = new MusicNativeApplication(store, runtime, null, null, clock);
         await Ok(app, "music.accounts.import", new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
         var original = Song(title: "Same Song", duration: 100);
         var first = await Ok(app, "music.songs.complete", new { song = original, platforms = new[] { "tx" } });
-        Check(Has(ReadSong(first), "tx") && handler.Searches == 1, "missing platforms complete through the existing dispatch");
+        Check(Has(ReadSong(first), "tx") && Searches() == 1, "missing platforms complete through the existing dispatch");
         await Ok(app, "music.songs.complete", new { song = original, platforms = new[] { "tx" }, contentFailed = new[] { "tx" } });
-        Check(handler.Searches == 1, "fresh content failure must not recheck");
+        Check(Searches() == 1, "fresh content failure must not recheck");
         clock.Now += MusicSongMatcher.Freshness;
         await Ok(app, "music.songs.complete", new { song = original, platforms = new[] { "tx" } });
         await Ok(app, "music.songs.complete", new { song = original, platforms = new[] { "tx" }, contentFailed = Array.Empty<string>() });
-        Check(handler.Searches == 1, "omitted or empty contentFailed never searches old existing mappings");
-        handler.Mid = "ReplacementMID";
+        Check(Searches() == 1, "omitted or empty contentFailed never searches old existing mappings");
+        mid = "ReplacementMID";
         var rechecked = await Ok(app, "music.songs.complete", new { song = original, platforms = new[] { "tx" }, contentFailed = new[] { "tx" } });
-        Check(handler.Searches == 2 && rechecked.GetProperty("song").GetProperty("sources").EnumerateArray()
-            .Any(source => source.GetProperty("musicInfo").GetProperty("songmid").GetString() == "ReplacementMID") && runtime.Calls == 0,
-            "content failure plus seven days must recheck through native matching");
+        Check(Searches() == 2 && rechecked.GetProperty("song").GetProperty("sources").EnumerateArray()
+            .Any(source => source.GetProperty("musicInfo").GetProperty("songmid").GetString() == "ReplacementMID") &&
+            runtime.Calls.All(call => call.Method != "music.script.request"),
+            "content failure plus seven days must recheck through canonical platform matching");
         var malformed = await app.ExecuteAsync("music.songs.complete", new { song = original, platforms = new[] { "tx" }, contentFailed = new[] { "unknown" } });
-        Check(!malformed.GetProperty("ok").GetBoolean() && handler.Searches == 2, "invalid optional platform data cannot dispatch requests");
+        Check(!malformed.GetProperty("ok").GetBoolean() && Searches() == 2, "invalid optional platform data cannot dispatch requests");
         var alias = await app.ExecuteAsync("music.song.complete", new { song = original, platforms = new[] { "tx" } });
-        Check(!alias.GetProperty("ok").GetBoolean() && handler.Searches == 2, "no new completion method alias is introduced");
-    }
-
-    private sealed class Transport : HttpMessageHandler
-    {
-        internal int Searches;
-        internal string Mid = "FixtureMID";
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
-        {
-            var input = request.Content is null ? null : JsonNode.Parse(await request.Content.ReadAsStringAsync(token));
-            string method = LJ.S(input?["req_0"]?["method"]);
-            object body;
-            switch (method)
-            {
-                case "DoSearchForQQMusicMobile":
-                    Searches++;
-                    body = new { meta = new { sum = 1, nextpage = -1 }, body = new { item_song = new[] {
-                        new { mid = Mid, id = 10, type = 0, title = "Same Song", interval = 100,
-                            singer = new[] { new { name = "Artist" } }, file = new { size_320mp3 = 120 } }
-                    } } }; break;
-                case "GetLoginUserInfo": body = new { code = 0 }; break;
-                case "GetHomepageHeader": body = new { Info = new { BaseInfo = new { EncryptedUin = "FixtureEUIN", Name = "Synthetic", Avatar = "" } } }; break;
-                default: return new(HttpStatusCode.ServiceUnavailable);
-            }
-            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new {
-                code = 0, req_0 = new { code = 0, data = body }
-            }), Encoding.UTF8, "application/json") };
-        }
-    }
-    private sealed class NoRuntime : IRuntimeClient
-    {
-        internal int Calls;
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("metadata must not upload scripts"); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        {
-            if (method == "music.script.sources.list") return Task.FromResult(JsonSerializer.SerializeToElement(new {
-                ok = true, contract = "music.script.v3", value = new { items = Array.Empty<object>() }
-            }));
-            Calls++; throw new InvalidOperationException("metadata must not execute scripts");
-        }
+        Check(!alias.GetProperty("ok").GetBoolean() && Searches() == 2, "no new completion method alias is introduced");
     }
     private sealed class Catalog : IMusicPlatformCatalog
     {
@@ -585,6 +563,7 @@ public static class MusicSongFactsTests
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default)
         { Calls++; return Search(r); }
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Unused();
+        public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default) => Unused();

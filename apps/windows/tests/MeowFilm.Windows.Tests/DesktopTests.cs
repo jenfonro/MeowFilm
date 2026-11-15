@@ -937,8 +937,9 @@ public static partial class DesktopTests
         });
     }
 
-    private static TestCase Case(string name, Func<Task> body) => new("desktop: " + name, () => OnStaAsync(body));
-    private static async Task OnStaAsync(Func<Task> body)
+    private static TestCase Case(string name, Func<Task> body, TimeSpan? timeout = null) =>
+        new("desktop: " + name, () => OnStaAsync(body, timeout));
+    private static async Task OnStaAsync(Func<Task> body, TimeSpan? timeout)
     {
         var result = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -967,7 +968,7 @@ public static partial class DesktopTests
         }) { IsBackground = true, Name = "meowfilm-desktop-code-test" };
         thread.SetApartmentState(ApartmentState.STA); thread.Start();
         Exception? failure;
-        try { failure = await result.Task.WaitAsync(TimeSpan.FromSeconds(8)); }
+        try { failure = await result.Task.WaitAsync(timeout ?? TimeSpan.FromSeconds(8)); }
         catch { Volatile.Read(ref owner)?.BeginInvokeShutdown(DispatcherPriority.Send); throw; }
         await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2));
         if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();

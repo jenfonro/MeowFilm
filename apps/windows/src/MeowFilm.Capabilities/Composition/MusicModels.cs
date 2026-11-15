@@ -30,8 +30,19 @@ public sealed record PlaylistRow(string Id, string Name, string Kind, long Revis
     }
 }
 
-public sealed record SongRow(JsonElement Raw, string? EntryId = null)
+public sealed record SongRow(JsonElement Raw, string? EntryId = null) : System.ComponentModel.INotifyPropertyChanged
 {
+    public JsonElement Raw { get; private set; } = Raw;
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    internal bool ApplyRepository(JsonElement? value)
+    {
+        if (value is not { } next || Raw.GetRawText() == next.GetRawText()) return false;
+        Raw = next.Clone();
+        foreach (var name in new[] { nameof(Raw), nameof(Title), nameof(Artist), nameof(Album),
+            nameof(Cover), nameof(Duration), nameof(IsOnline) })
+            PropertyChanged?.Invoke(this, new(name));
+        return true;
+    }
     private string Text(string key) => Raw.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
     public string Id => Text("songId");
     public string Title => Text("title");
@@ -49,7 +60,6 @@ public sealed record SongRow(JsonElement Raw, string? EntryId = null)
         {
             var input = JsonNode.Parse(value.GetRawText());
             var normalized = NativeMusicSong.Normalize(input);
-            MusicDto.Require(JsonNode.DeepEquals(input, normalized));
             return new(JsonSerializer.SerializeToElement(normalized), entryId);
         }
         catch (MusicOperationException) { throw; }
@@ -108,7 +118,7 @@ internal static class MusicDto
     internal static int Count(JsonElement value, string key)
     {
         var number = Integer(value, key);
-        Require(number <= 100_000);
+        Require(number <= int.MaxValue);
         return (int)number;
     }
     internal static JsonElement[] Page(JsonElement reply, string field, int offset)

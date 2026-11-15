@@ -138,7 +138,7 @@ import Combine
                 try await body()
                 try own.check(self.model)
                 guard self.active, self.actionID == token else { return }
-                self.actionError = self.model.error
+                self.actionError = self.model.notices.error
             } catch {
                 guard !Task.isCancelled, self.active, own.matches(self.model), self.actionID == token else { return }
                 self.actionError = MusicServiceError.sanitized(error).localizedDescription

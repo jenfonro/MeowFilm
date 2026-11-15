@@ -14,7 +14,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
 | `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；音乐本地启动测试使用合成存储与拒绝网络的 transport，冷启动清理测试使用临时数据与模拟 Keychain |
-| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/cat/source/pan/tmdb/douban/film/netease 八模块薄 entry，复用公共 JS 模块 |
+| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/cat/source/pan/tmdb/douban/film/netease/music-platform 九模块薄 entry，复用公共 JS 模块 |
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
 
@@ -172,12 +172,12 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `dev.meowfilm.aggregate` | 固定产品身份；安装宿主改写安装标识时，内部存储身份不变 |
 | Application Support 下 `meowfilm/documents` | 曲库普通文档根目录 |
 | Caches 下 `meowfilm/documents` | 普通缓存文档根目录 |
-| Application Support 下 `meowfilm/encrypted-documents-v1` | 设备会话等敏感文档的加密根目录 |
-| `music.library.v1` | 曲库、队列、历史和播放记录 |
-| `music.accounts.v1` | 三平台账号凭据与固定账号槽 |
-| `music.account-url-cache.v1` | 账号授权 URL 缓存 |
-| `meowfilm.music.audio-cache.v1` | 实际播放后的完整音频缓存 |
-| `music.playback-display.v2`、`music.home.snapshot.v1` | 播放展示和首页快照缓存 |
+| Application Support 下 `meowfilm/script-runtime/music-platform` | Node 唯一维护的匿名协议状态 |
+| `music.library.v3` | 永久歌曲仓库、引用队列、历史和播放记录 |
+| `dev.meowfilm.aggregate.music.platform.accounts.v1` | 三平台 Keychain 账号凭据与固定账号槽 |
+| `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
+| `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |
+| `music.presentation-resources.v1`、`music.home.display.v1`、`music.source-checks.v1` | 共享图片／歌词资源、首页展示快照和来源发现观察 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏的来源 ID 与影片 ID |

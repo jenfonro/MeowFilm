@@ -37,7 +37,7 @@
   </Style></Grid.Style>
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="48"/></Grid.RowDefinitions>
   <Grid x:Name="ArtworkFrame" Height="{Binding ActualWidth,ElementName=Surface}">
-   <art:ArtworkImage x:Name="Cover" Address="{Binding Cover}"/>
+   <art:ArtworkImage x:Name="Cover" Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}"/>
    <Grid Height="64" VerticalAlignment="Top" ClipToBounds="True" IsHitTestVisible="False">
     <Grid.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="White" Offset=".45"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></Grid.OpacityMask>
     <art:ArtworkImage x:Name="DecorationLayer" Address="{Binding Decoration}" ShowRetry="False" Height="{Binding ActualHeight,ElementName=ArtworkFrame}" VerticalAlignment="Top"/>

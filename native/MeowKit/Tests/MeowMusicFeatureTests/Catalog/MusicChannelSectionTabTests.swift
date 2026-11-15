@@ -1,15 +1,26 @@
 import XCTest
 @testable import MeowMusicFeature
 
-private actor SectionTabBrowser: MusicPublicBrowsing {
+private actor SectionTabBrowser: MusicPublicBrowsing, MusicSongRepositoryReading {
     var calls = 0
     var tabCalls = 0
     var lazy = false
     var gate: SectionTabGate?
+    private var lazySong: MusicRemoteTrack?
+    private var currentSong: MusicRemoteTrack?
     func deferTab(_ gate: SectionTabGate? = nil) { lazy = true; self.gate = gate }
+    func deferSongTab(_ track: MusicRemoteTrack, current: MusicRemoteTrack) {
+        lazy = true; lazySong = track; currentSong = current
+    }
+    func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] {
+        guard let currentSong, songIDs.contains(currentSong.songId) else { return [:] }
+        return [currentSong.songId: currentSong]
+    }
+    func songChanges() -> AsyncStream<Void> { .init { $0.finish() } }
     func loadSecond() async -> [MusicPublicBrowseItem] {
         tabCalls += 1
         if let gate { await gate.wait() }
+        if let lazySong { return [.init(id: "b", title: lazySong.title, content: .track(lazySong))] }
         return [.init(id: "b", title: "B", content: .unavailable)]
     }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage {
@@ -105,6 +116,28 @@ private actor SectionTabGate {
         XCTAssertEqual(model.sections[0].selectedTab, "two"); XCTAssertEqual(model.sections[0].items.map(\.id), ["b"])
         let calls = await service.calls, tabCalls = await service.tabCalls
         XCTAssertEqual(calls, 2); XCTAssertEqual(tabCalls, 1)
+    }
+    func testLazyTabUsesCurrentRepositoryFactsWithoutRenewingReturnedContent() async throws {
+        let service = SectionTabBrowser()
+        let original = MusicRemoteTrack(ref: .init(kind: .library, id: "song", occurrence: "tab-two"),
+                                        songId: "song", title: "Earlier title", sourcePosition: 7)
+        let current = MusicRemoteTrack(ref: .init(kind: .library, id: "song"), songId: "song",
+                                       title: "Current title", artist: "Current artist",
+                                       artwork: URL(string: "https://artwork.invalid/current"))
+        await service.deferSongTab(original, current: current)
+        let model = await loaded(service)
+        await model.selectSectionTab("two", sectionID: "section", intent: try XCTUnwrap(model.makeActionIntent()))
+        XCTAssertEqual(model.tracks.first?.title, current.title)
+        XCTAssertEqual(model.tracks.first?.artist, current.artist)
+        XCTAssertEqual(model.tracks.first?.artwork, current.artwork)
+        XCTAssertEqual(model.tracks.first?.ref, original.ref)
+        XCTAssertEqual(model.tracks.first?.sourcePosition, 7)
+        await model.selectSectionTab("one", sectionID: "section", intent: try XCTUnwrap(model.makeActionIntent()))
+        await model.selectSectionTab("two", sectionID: "section", intent: try XCTUnwrap(model.makeActionIntent()))
+        XCTAssertEqual(model.tracks.first?.title, current.title)
+        let calls = await service.calls, tabCalls = await service.tabCalls
+        XCTAssertEqual(calls, 1); XCTAssertEqual(tabCalls, 1)
+        model.disappear()
     }
     func testLateTabReadCannotRestoreDepartedPage() async throws {
         let service = SectionTabBrowser(), gate = SectionTabGate()

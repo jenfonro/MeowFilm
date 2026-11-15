@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -22,13 +21,11 @@ internal static class MusicFeedbackIdentity
     {
         try
         {
-            if (song.ValueKind != JsonValueKind.Object || song.GetRawText().Length > 262144) return null;
+            if (song.ValueKind != JsonValueKind.Object) return null;
             var root = NativeMusicSong.Normalize(JsonNode.Parse(song.GetRawText()));
-            var rows = root["sources"]!.AsArray().OfType<JsonObject>().ToArray();
             var candidates = new HashSet<MusicFeedbackRecording>();
-            foreach (var row in rows.Take(256))
+            foreach (var row in root["sources"]!.AsArray().OfType<JsonObject>())
             {
-                if (!NativeMusicSong.Compatible(root, row)) continue;
                 if (Recording(row, platform) is { } mapped) candidates.Add(mapped);
             }
             if (platform == "kg")
@@ -43,9 +40,6 @@ internal static class MusicFeedbackIdentity
             }
             if (Recording(root, platform) is { } primary && candidates.Contains(primary)) return primary;
             if (candidates.Count == 1) return candidates.Single();
-            if (platform == "kg" && candidates.Count > 0 &&
-                candidates.All(c => c.MixSongId is not null) && candidates.Select(c => c.MixSongId).Distinct().Count() == 1)
-                return candidates.OrderBy(c => c.Id, StringComparer.Ordinal).First();
             return null; // Ambiguous provenance is never resolved by candidate order.
         }
         catch { return null; }
@@ -54,24 +48,21 @@ internal static class MusicFeedbackIdentity
     private static MusicFeedbackRecording? Recording(JsonObject row, string platform)
     {
         var data = NativeMusicSong.SourceData(row);
-        if (Text(data["source"]) != platform || Text(row["source"]) is { Length: > 0 } p && p != platform) return null;
-        var id = Text(data["songmid"]);
-        if (platform == "wy") return Positive(id) ? new(platform, id) : null;
-        if (platform == "tx") return id.Length is >= 1 and <= 64 && id.All(char.IsAsciiLetterOrDigit) ? new(platform, id) : null;
-        var hash = Text(data["hash"]);
-        if (platform != "kg" || hash.Length != 32 || !hash.All(char.IsAsciiHexDigit) || hash.All(c => c == '0')) return null;
-        var ids = new[] { data["albumAudioId"], data["album_audio_id"], data["mixsongid"] }
-            .Select(Text).Where(s => s.Length > 0 && s != "0").ToArray();
-        if (ids.Any(s => !Positive(s)) || ids.Distinct(StringComparer.Ordinal).Count() > 1) return null;
-        if (id.Length == 32 && id.All(char.IsAsciiHexDigit) &&
-            !string.Equals(hash, id, StringComparison.OrdinalIgnoreCase)) return null;
-        return new(platform, hash.ToUpperInvariant(), ids.FirstOrDefault());
+        if (LJ.S(data["source"]) != platform) return null;
+        if (platform is "wy" or "tx")
+        {
+            string id = NativeMusicSong.InfoId(data);
+            return id.Length > 0 ? new(platform, id) : null;
+        }
+        if (platform != "kg") return null;
+        string hash = LJ.S(data["hash"]), albumAudioId = LJ.Scalar(data["albumAudioId"]);
+        return hash.Length > 0 ? new(platform, hash, albumAudioId.Length > 0 ? albumAudioId : null) : null;
     }
 
     internal static MusicFeedbackStart Start(MusicFeedbackAttempt instance, MusicFeedbackSelection selection,
         MusicFeedbackRecording recording, double duration, double position, double rate, string mode)
     {
-        string source = "unknown", sourceId = "", sourceType = "", algorithm = "";
+        string source = "unknown", sourceId = "", algorithm = "";
         JsonObject? selectedSong = null;
         try { selectedSong = JsonNode.Parse(selection.Song.GetRawText()) as JsonObject; }
         catch { }
@@ -97,17 +88,15 @@ internal static class MusicFeedbackIdentity
                 if (origin.Provider != "rule") source = "userfm";
                 mode = "playFm";
             }
-            else if (origin.Provider == "heartbeat" && Positive(origin.SourceId))
-            { source = "aiMode"; sourceId = origin.SourceId; sourceType = "track"; mode = "ai"; }
+            else if (origin.Provider == "heartbeat")
+            { source = "aiMode"; sourceId = origin.SourceId; mode = "ai"; }
             else if (origin.Provider == "queue-recommendations")
             {
                 if (origin.FeedbackSource.Length > 0) source = origin.FeedbackSource;
-                sourceType = "track";
                 if (origin.Kind == "heartbeat") mode = "ai";
             }
-            else if (origin.Kind == "similar") sourceType = "track";
             return Facts(new(instance, recording, duration, position, rate, selection.Automatic,
-                source, sourceId, sourceType, algorithm, mode)
+                source, sourceId, algorithm, mode)
                 { IsQueueRecommendation = origin.Provider == "queue-recommendations" && origin.FeedbackSource.Length > 0 });
         }
         // Only preserve provenance for the selected exact recording. FM and
@@ -118,20 +107,16 @@ internal static class MusicFeedbackIdentity
                 Value(ordinary, "sourcePlatform") == "" && Value(ordinary, "sourceType") is "search" or "search-song"))
         {
             string kind = Value(ordinary, "sourceType"), id = Value(ordinary, "sourceId");
-            if (kind is "playlist" or "album" && Positive(id))
-            { source = kind == "playlist" ? "list" : "album"; sourceId = id; sourceType = source; }
+            if (kind is "playlist" or "album" && id.Length > 0)
+            { source = kind == "playlist" ? "list" : "album"; sourceId = id; }
             else if (kind == "daily" && Value(ordinary, "dailyBranch") is "" or "default")
-            { source = "dailySongRecommend"; sourceType = "dailyRecommend"; }
+            { source = "dailySongRecommend"; }
             else if (kind is "search" or "search-song")
-            {
-                string keyword = Value(ordinary, "searchKeyword");
-                if (keyword.Length <= 512 && !keyword.Any(c => char.IsControl(c)))
-                { source = "search"; sourceId = keyword; sourceType = "track"; }
-            }
-            else if (kind == "song") { source = "song"; sourceType = "track"; }
+            { source = "search"; sourceId = Value(ordinary, "searchKeyword"); }
+            else if (kind == "song") { source = "song"; }
         }
         return Facts(new(instance, recording, duration, position, rate, selection.Automatic,
-            source, sourceId, sourceType, algorithm, mode));
+            source, sourceId, algorithm, mode));
     }
 
     private static MusicRecommendationFeedback? LiveRecommendation(MusicFeedbackSelection selection, JsonObject? song)
@@ -147,9 +132,4 @@ internal static class MusicFeedbackIdentity
 
     private static string Value(JsonElement value, string key) =>
         value.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.String ? item.GetString()! : "";
-    private static string Text(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var text) ? text :
-        node is JsonValue n && n.TryGetValue<long>(out var number) ? number.ToString(CultureInfo.InvariantCulture) : "";
-    private static bool Positive(string value) => value.Length is >= 1 and <= 16 && value[0] is >= '1' and <= '9' &&
-        value.All(char.IsAsciiDigit) && long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var id) &&
-        id <= 9007199254740991;
 }

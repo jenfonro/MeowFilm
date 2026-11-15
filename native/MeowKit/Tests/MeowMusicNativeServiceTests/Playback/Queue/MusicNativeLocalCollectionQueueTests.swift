@@ -103,7 +103,6 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
             ([tracks[0].ref, tracks[0].ref], 0, .invalidRequest),
             ([outsider], 0, .invalidRequest),
             ([.init(kind: .library, id: "")], 0, .invalidRequest),
-            ([.init(kind: .handle, id: tracks[0].ref.id)], 0, .invalidRequest),
             ([.init(kind: .queue, id: tracks[0].ref.id)], 0, .invalidRequest),
             (Array(repeating: tracks[0].ref, count: 2001), 0, .invalidRequest)
         ]
@@ -186,15 +185,15 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
         await service.close()
     }
 
-    func testMembershipUsesExactOpaqueBytesNotUnicodeCanonicalEquivalence() async throws {
+    func testMembershipUsesPermanentReferenceNotEquivalentDisplayMetadata() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let composed = "song:caf\u{00e9}", decomposed = "song:cafe\u{0301}"
         var a = try NativeMusicFixture.song("ExactA"), b = try NativeMusicFixture.song("ExactB")
-        a["songId"] = .string(composed); b["songId"] = .string(decomposed)
+        a["title"] = .string("caf\u{00e9}"); b["title"] = .string("cafe\u{0301}")
+        let memberID = a["songId"].string, outsiderID = b["songId"].string
         try await service.transaction(["library"]) { d in
-            d.library["library"]["songs"] = .obj([(composed, a), (decomposed, b)])
+            d.library["library"]["songs"] = .obj([(memberID, a), (outsiderID, b)])
             var source = MusicModel.freshCollection("exact-source", "Exact")
-            source["order"] = .strings([composed])
+            source["order"] = .strings([memberID])
             d.library["library"]["collections"] = .array(d.library["library"]["collections"].array + [source])
         }
         let collections = try await service.collections()
@@ -202,14 +201,14 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
         let before = store.snapshot()
         do {
             _ = try await service.changeCollectionQueue(collection: source,
-                refs: [.init(kind: .library, id: decomposed)], index: 0, expectedRevision: 0)
-            XCTFail("Canonical equivalent is not a member")
+                refs: [.init(kind: .library, id: outsiderID)], index: 0, expectedRevision: 0)
+            XCTFail("Equivalent display metadata does not make another permanent record a member")
         } catch { XCTAssertEqual(error as? MusicServiceError, .invalidRequest) }
         XCTAssertEqual(store.snapshot().0, before.0)
         _ = try await service.changeCollectionQueue(collection: source,
-            refs: [.init(kind: .library, id: composed)], index: 0, expectedRevision: 0)
+            refs: [.init(kind: .library, id: memberID)], index: 0, expectedRevision: 0)
         let queue = try await service.queue()
-        XCTAssertEqual(queue.entries.first?.track.songId.utf8.map { $0 }, Array(composed.utf8))
+        XCTAssertEqual(queue.entries.first?.track.songId, memberID)
         await service.close()
     }
 

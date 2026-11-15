@@ -245,13 +245,14 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         let first = try NativeMusicFixture.song("First"), second = try NativeMusicFixture.song("Second")
         XCTAssertNotEqual(first["songId"].string, second["songId"].string)
         var document = try MusicDocument(nil, runID: "system-admission")
+        document.library["library"]["songs"] = .obj([(first["songId"].string, first), (second["songId"].string, second)])
         document.queue["entries"] = .array([
-            .obj([("id", .string("entry-1")), ("song", first)]),
-            .obj([("id", .string("entry-2")), ("song", second)]),
+            .obj([("id", .string("entry-1")), ("songId", first["songId"])]),
+            .obj([("id", .string("entry-2")), ("songId", second["songId"])]),
         ])
         document.queue["currentId"] = .string("entry-1")
         document.queue["serial"] = .n(2); document.queue["revision"] = .n(1)
-        let store = NativeMusicMemoryDocument(try document.encode(changed: ["queue"]))
+        let store = NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue"]))
         let scripts = SystemPlaybackAdmissionScripts(providers)
         let native = try await NativeMusicFixture.service(store, scripts: scripts)
         let service = SystemPlaybackAdmissionService(native), player = SystemPlaybackAdmissionPlayer()
@@ -325,7 +326,7 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         let kinds = await f.service.recordedKinds()
         XCTAssertEqual(kinds, [.playing, .stopped])
         XCTAssertEqual(played.map(\.track.songId), [current.track.songId])
-        XCTAssertEqual(savedHistory["days"].array.flatMap { $0["songs"].array }.map { $0["song"]["songId"].string },
+        XCTAssertEqual(savedHistory["days"].array.flatMap { $0["songs"].array }.map { $0["songId"].string },
             [current.track.songId], "The first playing fact must create real persisted history, not just reach a record port")
         XCTAssertEqual(state.position, exitPosition)
         XCTAssertEqual(state.currentId, beforeQueue.currentId)

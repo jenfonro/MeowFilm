@@ -3,34 +3,58 @@ import XCTest
 import MeowMusicFeature
 @testable import MeowMusicNativeService
 
-private actor OwnershipDiscoveryCache: MusicSourceDiscoveryCaching {
-    nonisolated var persistsRecords: Bool { false }
+private actor OwnershipScripts: MusicScriptResolving {
+    let base = NativeMusicScriptFixture()
     let gate: MusicNativeCandidateDiscoveryBarrier
+    private var listed = 0, lookedUp: [String] = [], active = 0
     init(_ gate: MusicNativeCandidateDiscoveryBarrier) { self.gate = gate }
-    func entries(fingerprint: String, duration: Double) async -> [String: MusicSourceDiscoveryEntry] {
-        await gate.enter(); return [:]
+    func sources() async throws -> [MusicScriptSource] {
+        listed += 1; return await base.sources()
     }
-    func record(fingerprint: String, duration: Double, platform: String, checkedAt: Double,
-                sources: [MusicSourceDiscoverySource]) {}
-    func persist(retaining recordings: [MusicSourceDiscoveryRecording]) {}
+    func source(installationID: String) async throws -> MusicScriptSource {
+        lookedUp.append(installationID); active += 1
+        defer { active -= 1 }
+        let snapshot = try await base.source(installationID: installationID)
+        await gate.enter()
+        return snapshot
+    }
+    func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio> {
+        try await base.resolve(request: request)
+    }
+    func lyrics(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeLyrics> {
+        await base.lyrics(request: request)
+    }
+    func calls() async -> [MusicScriptRequest] { await base.calls() }
+    func inventory() -> (listed: Int, lookedUp: [String], active: Int) { (listed, lookedUp, active) }
 }
 
 final class MusicSourceSessionOwnershipTests: XCTestCase {
-    private func selection() throws -> MusicPlaybackSelection {
-        let source = try XCTUnwrap(MusicModel.sources(MusicNativeCandidateDiscoveryFixture.song()).first)
+    private func selection(_ service: NativeMusicService) async throws -> MusicPlaybackSelection {
+        let queue = try await service.queue()
+        let current = try XCTUnwrap(queue.entries.first { $0.id == queue.currentId })
+        let source = try XCTUnwrap(current.track.sources.first)
         return .init(installationId: NativeMusicFixture.installation, generation: 1,
                      siteId: source.platform, sourceKey: source.sourceKey, quality: "flac")
     }
     func testConcurrentFirstPlaybackAndInspectionShareResultsAndURLRequest() async throws {
-        let gate = MusicNativeCandidateDiscoveryBarrier(), scripts = NativeMusicScriptFixture()
-        let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(),
-            scripts: scripts, sourceDiscovery: OwnershipDiscoveryCache(gate))
+        let gate = MusicNativeCandidateDiscoveryBarrier()
+        let scripts = OwnershipScripts(gate)
+        let store = try MusicNativeCandidateDiscoveryFixture.store()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
-        let selected = try selection()
+        let documentBefore = try await service.read(), storedBefore = store.snapshot()
+        let selected = try await selection(service)
         let playback = Task { try await session.match(intent: .exact(selected)) }
         await gate.started(1)
         let page = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
+        let retiredPage = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
+        await retiredPage.close()
+        do { _ = try await retiredPage.loadMore(refresh: false); XCTFail("A retired inspection lease cannot load") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
         let before = await scripts.calls(); XCTAssertTrue(before.isEmpty)
+        let held = await scripts.inventory()
+        XCTAssertEqual(held.listed, 0); XCTAssertEqual(held.lookedUp, [NativeMusicFixture.installation])
+        XCTAssertEqual(held.active, 1)
         await gate.release()
         let first = try await playback.value
         var updates = await page.updates().makeAsyncIterator()
@@ -45,6 +69,14 @@ final class MusicSourceSessionOwnershipTests: XCTestCase {
         let retained = try await afterClose.match(intent: .exact(row.selection))
         XCTAssertEqual(retained.candidate.url, first.candidate.url, "Closing a page lease keeps the shared session")
         let finalCalls = await scripts.calls(); XCTAssertEqual(finalCalls.count, 1)
+        let completed = await scripts.inventory()
+        XCTAssertEqual(completed.listed, 0); XCTAssertEqual(Set(completed.lookedUp), [NativeMusicFixture.installation])
+        XCTAssertEqual(completed.active, 0)
+        let documentAfter = try await service.read()
+        XCTAssertEqual(documentAfter.queue, documentBefore.queue)
+        XCTAssertEqual(documentAfter.playback, documentBefore.playback)
+        XCTAssertEqual(documentAfter.history, documentBefore.history)
+        XCTAssertEqual(store.snapshot().0, storedBefore.0); XCTAssertEqual(store.snapshot().2, storedBefore.2)
         await service.close()
     }
 
@@ -62,31 +94,65 @@ final class MusicSourceSessionOwnershipTests: XCTestCase {
     }
     private enum Interruption { case configuration, queue, close, settings }
     private func interruptedFirstMatch(_ interruption: Interruption) async throws {
-        let gate = MusicNativeCandidateDiscoveryBarrier(), scripts = NativeMusicScriptFixture()
-        let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(),
-            scripts: scripts, sourceDiscovery: OwnershipDiscoveryCache(gate))
+        let gate = MusicNativeCandidateDiscoveryBarrier()
+        let scripts = OwnershipScripts(gate)
+        let store = try MusicNativeCandidateDiscoveryFixture.store()
+        let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
-        let selected = try selection()
+        let selected = try await selection(service)
         let task = Task { try await session.match(intent: .exact(selected)) }
         await gate.started(1)
+        var closing: Task<Void, Never>?
+        var completed: XCTestExpectation?
         switch interruption {
-        case .configuration: await service.sourceConfigurationChanged()
+        case .configuration:
+            let premature = expectation(description: "configuration waits for physical inventory")
+            premature.isInverted = true
+            let finished = expectation(description: "configuration finished after inventory")
+            completed = finished
+            closing = Task {
+                await service.sourceConfigurationChanged(); premature.fulfill(); finished.fulfill()
+            }
+            while await service.currentSourceSession != nil { await Task.yield() }
+            await fulfillment(of: [premature], timeout: 0.05)
         case .queue: _ = try await service.changeQueue(.clear, expectedRevision: 1)
-        case .close: await service.close()
+        case .close:
+            let premature = expectation(description: "close waits for physical inventory")
+            premature.isInverted = true
+            let finished = expectation(description: "close finished after inventory")
+            completed = finished
+            closing = Task {
+                await service.close(); premature.fulfill(); finished.fulfill()
+            }
+            while await service.available { await Task.yield() }
+            await fulfillment(of: [premature], timeout: 0.05)
         case .settings: _ = try await service.updateSettings(.init(ifRevision: 0, requestQuality: "128k"))
         }
+        let held = await scripts.inventory(), changed = store.snapshot()
+        XCTAssertEqual(held.active, 1)
+        XCTAssertEqual(held.lookedUp, [NativeMusicFixture.installation])
         await gate.release()
+        if let completed { await fulfillment(of: [completed], timeout: 3) }
+        await closing?.value
         do { _ = try await task.value; XCTFail("Invalidated first match published a result") }
         catch {
             let failure = MusicServiceError.sanitized(error)
             switch interruption {
-            case .configuration: XCTAssertEqual(failure, .closed)
+            case .configuration: XCTAssertEqual(failure, .cancelled)
             case .queue: XCTAssertEqual(failure, .notFound)
-            case .close: XCTAssertEqual(failure, .closed)
+            case .close: XCTAssertEqual(failure, .cancelled)
             case .settings: XCTAssertEqual(failure, .staleRevision)
             }
         }
         let calls = await scripts.calls(); XCTAssertTrue(calls.isEmpty)
+        let finished = await scripts.inventory(); XCTAssertEqual(finished.active, 0)
+        XCTAssertEqual(store.snapshot().0, changed.0); XCTAssertEqual(store.snapshot().2, changed.2)
+        switch interruption {
+        case .configuration, .close:
+            do { _ = try await session.match(intent: .exact(selected)); XCTFail("A closed session cannot start another match") }
+            catch { XCTAssertEqual(MusicServiceError.sanitized(error), .closed) }
+        case .queue, .settings: break
+        }
         if case .configuration = interruption {
             let fresh = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
             let result = try await fresh.match(intent: .quality("flac"))
@@ -168,8 +234,8 @@ extension MusicSourceSessionOwnershipTests {
     private func existingSessionClosure(onRead: Int?) async throws {
         let document = OwnershipClosingDocument(try MusicNativeCandidateDiscoveryFixture.store())
         let scripts = NativeMusicScriptFixture()
-        let service = NativeMusicService(document: document, scripts: scripts, qq: NativeMusicQQFixture(),
-            transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(document: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
+            clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let initial = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let old = try XCTUnwrap(initial as? MusicNativeSourceInspection)

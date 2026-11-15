@@ -2,13 +2,55 @@
 import Foundation
 import MeowMusicFeature
 
+/// Durable write facts only. Live mutation tracks are request material, not a
+/// second persistent song repository or an input to unknown-write recovery.
+struct MusicNativeSyncMemberProof: Codable, Equatable {
+    let nativeID: String
+    let occurrenceID: String
+    init(_ member: MusicLibrarySyncMember) {
+        nativeID = member.nativeID; occurrenceID = member.occurrenceID
+    }
+}
+struct MusicNativeSyncCollectionProof: Codable, Equatable {
+    let id: String
+    let name: String
+    let kind: MusicLibrarySyncKind
+    let writable: Bool
+    let canRename: Bool
+    let canDelete: Bool
+    let canOrder: Bool
+    let members: [MusicNativeSyncMemberProof]
+    let revision: String
+    init(_ collection: MusicLibrarySyncCollection) {
+        id = collection.id; name = collection.name; kind = collection.kind; writable = collection.writable
+        canRename = collection.canRename; canDelete = collection.canDelete; canOrder = collection.canOrder
+        members = collection.members.map(MusicNativeSyncMemberProof.init); revision = collection.revision
+    }
+}
+struct MusicNativeSyncWriteProof: Codable, Equatable {
+    let id: UUID
+    let action: MusicLibrarySyncMutation.Action
+    let collectionID: String?
+    let name: String?
+    let before: MusicNativeSyncCollectionProof?
+    let beforeSubscription: MusicLibrarySyncSubscription?
+    let directoryRevision: String
+    let members: [MusicNativeSyncMemberProof]
+    init(_ mutation: MusicLibrarySyncMutation) {
+        id = mutation.id; action = mutation.action; collectionID = mutation.collectionID; name = mutation.name
+        before = mutation.before.map(MusicNativeSyncCollectionProof.init)
+        beforeSubscription = mutation.beforeSubscription; directoryRevision = mutation.directoryRevision
+        members = mutation.members.map(MusicNativeSyncMemberProof.init)
+    }
+}
+
 struct MusicNativeSyncFence: Codable {
     let platform: MusicAccountPlatform
     let accountID: String
     let scope: String
     let localID: String
     let localRevision: Int
-    let mutation: MusicLibrarySyncMutation
+    let mutation: MusicNativeSyncWriteProof
     var acknowledgedID: String?
     var acknowledgedName: String?
 
@@ -73,7 +115,6 @@ struct MusicNativeSyncLedger: Codable {
         try value.automatic.validate()
         for fence in value.fences {
             guard fence.localRevision >= 0, !fence.localID.isEmpty, !fence.accountID.isEmpty, !fence.scope.isEmpty,
-                  fence.localID.utf8.count <= 1024, fence.accountID.utf8.count <= 128, fence.scope.utf8.count <= 1024,
                   (fence.mutation.action.isSubscription
                     ? wrapper["library"]["networkReferences"].array.contains(where: {
                         $0["id"].string == fence.localID && $0["platform"].string == fence.platform.rawValue &&
@@ -124,14 +165,7 @@ struct MusicNativeSyncLedger: Codable {
                 }
             }
             for member in fence.mutation.members + (fence.mutation.before?.members ?? []) {
-                guard !member.nativeID.isEmpty, !member.occurrenceID.isEmpty,
-                      member.nativeID.utf8.count <= 128, member.occurrenceID.utf8.count <= 128 else { throw MusicServiceError.corruptDocument }
-                let raw = try MJ.parse(member.track, maximum: 64 * 1024)
-                try MusicModel.rejectSecrets(raw)
-                let song = try MusicModel.normalize(.init(platform: fence.platform.rawValue, data: member.track))
-                guard try MusicModel.sources(song).contains(where: {
-                    $0.platform == fence.platform.rawValue && $0.nativeId == member.nativeID
-                }) else { throw MusicServiceError.corruptDocument }
+                guard !member.nativeID.isEmpty, !member.occurrenceID.isEmpty else { throw MusicServiceError.corruptDocument }
             }
         }
         return value
@@ -174,7 +208,7 @@ struct MusicNativeAutomaticSyncPreferences: Codable {
             relationshipPlatforms.allSatisfy { platform in selections.contains { $0.platform == platform && $0.playlists } } &&
             (relationshipPlatforms.isEmpty || orderOnly == nil), .corruptDocument)
         for binding in bindings.values {
-            try musicRequire(!binding.accountID.isEmpty && binding.accountID.utf8.count <= 1024 &&
+            try musicRequire(!binding.accountID.isEmpty &&
                 !binding.scope.isEmpty && binding.scope.utf8.count <= 1024, .corruptDocument)
         }
         if let orderOnly {

@@ -34,14 +34,9 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     @Published public private(set) var playlistsLoaded = false
     @Published public private(set) var automaticPaginationHeld = false
 
-    private struct SongOrigin: Sendable {
-        let request: MusicSearchPagination.Request
-        let index: Int
-    }
     private struct PlatformState<Item: Sendable> {
         var items: [Item] = []
-        var ranks: [String: Int] = [:]
-        var origins: [MusicReference: SongOrigin] = [:]
+        var ranks: [String: Double] = [:]
         var pages: [MusicSearchPage] = []
         var roundItems: [Item] = []
         var lastPage = 0
@@ -59,6 +54,9 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private var songStates: [MusicPublicBrowsePlatform: PlatformState<MusicRemoteTrack>] = [:]
     private var playlistStates: [MusicPublicBrowsePlatform: PlatformState<MusicPublicBrowseCollection>] = [:]
     private var songTask: Task<Void, Never>?, playlistTask: Task<Void, Never>?
+    private var repository: (any MusicSongRepositoryReading)?
+    private var songObservation: Task<Void, Never>?, songProjectionTask: Task<Void, Never>?
+    private var songProjectionID = UUID()
     private var songToken = UUID(), playlistToken = UUID()
     private var recoveryID: UUID?
     private var access = UUID()
@@ -102,6 +100,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         }, cacheProvider: { [weak owner] in
             owner?.searchResultsCache ?? MusicSearchResultsCache.make()
         })
+        repository = owner.service as? any MusicSongRepositoryReading
     }
     public var moreSongs: Bool { songStates.values.contains { $0.next != nil } }
     public var morePlaylists: Bool { playlistStates.values.contains { $0.next != nil } }
@@ -120,20 +119,62 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
             cache = cacheProvider()
         }
         access = generation; self.available = available
+        songObservation?.cancel(); songObservation = nil
+        songProjectionTask?.cancel(); songProjectionTask = nil
+        observeSongs()
         return true
     }
     public func appear() {
         guard !visible else { return }
         visible = true
+        observeSongs()
         if !songsCancelled { loadSongs(.initial) }
         if !playlistsCancelled { loadPlaylists(.initial) }
     }
     public func disappear() {
         visible = false; recoveryID = nil
+        songObservation?.cancel(); songObservation = nil
+        songProjectionTask?.cancel(); songProjectionTask = nil
         cancel(.songs, byUser: false); cancel(.playlists, byUser: false)
         automaticPaginationHeld = true
     }
     public func resumePagination() { if usable { automaticPaginationHeld = false } }
+    private func observeSongs() {
+        guard visible, available, songObservation == nil, let repository else { return }
+        songObservation = Task { [weak self] in
+            let changes = await repository.songChanges()
+            await self?.refreshSongProjections()
+            for await _ in changes {
+                guard !Task.isCancelled else { return }
+                await self?.refreshSongProjections()
+            }
+        }
+    }
+    private func refreshSongProjections() async {
+        guard !Task.isCancelled, usable, let repository else { return }
+        let own = UUID(), request = requestID, generation = access
+        songProjectionID = own
+        let ids = Set(songStates.values.flatMap(\.items).map(\.songId))
+        do {
+            let current = try await repository.repositoryTracks(songIDs: ids)
+            guard accepts(request, generation), songProjectionID == own else { return }
+            for platform in Array(songStates.keys) {
+                guard var state = songStates[platform] else { continue }
+                state.items = state.items.map { $0.projected(current) }
+                state.roundItems = state.roundItems.map { $0.projected(current) }
+                state.pages = state.pages.map { page in
+                    .init(platform: page.platform, query: page.query, page: page.page, limit: page.limit,
+                        total: page.total, nextPage: page.nextPage, items: page.items.map { $0.projected(current) },
+                        observation: page.observation)
+                }
+                songStates[platform] = state
+            }
+            songs = songs.map {
+                .init(id: $0.id, track: $0.track.projected(current), variants: $0.variants.map { $0.projected(current) },
+                    matchedPlatforms: $0.matchedPlatforms, score: $0.score)
+            }
+        } catch {}
+    }
     public func holdPagination() { automaticPaginationHeld = true }
     public func submit(_ keyword: String, preferences: MusicSearchPreferences) {
         clear()
@@ -144,6 +185,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         loadSongs(.initial); loadPlaylists(.initial)
     }
     public func clear() {
+        songProjectionID = UUID(); songProjectionTask?.cancel(); songProjectionTask = nil
         recoveryID = nil
         cancel(.songs, byUser: false); cancel(.playlists, byUser: false)
         requestID = UUID(); query = ""; songs = []; playlists = []
@@ -179,19 +221,19 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         guard usable else { throw MusicServiceError.accessUnavailable }
         let targets = try songs.map { try batchTarget($0) }
         let result = MusicSearchBatchRequest(query: query, targets: targets, startIndex: startIndex)
-        try result.validate(); return result
+        return result
     }
     public func makeBatchRequest(for row: MusicSearchSong) throws -> MusicSearchBatchRequest {
         guard usable else { throw MusicServiceError.accessUnavailable }
         let result = MusicSearchBatchRequest(query: query, targets: [try batchTarget(row)])
-        try result.validate(); return result
+        return result
     }
     public func finishPendingReads() async {
         let songs = songTask, playlists = playlistTask
         await songs?.value; await playlists?.value
     }
     /// Reads the selected recording through the native owner's same batch
-    /// resolver. Search rows keep their origins, identities and positions.
+    /// resolver. Search rows keep their permanent identities and positions.
     public func refreshTrack(_ row: MusicSearchSong, variant: MusicRemoteTrack? = nil) async throws -> MusicRemoteTrack {
         try Task.checkCancellation()
         guard usable else { throw MusicServiceError.accessUnavailable }
@@ -202,53 +244,14 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         defer { if recoveryID == own { recoveryID = nil } }
         let result = try await readRecording(.init(query: keyword, targets: [target]))
         guard accepts(request, generation), recoveryID == own else { throw MusicServiceError.staleResult }
-        guard target.origins.allSatisfy({ origin in
-            MusicSearchFusion.sameSearchTarget(result, origin.track, platform: origin.platform)
-        }) else {
-            throw MusicServiceError.targetChanged
-        }
         return result
     }
     private func batchTarget(_ row: MusicSearchSong, preferred: MusicRemoteTrack? = nil) throws -> MusicSearchBatchTarget {
-        if let preferred, !row.variants.contains(preferred) { throw MusicServiceError.invalidRequest }
-        var platforms = preferences.songPlatforms
-        if let preferred, let index = platforms.firstIndex(where: { platform in
-            preferred.sources.contains { $0.platform == platform.rawValue }
-        }) {
-            platforms.insert(platforms.remove(at: index), at: 0)
+        if let preferred {
+            guard row.variants.contains(where: { $0.ref == preferred.ref }) else { throw MusicServiceError.invalidRequest }
+            return .init(track: preferred)
         }
-        var origins: [MusicSearchBatchOrigin] = []
-        for platform in platforms {
-            var candidates = row.variants.filter { track in
-                track.sources.contains { $0.platform == platform.rawValue } &&
-                    songStates[platform]?.origins[track.ref] != nil
-            }
-            guard !candidates.isEmpty else { continue }
-            guard let state = songStates[platform] else { throw MusicServiceError.staleResult }
-            if let preferred, let index = candidates.firstIndex(of: preferred) {
-                candidates.insert(candidates.remove(at: index), at: 0)
-            }
-            var keys: [String] = []
-            var selected: [String: (track: MusicRemoteTrack, origin: SongOrigin)] = [:]
-            for track in candidates {
-                guard let origin = state.origins[track.ref], state.items[origin.index] == track else { continue }
-                let key = MusicSearchFusion.sourceIdentity(track, platform: platform)
-                if let previous = selected[key] {
-                    if origin.index > previous.origin.index { selected[key] = (track, origin) }
-                } else {
-                    keys.append(key); selected[key] = (track, origin)
-                }
-            }
-            guard !keys.isEmpty else { throw MusicServiceError.staleResult }
-            for key in keys {
-                let value = selected[key]!
-                origins.append(.init(platform: platform, page: value.origin.request.page,
-                                     limit: value.origin.request.limit, track: value.track))
-            }
-        }
-        let target = try MusicSearchBatchTarget(origins: origins)
-        try MusicSearchBatchRequest(query: query, targets: [target]).validate()
-        return target
+        return .init(track: row.track)
     }
     private func eligible<Item>(_ state: PlatformState<Item>, mode: ReadMode, cancelled: Bool) -> Bool {
         guard state.next != nil else { return false }
@@ -316,7 +319,6 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                                 try await reader(platform, keyword, range.page, range.limit)
                             }
                         }
-                        try Self.validate(value, platform: platform, keyword: keyword, range: range)
                         return .songs(value)
                     }
                     guard case .songs(let value) = cached else { throw MusicServiceError.invalidResponse }
@@ -339,18 +341,15 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private func acceptSong(_ page: MusicSearchPage, platform: MusicPublicBrowsePlatform,
                             range: MusicSearchPagination.Request, first: Bool) throws {
         guard var state = songStates[platform] else { throw MusicServiceError.staleResult }
+        let rankOffset = max((Double(range.page) - 1) * Double(range.limit), state.ranks.values.max() ?? 0)
         var seen = Dictionary(grouping: state.items) { MusicSearchFusion.sourceIdentity($0, platform: platform) }
         for (index, item) in page.items.enumerated() {
             let key = MusicSearchFusion.sourceIdentity(item, platform: platform)
             if let evidence = seen[key] {
-                guard evidence.allSatisfy({ MusicSearchFusion.sameRecording($0, item) }) else {
-                    throw MusicServiceError.nativeIDConflict
-                }
                 if evidence.contains(item) { continue }
             } else {
-                state.ranks[key] = (range.page - 1) * range.limit + index + 1
+                state.ranks[key] = rankOffset + Double(index) + 1
             }
-            state.origins[item.ref] = .init(request: range, index: state.items.count)
             seen[key, default: []].append(item)
             state.items.append(item); state.roundItems.append(item)
         }
@@ -408,7 +407,6 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                                 try await reader(platform, keyword, range.page, range.limit)
                             }
                         }
-                        try Self.validate(value, platform: platform, keyword: keyword, range: range)
                         return .playlists(value)
                     }
                     guard case .playlists(let value) = cached else { throw MusicServiceError.invalidResponse }
@@ -431,10 +429,11 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private func acceptPlaylist(_ page: MusicPlaylistSearchPage, platform: MusicPublicBrowsePlatform,
                                 range: MusicSearchPagination.Request, first: Bool) {
         guard var state = playlistStates[platform] else { return }
+        let rankOffset = max((Double(range.page) - 1) * Double(range.limit), state.ranks.values.max() ?? 0)
         var seen = Set(state.items.map(\.id))
         for (index, item) in page.items.enumerated() where seen.insert(item.id).inserted {
             state.items.append(item); state.roundItems.append(item)
-            state.ranks[item.id] = (range.page - 1) * range.limit + index + 1
+            state.ranks[item.id] = rankOffset + Double(index) + 1
         }
         state.lastPage = range.page; state.next = page.nextPage
         playlistStates[platform] = state; playlistsLoaded = true
@@ -452,6 +451,10 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         songs = first ? MusicSearchFusion.songs(batches, platformOrder: preferences.songPlatforms)
             : MusicSearchFusion.appendSongs(displayed: songs, adding: batches, platformOrder: preferences.songPlatforms)
         for platform in preferences.songPlatforms { songStates[platform]?.roundItems = [] }
+        if repository != nil {
+            songProjectionTask?.cancel()
+            songProjectionTask = Task { [weak self] in await self?.refreshSongProjections() }
+        }
         songFailures = preferences.songPlatforms.compactMap { platform in
             songStates[platform]?.error.map { .init(platform: platform, error: $0, diagnosticID: songStates[platform]?.diagnosticID) }
         }
@@ -470,29 +473,6 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
             playlistStates[platform]?.error.map { .init(platform: platform, error: $0, diagnosticID: playlistStates[platform]?.diagnosticID) }
         }
     }
-    private nonisolated static func validate(_ result: MusicSearchPage, platform: MusicPublicBrowsePlatform,
-        keyword: String, range: MusicSearchPagination.Request) throws {
-        // Migu's adapter validates raw groups before expanding or deduplicating editions.
-        guard result.platform == platform.rawValue, result.query == keyword, result.page == range.page,
-              result.limit == range.limit, result.total >= 0,
-              (platform == .migu || result.items.count <= range.limit),
-              MusicSearchPagination.validNextPage(page: range.page, limit: range.limit,
-                  next: result.nextPage, hasItems: !result.items.isEmpty),
-              result.items.allSatisfy({ !$0.songId.isEmpty && $0.duration.isFinite && $0.duration >= 0 &&
-                  $0.sources.contains(where: { $0.platform == platform.rawValue && !$0.nativeId.isEmpty && !$0.sourceKey.isEmpty }) }) else {
-            throw MusicServiceError.invalidResponse
-        }
-    }
-    private nonisolated static func validate(_ result: MusicPlaylistSearchPage, platform: MusicPublicBrowsePlatform,
-        keyword: String, range: MusicSearchPagination.Request) throws {
-        guard result.platform == platform, result.query == keyword, result.page == range.page,
-              result.limit == range.limit, result.total >= 0, result.items.count <= range.limit,
-              MusicSearchPagination.validNextPage(page: range.page, limit: range.limit,
-                  next: result.nextPage, hasItems: !result.items.isEmpty),
-              result.items.allSatisfy({ $0.platform == platform && $0.kind == .playlist }) else {
-            throw MusicServiceError.invalidResponse
-        }
-    }
-    deinit { songTask?.cancel(); playlistTask?.cancel() }
+    deinit { songTask?.cancel(); playlistTask?.cancel(); songObservation?.cancel(); songProjectionTask?.cancel() }
 }
 #endif

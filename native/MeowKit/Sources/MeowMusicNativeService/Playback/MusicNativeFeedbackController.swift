@@ -53,6 +53,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
     private var startedAt: TimeInterval?
     private var active: [MusicAccountPlatform: Listen] = [:]
     private var work: [UUID: Listen] = [:]
+    private var cleanupTasks: [UUID: Task<Void, Never>] = [:]
     // Unknown submission is spent for this listening occurrence/generation,
     // including successful URL, script and quality handoffs.
     private var spent: [MusicAccountPlatform: Int] = [:]
@@ -72,6 +73,24 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             }
             if ready { continuation.resume() }
         }
+        while true {
+            let pending = locked { Array(cleanupTasks.values) }
+            if pending.isEmpty { return }
+            for task in pending { await task.value }
+        }
+    }
+    private func retireLease(_ lease: MusicPlaybackFeedbackLease) {
+        locked {
+            guard cleanupTasks[lease.id] == nil else { return }
+            cleanupTasks[lease.id] = Task { [self] in
+                await lease.drain()
+                _ = locked { cleanupTasks.removeValue(forKey: lease.id) }
+            }
+        }
+    }
+    private func revoke(_ item: Listen) {
+        item.revoke()
+        if let lease = locked({ item.lease }) { retireLease(lease) }
     }
     private func notifyIdle() {
         let waiters: [CheckedContinuation<Void, Never>] = locked {
@@ -111,7 +130,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             }
             return old
         }
-        for item in old { item.revoke() }
+        for item in old { revoke(item) }
     }
     func breakContinuity(_ sample: MusicPlaybackFeedbackSample) {
         locked {
@@ -149,7 +168,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             }
             return (pending, active.values.filter { !$0.cancelled }.map(\.sourceTarget))
         }
-        for item in revoked { item.revoke() }
+        for item in revoked { revoke(item) }
         return targets
     }
     /// Settle the final native observation, not elapsed UI/navigation time.
@@ -169,7 +188,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                 active.removeAll()
             }
         }
-        for item in revoked { item.revoke() }
+        for item in revoked { revoke(item) }
         for (item, value) in ends { end(item, value: value) }
     }
     private func freeze(_ sample: MusicPlaybackFeedbackSample, reason: MusicPlaybackFeedbackReport.Reason,
@@ -200,7 +219,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             }
             return old
         }
-        for item in old { item.revoke() }
+        for item in old { revoke(item) }
     }
     private func sourceRevoked(_ item: Listen) {
         let revoke = locked {
@@ -213,7 +232,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             if item.workers == 0 { work.removeValue(forKey: item.id) }
             return true
         }
-        if revoke { item.revoke() }
+        if revoke { self.revoke(item) }
     }
     static func valid(_ sample: MusicPlaybackFeedbackSample) -> Bool {
         [sample.position, sample.duration, sample.observedAt, sample.occurredAt, sample.rate]
@@ -291,7 +310,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                 }
             }
         }
-        for item in revoked { item.revoke() }
+        for item in revoked { revoke(item) }
         for (item, value) in starts {
             do {
                 try item.sourceTarget.recommendationProof?.authorization.register(item.id) { [weak self, weak item] in
@@ -317,7 +336,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             if active[item.target.platform] === item { active.removeValue(forKey: item.target.platform) }
             return true
         }
-        if release { item.revoke() }
+        if release { revoke(item) }
         notifyIdle()
     }
     private func start(_ item: Listen, value: MusicPlaybackFeedbackReport, observedAt: TimeInterval,
@@ -331,7 +350,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                     source: item.target.source, sourceID: item.target.sourceID, algorithm: item.target.algorithm)
                 let lease = try await accounts.beginPlaybackFeedback(platform: item.target.platform, authorization: item.authorization)
                 do { try await lease.authorization.check() }
-                catch { lease.revoke(); throw error }
+                catch { retireLease(lease); throw error }
                 let install = { [self] in locked {
                     guard work[item.id] === item, !item.finished, !item.cancelled else { return false }
                     let admittedAt = clock()
@@ -344,9 +363,9 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                     if let proof = item.sourceTarget.recommendationProof { installed = try proof.authorization.perform(install) }
                     else { installed = install() }
                 } catch {
-                    lease.revoke(); throw error
+                    retireLease(lease); throw error
                 }
-                guard installed else { lease.revoke(); return }
+                guard installed else { retireLease(lease); return }
                 notifyIdle()
                 item.sourceTarget.recommendationProof?.authorization.remove(item.id)
                 try await item.authorization.check()

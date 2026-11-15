@@ -63,10 +63,11 @@ private actor MetadataSettingsFixture: MusicMetadataPreferencesServing {
 
 @MainActor
 final class MusicMetadataSettingsTests: XCTestCase {
+    private let receipts = MusicSettingsReceiptOwner()
     func testTogglesAllowAllDisabledAndOrderUsesLastConfirmedSharedRevision() async throws {
         let store = MetadataSettingsFixture()
         var published: [MusicMetadataPreferences] = []
-        let model = MusicMetadataSettingsModel(service: store, onChanged: { published.append($0) })
+        let model = MusicMetadataSettingsModel(service: store, receipts: receipts, onChanged: { published.append($0) })
         model.setAccess(available: true, generation: UUID()); model.reload(); await model.flush()
         XCTAssertEqual(model.value?.revision, 0)
         for platform in [MusicPublicBrowsePlatform.netease, .qq, .kugou] {
@@ -85,7 +86,7 @@ final class MusicMetadataSettingsTests: XCTestCase {
     }
 
     func testUnavailablePlatformInvalidPermutationAndDuplicateInputCannotWrite() async {
-        let store = MetadataSettingsFixture(), model = MusicMetadataSettingsModel(service: store)
+        let store = MetadataSettingsFixture(), model = MusicMetadataSettingsModel(service: store, receipts: receipts)
         model.setAccess(available: true, generation: UUID()); model.reload(); await model.flush()
         model.setEnabled(.migu, true)
         model.setEnabled(.qq, true)
@@ -98,7 +99,7 @@ final class MusicMetadataSettingsTests: XCTestCase {
 
     func testBusyWriteIsNotOptimisticallyDisplayedAndRejectsAdditionalMutations() async {
         let store = MetadataSettingsFixture(), gate = MetadataSettingsGate()
-        let model = MusicMetadataSettingsModel(service: store)
+        let model = MusicMetadataSettingsModel(service: store, receipts: receipts)
         model.setAccess(available: true, generation: UUID()); model.reload(); await model.flush()
         await store.blockWrite(gate)
         model.setEnabled(.qq, false)
@@ -112,7 +113,7 @@ final class MusicMetadataSettingsTests: XCTestCase {
     }
 
     func testStaleRevisionRereadsOnceWithoutReplayingTheUserPatch() async {
-        let store = MetadataSettingsFixture(), model = MusicMetadataSettingsModel(service: store)
+        let store = MetadataSettingsFixture(), model = MusicMetadataSettingsModel(service: store, receipts: receipts)
         model.setAccess(available: true, generation: UUID()); model.reload(); await model.flush()
         let concurrent = MusicMetadataPreferences(revision: 5, platforms: [.qq, .kugou, .netease],
                                                   enabledPlatforms: [.qq])
@@ -131,13 +132,14 @@ final class MusicMetadataSettingsTests: XCTestCase {
         for failure in [MusicServiceError.storageConflict, .commitUnconfirmed] {
             let store = MetadataSettingsFixture()
             var published: [MusicMetadataPreferences] = []
-            let model = MusicMetadataSettingsModel(service: store, onChanged: { published.append($0) })
+            let model = MusicMetadataSettingsModel(service: store, receipts: receipts, onChanged: { published.append($0) })
             model.setAccess(available: true, generation: UUID()); model.reload(); await model.flush()
             await store.fail(failure)
             model.setEnabled(.qq, false); await model.flush()
             let counts = await store.counts()
             XCTAssertEqual(counts.reads, 2); XCTAssertEqual(counts.writes, 1)
-            XCTAssertEqual(model.error, failure.localizedDescription)
+            XCTAssertEqual(model.error, failure == .commitUnconfirmed ? nil : failure.localizedDescription)
+            XCTAssertEqual(receipts.unknown.map(\.setting), failure == .commitUnconfirmed ? ["metadata/enabledPlatforms"] : [])
             XCTAssertEqual(model.value?.revision, failure == .commitUnconfirmed ? 1 : 0)
             XCTAssertEqual(model.value?.enabledPlatforms.contains(.qq), failure != .commitUnconfirmed)
             XCTAssertEqual(published.last, model.value)
@@ -145,7 +147,7 @@ final class MusicMetadataSettingsTests: XCTestCase {
     }
 
     func testOrdinaryFailureClearsStaleControlsAndRequiresExplicitReread() async {
-        let store = MetadataSettingsFixture(), model = MusicMetadataSettingsModel(service: store)
+        let store = MetadataSettingsFixture(), model = MusicMetadataSettingsModel(service: store, receipts: receipts)
         model.setAccess(available: true, generation: UUID()); model.reload(); await model.flush()
         await store.fail(.storageFailed)
         model.setEnabled(.qq, false); await model.flush()
@@ -160,7 +162,7 @@ final class MusicMetadataSettingsTests: XCTestCase {
     func testLateOldScopeReadIsSuppressedAndRepeatedReentryKeepsOnlyOnePhysicalSlot() async {
         let store = MetadataSettingsFixture(), gate = MetadataSettingsGate()
         var published: [MusicMetadataPreferences] = []
-        let model = MusicMetadataSettingsModel(service: store, onChanged: { published.append($0) })
+        let model = MusicMetadataSettingsModel(service: store, receipts: receipts, onChanged: { published.append($0) })
         await store.blockRead(gate)
         model.setAccess(available: true, generation: UUID()); model.reload()
         await gate.started()
@@ -181,7 +183,7 @@ final class MusicMetadataSettingsTests: XCTestCase {
     func testAccountChangeDoesNotPublishOldCommitOrReplayWriteAndReentryReadsNewScope() async {
         let store = MetadataSettingsFixture(), gate = MetadataSettingsGate()
         var published: [MusicMetadataPreferences] = []
-        let model = MusicMetadataSettingsModel(service: store, onChanged: { published.append($0) })
+        let model = MusicMetadataSettingsModel(service: store, receipts: receipts, onChanged: { published.append($0) })
         model.setAccess(available: true, generation: UUID()); model.reload(); await model.flush()
         await store.blockWrite(gate)
         model.setEnabled(.qq, false); await gate.started()
@@ -193,19 +195,61 @@ final class MusicMetadataSettingsTests: XCTestCase {
         let counts = await store.counts(); XCTAssertEqual(counts.writes, 1); XCTAssertEqual(counts.reads, 2)
     }
 
-    func testDisappearCancelsQueuedSaveAndDelayedReadCannotRepopulateHiddenPage() async {
-        let store = MetadataSettingsFixture(), model = MusicMetadataSettingsModel(service: store)
+    func testSubmittedSaveSurvivesDepartureAndDelayedReadCannotRepopulateHiddenPage() async {
+        let store = MetadataSettingsFixture(), model = MusicMetadataSettingsModel(service: store, receipts: receipts)
         let generation = UUID()
         model.setAccess(available: true, generation: generation); model.reload(); await model.flush()
         model.setEnabled(.qq, false)
         model.setAccess(available: false, generation: generation) // Before the MainActor task can begin.
         await model.flush()
-        var counts = await store.counts(); XCTAssertEqual(counts.writes, 0)
+        var counts = await store.counts(); XCTAssertEqual(counts.writes, 1)
         let gate = MetadataSettingsGate(); await store.blockRead(gate)
         model.setAccess(available: true, generation: generation); model.reload(); await gate.started()
         model.setAccess(available: false, generation: generation)
         await gate.release(); await model.flush()
         XCTAssertNil(model.value); XCTAssertNil(model.error); XCTAssertFalse(model.busy)
-        counts = await store.counts(); XCTAssertEqual(counts.writes, 0)
+        counts = await store.counts(); XCTAssertEqual(counts.writes, 1)
+    }
+
+    func testClosedPageDoesNotPublishLateUnknownAndReopenReadsCommittedValueBeforeSameItemSuccess() async {
+        let store = MetadataSettingsFixture(), gate = MetadataSettingsGate()
+        var published: [MusicMetadataPreferences] = []
+        let model = MusicMetadataSettingsModel(service: store, receipts: receipts, onChanged: { published.append($0) })
+        let generation = UUID()
+        model.setAccess(available: true, generation: generation); model.reload(); await model.flush()
+        await store.blockWrite(gate); await store.fail(.commitUnconfirmed)
+        model.setEnabled(.qq, false); await gate.started()
+        model.setAccess(available: false, generation: generation)
+        await gate.release(); await model.flush(); await receipts.flush()
+        XCTAssertNil(model.value); XCTAssertNil(model.error); XCTAssertFalse(model.busy)
+        XCTAssertEqual(published.map(\.revision), [0])
+        XCTAssertEqual(receipts.unknown.map(\.setting), ["metadata/enabledPlatforms"])
+        var counts = await store.counts(); XCTAssertEqual(counts.writes, 1); XCTAssertEqual(counts.reads, 1)
+        model.setAccess(available: true, generation: generation); model.reload(); await model.flush()
+        XCTAssertEqual(model.value?.enabledPlatforms, [.netease, .kugou])
+        XCTAssertEqual(receipts.unknown.count, 1, "Reading the committed value is not a write receipt")
+        model.reorder([.qq, .netease, .kugou]); await model.flush()
+        XCTAssertEqual(receipts.unknown.count, 1, "Another metadata setting cannot acknowledge this write")
+        model.setEnabled(.qq, true); await model.flush(); await receipts.flush()
+        XCTAssertTrue(receipts.unknown.isEmpty)
+        counts = await store.counts(); XCTAssertEqual(counts.writes, 3)
+    }
+
+    func testClosedPageSuccessfulReceiptRefreshesParentButCannotPublishControls() async {
+        let store = MetadataSettingsFixture(), gate = MetadataSettingsGate()
+        var published: [MusicMetadataPreferences] = []
+        let model = MusicMetadataSettingsModel(service: store, receipts: receipts, onChanged: { published.append($0) })
+        let generation = UUID()
+        model.setAccess(available: true, generation: generation); model.reload(); await model.flush()
+        await store.blockWrite(gate)
+        model.setEnabled(.qq, false); await gate.started()
+        model.setAccess(available: false, generation: generation)
+        await gate.release(); await model.flush(); await receipts.flush()
+        XCTAssertEqual(published.map(\.revision), [0, 1], "Business invalidation belongs to the surviving parent owner")
+        XCTAssertEqual(published.last?.enabledPlatforms, [.netease, .kugou])
+        XCTAssertNil(model.value); XCTAssertNil(model.error); XCTAssertFalse(model.busy)
+        XCTAssertTrue(receipts.unknown.isEmpty)
+        let counts = await store.counts()
+        XCTAssertEqual(counts.reads, 1); XCTAssertEqual(counts.writes, 1)
     }
 }

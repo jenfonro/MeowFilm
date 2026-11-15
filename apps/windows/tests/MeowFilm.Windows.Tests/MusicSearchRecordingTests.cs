@@ -9,7 +9,7 @@ public static partial class MusicSearchTests
     private static IEnumerable<TestCase> RecordingCases()
     {
         yield return new("Search rounds preserve canonical sources primary identity and displayed positions", CanonicalRounds);
-        yield return new("Search later rounds enforce all recording pairs and feed real song consumers", PairwiseRounds);
+        yield return new("Search later rounds retain the fixed baseline and feed real repository consumers", PairwiseRounds);
         yield return new("Search same-round conflicting subgroup accepts compatible platform consensus", SameRoundSubgroups);
         yield return new("Search later rounds reuse conflicting subgroups even after a platform ends", LaterRoundSubgroups);
         foreach (string kind in new[] { "songs", "playlists" })
@@ -30,7 +30,7 @@ public static partial class MusicSearchTests
             _ = SongRow.Read(row);
             var keys = row.GetProperty("sources").EnumerateArray().Select(source => S(source, "sourceKey")).ToArray();
             Check(keys.Length == keys.Distinct(StringComparer.Ordinal).Count());
-            Check(keys.Skip(1).SequenceEqual(keys.Skip(1).Order(StringComparer.Ordinal)), "non-primary sources are not canonical");
+            Check(Guid.TryParseExact(S(row, "songId"), "D", out _), "search must publish permanent repository UUIDs");
         }
         return rows;
     }
@@ -62,6 +62,7 @@ public static partial class MusicSearchTests
     private static async Task PairwiseRounds()
     {
         await using var f = new Fixture();
+        await f.Library.AdoptSongAsync(Song("wy", "wy1", duration: 103), default);
         f.Catalog.Handler = (r, _) => Task.FromResult(Page(r,
             [Song(r.Platform, r.Platform + r.Page, duration: r.Platform == "wy" ? 103 : r.Page == 1 ? 100 : 106)], r.Page == 1));
         string id = S(await f.Start(["wy", "tx"]), "id");
@@ -69,9 +70,9 @@ public static partial class MusicSearchTests
         Check(first.Length == 1 && first[0].GetProperty("sources").GetArrayLength() == 2);
         await f.Call("next", id);
         var rows = CanonicalRows(await f.Idle(id));
-        Check(rows.Length == 2 && S(rows[0], "songId") == S(first[0], "songId"));
-        Check(rows[0].GetProperty("sources").GetArrayLength() == 3 &&
-            rows[1].GetProperty("duration").GetDouble() == 106);
+        Check(rows.Length == 1 && S(rows[0], "songId") == S(first[0], "songId"));
+        Check(rows[0].GetProperty("sources").GetArrayLength() == 4 &&
+            rows[0].GetProperty("baselineDuration").GetDouble() == 103);
 
         await using var store = new MusicOfficialAudioTests.MemoryStore();
         await using var library = new MusicLibraryOwner(store);
@@ -83,7 +84,7 @@ public static partial class MusicSearchTests
         }
         await Call("music.library.addSongs", new { id = "favorites", ifRevision = 0, songs = rows });
         var favorites = await Call("music.library.detail", new { id = "favorites" });
-        Check(favorites.GetProperty("songs").GetArrayLength() == 2);
+        Check(favorites.GetProperty("songs").GetArrayLength() == 1);
         await Call("music.queue.replace", new { songs = rows, index = 0 });
         var queue = await Call("music.queue.get", new { });
         var current = queue.GetProperty("current");

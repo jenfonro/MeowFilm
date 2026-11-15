@@ -4,7 +4,7 @@ import MeowUI
 
 struct MusicSearchChartRowViewData: Equatable {
     let id: String
-    let rank: Int
+    let rank: Int?
     let title: String
 }
 
@@ -417,13 +417,13 @@ private final class MusicSearchChartRowButton: UIButton {
     func configure(row: MusicSearchChartRowViewData, chartID: String, isMusic: Bool,
                    font: UIFont, rankFont: UIFont, theme: PageTheme) {
         id = row.id
-        rank.text = String(row.rank); song.text = row.title
-        rank.textColor = UIColor(row.rank <= 3 ? theme.accent : theme.muted)
+        rank.text = row.rank.map(String.init); song.text = row.title
+        rank.textColor = UIColor(row.rank.map { $0 <= 3 } == true ? theme.accent : theme.muted)
         song.textColor = UIColor(theme.ink)
         rank.accessibilityIdentifier = "music.search.chart.rank.\(chartID).\(row.id)"
         song.accessibilityIdentifier = "music.search.chart.song.\(chartID).\(row.id)"
         accessibilityIdentifier = "music.search.chart.row.\(chartID).\(row.id)"
-        accessibilityLabel = (isMusic ? "播放" : "搜索") + "第\(row.rank)名，" + row.title
+        accessibilityLabel = (isMusic ? "播放" : "搜索") + (row.rank.map { "第\($0)名，" } ?? "") + row.title
         updateFonts(font: font, rankFont: rankFont)
     }
 

@@ -4,10 +4,17 @@ using MeowFilm.Capabilities.Search;
 namespace MeowFilm.Capabilities;
 
 public sealed record MusicDiscoveryKeyword(string Text, long Generation);
-public sealed record MusicDiscoverySong(SongRow Song, string ChartId, long Generation)
+public sealed record MusicDiscoverySong(SongRow Song, string ChartId, long Generation) : System.ComponentModel.INotifyPropertyChanged
 {
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
     public string Title => Song.Title;
     public string Artist => Song.Artist;
+    internal void RefreshSong(System.Text.Json.JsonElement? value)
+    {
+        if (!Song.ApplyRepository(value)) return;
+        PropertyChanged?.Invoke(this, new(nameof(Title)));
+        PropertyChanged?.Invoke(this, new(nameof(Artist)));
+    }
 }
 public sealed record MusicDiscoveryChart(string Id, string Name, string Creator, string Cover,
     MusicDiscoverySong[] Songs, long Generation)
@@ -66,8 +73,6 @@ public sealed partial class MusicCapability
     }
     private void PublishDiscovery(MusicSearchDiscoverySnapshot value)
     {
-        MusicDto.Require(value.Generation > 0 && value.Hot.Length <= 100 && value.Recommended.Length <= 6 &&
-            value.Charts.Length <= 3 && value.Charts.All(c => c.Songs.Length <= 20));
         var charts = value.Charts.Select(c => new MusicDiscoveryChart(c.Id, c.Name, c.Creator, c.Cover,
             c.Songs.Select(s => new MusicDiscoverySong(SongRow.Read(s), c.Id, value.Generation)).ToArray(), value.Generation)).ToArray();
         ClearDiscovery(); discoverySnapshot = value;

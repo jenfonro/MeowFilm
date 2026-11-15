@@ -7,7 +7,7 @@ import { createAppRuntime } from '../../runtime/bootstrap.mjs';
 
 const startupStages = new Set([
   'arguments', 'native-binding', 'bootstrap-channel', 'configuration', 'assembly',
-  'music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'listen', 'endpoint',
+  'music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform', 'listen', 'endpoint',
 ]);
 const startupErrorCategories = new Set([
   'INVALID_REQUEST', 'INVALID_RESPONSE', 'CLOSED', 'CANCELLED', 'TIMEOUT',

@@ -115,7 +115,7 @@ final class MusicPressFeedbackTests: XCTestCase {
             XCTAssertEqual(button.transform, .identity)
             assertRestored(cell.contentView)
             button.sendActions(for: .touchUpInside)
-            XCTAssertEqual(played, ["second"])
+            XCTAssertEqual(played, [tracks[1].songId])
             cell.resetPressFeedback()
             assertRestored(row)
             XCTAssertFalse(button.isHighlighted)
@@ -185,7 +185,8 @@ final class MusicPressFeedbackTests: XCTestCase {
             flow.itemSize = size
             let collection = UICollectionView(frame: window.bounds, collectionViewLayout: flow)
             collection.register(MusicBrowseCell.self, forCellWithReuseIdentifier: "card")
-            let track = MusicRemoteTrack(ref: .init(kind: .handle, id: "wrap"), songId: "wrap",
+            let songID = UUID().uuidString
+            let track = MusicRemoteTrack(ref: .init(kind: .library, id: songID), songId: songID,
                                          title: "一首名字很长需要折成两行的歌曲")
             let source = PressCardDataSource { cell in
                 cell.configure(item: .init(id: "wrap", title: track.title, content: .track(track)),
@@ -223,7 +224,8 @@ final class MusicPressFeedbackTests: XCTestCase {
     }
 
     private func makeTrack(_ id: String) -> MusicRemoteTrack {
-        .init(ref: .init(kind: .handle, id: id), songId: id, title: id)
+        let songID = UUID().uuidString
+        return .init(ref: .init(kind: .library, id: songID), songId: songID, title: id)
     }
 
     private func descendants(_ view: UIView) -> [UIView] {

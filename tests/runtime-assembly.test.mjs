@@ -13,6 +13,9 @@ import { contracts } from '../apps/runtime/contracts.mjs';
 import { createMusicScriptModule } from '../apps/runtime/modules/music-script.mjs';
 import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
 import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';
+import { createMusicPlatformModule } from '../apps/runtime/modules/music-platform.mjs';
+import { createMusicTransport } from '../packages/music-platform/src/transport.mjs';
+import { eapi, weapi, fixedEntropy, huge, nativeHTTP } from '../packages/music-platform/test/support.mjs';
 import { deferred, turn, until, rawRequest } from '../packages/runtime-bridge/test/http-fixture.js';
 import { lxScript } from '../packages/script-host/test/fixtures.js';
 
@@ -232,6 +235,223 @@ test('invalid assembly cannot open a listener or override methods; failed factor
   }
   await turn(); assert.equal(closes, 4);
 });
+
+test('the real music platform module exposes its common contract without fetching upstreams', async t => {
+  const dataRoot = temporaryData();
+  const module = createMusicPlatformModule({ dataRoot, transport: () => assert.fail('passive module fetched upstream') });
+  const { runtime, client } = await connect(t, [module]);
+  t.after(async () => { await runtime.close(); rmSync(dataRoot, { recursive: true }); });
+  const described = await client.describe();
+  assert.deepEqual(described.value.modules, [{
+    id: 'music-platform', version: '0.1.0', contract: 'music.platform.v1',
+    methods: ['music.platform.cache.clear', 'music.platform.describe', 'music.platform.request', 'music.platform.session.update'],
+  }]);
+  assert.deepEqual(await client.call('music.platform.describe'), {
+    ok: true, contract: 'music.platform.v1',
+    value: { execution: 'node', contract: 'music.platform.v1', platforms: ['wy', 'tx', 'kg', 'kw', 'mg'] },
+  });
+  assert.deepEqual(await client.call('music.platform.cache.clear'), {
+    ok: true, contract: 'music.platform.v1', value: { cleared: true },
+  });
+  await runtime.close();
+  await runtime.close();
+});
+
+test('default music platform HTTP executes integer wires and lossless responses without newer JSON APIs or fetch',
+  { timeout: 15000 }, async t => {
+    const rawJSON = Object.getOwnPropertyDescriptor(JSON, 'rawJSON'), fetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+    delete JSON.rawJSON;
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, value: () => assert.fail('default music must not use fetch') });
+    t.after(() => {
+      if (rawJSON) Object.defineProperty(JSON, 'rawJSON', rawJSON); else delete JSON.rawJSON;
+      if (fetch) Object.defineProperty(globalThis, 'fetch', fetch); else delete globalThis.fetch;
+    });
+    const parse = JSON.parse;
+    t.mock.method(JSON, 'parse', (source, reviver) => parse(source, typeof reviver === 'function' ?
+      function (key, value) { return reviver.call(this, key, value); } : reviver));
+    fixedEntropy(t);
+    const peer = await nativeHTTP(t, (request, reply) => {
+      const wire = { body: request.body.toString() };
+      if (request.url === '/eapi/link/page/rcmd/resource/show') {
+        const { path, data } = eapi(wire);
+        assert.equal(path, '/api/link/page/rcmd/resource/show'); assert.equal(data.cursor, 0);
+        assert.equal(data.isFirstScreen, true);
+        reply.end('{"code":200,"data":{"blocks":[],"hasMore":false}}');
+      } else if (request.url === '/weapi/v3/song/detail') {
+        assert.equal(weapi(wire).c, `[{"id":${huge}}]`);
+        reply.end(`{"code":500,"code":200,"songs":[{"id":1,"id":${huge},"name":"Exact (Live)","ar":[],"dt":240250}],"unused":1e400}`);
+      } else {
+        assert.equal(request.url, '/weapi/v1/radio/get');
+        const data = weapi(wire);
+        assert.equal(data.sourceIds, `[${huge}]`); assert.equal(data.unplaySonIds, `[1,${huge}]`);
+        reply.end('{"code":200,"data":[]}');
+      }
+    });
+    const dataRoot = temporaryData(), module = createMusicPlatformModule({ dataRoot });
+    const { runtime, client } = await connect(t, [module]);
+    try {
+      const home = await client.call('music.platform.request', { platform: 'wy', operation: 'home' });
+      peer.check(); assert.equal(home.ok, true); assert.equal(home.contract, 'music.platform.v1'); assert.equal(home.value.more, false);
+      const song = await client.call('music.platform.request', { platform: 'wy', operation: 'song', params: { id: huge } });
+      peer.check(); assert.equal(song.ok, true); assert.equal(song.value.sources[0].musicInfo.songmid, huge);
+      assert.equal(song.value.title, 'Exact (Live)'); assert.equal(song.value.duration, 240.25);
+      const similar = await client.call('music.platform.request', {
+        platform: 'wy', operation: 'similar', params: { sourceIds: [huge], unplaySongIds: ['1', huge] },
+      });
+      peer.check(); assert.equal(similar.ok, true); assert.deepEqual(similar.value.items, []);
+      assert.deepEqual(peer.requests.map(request => request.url), [
+        'https://interfacepc.music.163.com/eapi/link/page/rcmd/resource/show',
+        'https://music.163.com/weapi/v3/song/detail', 'https://music.163.com/weapi/v1/radio/get',
+      ]);
+      for (const request of peer.requests) {
+        assert.equal(request.closed, true); assert.equal(request.socketClosed, true);
+      }
+    } finally { await runtime.close(); rmSync(dataRoot, { recursive: true }); }
+  });
+
+test('default music platform HTTP keeps admitted reads after subscriber cancellation and physically closes them before shutdown',
+  { timeout: 15000 }, async t => {
+    const entered = deferred(), closed = deferred();
+    const peer = await nativeHTTP(t, (request, reply) => {
+      assert.equal(request.url, '/eapi/cloudsearch/pc');
+      assert.equal(eapi({ body: request.body.toString() }).data.s, 'pending');
+      reply.once('close', () => closed.resolve());
+      reply.writeHead(200, { 'Content-Type': 'application/json' }); reply.write('{"code":200,"result":');
+      entered.resolve();
+    });
+    const dataRoot = temporaryData(), module = createMusicPlatformModule({ dataRoot });
+    const { runtime, client } = await connect(t, [module]);
+    try {
+      const controller = new AbortController();
+      const pending = client.call('music.platform.request', {
+        platform: 'wy', operation: 'search', params: { keyword: 'pending' },
+      }, { signal: controller.signal });
+      const cancelled = assert.rejects(pending, { code: 'CANCELLED' });
+      await entered.promise; controller.abort(); await cancelled;
+      await until(() => runtime.state.active === 0);
+      peer.check(); assert.equal(peer.requests.length, 1);
+      assert.equal(peer.requests[0].signal.aborted, false);
+      assert.equal(peer.requests[0].closed, false); assert.equal(peer.requests[0].socketClosed, false);
+      assert.deepEqual(await client.shutdown(), {
+        ok: true, contract: 'runtime.http.v1', value: { closed: true, cleanupComplete: true },
+      });
+      await closed.promise;
+      assert.equal(peer.requests[0].signal.aborted, true);
+      assert.equal(peer.requests[0].closed, true); assert.equal(peer.requests[0].socketClosed, true);
+      assert.equal(peer.requests.length, 1); peer.check();
+    } finally { await runtime.close(); rmSync(dataRoot, { recursive: true }); }
+  });
+
+test('real music platform HTTP requests ignore protocol-valid unused fields without changing the recipe or result', async t => {
+  const dataRoot = temporaryData(), requests = [];
+  let nested = { text: '猫😀', integer: 42, values: [true, null] };
+  for (let depth = 0; depth < 12; depth++) nested = { unused: nested };
+  const module = createMusicPlatformModule({ dataRoot, transport: createMusicTransport({
+    fetch: async (url, options) => {
+      requests.push(String(url));
+      assert.equal(new URL(url).origin, 'http://search.kuwo.cn');
+      assert.equal(new URL(url).pathname, '/r.s'); assert.equal(new URL(url).searchParams.get('all'), 'Synthetic');
+      assert.equal(options.method, 'GET'); assert.equal(options.headers.Authorization, undefined);
+      return new Response(JSON.stringify({ TOTAL: '1', abslist: [
+        { MUSICRID: 'MUSIC_123', SONGNAME: 'Synthetic', ARTIST: 'Artist', DURATION: 180 },
+      ], unused: requests.length === 1 ? null : nested }));
+    },
+  }) });
+  const { runtime, client } = await connect(t, [module]);
+  try {
+    let baseline;
+    for (const extra of [{}, { unused: 'C' }, { unused: nested, url: 'https://unused.invalid/',
+      method: 'POST', headers: { Authorization: 'synthetic-unused' } }]) {
+      const reply = await client.call('music.platform.request', {
+        platform: 'kw', operation: 'search', params: { keyword: 'Synthetic', ...extra },
+      });
+      assert.equal(reply.ok, true); assert.equal(reply.contract, 'music.platform.v1');
+      assert.equal(reply.value.items[0].title, 'Synthetic'); assert.equal(reply.value.items[0].artist, 'Artist');
+      assert.equal(reply.value.items[0].sources[0].musicInfo.id, '123');
+      if (baseline) assert.deepEqual(reply.value, baseline); else baseline = reply.value;
+    }
+    assert.equal(requests.length, 3); assert.equal(new Set(requests).size, 1);
+  } finally {
+    await runtime.close(); rmSync(dataRoot, { recursive: true });
+  }
+});
+
+test('real music platform HTTP cancellation releases the subscriber while close drains admitted business IO', async t => {
+  const dataRoot = temporaryData(), entered = deferred(), release = deferred();
+  let signal, physical = 0;
+  const module = createMusicPlatformModule({ dataRoot, transport: createMusicTransport({
+    fetch: async (url, options) => {
+      const keyword = new URL(url).searchParams.get('all');
+      physical++;
+      try {
+        if (keyword === 'pending') { signal = options.signal; entered.resolve(); await release.promise; }
+        return new Response(JSON.stringify({ TOTAL: '0', abslist: [] }));
+      } finally { physical--; }
+    },
+  }) });
+  const { runtime, client } = await connect(t, [module]);
+  try {
+    const controller = new AbortController();
+    const pending = client.call('music.platform.request', {
+      platform: 'kw', operation: 'search', params: { keyword: 'pending' },
+    }, { signal: controller.signal });
+    const cancelled = assert.rejects(pending, { code: 'CANCELLED' });
+    await entered.promise;
+    controller.abort(); await cancelled;
+    await until(() => runtime.state.active === 0);
+    assert.equal(signal.aborted, false); assert.equal(physical, 1);
+    const current = await client.call('music.platform.request', {
+      platform: 'kw', operation: 'search', params: { keyword: 'current' },
+    });
+    assert.equal(current.ok, true); assert.deepEqual(current.value.items, []);
+    let acknowledged = false;
+    const shutdown = client.shutdown().then(reply => { acknowledged = true; return reply; });
+    shutdown.catch(() => {});
+    await until(() => signal.aborted);
+    assert.equal(physical, 1); assert.equal(acknowledged, false);
+    release.resolve();
+    assert.deepEqual(await shutdown, {
+      ok: true, contract: 'runtime.http.v1', value: { closed: true, cleanupComplete: true },
+    });
+    assert.equal(physical, 0);
+    await until(() => runtime.state.active === 0);
+  } finally {
+    release.resolve();
+    await runtime.close(); rmSync(dataRoot, { recursive: true });
+  }
+});
+
+for (const failure of ['throw', 'envelope']) {
+  test(`nine-module shutdown retains music platform ${failure} failure and drains every other owner`, async t => {
+    const ids = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform'];
+    const counts = Object.fromEntries(ids.map(id => [id, 0])), entered = deferred(), release = deferred();
+    const modules = ids.map(id => {
+      const spec = contracts[id];
+      return { ...fixture(id), methods: {
+        [spec.prefix + spec.operations[0]]: async () => ({ ok: true, contract: spec.contract, value: {} }),
+      }, async close() {
+        counts[id]++;
+        if (id === 'netease') { entered.resolve(); await release.promise; }
+        if (id === 'music-platform') {
+          if (failure === 'throw') throw new Error('PRIVATE cleanup detail');
+          return { ok: false, contract: spec.contract, code: 'INVALID_RESPONSE' };
+        }
+      } };
+    });
+    const { runtime, client } = await connect(t, modules);
+    let settled = false;
+    const pending = client.shutdown();
+    pending.finally(() => { settled = true; }).catch(() => {});
+    await entered.promise; await turn();
+    assert.deepEqual(counts, Object.fromEntries(ids.map(id => [id, 1])));
+    assert.equal(settled, false);
+    release.resolve();
+    assert.deepEqual(await pending, { ok: false, contract: 'runtime.http.v1', code: 'INVALID_RESPONSE' });
+    await assert.rejects(runtime.close(), { code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE' });
+    await assert.rejects(runtime.close(), { code: 'INVALID_RESPONSE' });
+    assert.deepEqual(counts, Object.fromEntries(ids.map(id => [id, 1])));
+  });
+}
 
 test('synchronous assembly receives no capabilities and handlers receive the HTTP lifecycle context', async t => {
   const identity = config(); let assemblies = 0, received;

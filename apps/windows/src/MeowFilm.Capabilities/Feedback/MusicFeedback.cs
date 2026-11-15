@@ -28,7 +28,8 @@ public sealed partial class MusicCapability
     private JsonElement? currentFeedbackContext;
     private MusicRecommendationFeedback? currentRecommendationFeedback;
     private bool currentFeedbackAutomatic, feedbackStarted, feedbackSuspended;
-    private long feedbackRevision;
+    private long feedbackRevision, feedbackSettingsGeneration;
+    private Task feedbackSettingsWork = Task.CompletedTask;
     private bool feedbackSettingsLoaded, feedbackSettingsBusy;
     private string feedbackStatus = "";
     private string publishedFeedbackStatus = "";
@@ -45,17 +46,34 @@ public sealed partial class MusicCapability
         Changed(nameof(FeedbackStatus));
     }
 
-    private async Task ReadFeedbackSettings(CancellationToken token, bool refresh = false)
+    private bool FeedbackSettingsCurrent(long generation) =>
+        generation == feedbackSettingsGeneration && !stopping && !disposed;
+    internal void RetireFeedbackSettings()
     {
+        feedbackSettingsGeneration++;
+        feedbackSettingsLoaded = false;
+        feedbackSettingsBusy = false;
+    }
+
+    private async Task ReadFeedbackSettings(CancellationToken token)
+    {
+        long generation = feedbackSettingsGeneration;
+        await feedbackSettingsWork;
+        if (!FeedbackSettingsCurrent(generation)) return;
         try
         {
-            var value = await PlaybackFeedback.ReadSettingsAsync(refresh, token);
-            PublishFeedbackSettings(value);
+            var value = await PlaybackFeedback.ReadSettingsAsync(refresh: true, token);
+            token.ThrowIfCancellationRequested();
+            if (FeedbackSettingsCurrent(generation)) PublishFeedbackSettings(value);
         }
         catch
         {
-            feedbackSettingsLoaded = false; feedbackStatus = "上报设置读取失败";
-            Changed(nameof(CanEditFeedback)); PublishFeedbackStatus(); throw;
+            if (FeedbackSettingsCurrent(generation))
+            {
+                feedbackSettingsLoaded = false; feedbackStatus = "上报设置读取失败";
+                Changed(nameof(CanEditFeedback)); PublishFeedbackStatus();
+            }
+            throw;
         }
     }
     private void PublishFeedbackSettings(MusicFeedbackSettings settings)
@@ -79,39 +97,54 @@ public sealed partial class MusicCapability
         var targets = FeedbackPlatforms.Where(value => value.Enabled || ReferenceEquals(value, row) && enabled)
             .Where(value => !ReferenceEquals(value, row) || enabled)
             .Select(value => value.Platform).ToArray();
-        long revision = feedbackRevision;
+        long revision = feedbackRevision, generation = feedbackSettingsGeneration;
         feedbackSettingsBusy = true;
         Changed(nameof(CanEditFeedback));
         RefreshPlatformSetting(row.Platform);
-        return RunAsync(async () =>
+        return feedbackSettingsWork = RunAsync(async () =>
         {
+            long receipt = ++settingSubmission;
             try
             {
-                PublishFeedbackSettings(await PlaybackFeedback.SaveSettingsAsync(revision, targets, lifetime.Token));
+                var value = await PlaybackFeedback.SaveSettingsAsync(revision, targets, lifetime.Token);
+                SettingReceipt("music.feedback.settings.save", "播放上报", receipt, confirmed: true);
+                if (FeedbackSettingsCurrent(generation)) PublishFeedbackSettings(value);
             }
-            catch (MusicFeedbackException error)
+            catch (Exception error)
             {
+                if (error is MusicFeedbackException { Code: "COMMIT_UNKNOWN" })
+                    SettingReceipt("music.feedback.settings.save", "播放上报", receipt, confirmed: false);
+                if (!FeedbackSettingsCurrent(generation)) return;
                 try
                 {
-                    PublishFeedbackSettings(await PlaybackFeedback.ReadSettingsAsync(refresh: true, lifetime.Token));
+                    // This is the save's own reconciliation, not a page read:
+                    // ReadFeedbackSettings waits for this physical work to finish.
+                    var value = await PlaybackFeedback.ReadSettingsAsync(refresh: true, lifetime.Token);
+                    if (!FeedbackSettingsCurrent(generation)) return;
+                    PublishFeedbackSettings(value);
                     feedbackStatus = FeedbackPlatforms.First(value => value.Platform == row.Platform).Enabled == enabled
                         ? "" : "播放上报设置未生效";
                 }
                 catch
                 {
-                    feedbackSettingsLoaded = false;
-                    feedbackStatus = "播放上报设置保存失败";
-                    throw new MusicOperationException(error.Code);
+                    if (FeedbackSettingsCurrent(generation))
+                    {
+                        feedbackSettingsLoaded = false;
+                        feedbackStatus = "播放上报设置保存失败";
+                    }
                 }
             }
             finally
             {
-                feedbackSettingsBusy = false;
-                Changed(nameof(CanEditFeedback));
-                PublishFeedbackStatus();
-                RefreshPlatformSetting(row.Platform);
+                if (FeedbackSettingsCurrent(generation))
+                {
+                    feedbackSettingsBusy = false;
+                    Changed(nameof(CanEditFeedback));
+                    PublishFeedbackStatus();
+                    RefreshPlatformSetting(row.Platform);
+                }
             }
-        });
+        }, publishStatus: false);
     }
 
     private void SelectFeedback(SongRow row, bool automatic, MusicRecommendationFeedback? recommendation = null)
@@ -146,10 +179,10 @@ public sealed partial class MusicCapability
         {
             result["sourceType"] = target.Operation;
             if (target.Parameters.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String &&
-                id.GetString() is { Length: > 0 and <= 128 } sourceId)
+                id.GetString() is { Length: > 0 } sourceId)
                 result["sourceId"] = sourceId;
             if (target.Operation == "daily" && target.Parameters.TryGetProperty("branch", out var branch) &&
-                branch.ValueKind == JsonValueKind.String && branch.GetString() is { Length: > 0 and <= 128 } dailyBranch)
+                branch.ValueKind == JsonValueKind.String && branch.GetString() is { Length: > 0 } dailyBranch)
                 result["dailyBranch"] = dailyBranch;
         }
         else if (location.Route == "catalog-search" && catalogQuery.Length > 0)

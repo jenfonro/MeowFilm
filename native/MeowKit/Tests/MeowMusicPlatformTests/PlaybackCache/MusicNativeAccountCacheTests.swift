@@ -4,6 +4,7 @@ import MeowAccounts
 import MeowMusicFeature
 import MeowJSON
 import MeowStorage
+import MeowMusicTestSupport
 @testable import MeowMusicPlatform
 
 private actor AccountURLCacheProvider: MusicAccountProvider {
@@ -14,8 +15,7 @@ private actor AccountURLCacheProvider: MusicAccountProvider {
     var revokeGate: MusicAccountTestGate?
     init(at now: Date) {
         result = .object(["url": .string("https://media.example.invalid/a.mp3"),
-            "expiresAt": .number(now.addingTimeInterval(3600).timeIntervalSince1970 * 1000),
-            "qualityVerified": .bool(false)])
+            "expiresAt": .number(now.addingTimeInterval(3600).timeIntervalSince1970 * 1000)])
     }
     func counts() -> [Int] { [verifies, capabilitiesCount, resolves] }
     func set(_ value: JSONValue) { result = value }
@@ -23,15 +23,15 @@ private actor AccountURLCacheProvider: MusicAccountProvider {
     func holdResolve(_ gate: MusicAccountTestGate) { resolveGate = gate }
     func holdRevoke(_ gate: MusicAccountTestGate) { revokeGate = gate }
     func nativeID(_ credential: AccountCredential) throws -> String {
-        try MusicNeteaseWire.id(MusicQQWire.decode(credential.dataRepresentation())["accountID"])
+        try MusicAccountFixture.userID(credential)
     }
-    func verify(_ credential: AccountCredential) throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) throws -> MusicAccountVerified {
         verifies += 1
         return .init(credential: credential, nickname: "合成账号", nativeID: try nativeID(credential))
     }
-    func refresh(_ credential: AccountCredential) throws -> MusicQQVerified { try verify(credential) }
-    func capabilities(mid: String, credential: AccountCredential) -> [String] { capabilitiesCount += 1; return qualities }
-    func resolve(mid: String, quality: String, credential: AccountCredential) async -> JSONValue {
+    func refresh(_ credential: AccountCredential) throws -> MusicAccountVerified { try verify(credential) }
+    func capabilities(mid: String) -> [String] { capabilitiesCount += 1; return qualities }
+    func resolve(mid: String, quality: String) async -> JSONValue {
         resolves += 1
         let value = result
         if let gate = resolveGate { resolveGate = nil; await gate.wait() }
@@ -39,11 +39,11 @@ private actor AccountURLCacheProvider: MusicAccountProvider {
     }
     func revoke() async { if let gate = revokeGate { revokeGate = nil; await gate.wait() } }
     func createQR(id: UUID) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
-    func pollQR(id: UUID) throws -> MusicQQLoginResult { throw MusicServiceError.unsupported }
+    func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) throws -> MusicQQRecommendation { throw MusicServiceError.unsupported }
-    func collectionRows(credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String, credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
 }
 
 private struct AccountURLCacheFixture {
@@ -59,7 +59,7 @@ private struct AccountURLCacheFixture {
         accounts = AccountSessionCoordinator(store: credentials)
         service = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],
             providers: [.netease: provider], urlCacheStore: store, clock: { [clock] in clock.now() })
-        try credentials.write(.init(credential: MusicNeteaseFixture.credential()), for: identity)
+        try credentials.write(.init(credential: MusicAccountCredential.make(platform: .netease, userID: "101", cookie: "MUSIC_U=synthetic-account")), for: identity)
     }
     func enable() async throws { _ = try await service.setAccess(available: true, generation: 1) }
 }
@@ -74,8 +74,7 @@ private struct AccountURLCacheFixture {
     }
     private func candidate(_ name: String, expires: Date? = nil) -> JSONValue {
         .object(["url": .string("https://media.example.invalid/\(name).mp3"),
-            "expiresAt": expires.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null,
-            "qualityVerified": .bool(false)])
+            "expiresAt": expires.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null])
     }
     private func disk() throws -> (URL, DocumentStore) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("music-url-cache-" + UUID().uuidString)
@@ -206,19 +205,19 @@ private struct AccountURLCacheFixture {
 
     func testLocalAggregateScopeIsStableAcrossLockRestartAndLogout() async throws {
         let credentials = MusicAccountTestStore(), clock = MusicAccountTestClock()
-        let http = MusicAccountTestHTTP(clock: clock)
+        let peer = MusicAccountRuntimePeer(clock: clock), client = try peer.makeClient()
         let scopes: [MusicAccountPlatform: AccountIdentity] = [
             .qq: try MusicAccountFixture.identity("tx"), .netease: try MusicAccountFixture.identity("wy"),
             .kugou: try MusicAccountFixture.identity("kg")
         ]
         try credentials.write(.init(credential: MusicAccountFixture.credential()), for: scopes[.qq]!)
-        try credentials.write(.init(credential: MusicNeteaseFixture.credential()), for: scopes[.netease]!)
+        try credentials.write(.init(credential: MusicAccountCredential.make(platform: .netease, userID: "101", cookie: "MUSIC_U=synthetic-account")), for: scopes[.netease]!)
         let service = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials),
-                                                scopes: scopes, transport: http)
+                                                scopes: scopes, platformClient: client)
         _ = try await service.setAccess(available: true, generation: 1)
         let scope = try await service.nativeCacheScope()
         try await service.checkNativeCacheScope(scope)
-        let statuses = try await service.statuses(), requests = await http.recorded()
+        let statuses = try await service.statuses(), requests = await peer.recorded()
         XCTAssertTrue(requests.isEmpty); XCTAssertFalse(statuses.contains { $0.phase == .signedIn })
         XCTAssertFalse(scope.scope.contains("synthetic")); XCTAssertFalse(scope.scope.contains(scopes[.qq]!.accountID.uuidString))
         _ = try await service.setAccess(available: false, generation: 2)
@@ -227,8 +226,11 @@ private struct AccountURLCacheFixture {
         let unlocked = try await service.nativeCacheScope()
         XCTAssertEqual(unlocked.scope, scope.scope); XCTAssertNotEqual(unlocked.revision, scope.revision)
         _ = await service.close()
+        try await client.close()
 
-        let restarted = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials), scopes: scopes, transport: http)
+        let nextClient = try peer.makeClient()
+        let restarted = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials),
+            scopes: scopes, platformClient: nextClient)
         _ = try await restarted.setAccess(available: true, generation: 1)
         let cold = try await restarted.nativeCacheScope()
         XCTAssertEqual(cold.scope, scope.scope)
@@ -236,7 +238,8 @@ private struct AccountURLCacheFixture {
         XCTAssertFalse(cold.authorization.isActive)
         let other = try await restarted.nativeCacheScope(); XCTAssertNotEqual(other.scope, cold.scope)
         _ = await restarted.close()
-        let finalRequests = await http.recorded(); XCTAssertTrue(finalRequests.isEmpty)
+        try await nextClient.close()
+        let finalRequests = await peer.recorded(); XCTAssertTrue(finalRequests.isEmpty)
     }
 
     func testForgedScopeCannotRevokeRealScopeAndStorageErrorIsNotAGuestScope() async throws {
@@ -255,7 +258,7 @@ private struct AccountURLCacheFixture {
         _ = await f.service.close()
     }
 
-    func testCorruptPersistentCacheIsAMissAndCannotOverwriteTheOldDocument() throws {
+    func testCorruptCurrentCacheIsAMissAndCannotOverwriteTheDamagedDocument() throws {
         let (directory, store) = try disk()
         defer { try? FileManager.default.removeItem(at: directory) }
         let corrupt = Data("synthetic-invalid-cache".utf8)
@@ -272,20 +275,20 @@ private struct AccountURLCacheFixture {
                         "https://media.example.invalid/a.mp3?MUSIC_U=synthetic-secret",
                         "file:///synthetic.mp3"] {
             XCTAssertThrowsError(try MusicNativeAccountURLCache.audio(.object([
-                "url": .string(address), "expiresAt": .null, "qualityVerified": .bool(false)
+                "url": .string(address), "expiresAt": .null
             ])))
         }
     }
 
     func testConcurrentGuestCacheReadsDoNotTurnContentionIntoAccessRevocation() async throws {
         let credentials = MusicAccountTestStore(), clock = MusicAccountTestClock()
-        let http = MusicAccountTestHTTP(clock: clock)
+        let peer = MusicAccountRuntimePeer(clock: clock), client = try peer.makeClient()
         let scopes: [MusicAccountPlatform: AccountIdentity] = [
             .qq: try MusicAccountFixture.identity("tx"), .netease: try MusicAccountFixture.identity("wy"),
             .kugou: try MusicAccountFixture.identity("kg")
         ]
         let service = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials),
-                                                scopes: scopes, transport: http)
+                                                scopes: scopes, platformClient: client)
         _ = try await service.setAccess(available: true, generation: 1)
         let scope = try await service.nativeCacheScope()
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -300,11 +303,12 @@ private struct AccountURLCacheFixture {
             try await group.waitForAll()
         }
         XCTAssertTrue(scope.authorization.isActive)
-        let requests = await http.recorded()
+        let requests = await peer.recorded()
         XCTAssertTrue(requests.isEmpty, "Cache scope reads must stay local")
         _ = try await service.setAccess(available: false, generation: 2)
         XCTAssertFalse(scope.authorization.isActive, "Real access revocation must remain synchronous")
         _ = await service.close()
+        try await client.close()
     }
 
     func testConcurrentStoredAccountScopeReadsKeepOneFenceAndReplacementRevokesIt() async throws {
@@ -340,15 +344,18 @@ private struct AccountURLCacheFixture {
                                                platform: "wy", nativeID: "101", quality: "128k")
         var cache = MusicNativeAccountURLCache(store: store)
         guard case .object(var value) = candidate("metadata") else { return XCTFail("Expected candidate") }
-        value["actualLevel"] = .string("standard"); value["licenseExpiresAt"] = .number(1_800_086_400_000)
-        value["cacheAllowed"] = .bool(true)
+        value["actualQuality"] = .string("128k"); value["licenseExpiresAt"] = .number(1_800_086_400_000)
+        value["full"] = .bool(true)
         let original = JSONValue.object(value)
         cache.put(original, for: key, at: now)
         var cold = MusicNativeAccountURLCache(store: store)
         XCTAssertEqual(cold.value(for: key, at: now.addingTimeInterval(600)), original)
         XCTAssertNil(cold.value(for: key, at: now.addingTimeInterval(MusicNativeAccountURLCache.retention + 1)))
         value["credential"] = .string("synthetic-secret")
-        XCTAssertThrowsError(try MusicNativeAccountURLCache.audio(.object(value)))
+        XCTAssertNoThrow(try MusicNativeAccountURLCache.audio(.object(value)))
+        cache.put(.object(value), for: key, at: now)
+        let persisted = String(decoding: try XCTUnwrap(store.read(key: MusicNativeAccountURLCache.key)), as: UTF8.self)
+        XCTAssertFalse(persisted.contains("synthetic-secret"))
         for i in 0..<55 {
             cache.put(candidate("\(i)"), for: .init(scope: key.scope, platform: "wy", nativeID: "\(i + 1)",
                                                  quality: "128k"), at: now)

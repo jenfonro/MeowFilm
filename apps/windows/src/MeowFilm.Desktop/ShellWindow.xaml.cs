@@ -117,6 +117,7 @@ public sealed partial class ShellWindow : DesktopWindow
         foreach (var session in _sessions)
         {
             session.Module.PropertyChanged += OnModulePropertyChanged;
+            SubscribeOwnedNotices(session.Module);
             SubscribeGlobalSurfaces(session);
             if (session.Module is IDesktopNavigationSource source)
             {
@@ -1191,6 +1192,7 @@ public sealed partial class ShellWindow : DesktopWindow
         }
         foreach (var (source, handler) in _navigationSubscriptions) source.NavigationRequested -= handler;
         _navigationSubscriptions.Clear();
+        UnsubscribeOwnedNotices();
         foreach (var (source, handler) in _sidebarSubscriptions) source.SettingsRequested -= handler;
         _sidebarSubscriptions.Clear();
         SidebarContributionHost.Content = null;

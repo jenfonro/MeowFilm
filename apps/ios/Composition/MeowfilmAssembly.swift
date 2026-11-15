@@ -47,7 +47,6 @@ final class MeowfilmAssembly: ObservableObject {
     private var closed = false
     private var observers: [NSObjectProtocol] = []
     private var service: NativeMusicService?
-    private var publicQQ: NativeMusicQQPublicService?
     private var lease: PlaybackOwnerLease?
     private var commandObservation: AnyCancellable?
     private var commandRefresh: Task<Void, Never>?
@@ -135,8 +134,6 @@ final class MeowfilmAssembly: ObservableObject {
         let novel = NovelFeature(library: resources.novelLibrary, rules: resources.novelRules, runtime: resources.novelRuntime)
         closeNovel = { await novel.close() }
         self.novel = novel; novel.start()
-        let publicQQ = resources.musicPublicQQ
-        self.publicQQ = publicQQ
         let tmdb = FilmTMDBSettingsModel(service: resources.filmMetadata) { [weak filmSearch = self.filmSearch] in
             filmSearch?.metadataSettingsChanged()
         }
@@ -161,27 +158,16 @@ final class MeowfilmAssembly: ObservableObject {
             do { try await resources.filmSourceSettings.start() }
             catch { /* Source state owns the user-visible failure and retry. */ }
         }
-        do {
-            try resources.musicClients.setAccess(available: true, generation: musicAccessGeneration)
-            try await publicQQ.setAccess(available: true, generation: musicAccessGeneration)
-        } catch {
-            resources.musicClients.revokeAccess(generation: musicAccessGeneration)
-            publicQQ.revokeAccess(generation: musicAccessGeneration)
-            await resources.musicAccountGate?.setAvailable(false)
-            failedStartup()
-            return
-        }
-        guard !closed, !Task.isCancelled else { return }
         await resources.musicAccountGate?.setAvailable(true)
         guard !closed, !Task.isCancelled else { return }
         let service = NativeMusicService(
             document: resources.musicDocument, scripts: resources.musicScripts,
-            accounts: resources.musicAccounts, qq: publicQQ,
+            accounts: resources.musicAccounts, platformClient: resources.musicPlatform,
             sourceDiscovery: resources.musicSourceDiscoveryCache,
             enabledPlatforms: [.netease, .qq, .kugou, .kuwo, .migu],
             homeSnapshot: resources.musicHomeSnapshot,
             audioFileCache: resources.musicAudioCache,
-            clientContexts: resources.musicClients
+            presentationCache: resources.musicPresentationCache
         )
         await prepareMusic(service, prepareAccounts: {
             guard let accounts = resources.musicAccounts else { throw MusicServiceError.accessUnavailable }
@@ -189,7 +175,7 @@ final class MeowfilmAssembly: ObservableObject {
         }, makeModel: {
             let model = MusicViewModel(service: service, playback: playback, accounts: resources.musicAccounts,
                                        scriptSources: resources.musicScripts)
-            model.setPlaybackDisplayCache(resources.musicDisplayCache)
+            model.setPresentationCache(resources.musicPresentationCache)
             return model
         })
     }
@@ -375,7 +361,7 @@ final class MeowfilmAssembly: ObservableObject {
         // Film's async stop delivers the captured native facts before closing
         // its Node session. Stopping only music here must not bypass that drain.
         playback.stop(owner: "music")
-        let model = music, service = service, publicQQ = publicQQ
+        let model = music, service = service
         let resources = resources, pendingScripts = scriptStartup, lease = lease
         let pendingStartup = startup
         let filmSearch = filmSearch, film = filmPlayback, filmMedia = filmMedia, filmBackground = filmBackground
@@ -386,8 +372,6 @@ final class MeowfilmAssembly: ObservableObject {
             // Local facts and frozen ends now belong to the feedback owner.
             // Never wait for a network ACK before retiring product access.
             service?.revokeAccess(generation: musicAccessGeneration)
-            publicQQ?.revokeAccess(generation: musicAccessGeneration)
-            resources?.musicClients.close()
             await pendingStartup?.value
             await novel?.close()
             await filmSearch?.close()
@@ -405,12 +389,17 @@ final class MeowfilmAssembly: ObservableObject {
             }
             await pendingScripts?.value
             await service?.close()
-            await publicQQ?.close()
+            if resources != nil { await MusicArtworkImages.shared.close() }
             do { try await resources?.musicScripts.close() }
+            catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
+            if let report = await resources?.musicAccountGate?.close(), !report.cleanupComplete,
+               self?.shutdownError == nil {
+                self?.shutdownError = MusicServiceError.commitUnconfirmed.localizedDescription
+            }
+            do { try await resources?.musicPlatform.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
             await resources?.scriptSession.close()
             lease?.cancel()
-            await resources?.musicAccountGate?.close()
         }
     }
 
@@ -442,16 +431,15 @@ final class MeowfilmAssembly: ObservableObject {
         await resources.filmRules.close()
         await resources.filmSourceSettings.close()
         try? await resources.musicScripts.close()
-        await resources.scriptSession.close()
-        resources.musicClients.close()
-        await resources.musicPublicQQ.close()
         await resources.musicAccountGate?.close()
+        try? await resources.musicPlatform.close()
+        await resources.scriptSession.close()
     }
 
     deinit {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         startup?.cancel(); scriptStartup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
-        let closeMusic = closeMusic, service = service, publicQQ = publicQQ, resources = resources, lease = lease
+        let closeMusic = closeMusic, service = service, resources = resources, lease = lease
         let pendingScripts = scriptStartup, stopping = stopping, filmSearch = filmSearch
         let film = filmPlayback, filmMedia = filmMedia, filmBackground = filmBackground
         let closeNovel = closeNovel
@@ -460,8 +448,6 @@ final class MeowfilmAssembly: ObservableObject {
             await closeMusic?()
             await service?.prepareForClose()
             service?.revokeAccess(generation: musicAccessGeneration)
-            publicQQ?.revokeAccess(generation: musicAccessGeneration)
-            resources?.musicClients.close()
             await closeNovel?()
             await filmSearch?.close()
             await filmBackground?.value
@@ -475,11 +461,15 @@ final class MeowfilmAssembly: ObservableObject {
             }
             await pendingScripts?.value
             await service?.close()
-            await publicQQ?.close()
+            if resources != nil { await MusicArtworkImages.shared.close() }
             try? await resources?.musicScripts.close()
+            if let report = await resources?.musicAccountGate?.close(), !report.cleanupComplete {
+                NSLog("Music account shutdown incomplete")
+            }
+            do { try await resources?.musicPlatform.close() }
+            catch { NSLog("Music platform shutdown failed") }
             await resources?.scriptSession.close()
             lease?.cancel()
-            await resources?.musicAccountGate?.close()
         }
     }
 }

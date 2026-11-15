@@ -254,7 +254,8 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
             XCTAssertEqual(state.selection, service.value)
             XCTAssertEqual(state.selection?.selected, failure == .commitUnconfirmed ? .kugou : .netease)
             XCTAssertEqual(state.selection?.revision, failure == .commitUnconfirmed ? 1 : 0)
-            XCTAssertEqual(errors, failure == .cancelled ? [] : [failure.message(operation: "保存数据源")])
+            XCTAssertEqual(errors, [.cancelled, .commitUnconfirmed].contains(failure) ? [] : [failure.message(operation: "保存数据源")])
+            XCTAssertEqual(owner.settingsReceipts.unknown.map(\.setting), failure == .commitUnconfirmed ? ["home/selectedSource"] : [])
             state.deactivate(); await owner.close()
         }
     }
@@ -295,7 +296,7 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
         state.deactivate(); await owner.close()
     }
 
-    func testDeactivateBeforeTasksBeginPreventsReadsAndWrites() async {
+    func testDeactivateBeforeTasksBeginCancelsReadButKeepsSubmittedSave() async {
         let service = HomeSourceSettingsService(), owner = makeOwner(service)
         let state = MusicHomeSourceSettingsModel(model: owner)
         state.activate(); state.deactivate()
@@ -303,9 +304,10 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
         XCTAssertEqual(service.reads, 1)
         state.select(.kugou); state.deactivate()
         XCTAssertNil(state.selection); XCTAssertFalse(state.isSaving)
+        await owner.settingsReceipts.flush()
         await activate(state, expecting: service.value)
-        XCTAssertEqual(service.reads, 2); XCTAssertTrue(service.writes.isEmpty)
-        XCTAssertEqual(state.selection?.selected, .netease)
+        XCTAssertEqual(service.reads, 2); XCTAssertEqual(service.writes.count, 1)
+        XCTAssertEqual(state.selection?.selected, .kugou)
         state.deactivate(); await owner.close()
     }
 
@@ -327,7 +329,7 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
         }
     }
 
-    func testDeactivateCancelsLateSaveWithoutPublishingOrStartingFailureReadback() async {
+    func testDeactivateSettlesLateSaveWithoutPublishingOrStartingFailureReadback() async {
         for failure in [nil, MusicServiceError.commitUnconfirmed, .storageFailed] {
             let service = HomeSourceSettingsService(), owner = makeOwner(service)
             let state = MusicHomeSourceSettingsModel(model: owner), gate = HomeSourceSettingsGate()
@@ -343,10 +345,40 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
             await releaseWithoutPublishing(gate, state: state)
             XCTAssertEqual(state.selection, service.value)
             XCTAssertFalse(state.isSaving)
-            XCTAssertEqual(service.writeCancellations, [true])
+            await owner.settingsReceipts.flush()
+            XCTAssertEqual(service.writeCancellations, [false])
+            XCTAssertEqual(owner.settingsReceipts.unknown.map(\.setting), failure == .commitUnconfirmed ? ["home/selectedSource"] : [])
             XCTAssertEqual(service.writes.count, 1); XCTAssertEqual(service.reads, 2)
             state.deactivate(); await owner.close()
         }
+    }
+
+    func testClosedHomeSourceUnknownReopensActualSelectionAndOnlyLaterSuccessfulSaveClearsItsNotice() async {
+        let service = HomeSourceSettingsService(), owner = makeOwner(service)
+        let closed = MusicHomeSourceSettingsModel(model: owner), gate = HomeSourceSettingsGate()
+        await activate(closed, expecting: service.value)
+        service.writeGate = gate; service.writeFailure = .commitUnconfirmed
+        closed.select(.kugou)
+        await fulfillment(of: [gate.entered], timeout: 2)
+        closed.deactivate()
+        await releaseWithoutPublishing(gate, state: closed); await owner.settingsReceipts.flush()
+        XCTAssertNil(closed.selection); XCTAssertFalse(closed.isSaving)
+        XCTAssertEqual(owner.settingsReceipts.unknown.map(\.setting), ["home/selectedSource"])
+        XCTAssertEqual(service.writes.count, 1)
+        let reopened = MusicHomeSourceSettingsModel(model: owner)
+        await activate(reopened, expecting: service.value)
+        XCTAssertEqual(reopened.selection?.selected, .kugou)
+        XCTAssertEqual(owner.settingsReceipts.unknown.map(\.setting), ["home/selectedSource"])
+        service.writeFailure = .storageFailed
+        await save(reopened, .netease)
+        XCTAssertEqual(owner.settingsReceipts.unknown.map(\.setting), ["home/selectedSource"])
+        owner.notices.error = "另一操作的错误"
+        await save(reopened, .netease); await owner.settingsReceipts.flush()
+        XCTAssertTrue(owner.settingsReceipts.unknown.isEmpty)
+        XCTAssertEqual(owner.notices.error, "另一操作的错误")
+        XCTAssertEqual(reopened.selection?.selected, .netease)
+        XCTAssertEqual(service.writes.count, 3, "Readback and unknown settlement never retry a save")
+        reopened.deactivate(); await owner.close()
     }
 
     func testUnavailableAccessClearsStateAndRestorationReloadsWithoutReactivation() async {
@@ -378,7 +410,7 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
         restoreObservation.cancel()
         await releaseWithoutPublishing(gate, state: state)
         XCTAssertEqual(state.selection, service.value)
-        XCTAssertEqual(service.writeCancellations, [true])
+        XCTAssertEqual(service.writeCancellations, [false])
         XCTAssertEqual(service.reads, 2)
         state.deactivate(); await owner.close()
     }
@@ -416,7 +448,7 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
         observation.cancel()
         await releaseWithoutPublishing(gate, state: state)
         XCTAssertEqual(state.selection, service.value); XCTAssertFalse(state.isSaving)
-        XCTAssertEqual(service.writeCancellations, [true])
+        XCTAssertEqual(service.writeCancellations, [false])
         XCTAssertEqual(service.reads, 2); XCTAssertEqual(service.writes.count, 1)
 
         owner.accessState.generation = UUID()
@@ -446,21 +478,21 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
         state.deactivate(); await owner.close()
     }
 
-    func testClosedOwnerCancelsPendingSaveAndCannotBeReactivated() async {
+    func testClosedOwnerDrainsSubmittedSaveAndCannotBeReactivated() async {
         let service = HomeSourceSettingsService(), owner = makeOwner(service)
         let state = MusicHomeSourceSettingsModel(model: owner), gate = HomeSourceSettingsGate()
         await activate(state, expecting: service.value)
         service.writeGate = gate; service.writeFailure = .storageFailed
         state.select(.kugou)
         await fulfillment(of: [gate.entered], timeout: 2)
-        let (cleared, observation) = observeSelection(state, equals: nil)
-        await owner.close()
-        await fulfillment(of: [cleared], timeout: 2)
-        observation.cancel()
-        XCTAssertTrue(owner.isClosed); XCTAssertNil(state.selection); XCTAssertFalse(state.isSaving)
-        state.deactivate(); state.activate(); state.select(.kugou)
+        state.deactivate()
+        owner.prepareForClose()
+        XCTAssertFalse(owner.isClosed, "Close must wait for the submitted physical write")
         await releaseWithoutPublishing(gate, state: state)
-        XCTAssertEqual(service.writeCancellations, [true])
+        await owner.close()
+        XCTAssertTrue(owner.isClosed); XCTAssertNil(state.selection); XCTAssertFalse(state.isSaving)
+        state.activate(); state.select(.kugou)
+        XCTAssertEqual(service.writeCancellations, [false])
         XCTAssertEqual(service.reads, 1); XCTAssertEqual(service.writes.count, 1)
         XCTAssertNil(state.selection); XCTAssertFalse(state.isSaving)
         state.deactivate()
@@ -485,7 +517,7 @@ final class MusicHomeSourceSettingsTests: XCTestCase {
             XCTAssertNil(released, "A suspended service request must not retain its presentation owner")
             gate.release()
             await fulfillment(of: [gate.returned], timeout: 2)
-            XCTAssertEqual(saving ? service.writeCancellations : service.readCancellations, [true])
+            XCTAssertEqual(saving ? service.writeCancellations : service.readCancellations, [!saving])
             await owner.close()
         }
     }

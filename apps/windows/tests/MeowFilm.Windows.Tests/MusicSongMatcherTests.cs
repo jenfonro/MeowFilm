@@ -23,12 +23,13 @@ public static class MusicSongMatcherTests
         yield return new("Song matching later page absence cannot suppress a focused first-page query", LaterPage);
         yield return new("Song matching a late older physical search cannot overwrite a newer observation", LateObservation);
         yield return new("Song matching a cached empty page never renews its negative check time", CachedNegative);
-        yield return new("Song matching persistence starts at local membership and survives restart without searching", Persistence);
-        yield return new("Song matching removed membership evicts derived data without changing queue or history", Removal);
+        yield return new("Song matching persists references to the unique repository and survives restart without searching", Persistence);
+        yield return new("Song matching removed membership retains repository facts and stable queue occurrences", Removal);
         yield return new("Song matching wrong recording exclusion is original-specific and survives subsequent discovery", Exclusion);
-        yield return new("Song matching incompatible versions and all-pair durations never become sources", Identity);
+        yield return new("Song matching keeps full-title differences separate and uses the fixed duration baseline", Identity);
         yield return new("Song matching duplicate callers share one physical request and cancellation is waiter-local", Concurrent);
         yield return new("Song matching account invalidation cancels and fences noncooperative old responses", Invalidation);
+        yield return new("Song matching completed flights race safely with account invalidation and physical drain", CompletionRace);
         yield return new("Song matching local songs never acquire guessed online mappings", Local);
     }
     private static void Check(bool condition, string message = "song matching assertion")
@@ -70,7 +71,10 @@ public static class MusicSongMatcherTests
             Matcher = new(Library, new(CacheStore), async (request, token) =>
             {
                 lock (Requests) Requests.Add(request);
-                return await Reply(request, token);
+                long observation = Library.BeginSongObservation();
+                var page = await Reply(request, token);
+                token.ThrowIfCancellationRequested();
+                return await Library.AdoptPlatformResultAsync(page, token, observation: observation);
             }, Clock);
         }
         internal Task<MusicSongMatcher.MatchResult> Match(JsonObject song, string platform = "tx",
@@ -91,7 +95,7 @@ public static class MusicSongMatcherTests
     private static async Task Target()
     {
         await using var f = new Fixture();
-        var original = Song();
+        var original = await f.Matcher.KnownAsync(Song(), default);
         var result = await f.Match(original);
         Check(Has(result.Song, "tx") && f.Requests.Count == 1 && f.Requests.Single().Platform == "tx");
         Check(LJ.S(result.Song["songId"]) == LJ.S(original["songId"]) && !Has(original, "tx"));
@@ -103,7 +107,7 @@ public static class MusicSongMatcherTests
     {
         await using var f = new Fixture();
         f.Reply = (request, _) => Task.FromResult(Page(request));
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         await f.Match(song);
         f.Clock.Now += MusicSongMatcher.NotFoundRetry - 1;
         await f.Match(song);
@@ -120,7 +124,7 @@ public static class MusicSongMatcherTests
     private static async Task Failure()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         await f.Favorite(song);
         f.Reply = (_, _) => throw new MusicPlatformException("NETWORK_ERROR");
         var failed = await f.Match(song);
@@ -136,7 +140,7 @@ public static class MusicSongMatcherTests
     private static async Task Freshness()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         await f.Favorite(song);
         await f.Match(song);
         long checkedAt = LJ.I(f.Saved.Single()!["platforms"]!["tx"]!["checkedAt"]);
@@ -155,7 +159,7 @@ public static class MusicSongMatcherTests
     private static async Task SearchEvidence()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         f.Matcher.ObserveSearch(Observation(song, MusicSongMatcher.Query(song), f.Clock.Now, f.Matcher.NextObservation(),
             ("wy", 1, ""), ("tx", 1, ""), ("kw", 0, "NETWORK_ERROR"), ("kg", 0, "")), Context);
         await f.Match(song);
@@ -164,6 +168,7 @@ public static class MusicSongMatcherTests
         await f.Match(song, "kg");
         Check(f.Requests.Select(request => request.Platform).SequenceEqual(["kw", "kg"]));
         var mapped = Song(); mapped["sources"]!.AsArray().Add(Song("tx", "from-search")["sources"]![0]!.DeepClone());
+        mapped = await f.Library.AdoptSongAsync(mapped, default);
         f.Matcher.ObserveSearch(Observation(NativeMusicSong.Normalize(mapped), MusicSongMatcher.Query(song),
             f.Clock.Now + 1, f.Matcher.NextObservation(), ("wy", 1, ""), ("tx", 1, "")), Context);
         Check(Has((await f.Match(song)).Song, "tx") && f.Requests.Count == 2);
@@ -171,7 +176,7 @@ public static class MusicSongMatcherTests
     private static async Task SearchConditions()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         f.Matcher.ObserveSearch(Observation(song, "broad artist query", f.Clock.Now, f.Matcher.NextObservation(),
             ("wy", 1, ""), ("tx", 1, "")), Context);
         await f.Match(song);
@@ -181,7 +186,7 @@ public static class MusicSongMatcherTests
     private static async Task ContentFailure()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         await f.Favorite(song);
         await f.Match(song);
         f.Clock.Now += MusicSongMatcher.Freshness - 1;
@@ -211,7 +216,7 @@ public static class MusicSongMatcherTests
     private static async Task RecheckFailure()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         await f.Favorite(song); await f.Match(song);
         long matchedAt = LJ.I(f.Saved.Single()!["platforms"]!["tx"]!["checkedAt"]);
         f.Clock.Now += MusicSongMatcher.Freshness;
@@ -232,7 +237,7 @@ public static class MusicSongMatcherTests
     private static async Task LaterPage()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         f.Matcher.ObserveSearch(Observation(song, MusicSongMatcher.Query(song), f.Clock.Now,
             f.Matcher.NextObservation(), ("wy", 1, ""), ("tx", 2, "")), Context);
         await f.Match(song);
@@ -254,7 +259,10 @@ public static class MusicSongMatcherTests
         {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
             f.Clock.Now++;
-            f.Matcher.ObserveSearch(Observation(Song("tx", "newer"), "Track Artist", f.Clock.Now,
+            var newer = await f.Library.AdoptPlatformResultAsync(
+                JsonSerializer.SerializeToElement(Song("tx", "newer")), default,
+                observation: f.Library.BeginSongObservation(), shape: MusicLibraryOwner.PlatformSongShape.Song);
+            f.Matcher.ObserveSearch(Observation(JsonNode.Parse(newer.GetRawText())!.AsObject(), "Track Artist", f.Clock.Now,
                 f.Matcher.NextObservation(), ("tx", 1, "")), Context);
             f.Clock.Now++;
             release.TrySetResult();
@@ -267,7 +275,7 @@ public static class MusicSongMatcherTests
     private static async Task CachedNegative()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         long at = f.Clock.Now;
         var observed = Observation(song, MusicSongMatcher.Query(song), at, f.Matcher.NextObservation(),
             ("wy", 1, ""), ("tx", 1, ""));
@@ -283,12 +291,14 @@ public static class MusicSongMatcherTests
     private static async Task Persistence()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         await f.Match(song);
-        Check(f.Saved.Count == 0, "temporary playback must not create persistent matching rows");
+        Check(f.Saved.Count == 1 && LJ.S(f.Saved[0]!["songId"]) == LJ.S(song["songId"]),
+            "discovery observations reference the permanent repository record");
         await f.Favorite(song);
         await f.Matcher.PersistAsync(default);
-        Check(f.Saved.Count == 1 && Has(f.Saved.Single()!["song"]!.AsObject(), "tx"));
+        Check(f.Saved.Count == 1 && f.Saved.Single()!["song"] is null &&
+            Has(await f.Matcher.KnownAsync(song, default), "tx"));
         int requests = f.Requests.Count;
         await f.CacheStore.DrainAsync();
         await using var restartedStore = new CacheDocumentStore(f.Store);
@@ -300,17 +310,17 @@ public static class MusicSongMatcherTests
     private static async Task Removal()
     {
         await using var f = new Fixture();
-        var song = Song();
+        var song = await f.Matcher.KnownAsync(Song(), default);
         await f.Favorite(song);
         await f.Command("music.queue.replace", new { songs = new[] { song }, index = 0 });
-        string queue = (await f.Command("music.queue.get", new { })).GetRawText();
         await f.Match(song);
+        string queue = (await f.Command("music.queue.get", new { })).GetRawText();
         Check(f.Saved.Count == 1);
         await f.Command("music.library.removeSong", new { id = "favorites", ifRevision = 1, songId = LJ.S(song["songId"]) });
         await f.Matcher.PersistAsync(default);
-        Check(f.Saved.Count == 0);
+        Check(f.Saved.Count == 1 && LJ.S(f.Saved[0]!["songId"]) == LJ.S(song["songId"]));
         Check((await f.Command("music.queue.get", new { })).GetRawText() == queue,
-            "derived-cache eviction cannot modify a durable queue snapshot or occurrence");
+            "collection removal cannot change repository facts or a durable queue occurrence");
     }
     private static async Task Exclusion()
     {
@@ -319,15 +329,15 @@ public static class MusicSongMatcherTests
         string wrong = NativeMusicSong.SourceKey(Song("tx", "mapped"));
         await f.Match(original);
         await f.Matcher.ExcludeAsync(original, wrong, default);
-        Check(!Has(await f.Matcher.KnownAsync(original, default), "tx"));
-        Check(!Has((await f.Match(original)).Song, "tx"),
+        Check(f.Matcher.IsExcluded(await f.Matcher.KnownAsync(original, default), wrong));
+        Check(f.Matcher.IsExcluded((await f.Match(original)).Song, wrong),
             "a subsequent search must not immediately select the same wrong recording");
         await f.Match(original);
         Check(f.Requests.Count == 2, "an actual search which only returned excluded recordings must not repeat on every read");
-        var anotherOriginal = Song("kg", "another-original");
-        Check(Has((await f.Match(anotherOriginal)).Song, "tx"),
-            "exclusion is not a global ban on the target recording");
-        Check(!Has(await f.Matcher.KnownAsync(original, default), "tx"));
+        var anotherOriginal = Song("kg", "another-original", title: "Another Track");
+        var independent = await f.Matcher.KnownAsync(anotherOriginal, default);
+        Check(!f.Matcher.IsExcluded(independent, wrong), "exclusion belongs to its permanent song rather than a global source ban");
+        Check(f.Matcher.IsExcluded(await f.Matcher.KnownAsync(original, default), wrong));
     }
     private static async Task Identity()
     {
@@ -341,8 +351,8 @@ public static class MusicSongMatcherTests
         var song = Song(duration: 103);
         song["sources"]!.AsArray().Add(Song("kw", "short", 100)["sources"]![0]!.DeepClone());
         pair.Reply = (request, _) => Task.FromResult(Page(request, Song("tx", "chain", 106)));
-        Check(!Has((await pair.Match(NativeMusicSong.Normalize(song))).Song, "tx"),
-            "a candidate must be compatible with every retained recording");
+        Check(Has((await pair.Match(NativeMusicSong.Normalize(song))).Song, "tx"),
+            "a candidate compares with the fixed representative baseline rather than every source");
     }
     private static async Task Concurrent()
     {
@@ -393,6 +403,35 @@ public static class MusicSongMatcherTests
         var a = MusicSongFixture.Local("local:first", "Track", "Artist", duration: 180);
         var b = MusicSongFixture.Local("local:second", "Track", "Artist", duration: 180);
         Check(!Has((await f.Match(a)).Song, "tx") && f.Requests.Count == 0);
-        Check(LJ.S((await f.Matcher.KnownAsync(b, default))["songId"]) == "local:second");
+        var first = await f.Matcher.KnownAsync(a, default);
+        var second = await f.Matcher.KnownAsync(b, default);
+        Check(LJ.S(first["songId"]) != LJ.S(second["songId"]) &&
+            Guid.TryParseExact(LJ.S(second["songId"]), "D", out _) && LJ.S(second["localFileId"]) == "local:second");
+    }
+    private static async Task CompletionRace()
+    {
+        await using var f = new Fixture();
+        for (int index = 0; index < 24; index++)
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            string id = "race-" + index, title = "Race " + index;
+            f.Reply = async (request, _) =>
+            {
+                entered.TrySetResult();
+                await release.Task;
+                return Page(request, Song("tx", id, title: title));
+            };
+            var matching = f.Match(Song(id: id, title: title));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var invalidation = Task.Run(async () => { await release.Task; f.Matcher.Invalidate("tx"); });
+            var drain = Task.Run(async () => { await release.Task; await f.Matcher.DrainAsync(); });
+            release.TrySetResult();
+            await Task.WhenAll(invalidation, drain).WaitAsync(TimeSpan.FromSeconds(3));
+            try { await matching.WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (OperationCanceledException) { }
+            catch (MusicLibraryException error) when (error.Code == "AUTH_CHANGED") { }
+            Check(f.Requests.Count == index + 1, "Each admitted flight runs once and physically settles");
+        }
     }
 }

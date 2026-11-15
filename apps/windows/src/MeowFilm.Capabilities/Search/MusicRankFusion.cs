@@ -1,5 +1,4 @@
-// Native translation of iWebPlus b900c259 static/rank-fusion.js and song-identity merge.
-// Same Music module's pure identity helpers only; no Library owner or persistence.
+// Native reciprocal-rank projection of songs already adopted by the unique repository.
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
@@ -10,32 +9,32 @@ internal sealed record SearchCandidate(string Platform, string Key, JsonObject I
 
 internal static class MusicRankFusion
 {
-    private sealed class Row(SearchCandidate candidate, MusicSearchKind kind, CancellationToken token)
+    private sealed class Row(SearchCandidate candidate, MusicSearchKind kind)
     {
         internal readonly SearchCandidate Candidate = candidate;
         internal readonly string Id = kind == MusicSearchKind.Songs ? LJ.S(candidate.Item["songId"]) :
             PlaylistKey(candidate.Item);
-        internal readonly NativeMusicSong.Recordings? Song = kind == MusicSearchKind.Songs ? new(candidate.Item, token) : null;
         internal readonly string Representation = LJ.Stringify(new JsonArray(candidate.Item.DeepClone(), candidate.Rank));
     }
     private sealed record Ranked(Group Group, double Score, string Tie, int Priority);
 
-    private sealed class Group(string key, string platform, JsonObject item, NativeMusicSong.Recordings? song, bool retained)
+    private sealed class Group(string key, string platform, JsonObject item, bool retained)
     {
         internal readonly string Key = key;
         internal readonly string Platform = platform;
         internal readonly bool Retained = retained;
         internal readonly Dictionary<string, double> Ranks = new(StringComparer.Ordinal);
-        internal JsonObject ToItem(CancellationToken token) => song?.ToSong(token) ?? (JsonObject)item.DeepClone();
+        internal JsonObject ToItem(CancellationToken token)
+        { token.ThrowIfCancellationRequested(); return item.DeepClone().AsObject(); }
     }
     private static string PlaylistKey(JsonObject item) =>
         LJ.Stringify(new JsonArray(LJ.S(item["source"]), LJ.Scalar(item["id"])));
 
     /// <summary>
     /// Equal-weight reciprocal rank fusion over the given candidates. <paramref name="order"/> is the
-    /// saved platform priority: it picks each group's representative (display metadata and primary
-    /// recording) and breaks score ties. Retained rows keep position, identity and representation.
-    /// Both initial and later rounds group their raw candidates through the same song identity owner.
+    /// saved platform priority: it breaks score ties. Repository metadata and permanent identities
+    /// are not rewritten by ranking. Retained rows keep position and identity.
+    /// Both initial and later rounds reference the permanent IDs assigned at acquisition.
     /// </summary>
     internal static JsonArray Fuse(IReadOnlyList<SearchCandidate> candidates, MusicSearchKind kind,
         IReadOnlyList<string> order, CancellationToken token, JsonArray? retained = null)
@@ -46,34 +45,31 @@ internal static class MusicRankFusion
             return order.Count;
         }
         var rows = new List<Row>(candidates.Count);
-        foreach (var candidate in candidates) { token.ThrowIfCancellationRequested(); rows.Add(new(candidate, kind, token)); }
+        foreach (var candidate in candidates) { token.ThrowIfCancellationRequested(); rows.Add(new(candidate, kind)); }
         // Hash is the reference's two unsigned FNV accumulators, not process-random GetHashCode.
         var ordered = rows.OrderBy(r => Priority(r.Candidate.Platform)).ThenBy(r => r.Candidate.Rank)
             .ThenBy(r => r.Id + ":" + r.Candidate.Key, StringComparer.Ordinal)
             .ThenBy(r => NativeMusicSong.Hash(r.Representation), StringComparer.Ordinal)
             .ThenBy(r => r.Representation, StringComparer.Ordinal);
-        var identities = new NativeMusicSongGroups(token);
         var groups = new Dictionary<string, Group>(StringComparer.Ordinal);
         var pinned = new List<Group>();
         foreach (var item in (retained ?? []).OfType<JsonObject>())
         {
             token.ThrowIfCancellationRequested();
-            var song = kind == MusicSearchKind.Songs ? identities.Import(item) : null;
-            string key = song?.Id ?? PlaylistKey(item);
-            string platform = song is null ? LJ.S(item["source"]) : LJ.S(NativeMusicSong.SourceData(item)["source"]);
-            var group = new Group(key, platform, item, song, true);
+            string key = kind == MusicSearchKind.Songs ? LJ.S(item["songId"]) : PlaylistKey(item);
+            string platform = kind == MusicSearchKind.Songs ? LJ.S(NativeMusicSong.SourceData(item)["source"]) : LJ.S(item["source"]);
+            var group = new Group(key, platform, item, true);
             LJ.Require(groups.TryAdd(key, group), "IDENTITY_MISMATCH");
             pinned.Add(group);
         }
         foreach (var row in ordered)
         {
             token.ThrowIfCancellationRequested();
-            var song = row.Song is null ? null : identities.Add(row.Song);
-            string key = song?.Id ?? row.Id;
+            string key = row.Id;
             if (!groups.TryGetValue(key, out var group))
             {
-                // The first row is the highest-priority platform's best-ranked candidate.
-                group = new(key, row.Candidate.Platform, row.Candidate.Item, song, false);
+                // The first row supplies ranking priority, not a new metadata owner.
+                group = new(key, row.Candidate.Platform, row.Candidate.Item, false);
                 groups.Add(key, group);
             }
             if (group.Retained) continue;
@@ -86,7 +82,10 @@ internal static class MusicRankFusion
             token.ThrowIfCancellationRequested();
             var platforms = group.Ranks.Keys.Order(StringComparer.Ordinal).ToArray();
             result.Add(new(group, platforms.Sum(p => 1 / (5 + group.Ranks[p])),
-                NativeMusicSong.Hash(group.Key), Priority(group.Platform)));
+                NativeMusicSong.Hash(kind == MusicSearchKind.Songs
+                    ? string.Join("\n", LJ.Array(group.ToItem(token)["sources"]).OfType<JsonObject>()
+                        .Select(NativeMusicSong.SourceKey).Order(StringComparer.Ordinal))
+                    : group.Key), Priority(group.Platform)));
         }
         return LJ.Arr(pinned.Concat(result.OrderByDescending(r => r.Score).ThenBy(r => r.Priority)
             .ThenBy(r => r.Tie, StringComparer.Ordinal).ThenBy(r => r.Group.Key, StringComparer.Ordinal)

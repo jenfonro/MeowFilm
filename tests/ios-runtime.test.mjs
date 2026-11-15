@@ -181,6 +181,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
     ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
     ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
     ['netease', '0.1.0', 'netease.token.v1'],
+    ['music-platform', '0.1.0', 'music.platform.v1'],
   ]);
   for (const method of ['music.script.sources.list', 'music.script.resolve', 'music.script.invoke'])
     assert.ok(described.modules[0].methods.includes(method), method);
@@ -189,6 +190,9 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
     'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
   ]);
   assert.deepEqual(described.modules[7].methods, ['netease.token.get']);
+  assert.deepEqual(described.modules[8].methods, [
+    'music.platform.cache.clear', 'music.platform.describe', 'music.platform.request', 'music.platform.session.update',
+  ]);
   await verifyTMDBAssembly(t, { client, baseUrl });
   await verifyPanAndDoubanAssembly(client);
   for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
@@ -231,7 +235,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   okay(await client.call('source.runtime.status'), 'source.runtime.v2');
   okay(await client.call('cat.script.status'), 'cat.script.v2');
   okay(await client.shutdown(), 'runtime.http.v1');
-  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 8);
+  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 9);
   runtime.channel.end();
   await closed;
   await client.close();
@@ -387,7 +391,7 @@ test('bootstrap native, channel, listener and endpoint failures retain ownership
 
 test('the iOS entry reports each module initialization failure and closes previously assembled owners',
   { timeout: 30000 }, async t => {
-    const stages = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease'];
+    const stages = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform'];
     const replacements = [
       ['../apps/runtime/modules/music-script.mjs', [['createMusicScriptModule', 'music']]],
       ['../apps/runtime/modules/cat-script.mjs', [['createCatScriptModule', 'cat']]],
@@ -398,7 +402,8 @@ test('the iOS entry reports each module initialization failure and closes previo
     ].map(([path, exports]) => [new URL(path, import.meta.url).href, exports.map(([name, stage]) =>
       `export function ${name}() { return globalThis.fixtureModule(${JSON.stringify(stage)}); }`).join('\n')]);
     replacements.push([new URL('../apps/runtime/entry.mjs', import.meta.url).href,
-      `export function connectFilmPlayback(modules) { modules.push(globalThis.fixtureModule('film')); }`]);
+      `export function connectFilmPlayback(modules) { modules.push(globalThis.fixtureModule('film')); }\n` +
+      `export function connectMusicPlatform(modules) { modules.push(globalThis.fixtureModule('music-platform')); }`]);
     for (const [stage, code, category] of [
       ...stages.map(stage => [stage, 'STORAGE_ERROR', 'STORAGE_ERROR']),
       ['pan', '/private/var?cookie=unknown-private-code', 'UNKNOWN'],

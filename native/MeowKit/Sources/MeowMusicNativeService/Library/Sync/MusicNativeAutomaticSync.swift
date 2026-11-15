@@ -54,10 +54,7 @@ private struct MusicNativeAutomaticSyncPort: MusicNativeLibrarySyncProviding {
         catch { return .notDispatched(MusicServiceError.sanitized(error)) }
         // Cancellation propagates into the existing account owner's per-write
         // authorization. An uncertain dispatched write keeps the engine fence.
-        let result = try await base.writeLibrarySync(session, mutation: mutation)
-        if case .notDispatched = result { return result }
-        try await checkLibrarySync(session)
-        return result
+        return try await base.writeLibrarySync(session, mutation: mutation)
     }
     func endLibrarySync(_ session: MusicLibrarySyncSession) async { await base.endLibrarySync(session) }
 }
@@ -141,7 +138,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
     }
 
     public func saveAutomaticLibrarySync(_ preferences: MusicAutomaticLibrarySyncPreferences, requestID: UUID,
-                                        authorization: MusicQueueAuthorization) async throws -> MusicLibrarySyncState {
+                                        authorization: MusicQueueAuthorization) async throws -> MusicAutomaticLibrarySyncSaveResult {
         try check(); try authorization.check()
         try musicRequire(automaticLibrarySyncRuntime.saving == nil, .busy)
         let selected = try automaticSelections(preferences.selections), own = epoch
@@ -163,17 +160,26 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
             value.relationshipPlatforms = value.relationshipPlatforms.filter { platform in selected.contains { $0.platform == platform && $0.playlists } }
             ledger.phase = .idle; ledger.issues = []
         }
-        if selected.isEmpty { return try await librarySyncState() }
-        if let draining = automaticLibrarySyncRuntime.task { _ = try? await draining.value }
-        try check(own); try authorization.check()
-        guard automaticLibrarySyncRuntime.saving == requestID else { throw MusicServiceError.staleAccess }
+        let committed = MusicAutomaticLibrarySyncPreferences(revision: savedRevision, selections: selected)
         do {
+            if selected.isEmpty {
+                return .init(preferences: committed, synchronization: .success(try await librarySyncState()))
+            }
+            if let draining = automaticLibrarySyncRuntime.task { _ = await draining.result }
+            try check(own); try authorization.check()
+            guard automaticLibrarySyncRuntime.saving == requestID else { throw MusicServiceError.staleAccess }
             try await bindAutomaticLibraryAccounts(revision: savedRevision, authorization: authorization)
-            return try await runAutomaticLibrarySync(.init(id: requestID, reason: .manual,
+            let state = try await runAutomaticLibrarySync(.init(id: requestID, reason: .manual,
                 preferenceRevision: savedRevision, authorization: authorization), bind: false)
+            return .init(preferences: committed, synchronization: .success(state))
         } catch {
-            try recordAutomaticSyncFailure(error, expected: savedRevision, authorization: authorization)
-            throw error
+            let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
+            do { try recordAutomaticSyncFailure(error, expected: savedRevision, authorization: authorization) }
+            catch {
+                return .init(preferences: committed,
+                    synchronization: .failure(error as? MusicServiceError ?? MusicServiceError.sanitized(error)))
+            }
+            return .init(preferences: committed, synchronization: .failure(failure))
         }
     }
 
@@ -193,7 +199,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
                 try check(own); try authorization.check()
                 try await port.checkLibrarySync(session)
                 try check(own); try authorization.check()
-                _ = try musicText(session.accountID, maximum: 1024)
+                try musicRequire(!session.accountID.isEmpty, .invalidResponse)
                 _ = try musicText(session.scope, maximum: 1024)
                 let previous = wrapper["library"]["accounts"][selection.platform.rawValue]
                 try musicRequire(session.platform == selection.platform &&
@@ -260,7 +266,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
         let cancel: @Sendable () -> Void = { permission.revoke(); task.cancel() }
         automaticLibrarySyncRuntime.task = task; automaticLibrarySyncRuntime.authorization = permission
         automaticLibrarySyncRuntime.attemptedIntent = (current.revision, current.intentRevision)
-        librarySyncRun = (request.id, cancel)
+        librarySyncRun = (request.id, cancel, { _ = await task.result })
         access.register(request.id, cancel: cancel)
         defer {
             permission.revoke(); access.remove(request.id)

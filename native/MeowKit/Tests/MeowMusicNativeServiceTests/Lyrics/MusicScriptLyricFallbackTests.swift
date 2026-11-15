@@ -1,5 +1,7 @@
 import Foundation
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 import XCTest
 @testable import MeowMusicNativeService
 
@@ -48,25 +50,13 @@ final class MusicScriptLyricFallbackTests: XCTestCase {
                 var info = try MJ.parse(track.data); info["copyrightId"] = .string("600123")
                 track = .init(platform: platform, data: info.bytes)
             }
-            let store = try MusicNativeCandidateDiscoveryFixture.store(song: MusicModel.normalize(track))
+            let store = try MusicNativeCandidateDiscoveryFixture.store(song: NativeMusicFixture.storedSong(track))
             let scripts = MusicLyricFallbackScripts(platform)
             if cold { await scripts.coldStart() }
-            let responses: [MusicNativeHTTPResponse]
-            switch platform {
-            case "wy": responses = [.init(status: 200, data: Data(#"{"code":200,"lrc":{"lyric":""}}"#.utf8))]
-            case "kg": responses = [.init(status: 200, data: Data(#"{"status":200,"errcode":200,"candidates":[]}"#.utf8))]
-            case "kw":
-                // Independent Python zlib/base64/XOR vector for "[00:00.00]":
-                // a valid native lyric envelope with no displayable lyric text.
-                responses = [.init(status: 200, data: Data(base64Encoded: "dHA9Y29udGVudA0KDQp4nPPMCQsLy8lJC3TNCfN3tLUFAC/XBVg=")!)]
-            case "mg": responses = [
-                .init(status: 200, data: Data(#"{"returnCode":"000000","resource":[{"songId":"123","copyrightId":"600123","lrcUrl":"https://d.musicapp.migu.cn/test.lrc"}]}"#.utf8)),
-                .init(status: 200, data: Data("[00:00.00]".utf8)),
-            ]
-            default: responses = []
-            }
-            let service = try await NativeMusicFixture.service(store, scripts: scripts,
-                qq: MusicNativeCandidateDiscoveryQQ(), http: MusicNativeLyricsTransport(responses))
+            let peer = NativeMusicResultFixture([.object(["text": .string("")])])
+            let service = try await NativeMusicFixture.service(store,
+            scripts: scripts,
+            platform: peer)
             let queue = try await service.queue()
             let result = try await service.lyrics(occurrenceId: "entry-1", sourceKey: queue.entries[0].track.sources[0].sourceKey)
             let calls = await scripts.calls()
@@ -81,10 +71,11 @@ final class MusicScriptLyricFallbackTests: XCTestCase {
 
     func testNativeErrorIsNotAnEmptyLyricResultAndDoesNotStartScripts() async throws {
         let track = MusicNativeCandidateDiscoveryFixture.track("wy", id: "123")
-        let store = try MusicNativeCandidateDiscoveryFixture.store(song: MusicModel.normalize(track))
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: NativeMusicFixture.storedSong(track))
         let scripts = MusicLyricFallbackScripts("wy")
-        let service = try await NativeMusicFixture.service(store, scripts: scripts,
-            http: MusicNativeLyricsTransport([.init(status: 503, data: Data())]))
+        let service = try await NativeMusicFixture.service(store,
+            scripts: scripts,
+            platform: NativeMusicResultFixture(failure: .upstreamFailed))
         let queue = try await service.queue()
         await scriptExpectFailure(.upstreamFailed) {
             try await service.lyrics(occurrenceId: "entry-1", sourceKey: queue.entries[0].track.sources[0].sourceKey)

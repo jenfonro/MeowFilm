@@ -3,27 +3,27 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class NativeMusicQueueRegressionTests: XCTestCase {
-    func testQueueReusesOnlyIdenticalSongsAndKeepsOccurrenceMetadataIndependent() async throws {
+    func testQueueReadsOneCurrentRepositoryAndKeepsOccurrenceContextIndependent() async throws {
         let first = try NativeMusicFixture.song("A")
-        var second = try NativeMusicFixture.song("B")
-        second["songId"] = first["songId"]
+        let second = try NativeMusicFixture.song("B")
         let songs = [first, first, second, second, first]
         let sessions = (1...5).map { UUID(uuidString: "00000000-0000-4000-8000-00000000000\($0)")! }
         let entries = songs.enumerated().map { index, song in
-            MJ.obj([("id", .string("entry-\(index + 1)")), ("key", song["songId"]), ("song", song),
+            MJ.obj([("id", .string("entry-\(index + 1)")), ("songId", song["songId"]),
                     ("context", .obj([("sourceType", .string("search")),
                         ("sourceTitle", .string("Occurrence \(index + 1)")),
                         ("remoteSession", .string(sessions[index].uuidString.lowercased()))]))])
         }
         var document = try MusicDocument(nil, runID: "fixture")
+        document.library["library"]["songs"] = .obj([(first["songId"].string, first), (second["songId"].string, second)])
         document.queue["entries"] = .array(entries)
         document.queue["currentId"] = .string("entry-2")
         document.queue["serial"] = .n(5); document.queue["revision"] = .n(1)
-        let store = NativeMusicMemoryDocument(try document.encode(changed: ["queue"]))
+        let store = NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue"]))
         let service = try await NativeMusicFixture.service(store)
         let queue = try await service.queue()
         let expectedSources = try songs.map(MusicModel.sources)
-        XCTAssertEqual(queue.entries.map(\.track.songId), Array(repeating: first["songId"].string, count: 5))
+        XCTAssertEqual(queue.entries.map(\.track.songId), songs.map { $0["songId"].string })
         XCTAssertEqual(queue.entries.map(\.track.title),
                        ["Synthetic A", "Synthetic A", "Synthetic B", "Synthetic B", "Synthetic A"])
         XCTAssertEqual(queue.entries.map(\.track.sources), expectedSources)
@@ -34,28 +34,31 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         XCTAssertEqual(queue.entries.map { $0.displayIdentity?.occurrenceID }, (1...5).map { "entry-\($0)" })
         XCTAssertEqual(queue.entries.map { $0.displayIdentity?.sourceID },
                        (1...5).map { "Occurrence \($0)" })
+        let oldQueue = try await service.read().queue
+        try await service.transaction(["library"]) { d in
+            d.library["library"]["songs"][first["songId"].string]["title"] = .string("Current A")
+        }
+        let current = try await service.queue(), state = try await service.read()
+        XCTAssertEqual(current.entries.map(\.track.title), ["Current A", "Current A", "Synthetic B", "Synthetic B", "Current A"])
+        XCTAssertEqual(state.queue, oldQueue)
         await service.close()
     }
 
-    func testQueueValidationRechecksSameSongIDWithDifferentSourceOrField() throws {
+    func testInvalidCurrentRepositoryReferencesAndDuplicateOccurrencesFailWithoutRepair() throws {
         let valid = try NativeMusicFixture.song("A")
-        var wrongSource = valid
-        var source = wrongSource["sources"].array[0]
-        source["sourceKey"] = .string("not-the-native-key")
-        wrongSource["sources"] = .array([source])
-        var wrongField = valid
-        wrongField["duration"] = .n(-1)
-        for (invalid, expected) in [(wrongSource, MusicServiceError.nativeIDConflict),
-                                    (wrongField, MusicServiceError.invalidImport)] {
+        for missingReference in [true, false] {
             var document = try MusicDocument(nil, runID: "fixture")
-            document.queue["entries"] = .array([valid, invalid].enumerated().map { index, song in
-                MJ.obj([("id", .string("entry-\(index + 1)")), ("key", song["songId"]), ("song", song)])
-            })
+            document.library["library"]["songs"][valid["songId"].string] = valid
+            document.queue["entries"] = .array([
+                .obj([("id", .string("entry-1")), ("songId", valid["songId"])]),
+                .obj([("id", .string(missingReference ? "entry-2" : "entry-1")),
+                      ("songId", missingReference ? .string(UUID().uuidString.lowercased()) : valid["songId"])])
+            ])
             document.queue["currentId"] = .string("entry-1")
             document.queue["serial"] = .n(2); document.queue["revision"] = .n(1)
-            let bytes = try document.encode(changed: ["queue"])
+            let bytes = try document.encode(changed: ["library", "queue"])
             XCTAssertThrowsError(try MusicDocument(bytes, runID: "fixture")) {
-                XCTAssertEqual($0 as? MusicServiceError, expected)
+                XCTAssertEqual($0 as? MusicServiceError, .corruptDocument)
             }
         }
     }

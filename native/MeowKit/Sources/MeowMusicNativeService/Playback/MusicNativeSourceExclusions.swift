@@ -10,7 +10,7 @@ extension NativeMusicService: MusicSourceExclusionServing {
         } + playback["recordingSourceExclusions"].array.map {
             MusicSourceExclusion(id: $0["id"].string, songID: $0["songID"].string, title: $0["title"].string,
                   artist: $0["artist"].string, provider: "", platform: $0["platform"].string,
-                  scope: .recording(fingerprint: $0["fingerprint"].string, duration: $0["duration"].number, sourceKey: $0["sourceKey"].string))
+                  scope: .recording(sourceKey: $0["sourceKey"].string))
         }
     }
     public func excludeSource(for reference: MusicReference, provider: String, platform: String) async throws {
@@ -58,8 +58,8 @@ extension NativeMusicService: MusicSourceExclusionServing {
             switch row.scope {
             case .providerPlatform:
                 await currentSourceSession?.session.exclusionsChanged(songID: row.songID, provider: row.provider, platform: row.platform, excluded: false)
-            case .recording(let fingerprint, let duration, let sourceKey):
-                await currentSourceSession?.session.recordingRestored(fingerprint: fingerprint, duration: duration, sourceKey: sourceKey)
+            case .recording(let sourceKey):
+                await currentSourceSession?.session.recordingRestored(songID: row.songID, sourceKey: sourceKey)
             }
         }
         if unconfirmed || Task.isCancelled { throw MusicServiceError.commitUnconfirmed }
@@ -87,24 +87,16 @@ extension NativeMusicService: MusicOfficialSourceChecking {
 
 // User decisions belong to the business document, never the discovery cache.
 extension NativeMusicService {
-    private func sameRecording(_ row: MJ, _ descriptor: MusicRecordingIdentity) -> Bool {
-        row["fingerprint"].string == descriptor.fingerprint &&
-            MusicRecordingIdentity(title: "", artist: "", duration: row["duration"].number)
-                .isCompatible(with: .init(title: "", artist: "", duration: descriptor.duration), sameNative: true)
-    }
-
     func recordingSourceExclusions(_ song: MJ) throws -> Set<String> {
-        let descriptor = MusicModel.descriptor(song)
         var keys = Set(try read().playback["recordingSourceExclusions"].array.filter {
-            sameRecording($0, descriptor)
+            $0["songID"] == song["songId"]
         }.map { $0["sourceKey"].string })
         if let primary = song["sources"].array.first?["sourceKey"].string { keys.remove(primary) }
         return keys
     }
 
     func excludeRecordingSource(_ song: MJ, sourceKey: String) async throws {
-        let descriptor = MusicModel.descriptor(song)
-        try musicRequire(!descriptor.fingerprint.isEmpty && !sourceKey.isEmpty &&
+        try musicRequire(!song["songId"].string.isEmpty && !sourceKey.isEmpty &&
             song["sources"].array.first?["sourceKey"].string != sourceKey, .invalidRequest)
         // Discovered, not-yet-adopted sources can be rejected too.
         let key = try MJ.parse(Data(sourceKey.utf8))
@@ -114,27 +106,22 @@ extension NativeMusicService {
         do {
             try transaction(["playback"]) { d in
                 var rows = d.playback["recordingSourceExclusions"].array
-                guard !rows.contains(where: { sameRecording($0, descriptor) && $0["sourceKey"].string == sourceKey }) else { return }
+                guard !rows.contains(where: { $0["songID"] == song["songId"] && $0["sourceKey"].string == sourceKey }) else { return }
                 rows.append(.obj([("id", .string(UUID().uuidString.lowercased())),
                     ("songID", song["songId"]), ("title", song["title"]), ("artist", song["artist"]),
-                    ("fingerprint", .string(descriptor.fingerprint)), ("duration", .number(descriptor.duration)),
                     ("platform", .string(platform)), ("sourceKey", .string(sourceKey))]))
                 d.playback["recordingSourceExclusions"] = .array(rows)
             }
         } catch MusicServiceError.commitUnconfirmed { unconfirmed = true }
         // Even an uncertain receipt may have committed. Fence prepared results
         // before reporting it, without retiring already armed playback.
-        for (id, value) in preparedSources where sameRecordingSong(value.seed.song, descriptor) &&
+        for (id, value) in preparedSources where value.seed.song["songId"] == song["songId"] &&
             value.result.option.sourceKey == sourceKey && !value.armed { discardSource(attemptID: id) }
         for (id, value) in preparedCacheSources where value.cache.identity.sourceKey == sourceKey &&
             value.cache.identity.songID == song["songId"].string && !value.armed { discardSource(attemptID: id) }
         sourceResults[song["songId"].string]?.removeAll { $0.option.sourceKey == sourceKey }
-        await currentSourceSession?.session.recordingExcluded(fingerprint: descriptor.fingerprint, duration: descriptor.duration, sourceKey: sourceKey)
+        await currentSourceSession?.session.recordingExcluded(songID: song["songId"].string, sourceKey: sourceKey)
         if unconfirmed || Task.isCancelled { throw MusicServiceError.commitUnconfirmed }
     }
 
-    private func sameRecordingSong(_ song: MJ, _ descriptor: MusicRecordingIdentity) -> Bool {
-        let other = MusicModel.descriptor(song)
-        return other.fingerprint == descriptor.fingerprint && other.isCompatible(with: descriptor, sameNative: true)
-    }
 }

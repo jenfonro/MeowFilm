@@ -99,11 +99,12 @@ public static class StorageTests
     private static async Task LocalMixedProtection()
     {
         using var fixture = new Temp();
-        const string account = "music.accounts.v1", device = "music.platform-context.v1", ordinary = account + ".notes";
-        Assert(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { account, device }));
+        const string account = "music.accounts.v2", device = "fixture.private", ordinary = account + ".notes";
+        string[] protectedNames = [account, device];
+        Assert(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { account }));
         string[] names = [Ns, account, device, ordinary];
         byte[] plain = "{\"generated\":\"fixture-value\"}"u8.ToArray();
-        await using (var store = new LocalDocumentStore(fixture.Root, names, protectedNamespaces: AppIdentity.ProtectedNamespaces))
+        await using (var store = new LocalDocumentStore(fixture.Root, names, protectedNamespaces: protectedNames))
         {
             foreach (string ns in names) await store.WriteAsync(ns, plain, DocumentFingerprint.Missing);
             foreach (string ns in new[] { account, device })
@@ -121,7 +122,7 @@ public static class StorageTests
             Equal(plain, (await store.ReadAsync(device)).Data!);
             Equal([42], File.ReadAllBytes(unknown));
         }
-        await using var reopened = new LocalDocumentStore(fixture.Root, names, protectedNamespaces: AppIdentity.ProtectedNamespaces);
+        await using var reopened = new LocalDocumentStore(fixture.Root, names, protectedNamespaces: protectedNames);
         Equal(plain, (await reopened.ReadAsync(device)).Data!);
         Equal(plain, (await reopened.ReadAsync(ordinary)).Data!);
     }

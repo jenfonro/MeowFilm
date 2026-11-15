@@ -70,9 +70,15 @@ final class NativeMusicOfficialPlatformTests: XCTestCase {
         let state = try await service.state()
         _ = try await service.updateSettings(.init(ifRevision: state.settingsRevision, qualityEnabled: ["spatial", "enhanced", "high"],
             qualityOrder: ["enhanced", "spatial", "high"], spatialEnabled: ["sky", "vivid"], spatialOrder: ["vivid", "sky"]))
-        let options = (try await service.sourceAvailability(for: page.items[0].ref)).options
+        let queued = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
+        let session = try await service.beginCandidateDiscovery(occurrenceID: XCTUnwrap(queued.currentId),
+            expectedQueueRevision: queued.revision)
+        let options = (try await session.snapshot(discover: false, force: false)).options.map(\.playback)
         XCTAssertEqual(options[0].qualities, ["jyeffect", "vivid", "sky", "192k", "320k"])
         XCTAssertFalse(options[0].qualities.contains("flac24bit")); XCTAssertFalse(options[0].qualities.contains("dolby"))
+        let manual = try await service.sourceAvailability(for: page.items[0].ref)
+        XCTAssertEqual(manual.options[0].qualities, ["128k", "192k", "320k", "flac", "flac24bit", "jyeffect", "dolby", "sky", "master", "vivid"])
+        await session.close(retainingAttemptID: nil)
         await service.close()
     }
     func testExplicitOfficialFailureDoesNotTryLXOrOtherPlatform() async throws {
@@ -109,7 +115,7 @@ final class NativeMusicOfficialPlatformTests: XCTestCase {
             else { _ = try await service.updateSettings(.init(ifRevision: state.settingsRevision, qualityEnabled: ["standard"])) }
             await gate.release()
             do { _ = try await task.value; XCTFail("Stale official resource") }
-            catch { XCTAssertEqual(error as? MusicServiceError, revoke ? .staleResult : .qualityDisabled) }
+            catch { XCTAssertEqual(error as? MusicServiceError, revoke ? .staleResult : .staleRevision) }
             let history = try await service.playedSongs(); XCTAssertTrue(history.isEmpty)
             await service.close()
         }

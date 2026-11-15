@@ -183,7 +183,7 @@ private struct SourceHandoffBoundaryAccounts: MusicNativeAccountProviding, Music
             let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
             let scripts = SourceHandoffBoundaryScripts()
             await scripts.setEnabled(false)
-            let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+            let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
             let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
                 scripts: scripts, accounts: accounts, clock: { clock.now() })
             let player = SourceHandoffBoundaryPlayer(), model = MusicViewModel(service: service, player: player)
@@ -208,7 +208,7 @@ private struct SourceHandoffBoundaryAccounts: MusicNativeAccountProviding, Music
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         let scripts = SourceHandoffBoundaryScripts()
         await scripts.setEnabled(false)
-        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts, accounts: accounts, clock: { clock.now() })
         let player = SourceHandoffBoundaryPlayer(), model = MusicViewModel(service: service, player: player)
@@ -243,7 +243,7 @@ private struct SourceHandoffBoundaryAccounts: MusicNativeAccountProviding, Music
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         await accounts.setResolveURL(URL(string: "https://media.invalid/original-128k")!, quality: "128k")
         await accounts.setResolveURL(URL(string: "https://media.invalid/original-flac")!, quality: "flac")
-        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
             accounts: SourceHandoffBoundaryAccounts(base: accounts, renewalQuality: actual), clock: { clock.now() })
         let player = SourceHandoffBoundaryPlayer(), model = try await setup(service, player: player)

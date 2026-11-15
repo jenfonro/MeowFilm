@@ -7,7 +7,7 @@ public sealed partial class MusicCapability
     private long officialAccountEpoch;
     private object OfficialInput(SongRow song, MusicOnlineTarget target, bool initial, bool refresh, bool cacheOnly = false) =>
         new {
-            platform = target.Platform, song = target.RecordingSong ?? song.Raw, originSong = song.Raw, sourceKey = target.SourceKey,
+            platform = target.Platform, song = KnownOfficialSong(song, target.RecordingSong), sourceKey = target.SourceKey,
             quality = initial ? target.PolicyRequest : target.Quality,
             qualityPolicySignature = target.QualityPolicySignature,
             scope = target.AccountScope, generation = target.Generation, refresh, cacheOnly,
@@ -42,7 +42,7 @@ public sealed partial class MusicCapability
                 }
                 var cachedTarget = target with { AccountScope = scope, Generation = MusicDto.Integer(authority, "generation"),
                     SourceKey = MusicDto.Text(authority, "sourceKey"), QualityCacheSignature = signature,
-                    Quality = info["quality"]!.GetValue<string>() };
+                    Quality = info["quality"]!.GetValue<string>(), RecordingSong = KnownOfficialSong(song, target.RecordingSong) };
                 var policy = await QualityCall("music.quality.settings.get", null, token);
                 if (MusicDto.Text(policy, "signature") != target.QualityPolicySignature)
                     throw new MusicOperationException("QUALITY_POLICY_CHANGED");
@@ -74,7 +74,8 @@ public sealed partial class MusicCapability
         return new(uri, new Dictionary<string, string>(), target with {
             Generation = MusicDto.Integer(response, "generation"), SourceKey = MusicDto.Text(response, "sourceKey"),
             AccountScope = MusicDto.Text(response, "scope"), Quality = request,
-            QualityCacheSignature = MusicDto.Text(response, "qualityCacheSignature")
+            QualityCacheSignature = MusicDto.Text(response, "qualityCacheSignature"),
+            RecordingSong = KnownOfficialSong(song, target.RecordingSong)
         }, expiry, response);
     }
 

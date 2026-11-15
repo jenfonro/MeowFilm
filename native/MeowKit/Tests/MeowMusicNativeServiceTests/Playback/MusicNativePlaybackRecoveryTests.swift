@@ -10,6 +10,69 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
         catch { XCTAssertEqual(error as? MusicServiceError, expected, file: file, line: line) }
     }
 
+    func testRecoveryUsesCurrentRepositoryAfterRefreshSuspension() async throws {
+        for duration in [130.0, 100.0] {
+            let f = try await MusicRecoveryTestFixture.make(duration: 100), gate = NativeMusicGate()
+            await f.accounts.setDuration(duration)
+            await f.accounts.holdRefresh(gate)
+            let before = try await f.service.read()
+            let task = Task { try await f.recover() }
+            await gate.started()
+            let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                "tx", id: "101", title: "Current recovery title", duration: 130))
+            let adopted = try await f.service.adoptSongs([corrected], authoritative: true)
+            XCTAssertEqual(adopted.first?["songId"], before.queue["entries"].array[0]["songId"])
+            await gate.release()
+            if duration == 130 {
+                let result = try await task.value
+                XCTAssertEqual(result.candidate.title, "Current recovery title")
+                XCTAssertEqual(result.candidate.occurrenceId, f.original.occurrenceId)
+                XCTAssertEqual(result.selection, f.selection)
+            } else {
+                do { _ = try await task.value; XCTFail("The old receipt cannot recover the current recording") }
+                catch { XCTAssertEqual(MusicServiceError.sanitized(error), .invalidMediaCandidate) }
+            }
+            let after = try await f.service.read(), counts = await f.accounts.counts()
+            XCTAssertEqual(after.queue, before.queue)
+            XCTAssertEqual(after.playback, before.playback)
+            XCTAssertEqual(counts.refreshes, 1)
+            let history = try await f.service.playedSongs()
+            XCTAssertTrue(history.isEmpty)
+            await f.service.close()
+        }
+    }
+
+    func testFinalReauthorizationUsesCurrentDurationAndTitleWithoutMetadataEqualityGate() async throws {
+        for duration in [101, 130] {
+            let f = try await MusicRecoveryTestFixture.make(duration: 100), gate = NativeMusicGate()
+            await f.accounts.setDuration(100)
+            let counts = await f.accounts.counts()
+            await f.accounts.holdOptions(call: counts.options + 2, gate: gate)
+            let before = try await f.service.read()
+            let task = Task { try await f.recover() }
+            await gate.started()
+            let corrected = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+                "tx", id: "101", title: "Final recovery title", duration: duration))
+            _ = try await f.service.adoptSongs([corrected], authoritative: true)
+            await gate.release()
+            if duration == 101 {
+                let result = try await task.value
+                XCTAssertEqual(result.candidate.title, "Final recovery title")
+                XCTAssertEqual(result.candidate.occurrenceId, f.original.occurrenceId)
+                XCTAssertEqual(result.selection, f.selection)
+            } else {
+                do { _ = try await task.value; XCTFail("Final reauthorization admitted the old duration") }
+                catch { XCTAssertEqual(MusicServiceError.sanitized(error), .invalidMediaCandidate) }
+            }
+            let after = try await f.service.read(), final = await f.accounts.counts()
+            XCTAssertEqual(after.queue, before.queue)
+            XCTAssertEqual(after.playback, before.playback)
+            XCTAssertEqual(final.options, counts.options + 2)
+            XCTAssertEqual(final.refreshes, 1)
+            await f.service.close()
+        }
+    }
+
     func testExactThreePlatformRefreshPreservesOccurrencePositionStartedAndExistingFactWriter() async throws {
         for platform in MusicAccountPlatform.allCases {
             let f = try await MusicRecoveryTestFixture.make(platform: platform)
@@ -132,12 +195,14 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
                 let old = try f.store.read()
                 var d = try MusicDocument(old, runID: "fixture")
                 var entries = d.queue["entries"].array
-                // A reused stable locator with changed recording data, even
-                // without a bumped revision, must not borrow the original pin.
-                entries[0]["song"] = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
-                    "tx", id: "101", title: "Different synthetic recording"))
+                // A different permanent record cannot borrow the old pin,
+                // even if an external writer omitted its queue revision.
+                let replacement = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(
+                    "tx", id: "102", title: "Different synthetic recording"))
+                d.library["library"]["songs"][replacement["songId"].string] = replacement
+                entries[0]["songId"] = replacement["songId"]
                 d.queue["entries"] = .array(entries)
-                try f.store.compareAndSwap(expected: old, replacement: d.encode(changed: ["queue"]))
+                try f.store.compareAndSwap(expected: old, replacement: d.encode(changed: ["library", "queue"]))
             }
             let before = await f.accounts.counts()
             await fails(mutation == "recording" ? .targetChanged : .staleRevision) { try await f.recover() }
@@ -296,11 +361,13 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
             await f.accounts.holdRefresh(gate)
             let task = Task { try await f.recover() }
             await gate.started()
+            var retiring: Task<Void, Error>?
             if protection {
                 f.service.revokeAccess(generation: 1)
-                try await f.service.setAccess(available: false, generation: 2)
+                retiring = Task { try await f.service.setAccess(available: false, generation: 2) }
             } else { await f.accounts.rotate() }
             await gate.release()
+            try await retiring?.value
             do { _ = try await task.value; XCTFail("revoked recovery") } catch {}
             let counts = await f.accounts.counts()
             XCTAssertEqual(counts.refreshes, 1); XCTAssertEqual(counts.resolves, 1)

@@ -240,14 +240,25 @@ final class MusicHomeArtistUIKitTests: XCTestCase {
     private func artworkURLs() async throws -> [URL] {
         let colors: [UIColor] = [UIColor(red: 0.62, green: 0.53, blue: 0.36, alpha: 1), .systemTeal, .systemPink]
         var urls: [URL] = []
+        var bytes: [URL: Data] = [:]
+        let resource = UUID().uuidString
         for (index, color) in colors.enumerated() {
-            let url = URL(string: "https://artist-home.example/\(index).png")!
+            let url = URL(string: "https://artist-home.invalid/\(resource)/\(index).png")!
             let image = UIGraphicsImageRenderer(size: CGSize(width: 120, height: 120)).image { context in
                 color.setFill()
                 context.fill(CGRect(x: 0, y: 0, width: 120, height: 120))
             }
-            _ = try await MusicArtworkImages.shared.read(url, cachedData: XCTUnwrap(image.pngData()))
+            bytes[url] = try XCTUnwrap(image.pngData())
             urls.append(url)
+        }
+        MusicArtworkImages.shared.configure(cache: MusicUIKitArtworkCache(bytes), selector: nil)
+        addTeardownBlock { @MainActor in
+            MusicArtworkImages.shared.configure(cache: MusicUIKitArtworkCache([:]), selector: nil)
+        }
+        for url in urls {
+            let value = try await MusicArtworkImages.shared.read(url)
+            XCTAssertEqual(value.1, bytes[url])
+            XCTAssertEqual(value.2, url)
         }
         return urls
     }
@@ -328,6 +339,7 @@ private actor ArtistHomeUIKitService: MusicServing, MusicAccountBrowsing, MusicP
     let avatars: [URL]
     let onOpen: @Sendable () -> Void
     private var details: [MusicPublicBrowseCollection] = [], queues: [MusicPublicBrowseCollection] = []
+    private let songID = UUID().uuidString
     private var searches = 0
     init(album: MusicPublicBrowseCollection, avatars: [URL], onOpen: @escaping @Sendable () -> Void) {
         self.album = album; self.avatars = avatars; self.onOpen = onOpen
@@ -346,10 +358,10 @@ private actor ArtistHomeUIKitService: MusicServing, MusicAccountBrowsing, MusicP
     }
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) -> MusicPublicBrowseDetail {
         details.append(collection)
-        let track = MusicRemoteTrack(ref: .init(kind: .handle, id: "wy:41"), songId: "41", title: "曲目",
+        let track = MusicRemoteTrack(ref: .init(kind: .library, id: songID), songId: songID, title: "曲目",
             sources: [.init(sourceKey: "wy:41", platform: "wy", nativeId: "41")])
         return .init(collection: collection, members: [.init(nativeID: "41", sourcePosition: 0, track: track)],
-                     total: 1, cursor: nil, snapshot: "artist-album")
+                     total: 1, cursor: nil)
     }
     func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) throws -> MusicRemoteQueueSource {
         queues.append(request.collection); onOpen()

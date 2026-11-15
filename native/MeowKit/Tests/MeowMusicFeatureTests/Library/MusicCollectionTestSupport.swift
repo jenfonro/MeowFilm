@@ -217,13 +217,11 @@ extension MusicCollectionService: MusicNetworkPlaylistServing {
 
 extension MusicCollectionService: MusicSearchBatchPlaying {
     func searchRecording(_ request: MusicSearchBatchRequest) async throws -> MusicRemoteTrack {
-        try request.validate()
         guard request.targets.count == 1 else { throw MusicServiceError.invalidRequest }
         return request.targets[0].track
     }
     func replaceSearchBatch(_ request: MusicSearchBatchRequest, expectedRevision: Int,
                             intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
-        try request.validate()
         try intent.check()
         guard queueRevision == expectedRevision else { throw MusicServiceError.staleRevision }
         batchTargetHistory.append(request.targets.count)

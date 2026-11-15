@@ -358,8 +358,8 @@ public static partial class MusicUiTests
                 int reads = f.Http.SearchRequests;
                 foreach (int count in new[] { 2, 0 })
                 {
-                    f.Http.SearchResult = _ => new { code = 200, result = new { playlistCount = count,
-                        playlists = SearchPlaylistPresentationPage(1, count).ToArray() } };
+                    f.Http.SearchResult = (_, _) => new {
+                        items = SearchPlaylistPresentationPage(1, count).ToArray(), more = false };
                     await f.Search("短歌单" + count); await f.Module.OpenSearchTabAsync("playlists");
                     await SearchUntil(() => !f.Module.SearchPlaylistsLoading &&
                         f.Module.CatalogSections.Single().Items.Count == count);
@@ -436,8 +436,17 @@ public static partial class MusicUiTests
         try
         {
             await f.Policy([], ["wy"]);
-            f.Http.SearchResult = count => new { code = 200, result = new { playlistCount,
-                playlists = SearchPlaylistPresentationPage(count, 30).ToArray() } };
+            f.Http.SearchResult = (count, _) =>
+            {
+                int page = f.Runtime.Platform.Requests.Last(call => call.Operation == "search")
+                    .Parameters.GetProperty("page").GetInt32();
+                return new
+                {
+                    items = SearchPlaylistPresentationPage(count, 30).ToArray(),
+                    more = page * 30 < playlistCount,
+                    continuation = page * 30 < playlistCount ? new { page = page + 1 } : null
+                };
+            };
             await f.Search("歌单分页");
             await f.Module.OpenSearchTabAsync("playlists");
             await SearchUntil(() => f.Module.CatalogSections.Count == 1 &&
@@ -456,7 +465,7 @@ public static partial class MusicUiTests
             {
                 id = (start + index).ToString(System.Globalization.CultureInfo.InvariantCulture),
                 name = "歌单" + requestIndex + "-" + index,
-                trackCount = 1
+                count = 1, source = "wy"
             };
     }
 

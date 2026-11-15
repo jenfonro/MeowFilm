@@ -6,7 +6,7 @@ public static partial class MusicNativeLibraryTests
     {
         yield return new("Native music full next append preserves order occurrences current mode and one CAS", FullAppend);
         yield return new("Native music full next append stale version and cancellation cannot write", FullAppendRejected);
-        yield return new("Native music full next append empty queue selects first and public append contract stays bounded", FullAppendEmpty);
+        yield return new("Native music public and full next append complete collections and select the first occurrence in an empty queue", FullAppendEmpty);
     }
 
     private static async Task FullAppend()
@@ -25,9 +25,12 @@ public static partial class MusicNativeLibraryTests
             result.GetProperty("version").GetInt64() == version + 1 && result.GetProperty("mode").GetInt32() == 2);
         Check(!result.TryGetProperty("entryIds", out _) && f.Store.Writes == writes + 1);
         var entries = f.Store.State("queue")["entries"]!.AsArray();
-        var expected = new[] { "library:local:a" }.Concat(songs.Select(s => s.GetProperty("songId").GetString()))
+        var repository = f.Store.State("library")["library"]!["songs"]!.AsObject();
+        var expected = new[] { "library:local:a" }.Concat(Enumerable.Range(0, 1005).Select(i => "library:local:" + (i == 501 ? "0" : i.ToString())))
             .Concat(new[] { "library:local:prior", "library:local:b", "library:local:c" });
-        Check(entries.Select(e => e!["key"]!.GetValue<string>()).SequenceEqual(expected));
+        Check(entries.Select(e => repository[e!["songId"]!.GetValue<string>()]!["localFileId"]!.GetValue<string>()).SequenceEqual(expected));
+        Check(entries.All(e => Guid.TryParse(e!["songId"]!.GetValue<string>(), out _) &&
+            !e.AsObject().ContainsKey("song") && !e.AsObject().ContainsKey("key")));
         Check(entries.Select(e => e!["id"]!.GetValue<string>()).Distinct().Count() == 1009);
         Check(entries[1]!["context"]!["sourceTitle"]!.GetValue<string>() == "Full");
         var priority = f.Store.State("queue")["priority"]!.AsArray();
@@ -59,16 +62,19 @@ public static partial class MusicNativeLibraryTests
 
     private static async Task FullAppendEmpty()
     {
-        await using var f = new Fixture(); var owner = f.Owner();
-        var songs = Enumerable.Range(0, 1001).Select(i => E(Song(i.ToString()))).ToArray();
-        await Error(owner, "music.queue.append", new { songs, next = true }, "LIMIT");
-        await Error(owner, "music.queue.append", new { songs = songs.Take(1).ToArray(), next = true, expectedVersion = 0 }, "INVALID_REQUEST");
-        Check(f.Store.Writes == 0);
-        var result = await owner.AppendQueueAsync(songs, null, 0);
-        Check(result.GetProperty("ok").GetBoolean(), result.ToString());
-        var queue = await Ok(owner, "music.queue.get");
-        Check(queue.GetProperty("total").GetInt32() == 1001 && queue.GetProperty("mode").GetInt32() == 1);
-        Check(queue.GetProperty("currentId").GetString() == queue.GetProperty("entries")[0].GetProperty("id").GetString());
-        Check(f.Store.State("queue")["priority"]!.AsArray().Count == 0 && f.Store.Writes == 1);
+        foreach (bool full in new[] { false, true })
+        {
+            await using var f = new Fixture(); var owner = f.Owner();
+            var songs = Enumerable.Range(0, 1001).Select(i => E(Song(i.ToString()))).ToArray();
+            await Error(owner, "music.queue.append", new { songs = songs.Take(1).ToArray(), next = true, expectedVersion = 0 }, "INVALID_REQUEST");
+            Check(f.Store.Writes == 0);
+            var result = full ? await owner.AppendQueueAsync(songs, null, 0)
+                : await Ok(owner, "music.queue.append", new { songs, next = true });
+            Check(result.GetProperty("ok").GetBoolean(), result.ToString());
+            var queue = await Ok(owner, "music.queue.get");
+            Check(queue.GetProperty("total").GetInt32() == 1001 && queue.GetProperty("mode").GetInt32() == 1);
+            Check(queue.GetProperty("currentId").GetString() == queue.GetProperty("entries")[0].GetProperty("id").GetString());
+            Check(f.Store.State("queue")["priority"]!.AsArray().Count == 0 && f.Store.Writes == 1);
+        }
     }
 }

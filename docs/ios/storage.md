@@ -4,14 +4,14 @@
 
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
-| 曲库、队列、历史、设置（`music.library.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
+| 永久歌曲仓库、引用队列、历史、设置（`music.library.v3`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
 | 影视规则 | Node 私有文档 | `meowfilm/script-runtime/film-rules/rules.json`，原生仅保编辑草稿／展示快照 |
 | 视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.video-sources.v1`，参与备份 |
 | 音乐脚本安装、源码与私有数据 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music`，参与备份 |
-| 播放展示、来源发现、首页快照、账号 URL 与副歌点缓存 | 普通文档 | Caches 下 `meowfilm/documents` |
-| 客户端设备会话（`music.client-context.<平台>.v1`）、QQ 设备身份（`music.qq-public.v1`） | 加密文档 | Application Support 下 `meowfilm/encrypted-documents-v1`，排除备份 |
-| 账号凭据（`<bundle>.music.accounts.v1`） | `MeowAccounts` Keychain 凭据 | `afterFirstUnlockThisDeviceOnly`，不同步 |
-| 实际播放后的音频 | 音频文件缓存 | Caches 下 `meowfilm.music.audio-cache.v1`，Data Protection class C |
+| 共享图片／歌词（`music.presentation-resources.v1`）、来源观察（`music.source-checks.v1`）、首页展示（`music.home.display.v1`）、官方音频定位（`music.platform.audio-locators.v1`） | 普通文档 | Caches 下 `meowfilm/documents` |
+| 平台匿名协议状态 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music-platform`，不保存原生账号凭据 |
+| 账号凭据（`<bundle>.music.platform.accounts.v1`） | `MeowAccounts` Keychain 凭据 | `afterFirstUnlockThisDeviceOnly`，不同步；bundle 使用稳定产品身份 |
+| 实际播放后的音频 | 音频文件缓存 | Caches 下 `meowfilm.music.audio-resources.v1`，Data Protection class C |
 
 ## 普通文档
 
@@ -26,13 +26,13 @@
 
 ### 音乐数据源偏好
 
-- `music.library.v1` envelope 的 `records` 新增 `catalogSource` 区，key 为 JSON 字符串 `["meowfilm","music",1,"device","catalogSource"]`。
+- `music.library.v3` envelope 的 `records` 包含 `catalogSource` 区，key 为 JSON 字符串 `["meowfilm","music",3,"device","catalogSource"]`。
 - 记录字段封闭：`{"schema":1,"revision":0,"platform":"wy"}`；platform 只允许 `wy`／`kg`，revision 必须为非负 JSON 安全整数。记录缺失时默认网易云、revision 0，读取不写盘；未知字段、非法类型、版本或平台明确返回 `corruptDocument`，保留原文件。
 - 保存使用文档 transaction CAS，并核对该记录独立的 revision；成功切换加一，同值保存不写盘，过期 revision 返回 `staleRevision`。与 playback 的 `settingsRevision` 无关，不重写 library、queue、playback 或 history。
 
 ## 加密文档
 
-`EncryptedDocumentStore` 只保存设备会话等敏感文档。
+`EncryptedDocumentStore` 提供通用敏感文档 API。当前音乐装配不再用它保存平台设备会话：匿名协议状态归 Node，原生账号凭据使用上表中的 Keychain store。
 
 ### 密钥
 
@@ -55,22 +55,21 @@
 - 命名空间已有任何文件但缺少 key 时，不创建新 key。
 - 默认上限：单文档明文 8 MiB、命名空间密文 32 MiB、文件 128 个；可配置硬上限分别为 64 MiB、256 MiB、1024 个。
 - 同一命名空间只能有一个存储实例。跨进程事务、恶意同进程代码和回滚攻击不在契约范围内。
-- 原子 rename 后没有可失败步骤。网易云／酷狗／QQ 设备文档的同步写入错误不会因发生在保存阶段就变成 `COMMIT_UNCONFIRMED`；保护属性不符为 `STORAGE_POLICY_MISMATCH`，缺签名权限为 `STORAGE_PERMISSION_DENIED`，其他确定失败按存储／访问／损坏等类别报告。真正明确报告的未知提交（例如账号恢复流程）仍保留原语义。
-- 设备文档适配器在 OSLog `dev.meowfilm.aggregate` / `storage` 记录封闭错误类别、读写阶段和请求诊断 ID，不记录路径、Keychain service、凭据或任意底层错误文本。故障注入能验证分类，不能替代签名真机故障诊断。
+- 原子 rename 后没有可失败步骤。当前原生账号提交的保存失败、冲突或未知结果按其真实安全存储回执处理，不由普通缓存写入推断；账号发布边界见[音乐平台客户端上下文](../common/music/platform-client-context.md)。
 
-## 锁屏与旧数据
+## 锁屏与当前数据
 
-- 凭据、设备会话、普通文档和音频缓存在首次解锁后均可读。App 锁屏时不撤销音乐服务，锁屏播放、自动下一首和锁屏切歌沿用正常流程；音乐服务每次启动准入一次，只在关闭时撤销。首次解锁前启动在仅 audio 后台模式下不可达，不另行处理。
+- 凭据、普通文档和音频缓存在首次解锁后均可读。App 锁屏时不撤销音乐服务，锁屏播放、自动下一首和锁屏切歌沿用正常流程；音乐服务每次启动准入一次，只在关闭时撤销。首次解锁前启动在仅 audio 后台模式下不可达，不另行处理。
 - 音频缓存只接受 class C，保护等级不符按缓存未命中处理，不在打开时修改已有文件的等级。
 - 不提供旧凭据、密钥、加密文件或音频缓存保护等级的兼容、迁移或读取时修复。
-- 普通数据曾以加密文档保存在 `encrypted-documents-v1`。升级后不读取、不迁移、不删除这些旧文档及其 Keychain 密钥，曲库从空开始。
+- 音乐仅读写当前唯一格式；从隔离空数据建立的新仓库、引用队列和缓存可正常保存重载，不探测、采用或自动清理旧版本数据。
 
 ## 清除本机用户数据
 
 - 设置首页最底部独立分组 → 清空本机数据。二次确认说明不可撤销、清除范围以及需关闭并重新打开 App；取消不产生请求。
 - 确认后只持久写入 Application Support 下独立的 `meowfilm-reset.pending`（排除备份），停止播放、同步、脚本和业务访问，并切换为待重启界面。此时尚未清理；不会强制退出或在原进程热重建服务，前后台切换也不会执行清理。内嵌 Node 每进程只能启动一次。App 等待规则／来源 owner 取消排空、音乐模块终态、共享 bridge 和 Node 线程实际结束；仍需新进程才进行删除。
-- 下次冷启动由 `MeowfilmLaunchController` 在创建 `MeowfilmAssembly` 前执行清理。清除 Application Support/meowfilm、Caches/meowfilm、Caches/meowfilm.music.audio-cache.v1、临时目录下的 meowfilm（运行器回退位置），以及当前 App UserDefaults domain、App Cookie 与 URL 缓存。
-- Keychain 按稳定产品 ID `dev.meowfilm.aggregate` 下的精确 service 清除：账号凭据、网易云／酷狗客户端设备、QQ 设备，以及旧版曲库、播放展示、来源发现、账号 URL 缓存密钥。只删除本地 data-protection generic-password 项，不枚举整个 access group、不按 class 全删，不先读取或验证旧项保护属性。侧载后的偏好域使用实际 bundle ID，Keychain service 仍使用稳定产品 ID。
+- 下次冷启动由 `MeowfilmLaunchController` 在创建 `MeowfilmAssembly` 前执行清理。清除 Application Support/meowfilm、Caches/meowfilm、Caches/meowfilm.music.audio-resources.v1、临时目录下的 meowfilm（运行器回退位置），以及当前 App UserDefaults domain、App Cookie 与 URL 缓存。
+- Keychain 只清除当前账号精确 service `dev.meowfilm.aggregate.music.platform.accounts.v1`；不读取、枚举或清除旧设备／旧曲库 services。只删除本地 data-protection generic-password 项，不枚举整个 access group、不按 class 全删，不先读取或验证项的保护属性。侧载后的偏好域使用实际 bundle ID，Keychain service 仍使用稳定产品 ID。
 - 不调用云端退出／歌单／收藏删除，不删除 App 外导入原文件、链接目标或其他 service。应用根目录中未知的本地文件也属于重置范围，不尝试解密损坏文档。
 - 清理可幂等重做，缺失项视为成功。只有全部完成才删除待清除标志并创建新业务装配；中断或任一失败保留标志，阻断业务启动，在统一信息框提供重试，不将部分清理报告为成功。签名权限问题不能靠清除自动修复。
 
@@ -82,7 +81,7 @@
 
 Cat 继续使用 `meowfilm/script-runtime/cat`，客户端视频选项、排序、检测与删除记录仍属于 `film.video-sources.v1`。HTTP／引擎适配不改变这些目录或 namespace，不把公共独立入口的默认根目录套到旧安装上，再用空 status 清掉客户端记录；不新增自动数据迁移或清理。
 
-内置官方源开关仍属于 `music.library.v1` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，已有文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
+内置官方源开关属于 `music.library.v3` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，当前格式文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
 
 ## 影视设置
 

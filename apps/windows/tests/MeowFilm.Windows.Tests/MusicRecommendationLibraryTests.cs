@@ -15,6 +15,7 @@ public static class MusicRecommendationLibraryTests
         yield return new("Recommendation owner empty checkpoint restored by one CAS", () => Restore(0));
         yield return new("Recommendation owner singleton retains occurrence context and selection", () => Restore(1));
         yield return new("Recommendation owner full paged queue restore preserves all occurrences", () => Restore(120));
+        yield return new("Recommendation checkpoint restores references without reverting newer repository metadata", RestoreCurrentMetadata);
         yield return new("Recommendation owner heartbeat restore inserts only E after checkpoint B in one CAS", () => RestoreCurrent("middle"));
         yield return new("Recommendation owner heartbeat restore never duplicates the same occurrence", () => RestoreCurrent("same"));
         yield return new("Recommendation owner heartbeat restore keeps distinct occurrences of the same recording", () => RestoreCurrent("duplicate"));
@@ -77,6 +78,35 @@ public static class MusicRecommendationLibraryTests
             result.AddRange(page.GetProperty("entries").EnumerateArray().Select(x => x.Clone()));
         }
         return J(new { currentId = Current(first), entries = result, mode = N(first, "mode") }).GetRawText();
+    }
+    private static async Task RestoreCurrentMetadata()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 0,
+            context = new { sourceType = "search", searchKeyword = "original" } });
+        var before = await Queue(owner);
+        string songId = before.GetProperty("current").GetProperty("song").GetProperty("songId").GetString()!;
+        var entered = await Enter(owner);
+        var current = await Queue(owner);
+        var changed = MusicSongFixture.Online("wy", "1", "Corrected current title", "Updated artist",
+            duration: 240, cover: "https://images.example.test/current.png");
+        await owner.AdoptPlatformResultAsync(J(changed), default, shape: MusicLibraryOwner.PlatformSongShape.Song);
+        Check(N(await Queue(owner), "version") == N(current, "version"), "metadata adoption does not mutate the queue");
+        int writes = store.Writes;
+        await Command(owner, "restore", new { nonce = Nonce(), expectedVersion = N(current, "version"),
+            checkpoint = S(entered, "checkpoint") });
+        var restored = await Queue(owner);
+        var song = restored.GetProperty("current").GetProperty("song");
+        Check(store.Writes == writes + 1 && N(restored, "version") == N(current, "version") + 1 &&
+            Current(restored) == Current(before) && song.GetProperty("songId").GetString() == songId);
+        Check(S(song, "title") == "Corrected current title" && S(song, "artist") == "Updated artist" &&
+            N(song, "duration") == 240 && S(song, "cover_url") == "https://images.example.test/current.png");
+        Check(restored.GetProperty("entries").EnumerateArray().Select(row => S(row, "id"))
+            .SequenceEqual(before.GetProperty("entries").EnumerateArray().Select(row => S(row, "id"))) &&
+            S(restored.GetProperty("current").GetProperty("context"), "searchKeyword") == "original");
+        await using var cold = new MusicLibraryOwner(store);
+        var reloaded = await Queue(cold);
+        Check(reloaded.GetProperty("current").GetProperty("song").GetRawText() == song.GetRawText());
     }
     private static async Task RestoreCurrent(string original)
     {

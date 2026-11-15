@@ -12,7 +12,7 @@ public static class MusicSourceExclusionTests
     }
     private static readonly string A = "11111111-1111-4111-8111-111111111111";
     private static readonly string B = "22222222-2222-4222-8222-222222222222";
-    private static object Entry(string song = "song:a", string? provider = null, string platform = "wy") =>
+    private static object Entry(string song, string? provider = null, string platform = "wy") =>
         new { songId = song, provider = provider ?? A, platform, title = "Synthetic", artist = "Fixture", providerName = "Provider" };
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("exclusion contract"); }
     private static async Task<JsonElement> Ok(MusicLibraryOwner owner, string method, object? input = null)
@@ -23,30 +23,41 @@ public static class MusicSourceExclusionTests
     private static async Task Persist()
     {
         var store = new QualityFixture.DocumentStore();
+        string songA;
         await using (var owner = new MusicLibraryOwner(store))
         {
             Check((await Ok(owner, "music.sourceExclusions.list")).GetProperty("items").GetArrayLength() == 0 && store.Writes == 0);
-            await Ok(owner, "music.sourceExclusions.add", Entry());
+            await Ok(owner, "music.queue.replace", new { songs = new[] {
+                MusicSongFixture.Online("wy", "a", "Track A", "Fixture", duration: 180),
+                MusicSongFixture.Online("wy", "b", "Track B", "Fixture", duration: 180) }, index = 0 });
+            var queue = await Ok(owner, "music.queue.get");
+            songA = queue.GetProperty("entries")[0].GetProperty("song").GetProperty("songId").GetString()!;
+            string songB = queue.GetProperty("entries")[1].GetProperty("song").GetProperty("songId").GetString()!;
+            await Ok(owner, "music.sourceExclusions.add", Entry(songA));
             int writes = store.Writes;
-            Check(!(await Ok(owner, "music.sourceExclusions.add", Entry())).GetProperty("added").GetBoolean() && store.Writes == writes);
-            await Ok(owner, "music.sourceExclusions.add", Entry(provider: B));
-            await Ok(owner, "music.sourceExclusions.add", Entry(platform: "kg"));
-            await Ok(owner, "music.sourceExclusions.add", Entry(song: "song:b"));
-            await Ok(owner, "music.sourceExclusions.add", Entry(provider: "official"));
-            Check((await Ok(owner, "music.sourceExclusions.list", new { songId = "song:a" })).GetProperty("items").GetArrayLength() == 4);
+            Check(!(await Ok(owner, "music.sourceExclusions.add", Entry(songA))).GetProperty("added").GetBoolean() && store.Writes == writes);
+            await Ok(owner, "music.sourceExclusions.add", Entry(songA, provider: B));
+            await Ok(owner, "music.sourceExclusions.add", Entry(songA, platform: "kg"));
+            await Ok(owner, "music.sourceExclusions.add", Entry(songB));
+            await Ok(owner, "music.sourceExclusions.add", Entry(songA, provider: "official"));
+            Check((await Ok(owner, "music.sourceExclusions.list", new { songId = songA })).GetProperty("items").GetArrayLength() == 4);
             await Ok(owner, "music.settings.save", new { ifRevision = 0, lyrics = false });
         }
         await using var reopened = new MusicLibraryOwner(store);
         Check((await Ok(reopened, "music.sourceExclusions.list")).GetProperty("items").GetArrayLength() == 5);
-        await Ok(reopened, "music.sourceExclusions.remove", new { songId = "song:a", provider = A, platform = "wy" });
+        await Ok(reopened, "music.sourceExclusions.remove", new { songId = songA, provider = A, platform = "wy" });
         var rows = (await Ok(reopened, "music.sourceExclusions.list")).GetProperty("items");
         Check(rows.GetArrayLength() == 4 && rows.EnumerateArray().Any(row => row.GetProperty("provider").GetString() == B));
     }
     private static async Task Failure()
     {
-        var store = new QualityFixture.DocumentStore { Fault = true, FaultNamespace = MusicLibraryOwner.DocumentNamespace };
+        var store = new QualityFixture.DocumentStore { FaultNamespace = MusicLibraryOwner.DocumentNamespace };
         await using var owner = new MusicLibraryOwner(store);
-        var reply = await owner.ExecuteAsync("music.sourceExclusions.add", Entry());
+        await Ok(owner, "music.queue.replace", new { songs = new[] {
+            MusicSongFixture.Online("wy", "failure", "Track failure", "Fixture", duration: 180) }, index = 0 });
+        string id = (await Ok(owner, "music.queue.get")).GetProperty("current").GetProperty("song").GetProperty("songId").GetString()!;
+        store.Fault = true;
+        var reply = await owner.ExecuteAsync("music.sourceExclusions.add", Entry(id));
         Check(!reply.GetProperty("ok").GetBoolean() && reply.GetProperty("code").GetString() == "COMMIT_UNKNOWN");
         await owner.ReconcileAsync();
         Check((await Ok(owner, "music.sourceExclusions.list")).GetProperty("items").GetArrayLength() == 0);

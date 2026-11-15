@@ -15,7 +15,6 @@ struct MusicNativeResolvedSource: Sendable {
 }
 struct MusicNativePreparedSource: Sendable {
     let seed: MusicSourceInspectionSeed
-    let recording: MJ
     let result: MusicNativeResolvedSource
     let candidate: MusicPlaybackCandidate
     var cache: MusicNativeAudioCacheAttempt?
@@ -24,7 +23,7 @@ struct MusicNativePreparedSource: Sendable {
 
 struct MusicNativePreparedCacheSource: Sendable {
     let playback: MusicCachedPlayback
-    let recording: MusicNativePlaybackRecording
+    let songID: String
     let cache: MusicNativeAudioCacheAttempt
     let queueRevision: Int
     let settingsRevision: Int
@@ -104,14 +103,14 @@ extension NativeMusicService: MusicSourcePlaybackServing {
     func forgetSource(_ selection: MusicPlaybackSelection, songID: String) {
         sourceResults[songID]?.removeAll { $0.choice.selection == selection }
     }
-    func prepareSource(_ value: MusicNativeResolvedSource, seed: MusicSourceInspectionSeed, staged: MJ)
+    func prepareSource(_ value: MusicNativeResolvedSource, seed: MusicSourceInspectionSeed)
         async throws -> MusicPreparedSource {
         try inspectionCheck(seed)
-        let recording = try playbackRecording(original: seed.song, expanded: staged, state: read())
-        try admitSource(seed.song, selection: value.choice.selection)
+        let song = try currentSongMetadata(seed.song)
+        try admitSource(song, selection: value.choice.selection)
         try value.audio.playbackAuthorization?.check()
         try musicRequire(value.audio.expiresAt.map { $0 > now() } ?? true, .invalidMediaCandidate)
-        try validateDelivery(value.audio, song: staged, playback: seed.playback, automaticQuality: false)
+        try validateDelivery(value.audio, song: song, playback: seed.playback, automaticQuality: false)
         let id = UUID().uuidString.lowercased(), audio = value.audio
         // A prepared remote source needs its own revocable admission, including
         // scripts without account authorization. Never revoke a cached URL's
@@ -119,17 +118,19 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         let authorization = audio.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
         var cache: MusicNativeAudioCacheAttempt?
         do {
-            cache = try await prepareAudioCache(audio: audio, song: staged, selection: value.choice.selection,
+            cache = try await prepareAudioCache(audio: audio, song: song, selection: value.choice.selection,
                 attemptID: id, playbackAuthorization: authorization, preparing: true)
             try inspectionCheck(seed)
+            let song = try currentSongMetadata(seed.song)
+            try validateDelivery(audio, song: song, playback: seed.playback, automaticQuality: false)
             let candidate = MusicPlaybackCandidate(attemptId: id, occurrenceId: seed.ref.id, resourceId: "music:" + id,
-                url: audio.url, headers: audio.headers, title: staged["title"].string,
+                url: audio.url, headers: audio.headers, title: song["title"].string,
                 startPosition: try read().playback["position"]["seconds"].number, requestedQuality: value.quality,
                 resolvedSelection: value.choice.selection,
                 expiresAt: audio.expiresAt.map { $0.timeIntervalSince1970 * 1000 }, delivery: audio.delivery,
                 playbackAuthorization: authorization, byteSource: cache?.source)
             _ = try candidate.resource()
-            preparedSources[id] = .init(seed: seed, recording: recording.expanded, result: value, candidate: candidate, cache: cache)
+            preparedSources[id] = .init(seed: seed, result: value, candidate: candidate, cache: cache)
             observeAudioCacheCapture(cache)
             return .init(candidate: candidate, selection: value.choice.selection)
         } catch {
@@ -148,9 +149,12 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         guard let value = preparedSources[attemptID] else { throw MusicServiceError.staleResult }
         try await admitRecordingSource(value.seed.song, sourceKey: value.result.option.sourceKey)
         try musicRequire(preparedSources[attemptID] != nil, .staleResult)
-        try inspectionCheck(value.seed); try admitSource(value.seed.song, selection: value.result.choice.selection)
+        try inspectionCheck(value.seed)
+        let song = try currentSongMetadata(value.seed.song)
+        try admitSource(song, selection: value.result.choice.selection)
         try value.candidate.playbackAuthorization?.check()
         try musicRequire(value.result.audio.expiresAt.map { $0 > now() } ?? true, .invalidMediaCandidate)
+        try validateDelivery(value.result.audio, song: song, playback: value.seed.playback, automaticQuality: false)
         preparedSources[attemptID]?.armed = true
     }
     /// Called only by an actual native fact after the media controller committed.
@@ -159,26 +163,25 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         if let value = preparedCacheSources[fact.attemptId], value.armed {
             let candidate = value.playback.candidate, selection = value.playback.selection
             try value.cache.authorization.check()
-            _ = try activeSourceDocument(occurrenceID: candidate.occurrenceId,
-                                         recording: value.recording, selection: selection)
+            let d = try activeSourceDocument(occurrenceID: candidate.occurrenceId,
+                                             songID: value.songID, selection: selection)
             try musicRequire(fact.resourceId == candidate.resourceId && fact.occurrenceId == candidate.occurrenceId, .staleResult)
-            let song = value.recording.expanded
+            let song = try repositorySong(value.songID, d)
             replaceFeedbackAttempt(attemptID: fact.attemptId, occurrenceID: candidate.occurrenceId,
                                    song: song, sourceKey: selection.sourceKey, authorization: value.cache.authorization)
             retireCachedPlaybackRecovery(); retireAudioCacheAttempt()
             cancelWork("playback"); spent.insert(fact.attemptId)
             attempt = .init(id: fact.attemptId, occurrence: candidate.occurrenceId, sourceKey: selection.sourceKey,
-                            selection: selection, recording: value.recording, ready: true, authorization: value.cache.authorization)
+                            selection: selection, ready: true, authorization: value.cache.authorization)
             audioCacheAttempt = value.cache; preparedCacheSources[fact.attemptId] = nil
             return
         }
         guard let value = preparedSources[fact.attemptId], value.armed else { return }
         try check(value.seed.epoch)
         let selection = value.result.choice.selection
-        let recording = MusicNativePlaybackRecording(original: value.seed.song, expanded: value.recording)
         let d = try activeSourceDocument(occurrenceID: value.seed.ref.id,
-                                        recording: recording, selection: selection)
-        let song = value.recording
+                                        songID: value.seed.song["songId"].string, selection: selection)
+        let song = try repositorySong(value.seed.song["songId"].string, d)
         try musicRequire(fact.occurrenceId == value.seed.ref.id && fact.resourceId == value.candidate.resourceId, .staleResult)
         try value.candidate.playbackAuthorization?.check()
         replaceFeedbackAttempt(attemptID: fact.attemptId, occurrenceID: value.seed.ref.id,
@@ -187,7 +190,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         retireCachedPlaybackRecovery(); retireAudioCacheAttempt()
         cancelWork("playback"); spent.insert(fact.attemptId)
         attempt = .init(id: fact.attemptId, occurrence: value.seed.ref.id, sourceKey: value.result.option.sourceKey,
-            selection: selection, recording: recording, authorization: value.candidate.playbackAuthorization)
+            selection: selection, authorization: value.candidate.playbackAuthorization)
         preparedSources[fact.attemptId] = nil
         if selection.installationId.hasPrefix("official:"), platformEnabled(selection.siteId),
            Self.officialEnabled(selection.siteId, d.playback) {
@@ -196,13 +199,13 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         attempt?.ready = true
         audioCacheAttempt = value.cache
     }
-    private func activeSourceDocument(occurrenceID: String, recording: MusicNativePlaybackRecording,
+    private func activeSourceDocument(occurrenceID: String, songID: String,
                                       selection: MusicPlaybackSelection) throws -> MusicDocument {
         let d = try read()
         try musicRequire(d.queue["currentId"].string == occurrenceID, .targetChanged)
         let song = try song(.init(kind: .queue, id: occurrenceID), d)
-        try musicRequire(song == recording.original, .targetChanged)
-        let (source, _) = try target(recording.expanded, selection.sourceKey)
+        try musicRequire(song["songId"].string == songID, .targetChanged)
+        let (source, _) = try target(song, selection.sourceKey)
         try musicRequire(source.platform == selection.siteId, .targetChanged)
         try admitSource(song, selection: selection)
         return d
@@ -238,15 +241,16 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         try musicRequire(d.queue["currentId"].string == candidate.occurrenceId &&
             d.queue["revision"].int == value.queueRevision && d.playback["revision"].int == value.settingsRevision, .staleRevision)
         try value.cache.authorization.check()
-        try admitSource(song(.init(kind: .queue, id: candidate.occurrenceId), d), selection: value.playback.selection)
+        let song = try song(.init(kind: .queue, id: candidate.occurrenceId), d)
+        try admitSource(song, selection: value.playback.selection)
+        try musicRequire(MusicMediaDuration.matches(expected: song["duration"].number, actual: candidate.delivery?.duration),
+                         .invalidMediaCandidate)
     }
     func prepareCachedSource(seed: MusicSourceInspectionSeed, quality: String,
-                             selection: MusicPlaybackSelection? = nil,
-                             automaticQuality: Bool = false) async throws -> MusicPreparedSource? {
+                             selection: MusicPlaybackSelection? = nil) async throws -> MusicPreparedSource? {
         try inspectionCheck(seed)
         let hit = try await cachedPlayback(attemptID: UUID().uuidString.lowercased(), occurrenceID: seed.ref.id,
-                                          selection: selection, requestedQuality: quality, preparing: true,
-                                          automaticQuality: automaticQuality)
+                                          selection: selection, requestedQuality: quality, preparing: true)
         do { try inspectionCheck(seed) }
         catch { if let hit { discardSource(attemptID: hit.candidate.attemptId) }; throw error }
         return hit.map { .init(candidate: $0.candidate, selection: $0.selection) }
@@ -286,7 +290,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
     private var files: [MusicResolvedSource] = []
     private var excludedProviders: [String: Set<String>] = [:]
     // Session-local notification fence; durable recording decisions remain in
-    // sourceDiscovery. A rejected, unadopted mapping need not change seed.
+    // playback settings. A rejected mapping need not change the song reference.
     private var rejectedSourceKeys = Set<String>()
     private var options: [MusicPlaybackOption]?
     private var optionRead: Task<[MusicPlaybackOption], Error>?
@@ -299,6 +303,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
     private var mediaFailed = Set<String>()
     private var invalidMediaURLs = Set<URL>()
     private var closed = false, matching = false
+    private var closing: Task<Void, Never>?
     private var pageTasks: [UUID: Task<Void, Never>] = [:]
     private var busyProviders = Set<String>()
     private var authorizations: [ObjectIdentifier: Task<Void, Never>] = [:]
@@ -352,7 +357,12 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
     private func readOptions(discover: Bool = false, force: Bool = false) async throws -> [MusicPlaybackOption] {
         try await check()
         if let optionRead { return try await optionRead.value }
-        if !discover, let options { return options }
+        if !discover, let options {
+            let merged = try await owner.currentSongMetadata(staged)
+            try await check()
+            staged = withoutRejectedRecordings(merged)
+            return options
+        }
         let task = Task { try await self.collectOptions(discover: discover, force: force) }
         optionRead = task
         defer { optionRead = nil }
@@ -367,10 +377,10 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
             checkedDiscoveryPlatforms.formUnion(failures.union(discovery.searched))
             discovered = true; options = nil
         }
-        if let options { return options }
-        let cache = try await owner.sourceDiscoveryState(staged)
-        let merged = await owner.mergeSourceDiscoveryCache(staged, entries: cache.current(window: MusicSourceDiscoveryWindow.playback))
+        let merged = try await owner.currentSongMetadata(staged)
+        try await check()
         staged = withoutRejectedRecordings(merged)
+        if let options { return options }
         let collector = MusicSourceOptionCollector()
         try await owner.inspectionOptions(seed, staged: staged, label: label) { await collector.append($0) }
         try await check()
@@ -509,10 +519,8 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         await owner.discardSource(attemptID: candidate.attemptId)
         publish()
     }
-    private func cachedFile(quality: String, selection: MusicPlaybackSelection? = nil,
-                            automaticQuality: Bool = false) async throws -> MusicPreparedSource? {
-        guard let file = try await owner.prepareCachedSource(seed: seed, quality: quality, selection: selection,
-                                                            automaticQuality: automaticQuality) else { return nil }
+    private func cachedFile(quality: String, selection: MusicPlaybackSelection? = nil) async throws -> MusicPreparedSource? {
+        guard let file = try await owner.prepareCachedSource(seed: seed, quality: quality, selection: selection) else { return nil }
         // Disk eviction is best-effort. A failed index write must not feed the
         // same bad file back into recovery forever; a new file has a new URL.
         if invalidMediaURLs.contains(file.candidate.url) {
@@ -534,13 +542,12 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         for task in pages { task.cancel() }; for task in pages { await task.value }
         try await check()
         while true {
+            let merged = try await owner.currentSongMetadata(staged)
+            try await check()
+            staged = withoutRejectedRecordings(merged)
             let winner: MusicNativeResolvedSource
             if case .exact(let selected) = intent {
                 guard qualities.contains(selected.quality) else { throw MusicServiceError.qualityDisabled }
-                let metadata = try await owner.sourceDiscoveryState(staged)
-                let merged = await owner.mergeSourceDiscoveryCache(staged, entries: metadata.current(window: MusicSourceDiscoveryWindow.playback))
-                try await check()
-                staged = withoutRejectedRecordings(merged)
                 if let file = try await cachedFile(quality: selected.quality, selection: selected) { return file }
                 guard !mediaFailed.contains(mediaKey(selected)) else { throw MusicServiceError.sourceUnavailable }
                 let row = results.first { mediaKey($0.choice.selection) == mediaKey(selected) }
@@ -562,7 +569,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
                 let requested = quality.map { [$0] } ?? MusicSourceQualityPolicy.ordered(seed.state, automatic: true)
                 var found: MusicNativeResolvedSource?
                 for tier in requested {
-                    if let file = try await cachedFile(quality: tier, automaticQuality: automaticQuality) {
+                    if let file = try await cachedFile(quality: tier) {
                         let id = "cache:" + mediaKey(file.selection)
                         files.removeAll { $0.id == id }
                         files.append(.init(id: id, selection: file.selection, title: "本机缓存", delivery: file.candidate.delivery))
@@ -581,7 +588,7 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
             try await owner.admitRecordingSource(seed.song, sourceKey: winner.option.sourceKey)
             try await check()
             do {
-                return try await owner.prepareSource(winner, seed: seed, staged: staged)
+                return try await owner.prepareSource(winner, seed: seed)
             } catch {
                 try await check()
                 guard MusicServiceError.sanitized(error) == .invalidMediaCandidate else { throw error }
@@ -663,19 +670,14 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
                                                 expectedRevision: expectedQueueRevision)
         recordingRejected(sourceKey: sourceKey)
     }
-    func recordingRestored(fingerprint: String, duration: Double, sourceKey: String) {
-        let descriptor = MusicModel.descriptor(seed.song)
-        guard descriptor.fingerprint == fingerprint,
-              descriptor.isCompatible(with: .init(title: "", artist: "", duration: duration), sameNative: true) else { return }
-        rejectedSourceKeys.remove(sourceKey)
-        options = nil
+    func recordingRestored(songID: String, sourceKey: String) {
+        guard seed.song["songId"].string == songID else { return }
+        rejectedSourceKeys.remove(sourceKey); options = nil
         attempted = Set(results.map(\.attemptKey)); mediaFailed = []
         publish()
     }
-    func recordingExcluded(fingerprint: String, duration: Double, sourceKey: String) {
-        let descriptor = MusicModel.descriptor(seed.song)
-        guard descriptor.fingerprint == fingerprint,
-              descriptor.isCompatible(with: .init(title: "", artist: "", duration: duration), sameNative: true) else { return }
+    func recordingExcluded(songID: String, sourceKey: String) {
+        guard seed.song["songId"].string == songID else { return }
         recordingRejected(sourceKey: sourceKey)
     }
     func recordingRejected(sourceKey: String) {
@@ -688,12 +690,19 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
         publish()
     }
     func close() async {
-        guard !closed else { return }
-        optionRead?.cancel(); optionRead = nil
-        closed = true; seed.lifetime.close(); revision = UUID(); cancelInspection()
-        for task in authorizations.values { task.cancel() }; authorizations = [:]
-        for observer in observers.values { observer.finish() }; observers = [:]
-        await owner.candidateCancelWork(label)
+        if closing == nil {
+            let optionTask = optionRead; optionTask?.cancel(); optionRead = nil
+            let physicalPages = Array(pageTasks.values), owner = owner, label = label
+            closed = true; seed.lifetime.close(); revision = UUID(); cancelInspection()
+            for task in authorizations.values { task.cancel() }; authorizations = [:]
+            for observer in observers.values { observer.finish() }; observers = [:]
+            closing = Task {
+                await owner.candidateCancelWork(label)
+                _ = await optionTask?.result
+                for task in physicalPages { await task.value }
+            }
+        }
+        await closing?.value
     }
     private func observeAuthorization(_ authorization: MusicQueueAuthorization?) {
         guard let authorization else { return }

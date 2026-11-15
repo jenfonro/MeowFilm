@@ -271,7 +271,7 @@ public final class MusicSearchViewController: SearchPageViewController,
             }
             cards.append(.init(id: chart.id, title: chart.collection.title,
                 rows: discoveryPage.members(of: chart.id).map {
-                    .init(id: $0.nativeID, rank: $0.sourcePosition + 1, title: $0.track.title)
+                    .init(id: $0.nativeID, rank: $0.sourcePosition.map { $0 + 1 }, title: $0.track.title)
                 }, rowsAreMusic: true, showsPlayButton: true, state: state))
         }
         return cards
@@ -1066,11 +1066,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         let request = results.requestID
         results.holdPagination()
         let sources = MusicSourcesViewController(model: model, tracks: song.variants,
-            appearance: appearance, originIsCurrent: { [weak results] in results?.requestID == request },
-            refresh: { [weak results] in
-                guard let results, results.requestID == request else { throw MusicServiceError.staleResult }
-                return try await results.refreshTrack(song, variant: $0)
-            })
+            appearance: appearance, originIsCurrent: { [weak results] in results?.requestID == request })
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([sources], animated: false)
         navigation.modalPresentationStyle = .pageSheet

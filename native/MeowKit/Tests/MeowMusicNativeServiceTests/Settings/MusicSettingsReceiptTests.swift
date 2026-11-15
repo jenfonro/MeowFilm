@@ -17,7 +17,7 @@ import MeowContracts
 
 // The real native service commits the document. Only delivery of its receipt is held.
 private actor SettingsReceiptService: MusicServing {
-    enum Receipt { case success, unconfirmed, failureBeforeCommit }
+    enum Receipt: Equatable { case success, unconfirmed, failureBeforeCommit }
     let native: NativeMusicService
     let gate: NativeMusicGate
     let receipt: Receipt
@@ -111,10 +111,19 @@ private actor SettingsReceiptService: MusicServing {
         XCTAssertEqual(model.clock.position, 19)
         XCTAssertEqual(quality.value.requestQuality, "flac", "Closed page must not receive the late success")
         XCTAssertTrue(sources.official.contains(.qq), "Closed page must not receive the late success")
-        XCTAssertNil(model.error)
+        if mode == .unconfirmed {
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting),
+                [official ? "playback/officialSources" : "playback/requestQuality"])
+            XCTAssertNotNil(model.error, "Closing a page cannot swallow an unknown submitted commit")
+        } else {
+            XCTAssertNil(model.error)
+        }
         let reopenedQuality = MusicQualitySettingsState(model: model)
         let reopenedSources = MusicSourceManagementState(model: model)
         reopenedQuality.start(); reopenedSources.start()
+        if mode == .unconfirmed {
+            XCTAssertNotNil(model.error, "Reading committed state is not a confirmed write receipt")
+        }
         if official {
             XCTAssertFalse(reopenedSources.official.contains(.qq))
             reopenedSources.setOfficial(.qq, enabled: true)
@@ -130,6 +139,7 @@ private actor SettingsReceiptService: MusicServing {
         if official { XCTAssertTrue(next.officialSources.contains(.qq)) }
         else { XCTAssertEqual(next.requestQuality, "128k") }
         XCTAssertNil(model.error)
+        XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
         reopenedQuality.close(); reopenedSources.close()
         await model.close(); await native.close()
     }
@@ -166,7 +176,7 @@ private actor SettingsReceiptService: MusicServing {
         quality.close(); await model.close(); await native.close()
     }
 
-    func testAccessRevocationPreventsCommittedReceiptFromPublishing() async throws {
+    func testAccessRevocationIsolatesPageButSettlesSubmittedReceiptGlobally() async throws {
         for mode in [SettingsReceiptService.Receipt.success, .unconfirmed] {
             let native = try await NativeMusicFixture.service(), gate = NativeMusicGate()
             let service = SettingsReceiptService(native: native, gate: gate, receipt: mode)
@@ -179,10 +189,42 @@ private actor SettingsReceiptService: MusicServing {
             let revoked = model.state
             await gate.release(); await quality.flush()
             XCTAssertEqual(model.state, revoked)
-            XCTAssertNil(model.error)
+            if mode == .unconfirmed {
+                XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), ["playback/requestQuality"])
+                XCTAssertNotNil(model.error)
+            } else { XCTAssertNil(model.error) }
             let saved = try await native.state()
             XCTAssertEqual(saved.requestQuality, "320k"); XCTAssertEqual(saved.settingsRevision, 1)
             quality.close(); await model.close(); await native.close()
         }
+    }
+
+    func testOtherSettingAndStoreSuccessCannotClearUnknownOrUnrelatedError() async throws {
+        let native = try await NativeMusicFixture.service(), gate = NativeMusicGate()
+        let service = SettingsReceiptService(native: native, gate: gate, receipt: .unconfirmed)
+        let model = MusicViewModel(service: service, player: SettingsReceiptPlayer())
+        await model.load()
+        let quality = MusicQualitySettingsState(model: model)
+        quality.start(); quality.setRequestQuality("320k")
+        await gate.started(); quality.close(); await gate.release(); await quality.flush()
+        XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), ["playback/requestQuality"])
+
+        await model.updateSettings(.init(ifRevision: model.state.settingsRevision, officialSources: []))
+        XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), ["playback/requestQuality"])
+        let otherNative = try await NativeMusicFixture.service()
+        let other = MusicViewModel(service: otherNative, player: SettingsReceiptPlayer())
+        await other.load()
+        await other.updateSettings(.init(ifRevision: other.state.settingsRevision, requestQuality: "128k"))
+        XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting), ["playback/requestQuality"],
+                       "Another storage owner cannot acknowledge this owner's commit")
+
+        model.error = "Unrelated operation failed"
+        await model.updateSettings(.init(ifRevision: model.state.settingsRevision, requestQuality: "128k"))
+        XCTAssertTrue(model.settingsReceipts.unknown.isEmpty)
+        XCTAssertEqual(model.error, "Unrelated operation failed")
+        let saved = try await native.state()
+        XCTAssertEqual(saved.settingsRevision, 3, "Unknown must not automatically replay the submitted save")
+        await other.close(); await otherNative.close()
+        await model.close(); await native.close()
     }
 }

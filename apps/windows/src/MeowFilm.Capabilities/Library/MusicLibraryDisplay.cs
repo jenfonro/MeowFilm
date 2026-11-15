@@ -7,8 +7,8 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    public const string LyricDisplayNamespace = MusicRecordingPresentationCache.Namespace;
-    private static string DisplayKey(JsonObject song) => MusicRecordingPresentationCache.Key(song);
+    public const string LyricDisplayNamespace = MusicPresentationCache.Namespace;
+    private static string DisplayKey(JsonObject song) => MusicPresentationCache.SongKey(song);
 
     private static void ValidateDisplayLines(JsonArray lines)
     {
@@ -119,14 +119,18 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(p, save ? "song sourceKey lines" : "song sourceKey", save ? "song sourceKey lines" : "song");
             var song = NativeMusicSong.Normalize(p["song"]);
             string key = DisplayKey(song);
-            string? requested = p["sourceKey"] is null ? null : LJ.Text(p["sourceKey"], 8192);
+            string? requested = null;
+            if (p["sourceKey"] is { } requestedKey)
+            {
+                LJ.Require(requestedKey is JsonValue value && value.TryGetValue<string>(out _));
+                requested = requestedKey.GetValue<string>();
+            }
             if (requested is not null)
                 LJ.Require(LJ.Array(song["sources"]).OfType<JsonObject>()
                     .Any(source => LJ.S(source["sourceKey"]) == requested), "TARGET_CHANGED");
             JsonObject? saved = null;
-            var presentations = new MusicRecordingPresentationCache(displayCache);
-            // Load once before either patch or read. The cache's memory CAS
-            // preserves concurrent artwork/other-song patches.
+            var presentations = PresentationCache;
+            long cacheEpoch = presentations.LyricEpoch;
             try { await presentations.LoadAsync(token).ConfigureAwait(false); }
             catch (DocumentStoreException) { }
             await EnterAsync(token).ConfigureAwait(false); entered = true;
@@ -142,7 +146,7 @@ public sealed partial class MusicLibraryOwner
                 // flight wins; inspect the latest memory snapshot without I/O.
                 try
                 {
-                    saved = presentations.ReadMemory(key);
+                    saved = presentations.ReadLyricsMemory(key);
                     if (saved is not null)
                     {
                         saved["lines"] = DecodeCachedDisplayLines(saved["lines"]);
@@ -172,10 +176,7 @@ public sealed partial class MusicLibraryOwner
                 LJ.Require(bytes.Length <= 512 * 1024, "LIMIT");
                 try
                 {
-                    await presentations.PatchAsync(key, LJ.S(song["songId"]), value =>
-                    {
-                        value["sourceKey"] = requested; value["lines"] = p["lines"]?.DeepClone();
-                    }, token).ConfigureAwait(false);
+                    await presentations.SaveLyricsAsync(key, requested, LJ.Array(p["lines"]), cacheEpoch, token).ConfigureAwait(false);
                 }
                 catch (DocumentStoreException) { System.Diagnostics.Trace.TraceWarning("LYRIC_DISPLAY_CACHE_UNAVAILABLE"); }
                 result = LJ.Obj(("saved", true));

@@ -6,8 +6,11 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
-using MeowFilm.Core.Runtime;
+using System.Text.Json.Nodes;
+using System.IO.Compression;
+using System.Buffers.Binary;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Platform.Storage;
@@ -26,6 +29,7 @@ public static class MusicQqAccountUiTests
         yield return Case("platform-switch-fences-old-authorization-and-pixels", Switch);
         yield return Case("lost-save-receipt-explicit-reconciliation-not-false-login", Unknown);
         yield return Case("refused-terminal-clears-image", Refused);
+        yield return Case("display-expiry-does-not-block-canonical-poll", DisplayExpiry);
         yield return Case("unloaded-cancels-and-context-replacement-cannot-reuse-challenge", Unload);
         yield return Case("minimized-cancels-and-restore-does-not-recreate-challenge", Minimized);
         yield return Case("datacontext-replacement-cancels-old-owner-without-polling-new-owner", ContextReplacement);
@@ -66,18 +70,18 @@ public static class MusicQqAccountUiTests
         await f.Module.ReadAccountsAsync();
         Check(f.Module.SelectedAccount!.State == "verified");
         await f.Module.LogoutAccountAsync(f.Module.SelectedAccount!, confirmed: true);
-        Check(f.Module.SelectedAccount.State == "none" && f.Runtime.Calls == 0);
+        Check(f.Module.SelectedAccount.State == "none" && f.Runtime.Calls.Count == 0);
     }
     private static Task Image()
     {
-        string png = Convert.ToBase64String(QqAccountFixtureHandler.Image);
+        string png = Convert.ToBase64String(Png());
         var image = MusicAccountQrImage.DecodePng(png);
         Check(image.IsFrozen && image.Format == PixelFormats.Bgra32 && image.PixelWidth == 16);
         byte[] pixels = new byte[16 * 16 * 4]; image.CopyPixels(pixels, 64, 0);
         Check(pixels.Contains((byte)0) && pixels.Contains((byte)255));
         foreach (var text in new[] { "https://attacker.invalid/secret", "data:image/svg+xml,<svg/>", "not-base64",
-            Convert.ToBase64String(QqAccountFixtureHandler.Png(width: 2048)),
-            Convert.ToBase64String(QqAccountFixtureHandler.Png(inflated: 1024 * 1024)) })
+            Convert.ToBase64String(Png(width: 2048)),
+            Convert.ToBase64String(Png(inflated: 1024 * 1024)) })
         {
             try { MusicAccountQrImage.DecodePng(text); throw new InvalidOperationException("Expected image rejection"); }
             catch (Exception e) when (e.Message is "INVALID_RESPONSE" or "LIMIT") { }
@@ -101,13 +105,13 @@ public static class MusicQqAccountUiTests
             int calls = f.Transport.Calls;
             await Task.Delay(2300); Check(f.Transport.Calls == calls);
             window.Show(); await Task.Delay(2200);
-            Check(!f.Module.HasAccountQr && f.Transport.Calls == calls && f.Runtime.Calls == 0);
+            Check(!f.Module.HasAccountQr && f.Transport.Calls == calls && f.Runtime.Calls.Count == 0);
         }
         finally { window.Close(); }
     }
     private static async Task PendingHidden()
     {
-        await using var f = await Fixture.Create(); f.Transport.HoldAt = "ptqrshow";
+        await using var f = await Fixture.Create(); f.Transport.HoldAt = "qr.create";
         var view = new MusicAccountsView { DataContext = f.Module };
         var window = Offscreen(view);
         try
@@ -125,7 +129,7 @@ public static class MusicQqAccountUiTests
     }
     private static async Task SingleFlight()
     {
-        await using var f = await Fixture.Create(); f.Transport.HoldAt = "ptqrlogin";
+        await using var f = await Fixture.Create(); f.Transport.HoldAt = "qr.poll";
         await f.Module.BeginAccountQrAsync();
         var first = f.Module.CheckAccountQrAsync();
         await f.Module.CheckAccountQrAsync(); // Admission is synchronous before command dispatch.
@@ -137,7 +141,7 @@ public static class MusicQqAccountUiTests
     }
     private static async Task Switch()
     {
-        await using var f = await Fixture.Create(); f.Transport.HoldAt = "QQLogin";
+        await using var f = await Fixture.Create(); f.Transport.HoldAt = "qr.poll";
         await f.Module.BeginAccountQrAsync();
         var first = f.Module.CheckAccountQrAsync();
         await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
@@ -162,6 +166,20 @@ public static class MusicQqAccountUiTests
         await using var f = await Fixture.Create(); f.Transport.Status = 68;
         await f.Module.BeginAccountQrAsync(); await f.Module.CheckAccountQrAsync();
         Check(!f.Module.HasAccountQr && f.Module.AccountStatus == "已拒绝登录" && f.Store.Writes == 0);
+    }
+    private static async Task DisplayExpiry()
+    {
+        await using var f = await Fixture.Create();
+        f.Transport.ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeMilliseconds();
+        f.Transport.Status = 66;
+        await f.Module.BeginAccountQrAsync();
+        Check(f.Module.HasAccountQr && !f.Module.CanSaveAccountQr && f.Module.CanCheckAccountQr);
+        await f.Module.CheckAccountQrAsync();
+        Check(f.Transport.Polls == 1 && f.Module.HasAccountQr && f.Module.AccountStatus == "等待扫码");
+        f.Transport.Status = 0;
+        await f.Module.CheckAccountQrAsync();
+        Check(f.Transport.Polls == 2 && !f.Module.HasAccountQr && f.Module.SelectedAccount!.State == "verified" &&
+            f.Module.SelectedAccount.UserId == "42" && f.Store.Writes == 1);
     }
     private static async Task Unload()
     {
@@ -207,12 +225,12 @@ public static class MusicQqAccountUiTests
         try
         {
             window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            await first.Module.ActivatePlatformSettingsAsync();
+            await next.Module.ActivatePlatformSettingsAsync();
             OpenLogin(view);
             await first.Module.BeginAccountQrAsync();
             await next.Module.BeginAccountQrAsync();
             Check(next.Module.HasAccountQr);
-            await first.Module.ActivatePlatformSettingsAsync();
-            await next.Module.ActivatePlatformSettingsAsync();
             int firstCancels = first.Calls.AccountCalls.Count(method => method == "music.accounts.cancel");
             int firstReads = first.Calls.AccountCalls.Count(method => method == "music.accounts.list");
             int nextAccountCalls = next.Calls.AccountCalls.Count;
@@ -220,8 +238,10 @@ public static class MusicQqAccountUiTests
             int nextCalls = next.Transport.Calls;
             view.DataContext = next.Module;
             await Until(() => !first.Module.HasAccountQr && !first.Module.AccountBusy);
-            Check(first.Calls.AccountCalls.Count(method => method == "music.accounts.cancel") == firstCancels + 1 &&
-                first.Calls.AccountCalls.Count(method => method == "music.accounts.list") == firstReads + 1);
+            int cancelDelta = first.Calls.AccountCalls.Count(method => method == "music.accounts.cancel") - firstCancels;
+            int readDelta = first.Calls.AccountCalls.Count(method => method == "music.accounts.list") - firstReads;
+            Check(cancelDelta == 1, $"old cancel delta={cancelDelta}; read delta={readDelta}; old busy={first.Module.AccountBusy}; old qr={first.Module.HasAccountQr}");
+            Check(readDelta == 1, $"old read delta={readDelta}; cancel delta={cancelDelta}; next account delta={next.Calls.AccountCalls.Count - nextAccountCalls}");
             int calls = first.Transport.Calls;
             await Task.Delay(2300);
             Check(first.Transport.Calls == calls && next.Transport.Calls == nextCalls && next.Module.HasAccountQr);
@@ -245,27 +265,87 @@ public static class MusicQqAccountUiTests
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
         { throw new TimeoutException($"QQ account wait at {member}:{line}: {expression}"); }
     }
-    private sealed class NoRuntime : IRuntimeClient
+    private static byte[] Png(int width = 16, int? inflated = null)
     {
-        internal int Calls;
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Native business must not upload script sources"); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Ordinary account must not start Node"); }
+        byte[] pixels = new byte[width * 16 * 4];
+        for (int i = 0; i < pixels.Length; i += 8) Array.Fill(pixels, (byte)255, i, Math.Min(4, pixels.Length - i));
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(BitmapSource.Create(width, 16, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4)));
+        using var output = new MemoryStream(); encoder.Save(output);
+        if (inflated is null) return output.ToArray();
+        // Keep a valid small IHDR but replace IDAT by excessive decompressed data.
+        // The native image boundary must reject it before publishing pixels.
+        byte[] original = output.ToArray();
+        using var compressed = new MemoryStream();
+        using (var zlib = new ZLibStream(compressed, CompressionLevel.SmallestSize, leaveOpen: true))
+            zlib.Write(new byte[inflated.Value]);
+        using var bomb = new MemoryStream(); bomb.Write(original, 0, 8);
+        bool wrote = false;
+        for (int offset = 8; offset < original.Length;)
+        {
+            int size = checked((int)BinaryPrimitives.ReadUInt32BigEndian(original.AsSpan(offset, 4)));
+            string kind = System.Text.Encoding.ASCII.GetString(original, offset + 4, 4);
+            if (kind != "IDAT") bomb.Write(original, offset, size + 12);
+            else if (!wrote)
+            {
+                byte[] data = compressed.ToArray(), chunk = new byte[data.Length + 12];
+                BinaryPrimitives.WriteUInt32BigEndian(chunk, (uint)data.Length);
+                "IDAT"u8.CopyTo(chunk.AsSpan(4)); data.CopyTo(chunk, 8);
+                uint crc = uint.MaxValue;
+                foreach (byte b in chunk.AsSpan(4, data.Length + 4))
+                {
+                    crc ^= b;
+                    for (int bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ ((crc & 1) != 0 ? 0xedb88320u : 0);
+                }
+                BinaryPrimitives.WriteUInt32BigEndian(chunk.AsSpan(chunk.Length - 4), ~crc);
+                bomb.Write(chunk); wrote = true;
+            }
+            offset += size + 12;
+        }
+        return bomb.ToArray();
+    }
+    private sealed class QrScenario
+    {
+        internal int Calls, Polls, Status;
+        internal long ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeMilliseconds();
+        internal string? HoldAt;
+        internal readonly TaskCompletionSource Arrived = MusicAccountRuntimeFixture.Signal(), Release = MusicAccountRuntimeFixture.Signal();
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
+        {
+            if (call.Operation == "qr.cancel") return MusicPlatformRuntimeFixture.Json(new { cancelled = true });
+            Calls++;
+            if (HoldAt == call.Operation) { Arrived.TrySetResult(); await Release.Task; }
+            if (call.Operation == "qr.create") return MusicPlatformRuntimeFixture.Json(new {
+                challengeId = call.Parameters.GetProperty("challengeId").GetString(),
+                expiresAt = ExpiresAt,
+                url = "",
+                imageBase64 = Convert.ToBase64String(Png()) });
+            if (call.Operation == "qr.poll")
+            {
+                Polls++;
+                var account = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation("tx").GetRawText())!.AsObject();
+                account["cookie"] = "musicid=42; musickey=SYNTHETIC_QQ_KEY";
+                return MusicPlatformRuntimeFixture.Json(new { status = Status switch { 66 => "waiting", 68 => "refused", _ => "authenticated" },
+                    account = Status == 0 ? account : null });
+            }
+            throw new InvalidOperationException(call.Operation);
+        }
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        internal NoRuntime Runtime = new();
-        internal QqAccountFixtureHandler Transport = new();
-        internal QqAccountStore Store;
+        internal NativeMusicScriptTestRuntime Runtime = new();
+        internal QrScenario Transport = new();
+        internal MusicAccountRuntimeFixture.StoreProbe Store;
         internal MusicNativeApplication Application;
         internal MusicAccountFixtureApplication Calls;
         internal MusicCapability Module;
         private Fixture()
         {
-            Store = new(new LocalDocumentStore(MusicNativeQqAccountTests.DataPath(), AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
-            Application = new(Store, Runtime, Transport);
+            string root = TestWorkspace.DataPath("qq-account-ui", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            Store = new(new LocalDocumentStore(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
+            Runtime.Platform.OnRequest = Transport.Read;
+            Application = new(Store, Runtime);
             Calls = new(Application);
             Module = new(Calls, Store, new Output(), new Dialogs());
         }
@@ -284,8 +364,8 @@ public static class MusicQqAccountUiTests
         public async ValueTask DisposeAsync()
         {
             Transport.Release.TrySetResult();
-            try { await Module.DisposeAsync(); Check(Runtime.Calls == 0); }
-            finally { await Store.DisposeAsync(); }
+            try { await Module.DisposeAsync(); Check(Runtime.Calls.Count == 0); }
+            finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
         }
     }
     private sealed class Dialogs : IMusicDialogs

@@ -327,20 +327,16 @@ public sealed partial class MusicCapability
         var rows = new List<PlaylistRow>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
         long revision = -1;
-        int? expectedCount = null;
         while (true)
         {
             var reply = await Call("music.library.list", new { offset = rows.Count, limit = 100 }, token);
             var nextRevision = MusicDto.Integer(reply, "revision");
             if (revision >= 0 && revision != nextRevision) throw new MusicOperationException("REVISION_CONFLICT");
             revision = nextRevision;
-            var count = MusicDto.Count(reply, "total");
-            MusicDto.Require(expectedCount is null || expectedCount == count);
-            expectedCount = count;
-            var page = MusicDto.Page(reply, "items", rows.Count).Select(PlaylistRow.Read).ToArray();
+            var page = reply.GetProperty("items").EnumerateArray().Select(PlaylistRow.Read).ToArray();
             MusicDto.Require(page.All(row => ids.Add(row.Id)));
             rows.AddRange(page);
-            if (rows.Count >= count) break;
+            if (page.Length < 100) break;
         }
         return (rows.ToArray(), revision);
     }

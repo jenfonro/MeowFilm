@@ -31,7 +31,9 @@ public static partial class MusicUiTests
             await f.Module.AddSourceExclusionAsync(song,
                 f.Module.ExclusionProviders.Single(provider => provider.Key == "official"),
                 f.Module.ExclusionPlatforms.Single(platform => platform.Key == "wy"));
-            True(f.Module.SourceExclusions.Single().SongId == songs[^1]["songId"]!.GetValue<string>(),
+            var lastPage = await f.Rpc("music.queue.get", new { offset = 200, limit = 100 });
+            string songId = lastPage.GetProperty("entries").EnumerateArray().Last().GetProperty("song").GetProperty("songId").GetString()!;
+            True(Guid.TryParse(songId, out _) && f.Module.SourceExclusions.Single().SongId == songId,
                 "a song beyond the first two pages is selectable by its real identity");
             True(!f.Module.HasCurrent, "manual exclusion never begins playback");
         });

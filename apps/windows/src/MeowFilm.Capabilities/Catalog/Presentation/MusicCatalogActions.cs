@@ -31,14 +31,13 @@ public sealed partial class MusicCapability
         return IsCatalogBatch ? CatalogBatchActionAsync("play", 0) : CatalogPlaylistActionAsync("play", 0);
     }
     public Task SaveCatalogPlaylistAsync() => IsCatalogBatch ? CatalogBatchActionAsync("save", 0) : SaveNetworkPlaylistAsync();
-    private Task CatalogPlaylistActionAsync(string action, int index, string? expectedSongId = null, string? memberId = null,
-        MusicCatalogCard? entry = null, string? sourcePlaylistId = null)
+    private Task CatalogPlaylistActionAsync(string action, int index, string? songId = null, string? memberId = null,
+        MusicCatalogCard? entry = null, string? sourcePlaylistId = null, int memberOccurrence = 0)
     {
         if (entry is null ? !CanCatalogAction : !CanCatalogBrowse || !entry.CanPlay || !ContainsCatalogCard(entry)) return Task.CompletedTask;
         var parts = entry is null ? location.Route.Split('/', 3) : new[] { "catalog-playlist", entry.Platform, Uri.EscapeDataString(sourcePlaylistId ?? entry.ActionId) };
         if (parts.Length != 3 || index < 0) return Task.CompletedTask;
         var platform = parts[1]; var id = Uri.UnescapeDataString(parts[2]);
-        var expectedSnapshot = entry is null ? catalogSnapshot : "";
         JsonElement? personal = entry?.Locator;
         if (entry is null && catalogLoadedTarget is { } loaded && loaded.Parameters.TryGetProperty("personal", out var locator)) personal = locator.Clone();
         return TrackCatalogAction(async (signal, currentAction) =>
@@ -52,10 +51,6 @@ public sealed partial class MusicCapability
             var token = MusicDto.Text(prepared, "token");
             try
             {
-                MusicDto.Require(MusicCatalogDto.Text(prepared, "platform") == platform &&
-                    MusicCatalogDto.Text(prepared, "id") == id);
-                if (action == "play" && entry is null && expectedSnapshot != MusicCatalogDto.Text(prepared, "snapshot"))
-                    throw new MusicOperationException("SNAPSHOT_CHANGED");
                 if (!currentAction()) return;
                 await RunAsync(async () =>
                 {
@@ -65,10 +60,11 @@ public sealed partial class MusicCapability
                     if (action == "play")
                     {
                         if (memberId is not null) parameters["memberId"] = memberId;
+                        else if (songId is not null) parameters["songId"] = songId;
                         else if (sourcePlaylistId is null) parameters["index"] = index;
+                        if (memberId is not null || songId is not null) parameters["memberOccurrence"] = memberOccurrence;
                     }
                     parameters["expectedVersion"] = version;
-                    if (expectedSongId is not null) parameters["expectedSongId"] = expectedSongId;
                     try
                     {
                         queueEpoch++;
@@ -128,7 +124,7 @@ public sealed partial class MusicCapability
         return TrackCatalogAction(async (signal, currentAction) =>
         {
             RequireCatalogContent();
-            MusicDto.Require(!catalogMore && songs.Length == total && songs.Length <= 1000);
+            MusicDto.Require(songs.Length > 0);
             long version = 0;
             if (action == "play") version = MusicDto.Integer(await Call("music.queue.get", new { offset = 0, limit = 1 }, signal), "version");
             if (!currentAction()) return;
@@ -206,8 +202,14 @@ public sealed partial class MusicCapability
             });
         }, card: card);
     }
-    private Task CatalogSectionPlaylistAsync(MusicCatalogCard card, string playlistId) =>
-        CatalogPlaylistActionAsync("play", 0, card.Song!.Id, entry: card, sourcePlaylistId: playlistId);
+    private Task CatalogSectionPlaylistAsync(MusicCatalogCard card, string playlistId)
+    {
+        var section = CatalogSections.First(s => s.Items.Any(item => ReferenceEquals(item, card)));
+        int occurrence = section.Items.TakeWhile(item => !ReferenceEquals(item, card))
+            .Count(item => item.Song?.Id == card.Song!.Id);
+        return CatalogPlaylistActionAsync("play", 0, card.Song!.Id, entry: card,
+            sourcePlaylistId: playlistId, memberOccurrence: occurrence);
+    }
 
     private Task PlayCatalogSongAsync(MusicCatalogCard card)
     {
@@ -226,8 +228,6 @@ public sealed partial class MusicCapability
         var reply = await Call("music.catalog.song", new { platform, id }, signal);
         if (!currentAction() || !sourceCurrent()) return;
         var song = SongRow.Read(reply.GetProperty("song"));
-        MusicDto.Require(SongJson.NativeId(song.Raw) == id &&
-            SongJson.Platform(song.Raw) == platform);
         await RunAsync(async () =>
         {
             if (!currentAction() || !sourceCurrent()) return;

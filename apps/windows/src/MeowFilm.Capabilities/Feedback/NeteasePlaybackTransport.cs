@@ -1,76 +1,34 @@
-using System.Globalization;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Feedback;
 
-/// <summary>Exact-account preflight and the single NCBL playback file channel.</summary>
-internal sealed class NeteasePlaybackTransport(IMusicPlatformSessionSource accounts, MusicPlatformHttp http,
-    MusicPlatformClientContextOwner clients)
+/// <summary>Node protocol adapter for the native durable playback outbox.</summary>
+internal sealed class NeteasePlaybackTransport(IMusicPlatformSessionSource accounts, MusicPlatformClient client)
 {
-    private readonly MusicPlatformHttp http = http;
-    internal const string UploadUrl = "https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true";
-    internal const string UserAgent = "Meowfilm (Windows)";
-
+    private readonly MusicPlatformClient client = client;
     internal async Task QualifyAccountAsync(MusicPlatformSession account, CancellationToken token)
     {
         Guard(account, token);
-        _ = FeedbackProtocolRules.Cookies(account);
-        var client = await clients.AcquireWyAsync(token).ConfigureAwait(false);
-        Guard(account, token);
-        var response = await http.SendFeedbackJsonAsync("wy", FeedbackProtocolRequests.WyIdentity(account, client), token)
-            .ConfigureAwait(false);
-        Guard(account, token);
-        FeedbackProtocolRequests.VerifyWyIdentity(response.Body, account);
-        // Validate authorization expiry without persisting response credentials or
-        // adding the ordinary catalog client's synthetic cookies to the upload.
-        _ = MusicWyRequestContext.ResponseFields(response.SetCookieHeaders, DateTimeOffset.UtcNow);
-        Guard(account, token);
+        try { _ = await client.RequestAsync("wy", "feedback.qualify", new { }, account, token, () => Guard(account, token)).ConfigureAwait(false); }
+        catch (MusicPlatformException error) { throw new MusicFeedbackException(error.Code); }
     }
-
     internal async Task<Upload> PrepareAsync(MusicPlatformSession account, NeteasePlaybackPending value,
         NeteasePlaybackEvent next, CancellationToken token)
     {
-        try
+        FeedbackProtocolRules.Require(value.Account.Matches(account), "SESSION_CHANGED");
+        await QualifyAccountAsync(account, token).ConfigureAwait(false);
+        bool start = value.Start?.Id == next.Id;
+        FeedbackProtocolRules.Require(start || value.End?.Id == next.Id, "INSTANCE_MISMATCH");
+        var facts = JsonSerializer.SerializeToElement(new
         {
-            FeedbackProtocolRules.Require(value.Account.Matches(account), "SESSION_CHANGED");
-            await QualifyAccountAsync(account, token).ConfigureAwait(false);
-            byte[] metadata = Metadata(account);
-            byte[] encoded;
-            try
-            {
-                byte[] records = Records(value, next);
-                // Codec and HTTP body bounds are protocol/resource boundaries.
-                FeedbackProtocolRules.Require(metadata.Length <= 8192 && records.Length <= 65536, "LIMIT");
-                encoded = NeteasePlaybackLogCodec.Encode(metadata, records);
-            }
-            finally { CryptographicOperations.ZeroMemory(metadata); }
-            var filename = "play_" + Guid.NewGuid().ToString("N");
-            var request = new HttpRequestMessage(HttpMethod.Post, UploadUrl);
-            try
-            {
-                var multipart = new MultipartFormDataContent();
-                request.Content = multipart;
-                var part = new ByteArrayContent(encoded);
-                part.Headers.ContentType = new MediaTypeHeaderValue("multipart/form-data");
-                multipart.Add(part, "file", filename);
-                request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
-                request.Headers.TryAddWithoutValidation("Cookie", account.Cookie);
-                Guard(account, token);
-                return new(this, account, request, encoded, filename);
-            }
-            catch { request.Dispose(); CryptographicOperations.ZeroMemory(encoded); throw; }
-        }
-        catch (MusicFeedbackException) { throw; }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception error) { throw new MusicFeedbackException(FeedbackProtocolRules.SafeError(error)); }
+            @event = start ? "start" : "end", occurredAt = next.At / 1000d, listened = next.Realtime,
+            mediaListened = next.Time, reason = next.Reason, rate = next.Rate,
+            target = new { nativeId = value.RecordingId, source = value.Source ?? "", sourceId = value.SourceId ?? "",
+                algorithm = value.Algorithm ?? "", origin = new { kind = value.PlayScene ?? "" } }
+        });
+        return new(this, account, facts);
     }
-
     internal static NeteasePlaybackPending Start(MusicPlatformSession account, MusicFeedbackStart input, long revision)
     {
         string? source = input.Source is "" or "unknown" ? null : input.Source;
@@ -93,59 +51,26 @@ internal sealed class NeteasePlaybackTransport(IMusicPlatformSessionSource accou
             scene);
     }
 
-    internal static byte[] Metadata(MusicPlatformSession account) =>
-        JsonSerializer.SerializeToUtf8Bytes(new { MUSIC_U = FeedbackProtocolRules.Cookies(account)["MUSIC_U"] },
-            FeedbackProtocolRules.Json);
-
-    internal static byte[] Records(NeteasePlaybackPending value, NeteasePlaybackEvent next)
-    {
-        bool start = value.Start?.Id == next.Id;
-        FeedbackProtocolRules.Require(start || value.End?.Id == next.Id, "INSTANCE_MISMATCH");
-        var json = new JsonObject
-        {
-            ["id"] = JsonNode.Parse(value.RecordingId), ["type"] = "song", ["time"] = Math.Floor(next.Time),
-            ["realtime"] = Math.Floor(next.Realtime), ["_logTime"] = next.At
-        };
-        if (value.Source is not null) json["source"] = value.Source;
-        if (value.SourceId is not null) json["sourceId"] = value.SourceId;
-        if (value.Algorithm is not null) json["alg"] = value.Algorithm;
-        if (value.PlayScene is not null) json["play_scene"] = value.PlayScene;
-        if (!start)
-        {
-            json["end"] = next.Reason;
-            json["play_speed"] = next.Rate;
-        }
-        string prefix = (next.At / 1000).ToString(CultureInfo.InvariantCulture);
-        return Encoding.UTF8.GetBytes(prefix + "\x01" + (start ? "_plv" : "_pld") + "\x01" +
-            json.ToJsonString(FeedbackProtocolRules.Json) + "\n");
-    }
-
     private void Guard(MusicPlatformSession account, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         FeedbackProtocolRules.Require(account.Platform == "wy" && accounts.IsCurrent(account), "SESSION_CHANGED");
     }
-
-    internal sealed class Upload(NeteasePlaybackTransport owner, MusicPlatformSession account,
-        HttpRequestMessage request, byte[] encoded, string filename) : IDisposable
+    internal sealed class Upload(NeteasePlaybackTransport owner, MusicPlatformSession account, JsonElement facts) : IDisposable
     {
+        private JsonElement payload = facts;
         internal async Task SendAsync(CancellationToken token)
         {
             owner.Guard(account, token);
             try
             {
-                var result = await owner.http.SendFeedbackJsonAsync("wy", request, token).ConfigureAwait(false);
-                owner.Guard(account, token);
-                FeedbackProtocolRules.WySuccess(result.Body);
-                FeedbackProtocolRules.Require(result.Body["data"] is JsonObject data &&
-                    data["successfiles"] is JsonArray files &&
-                    files.All(item => item is JsonValue scalar && scalar.TryGetValue<string>(out _)) &&
-                    files.Any(item => item!.GetValue<string>() == filename), "UPSTREAM_UNCONFIRMED");
+                var receipt = await owner.client.RequestAsync("wy", "feedback.upload", new { events = new[] { payload } }, account, token,
+                    () => owner.Guard(account, token)).ConfigureAwait(false);
+                string status = receipt.GetProperty("status").GetString()!;
+                if (status != "confirmed") throw new MusicFeedbackException(receipt.GetProperty("errorCode").GetString() ?? "UPSTREAM_UNCONFIRMED", status);
             }
-            catch (MusicFeedbackException) { throw; }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception error) { throw new MusicFeedbackException(FeedbackProtocolRules.SafeError(error)); }
+            catch (MusicPlatformException error) { throw new MusicFeedbackException(error.Code); }
         }
-        public void Dispose() { request.Dispose(); CryptographicOperations.ZeroMemory(encoded); }
+        public void Dispose() { payload = default; }
     }
 }

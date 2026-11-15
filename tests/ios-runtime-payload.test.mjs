@@ -32,7 +32,7 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
     } });
     const { createRuntime, createRuntimeClient, createAppRuntime, createMusicScriptModule,
       createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule,
-      createTMDBDataModule, createDoubanDataModule, connectFilmPlayback,
+      createTMDBDataModule, createDoubanDataModule, connectFilmPlayback, connectMusicPlatform,
       createNeteaseTokenModule } = await import('./app/entry.mjs');
     const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
     const runtime = createRuntime({ sessionId, dataRoot: join(payload, 'data'), source: { platform: 'ios' } });
@@ -57,6 +57,7 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
     ];
     connectFilmPlayback(modules, { dataRoot });
     modules.push(createNeteaseTokenModule());
+    connectMusicPlatform(modules, { dataRoot });
     const app = createAppRuntime({ sessionId, modules });
     try {
       await app.start();
@@ -70,11 +71,15 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
         ['source', '0.3.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
         ['tmdb', '0.1.0', 'tmdb.data.v1'], ['douban', '0.1.0', 'douban.data.v1'],
         ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
+        ['music-platform', '0.1.0', 'music.platform.v1'],
       ]);
       assert.deepEqual(described.value.modules[4].methods, [
         'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
       ]);
       assert.deepEqual(described.value.modules[7].methods, ['netease.token.get']);
+      assert.deepEqual(described.value.modules[8].methods, [
+        'music.platform.cache.clear', 'music.platform.describe', 'music.platform.request', 'music.platform.session.update',
+      ]);
       assert.ok(described.value.modules[2].methods.includes('source.runtime.rules.process'));
       for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
         'film.settings.get', 'film.library.get']) {

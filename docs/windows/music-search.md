@@ -3,7 +3,7 @@
 ## 所有权
 
 - `MusicSearchCoordinator` 拥有一次关键词下的歌曲和歌单搜索会话、轮次、平台分页、每平台并发、结果缓存、融合、通知、取消和关闭排空。
-- `MusicPlatformCatalog` 执行每个平台的原生物理搜索；Coordinator 不持有凭据、平台 HTTP、持久化或脚本能力。
+- `MusicPlatformCatalog` 经唯一 `MusicPlatformClient` 调共同 Node 搜索；Coordinator 不持有凭据、平台 HTTP、持久化或脚本能力。
 - `MusicLibraryOwner` 是搜索偏好与搜索历史的唯一 writer。
 - `MusicNativeApplication` 在每次物理平台请求内取得精确账号 lease，并在认证失效时只撤销该 lease。
 - 页面只投影当前 snapshot，不自行启动第二套平台请求、轮询或结果融合。
@@ -11,7 +11,7 @@
 
 ## 搜索偏好
 
-`music.library.v1` 的 `native-search-policy` 只接受当前 schema（字段见[搜索设置与历史](music-search-preferences.md)）：
+`music.library.v2` 的 `native-search-policy` 只接受当前 schema（字段见[搜索设置与历史](music-search-preferences.md)）：
 
 ```json
 {
@@ -74,7 +74,7 @@ music.search.cancel
 ## 轮次、分页与并发
 
 - 一次搜索提交为第 1 轮，每次下滑加载为下一轮。每轮对每个仍可继续的平台请求 `pages` 页，每轮条数不固定。
-- 搜索页的 `more` 需平台声明还有后续；没有显式游标的平台短页即末页，QQ 按平台 `nextpage`，空页始终结束；即使平台 `total` 更大也如此。每轮按未提交前缀按需生成请求，在途不超过 `concurrency`，页码到 `int` 上限即停止。
+- 搜索页消费共同 Node 返回的 `more`、`continuation` 及实际协议需要的 `consumed`，不以短页或可见空页推断结束。每轮按未提交前缀按需生成请求，在途不超过 `concurrency`，页码到 `int` 上限即停止。
 - “页”由平台适配器 `MusicSearchPaging` 定义：网易云按偏移量取数，一个请求可覆盖多页但最多 100 条；其余平台每页一个请求。当前页长均为 30，咪咕歌曲按分组计页。
 - 并发按“类型 × 平台”限制：同一会话中每个平台最多同时 `concurrency` 个请求，歌曲与歌单互不占用；不存在全局请求槽。单次请求截止时间 25 秒，从请求真正发出时开始计算。
 - 一个平台在一轮内只按页序提交连续成功的前缀。失败、结果结束或平台把游标移到别处时，该平台本轮停止，未提交的页留给下一轮。
@@ -83,13 +83,7 @@ music.search.cancel
 - `UNSUPPORTED` 使该平台在本会话中停止；其他错误不停止平台。
 - 空平台集合是合法的显式选择，返回 `NO_PLATFORMS`，不发出目录请求。
 
-咪咕歌曲搜索可声明 `totalUnit="groups"`：
-
-- 仅 `mg + songs` 允许 group 单位；
-- 原生 group 页按请求页长限制 group 数量；每个 group 的录音版本完整展开，不另设单组或单页版本数量额度；
-- group rank、groupCount、rawItemCount、total 和 continuation 必须完整一致；
-- copyright ID 只用于跨页录音版本去重，不能替换平台资源 ID；
-- 精简后的完整页直接进入融合，不以持久文档或派生 JSON 的大小限制截断搜索页。
+咪咕歌曲结果的 `totalUnit="groups"`、成员包装与 rank 由共同 Node 结果保留；`MusicSearchPage` 实际消费 song、rank、more 和 continuation，不按 group／版本数量或预期条数复验。copyright ID 保持平台定位职责，不替换永久 songId。分页只由真实游标推进，不用短页推断结束。
 
 ## 缓存
 
@@ -100,7 +94,7 @@ music.search.cancel
 - 页面返回和已加载标签切换仅恢复 snapshot 与滚动位置；显式提交始终交由 Coordinator，不在 UI 维护第二份 TTL 或把旧 snapshot 当成永久缓存。
 ## 结果融合
 
-歌曲候选先由 `NativeMusicSong` 规范化。录音兼容、来源合并与排序由[统一歌曲模型](music-native-library.md#统一歌曲与录音分组)拥有；`MusicRankFusion` 不另外实现时长容差、跨页兼容或冲突身份算法。同一指纹内可以存在多个不兼容的录音子组，新候选必须检查完整证据，寻找可兼容子组，而不是只查询基础 `songId`。
+歌曲在获取时采用到唯一原生仓库；`MusicRankFusion` 按已分配永久 songId 融合，不另算元数据指纹、时长容差或冲突后缀。身份／来源合并由[原生仓库](music-native-library.md#统一歌曲与录音分组)负责，遵循[共同歌曲规则](../common/music/smart-playback.md#歌曲身份与唯一仓库)。
 
 歌单只按 `platform + native id` 分组，同名歌单不合并。
 
@@ -113,7 +107,7 @@ score = Σ 1 / (5 + 该平台最佳 rank)
 同平台多个版本只贡献最佳 rank。平台优先级（设置中的平台顺序）决定合并后的代表项：其显示信息和主录音来自优先级最高的平台；同分时也按代表项的平台优先级排序，再按稳定哈希及身份排序，不依赖平台响应到达顺序或进程随机哈希。
 
 - 第 1 轮：每当一个平台提交新结果，就对全部候选重新融合并发布（热加载）。
-- 第 2 轮起：本轮所有平台结束后，把已显示行作为 retained 分组导入同一个融合入口，再逐个处理本轮原始新候选。已显示行固定位置、身份、显示信息和主录音；兼容的新来源加入对应子组，不新增重复行。仅新分组计算本轮 RRF 并追加到末尾，不能先把本轮单独合成代表项再用另一套规则跨页追加。歌单也使用同一入口，按 `platform + native id` 去重。
+- 第 2 轮起：本轮所有平台结束后，把已显示行作为 retained 分组导入同一融合入口，按永久 songId 保持既有位置并追加新记录。资料更新由当前仓库投影，不以保留行冒充第二份持久歌曲事实。歌单按 `platform + native id` 去重。
 
 ## Snapshot
 

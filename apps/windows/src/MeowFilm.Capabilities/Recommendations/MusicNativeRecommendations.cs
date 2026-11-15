@@ -359,7 +359,13 @@ public sealed partial class MusicNativeApplication
         // Retain the service result so narrow preparation includes physical settle.
         token.ThrowIfCancellationRequested();
         using var frame = sessions.Begin(awaitPhysical: true, inheritLease: true);
-        return await request.ReadAsync(catalog, CancellationToken.None).ConfigureAwait(false);
+        try { return await request.ReadAsync(catalog, CancellationToken.None).ConfigureAwait(false); }
+        catch (MusicPlatformException error)
+        {
+            if (error.Code is "AUTH_EXPIRED" or "AUTH_REQUIRED" && frame.Session is { } failed)
+                accounts.Revoke(failed);
+            throw;
+        }
     }
 
     private void RecommendationAccountChanged(string platform) => recommendations.Invalidate(platform);

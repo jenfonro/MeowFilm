@@ -13,15 +13,17 @@ public sealed partial class MusicCapability
     public Task ClearPlaybackCacheAsync() => RunAsync(async () =>
     {
         if (audioFileCache is null || !dialogs.Confirm("清空播放缓存？", "播放缓存")) return;
-        presentationCacheEpoch++;
-        CancelLyrics(); // Fence pending metadata patches without clearing visible text.
         CancelMusicPreload();
+        ArtworkLoader.ClearMemory();
+        await presentationCache.ClearAllAsync(lifetime.Token);
         await audioFileCache.ClearAsync(lifetime.Token);
         status = "播放缓存文件已清理（当前播放不中断）"; Changed(nameof(Status));
     });
 
     private void ConfirmPlaybackFileCache()
     {
+        if (current is { } played && OwnsCurrent && playback.HasMedia)
+            TrackPlaybackCache(presentationCache.TouchPlayedAsync(played.Id, CurrentArtwork, lifetime.Token));
         if (audioFileCache is null || musicRecovery is not { Media.Target: { } target } state || !CurrentRecovery(state)) return;
         if (state.Media!.Bytes is { } bytes)
         {

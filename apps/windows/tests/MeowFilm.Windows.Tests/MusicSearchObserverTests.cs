@@ -453,6 +453,7 @@ public static class MusicSearchObserverTests
         private static Task<JsonElement> Unused() => throw new InvalidOperationException("NON_SEARCH_CALL");
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Unused();
+        public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default) => Unused();

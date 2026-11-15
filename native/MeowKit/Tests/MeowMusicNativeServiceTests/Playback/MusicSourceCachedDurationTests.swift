@@ -2,16 +2,66 @@ import Foundation
 import XCTest
 import MeowJSON
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 @testable import MeowMusicPlatform
 
 final class MusicSourceCachedDurationTests: XCTestCase {
+    func testCurrentRepositorySuppliesSameSessionOptionsMediaAndTitleWithoutQueueMutation() async throws {
+        for mode in ["automatic", "quality", "exact"] {
+            let accounts = DurationHistoryAccounts(duration: 100, verifiedQuality: true, qualities: ["128k", "flac"])
+            let qq = DurationHistoryQQ()
+            let service = try await NativeMusicFixture.service(accounts: accounts, platform: qq)
+            let first = try await enqueue(service, duration: 100)
+            let source = try XCTUnwrap(first.track.sources.first)
+            let oldSelection = MusicPlaybackSelection(installationId: DurationHistoryAccounts.provider, generation: 1,
+                siteId: source.platform, sourceKey: source.sourceKey, quality: "128k")
+            let session = try await service.sourceSession(occurrenceID: XCTUnwrap(first.state.currentId),
+                                                         expectedQueueRevision: first.state.revision)
+            let old = try await session.match(intent: .quality("128k"))
+            XCTAssertEqual(old.candidate.delivery?.duration, 100)
+            await service.discardSource(attemptID: old.candidate.attemptId)
+            let before = try await service.read()
+
+            await qq.setTitle("Current corrected title")
+            let corrected = try await service.search(platform: "tx", query: "130", page: 1, limit: 30)
+            XCTAssertEqual(corrected.items.first?.songId, first.track.songId)
+            await accounts.setDuration(130)
+            let selected = selection(source, provider: DurationHistoryAccounts.provider)
+            let intent: MusicSourceIntent = mode == "automatic" ? .automatic :
+                mode == "quality" ? .quality("flac") : .exact(selected)
+            let result = try await session.match(intent: intent)
+            XCTAssertEqual(result.selection, selected)
+            XCTAssertEqual(result.candidate.delivery?.duration, 130)
+            XCTAssertEqual(result.candidate.title, "Current corrected title")
+            XCTAssertEqual(result.candidate.occurrenceId, first.state.currentId)
+            try await service.activateSource(attemptID: result.candidate.attemptId)
+            await service.discardSource(attemptID: result.candidate.attemptId)
+
+            do {
+                _ = try await session.match(intent: .exact(oldSelection))
+                XCTFail("The old 100-second URL cannot satisfy the current 130-second recording")
+            } catch { XCTAssertEqual(MusicServiceError.sanitized(error), .invalidMediaCandidate) }
+            let after = try await service.read()
+            XCTAssertEqual(after.queue, before.queue)
+            XCTAssertEqual(after.playback, before.playback)
+            XCTAssertEqual(after.library["library"]["songs"][first.track.songId]["baselineDuration"].number, 100)
+            let resolutions = await accounts.resolutions, searches = await qq.queries
+            XCTAssertEqual(resolutions, 2, "Cached options and the rejected old URL require no extra resolution")
+            XCTAssertEqual(searches, ["100", "130"])
+            let history = try await service.playedSongs()
+            XCTAssertTrue(history.isEmpty)
+            await service.close()
+        }
+    }
+
     func testChangedMetadataRejectsCachedDurationAndPreservesSelectionIntent() async throws {
         for verifiedQuality in [false, true] {
             for mode in ["automatic", "quality", "exact"] {
                 let accounts = DurationHistoryAccounts(duration: 1800, verifiedQuality: verifiedQuality)
                 let scripts = NativeMusicScriptFixture(), qq = DurationHistoryQQ()
-                let service = try await NativeMusicFixture.service(scripts: scripts, accounts: accounts, qq: qq)
+                let service = try await NativeMusicFixture.service(scripts: scripts, accounts: accounts, platform: qq)
                 let first = try await enqueue(service, duration: 1800)
                 let source = try XCTUnwrap(first.track.sources.first)
                 let selected = selection(source, provider: DurationHistoryAccounts.provider)
@@ -86,7 +136,7 @@ final class MusicSourceCachedDurationTests: XCTestCase {
         for value in cases {
             let accounts = DurationHistoryAccounts(duration: value.receipt, verifiedQuality: false)
             let qq = DurationHistoryQQ()
-            let service = try await NativeMusicFixture.service(accounts: accounts, qq: qq)
+            let service = try await NativeMusicFixture.service(accounts: accounts, platform: qq)
             let first = try await enqueue(service, duration: 1800)
             let selected = selection(try XCTUnwrap(first.track.sources.first), provider: DurationHistoryAccounts.provider)
             let original = try await service.sourceSession(occurrenceID: XCTUnwrap(first.state.currentId),
@@ -139,12 +189,25 @@ final class MusicSourceCachedDurationTests: XCTestCase {
     }
 }
 
-private actor DurationHistoryQQ: MusicPublicQQProviding {
+private actor DurationHistoryQQ: MusicPlatformFixtureResponding {
+    func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
+        switch request.operation {
+        case "search":
+            return try MusicPlatformFixture.page(await search(query: request.parameters[music: "keyword"].musicText,
+                page: Int(request.parameters[music: "page"].musicNumber ?? 1),
+                limit: Int(request.parameters[music: "limit"].musicNumber ?? 30)), platform: request.platform)
+        case "lyrics": return .object(["text": .string(try await lyrics(mid: request.parameters[music: "musicInfo"][music: "songmid"].musicText).text)])
+        default: throw MusicPlatformFixture.Failure.remote("UNSUPPORTED")
+        }
+    }
+
     var queries: [String] = []
+    private var title = "Synthetic recording"
+    func setTitle(_ title: String) { self.title = title }
     func search(query: String, page: Int, limit: Int) throws -> MusicNativeTrackPage {
         queries.append(query)
         guard let duration = Int(query) else { throw MusicServiceError.invalidRequest }
-        return .init(items: [MusicNativeCandidateDiscoveryFixture.track(duration: duration)], total: 1)
+        return .init(items: [MusicNativeCandidateDiscoveryFixture.track(title: title, duration: duration)], total: 1)
     }
     func lyrics(mid: String) throws -> MusicNativeLyrics { throw MusicServiceError.unsupported }
 }
@@ -152,16 +215,18 @@ private actor DurationHistoryQQ: MusicPublicQQProviding {
 private actor DurationHistoryAccounts: MusicNativeAccountProviding {
     static let provider = "official:duration-history"
     static let url = URL(string: "https://media.invalid/duration-history.flac")!
-    let duration: Double?
+    var duration: Double?
     let verifiedQuality: Bool
+    let qualities: [String]
     var resolutions = 0
-    init(duration: Double?, verifiedQuality: Bool) {
-        self.duration = duration; self.verifiedQuality = verifiedQuality
+    init(duration: Double?, verifiedQuality: Bool, qualities: [String] = ["flac"]) {
+        self.duration = duration; self.verifiedQuality = verifiedQuality; self.qualities = qualities
     }
+    func setDuration(_ duration: Double) { self.duration = duration }
     func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) -> [MusicPlaybackOption] {
         guard platform == .qq else { return [] }
         return [.init(installationId: Self.provider, generation: 1, siteId: "tx",
-            sourceKey: sourceKey, qualities: ["flac"], title: "Duration history", version: "1",
+            sourceKey: sourceKey, qualities: qualities, title: "Duration history", version: "1",
             contentHash: String(repeating: "a", count: 64))]
     }
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String,
@@ -169,9 +234,9 @@ private actor DurationHistoryAccounts: MusicNativeAccountProviding {
         resolutions += 1
         var fields: [String: JSONValue] = ["url": .string(Self.url.absoluteString), "expiresAt": .null,
                                           "qualityVerified": .bool(verifiedQuality)]
-        if verifiedQuality { fields["actualQuality"] = .string("flac") }
+        if verifiedQuality { fields["actualQuality"] = .string(selection.quality) }
         if let duration { fields["duration"] = .number(duration) }
-        return try MusicPlatformJSON.nativeAccountAudio(fields)
+        return try MusicAccountFields.nativeAccountAudio(fields)
     }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {
         throw MusicServiceError.unsupported

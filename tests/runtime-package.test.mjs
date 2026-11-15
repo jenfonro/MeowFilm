@@ -42,6 +42,9 @@ function fixture({ missing = [], omitFiles = [], runtimeImports = {} } = {}) {
   function runtimeFile(location, fallback = sourceCode) {
     file(`apps/runtime/${location}`, runtimeImports[location] ?? fallback);
   }
+  for (const name of ['NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt',
+    'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt'])
+    file(`LICENSES/${name}`, readFileSync(join(repository, 'LICENSES', name)));
   function add(location, name, version, fields = {}, workspace = false) {
     const manifest = {
       name, version, type: 'module', main: './src/index.js', exports: { '.': './src/index.js' },
@@ -113,6 +116,7 @@ function fixture({ missing = [], omitFiles = [], runtimeImports = {} } = {}) {
   file('packages/film-playback/src/index.js',
     `import '@meowfilm/film-rules';\nimport '@meowfilm/film-search';\nimport '@meowfilm/script-host';\n${sourceCode}`);
   add('packages/netease-token', '@meowfilm/netease-token', '0.1.0', { files: ['src'] }, true);
+  add('packages/music-platform', '@meowfilm/music-platform', '0.1.0', { files: ['src'] }, true);
   add('packages/unused-core', '@meowfilm/unused-core', '0.2.0',
     { dependencies: { 'music-lib': '~1.0.0' } }, true);
   add('packages/inactive-core', '@meowfilm/inactive-core', '0.1.0',
@@ -147,6 +151,7 @@ function fixture({ missing = [], omitFiles = [], runtimeImports = {} } = {}) {
   runtimeFile('modules/pan-runtime.mjs', `import '@meowfilm/pan-runtime';\n${sourceCode}`);
   runtimeFile('modules/film-playback.mjs', `import '@meowfilm/film-playback';\n${sourceCode}`);
   runtimeFile('modules/netease-token.mjs', `import '@meowfilm/netease-token';\n${sourceCode}`);
+  runtimeFile('modules/music-platform.mjs', `import '@meowfilm/music-platform';\n${sourceCode}`);
   runtimeFile('modules/source-rules.mjs',
     `import '@meowfilm/novel-rules';\nimport '@meowfilm/script-host/native-json';\n${sourceCode}`);
   runtimeFile('modules/metadata/tmdb.mjs', `import '@meowfilm/film-playback/metadata-query';\n${sourceCode}`);
@@ -155,7 +160,7 @@ function fixture({ missing = [], omitFiles = [], runtimeImports = {} } = {}) {
   for (const [path, content] of [
     ['entry.mjs', `import './bootstrap.mjs';\nimport './modules/music-script.mjs';\nimport './modules/cat-script.mjs';\n` +
       `import './modules/source-runtime.mjs';\nimport './modules/pan-runtime.mjs';\nimport './modules/metadata-data.mjs';\n` +
-      `import './modules/film-playback.mjs';\nimport './modules/netease-token.mjs';\n${sourceCode}`],
+      `import './modules/film-playback.mjs';\nimport './modules/netease-token.mjs';\nimport './modules/music-platform.mjs';\n${sourceCode}`],
     ['pan-entry.mjs', `import './modules/pan-runtime.mjs';\n${sourceCode}`],
     ['client.mjs', sourceCode], ['contracts.mjs', sourceCode],
     ['modules/source-candidates.mjs', sourceCode], ['modules/source-library.mjs', sourceCode],
@@ -211,10 +216,10 @@ test('interpreted workspace files still reject unsupported negative rules', asyn
   await fails(f, 'UNSAFE_PATH');
 });
 
-test('common runtime packaging stages the eight-module App closure with exact hashes', async () => {
+test('common runtime packaging stages the nine-module App closure with exact hashes', async () => {
   const f = fixture(), manifest = await f.pack();
   assert.equal(manifest.product, 'aggregate');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.assemblyProfile, 'common-native');
@@ -224,7 +229,7 @@ test('common runtime packaging stages the eight-module App closure with exact ha
     ['app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
       'app/modules/cat-script.mjs', 'app/modules/film-playback.mjs', 'app/modules/metadata-data.mjs', 'app/modules/metadata/douban.mjs',
       'app/modules/metadata/network.mjs', 'app/modules/metadata/settings.mjs', 'app/modules/metadata/tmdb.mjs',
-      'app/modules/music-script.mjs',
+      'app/modules/music-platform.mjs', 'app/modules/music-script.mjs',
       'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-library.mjs',
       'app/modules/source-rules.mjs', 'app/modules/source-runtime.mjs', 'app/modules/source-web.mjs',
       'app/pan-entry.mjs']);
@@ -232,7 +237,7 @@ test('common runtime packaging stages the eight-module App closure with exact ha
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
     'node_modules/@meowfilm/source-runtime', 'node_modules/@meowfilm/pan-runtime',
     'node_modules/@meowfilm/film-rules', 'node_modules/@meowfilm/film-search', 'node_modules/@meowfilm/film-playback',
-    'node_modules/@meowfilm/netease-token', 'node_modules/@meowfilm/novel-rules',
+    'node_modules/@meowfilm/netease-token', 'node_modules/@meowfilm/music-platform', 'node_modules/@meowfilm/novel-rules',
     'node_modules/shared', 'node_modules/host-lib', 'node_modules/peer-lib',
     'node_modules/fixture-lib', 'node_modules/fixture-lib/node_modules/shared', 'node_modules/@fixture/token',
     'node_modules/music-lib', 'node_modules/@meowfilm/script-host/node_modules/fixture-dom',
@@ -251,7 +256,18 @@ test('common runtime packaging stages the eight-module App closure with exact ha
     const bytes = readFileSync(join(f.output(), file.path));
     assert.equal(file.bytes, bytes.length); assert.equal(file.sha256, sha256(bytes));
   }
+  for (const name of ['NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt',
+    'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt'])
+    assert.deepEqual(readFileSync(join(f.output(), 'licenses', name)), readFileSync(join(repository, 'LICENSES', name)));
 });
+
+for (const name of ['NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt',
+  'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt']) {
+  test(`common runtime refuses an incomplete music license closure: ${name}`, async () => {
+    const f = fixture({ missing: [`LICENSES/${name}`] });
+    await fails(f, 'MISSING_SOURCE');
+  });
+}
 
 for (const [workspace, file] of [
   ['film-rules', 'film-rules.js'], ['film-search', 'film-search.js'], ['film-playback', 'src/index.js'],

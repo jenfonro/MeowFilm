@@ -14,7 +14,7 @@ MusicCapability
 
 - `MusicRecommendationCoordinator` 拥有推荐会话、请求代次、继续条件、反馈来源和未知提交状态。
 - `MusicRecommendationQueuePort` 是覆盖唯一 `MusicLibraryOwner` 的队列准入 lane，不是第二个存储 owner。
-- 固定平台目录负责读取推荐批次；Node、LX 脚本和页面绑定不参与推荐编排。
+- 固定平台目录通过共同 Node 读取推荐批次；推荐会话、唯一队列 lane 和媒体编排仍由原生拥有，LX 脚本和页面绑定不参与。
 - 推荐会话只存在于当前进程；持久化的仍是唯一曲库 owner 中的队列、历史和设置。
 
 ## 当前命令与类型
@@ -30,8 +30,8 @@ music.recommendations.start / get / choose / continue / retry / return / cancel 
 | kind | 参数与提交 |
 | --- | --- |
 | `fm` | `mode=default|familiar|explore|puzzle|scene`、`submode`，或 `ruleId/tabTagId`；同一 FM lineage 的频道切换使用 append + selectIndex |
-| `similar` | `sourceType=artist|song`、`sourceIds`（协议最多 20 个 ID）；始终独立 enter，不捕获 checkpoint |
-| `heartbeat` | `entry=favorites|current`，首页保留 `songId`；current 必须带真实网易 `songId`，播放器另带 `seedEntryId`。本地融合收藏不传本地歌单 ID，由平台读取当前账号真实喜欢歌单并核实成员；已有 `playlistId` 时仍校验其与实际喜欢歌单一致。捕获 checkpoint；续批固定原 startMusicId／playlistId／账号和入口类型，以实际尾曲推进 songId |
+| `similar` | `sourceType=artist|song`、非空 `sourceIds`；实际所需定位交共同 Node 配方，上游拒绝按真实分类返回；始终独立 enter，不捕获 checkpoint |
+| `heartbeat` | `entry=favorites|current`，首页保留真实网易种子，播放器另带 `seedEntryId`；本地融合收藏不传本地歌单 ID。实际喜欢歌单定位和请求由 Node 执行，不以旧完整成员证明准入。捕获 checkpoint；续批沿共同返回 context，以实际尾曲推进 |
 | `queue` | 必须带当前 occurrence 的 `seedEntryId`；`restore=false` 为只读候选，`restore=true` 为主动 enter 并捕获 checkpoint；只要求种子可解析成网易 ID，不要求整队网易身份 |
 
 当前只接 `platform=wy`、本地播放；其他平台返回 `UNSUPPORTED`，`local=false` 返回 `REMOTE_NOT_SUPPORTED`。已有共享资料中的网易 ID 由 `MusicFeedbackIdentity.Resolve` 解析，不为菜单补搜。
@@ -48,7 +48,7 @@ sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 
 `Session.Config` 是来源配置，队列 `playback-settings.mode` 是唯一全局循环值（1 列表／2 随机／3 单曲），checkpoint 不包含该设置。普通 mode 命令同时关闭续播；进入或选回特殊方式由协调器经同一队列 lane 一致设为列表顺序和续播开启。待进入来源暂存 `PreviousSession`；取得可用批次并经唯一队列 owner 提交后才转移来源所有权，失败保留原来源与媒体。
 
-`MusicQueueRecommendationsRequest(Platform, SeedSongId, Offset)` 的 seed 在会话中固定，分页仅前移服务端 offset；[平台配方](music-native-platforms.md#网易云漫游与推荐)不携带当前整队或搜索上下文。
+`MusicQueueRecommendationsRequest(Platform, SeedSongId, Offset)` 的 seed 在会话中固定，分页仅前移服务端 offset；[共同平台请求](../common/music/platform-client-context.md)不携带当前整队或搜索上下文，推荐候选规则见[推荐候选与插队](../common/music/playback-sessions.md#推荐候选与插队)。
 
 ## 播放器呈现
 
@@ -71,7 +71,7 @@ sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 
 ## 本机 FM 记忆
 
-`MusicFmPreferences` 使用 `music.fm-selection.v1`，已注册到 `AppIdentity.NativeNamespaces`。文档为 `schema=1/accounts:{<真实网易 userId>:{mode,submode,ruleId,tabTagId}}`。不存凭据、队列或活会话，不进入曲库同步。
+`MusicFmPreferences` 使用 `music.fm-selection.v2`，已注册到 `AppIdentity.NativeNamespaces`。文档为 `schema=1/accounts:{<真实网易 userId>:{mode,submode,ruleId,tabTagId}}`。不存凭据、队列或活会话，不进入曲库同步。
 
 首页不指定 mode 的 FM start 在账号首次观察后读取该账号选择；无记录使用 default。只有账号 lease 和已提交 FM 配置仍属当前来源时才保存；切换失败、取消、旧响应不能覆盖。未知提交须显式 reconcile，确认成功后才保存真实配置。
 

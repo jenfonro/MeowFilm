@@ -155,7 +155,7 @@
     <Button.ContextMenu><ContextMenu Style="{DynamicResource MeowFilm.ContextMenu}"/></Button.ContextMenu>
     <StackPanel>
      <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="8">
-      <art:ArtworkImage Address="{Binding Cover}"/>
+      <art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}"/>
       <Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=PlaylistHost}"/>
       <Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=PlaylistHost}"/>
      </Grid>
@@ -175,7 +175,7 @@
            IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" local:CardClip.Radius="4">
      <Grid.Style><Style TargetType="Grid"><Setter Property="Background" Value="#E7EAF0"/><Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger></Style.Triggers></Style></Grid.Style>
-     <art:ArtworkImage Address="{Binding Cover}"/>
+     <art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}"/>
      <TextBlock Text="{Binding Title}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="10"
                 FontSize="{StaticResource MeowFilm.Font.Size.SectionTitle}" TextAlignment="Center" TextWrapping="Wrap">
       <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}"><Setter Property="Foreground" Value="#30394D"/><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
@@ -190,7 +190,7 @@
     <Button.ContextMenu><ContextMenu Style="{DynamicResource MeowFilm.ContextMenu}"/></Button.ContextMenu>
     <Grid Height="64">
      <Grid.ColumnDefinitions><ColumnDefinition Width="64"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-     <art:ArtworkImage Address="{Binding Cover}" Width="56" Height="56" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
+     <art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}" Width="56" Height="56" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
      <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="8,0,16,0">
       <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.SongTitle}"/>
       <TextBlock Text="{Binding Subtitle}" Style="{StaticResource Catalog.SongArtist}"/>
@@ -203,7 +203,7 @@
     <Grid Height="72">
      <Grid.ColumnDefinitions><ColumnDefinition Width="44"/><ColumnDefinition Width="76"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <TextBlock Text="{Binding RankText}" FontSize="{StaticResource MeowFilm.Font.Size.Title}" VerticalAlignment="Center" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}"/>
-     <art:ArtworkImage Grid.Column="1" Address="{Binding Cover}" Width="64" Height="64" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
+     <art:ArtworkImage Grid.Column="1" Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}" Width="64" Height="64" HorizontalAlignment="Left" local:CardClip.Radius="4"/>
      <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="8,0,16,0">
       <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.SongTitle}"/>
       <TextBlock Text="{Binding Subtitle}" Style="{StaticResource Catalog.SongArtist}"/>
@@ -219,7 +219,7 @@
    <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,20,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <Grid x:Name="BannerFrame" Background="#E7EAF0" local:CardClip.Radius="8">
      <Grid.Height><MultiBinding Converter="{StaticResource Catalog.BannerHeight}"><Binding Path="ActualWidth" ElementName="BannerFrame"/><Binding Path="AspectRatio" ElementName="BannerImage"/></MultiBinding></Grid.Height>
-     <art:ArtworkImage x:Name="BannerImage" Address="{Binding Cover}" Stretch="Uniform"/>
+     <art:ArtworkImage x:Name="BannerImage" Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}" Stretch="Uniform"/>
      <TextBlock Text="{Binding Title}" VerticalAlignment="Bottom" Margin="12" TextWrapping="Wrap"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
     </Grid>
    </Button>
@@ -229,7 +229,7 @@
     <Border Background="{DynamicResource MeowFilm.Brush.Surface}" CornerRadius="12" Padding="20" Height="154">
      <StackPanel><DockPanel Margin="0,0,0,14"><TextBlock DockPanel.Dock="Right" Text="{Binding UpdateFrequency}" Style="{StaticResource Capability.Muted}" FontSize="11"/><TextBlock Text="{Binding Title}" FontSize="{StaticResource MeowFilm.Font.Size.SectionTitle}" TextTrimming="CharacterEllipsis"/></DockPanel>
       <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="96"/><ColumnDefinition/></Grid.ColumnDefinitions>
-       <Grid Width="80" Height="80" HorizontalAlignment="Left"><art:ArtworkImage Address="{Binding ThirdPreviewCover}" Margin="12,12,-10,-4" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding SecondPreviewCover}" Margin="6,6,-5,-2" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding FirstPreviewCover}" local:CardClip.Radius="4"/><Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/><Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" local:CardClip.Radius="4" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/></Grid>
+       <Grid Width="80" Height="80" HorizontalAlignment="Left"><art:ArtworkImage Address="{Binding ThirdPreviewCover}" DisplayIdentity="{Binding ThirdPreviewIdentity}" Margin="12,12,-10,-4" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding SecondPreviewCover}" DisplayIdentity="{Binding SecondPreviewIdentity}" Margin="6,6,-5,-2" ShowRetry="False" local:CardClip.Radius="4"/><art:ArtworkImage Address="{Binding FirstPreviewCover}" DisplayIdentity="{Binding FirstPreviewIdentity}" local:CardClip.Radius="4"/><Border Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/><Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" local:CardClip.Radius="4" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=RankingHost}"/></Grid>
        <ItemsControl Grid.Column="1" ItemsSource="{Binding PreviewSongs}"><ItemsControl.ItemTemplate><DataTemplate><Grid Height="27"><Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition/><ColumnDefinition Width="20"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Rank}" Style="{StaticResource Capability.Muted}"/><TextBlock Grid.Column="1" TextTrimming="CharacterEllipsis"><Run Text="{Binding Title}"/><Run Text=" − "/><Run Text="{Binding Artist}" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/></TextBlock><TextBlock Grid.Column="2" Text="{Binding Movement}" Foreground="{DynamicResource MeowFilm.Brush.Accent}" HorizontalAlignment="Right"/></Grid></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
       </Grid>
      </StackPanel>
@@ -247,7 +247,7 @@
     <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.SongButton}" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}" Padding="8">
      <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="60"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
       <Grid Width="50" Height="50" HorizontalAlignment="Left" local:CardClip.Radius="8">
-       <art:ArtworkImage Address="{Binding Cover}"/>
+       <art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}"/>
        <Border Background="#40000000" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=SongRow}">
         <Path Data="M 0,0 L 0,22 L 18,11 Z" Fill="White" Width="18" Height="22" Stretch="Fill" HorizontalAlignment="Center" VerticalAlignment="Center"/>
        </Border>

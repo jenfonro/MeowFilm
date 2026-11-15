@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
 
@@ -35,12 +36,12 @@ public partial class MusicPlayerDetailView : UserControl
         lyricPresentationKey = module.PlaybackPresentationKey;
         InitializeComponent();
         DataContext = module;
-        module.AttachPlaybackArtwork(DetailRecord);
+        ArtworkScope.SetLoader(DetailRecord, module.ArtworkLoader);
+        DetailRecord.SetBinding(MusicRecordView.ArtworkIdentityProperty, new System.Windows.Data.Binding(nameof(MusicCapability.CurrentArtworkIdentity)));
         var footer = new MusicPlayerView(module, showArtwork: false);
         // The footer's own theme supplies the ordinary-page defaults; this page's backdrop palette wins.
         footer.Resources.MergedDictionaries.Add((ResourceDictionary)Resources["Player.FooterPalette"]);
         DetailPlayerHost.Content = footer;
-        DetailRecord.ArtworkLoadCompleted += (_, e) => module.ArtworkLoadCompleted(e.Address, e.Succeeded);
         DetailRecord.PaletteUpdated += (_, _) => module.RefreshPlayerAppearance(DetailRecord.PaletteBrush, animate: IsVisible);
         lyricResumeTimer.Tick += (_, _) =>
         {

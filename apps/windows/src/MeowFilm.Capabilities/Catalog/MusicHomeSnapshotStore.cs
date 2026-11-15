@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using MeowFilm.Platform.Storage;
 
@@ -10,14 +11,14 @@ internal sealed record MusicHomeSnapshot(string Platform, JsonElement[] Pages);
 // Display content only. Restored actions still require current account authority.
 internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
 {
-    internal const string Namespace = "music.home.v1";
+    internal const string Namespace = "music.home.v2";
     private readonly SemaphoreSlim gate = new(1, 1);
 
-    internal async Task<MusicHomeSnapshot?> ReadAsync(CancellationToken token = default)
+    internal async Task<MusicHomeSnapshot?> ReadAsync(Func<string, JsonElement?> song, CancellationToken token = default)
     {
         try
         {
-            return Decode(await store.ReadAsync(Namespace, token).ConfigureAwait(false), token);
+            return Decode(await store.ReadAsync(Namespace, token).ConfigureAwait(false), song, token);
         }
         catch (Exception error) when (IsCacheFailure(error)) { return null; }
     }
@@ -35,7 +36,7 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
         finally { gate.Release(); }
     }
 
-    private static MusicHomeSnapshot? Decode(DocumentSnapshot saved, CancellationToken token)
+    private static MusicHomeSnapshot? Decode(DocumentSnapshot saved, Func<string, JsonElement?> song, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         if (saved.Data is null || saved.Data.Length > LocalDocumentStore.MaximumDocumentBytes) return null;
@@ -52,8 +53,10 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
             int index = 0;
             foreach (var page in pages.EnumerateArray())
             {
-                ReadPage(page, platform, token);
-                result[index++] = page.Clone();
+                var restored = Restore(JsonNode.Parse(page.GetRawText()), song, token);
+                var current = JsonSerializer.SerializeToElement(restored);
+                ReadPage(current, platform, token);
+                result[index++] = current;
             }
             token.ThrowIfCancellationRequested();
             return new(platform, result);
@@ -79,7 +82,11 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
                     ReadPage(page, snapshot.Platform, token);
                     writer.WriteStartObject();
                     foreach (var property in page.EnumerateObject())
-                        if (PageField(property.Name)) property.WriteTo(writer);
+                        if (PageField(property.Name))
+                        {
+                            writer.WritePropertyName(property.Name);
+                            JsonSerializer.Serialize(writer, Reference(JsonNode.Parse(property.Value.GetRawText()), token));
+                        }
                     writer.WriteEndObject();
                     writer.Flush();
                     if (output.Length > LocalDocumentStore.MaximumDocumentBytes)
@@ -118,6 +125,39 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
     }
 
     private static bool PageField(string name) => name is "platform" or "entries" or "sections" or "items";
+
+    private static JsonNode? Reference(JsonNode? value, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (value is JsonObject song && song["sources"] is JsonArray && song.ContainsKey("title"))
+        {
+            string id = song["songId"]!.GetValue<string>();
+            Require(id.Length > 0);
+            return new JsonObject { ["songId"] = id };
+        }
+        if (value is JsonObject obj)
+        {
+            bool bound = obj["song"] is JsonObject songValue && songValue["sources"] is JsonArray;
+            return new JsonObject(obj.Where(pair => !bound || pair.Key is not ("title" or "artist" or "cover"))
+                .Select(pair => KeyValuePair.Create(pair.Key, Reference(pair.Value, token))));
+        }
+        if (value is JsonArray array) return new JsonArray(array.Select(item => Reference(item, token)).ToArray());
+        return value?.DeepClone();
+    }
+    private static JsonNode? Restore(JsonNode? value, Func<string, JsonElement?> song, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (value is JsonObject reference && reference.Count == 1 && reference["songId"] is JsonValue id)
+        {
+            var current = song(id.GetValue<string>());
+            Require(current is not null);
+            return JsonNode.Parse(current!.Value.GetRawText());
+        }
+        if (value is JsonObject obj)
+            return new JsonObject(obj.Select(pair => KeyValuePair.Create(pair.Key, Restore(pair.Value, song, token))));
+        if (value is JsonArray array) return new JsonArray(array.Select(item => Restore(item, song, token)).ToArray());
+        return value?.DeepClone();
+    }
 
     private static void CheckContent(JsonElement value, CancellationToken token)
     {

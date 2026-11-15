@@ -151,7 +151,6 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
                 if (flight is null)
                 {
                     var account = baseline.Account;
-                    _ = AccountRules.Cookies(account.Cookie!);
                     var session = new MusicPlatformSession(platform, account.Scope!, account.Generation, account.Profile!.UserId, account.Cookie!);
                     leases.Add(session, new(baseline.Epoch));
                     var left = TimeSpan.FromSeconds(25) - System.Diagnostics.Stopwatch.GetElapsedTime(started);
@@ -173,18 +172,6 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         }
         finally { Leave(); }
     }
-    private MusicAccountDetailsObservation ValidateDetailsObservation(
-        MusicAccountDetailsObservation observed, string platform, string cookie)
-    {
-        AccountRules.Require(observed is not null, "INVALID_RESPONSE");
-        var profile = AccountRules.Profile(observed!.Profile, platform, cookie);
-        long now = clock.GetUtcNow().ToUnixTimeMilliseconds();
-        AccountRules.Require(observed.ProfileFetchedAt > 0 && observed.ProfileFetchedAt <= now &&
-            now - observed.ProfileFetchedAt <= 60000, "INVALID_RESPONSE");
-        var rights = AccountDetailsSnapshot.Validate(observed.Entitlements, platform);
-        AccountRules.Require(rights.CheckedAt <= now && now - rights.CheckedAt <= 60000, "INVALID_RESPONSE");
-        return observed with { Profile = profile, Entitlements = rights };
-    }
     private async Task RunDetailsFlight(DetailsFlight flight)
     {
         MusicAccountDetails? result = null; Exception? failure = null;
@@ -192,11 +179,9 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         try
         {
             DetailsGuard(flight);
-            var observed = ValidateDetailsObservation(await protocol.ReadAccountDetailsAsync(flight.Session, flight.Deadline.Token)
-                .ConfigureAwait(false), platform, flight.Session.Cookie);
+            var observed = await protocol.ReadAccountDetailsAsync(flight.Session, flight.Deadline.Token).ConfigureAwait(false);
             DetailsGuard(flight);
             var profile = observed.Profile;
-            AccountRules.Require(profile.UserId == flight.Session.UserId, "IDENTITY_MISMATCH");
             var rights = observed.Entitlements;
             // WY/QQ keep a prior known cache on unknown/outage. The current
             // refresh still returns unknown, never the old active rights as new proof.
@@ -204,13 +189,12 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
                 flight.Cache is { } old && old.BelongsTo(flight.Before) && old.Rights.Membership.Vip is not null
                     ? old.Rights : rights;
             var next = new StoredAccountDetails(flight.Before.Generation,
-                flight.Before.Scope!, flight.Before.ValueFingerprint!, profile.UserId, profile,
+                flight.Before.Scope!, flight.Before.ValueFingerprint!, flight.Session.UserId, profile,
                 observed.ProfileFetchedAt, observed.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, persistRights);
             await SaveDetails(flight, next).ConfigureAwait(false);
             lock (gate)
             {
                 DetailsGuard(flight);
-                states[platform].Verified = flight.Before; // Fresh credential + exact identity, not membership/device inference.
                 result = DetailsView(platform, flight.Before, next, false, rights);
             }
         }
@@ -224,7 +208,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
                 else if (!IsCurrent(flight.Session)) code = "SESSION_CHANGED";
                 else if (flight.Deadline.IsCancellationRequested) code = "TIMEOUT";
             }
-            if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" or "IDENTITY_MISMATCH" or "VERIFICATION_REQUIRED")
+            if (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
                 Revoke(flight.Session); // Exact issued snapshot only; a late failure cannot revoke its replacement.
             failure = new MusicAccountException(code);
         }

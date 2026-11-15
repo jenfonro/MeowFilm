@@ -1,15 +1,15 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.IO;
-using System.Net;
-using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
-using MeowFilm.Core.Runtime;
+using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
@@ -35,17 +35,17 @@ public static class MusicAccountIntegrationTests
                 Check(f.Module.AccountStatus == "等待扫码" && f.Module.HasAccountQr);
                 await f.Module.CheckAccountQrAsync();
                 Check(f.Module.AccountStatus == "等待扫码");
-                await f.Configure(new { qrStatus = 802 });
+                await f.Configure(new { qrStatus = "confirming" });
                 await f.Module.CheckAccountQrAsync();
                 Check(f.Module.AccountStatus == "等待确认");
-                await f.Configure(new { qrStatus = 803 });
+                await f.Configure(new { qrStatus = "authenticated" });
                 await f.Module.CheckAccountQrAsync();
                 Check(!f.Module.HasAccountQr && f.Module.AccountQrImage is null);
                 Check(f.Module.SelectedAccount!.State == "verified");
                 Check(f.Module.SelectedAccount.UserId == "9007199254740997");
                 Check(f.Module.AccountStatus == "会话验证成功");
-                Check(f.Transport.RightsRequests == 1);
-                var document = await f.Store.ReadAsync("music.accounts.v1");
+                Check(f.Transport.Verifications == 1);
+                var document = await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace);
                 Check(document.Fingerprint.Exists);
                 var accounts = AccountDocument.Decode(document);
                 var details = await f.Application.ReadDetailsAsync("wy");
@@ -64,7 +64,7 @@ public static class MusicAccountIntegrationTests
             Check(reopened.Transport.Requests == 0);
             await reopened.Module.ValidateAccountAsync();
             Check(reopened.Module.SelectedAccount.State == "verified");
-            Check(reopened.Transport.RightsRequests == 1);
+            Check(reopened.Transport.Verifications == 1);
             await reopened.Module.LogoutAccountAsync(reopened.Module.SelectedAccount!, confirmed: true);
             Check(reopened.Module.SelectedAccount.State == "none");
         });
@@ -78,7 +78,7 @@ public static class MusicAccountIntegrationTests
             Check(!f.Module.HasAccountQr && !f.Module.CanCheckAccountQr);
             Check(f.Module.SelectedAccount!.State == "none");
             Check(f.Module.AccountStatus == "已取消");
-            await f.Configure(new { qrStatus = 803 });
+            await f.Configure(new { qrStatus = "authenticated" });
             await f.Module.CheckAccountQrAsync();
             Check(f.Module.SelectedAccount.State == "none");
         });
@@ -100,13 +100,13 @@ public static class MusicAccountIntegrationTests
             await f.Module.ImportAccountAsync("musicid=42; musickey=SYNTHETIC_QQ; encrypt_uin=SYNTHETIC_EUIN");
             Check(f.Module.SelectedAccount.State == "verified" && f.Module.SelectedAccount.Platform == "tx");
             Check(!f.Module.HasAccountQr);
-            Check(f.Transport.RightsRequests == 1);
+            Check(f.Transport.Verifications == 1);
         });
         yield return Case("QR account failure is finite and does not save an anonymous profile", async () =>
         {
             await using var f = await Fixture.Create();
             f.Module.SelectedAccount = f.Module.Accounts[0];
-            await f.Configure(new { qrStatus = 803, expired = true });
+            await f.Configure(new { qrStatus = "authenticated", expired = true });
             await f.Module.BeginAccountQrAsync();
             await f.Module.CheckAccountQrAsync();
             Check(!f.Module.HasAccountQr);
@@ -125,12 +125,13 @@ public static class MusicAccountIntegrationTests
             image.CopyPixels(pixels, image.PixelWidth, 0);
             Check(pixels.Take(image.PixelWidth * 16).All(pixel => pixel == 255));
             Check(pixels.Any(pixel => pixel == 0) && pixels.All(pixel => pixel is 0 or 255));
-            foreach (var invalid in new[] { "https://attacker.invalid/login?codekey=x", "http://music.163.com/login?codekey=x",
+            // Encoding protocol text never opens it. URI-use restrictions belong to actual loaders.
+            foreach (var address in new[] { "https://attacker.invalid/login?codekey=x", "http://music.163.com/login?codekey=x",
                 "https://music.163.com/login?codekey=x&redirect=x", "https://music.163.com:444/login?codekey=x",
-                "file:///fixture", "https://music.163.com/login?codekey=" })
+                "file:///fixture", "https://music.163.com/login?codekey=", "relative-text", "https://user@qr.invalid/" })
             {
-                try { MusicAccountQrImage.Create(invalid); throw new InvalidOperationException("Expected unsafe QR rejection"); }
-                catch (Exception error) when (error.Message == "INVALID_RESPONSE") { }
+                var encoded = MusicAccountQrImage.Create(address);
+                Check(encoded.IsFrozen && encoded.PixelWidth == encoded.PixelHeight && encoded.PixelWidth <= 1024);
             }
             return Task.CompletedTask;
         });
@@ -188,7 +189,7 @@ public static class MusicAccountIntegrationTests
             f.Transport.Release.TrySetResult();
             await f.Module.ReadAccountsAsync();
             Check(f.Module.SelectedAccount!.State == "none");
-            Check(!(await f.Store.ReadAsync("music.accounts.v1")).Fingerprint.Exists);
+            Check(!(await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
         });
         yield return Case("admitted cancelled CAS returns unknown and explicit read waits for physical DPAPI receipt", async () =>
         {
@@ -205,7 +206,7 @@ public static class MusicAccountIntegrationTests
             Check(!read.IsCompleted);
             f.Store.Release.TrySetResult();
             Check(AccountState(await read) == "saved" && f.Store.AccountWrites == 1);
-            Check((await f.Store.ReadAsync("music.accounts.v1")).Fingerprint.Exists);
+            Check((await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
         });
         yield return Case("lost QR CAS acknowledgement requires explicit reconciliation without replay and survives restart", async () =>
         {
@@ -214,7 +215,7 @@ public static class MusicAccountIntegrationTests
             {
                 data = f.Data;
                 f.Module.SelectedAccount = f.Module.Accounts[0];
-                f.Transport.QrStatus = 803; f.Store.LoseReceipt = "music.accounts.v1";
+                f.Transport.QrStatus = "authenticated"; f.Store.LoseReceipt = MusicAccountOwner.DocumentNamespace;
                 await f.Module.BeginAccountQrAsync(); await f.Module.CheckAccountQrAsync();
                 Check(f.Module.AccountStatus.Contains("未确认", StringComparison.Ordinal));
                 var count = f.Transport.Requests;
@@ -222,39 +223,39 @@ public static class MusicAccountIntegrationTests
                 await f.Module.ReadAccountsAsync();
                 Check(f.Module.SelectedAccount!.State == "saved" && f.Store.AccountWrites == 1);
                 await f.Module.PrepareShutdownAsync();
-                Check(f.Store.DisposeCalls == 0 && f.Transport.DisposeCalls == 0 && !f.Runtime.HasStarted);
+                Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0 && !f.Runtime.Calls.Any(call => !call.Method.StartsWith("music.platform.", StringComparison.Ordinal)));
             }
             await using var restarted = await Fixture.Create(data);
             Check(AccountState(await restarted.Application.ExecuteAsync("music.accounts.list")) == "saved");
-            restarted.Store.LoseReceipt = "music.accounts.v1";
+            restarted.Store.LoseReceipt = MusicAccountOwner.DocumentNamespace;
             var logout = await restarted.Application.ExecuteAsync("music.accounts.logout", new { platform = "wy" });
             Check(logout.GetProperty("code").GetString() == "COMMIT_UNKNOWN");
             Check(AccountState(await restarted.Application.ExecuteAsync("music.accounts.list")) == "none");
         });
-        yield return Case("actual catalog authentication failure revokes original lease and clears anonymous cache", async () =>
+        yield return Case("actual catalog authentication failure revokes original lease and keeps guest access isolated", async () =>
         {
             await using var f = await Fixture.Create(nativeOnly: true);
             var args = new { platform = "wy" };
             Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
                 "initial anonymous catalog request must succeed");
             Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
-                "repeated anonymous catalog request must succeed from cache");
-            Check(f.Transport.CatalogRequests == 1, $"anonymous catalog cache: {f.Transport.CatalogRequests} requests");
+                "repeated anonymous catalog request must succeed");
+            Check(f.Transport.CatalogRequests == 2, $"canonical anonymous reads: {f.Transport.CatalogRequests} requests");
             Check((await f.Application.ExecuteAsync("music.accounts.import",
                 new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_SESSION" })).GetProperty("ok").GetBoolean(),
                 "account import must establish the lease under test");
-            f.Transport.CatalogStatus = 401;
+            f.Transport.CatalogFailure = "AUTH_REQUIRED";
             var failed = await f.Application.ExecuteAsync("music.catalog.home", args);
             string? failureCode = failed.GetProperty("code").GetString();
             Check(!failed.GetProperty("ok").GetBoolean() && failureCode == "AUTH_REQUIRED",
                 $"catalog authentication failure must remain AUTH_REQUIRED: {failureCode}");
             Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == "revoked",
                 "catalog authentication failure must revoke the original lease");
-            Check(f.Transport.CatalogRequests == 2, $"authenticated catalog rejection: {f.Transport.CatalogRequests} requests");
-            f.Transport.CatalogStatus = 200;
+            Check(f.Transport.CatalogRequests == 3, $"authenticated catalog rejection: {f.Transport.CatalogRequests} requests");
+            f.Transport.CatalogFailure = null;
             Check((await f.Application.ExecuteAsync("music.catalog.home", args)).GetProperty("ok").GetBoolean(),
                 "anonymous catalog remains available after account revocation");
-            Check(f.Transport.CatalogRequests == 3,
+            Check(f.Transport.CatalogRequests == 4,
                 $"revoked lookup must not resurrect pre-login guest cache: {f.Transport.CatalogRequests} requests");
         });
         yield return Case("late catalog authentication error never revokes replacement account generation", async () =>
@@ -262,7 +263,7 @@ public static class MusicAccountIntegrationTests
             await using var f = await Fixture.Create(nativeOnly: true);
             Check((await f.Application.ExecuteAsync("music.accounts.import",
                 new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_OLD" })).GetProperty("ok").GetBoolean());
-            f.Transport.CatalogStatus = 401; f.Transport.HoldCatalog = true;
+            f.Transport.CatalogFailure = "AUTH_REQUIRED"; f.Transport.HoldCatalog = true;
             f.Transport.Arrived = Signal(); f.Transport.Release = Signal();
             var old = f.Application.ExecuteAsync("music.catalog.home", new { platform = "wy" });
             await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -272,6 +273,18 @@ public static class MusicAccountIntegrationTests
             Check(!(await old).GetProperty("ok").GetBoolean());
             Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == "verified");
         });
+        yield return Case("details presentation keeps current profile on ordinary refusal verification and upstream unknown", DetailsDisplayFailure);
+        yield return Case("VIP sign and banner ordinary errors retain current account without republishing", VipReadFailures);
+        yield return Case("VIP rejected notSent and unknown receipts never invent an account logout or retry", VipWriteFailures);
+        yield return Case("confirmed VIP sign survives failed optional readback with its real authentication meaning", VipReadbackFailure);
+        yield return Case("VIP sign and banner explicit authentication rejects only current account", VipReadAuthentication);
+        yield return Case("VIP rejected and notSent authentication receipts revoke without durable logout", VipWriteAuthentication);
+        yield return Case("late VIP authentication rejection cannot revoke replacement account", VipLateAuthentication);
+        yield return Case("VIP shared read keeps independent subscribers without cancelling or signing", VipSharedRead);
+        yield return Case("VIP admitted sign settles after caller cancellation and is never replayed", VipAdmittedCancellation);
+        yield return Case("VIP unknown receipt survives temporary account document failure and recovery", VipUnknownAccountRecovery);
+        yield return Case("VIP application preparation waits for physical sign and resume retains its confirmed receipt", VipPreparedSign);
+        yield return Case("VIP typed reads obey application close admission and physical preparation and disposal", VipTypedDrain);
         yield return Case("unknown account receipt fails reversible prepare until explicit physical DPAPI reconciliation", async () =>
         {
             await using var f = await Fixture.Create();
@@ -285,7 +298,7 @@ public static class MusicAccountIntegrationTests
             try { await f.Application.PrepareShutdownAsync(cancelledWait.Token); throw new InvalidOperationException("Expected cancellation"); }
             catch (OperationCanceledException) { }
             await Unknown(prepare);
-            Check(f.Store.DisposeCalls == 0 && f.Transport.DisposeCalls == 0);
+            Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
             Check((await f.Application.ExecuteAsync("music.queue.get")).GetProperty("code").GetString() == "CLOSED");
             await f.Application.CancelShutdownPreparationAsync();
             var read = f.Application.ExecuteAsync("music.accounts.list");
@@ -293,8 +306,8 @@ public static class MusicAccountIntegrationTests
             f.Store.Release.TrySetResult(); await import;
             Check(AccountState(await read) == "saved");
             await f.Application.PrepareShutdownAsync();
-            Check((await f.Store.ReadAsync("music.accounts.v1")).Fingerprint.Exists);
-            Check(f.Store.DisposeCalls == 0 && f.Runtime.DisposeCalls == 0 && !f.Runtime.HasStarted);
+            Check((await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
+            Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0 && !f.Runtime.Calls.Any(call => !call.Method.StartsWith("music.platform.", StringComparison.Ordinal)));
         });
         yield return Case("recovering preparation keeps real catalog and account owners usable without reimport", async () =>
         {
@@ -302,12 +315,12 @@ public static class MusicAccountIntegrationTests
             f.Module.SelectedAccount = f.Module.Accounts[0]; await f.Module.ImportAccountAsync("MUSIC_U=SYNTHETIC_SESSION");
             await f.Module.PrepareShutdownAsync(); await f.Module.CancelShutdownPreparationAsync();
             await WaitForEditable(f.Module);
-            Check(f.Module.CanEdit && f.Transport.DisposeCalls == 0 && f.Store.DisposeCalls == 0);
+            Check(f.Module.CanEdit && f.Runtime.Disposals == 0 && f.Store.DisposeCalls == 0);
             await f.Module.ValidateAccountAsync(); Check(f.Module.SelectedAccount!.State == "verified");
             Check((await f.Application.ExecuteAsync("music.catalog.home", new { platform = "wy" })).GetProperty("ok").GetBoolean());
-            Check(!f.Runtime.HasStarted);
+            Check(!f.Runtime.Calls.Any(call => !call.Method.StartsWith("music.platform.", StringComparison.Ordinal)));
         });
-        yield return Case("explicit abort waits physical unknown CAS and releases owned HTTP only after settlement", async () =>
+        yield return Case("explicit abort waits physical unknown CAS and releases native client only after settlement", async () =>
         {
             await using var f = await Fixture.Create();
             f.Store.Arrived = Signal(); f.Store.Release = Signal();
@@ -318,15 +331,15 @@ public static class MusicAccountIntegrationTests
             Check((await import).GetProperty("code").GetString() == "COMMIT_UNKNOWN");
             var abort = f.Module.AbortAsync();
             await Task.Delay(30);
-            Check(!abort.IsCompleted && f.Store.DisposeCalls == 0 && f.Transport.DisposeCalls == 0);
+            Check(!abort.IsCompleted && f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
             f.Store.Release.TrySetResult(); await abort;
-            Check(f.Store.DisposeCalls == 0 && f.Runtime.DisposeCalls == 0 && f.Transport.DisposeCalls == 1);
-            Check((await f.Store.ReadAsync("music.accounts.v1")).Fingerprint.Exists);
+            Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
+            Check((await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
         });
         yield return Case("production unknown library receipt fails prepare and final disposal fences without disposing shared store or runtime", async () =>
         {
             var f = await Fixture.Create();
-            f.Store.LoseReceipt = "music.library.v1";
+            f.Store.LoseReceipt = MusicLibraryOwner.DocumentNamespace;
             try
             {
                 var result = await f.Application.ExecuteAsync("music.queue.mode", new { mode = 2 });
@@ -334,13 +347,402 @@ public static class MusicAccountIntegrationTests
                 var prepare = f.Application.PrepareShutdownAsync();
                 await Unknown(prepare);
                 Check(ReferenceEquals(prepare, f.Application.PrepareShutdownAsync()));
-                Check(f.Store.DisposeCalls == 0 && f.Runtime.DisposeCalls == 0 && f.Transport.DisposeCalls == 0);
+                Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
                 await Unknown(f.Application.DisposeAsync().AsTask());
-                Check(f.Store.DisposeCalls == 0 && f.Runtime.DisposeCalls == 0 && f.Transport.DisposeCalls == 1);
-                Check((await f.Store.ReadAsync("music.library.v1")).Fingerprint.Exists);
+                Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
+                Check((await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint.Exists);
             }
             finally { await Unknown(f.DisposeAsync().AsTask()); }
         });
+    }
+    private static async Task DetailsDisplayFailure()
+    {
+        await using var f = await Fixture.Create(nativeOnly: true);
+        Check((await f.Application.ExecuteAsync("music.accounts.import",
+            new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_DISPLAY" })).GetProperty("ok").GetBoolean());
+        var known = await f.Application.ReadDetailsAsync("wy");
+        await using var model = new MusicAccountDetailsViewModel(f.Application);
+        model.SelectAccount(new("wy", "网易云音乐", known.State, known.Profile!.DisplayName, known.Profile.UserId, known.Generation));
+        await model.ActivateAsync();
+        Check(model.HasProfile && model.HasSession && model.DisplayName == known.Profile.DisplayName && model.CanRefresh);
+        int writes = f.Store.AccountWrites;
+        var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+        int observations = 0; model.Observed += _ => observations++;
+        foreach (string code in new[] { "FORBIDDEN", "VERIFICATION_REQUIRED", "UPSTREAM_ERROR" })
+        {
+            f.Runtime.OnRequest = (call, token) => call.Operation == "account.profile"
+                ? Task.FromException<JsonElement>(new MusicPlatformException(code)) : f.Transport.Respond(call, token);
+            await model.RefreshAsync();
+            Check(model.HasProfile && model.HasSession && model.CanRefresh && model.DisplayName == known.Profile.DisplayName &&
+                model.UserId == known.Profile.UserId && observations == 0);
+            Check(model.Status == (code == "VERIFICATION_REQUIRED" ? "等待平台验证" : "资料或权益读取失败"));
+            Check((await f.Application.ReadDetailsAsync("wy")) is { State: "verified", Profile: not null });
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+        }
+        f.Runtime.OnRequest = (call, token) => call.Operation == "account.profile"
+            ? Task.FromException<JsonElement>(new MusicPlatformException("INVALID_CREDENTIALS")) : f.Transport.Respond(call, token);
+        await model.RefreshAsync();
+        Check(!model.HasProfile && model.DisplayName == "" && model.Status == "账号会话无效或已过期");
+        Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == "revoked" && f.Store.AccountWrites == writes);
+    }
+    private static async Task VipReadFailures()
+    {
+        await using var f = await Fixture.Create(nativeOnly: true);
+        Check((await f.Application.ExecuteAsync("music.accounts.import",
+            new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+        var known = await f.Application.ReadVipPageAsync();
+        Check(known.Account is not null && known.Sign is not null && known.Banner is not null);
+        int writes = f.Store.AccountWrites;
+        int publications = f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update");
+        int invalidations = 0; f.Application.VipPageInvalidated += () => invalidations++;
+        var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+        foreach (string code in new[] { "FORBIDDEN", "VERIFICATION_REQUIRED", "UPSTREAM_ERROR" })
+        {
+            f.Runtime.OnRequest = (call, token) => call.Operation is "vip.signCard" or "vip.banner"
+                ? Task.FromException<JsonElement>(new MusicPlatformException(code)) : f.Transport.Respond(call, token);
+            var failed = await f.Application.ReadVipPageAsync();
+            Check(failed.Generation == known.Generation && failed.Account == known.Account &&
+                failed.Sign is null && failed.Banner is null && failed.SignError == code && failed.BannerError == code);
+            Check((await f.Application.ReadDetailsAsync("wy")) is { State: "verified", Profile: not null });
+            Check(invalidations == 0 && f.Store.AccountWrites == writes &&
+                (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            Check(f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update") == publications);
+        }
+    }
+    private static async Task VipWriteFailures()
+    {
+        foreach (var (status, code, expected) in new[] {
+            ("rejected", "FORBIDDEN", "FORBIDDEN"),
+            ("notSent", "VERIFICATION_REQUIRED", "VERIFICATION_REQUIRED"),
+            ("unknown", "UPSTREAM_ERROR", "COMMIT_UNKNOWN") })
+        {
+            await using var f = await Fixture.Create(nativeOnly: true);
+            Check((await f.Application.ExecuteAsync("music.accounts.import",
+                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+            var known = await f.Application.ReadVipPageAsync();
+            int writes = f.Store.AccountWrites;
+            int publications = f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update");
+            var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+            f.Runtime.OnRequest = (call, token) => call.Operation == "vip.checkIn"
+                ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { status, errorCode = code })) : f.Transport.Respond(call, token);
+            await OperationError(() => f.Application.SignVipPageAsync(known.Generation), expected);
+            var retained = await f.Application.ReadVipPageAsync();
+            Check(retained.Account == known.Account && retained.SignUnconfirmed == (status == "unknown") && !retained.SignConfirmed);
+            Check((await f.Application.ReadDetailsAsync("wy")) is { State: "verified", Profile: not null });
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            Check(f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update") == publications);
+            if (status == "unknown") await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "COMMIT_UNKNOWN");
+            Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1);
+        }
+    }
+    private static async Task VipReadbackFailure()
+    {
+        foreach (string code in new[] { "FORBIDDEN", "VERIFICATION_REQUIRED", "UPSTREAM_ERROR", "AUTH_EXPIRED" })
+        {
+            await using var f = await Fixture.Create(nativeOnly: true);
+            Check((await f.Application.ExecuteAsync("music.accounts.import",
+                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+            var known = await f.Application.ReadVipPageAsync();
+            int writes = f.Store.AccountWrites;
+            var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+            f.Runtime.OnRequest = (call, token) => call.Operation == "vip.signCard"
+                ? Task.FromException<JsonElement>(new MusicPlatformException(code)) : f.Transport.Respond(call, token);
+            var receipt = await f.Application.SignVipPageAsync(known.Generation);
+            Check(receipt.Generation == known.Generation && receipt.RefreshedSign is null);
+            Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == (code == "AUTH_EXPIRED" ? "revoked" : "verified"));
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            if (code != "AUTH_EXPIRED")
+            {
+                var retained = await f.Application.ReadVipPageAsync();
+                Check(retained.SignConfirmed && retained.SignedToday && !retained.SignUnconfirmed && retained.SignError == code);
+                await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "ALREADY_SIGNED");
+            }
+            Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1);
+        }
+    }
+    private static async Task VipReadAuthentication()
+    {
+        foreach (var (operation, code) in new[] { ("vip.signCard", "AUTH_REQUIRED"), ("vip.banner", "IDENTITY_MISMATCH") })
+        {
+            await using var f = await Fixture.Create(nativeOnly: true);
+            Check((await f.Application.ExecuteAsync("music.accounts.import",
+                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+            await f.Application.ReadVipPageAsync();
+            int writes = f.Store.AccountWrites;
+            var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+            f.Runtime.OnRequest = (call, token) => call.Operation == operation
+                ? Task.FromException<JsonElement>(new MusicPlatformException(code)) : f.Transport.Respond(call, token);
+            await OperationError(() => f.Application.ReadVipPageAsync(), "STALE_SESSION");
+            Check((await f.Application.ReadDetailsAsync("wy")) is { State: "revoked", Profile: null });
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+        }
+    }
+    private static async Task VipWriteAuthentication()
+    {
+        foreach (var (status, code) in new[] { ("rejected", "AUTH_EXPIRED"), ("notSent", "INVALID_CREDENTIALS") })
+        {
+            await using var f = await Fixture.Create(nativeOnly: true);
+            Check((await f.Application.ExecuteAsync("music.accounts.import",
+                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+            var known = await f.Application.ReadVipPageAsync();
+            int writes = f.Store.AccountWrites;
+            var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+            f.Runtime.OnRequest = (call, token) => call.Operation == "vip.checkIn"
+                ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { status, errorCode = code })) : f.Transport.Respond(call, token);
+            await OperationError(() => f.Application.SignVipPageAsync(known.Generation), code);
+            Check((await f.Application.ReadDetailsAsync("wy")) is { State: "revoked", Profile: null });
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1);
+        }
+    }
+    private static async Task VipLateAuthentication()
+    {
+        await using var f = await Fixture.Create(nativeOnly: true);
+        Check((await f.Application.ExecuteAsync("music.accounts.import",
+            new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_OLD" })).GetProperty("ok").GetBoolean());
+        var known = await f.Application.ReadVipPageAsync();
+        var entered = Signal(); var release = Signal();
+        f.Runtime.OnRequest = async (call, token) =>
+        {
+            if (call.Operation != "vip.checkIn") return await f.Transport.Respond(call, token);
+            entered.TrySetResult(); await release.Task;
+            return MusicPlatformRuntimeFixture.Json(new { status = "rejected", errorCode = "INVALID_CREDENTIALS" });
+        };
+        var old = f.Application.SignVipPageAsync(known.Generation);
+        MusicAccountDetails replacement;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check((await f.Application.ExecuteAsync("music.accounts.import",
+                new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_REPLACEMENT" })).GetProperty("ok").GetBoolean());
+            replacement = await f.Application.ReadDetailsAsync("wy");
+            Check(replacement.Generation > known.Generation && replacement.State == "verified");
+        }
+        finally { release.TrySetResult(); }
+        await OperationError(() => old, "INVALID_CREDENTIALS");
+        var current = await f.Application.ReadDetailsAsync("wy");
+        Check(current.Generation == replacement.Generation && current.State == "verified" && current.Profile == replacement.Profile);
+        Check(f.Store.AccountWrites == 2 && f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1);
+        f.Runtime.OnRequest = f.Transport.Respond;
+        Check((await f.Application.ReadVipPageAsync()).Account?.Generation == replacement.Generation);
+    }
+    private static async Task VipSharedRead()
+    {
+        await using var f = await Fixture.Create(nativeOnly: true);
+        Check((await f.Application.ExecuteAsync("music.accounts.import",
+            new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+        var entered = Signal(); var release = Signal(); var cancelled = Signal();
+        f.Runtime.OnRequest = async (call, token) =>
+        {
+            if (call.Operation == "vip.signCard")
+            {
+                using var registration = token.Register(() => cancelled.TrySetResult());
+                entered.TrySetResult(); await release.Task;
+            }
+            return await f.Transport.Respond(call, token);
+        };
+        using var cancellation = new CancellationTokenSource();
+        var reading = f.Application.ReadVipPageAsync(cancellation.Token);
+        Task<MusicVipPageSnapshot>? joined = null;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+            try { await reading.WaitAsync(TimeSpan.FromSeconds(5)); throw new InvalidOperationException("Expected unsubscribe"); }
+            catch (OperationCanceledException) { Check(cancellation.IsCancellationRequested); }
+            Check(!cancelled.Task.IsCompleted && !release.Task.IsCompleted);
+            joined = f.Application.ReadVipPageAsync();
+            Check(!joined.IsCompleted && f.Runtime.Requests.Count(call => call.Operation == "vip.signCard") == 1);
+        }
+        finally { release.TrySetResult(); if (joined is not null) await joined; }
+        var current = await joined!.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(current.Generation > 0 && current.Account is not null && current.Sign is not null);
+        Check(!cancelled.Task.IsCompleted && f.Store.AccountWrites == 1 &&
+            f.Runtime.Requests.Count(call => call.Operation == "vip.signCard") == 1 &&
+            f.Runtime.Requests.All(call => call.Operation != "vip.checkIn"));
+    }
+    private static async Task VipAdmittedCancellation()
+    {
+        await using var f = await Fixture.Create(nativeOnly: true);
+        Check((await f.Application.ExecuteAsync("music.accounts.import",
+            new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+        var known = await f.Application.ReadVipPageAsync();
+        var before = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+        var entered = Signal(); var release = Signal(); var cancelled = Signal();
+        f.Runtime.OnRequest = async (call, token) =>
+        {
+            if (call.Operation == "vip.checkIn")
+            {
+                Check(!token.CanBeCanceled, "an admitted mutation owns its physical receipt");
+                using var registration = token.Register(() => cancelled.TrySetResult());
+                entered.TrySetResult(); await release.Task;
+            }
+            return await f.Transport.Respond(call, token);
+        };
+        using var cancellation = new CancellationTokenSource();
+        var signing = f.Application.SignVipPageAsync(known.Generation, cancellation.Token);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
+            Check(!signing.IsCompleted && !cancelled.Task.IsCompleted);
+            release.TrySetResult();
+            var receipt = await signing.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(receipt.Generation == known.Generation && receipt.RefreshedSign is null);
+            await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "ALREADY_SIGNED");
+            var reread = await f.Application.ReadVipPageAsync();
+            Check(reread.Generation == known.Generation && reread.Sign is { SignedToday: false } &&
+                reread.SignConfirmed && reread.SignedToday && !reread.SignUnconfirmed);
+            Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1 &&
+                f.Store.AccountWrites == 1 && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == before);
+        }
+        finally { release.TrySetResult(); await signing; }
+    }
+    private static async Task VipUnknownAccountRecovery()
+    {
+        await using var f = await Fixture.Create(nativeOnly: true);
+        Check((await f.Application.ExecuteAsync("music.accounts.import",
+            new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+        var known = await f.Application.ReadVipPageAsync();
+        var before = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+        f.Runtime.OnRequest = (call, token) => call.Operation == "vip.checkIn"
+            ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { status = "unknown", errorCode = "NETWORK_ERROR" }))
+            : f.Transport.Respond(call, token);
+        await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "COMMIT_UNKNOWN");
+        f.Store.FailAccountReads = true;
+        try
+        {
+            var unavailable = await f.Application.ReadVipPageAsync();
+            Check(unavailable.Generation == 0 && unavailable.Account is null && unavailable.Sign is null &&
+                unavailable.Banner is null && !unavailable.SignedToday && !unavailable.SignConfirmed &&
+                !unavailable.SignUnconfirmed && unavailable.AccountError == "STORAGE_UNAVAILABLE");
+        }
+        finally { f.Store.FailAccountReads = false; }
+        var recovered = await f.Application.ReadVipPageAsync();
+        Check(recovered.Generation == known.Generation && recovered.Account == known.Account &&
+            recovered.Sign is { SignedToday: false } && recovered.SignUnconfirmed &&
+            !recovered.SignConfirmed && !recovered.SignedToday);
+        await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "COMMIT_UNKNOWN");
+        Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1 && f.Store.AccountWrites == 1 &&
+            (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == before);
+    }
+    private static async Task VipPreparedSign()
+    {
+        await using var f = await Fixture.Create(nativeOnly: true);
+        Check((await f.Application.ExecuteAsync("music.accounts.import",
+            new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+        var known = await f.Application.ReadVipPageAsync();
+        var entered = Signal(); var release = Signal(); var cancelled = Signal();
+        f.Runtime.OnRequest = async (call, token) =>
+        {
+            if (call.Operation == "vip.checkIn")
+            {
+                using var registration = token.Register(() => cancelled.TrySetResult());
+                entered.TrySetResult(); await release.Task;
+            }
+            return await f.Transport.Respond(call, token);
+        };
+        var signing = f.Application.SignVipPageAsync(known.Generation);
+        Task preparing = Task.CompletedTask;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            preparing = f.Application.PrepareShutdownAsync();
+            await OperationError(() => f.Application.ReadVipPageAsync(), "CLOSED");
+            await Task.Delay(30);
+            Check(!signing.IsCompleted && !preparing.IsCompleted && !cancelled.Task.IsCompleted &&
+                f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
+            release.TrySetResult();
+            Check((await signing.WaitAsync(TimeSpan.FromSeconds(5))).Generation == known.Generation);
+            await preparing.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            release.TrySetResult();
+            try { await signing; } finally { await preparing; }
+        }
+        await f.Application.CancelShutdownPreparationAsync();
+        var resumed = await f.Application.ReadVipPageAsync();
+        Check(resumed.Generation == known.Generation && resumed.Sign is { SignedToday: false } &&
+            resumed.SignConfirmed && resumed.SignedToday && !resumed.SignUnconfirmed,
+            "retiring a page cannot turn the real confirmed sign receipt into an unknown mutation");
+        await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "ALREADY_SIGNED");
+        Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1 && f.Store.AccountWrites == 1);
+    }
+    private static async Task VipTypedDrain()
+    {
+        await using var f = await Fixture.Create(nativeOnly: true);
+        Check((await f.Application.ExecuteAsync("music.accounts.import",
+            new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
+        var entered = Signal(); var release = Signal(); var cancelled = Signal();
+        f.Runtime.OnRequest = async (call, token) =>
+        {
+            if (call.Operation == "vip.signCard")
+            {
+                using var registration = token.Register(() => cancelled.TrySetResult());
+                entered.TrySetResult(); await release.Task;
+            }
+            return await f.Transport.Respond(call, token);
+        };
+        var reading = f.Application.ReadVipPageAsync();
+        Task preparing = Task.CompletedTask;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            preparing = f.Application.PrepareShutdownAsync();
+            await OperationError(() => f.Application.ReadVipPageAsync(), "CLOSED");
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!preparing.IsCompleted && f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
+        }
+        finally
+        {
+            release.TrySetResult();
+            try { await VipClosedRead(reading); } finally { await preparing; }
+        }
+        await f.Application.CancelShutdownPreparationAsync();
+        f.Runtime.OnRequest = f.Transport.Respond;
+        Check((await f.Application.ReadVipPageAsync()).Generation > 0);
+
+        var closeEntered = Signal(); var closeRelease = Signal(); var closeCancelled = Signal();
+        f.Runtime.OnRequest = async (call, token) =>
+        {
+            if (call.Operation == "vip.signCard")
+            {
+                using var registration = token.Register(() => closeCancelled.TrySetResult());
+                closeEntered.TrySetResult(); await closeRelease.Task;
+            }
+            return await f.Transport.Respond(call, token);
+        };
+        var lastRead = f.Application.ReadVipPageAsync();
+        Task disposal = Task.CompletedTask;
+        try
+        {
+            await closeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            disposal = f.Application.DisposeAsync().AsTask();
+            await OperationError(() => f.Application.ReadVipPageAsync(), "CLOSED");
+            await closeCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!disposal.IsCompleted && f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
+        }
+        finally
+        {
+            closeRelease.TrySetResult();
+            try { await VipClosedRead(lastRead); } finally { await disposal; }
+        }
+        Check(f.Runtime.Requests.Count(call => call.Operation == "vip.signCard") == 3 &&
+            f.Runtime.Requests.All(call => call.Operation != "vip.checkIn") && f.Store.AccountWrites == 1 &&
+            f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
+    }
+    private static async Task VipClosedRead(Task reading)
+    {
+        try { await reading; }
+        catch (OperationCanceledException) { return; }
+        catch (MusicOperationException error) { Check(error.Code == "CLOSED"); return; }
+        throw new InvalidOperationException("Expected retired VIP read");
+    }
+    private static async Task OperationError(Func<Task> action, string expected)
+    {
+        try { await action(); }
+        catch (MusicOperationException error) { Check(error.Code == expected && error.InnerException is null); return; }
+        throw new InvalidOperationException("Expected " + expected);
     }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static string? AccountState(JsonElement result) => result.GetProperty("items")[0].GetProperty("state").GetString();
@@ -388,8 +790,8 @@ public static class MusicAccountIntegrationTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        public readonly NativeMusicScriptTestRuntime Runtime = new();
-        public readonly AccountTransport Transport = new();
+        public readonly MusicPlatformRuntimeFixture Runtime = new();
+        public readonly AccountPeer Transport = new();
         public ControlledStore Store { get; }
         public string Data { get; }
         public MusicNativeApplication Application { get; }
@@ -398,7 +800,8 @@ public static class MusicAccountIntegrationTests
         private Fixture(string data, ControlledStore store)
         {
             Data = data; Store = store;
-            Application = new(store, Runtime, Transport);
+            Runtime.OnRequest = Transport.Respond;
+            Application = new(store, Runtime);
             Calls = new(Application);
             Module = new(Calls, store, new Output(), new Dialogs());
         }
@@ -419,7 +822,7 @@ public static class MusicAccountIntegrationTests
                     await result.Module.InitializeAsync(default);
                     await result.Module.NavigateAsync("favorites", default);
                 }
-                Check(!result.Runtime.HasStarted && result.Transport.Requests == 0);
+                Check(!result.Runtime.Calls.Any(call => !call.Method.StartsWith("music.platform.", StringComparison.Ordinal)) && result.Transport.Requests == 0);
                 return result;
             }
             catch { await result.DisposeAsync(); throw; }
@@ -427,14 +830,14 @@ public static class MusicAccountIntegrationTests
         public Task Configure(object parameters)
         {
             var p = JsonSerializer.SerializeToElement(parameters);
-            if (p.TryGetProperty("qrStatus", out var status)) Transport.QrStatus = status.GetInt32();
+            if (p.TryGetProperty("qrStatus", out var status)) Transport.QrStatus = status.GetString()!;
             if (p.TryGetProperty("expired", out var expired)) Transport.Expired = expired.GetBoolean();
             return Task.CompletedTask;
         }
         public async ValueTask DisposeAsync()
         {
             Store.Release?.TrySetResult(); Transport.Release?.TrySetResult();
-            try { await Module.DisposeAsync(); Check(!Runtime.HasStarted); }
+            try { await Module.DisposeAsync(); Check(!Runtime.Calls.Any(call => !call.Method.StartsWith("music.platform.", StringComparison.Ordinal))); }
             finally
             {
                 await Runtime.DisposeAsync(); await Store.DisposeAsync();
@@ -444,15 +847,18 @@ public static class MusicAccountIntegrationTests
     private sealed class ControlledStore(LocalDocumentStore inner) : IDocumentStore
     {
         public string? LoseReceipt;
+        public bool FailAccountReads;
         public int Writes, AccountWrites, DisposeCalls;
         public TaskCompletionSource? Arrived, Release;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) =>
+            FailAccountReads && ns == MusicAccountOwner.DocumentNamespace
+                ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : inner.ReadAsync(ns, token);
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
             Interlocked.Increment(ref Writes);
-            if (ns == "music.accounts.v1") Interlocked.Increment(ref AccountWrites);
-            if (ns == "music.accounts.v1" && Release is { } hold)
+            if (ns == MusicAccountOwner.DocumentNamespace) Interlocked.Increment(ref AccountWrites);
+            if (ns == MusicAccountOwner.DocumentNamespace && Release is { } hold)
             {
                 Arrived!.TrySetResult();
                 await hold.Task; // Simulate a physical CAS already admitted before caller cancellation.
@@ -465,69 +871,54 @@ public static class MusicAccountIntegrationTests
         }
         public async ValueTask DisposeAsync() { DisposeCalls++; await inner.DisposeAsync(); }
     }
-    private sealed class AccountTransport : HttpMessageHandler
+    private sealed class AccountPeer
     {
-        public int QrStatus = 801, CatalogStatus = 200, Requests, DisposeCalls, CatalogRequests, RightsRequests;
+        public string QrStatus = "waiting";
+        public string? CatalogFailure;
+        public int Requests, CatalogRequests, Verifications;
         public bool Expired;
         public TaskCompletionSource? Arrived, Release;
         public bool HoldValidation, HoldCatalog;
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        internal async Task<JsonElement> Respond(MusicPlatformRuntimeFixture.Call call, CancellationToken cancellationToken)
         {
+            if (call.Operation == "qr.cancel") return MusicPlatformRuntimeFixture.Json(new { cancelled = true });
             Interlocked.Increment(ref Requests);
-            var uri = request.RequestUri!;
-            HttpResponseMessage Json(object body, int status = 200) => new((HttpStatusCode)status)
-            { Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json") };
-            if (uri.Host == "interfacepc.music.163.com" &&
-                uri.AbsolutePath.StartsWith("/eapi/login/qrcode/", StringComparison.Ordinal))
-            {
-                if (uri.AbsolutePath.EndsWith("/unikey", StringComparison.Ordinal)) return Json(new { code = 200, unikey = "SYNTHETIC_QR" });
-                var result = Json(new { code = QrStatus });
-                if (QrStatus == 803) result.Headers.TryAddWithoutValidation("Set-Cookie", "MUSIC_U=SYNTHETIC_SESSION; Domain=.music.163.com; Path=/; HttpOnly");
-                return result;
+            if (call.Operation == "qr.create") {
+                return MusicPlatformRuntimeFixture.Json(new { challengeId = call.Parameters.GetProperty("challengeId").GetString(),
+                    url = "https://music.163.com/login?codekey=SYNTHETIC_QR", expiresAt = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeMilliseconds(), imageBase64 = (string?)null });
             }
-            if (uri.Host == "u.y.qq.com")
-            {
-                using var payload = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
-                var operation = payload.RootElement.GetProperty("req_0");
-                var method = operation.GetProperty("method").GetString();
-                if (method == "GetLoginUserInfo")
-                    return Json(new { code = 0, req_0 = new { code = 0, data = new { code = 0 } } });
-                if (method == "vip_login_base")
-                {
-                    Check(operation.GetProperty("module").GetString() == "VipLogin.VipLoginInter" &&
-                        payload.RootElement.GetProperty("comm").GetProperty("qq").GetString() == "42" &&
-                        payload.RootElement.GetProperty("comm").GetProperty("authst").GetString() == "SYNTHETIC_QQ");
-                    Interlocked.Increment(ref RightsRequests);
-                    return Json(new { code = 0, req_0 = new { code = 0, data = new { svip = 0, identity = new { vip = 0 } } } });
-                }
-                Check(method == "GetHomepageHeader" &&
-                    operation.GetProperty("module").GetString() == "music.UnifiedHomepage.UnifiedHomepageSrv");
-                return Json(new { code = 0, req_0 = new { code = 0, data = new { Info = new { BaseInfo = new { EncryptedUin = "SYNTHETIC_EUIN", Name = "合成账号" } } } } });
+            if (call.Operation == "qr.poll") {
+                if (QrStatus != "authenticated") return MusicPlatformRuntimeFixture.Json(new { status = QrStatus });
+                if (Expired) throw new MusicPlatformException("AUTH_EXPIRED");
+                Interlocked.Increment(ref Verifications);
+                var account = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation("wy", "9007199254740997", vip: false).GetRawText())!.AsObject();
+                account["cookie"] = "MUSIC_U=SYNTHETIC_SESSION";
+                return MusicPlatformRuntimeFixture.Json(new { status = "authenticated", account });
             }
-            Check(uri.Host is "music.163.com" or "interfacepc.music.163.com");
-            if (uri.AbsolutePath.Contains("/nuser/account/get", StringComparison.Ordinal))
-            {
+            if (call.Operation is "account.verify" or "account.profile") {
                 var expired = Expired;
-                if (HoldValidation) { HoldValidation = false; Arrived!.TrySetResult(); await Release!.Task; }
-                return Json(new { code = 200, profile = expired ? null : new { userId = "9007199254740997", nickname = "合成账号" } });
+                if (HoldValidation) { HoldValidation = false; Arrived!.TrySetResult(); await Release!.Task.WaitAsync(cancellationToken); }
+                if (expired) throw new MusicPlatformException("AUTH_EXPIRED");
+                Interlocked.Increment(ref Verifications);
+                var observation = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation(call.Platform,
+                    call.Platform == "tx" ? "42" : "9007199254740997", vip: false, displayName: "合成账号").GetRawText())!.AsObject();
+                if (call.Operation == "account.verify")
+                    observation["cookie"] = call.Payload.GetProperty("candidate").GetProperty("cookie").GetString();
+                return MusicPlatformRuntimeFixture.Json(observation);
             }
-            if (uri.AbsolutePath == "/weapi/music-vip-membership/client/vip/info")
-            {
-                Check(uri.Host == "music.163.com" && uri.Scheme == "https" &&
-                    request.Headers.TryGetValues("Cookie", out var cookies) &&
-                    cookies.Single().Contains("MUSIC_U=SYNTHETIC_", StringComparison.Ordinal));
-                Interlocked.Increment(ref RightsRequests);
-                return Json(new { code = 200, data = new { userId = "9007199254740997",
-                    now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), associator = new { expireTime = 0 },
-                    musicPackage = new { expireTime = 0 }, redplus = new { expireTime = 0 } } });
-            }
-            Check(uri.Host == "interfacepc.music.163.com" && uri.AbsolutePath == "/eapi/link/page/rcmd/resource/show");
+            if (call.Operation == "vip.signCard") return MusicPlatformRuntimeFixture.Json(new {
+                text = "Fixture sign", subText = "", redPrize = false, redDay = false, buttonText = "签到",
+                background = "", days = new[] { new { text = "今天", signed = false, cover = "", signedAt = 0L, today = true } } });
+            if (call.Operation == "vip.banner") return MusicPlatformRuntimeFixture.Json(new {
+                image = "https://images.invalid/vip", resourceType = "playlist", resourceId = "fixture-vip" });
+            if (call.Operation == "vip.checkIn") return MusicPlatformRuntimeFixture.Json(new { status = "confirmed", errorCode = "" });
+            Check(call.Operation == "home");
             Interlocked.Increment(ref CatalogRequests);
-            var catalogStatus = CatalogStatus;
+            var catalogFailure = CatalogFailure;
             if (HoldCatalog) { HoldCatalog = false; Arrived!.TrySetResult(); await Release!.Task; }
-            return Json(new { code = 200, data = new { cursor = "0", hasMore = false, blocks = Array.Empty<object>() } }, catalogStatus);
+            if (catalogFailure is not null) throw new MusicPlatformException(catalogFailure);
+            return MusicPlatformRuntimeFixture.Json(new { platform = call.Platform, sections = Array.Empty<object>(), more = false, continuation = (object?)null });
         }
-        protected override void Dispose(bool disposing) { if (disposing) DisposeCalls++; base.Dispose(disposing); }
     }
     private sealed class Dialogs : IMusicDialogs
     {

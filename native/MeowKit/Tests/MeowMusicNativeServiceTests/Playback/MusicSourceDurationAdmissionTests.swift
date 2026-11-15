@@ -21,7 +21,7 @@ private struct DurationAdmissionAccounts: MusicNativeAccountProviding {
         ]
         if let actualQuality { fields["actualQuality"] = .string(actualQuality) }
         if let duration { fields["duration"] = .number(duration) }
-        return try MusicPlatformJSON.nativeAccountAudio(fields)
+        return try MusicAccountFields.nativeAccountAudio(fields)
     }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {
         throw MusicServiceError.unsupported

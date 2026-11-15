@@ -5,6 +5,8 @@ import MeowAccounts
 import MeowContracts
 import MeowJSON
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicPlatform
 @testable import MeowMusicNativeService
 
@@ -70,7 +72,7 @@ import MeowMusicFeature
     }
 
     func testGuestFailurePreservesVisibleHomeWithoutAutomaticRetry() async throws {
-        for failure in [MusicServiceError.authRequired, .networkOffline] {
+        for failure in [MusicServiceError.authRequired, .connectionFailed] {
             try await assertPrivateRecovery(guestFailure: failure)
         }
     }
@@ -158,8 +160,8 @@ import MeowMusicFeature
         await model.loadIfNeeded()
         let firstGuest = await fixture.http.requests()
         XCTAssertEqual(firstGuest.count, 1)
-        XCTAssertEqual(firstGuest.first?.url.path, "/eapi/link/page/rcmd/resource/show")
-        XCTAssertEqual(firstGuest.first?.method, "POST")
+        XCTAssertEqual(firstGuest.first?.platform, "wy")
+        XCTAssertEqual(firstGuest.first?.operation, "home")
         if guestFailure != nil {
             await model.refresh()
             XCTAssertEqual(model.error, guestFailure)
@@ -196,7 +198,7 @@ private struct HomeAccountIntegrationFixture: Sendable {
     let accounts: AccountSessionCoordinator
     let provider = HomeAccountIntegrationProvider()
     let snapshot = HomeAccountIntegrationSnapshot()
-    let http: HomeAccountIntegrationHTTP
+    let http: HomeAccountIntegrationPeer
     let owner: NativeMusicAccountService
     let service: NativeMusicService
     init(guestFailure: MusicServiceError? = nil) throws {
@@ -206,8 +208,8 @@ private struct HomeAccountIntegrationFixture: Sendable {
         owner = .init(accounts: accounts, scopes: [.netease: identity], providers: [.netease: provider],
                       clock: { NativeMusicFixture.date })
         http = .init(failure: guestFailure)
-        service = .init(document: NativeMusicMemoryDocument(), accounts: owner, qq: NativeMusicQQFixture(),
-                        enabledPlatforms: [.netease], homeSnapshot: snapshot, transport: http,
+        service = .init(document: NativeMusicMemoryDocument(), accounts: owner,
+                        platformClient: try http.makeClient(), enabledPlatforms: [.netease], homeSnapshot: snapshot,
                         clock: { NativeMusicFixture.date })
     }
     func enable() async throws {
@@ -260,60 +262,60 @@ private actor HomeAccountIntegrationProvider: MusicAccountProvider, MusicNetease
     func failVerification(_ failure: MusicServiceError) { verificationFailure = failure }
     func failRecommendations(_ failure: MusicServiceError) { recommendationFailure = failure }
     func nativeID(_ credential: AccountCredential) -> String { "101" }
-    func verify(_ credential: AccountCredential) throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) throws -> MusicAccountVerified {
         recorded.verifications += 1
         if let verificationFailure { throw verificationFailure }
         return .init(credential: credential, nickname: "Synthetic", nativeID: "101")
     }
-    func refresh(_ credential: AccountCredential) throws -> MusicQQVerified {
+    func refresh(_ credential: AccountCredential) throws -> MusicAccountVerified {
         recorded.refreshes += 1; throw MusicServiceError.unsupported
     }
-    func homePayload(_ request: MusicNativeHomeRequest, credential: AccountCredential,
+    func homePayload(_ request: MusicNativeHomeRequest,
                      authorize: @escaping @Sendable () async throws -> Void) async throws -> Data {
         recorded.homePayloads += 1
         try await authorize()
         switch request {
         case .home(nil):
             return homeAccountPayload(id: 11)
-        case .artistActivity: return Data(#"{"code":200,"data":{"newWorks":[],"hasMore":false}}"#.utf8)
+        case .artistActivity: return Data(#"{"sections":[]}"#.utf8)
         default: throw MusicServiceError.unsupported
         }
     }
-    func recommendations(kind: String, page: Int, credential: AccountCredential) throws -> MusicQQRecommendation {
+    func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation {
         recorded.recommendations += 1
         if let recommendationFailure { throw recommendationFailure }
         return .init(rows: [], nextPage: nil)
     }
     func createQR(id: UUID) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
-    func pollQR(id: UUID) throws -> MusicQQLoginResult { throw MusicServiceError.unsupported }
+    func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func collectionRows(credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String, credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func capabilities(mid: String, credential: AccountCredential) throws -> [String] { throw MusicServiceError.unsupported }
-    func resolve(mid: String, quality: String, credential: AccountCredential) throws -> JSONValue { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func capabilities(mid: String) throws -> [String] { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> JSONValue { throw MusicServiceError.unsupported }
 }
 
 private func homeAccountPayload(id: Int) -> Data {
     Data("""
-    {"code":200,"data":{"hasMore":false,"blocks":[{"positionCode":"playlists","dslData":{"items":[
-    {"resourceType":"playlist","id":"\(id)","title":"Synthetic \(id)","coverImg":"https://p1.music.126.net/\(id).jpg"}
-    ]}}]}}
+    {"sections":[{"id":"playlists","type":"playlists","items":[
+    {"id":"\(id)","name":"Synthetic \(id)","cover":"https://p1.music.126.net/\(id).jpg","action":{"type":"playlist"}}
+    ]}]}
     """.utf8)
 }
 
-private actor HomeAccountIntegrationHTTP: MusicNativeHTTPTransport {
+private actor HomeAccountIntegrationPeer: MusicPlatformFixtureResponding {
     private let failure: MusicServiceError?
-    private var sent: [MusicNativeHTTPRequest] = []
+    private var sent: [MusicPlatformFixture.Request] = []
     private var gate: NativeMusicGate?
     private var entered: XCTestExpectation?
     init(failure: MusicServiceError?) { self.failure = failure }
-    func requests() -> [MusicNativeHTTPRequest] { sent }
+    func requests() -> [MusicPlatformFixture.Request] { sent }
     func hold(_ gate: NativeMusicGate, entered: XCTestExpectation) { self.gate = gate; self.entered = entered }
-    func send(_ request: MusicNativeHTTPRequest) async throws -> MusicNativeHTTPResponse {
+    func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
         sent.append(request)
-        guard request.url.path == "/eapi/link/page/rcmd/resource/show" else {
-            XCTFail("Unexpected anonymous request: \(request.url.path)")
+        guard request.platform == "wy", request.operation == "home" else {
+            XCTFail("Unexpected anonymous operation: \(request.operation)")
             throw MusicServiceError.invalidRequest
         }
         if let gate {
@@ -321,7 +323,7 @@ private actor HomeAccountIntegrationHTTP: MusicNativeHTTPTransport {
             await gate.wait()
         }
         if let failure { throw failure }
-        return .init(status: 200, data: homeAccountPayload(id: 90))
+        return try RuntimeJSON.decode(homeAccountPayload(id: 90))
     }
 }
 

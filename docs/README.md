@@ -18,6 +18,7 @@
 - [Runtime bridge](runtime/runtime-bridge.md)
 - [TMDB／豆瓣只读数据、持久设置与图片流](runtime/metadata-data.md)
 - [网易订阅实时 token](runtime/netease-token.md)
+- [共同音乐平台请求 music.platform.v1](runtime/music-platform.md)
 - [内置网盘能力 pan.runtime.v1](runtime/pan-runtime.md)
 - [本地影视会话、智能匹配与媒体流 film.playback.v1](runtime/film-playback.md)
 - [外部 LX、CatNode 与 Reader／CatVod 来源动态验收](runtime/source-acceptance.md)

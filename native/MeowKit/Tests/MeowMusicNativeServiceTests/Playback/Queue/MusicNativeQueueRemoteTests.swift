@@ -3,6 +3,31 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeQueueRemoteTests: XCTestCase {
+    func testCompleteReadAdoptsCurrentSourceFactsAndOldProjectionCannotRestoreThem() async throws {
+        var current = try MJ.parse(NativeMusicFixture.track("same").data)
+        current["name"] = .string("Current title")
+        current["albumName"] = .string("Current album")
+        let loader = MusicAccountQueuePages(roots: [[.init(platform: "tx", data: current.bytes)]])
+        let service = try await NativeMusicFixture.service()
+        let source = MusicAccountQueueFixture.source(loader)
+        let browsed = try await service.search(platform: "tx", query: "same", page: 1, limit: 30)
+        let savedID = try XCTUnwrap(browsed.items.first?.songId)
+        let browsedState = try await service.read()
+        let oldProjection = try await service.song(browsed.items[0].ref, browsedState)
+        _ = try await service.replaceRemoteQueue(source, start: .init(index: 0), expectedRevision: 0, intent: .init())
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries[0].track.songId, savedID)
+        XCTAssertEqual(queue.entries[0].track.title, "Current title")
+        XCTAssertEqual(queue.entries[0].track.album, "Current album")
+        _ = try await service.sharedSongMetadata(oldProjection)
+        let reread = try await service.queue()
+        XCTAssertEqual(reread.revision, queue.revision)
+        XCTAssertEqual(reread.currentId, queue.currentId)
+        XCTAssertEqual(reread.entries, queue.entries)
+        let calls = await loader.events(); XCTAssertEqual(calls, ["root"], "ordinary complete reads do not repeat the root")
+        await source.close(); await service.close()
+    }
+
     func testCancelledOpenReleasesNonCooperativeLateAccountLeaseWithoutQueueMutation() async throws {
         let owner = MusicAccountQueueOpeningFixture(), store = NativeMusicMemoryDocument()
         let service = try await NativeMusicFixture.service(store, accounts: owner)
@@ -32,7 +57,8 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
         let queue = try await service.queue(), calls = await loader.events(), resolutions = await scripts.calls()
         XCTAssertEqual(queue.entries.count, 630); XCTAssertEqual(Set(queue.entries.map(\.id)).count, 630)
         XCTAssertEqual(queue.currentId, queue.entries[17].id); XCTAssertEqual(state.currentId, queue.currentId)
-        XCTAssertTrue(queue.entries.allSatisfy { $0.track.songId == start.songID })
+        XCTAssertEqual(Set(queue.entries.map(\.track.songId)).count, 1)
+        XCTAssertTrue(queue.entries.allSatisfy { $0.track.sources.first?.nativeId == "Duplicate" })
         XCTAssertTrue(Set(old.entries.map(\.id)).isDisjoint(with: Set(queue.entries.map(\.id))))
         XCTAssertEqual(calls.count, 21); XCTAssertTrue(resolutions.isEmpty)
         let saved = try MusicDocument(store.snapshot().0, runID: "fixture")
@@ -63,11 +89,15 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
 
     func testLaterPageFailureAndCASFailureLeaveOriginalQueueBytesAndHistoryUntouched() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let old = try await MusicAccountQueueFixture.seed(service), before = store.snapshot()
+        let old = try await MusicAccountQueueFixture.seed(service)
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]],
             pages: ["p1": .init(items: [NativeMusicFixture.track("Second")])], rootCursor: "p1")
         let source = MusicAccountQueueFixture.source(loader)
         let start = try await MusicAccountQueueFixture.start(service, source)
+        let previewed = try await service.queue(), before = store.snapshot()
+        XCTAssertEqual(previewed.revision, old.revision)
+        XCTAssertEqual(previewed.currentId, old.currentId)
+        XCTAssertEqual(previewed.entries, old.entries)
         await loader.fail("p1")
         do {
             _ = try await service.replaceRemoteQueue(source, start: start, expectedRevision: old.revision, intent: .init())
@@ -85,13 +115,17 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
     func testRevokedAccountOrPageIntentRejectsNonCooperativeLatePageWithoutWriting() async throws {
         for revokeAccount in [false, true] {
             let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-            let old = try await MusicAccountQueueFixture.seed(service), before = store.snapshot()
+            let old = try await MusicAccountQueueFixture.seed(service)
             let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]],
                 pages: ["p1": .init(items: [NativeMusicFixture.track("Second")])], rootCursor: "p1")
             let gate = NativeMusicGate(), authority = MusicQueueAuthorization(), intent = MusicQueueAuthorization()
             await loader.hold("p1", gate: gate)
             let source = MusicAccountQueueFixture.source(loader, authorization: authority)
             let start = try await MusicAccountQueueFixture.start(service, source)
+            let previewed = try await service.queue(), before = store.snapshot()
+            XCTAssertEqual(previewed.revision, old.revision)
+            XCTAssertEqual(previewed.currentId, old.currentId)
+            XCTAssertEqual(previewed.entries, old.entries)
             let task = Task { try await service.replaceRemoteQueue(source, start: start, expectedRevision: old.revision, intent: intent) }
             await gate.started()
             if revokeAccount { authority.revoke() } else { intent.revoke() }
@@ -102,21 +136,31 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
         }
     }
 
-    func testWrongOccurrenceSelectionAndCursorCycleCannotProduceAPartialQueue() async throws {
+    func testOutOfRangeOccurrenceAndCursorCycleCannotProduceAPartialQueue() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let old = try await MusicAccountQueueFixture.seed(service), before = store.snapshot()
+        let old = try await MusicAccountQueueFixture.seed(service)
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]])
         let source = MusicAccountQueueFixture.source(loader)
-        let start = try await MusicAccountQueueFixture.start(service, source)
-        let wrong = MusicRemoteQueueStart(index: 0, songID: "different-recording", primarySource: try XCTUnwrap(start.primarySource))
+        _ = try await MusicAccountQueueFixture.start(service, source)
+        let previewed = try await service.queue(), before = store.snapshot()
+        XCTAssertEqual(previewed.revision, old.revision)
+        XCTAssertEqual(previewed.currentId, old.currentId)
+        XCTAssertEqual(previewed.entries, old.entries)
+        let wrong = MusicRemoteQueueStart(index: 1)
         do { _ = try await service.replaceRemoteQueue(source, start: wrong, expectedRevision: old.revision, intent: .init()); XCTFail() }
-        catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
+        catch { XCTAssertEqual(error as? MusicServiceError, .notFound) }
+        XCTAssertEqual(store.snapshot().0, before.0); XCTAssertEqual(store.snapshot().2, before.2)
         let cycle = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]],
             pages: ["loop": .init(items: [NativeMusicFixture.track("Second")], cursor: "loop")], rootCursor: "loop")
         let badSource = MusicAccountQueueFixture.source(cycle)
         let badStart = try await MusicAccountQueueFixture.start(service, badSource)
+        let beforeCycle = store.snapshot()
         do { _ = try await service.replaceRemoteQueue(badSource, start: badStart, expectedRevision: old.revision, intent: .init()); XCTFail() }
         catch { XCTAssertEqual(error as? MusicServiceError, .invalidResponse) }
-        XCTAssertEqual(store.snapshot().0, before.0); XCTAssertEqual(store.snapshot().2, before.2)
+        XCTAssertEqual(store.snapshot().0, beforeCycle.0); XCTAssertEqual(store.snapshot().2, beforeCycle.2)
+        let unchanged = try await service.queue()
+        XCTAssertEqual(unchanged.entries, old.entries)
+        XCTAssertEqual(unchanged.currentId, old.currentId)
+        XCTAssertEqual(unchanged.revision, old.revision)
     }
 }

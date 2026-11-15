@@ -1,41 +1,7 @@
 import Foundation
 import MeowMusicFeature
 
-/// The queue member stays frozen; accepted source facts belong to its attempt.
-struct MusicNativePlaybackRecording: Sendable {
-    let original: MJ
-    let expanded: MJ
-}
-
 extension NativeMusicService {
-    func playbackRecording(original: MJ, expanded: MJ, state: MusicDocument) throws -> MusicNativePlaybackRecording {
-        let song = try MusicModel.cleanSong(expanded)
-        try MusicModel.rejectSecrets(song)
-        try musicRequire(song["songId"] == original["songId"] && MusicModel.compatible(original, song), .songIDConflict)
-        if song == original { return .init(original: original, expanded: song) }
-        let known = state.library["library"]["songs"].fields.map(\.1) + state.queue["entries"].array.map { $0["song"] }
-        for row in song["sources"].array {
-            for other in known {
-                for source in other["sources"].array where source["sourceKey"] == row["sourceKey"] {
-                    try musicRequire(MusicModel.compatible(source, row), .nativeIDConflict)
-                }
-            }
-        }
-        return .init(original: original, expanded: song)
-    }
-
-    func playbackSong(_ reference: MusicReference, _ state: MusicDocument) throws -> MJ {
-        let original = try song(reference, state)
-        guard reference.kind == .queue, let current = attempt, current.occurrence == reference.id,
-              let recording = current.recording else { return original }
-        // Explicit removal of an unrelated source may edit this member without
-        // retiring its healthy native item. Its primary recording still binds it.
-        try musicRequire(original["songId"] == recording.original["songId"] &&
-            MusicModel.compatible(original, recording.original) &&
-            MusicModel.sources(original).first == MusicModel.sources(recording.original).first, .targetChanged)
-        return filteringRecordingSourceAdditions(recording.expanded, existing: original["sources"].array,
-                                                  playback: state.playback)
-    }
     // Official account quality names are not LX capabilities. Keep their
     // grouping local to playback without rewriting the durable library schema.
     static func officialQualities(_ values: [String], _ prefs: MJ) -> [String] {
@@ -121,13 +87,7 @@ extension NativeMusicService {
                       Self.officialEnabled(row.platform, d.playback) else { continue }
                 do {
                     let values = try await work { try await accounts.nativeOptions(platform: platform, nativeID: row.nativeId, sourceKey: row.sourceKey) }
-                    try musicRequire(values.count <= 1, .invalidResponse)
                     for value in values {
-                        try musicRequire(value.installationId.hasPrefix("official:") && value.siteId == row.platform && value.sourceKey == row.sourceKey &&
-                            value.generation > 0 && value.generation <= 9_007_199_254_740_991 && musicHex(value.contentHash) &&
-                            value.qualities.count <= 10 && Set(value.qualities).count == value.qualities.count &&
-                            value.qualities.allSatisfy { ["128k", "192k", "320k", "flac", "flac24bit", "master",
-                                                         "jyeffect", "dolby", "sky", "vivid"].contains($0) }, .invalidResponse)
                         let qualities = value.qualities
                         if !qualities.isEmpty { result.append(.init(installationId: value.installationId, generation: value.generation,
                             siteId: value.siteId, sourceKey: row.sourceKey, qualities: qualities, title: value.title,
@@ -174,19 +134,9 @@ extension NativeMusicService {
         let own = epoch, d = try read()
         try musicRequire(d.queue["currentId"].string == occurrenceId, .targetChanged)
         let ref = MusicReference(kind: .queue, id: occurrenceId)
-        let original = try self.song(ref, d)
-        let expanded: MJ
-        if original["sources"].array.contains(where: { $0["sourceKey"].string == selection.sourceKey }) {
-            expanded = original
-        } else { expanded = try await sharedSongMetadata(original) }
-        try check(own)
-        let latest = try read()
-        try musicRequire(latest.queue["revision"] == d.queue["revision"] &&
-            latest.playback["revision"] == d.playback["revision"] &&
-            latest.queue["currentId"].string == occurrenceId && self.song(ref, latest) == original, .targetChanged)
+        let song = try self.song(ref, d), (source, _) = try target(song, selection.sourceKey)
+        let songID = song["songId"].string
         try musicRequire(!spent.contains(attemptId), .staleResult)
-        let recording = try playbackRecording(original: original, expanded: expanded, state: latest)
-        let song = recording.expanded, (source, info) = try target(song, selection.sourceKey)
         try admitSource(song, selection: selection)
         try musicRequire(source.platform == selection.siteId, .targetChanged)
         try requirePlatform(source.platform)
@@ -196,7 +146,7 @@ extension NativeMusicService {
         retireAudioCacheAttempt()
         cancelWork("playback"); spent.insert(attemptId)
         attempt = Attempt(id: attemptId, occurrence: occurrenceId, sourceKey: selection.sourceKey,
-                          selection: selection, recording: recording)
+                          selection: selection)
         let start = d.playback["position"]["seconds"].number
         do {
             let audio: MusicNativeAudio
@@ -212,6 +162,8 @@ extension NativeMusicService {
                 let snapshot = try await work(label: "playback") { try await scripts.source(installationID: selection.installationId) }
                 _ = try validate(snapshot, site: source.platform, quality: selection.quality)
                 try pinScript(snapshot, selection: selection)
+                try musicRequire(attempt?.id == attemptId, .staleResult)
+                let (_, info) = try target(repositorySong(songID, read()), selection.sourceKey)
                 let request = MusicScriptRequest(source: snapshot,
                     siteID: source.platform, sourceKey: source.sourceKey, quality: selection.quality, musicInfo: info.bytes)
                 let execution = try await work(label: "playback") { try await scripts.resolve(request: request) }
@@ -229,30 +181,34 @@ extension NativeMusicService {
             let current = try read()
             try musicRequire(attempt?.id == attemptId && current.queue["currentId"].string == occurrenceId, .staleResult)
             attempt?.selection = resolvedSelection
-            _ = try target(playbackSong(ref, current), selection.sourceKey)
+            let currentSong = try repositorySong(songID, current)
+            _ = try target(currentSong, selection.sourceKey)
             try musicRequire(!selection.installationId.hasPrefix("official:") ||
                 Self.officialEnabled(source.platform, current.playback), .sourceUnavailable)
             let valid = try media(audio)
-            try validateDelivery(valid, song: song, playback: current.playback, automaticQuality: false)
+            try validateDelivery(valid, song: currentSong, playback: current.playback, automaticQuality: false)
             let authorization = valid.playbackAuthorization.map { MusicQueueAuthorization(parent: $0) } ?? MusicQueueAuthorization()
-            audioCacheAttempt = try await prepareAudioCache(audio: valid, song: song,
+            audioCacheAttempt = try await prepareAudioCache(audio: valid, song: currentSong,
                 selection: resolvedSelection, attemptID: attemptId, playbackAuthorization: authorization)
             observeAudioCacheCapture(audioCacheAttempt)
-            let candidate = MusicPlaybackCandidate(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
-                url: valid.url, headers: valid.headers, title: song["title"].string, startPosition: start,
-                requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
-                expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
-                delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
-            _ = try candidate.resource()
-            try await admitRecordingSource(song, sourceKey: selection.sourceKey)
+            try await admitRecordingSource(currentSong, sourceKey: selection.sourceKey)
             try check(own)
             try musicRequire(attempt?.id == attemptId, .staleResult)
             let latest = try read()
             try musicRequire(latest.queue["currentId"].string == occurrenceId &&
                 latest.queue["revision"] == d.queue["revision"] &&
                 latest.playback["revision"] == d.playback["revision"], .staleRevision)
-            try admitSource(song, selection: selection)
-            try pinPlaybackRecovery(candidate: candidate, song: song, state: latest)
+            let latestSong = try repositorySong(songID, latest)
+            _ = try target(latestSong, selection.sourceKey)
+            try admitSource(latestSong, selection: resolvedSelection)
+            try validateDelivery(valid, song: latestSong, playback: latest.playback, automaticQuality: false)
+            let candidate = MusicPlaybackCandidate(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
+                url: valid.url, headers: valid.headers, title: latestSong["title"].string, startPosition: start,
+                requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
+                expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
+                delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
+            _ = try candidate.resource()
+            try pinPlaybackRecovery(candidate: candidate, song: latestSong, state: latest)
             let publish = {
                 self.attempt?.authorization = authorization
                 self.attempt?.ready = true
@@ -288,7 +244,10 @@ extension NativeMusicService {
         try musicRequire(fact.position.isFinite && (0...604_800).contains(fact.position) &&
             (fact.duration == nil || fact.duration!.isFinite && (0...604_800).contains(fact.duration!)))
         if ![.failed, .stopped].contains(fact.kind) {
-            let song = try song(.init(kind: .queue, id: fact.occurrenceId), read())
+            let state = try read()
+            guard let entry = state.queue["entries"].array.first(where: { $0["id"].string == fact.occurrenceId })
+                else { throw MusicServiceError.staleResult }
+            let song = try entrySong(entry, state)
             try musicRequire(MusicMediaDuration.matches(expected: song["duration"].number, actual: fact.duration), .invalidMediaCandidate)
         }
         try commitPreparedSource(fact)
@@ -307,21 +266,13 @@ extension NativeMusicService {
             if record {
                 let formatter = DateFormatter(); formatter.calendar = Calendar(identifier: .gregorian)
                 formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
-                let date = formatter.string(from: now()), item = MJ.obj([("song", entry["song"]), ("context", entry["context"]), ("at", .number(now().timeIntervalSince1970 * 1000))])
+                let date = formatter.string(from: now())
+                let item = MJ.obj([("songId", entry["songId"]), ("context", entry["context"]),
+                    ("at", .number(now().timeIntervalSince1970 * 1000))])
                 var days = d.history["days"].array
                 let index = days.firstIndex { $0["date"].string == date }
                 var day = index.map { days[$0] } ?? .obj([("date", .string(date)), ("songs", .array([]))])
-                var song = try playbackSong(.init(kind: .queue, id: current.occurrence), d), old: [MJ] = []
-                let keys = Set(try MusicModel.sources(song).map(\.sourceKey))
-                for previous in day["songs"].array {
-                    let oldKeys = Set(try MusicModel.sources(previous["song"]).map(\.sourceKey))
-                    if !keys.isDisjoint(with: oldKeys) || previous["song"]["songId"] == song["songId"] && MusicModel.compatible(previous["song"], song) {
-                        var sources = song["sources"].array
-                        for source in previous["song"]["sources"].array where !sources.contains(where: { $0["sourceKey"] == source["sourceKey"] }) { sources.append(source) }
-                        song["sources"] = .array(sources)
-                    } else { old.append(previous) }
-                }
-                var merged = item; merged["song"] = song; day["songs"] = .array([merged] + old)
+                day["songs"] = .array([item] + day["songs"].array.filter { $0["songId"] != item["songId"] })
                 if let index { days[index] = day } else { days.append(day) }
                 d.history["days"] = .array(Array(days.sorted { $0["date"].string > $1["date"].string }.prefix(7)))
             }
@@ -347,13 +298,18 @@ extension NativeMusicService {
             else if [.paused, .ended, .failed, .stopped].contains(fact.kind) { attempt?.isPlaying = false }
             attempt?.latestFact = fact
             audioCacheAcceptedFact(fact)
+            if record {
+                let song = try self.song(.init(kind: .queue, id: current.occurrence), read())
+                await presentationCache?.played(songID: song["songId"].string,
+                    artwork: MusicNativePublicBrowseSupport.artwork(song["cover_url"]), confirmedAt: now())
+            }
         }
         return accepted
     }
     public func lyrics(occurrenceId: String, sourceKey: String) async throws -> MusicLyricsSnapshot {
         let own = epoch, d = try read()
         try musicRequire(d.queue["currentId"].string == occurrenceId, .targetChanged)
-        let original = try playbackSong(.init(kind: .queue, id: occurrenceId), d)
+        let original = try song(.init(kind: .queue, id: occurrenceId), d)
         let song = try await sharedSongMetadata(original), (source, info) = try target(song, sourceKey)
         try check(own)
         try musicRequire(try read().queue["currentId"].string == occurrenceId, .targetChanged)
@@ -363,8 +319,8 @@ extension NativeMusicService {
         var lines: [MusicLyricLine]
         if ["wy", "tx", "kg", "kw", "mg"].contains(source.platform) {
             let port = publicPlatforms
-            // Native lyrics come first and never start Node. Only an empty wy/kw/mg
-            // result tries enabled same-platform scripts; tx/kg stay native-only.
+            // Shared platform lyrics come first. Only an empty wy/kw/mg
+            // result tries enabled same-platform scripts.
             let payload = try await work(label: "lyrics") { try await port.lyrics(platform: source.platform, info: info) }
             lines = try MusicNativeLyricsParser.parse(payload, duration: song["duration"].number)
             if lines.isEmpty, ["wy", "kw", "mg"].contains(source.platform) {

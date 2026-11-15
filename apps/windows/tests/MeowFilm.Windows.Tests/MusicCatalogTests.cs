@@ -1,11 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Net.Http;
 using System.Runtime.ExceptionServices;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
@@ -31,8 +27,8 @@ using System.Windows.Media.Imaging;
 
 namespace MeowFilm.Windows.Tests;
 
-// Real WPF + Native application/catalog/platform protocols + DPAPI. Synthetic
-// HttpMessageHandler replaces upstream; only explicit authored LX needs Node.
+// Real WPF + native application/catalog + DPAPI. The shared canonical runtime
+// peer supplies platform results; only explicit authored LX starts a script runtime.
 public static partial class MusicCatalogTests
 {
     public static IEnumerable<TestCase> Cases()
@@ -2050,7 +2046,9 @@ public static partial class MusicCatalogTests
             Equal("feature,playlist,chart,artist,vip,euro,djR,huayu,qingge,acg",
                 string.Join(",", f.Module.VisibleChannelTabs.Select(card => card.ActionId)));
             Equal("china,yingshi,rock,music_top_tab_jpop,paobu,music_top_tab_game,yueyu,music_top_tab_sunoai,old_hat,music_top_tab_dance,hFlow,music_top_tab_world,music_top_tab_dj,rnb,chuxing,music_tab_drive,music_top_tab_tipsy,rap,xiangcun,music_top_tab_french,sleep,music_top_tab_light_music,classic,music_top_tab_children,HiFi,sir,ballad,music_top_tab_latin,music_tab_pioneer,funk,landiao,yueqi,study,yinyueju,music_top_tab_sport",
-                string.Join(",", f.Module.MoreChannelTabs.Select(card => card.ActionId)));
+                string.Join(",", f.Module.MoreChannelTabs.Take(35).Select(card => card.ActionId)));
+            Equal("music_top_tab_acg,newsong,origin",
+                string.Join(",", f.Module.MoreChannelTabs.Skip(35).Select(card => card.ActionId)));
             await f.Module.OpenCatalogCardAsync(cards.Single(c => c.Id == "rock"));
             Equal("MUSIC_ROCK", f.Client.Last("music.catalog.channel").GetProperty("pageCode").GetString());
             Equal("摇滚", f.Module.Heading); // provider publishes descriptor title, not protocol title
@@ -2163,7 +2161,7 @@ public static partial class MusicCatalogTests
             True(before.SequenceEqual(f.Module.CatalogSections), "failure retains previous successful merged page");
             Equal("第 2 页", f.Module.CatalogPageText);
         });
-        yield return Case("playlist next page appends with snapshot and bounded page size then refresh resets", async () =>
+        yield return Case("playlist next page appends with actual continuation then refresh resets", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
@@ -2171,7 +2169,7 @@ public static partial class MusicCatalogTests
             await f.Module.CatalogPageAsync(1);
             var p = f.Client.Last("music.catalog.playlist");
             Equal(2, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
-            Equal(64, p.GetProperty("snapshot").GetString()!.Length);
+            Equal(100, p.GetProperty("continuation").GetProperty("offset").GetInt32());
             Equal(200, f.Module.Songs.Count);
             Equal("1001", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
             Equal("1101", MusicSongFixture.NativeId(f.Module.Songs[100].Raw));
@@ -2183,7 +2181,7 @@ public static partial class MusicCatalogTests
             p = f.Client.Last("music.catalog.playlist");
             Equal(1, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
             True(p.GetProperty("refresh").GetBoolean(), "returning to a network playlist refreshes its members");
-            True(!p.TryGetProperty("snapshot", out _), "returning starts without the old member snapshot");
+            True(!p.TryGetProperty("continuation", out _), "returning starts from the current first page");
             Equal(100, f.Module.Songs.Count);
             Equal("第 1 页", f.Module.CatalogPageText);
             True(!f.Module.CanCatalogPrevious, "the accumulated song surface does not expose a page-back control");
@@ -2191,18 +2189,17 @@ public static partial class MusicCatalogTests
             await f.Module.LoadMoreCatalogPlaylistAsync();
             p = f.Client.Last("music.catalog.playlist");
             Equal(2, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
-            Equal(64, p.GetProperty("snapshot").GetString()!.Length);
+            Equal(100, p.GetProperty("continuation").GetProperty("offset").GetInt32());
             Equal(200, f.Module.Songs.Count);
             Equal("1001", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
             Equal("1101", MusicSongFixture.NativeId(f.Module.Songs[100].Raw));
             True(!f.Module.CanCatalogPrevious, "appending after re-entry does not expose previous");
-            // The preceding page may use the song-detail cache instead of advancing this transport fixture.
             await f.Configure(new { nextDetail = 200 });
             await f.Module.LoadMoreCatalogPlaylistAsync();
             Equal(205, f.Module.Songs.Count);
             p = f.Client.Last("music.catalog.playlist");
             Equal(3, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
-            Equal(64, p.GetProperty("snapshot").GetString()!.Length);
+            Equal(200, p.GetProperty("continuation").GetProperty("offset").GetInt32());
             True(!f.Module.CanCatalogPrevious, "the final accumulated page does not expose previous");
             True(!f.Module.CanLoadMoreCatalogPlaylist, "the final page terminates scroll pagination");
             calls = f.Client.Count("music.catalog.playlist");
@@ -2213,17 +2210,17 @@ public static partial class MusicCatalogTests
             p = f.Client.Last("music.catalog.playlist");
             Equal(1, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
             True(p.GetProperty("refresh").GetBoolean(), "playlist refresh");
-            True(!p.TryGetProperty("snapshot", out _), "fresh first page has no old snapshot");
+            True(!p.TryGetProperty("continuation", out _), "refresh starts from the first page");
         });
-        yield return Case("snapshot changed response cannot replace current native page", async () =>
+        yield return Case("unused snapshot field does not block the actual next page", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
             var first = f.Module.Songs[0];
             f.Client.Transform("music.catalog.playlist", value => Edit(value, node => node["snapshot"] = new string('b', 64)));
             await f.Module.CatalogPageAsync(1);
-            True(ReferenceEquals(first, f.Module.Songs[0]), "snapshot changed keeps old data");
-            Equal("第 1 页", f.Module.CatalogPageText); Equal("内容已变更，请刷新", f.Module.Status);
+            Equal(first.Id, f.Module.Songs[0].Id);
+            Equal(200, f.Module.Songs.Count); Equal("第 2 页", f.Module.CatalogPageText);
         });
         yield return Case("rapid tag A B A suppresses old B receipt and restores A selection", async () =>
         {
@@ -2319,7 +2316,7 @@ public static partial class MusicCatalogTests
             await f.Module.NavigateAsync("catalog-channels", default);
             hold.Release(); await pending;
             True(f.Module.CurrentChannelKey.Length > 0, "directory resolves to its first openable channel");
-            Equal(45, f.Module.ChannelTabs.Count);
+            Equal(48, f.Module.ChannelTabs.Count);
         });
         yield return Case("guest home auth failure preserves display without retry until an explicit refresh", async () =>
         {
@@ -2480,7 +2477,11 @@ public static partial class MusicCatalogTests
                 await WaitForSearch(f.Module);
                 var card = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Song is not null);
                 True(card.CanOpen && card.Song is not null, "real provider normalized song is actionable");
-                Equal(platform, MusicSongFixture.Info(card.Song!.Raw).GetProperty("source").GetString());
+                var recording = card.Song!.Raw.GetProperty("sources").EnumerateArray()
+                    .Single(source => source.GetProperty("source").GetString() == platform);
+                Equal(platform, recording.GetProperty("musicInfo").GetProperty("source").GetString());
+                Equal("1001", recording.GetProperty("musicInfo").GetProperty("songmid").GetString());
+                True(Guid.TryParseExact(card.Song.Id, "D", out _), "the requested source belongs to a permanent native song");
                 var id = platform == "kg" ? "global-test" : "500";
                 await f.Module.NavigateAsync("catalog-playlist/" + platform + "/" + id, default);
                 Equal(platform, f.Module.SelectedCatalogPlatform.Key);
@@ -2649,8 +2650,13 @@ public static partial class MusicCatalogTests
         {
             const string address = "https://art.example.test/song.jpg";
             var view = new MusicCatalogView();
+            await using var store = new MusicOfficialAudioTests.MemoryStore();
+            await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(store);
+            var song = await MusicSongFixture.AdoptAsync(library,
+                MusicSongFixture.Online("wy", "1", "测试歌曲 Song", "测试歌手 / Artist", cover: address));
+            var songRow = SongRow.Read(MusicSongFixture.Element(song));
             var row = new MusicCatalogCard("1", "测试歌曲 Song", "测试歌手 / Artist", address,
-                "song", "wy", new SongRow(JsonSerializer.SerializeToElement(new { songId = "1", title = "测试歌曲 Song" })), ActionId: "1");
+                "song", "wy", songRow, ActionId: "1");
             var content = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.SongRow")).LoadContent();
             content.DataContext = row; view.Content = content;
             var loader = new CatalogArtworkLoader(); ArtworkScope.SetLoader(view, loader);
@@ -2661,6 +2667,7 @@ public static partial class MusicCatalogTests
                 window.Show(); window.UpdateLayout(); await Drain();
                 Equal(1, loader.Addresses.Count); Equal(address, loader.Addresses[0]);
                 var image = Descendants<ArtworkImage>(view).Single();
+                Equal(songRow.Id, image.DisplayIdentity);
                 Equal(50d, image.ActualWidth); Equal(50d, image.ActualHeight);
                 True(Descendants<Image>(image).Single().Source is not null, "real artwork control displays acquired pixels");
                 var title = Descendants<TextBlock>(view).Single(t => t.Text == row.Title);
@@ -2973,7 +2980,8 @@ public static partial class MusicCatalogTests
         private Fixture(LocalDocumentStore store, bool vipAccount, string root)
         {
             this.store = store; this.root = root;
-            var native = new MusicNativeApplication(store, runtime, transport);
+            runtime.Platform.OnRequest = transport.Read;
+            var native = new MusicNativeApplication(store, runtime);
             IMusicApplication application = native;
             if (vipAccount) application = Vip = new(native);
             Client = new(application); Module = new(Client, store, Playback);
@@ -2983,7 +2991,6 @@ public static partial class MusicCatalogTests
             var data = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Isolated test data required");
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
             var store = new LocalDocumentStore(dir, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-            await MusicClientContextFixture.SeedQqAsync(store);
             var f = new Fixture(store, vipAccount, dir);
             try
             {
@@ -3026,7 +3033,7 @@ public static partial class MusicCatalogTests
                 File.WriteAllBytes(path, [0, 1, 2, 3]); // Native grant/resolve; Output does not decode bytes.
                 return path;
             }).ToArray();
-            var grants = new GrantedMediaFiles(store, "music.files.v1", [".wav"]);
+            var grants = new GrantedMediaFiles(store, "music.files.v2", [".wav"]);
             var files = await grants.GrantAsync(paths);
             var favorite = await Rpc("music.library.detail", new { id = "favorites", limit = 1 });
             await Rpc("music.library.addSongs", new { id = "favorites",
@@ -3060,193 +3067,129 @@ public static partial class MusicCatalogTests
             }
         }
     }
-    private sealed class CatalogTransport : HttpMessageHandler
+    private sealed class CatalogTransport
     {
         internal readonly JsonObject State = new();
-        private int artistReads;
         private int Number(string key, int fallback = 0) => State[key]?.GetValue<int>() ?? fallback;
-        private static object Wy(int id) => new { id = id.ToString(), name = "合成曲 " + id,
-            ar = new[] { new { name = "合成艺人" } }, al = new { name = "合成专辑" }, dt = 185000 };
-        private static object Tx(int id) => new { mid = "mid" + id, id = id.ToString(), type = 0, title = "合成曲 " + id,
-            singer = new[] { new { name = "合成艺人" } }, album = new { name = "合成专辑", mid = "albumM1" }, interval = 185, file = new { } };
-        private static object Kg(int id) => new { FileHash = id.ToString("X").PadLeft(32, '0'), FileName = "合成艺人 - 合成曲 " + id,
-            SingerName = "合成艺人", AlbumName = "合成专辑", AlbumID = "31", MixSongID = id.ToString(), Duration = 185 };
-        private static object Channel(string code, string name, string pageCode = "") => new
+        private static JsonObject Track(string platform, int id) => MusicSongFixture.Online(platform, id.ToString(),
+            "合成曲 " + id, "合成艺人", "合成专辑", 185,
+            native: platform == "kg" ? new JsonObject { ["hash"] = id.ToString("X").PadLeft(32, '0') } : null);
+        private static object Playlist(string platform, string id, string name = "完整云歌单", string cover = "https://img.invalid/playlist.jpg") =>
+            new { id, name, source = platform, count = 205, cover, kind = "playlist", action = new { type = "playlist", id } };
+        private static object Section(string id, string title, string type, IEnumerable<object> items, string layout = "rail") =>
+            new { id, title, type, layout, items = items.ToArray() };
+        private static object Channels()
         {
-            code,
-            name,
-            url = pageCode.Length == 0 ? "" : "orpheus://rnpage?component=cube-renderer-rn&page=" + pageCode
-        };
-        private static object[] Channels() =>
-        [
-            Channel("chart", "排行榜"), Channel("vip", "VIP"), Channel("playlist", "歌单"),
-            Channel("huayu", "华语", "MUSIC_HUAYU"), Channel("qingge", "情歌", "MUSIC_QINGGE"),
-            Channel("euro", "欧美", "MUSIC_EURO"), Channel("djR", "电音", "MUSIC_DJR"),
-            Channel("yingshi", "OST", "MUSIC_OST"), Channel("rap", "说唱", "MUSIC_RAP"),
-            Channel("music_top_tab_dj", "慢摇DJ", "MUSIC_SLOW_DJ"), Channel("music_top_tab_sport", "运动", "MUSIC_SPORT"),
-            Channel("china", "国风", "MUSIC_CHINA"), Channel("yueyu", "粤语", "MUSIC_CANTONESE"),
-            Channel("rnb", "R&B", "MUSIC_RNB"), Channel("ballad", "民谣", "MUSIC_BALLAD"),
-            Channel("rock", "摇滚", "MUSIC_ROCK"), Channel("paobu", "跑步", "MUSIC_RUNNING"),
-            Channel("music_top_tab_acg", "二次元", "MUSIC_ACG"), Channel("yueqi", "乐器", "MUSIC_INSTRUMENT"),
-            Channel("chuxing", "出行", "MUSIC_TRAVEL"), Channel("hFlow", "K-Pop", "MUSIC_KPOP"),
-            Channel("music_tab_drive", "驾车", "MUSIC_DRIVE"), Channel("classic", "古典", "MUSIC_CLASSIC"),
-            Channel("study", "专注", "MUSIC_STUDY"), Channel("sir", "爵士", "MUSIC_JAZZ"),
-            Channel("music_tab_pioneer", "先锋", "MUSIC_PIONEER"), Channel("xiangcun", "乡村乐", "MUSIC_COUNTRY"),
-            Channel("funk", "放克", "MUSIC_FUNK"), Channel("landiao", "蓝调", "MUSIC_BLUES"),
-            Channel("music_top_tab_children", "儿歌", "MUSIC_CHILDREN"), Channel("music_top_tab_game", "游戏", "MUSIC_GAME"),
-            Channel("music_top_tab_light_music", "轻音乐", "MUSIC_LIGHT"), Channel("music_top_tab_jpop", "日语", "MUSIC_JPOP"),
-            Channel("HiFi", "高音质", "MUSIC_HIFI"), Channel("music_top_tab_french", "法语", "MUSIC_FRENCH"),
-            Channel("music_top_tab_dance", "舞蹈", "MUSIC_DANCE"), Channel("music_top_tab_latin", "拉丁", "MUSIC_LATIN"),
-            Channel("music_top_tab_sunoai", "AI", "MUSIC_AI"), Channel("music_top_tab_world", "全球", "MUSIC_WORLD"),
-            Channel("yinyueju", "音乐剧", "MUSIC_MUSICAL"), Channel("music_top_tab_tipsy", "放松", "MUSIC_RELAX"),
-            Channel("sleep", "助眠", "MUSIC_SLEEP"), Channel("old_hat", "经典", "MUSIC_OLD"),
-            Channel("feature", "精选"), Channel("newsong", "新歌"), Channel("origin", "原创", "MUSIC_ORIGIN")
-        ];
-        private static Dictionary<string, string> Form(string text) => text.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
-            .Select(p => p.Split('=', 2)).ToDictionary(p => Uri.UnescapeDataString(p[0]), p => Uri.UnescapeDataString(p[1].Replace('+', ' ')));
-        private static async Task<JsonObject> Eapi(HttpRequestMessage request)
-        {
-            var form = Form(await request.Content!.ReadAsStringAsync());
-            using var aes = Aes.Create(); aes.Key = "e82ckenh8dichen8"u8.ToArray();
-            var parts = Encoding.UTF8.GetString(aes.DecryptEcb(Convert.FromHexString(form["params"]), PaddingMode.PKCS7)).Split("-36cd479b6b5-");
-            True(parts.Length == 3 && parts[2] == Convert.ToHexStringLower(MD5.HashData(Encoding.UTF8.GetBytes("nobody" + parts[0] + "use" + parts[1] + "md5forencrypt"))),
-                "production EAPI request checksum");
-            return JsonNode.Parse(parts[1])!.AsObject();
+            string[] ids = ("feature,playlist,chart,artist,vip,euro,djR,huayu,qingge,acg," +
+                "china,yingshi,rock,music_top_tab_jpop,paobu,music_top_tab_game,yueyu,music_top_tab_sunoai,old_hat,music_top_tab_dance,hFlow,music_top_tab_world,music_top_tab_dj,rnb,chuxing,music_tab_drive,music_top_tab_tipsy,rap,xiangcun,music_top_tab_french,sleep,music_top_tab_light_music,classic,music_top_tab_children,HiFi,sir,ballad,music_top_tab_latin,music_tab_pioneer,funk,landiao,yueqi,study,yinyueju,music_top_tab_sport").Split(',');
+            string[] names = ("精选,歌单广场,排行榜,歌手,VIP,欧美,电音,华语,情歌,二次元," +
+                "国风,OST,摇滚,日语,跑步,游戏,粤语,AI,经典,舞蹈,K-Pop,全球,慢摇DJ,R&B,出行,驾车,放松,说唱,乡村乐,法语,助眠,轻音乐,古典,儿歌,高音质,爵士,民谣,拉丁,先锋,放克,蓝调,乐器,专注,音乐剧,运动").Split(',');
+            ids = [.. ids, "music_top_tab_acg", "newsong", "origin"];
+            names = [.. names, "二次元", "新歌", "原创"];
+            return new { platform = "wy", items = ids.Select((id, index) => new {
+                id, name = names[index], kind = "channel", available = true,
+                pageCode = id == "rock" ? "MUSIC_ROCK" : index < 5 ? "" : "MUSIC_" + id.ToUpperInvariant(),
+                placement = index < 10 ? "primary" : "more" }).ToArray() };
         }
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        internal Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
-            HttpResponseMessage Json(object body, int status = 200) => new((HttpStatusCode)status)
-            { Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json") };
-            var uri = request.RequestUri!; var path = uri.AbsolutePath; int total = Number("total", 205);
-            if (uri.Host == "u.y.qq.com")
+            string platform = call.Platform, operation = call.Operation;
+            var p = call.Parameters;
+            int total = Number("total", 205);
+            string Text(string key, string fallback = "") => p.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : fallback;
+            int Integer(string key, int fallback) => p.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.Number ? value.GetInt32() : fallback;
+            int Cursor(string key = "offset") => p.TryGetProperty("continuation", out var value) && value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) ? field.GetInt32() : 0;
+            object result;
+            if (operation is "playlist" or "playlist.complete")
             {
-                var payload = JsonNode.Parse(await request.Content!.ReadAsStringAsync())!["req_0"]!["param"]!;
-                if (payload["query"] is not null) return Json(new { code = 0, req_0 = new { code = 0, data = new {
-                    meta = new { sum = 1, nextpage = -1 }, body = new { item_song = new[] { Tx(1001) } } } } });
-                int first = payload["song_begin"]!.GetValue<int>(), count = Math.Min(payload["song_num"]!.GetValue<int>(), Math.Max(0, total - first));
-                return Json(new { code = 0, req_0 = new { code = 0, data = new {
-                    dirinfo = new { tid = payload["disstid"]!.ToString(), title = "完整云歌单" }, songlist_size = count,
-                    total_song_num = total, hasmore = first + count < total ? 1 : 0, songlist = Enumerable.Range(1001 + first, count).Select(Tx) } } });
+                if (Number("playlistFailure") != 0) throw new MeowFilm.Capabilities.Platforms.MusicPlatformException("UPSTREAM_ERROR");
+                int first = operation == "playlist.complete" ? 0 : (Integer("page", 1) - 1) * Integer("limit", 100);
+                int count = operation == "playlist.complete" ? total : Math.Min(Integer("limit", 100), Math.Max(0, total - first));
+                if (operation == "playlist" && Number("detailLimit") > 0) count = Math.Min(count, Number("detailLimit"));
+                result = new { platform, kind = "playlist", id = Text("id"), name = "完整云歌单", cover = "https://img.invalid/playlist.jpg",
+                    count = total, total, items = Enumerable.Range(1001 + first, count).Select(id => Track(platform, id)).ToArray(),
+                    more = first + count < total, continuation = first + count < total ? new { offset = first + count } : null,
+                    source = new { sourceTitle = "完整云歌单", sourceType = "playlist", playlistId = Text("id"), platform } };
             }
-            if (uri.Host == "gateway.kugou.com")
+            else if (operation == "song") result = Track(platform, int.TryParse(Text("id"), out int id) ? id : 1001);
+            else if (operation == "search")
             {
-                var p = Form(uri.Query);
-                if (path.Contains("/search/", StringComparison.Ordinal)) return Json(new { status = 1, error_code = 0, data = new { total = 1, lists = new[] { Kg(1001) } } });
-                int first = int.Parse(p["begin_idx"]), count = Math.Min(int.Parse(p.GetValueOrDefault("pagesize", p.GetValueOrDefault("page_size", "100"))), Math.Max(0, total - first));
-                return Json(new { status = 1, error_code = 0, data = new {
-                    list_info = new { global_collection_id = p["global_collection_id"], name = "完整云歌单", count = total },
-                    songs = Enumerable.Range(1001 + first, count).Select(Kg) } });
-            }
-            True(uri.Host is "music.163.com" or "interfacepc.music.163.com", "no unregistered upstream");
-            if (path.Contains("/playlist/detail", StringComparison.Ordinal))
-            {
-                if (Number("playlistFailure") != 0) return Json(new { }, Number("playlistFailure"));
-                var p = await Eapi(request);
-                return Json(new { code = 200, playlist = new { id = p["id"]!.ToString(), name = "完整云歌单",
-                    coverImgUrl = "https://img.invalid/playlist.jpg", trackCount = total,
-                    trackIds = Enumerable.Range(1001, total).Select(id => new { id = id.ToString() }), updateTime = 1 } });
-            }
-            if (path.Contains("/song/detail", StringComparison.Ordinal))
-            {
-                var form = Form(await request.Content!.ReadAsStringAsync());
-                True(form["encSecKey"].Length == 256, "production WEAPI key remains encrypted");
-                int first = Number("nextDetail"), count = Math.Min(Number("detailLimit", 100), total - first);
-                State["nextDetail"] = first + count >= total ? 0 : first + count;
-                return Json(new { code = 200, songs = Enumerable.Range(1001 + first, count).Select(Wy) });
-            }
-            if (path.Contains("/cloudsearch/", StringComparison.Ordinal))
-            {
-                var p = await Eapi(request);
-                int first = p["offset"]?.GetValue<int>() ?? 0;
-                int playlistTotal = Number("searchPlaylistTotal", 1);
-                int count = Math.Min(p["limit"]?.GetValue<int>() ?? 30, Math.Max(0, playlistTotal - first));
-                return Json(new { code = 200, result = new
+                if (Text("kind") == "playlists")
                 {
-                    playlistCount = playlistTotal,
-                    playlists = Enumerable.Range(500 + first, count)
-                        .Select(id => new { id = id.ToString(), name = "完整云歌单",
-                            coverImgUrl = "https://art.example.test/search-playlist.jpg", trackCount = 205 })
-                } });
+                    int first = (Integer("page", 1) - 1) * Integer("limit", 30), all = Number("searchPlaylistTotal", 1);
+                    int count = Math.Min(Integer("limit", 30), Math.Max(0, all - first));
+                    result = new { platform, kind = "playlists", items = Enumerable.Range(500 + first, count)
+                        .Select(id => Playlist(platform, id.ToString(), cover: "https://art.example.test/search-playlist.jpg")).ToArray(),
+                        more = first + count < all, continuation = first + count < all ? new { offset = first + count } : null };
+                }
+                else result = new { platform, kind = "songs", items = new[] { Track(platform, 1001) }, more = false, continuation = (object?)null };
             }
-            if (path.EndsWith("/position/show/resource", StringComparison.Ordinal))
-                return Json(new { code = 200, data = new { generalizedSceneShow = new { generalizedMap = new { nowChannelItems = Channels() } } } });
-            if (path.StartsWith("/weapi/v1/artist/", StringComparison.Ordinal) &&
-                !path.EndsWith("/list", StringComparison.Ordinal))
+            else if (operation == "channels") result = Channels();
+            else if (operation == "artist")
             {
-                var id = int.Parse(path[(path.LastIndexOf('/') + 1)..], System.Globalization.CultureInfo.InvariantCulture);
-                return Json(new
-                {
-                    code = 200,
-                    artist = new
+                string id = Text("id");
+                result = new { platform, id, name = "合成歌手 " + id, cover = "https://img.invalid/artist-" + id + ".jpg",
+                    items = Enumerable.Range(4101, 3).Select(i => Track(platform, i)).ToArray(), count = 3, more = false };
+            }
+            else if (operation == "channel" && Text("id") == "artist")
+            {
+                int first = Cursor(), pages = Math.Max(1, Number("artistPages", 1));
+                string selected = Text("tag", "-1:-1:-1");
+                if (selected.Length == 0) selected = "-1:-1:-1";
+                int[] chosen = selected.Split(':').Select(int.Parse).ToArray();
+                var tags = new List<object>();
+                foreach (var (group, values, component) in new[] {
+                    ("area", new[] { -1, 7, 96, 8, 16, 0 }, 0), ("type", new[] { -1, 1, 2, 3 }, 1),
+                    ("initial", new[] { -1 }.Concat(Enumerable.Range(65, 26)).Append(0).ToArray(), 2) })
+                    foreach (int value in values)
                     {
-                        id = id.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                        name = "合成歌手 " + id,
-                        picUrl = "https://img.invalid/artist-" + id + ".jpg"
-                    },
-                    hotSongs = Enumerable.Range(4101, 3).Select(Wy)
-                });
+                        int[] next = chosen.ToArray(); next[component] = value;
+                        tags.Add(new { id = string.Join(":", next), name = value.ToString(), group, selected = value == chosen[component] });
+                    }
+                result = new { platform, id = "artist", name = "歌手", tags, selectedTag = selected,
+                    sections = new[] { Section("artists", "", "artists", Enumerable.Range(1 + first, 40).Select(id => (object)new {
+                        id = id.ToString(), name = "合成歌手 " + id, cover = "https://img.invalid/artist-" + id + ".jpg",
+                        kind = "artist", action = new { type = "artist", id = id.ToString() } }), "artist-grid") },
+                    more = first / 40 + 1 < pages, continuation = first / 40 + 1 < pages ? new { offset = first + 40 } : null };
             }
-            if (path.EndsWith("/artist/list", StringComparison.Ordinal))
+            else if (operation == "channel" && Text("id") == "vip")
+                result = new { platform, id = "vip", name = "VIP", more = false,
+                    sections = new[] {
+                        Section("vip-songs", "黑胶VIP 每日推荐", "songs", new[] { Track(platform, 3001), Track(platform, 3002) }),
+                        Section("vip-ranks", "黑胶VIP 排行榜", "rankings", new[] { 700, 701 }.Select((id, index) => (object)new {
+                            id = id.ToString(), name = index == 0 ? "黑胶VIP 热歌榜" : "黑胶SVIP 飙升榜", kind = "playlist",
+                            action = new { type = "playlist", id = id.ToString() },
+                            preview = new[] { new { title = "会员歌曲", artist = "会员歌手", cover = "", rank = 1, lastRank = index == 0 ? 2 : 0,
+                                song = Track(platform, 3001 + index) } } }), "vip-ranked-songs") } };
+            else if (operation == "channel")
             {
-                int page = Interlocked.Increment(ref artistReads) - 1;
-                int pages = Math.Max(1, Number("artistPages", 1));
-                return Json(new
-                {
-                    code = 200,
-                    artists = Enumerable.Range(1 + page * 40, 40).Select(id => new
-                    {
-                        id = id.ToString(),
-                        name = "合成歌手 " + id,
-                        picUrl = "https://img.invalid/artist-" + id + ".jpg",
-                        musicSize = 100 + id
-                    }),
-                    more = page + 1 < pages
-                });
+                int offset = Cursor(); string tag = Text("tag", "30");
+                if (tag.Length == 0) tag = "30";
+                if (State["tagFailure"]?.GetValue<bool>() == true && tag == "31") throw new MeowFilm.Capabilities.Platforms.MusicPlatformException("UPSTREAM_ERROR");
+                var sections = new List<object>();
+                if (offset == 0) sections.Add(Section("banner", "", "banner", new[] { Track(platform, 1001) }));
+                sections.Add(Section("feed", "频道歌曲", "songs", new[] { Track(platform, 2001 + offset + int.Parse(tag)) }));
+                result = new { platform, id = Text("id"), name = "摇滚", sections,
+                    tags = new[] { new { id = "30", name = "风格一" }, new { id = "31", name = "风格二" } }, selectedTag = tag,
+                    more = offset == 0, continuation = offset == 0 ? new { offset = 1, ruleId = "11", pointIds = new[] { "22" }, algTagIds = tag,
+                        tag, scope = "public", target = Text("id") } : null };
             }
-            if (path.EndsWith("/vipnewcenter/app/viptab/recommend/song/list", StringComparison.Ordinal))
-                return Json(new { code = 200, data = new { title = "黑胶VIP 每日推荐",
-                    songInfoList = new[] { Wy(3001), Wy(3002) } } });
-            if (path.EndsWith("/toplist/detail/v2", StringComparison.Ordinal))
-                return Json(new { code = 200, data = new[] { new { name = "会员榜", categoryCode = "vip",
-                    frontDisplayType = "ranked-songs", list = new object[] {
-                        new { targetType = "PLAYLIST", resourceId = "700", name = "黑胶VIP 热歌榜", canPlay = true,
-                            rankItems = new[] { new { trackId = "3001", songName = "会员歌曲", artistName = "会员歌手", rank = 1, lastRank = 2 } } },
-                        new { targetType = "PLAYLIST", resourceId = "701", name = "黑胶SVIP 飙升榜", canPlay = true,
-                            rankItems = new[] { new { trackId = "3002", songName = "会员新歌", artistName = "会员歌手", rank = 1, lastRank = 0 } } },
-                        new { targetType = "PLAYLIST", resourceId = "702", name = "普通热歌榜", canPlay = true,
-                            rankItems = new[] { new { trackId = "1001", songName = "普通歌曲", artistName = "普通歌手", rank = 1, lastRank = 1 } } }
-                    } } } });
-            if (path.EndsWith("/cube/render/page/protocol", StringComparison.Ordinal))
-                return Json(new { code = 200, data = new { pageProtocol = new { title = "摇滚频道", pages = new object[] {
-                    new { id = "feed", componentName = "Container", props = new { songList = new { ruleId = "11", pointId = new[] { new { id = "22" } }, title = "频道歌曲" } } },
-                    new { id = "banner", componentName = "Container", props = new { carousel = new[] { new { title = "嵌套歌曲", action = "orpheus://song/1001" } } } } } } } });
-            if (path.EndsWith("/tag/tab/tags", StringComparison.Ordinal))
-                return Json(new { code = 200, data = new { algTagInfos = new[] { new { algTagId = "30", algTagName = "风格一" }, new { algTagId = "31", algTagName = "风格二" } } } });
-            if (path.EndsWith("/tag/tab/alg/recommends", StringComparison.Ordinal))
+            else if (operation == "home")
             {
-                var p = await Eapi(request); int offset = p["offset"]!.GetValue<int>();
-                var tag = p["algTagIds"]?.ToString() ?? "";
-                if (State["tagFailure"]?.GetValue<bool>() == true && tag == "31") return Json(new { }, 503);
-                return Json(new { code = 200, songs = new[] { Wy(2001 + offset + (int.TryParse(tag, out int n) ? n : 0)) }, hasMore = offset == 0 });
-            }
-            if (path.EndsWith("/rcmd/resource/show", StringComparison.Ordinal))
-            {
-                if (Number("homeFailure") != 0) return Json(new { }, Number("homeFailure"));
-                var p = await Eapi(request); int cursor = p["cursor"]?.GetValue<int>() ?? 0;
+                if (Number("homeFailure") != 0) throw new MeowFilm.Capabilities.Platforms.MusicPlatformException("UPSTREAM_ERROR");
+                int cursor = Cursor("cursor");
                 var entries = new List<object>();
-                if (Number("detailLimit") > 0)
-                    entries.Add(new { resourceType = "playlist", resourceId = (600 + cursor).ToString(), name = "入口歌单" });
-                entries.Add(new { resourceType = "dailysongs", name = "每日推荐",
-                    coverImg = "https://art.example.test/private-daily.jpg" });
-                entries.Add(new { resourceType = "song", resourceExtInfo = new { songData = Wy(1001 + cursor) }, name = "嵌套歌曲" });
-                return Json(new { code = 200, data = new { cursor = (cursor + 1).ToString(), hasMore = cursor < Number("homePages", 2) - 1,
-                    blockCodeOrderList = "[\"PLAYLIST\"]", blocks = new object[] {
-                        new { positionCode = "PLAYLIST", uiElement = new { subTitle = new { title = "推荐歌单" } },
-                            creatives = new[] { new { resources = new[] { new { resourceType = "playlist", resourceId = (Number("homePlaylistStart", 500) + cursor).ToString(),
-                                name = "合成歌单", coverImg = "https://art.example.test/public-playlist.jpg" } } } } },
-                        new { positionCode = "ENTRANCE", creatives = new[] { new { resources = entries.ToArray() } } } } } });
+                if (Number("detailLimit") > 0) entries.Add(Playlist(platform, (600 + cursor).ToString(), "入口歌单"));
+                entries.Add(new { id = "daily", name = "每日推荐", kind = "daily", cover = "https://art.example.test/private-daily.jpg",
+                    action = new { type = "daily", branch = "default" }, presentation = "preview", requiresAccount = true, available = false, errorCode = "AUTH_REQUIRED" });
+                entries.Add(new { song = Track(platform, 1001 + cursor), action = new { type = "song", id = (1001 + cursor).ToString() } });
+                result = new { platform, sections = new[] {
+                    Section("PLAYLIST", "推荐歌单", "playlists", new[] { Playlist(platform, (Number("homePlaylistStart", 500) + cursor).ToString(), "合成歌单", "https://art.example.test/public-playlist.jpg") }),
+                    Section("ENTRANCE", "", "entries", entries) }, more = cursor < Number("homePages", 2) - 1,
+                    continuation = cursor < Number("homePages", 2) - 1 ? new { cursor = cursor + 1 } : null };
             }
-            throw new InvalidOperationException("Unexpected synthetic catalog request");
+            else throw new InvalidOperationException("Unexpected canonical catalog operation: " + operation);
+            return Task.FromResult(MusicPlatformRuntimeFixture.Json(result));
         }
     }
     private static async Task OnSta(Func<Task> action)

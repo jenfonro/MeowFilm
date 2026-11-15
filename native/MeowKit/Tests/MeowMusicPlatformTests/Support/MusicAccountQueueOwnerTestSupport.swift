@@ -41,7 +41,13 @@ final class MusicAccountQueueOwnerGate: @unchecked Sendable {
     }
 }
 
-actor MusicAccountQueueOwnerProvider: MusicAccountProvider {
+actor MusicAccountQueueOwnerProvider: MusicAccountProvider, MusicAccountSessionPublishing {
+    private var publishedCredential: AccountCredential?
+    func publish(_ credential: AccountCredential, scope: String, generation: Int,
+                 authorization: MusicQueueAuthorization) throws {
+        try authorization.check(); publishedCredential = credential
+    }
+
     struct AccountCalls: Equatable, Sendable {
         var verifies = 0, refreshes = 0, logins = 0, polls = 0
     }
@@ -80,11 +86,11 @@ actor MusicAccountQueueOwnerProvider: MusicAccountProvider {
         }
     }
     func nativeID(_ credential: AccountCredential) async throws -> String { try await account.nativeID(credential) }
-    func verify(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         await wait("validate")
         return try await account.verify(credential)
     }
-    func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified {
+    func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         await wait("refresh")
         return try await account.refresh(credential)
     }
@@ -92,7 +98,7 @@ actor MusicAccountQueueOwnerProvider: MusicAccountProvider {
         logins += 1; await wait("login")
         return .init(id: id, platform: platform, image: Data([0]), expiresAt: .distantFuture)
     }
-    func pollQR(id: UUID) -> MusicQQLoginResult {
+    func pollQR(id: UUID) -> MusicAccountLoginResult {
         polls += 1
         return .init(progress: .waiting, verified: nil)
     }
@@ -116,20 +122,20 @@ actor MusicAccountQueueOwnerProvider: MusicAccountProvider {
         }
         return result
     }
-    func recommendations(kind: String, page: Int, credential: AccountCredential) async throws -> MusicQQRecommendation {
+    func recommendations(kind: String, page: Int) async throws -> MusicAccountRecommendation {
         let continuation = kind == "radar" && page == 1
         let shape = recommendationPages[page] ?? .init(count: continuation ? 30 : 35,
                                                       nextPage: continuation ? 2 : nil)
         let value = try await rows(operation: "recommendations", argument: kind, page: page,
-                                   count: shape.count, credential: credential)
+                                   count: shape.count, credential: publishedCredential!)
         return .init(rows: value, nextPage: shape.nextPage)
     }
-    func tracks(collectionID: String, credential: AccountCredential) async throws -> [JSONValue] {
-        try await rows(operation: "tracks", argument: collectionID, page: 1, count: 65, credential: credential)
+    func tracks(collectionID: String) async throws -> [JSONValue] {
+        try await rows(operation: "tracks", argument: collectionID, page: 1, count: 65, credential: publishedCredential!)
     }
-    func collectionRows(credential: AccountCredential) throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func capabilities(mid: String, credential: AccountCredential) throws -> [String] { throw MusicServiceError.unsupported }
-    func resolve(mid: String, quality: String, credential: AccountCredential) throws -> JSONValue {
+    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func capabilities(mid: String) throws -> [String] { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> JSONValue {
         throw MusicServiceError.unsupported
     }
 }
@@ -147,7 +153,7 @@ struct MusicAccountQueueOwnerFixture: Sendable {
         identity = try MusicAccountFixture.identity()
         otherIdentity = try MusicAccountFixture.identity("wy")
         store.seed(try MusicUpdateProvider.credential(), for: identity)
-        store.seed(try MusicUpdateProvider.credential("other", uid: "99"), for: otherIdentity)
+        store.seed(try MusicAccountFixture.credential(99, platform: .netease), for: otherIdentity)
         accounts = .init(store: store)
         owner = .init(accounts: accounts, scopes: [.qq: identity, .netease: otherIdentity],
                       providers: [.qq: provider, .netease: otherProvider], clock: { [clock] in clock.now() })

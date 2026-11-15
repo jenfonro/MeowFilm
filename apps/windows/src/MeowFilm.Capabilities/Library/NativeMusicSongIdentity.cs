@@ -1,146 +1,138 @@
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 
 namespace MeowFilm.Capabilities.Library;
 
 internal static partial class NativeMusicSong
 {
-    internal sealed record RecordingIdentity(string Key, string Title, string Artist, string Version, double Duration)
-    {
-        private static bool Known(string value) => value.Length > 0 &&
-            !value.StartsWith("unknown", StringComparison.Ordinal) && !value.StartsWith("未知", StringComparison.Ordinal);
-        internal string Fingerprint { get; } = Known(Title) && Known(Artist)
-            ? LJ.Stringify(new JsonArray(Title, Artist, Version)) : "";
-        internal JsonObject Descriptor() =>
-            LJ.Obj(("title", Title), ("artist", Artist), ("version", Version), ("duration", Duration));
-        internal bool Compatible(RecordingIdentity other)
-        {
-            bool durations = !(Duration > 0 && other.Duration > 0) ||
-                Math.Abs(Duration - other.Duration) <= Math.Max(3, Math.Min(Duration, other.Duration) * .02);
-            if (Key.Length > 0 && Key == other.Key)
-                return (!Known(Artist) || !Known(other.Artist) || Artist == other.Artist) &&
-                    (!Known(Title) || !Known(other.Title) || Version == other.Version) && durations;
-            return Fingerprint.Length > 0 && Fingerprint == other.Fingerprint &&
-                Duration > 0 && other.Duration > 0 && durations;
-        }
-    }
+    private static bool KnownIdentityText(string value) => value.Length > 0 &&
+        value is not ("未知歌手" or "未知歌曲" or "unknown" or "unknown artist" or "unknown title");
 
+    internal sealed record RecordingIdentity(string Key, string Title, string Artist, double Duration)
+    {
+        internal string Fingerprint => KnownIdentityText(Title) && Artist.Length > 0
+            ? LJ.Stringify(new JsonArray(Title, Artist)) : "";
+        internal bool Compatible(RecordingIdentity other) => Key.Length > 0 && Key == other.Key ||
+            Fingerprint.Length > 0 && Fingerprint == other.Fingerprint && Duration > 0 && other.Duration > 0 &&
+            Math.Abs(Duration - other.Duration) <= 5;
+    }
+    private static string ArtistKey(JsonObject value)
+    {
+        var data = value.ContainsKey("musicInfo") ? SourceData(value) : value;
+        if (data["artistNames"] is JsonArray names)
+        {
+            var normalized = names.Select(name => NormalText(LJ.S(name))).ToArray();
+            return normalized.Length == 0 || !normalized.All(KnownIdentityText) ? "" :
+                LJ.Stringify(LJ.Arr(normalized.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)));
+        }
+        string name = NormalText(value.ContainsKey("musicInfo") ? LJ.S(data["singer"]) : LJ.S(data["artist"]));
+        return KnownIdentityText(name) ? LJ.Stringify(new JsonArray(name)) : "";
+    }
     internal static RecordingIdentity ReadIdentity(JsonObject value)
     {
         var shown = Display(value);
-        string name = NormalText(shown.Title);
-        string artist = string.Join(" & ", Regex.Split(NormalText(shown.Artist),
-            Pattern(@"\s*(?:、|;|\s/\s|\s&\s|\sfeat\.?\s|\sfeaturing\s)\s*"), RegexOptions.CultureInvariant, RegexTimeout)
-            .Where(s => s.Length > 0).Order(StringComparer.Ordinal));
-        string[] patterns = ["和声伴奏|和聲伴奏", "伴奏|instrumental|karaoke", @"(?<![a-z0-9_])live(?![a-z0-9_])|现场|現場",
-            @"remix|(?<![a-z0-9_])dj(?![a-z0-9_])", "remaster|重制|重製", "acoustic|不插电|不插電", @"翻唱|(?<![a-z0-9_])cover(?![a-z0-9_])"];
-        string[] tags = ["harmony", "instrumental", "live", "remix", "remaster", "acoustic", "cover"];
-        var versions = tags.Where((_, i) => Match(name, patterns[i]));
-        string title = Regex.Replace(name, Pattern(@"\s*[\(（]([^()（）]+)[\)）]\s*$"), m =>
-            NormalText(m.Groups[1].Value) == Regex.Split(name, "[（(]", RegexOptions.None, RegexTimeout)[0].Trim(' ') ? "" : m.Value,
-            RegexOptions.CultureInvariant, RegexTimeout);
-        title = Replace(Replace(title, @"\s*\(\s*", "("), @"\s*\)\s*", ")").Trim(' ');
-        return new(SourceKey(value), title, artist, string.Join(',', versions), shown.Duration);
+        var baseline = value["baselineDuration"] is null ? shown.Duration : LJ.N(value["baselineDuration"]);
+        return new(SourceKey(value), NormalText(shown.Title), ArtistKey(value), baseline > 0 ? baseline : 0);
     }
-    internal static JsonObject Descriptor(JsonObject value) => ReadIdentity(value).Descriptor();
     internal static string Fingerprint(JsonObject song) => ReadIdentity(song).Fingerprint;
     internal static bool Compatible(JsonObject a, JsonObject b) => ReadIdentity(a).Compatible(ReadIdentity(b));
 
-    /// <summary>
-    /// One song's canonical recording set. Inputs are normalized songs (or the validated sources
-    /// in Normalize). Identity evidence is parsed once, not re-normalized for every pair.
-    /// The preferred song supplies display metadata and the primary recording; other sources
-    /// can join only when all recording pairs remain compatible.
-    /// </summary>
+    /// <summary>A repository record. Its first valid duration is fixed; registered sources never change owners.</summary>
     internal sealed class Recordings
     {
-        private sealed record Recording(JsonObject Source, RecordingIdentity Identity);
         private JsonObject representative;
-        private readonly Dictionary<string, Recording> sources = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, JsonObject> sources = new(StringComparer.Ordinal);
         internal string Id { get; set; }
-        internal RecordingIdentity Identity { get; private set; }
+        internal RecordingIdentity Identity => ReadIdentity(representative);
         internal bool IsLocal => sources.Count == 0;
-        internal IEnumerable<JsonObject> Sources => sources.Values.Select(row => row.Source);
-        internal IEnumerable<RecordingIdentity> Evidence => sources.Values.Select(row => row.Identity).Prepend(Identity);
+        internal string LocalFileId => LJ.S(representative["localFileId"]);
+        internal IEnumerable<JsonObject> Sources => sources.Values;
 
         internal Recordings(JsonObject song, CancellationToken token = default)
-            : this(song, LJ.Array(song["sources"], "INVALID_SOURCE").Select(source => LJ.Object(source, "INVALID_SOURCE")), token) { }
+            : this(song, LJ.Array(song["sources"]).OfType<JsonObject>(), token) { }
         internal Recordings(JsonObject song, IEnumerable<JsonObject> listed, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
-            representative = song; Id = LJ.S(song["songId"]); Identity = ReadIdentity(song);
-            foreach (var source in listed)
-            {
-                token.ThrowIfCancellationRequested();
-                string key = LJ.S(source["sourceKey"]);
-                LJ.Require(!sources.ContainsKey(key), "INVALID_SOURCE");
-                var evidence = ReadIdentity(source);
-                LJ.Require(Accepts(evidence, token), "RECORDING_CONFLICT");
-                sources.Add(key, new(source, evidence));
-            }
+            representative = song.DeepClone().AsObject(); Id = LJ.S(song["songId"]);
+            if (!representative.ContainsKey("baselineDuration"))
+                representative["baselineDuration"] = ValidDuration(song["duration"]);
+            foreach (var source in listed) { token.ThrowIfCancellationRequested(); sources[LJ.S(source["sourceKey"])] = source.DeepClone().AsObject(); }
         }
         internal bool Accepts(RecordingIdentity evidence, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
-            if (!Identity.Compatible(evidence)) return false;
-            foreach (var row in sources.Values)
-            {
-                token.ThrowIfCancellationRequested();
-                if (!row.Identity.Compatible(evidence)) return false;
-            }
-            return true;
+            return sources.ContainsKey(evidence.Key) || Identity.Compatible(evidence);
         }
         internal bool CanMerge(Recordings other, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
-            // Local identity belongs to the local song id, not guessed title/duration metadata.
-            if (sources.Count == 0 && other.sources.Count == 0) return Id == other.Id;
-            foreach (var evidence in other.Evidence)
-            {
-                token.ThrowIfCancellationRequested();
-                if (!Accepts(evidence, token)) return false;
-            }
-            return true;
+            if (Id.Length > 0 && Id == other.Id) return true;
+            if (LocalFileId.Length > 0 && LocalFileId == other.LocalFileId) return true;
+            if (sources.Keys.Intersect(other.sources.Keys, StringComparer.Ordinal).Any()) return true;
+            return !IsLocal && !other.IsLocal && Identity.Fingerprint.Length > 0 &&
+                Identity.Fingerprint == other.Identity.Fingerprint && Identity.Duration > 0 && other.Identity.Duration > 0 &&
+                Math.Abs(Identity.Duration - other.Identity.Duration) <= 5;
         }
         internal bool TryMerge(Recordings other, bool preferIncoming = false, CancellationToken token = default)
         {
             if (!CanMerge(other, token)) return false;
-            foreach (var pair in other.sources)
+            bool samePrimary = SourceKey(representative).Length > 0 &&
+                SourceKey(representative) == SourceKey(other.representative);
+            foreach (var source in other.sources)
             {
                 token.ThrowIfCancellationRequested();
-                if (preferIncoming) sources[pair.Key] = pair.Value;
-                else sources.TryAdd(pair.Key, pair.Value);
+                if (preferIncoming) sources[source.Key] = source.Value.DeepClone().AsObject();
+                else sources.TryAdd(source.Key, source.Value.DeepClone().AsObject());
             }
-            var preferred = preferIncoming ? other.Identity : Identity;
-            string primary = preferred.Key.Length > 0 ? preferred.Key : preferIncoming ? Identity.Key : other.Identity.Key;
-            if (preferIncoming) representative = other.representative;
-            Identity = preferred.Key == primary ? preferred : preferred with { Key = primary };
+            foreach (string field in new[] { "title", "artist", "album" })
+                if (preferIncoming && samePrimary ||
+                    LJ.S(other.representative[field]).Length > 0 && LJ.S(representative[field]).Length == 0)
+                    representative[field] = other.representative[field]?.DeepClone();
+            if (preferIncoming && samePrimary ||
+                other.representative["artistNames"] is JsonArray && representative["artistNames"] is null)
+            {
+                if (other.representative["artistNames"] is JsonArray names)
+                    representative["artistNames"] = names.DeepClone();
+                else representative.Remove("artistNames");
+            }
+            if (preferIncoming && samePrimary || ValidDuration(representative["duration"]) is null)
+                representative["duration"] = ValidDuration(other.representative["duration"]);
+            if (ValidDuration(representative["baselineDuration"]) is null)
+                representative["baselineDuration"] = ValidDuration(other.representative["baselineDuration"]) ??
+                    ValidDuration(other.representative["duration"]);
             return true;
         }
         internal bool TryAddSource(JsonObject source, bool replace = false)
         {
-            var canonical = DurableSource(source);
-            var evidence = ReadIdentity(canonical);
+            var canonical = DurableSource(source); var evidence = ReadIdentity(canonical);
             if (!Accepts(evidence)) return false;
-            if (replace) sources[LJ.S(canonical["sourceKey"])] = new(canonical, evidence);
-            else sources.TryAdd(LJ.S(canonical["sourceKey"]), new(canonical, evidence));
-            if (Identity.Key.Length == 0) Identity = Identity with { Key = evidence.Key };
+            if (replace) sources[LJ.S(canonical["sourceKey"])] = canonical;
+            else sources.TryAdd(LJ.S(canonical["sourceKey"]), canonical);
             return true;
         }
-        internal string QualifiedId() => Id + ":" + Hash(LJ.Stringify(new JsonArray(Identity.Key, Identity.Descriptor(),
-            LJ.Arr(sources.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair =>
-                new JsonArray(pair.Key, pair.Value.Identity.Descriptor()))))));
+        internal void SelectArtwork(string[] platforms, HashSet<string> enabled, bool force = false)
+        {
+            if (IsLocal) return;
+            var eligible = platforms.Where(enabled.Contains).SelectMany(platform =>
+                sources.Values.Where(source => LJ.S(source["source"]) == platform &&
+                    LJ.S(source["musicInfo"]?["img"]).Length > 0)).ToArray();
+            string key = LJ.S(representative["artworkSourceKey"]);
+            var selected = force ? null : eligible.FirstOrDefault(source => LJ.S(source["sourceKey"]) == key);
+            if (selected is null && !force && key.Length == 0)
+                selected = eligible.FirstOrDefault(source => LJ.S(source["musicInfo"]?["img"]) == LJ.S(representative["cover_url"]));
+            selected ??= eligible.FirstOrDefault();
+            string image = LJ.S(selected?["musicInfo"]?["img"]);
+            bool changed = force || LJ.S(selected?["sourceKey"]) != key ||
+                image != LJ.S(representative["artworkSourceImage"]);
+            representative["artworkSourceKey"] = selected?["sourceKey"]?.DeepClone() ?? JsonValue.Create("");
+            representative["artworkSourceImage"] = image;
+            if (changed) representative["cover_url"] = image;
+        }
         internal JsonObject ToSong(CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
-            var result = (JsonObject)representative.DeepClone();
+            var result = representative.DeepClone().AsObject();
             result["songId"] = Id;
-            result["sources"] = new JsonArray(sources.OrderBy(pair => pair.Key == Identity.Key ? 0 : 1)
-                .ThenBy(pair => pair.Key, StringComparer.Ordinal).Select(pair =>
-                {
-                    token.ThrowIfCancellationRequested();
-                    return pair.Value.Source.DeepClone();
-                }).ToArray());
+            result["sources"] = LJ.Arr(sources.Values);
             return result;
         }
     }

@@ -27,7 +27,7 @@ class NodePreflightTests(unittest.TestCase):
         self.manifest = {
             "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
             "platform": "ios", "transport": "runtime.http.v1",
-            "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
+            "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"],
             "target": target,
             "trustedNative": [{"platform": "ios", "arch": "x64", "abi": 1, "napi": 8,
                                "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",
@@ -74,6 +74,7 @@ class NodePreflightTests(unittest.TestCase):
             ["music", "cat", "source"],
             ["music", "cat", "source", "tmdb", "netease"],
             ["music", "cat", "source", "pan", "tmdb", "douban", "film"],
+            ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
             ["music", "cat", "source", "pan", "tmdb", "douban"],
             ["music", "cat", "source", "pan", "tmdb", "douban", "film", "unknown"],
             ["music", "cat", "source", "pan", "tmdb", "douban", "douban"],
@@ -140,7 +141,8 @@ class NodePreflightBuildTests(unittest.TestCase):
         self.work = self.root / "tmp/ios-node-preflight"
         self.inputs = self.root / "scripts/ios-node-preflight"
         self.inputs.mkdir(parents=True)
-        (self.inputs / "probe.mjs").write_text("export {};")
+        self.probe_source = (ROOT / "scripts/ios-node-preflight/probe.mjs").read_bytes()
+        (self.inputs / "probe.mjs").write_bytes(self.probe_source)
         self.dependency = self.root / "NodeMobile.xcframework"
         slice_for = lambda selected: f'fixture-{selected["sdk"]}-{selected["arch"]}'
         self.prepare = {**preflight.PREPARE,
@@ -173,7 +175,7 @@ class NodePreflightBuildTests(unittest.TestCase):
             (payload / "runtime-manifest.json").write_text(json.dumps({
                 "schemaVersion": 1, "status": "complete", "assemblyProfile": "common-native",
                 "platform": "ios", "transport": "runtime.http.v1",
-                "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"],
+                "entry": "app/ios/entries/aggregate.mjs", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"],
                 "target": selected,
                 "trustedNative": [{"platform": "ios", "arch": selected["arch"], "abi": 1, "napi": 8,
                                   "path": "Frameworks/MeowScriptHost.framework/MeowScriptHost",
@@ -227,7 +229,7 @@ class NodePreflightBuildTests(unittest.TestCase):
         for name in ("simulator", "device"):
             app = self.work / name / "NodePreflight.app"
             self.assertEqual((app / "Frameworks/MeowScriptHost.framework/MeowScriptHost").read_bytes(), b"native-fixture")
-            self.assertEqual((app / "Runtime/probe.mjs").read_text(), "export {};")
+            self.assertEqual((app / "Runtime/probe.mjs").read_bytes(), self.probe_source)
 
     def test_either_prepare_failure_stops_before_using_old_complete_payloads(self):
         for failed_sdk in ("iphonesimulator", "iphoneos"):
@@ -267,6 +269,8 @@ class NodePreflightBuildTests(unittest.TestCase):
 
 
 class NodePreflightProbeTests(unittest.TestCase):
+    music_case = "music-platform-default-http-json-and-close"
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -292,11 +296,11 @@ class NodePreflightProbeTests(unittest.TestCase):
         options["stdout"].close()
         return self.process
 
-    def probe(self):
+    def probe(self, selected_case="netease-token-sdk-worker"):
         with patch.object(preflight, "run"), \
                 patch.object(preflight, "output", return_value=str(self.documents.parent)), \
                 patch.object(preflight.subprocess, "Popen", side_effect=self.launch):
-            return preflight.probe("simulator-id", "netease-token-sdk-worker")
+            return preflight.probe("simulator-id", selected_case)
 
     def test_selected_case_is_forwarded_and_actual_result_is_saved(self):
         self.assertEqual(self.probe(), 0)
@@ -305,19 +309,39 @@ class NodePreflightProbeTests(unittest.TestCase):
         self.assertEqual(result["cases"], self.report["cases"])
         self.assertEqual(result["nodeReturn"]["exitCode"], 0)
 
+    def test_music_platform_case_is_forwarded_and_original_business_report_is_saved(self):
+        self.report = {
+            "complete": True, "passed": True, "node": "v18.20.4", "platform": "ios",
+            "cases": [{"name": self.music_case, "passed": True, "detail": {
+                "platform": "wy", "contract": "music.platform.v1", "network": "loopback-only",
+                "requests": 6, "home": True, "integerRequest": True, "integerResponse": True,
+                "duplicateLast": True, "unusedOverflow": True, "cancelled": True, "physicalClose": True,
+            }}],
+        }
+        self.assertEqual(self.probe(self.music_case), 0)
+        self.assertEqual(self.command[-2:], ["--case", self.music_case])
+        result = json.loads((self.work / "result.json").read_text())
+        self.assertEqual(result, {**self.report, "nodeReturn": {"exitCode": 0}})
+
     def test_missing_extra_or_different_cases_cannot_satisfy_selected_probe(self):
-        for cases in ([], [{"name": "another-case"}], self.report["cases"] * 2):
-            with self.subTest(cases=cases):
-                self.report["cases"] = cases
-                with self.assertRaisesRegex(ValueError, "exactly once"):
-                    self.probe()
-                self.assertFalse((self.work / "result.json").exists())
+        for selected_case in ("netease-token-sdk-worker", self.music_case):
+            expected = [{"name": selected_case, "passed": True}]
+            for cases in ([], [{"name": "another-case"}], expected * 2):
+                with self.subTest(selected_case=selected_case, cases=cases):
+                    self.report["cases"] = cases
+                    with self.assertRaisesRegex(ValueError, "exactly once"):
+                        self.probe(selected_case)
+                    self.assertFalse((self.work / "result.json").exists())
 
     def test_failed_case_or_node_exit_is_not_reported_as_success(self):
-        for passed, code in ((False, 0), (True, 1)):
-            with self.subTest(passed=passed, code=code):
-                self.report["passed"], self.exit_code = passed, code
-                self.assertEqual(self.probe(), 1)
+        for selected_case in ("netease-token-sdk-worker", self.music_case):
+            for passed, code in ((False, 0), (True, 1)):
+                with self.subTest(selected_case=selected_case, passed=passed, code=code):
+                    self.report["cases"] = [{"name": selected_case, "passed": passed}]
+                    self.report["passed"], self.exit_code = passed, code
+                    self.assertEqual(self.probe(selected_case), 1)
+                    result = json.loads((self.work / "result.json").read_text())
+                    self.assertEqual(result, {**self.report, "nodeReturn": {"exitCode": code}})
 
 
 if __name__ == "__main__":

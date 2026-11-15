@@ -2,14 +2,13 @@
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-// Real owner/protocol and Windows DPAPI. Only the HTTP peer is synthetic.
+// Real owner/protocol and Windows DPAPI; only canonical runtime results are synthetic.
 public static partial class MusicNativeAccountDetailsTests
 {
     private const string UserId = MusicAccountDetailsFixture.UserId;
@@ -22,23 +21,27 @@ public static partial class MusicNativeAccountDetailsTests
             yield return Case(p + "-explicit-live-profile-rights-CAS-cold-reopen", () => Reopen(p));
             yield return Case(p + "-stale-generation-zero-HTTP-zero-write", () => WrongGeneration(p));
             yield return Case(p + "-membership-auth-failure-revokes-exact-account", () => AuthFailure(p));
+            yield return Case(p + "-explicit-auth-required-revokes-exact-account", () => AuthFailure(p, "AUTH_REQUIRED", "AUTH_EXPIRED"));
+            yield return Case(p + "-explicit-invalid-credentials-revokes-exact-account", () => AuthFailure(p, "INVALID_CREDENTIALS"));
             yield return Case(p + "-profile-identity-mismatch-never-commits", () => IdentityFailure(p));
+            yield return Case(p + "-ordinary-refusal-verification-unknown-keeps-current-details-and-session", () => OrdinaryFailure(p));
             yield return Case(p + "-rights-network-unknown-no-logout", () => Unknown(p));
             yield return Case(p + "-last-unsubscribe-retains-cache-refresh", () => CancelHttp(p));
         }
-        yield return Case("WY-upstream-clock-absolute-expiry-levels-and-unknown", WySnapshots);
-        yield return Case("QQ-native-wire-aliases-precedence-flags-and-boundaries", QqSnapshots);
-        yield return Case("KG-union-products-identity-start-and-unknown-retry", KgSnapshots);
-        yield return Case("calendar-dates-China-time-no-local-time-guess", Dates);
         yield return Case("WY-QQ-unknown-refresh-keeps-known-persistent-rights", PreserveKnown);
         yield return Case("expired-local-rights-unknown-keeps-absolute-expiry", Stale);
         yield return Case("profile-network-does-not-revoke-or-write", ProfileOutage);
         yield return Case("coalesced-refresh-one-cancel-does-not-cancel-other", Coalesce);
-        yield return Case("close-awaits-physical-and-borrows-store-http", Close);
-        yield return Case("cancel-during-async-stream-disposal-cannot-publish", DisposeStream);
-        yield return Case("protocol-total-deadline-awaits-noncooperative-handler", Deadline);
+        yield return Case("close-awaits-physical-and-borrows-store-runtime", Close);
+        yield return Case("unsubscribe-during-runtime-cleanup-retains-owner-refresh", DisposeStream);
+        yield return Case("owner-total-deadline-awaits-noncooperative-runtime", Deadline);
         yield return Case("local-read-cancel-awaits-real-store", CancelRead);
         yield return Case("external-account-replace-old-auth-cannot-revoke-new", ExternalReplace);
+        foreach (string code in new[] { "AUTH_REQUIRED", "INVALID_CREDENTIALS", "IDENTITY_MISMATCH" })
+        {
+            string failure = code;
+            yield return Case("external-account-replace-old-" + failure + "-cannot-revoke-new", () => ExternalReplace(failure));
+        }
         yield return Case("logout-fences-refresh-retained-cache-never-reappears", Logout);
         yield return Case("cache-CAS-conflict-never-blocks-account", Conflict);
         yield return Case("cache-disk-failure-never-hides-account", LostReceipt);
@@ -101,13 +104,13 @@ public static partial class MusicNativeAccountDetailsTests
             string accountBefore = MusicAccountDetailsFixture.AccountRow(await f.Document()).ToJsonString();
             var session = await f.Owner.AcquireAsync(platform);
             var result = await f.Refresh();
-            Check(result.Generation == 1 && result.State == "verified" && result.Profile?.DisplayName == "Fresh name" &&
+            Check(result.Generation == 1 && result.State == "saved" && result.Profile?.DisplayName == "Fresh name" &&
                 result.Profile.UserId == UserId && result.Membership.Vip == true && result.Membership.ExpiresAt > 0 &&
                 result.ProfileFreshness == MusicAccountDetailsFreshness.Fresh &&
                 result.MembershipFreshness == MusicAccountDetailsFreshness.Fresh);
             Check(result.Membership.Tier == (platform == "wy" ? "vip" : platform == "tx" ? "huge_vip" : "concept:svip"));
             Check(result.AudioLevels.Count == (platform == "wy" ? 6 : 0) && f.Owner.IsCurrent(session!));
-            Check(f.Steps.SequenceEqual(platform == "tx" ? ["auth", "profile", "rights"] : new[] { "profile", "rights" }));
+            Check(f.Steps.SequenceEqual(["account.profile"]));
             var doc = await f.Document();
             Check(MusicAccountDetailsFixture.AccountRow(doc).ToJsonString() == accountBefore, "Account row changed");
             Check(doc["entries"]!.AsArray().Count == 1, "Unexpected account document entry");
@@ -127,7 +130,7 @@ public static partial class MusicNativeAccountDetailsTests
         Check(restored.State == "saved" && restored.Profile?.DisplayName == "Fresh name" &&
             restored.Membership.Vip == true && reopened.Steps.Count == 0 && reopened.Wrapper.Writes == 0);
         await reopened.Refresh();
-        Check(reopened.Steps.Count == (platform == "tx" ? 3 : 2), "Explicit refresh was a cache hit");
+        Check(reopened.Steps.SequenceEqual(["account.profile"]), "Explicit refresh was a cache hit");
     }
     private static async Task WrongGeneration(string platform)
     {
@@ -136,13 +139,13 @@ public static partial class MusicNativeAccountDetailsTests
         await Error(() => f.Owner.RefreshDetailsAsync(platform, 2), "SESSION_CHANGED");
         Check(f.Steps.Count == 0 && f.Wrapper.Writes == 0);
     }
-    private static async Task AuthFailure(string platform)
+    private static async Task AuthFailure(string platform, string code = "AUTH_EXPIRED", string? expected = null)
     {
         await using var f = new MusicAccountDetailsFixture(platform); await f.Seed();
         var session = await f.Owner.AcquireAsync(platform);
         int events = 0; f.Owner.SessionChanged += _ => events++;
-        f.Fault = "auth";
-        await Error(() => f.Refresh(), "AUTH_EXPIRED");
+        f.FailureCode = code;
+        await Error(() => f.Refresh(), expected ?? code);
         Check(!f.Owner.IsCurrent(session!) && await f.Owner.AcquireAsync(platform) is null && events > 0);
         var hidden = await f.Owner.ReadDetailsAsync(platform);
         Check(hidden.State == "revoked" && hidden.Profile is null && hidden.Membership.Vip is null && f.Wrapper.Writes == 0);
@@ -151,24 +154,42 @@ public static partial class MusicNativeAccountDetailsTests
     private static async Task IdentityFailure(string platform)
     {
         await using var f = new MusicAccountDetailsFixture(platform); await f.Seed();
-        f.Change = (step, data) => {
-            if (step == "profile")
-            {
-                if (platform == "wy") data["profile"]!["userId"] = "7654321";
-                else if (platform == "tx") data["req_0"]!["data"]!["Info"]!["BaseInfo"]!["EncryptedUin"] = "WRONG_EUIN";
-                else data["data"]!["userid"] = "7654321";
-            }
-            return data;
-        };
+        var session = await f.Owner.AcquireAsync(platform);
+        f.FailureCode = "IDENTITY_MISMATCH";
         await Error(() => f.Refresh(), "IDENTITY_MISMATCH");
-        Check(!f.Steps.Contains("rights") && f.Wrapper.Writes == 0);
-        Check((await f.Owner.ReadDetailsAsync(platform)).Profile is null);
+        Check(f.Steps.SequenceEqual(["account.profile"]) && f.Wrapper.Writes == 0);
+        Check(!f.Owner.IsCurrent(session!) && await f.Owner.AcquireAsync(platform) is null);
+        Check((await f.Owner.ReadDetailsAsync(platform)) is { State: "revoked", Profile: null });
+        Check(MusicAccountDetailsFixture.AccountRow(await f.Document())["cookie"] is not null);
+    }
+    private static async Task OrdinaryFailure(string platform)
+    {
+        await using var f = new MusicAccountDetailsFixture(platform); await f.Seed();
+        var known = await f.Refresh();
+        await f.Cache.DrainAsync();
+        var session = await f.Owner.AcquireAsync(platform);
+        string document = (await f.Document()).ToJsonString();
+        int events = 0; f.Owner.SessionChanged += _ => events++;
+        int publications = f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update");
+        foreach (string code in new[] { "FORBIDDEN", "VERIFICATION_REQUIRED", "UPSTREAM_ERROR" })
+        {
+            f.FailureCode = code;
+            await Error(() => f.Refresh(), code);
+            var retained = await f.Owner.ReadDetailsAsync(platform);
+            Check(retained.State == known.State && retained.Generation == known.Generation &&
+                retained.Profile == known.Profile && retained.Membership == known.Membership &&
+                retained.AudioLevels.SequenceEqual(known.AudioLevels));
+            Check(f.Owner.IsCurrent(session!) && (await f.Owner.AcquireAsync(platform))?.Cookie == session!.Cookie);
+            Check(events == 0 && f.Wrapper.Writes == 0 && (await f.Document()).ToJsonString() == document);
+            Check(f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update") == publications,
+                "Ordinary details failure published or revoked a session");
+        }
     }
     private static async Task Unknown(string platform)
     {
-        await using var f = new MusicAccountDetailsFixture(platform); await f.Seed(); f.Fault = "network";
+        await using var f = new MusicAccountDetailsFixture(platform); await f.Seed(); f.UnknownRights = true;
         var result = await f.Refresh();
-        Check(result.State == "verified" && result.Profile?.DisplayName == "Fresh name" && result.Membership.Vip is null &&
+        Check(result.State == "saved" && result.Profile?.DisplayName == "Fresh name" && result.Membership.Vip is null &&
             result.VerificationDeferred && result.ErrorCode == "NETWORK_ERROR" && result.MembershipRecheckAt == 0 &&
             result.MembershipFreshness == MusicAccountDetailsFreshness.Deferred);
         Check(platform == "kg" ? result.RetryAt == result.MembershipCheckedAt + 60000 : result.RetryAt == 0);
@@ -178,7 +199,7 @@ public static partial class MusicNativeAccountDetailsTests
     }
     private static async Task CancelHttp(string platform)
     {
-        await using var f = new MusicAccountDetailsFixture(platform); await f.Seed(); f.HoldStep = "rights";
+        await using var f = new MusicAccountDetailsFixture(platform); await f.Seed(); f.HoldResponse = true;
         using var cancellation = new CancellationTokenSource();
         var refresh = f.Refresh(cancellation.Token);
         await Wait(f.Entered.Task); cancellation.Cancel();
@@ -188,87 +209,13 @@ public static partial class MusicNativeAccountDetailsTests
         f.Release.TrySetResult(); Check((await joined).Membership.Vip == true);
         Check(f.Wrapper.Writes == 0 && (await f.Owner.ReadDetailsAsync(platform)).Profile?.DisplayName != "Saved name");
     }
-    private static Task WySnapshots()
-    {
-        const long now = 1800000000000, upstream = now - 10000;
-        var data = new JsonObject { ["userId"] = UserId, ["now"] = upstream,
-            ["associator"] = new JsonObject { ["expireTime"] = upstream + 100000 },
-            ["redplus"] = new JsonObject { ["expireTime"] = upstream + 50000 } };
-        var svip = AccountDetailsSnapshot.Wy(data, UserId, now);
-        Check(svip.Membership.Tier == "svip" && svip.Membership.ExpiresAt == upstream + 50000 &&
-            svip.RecheckAt == now + 50000 && svip.AudioLevels.Count == 10);
-        data["redplus"]!["expireTime"] = upstream - 1;
-        var vip = AccountDetailsSnapshot.Wy(data, UserId, now);
-        Check(vip.Membership.Tier == "vip" && vip.AudioLevels.Count == 6);
-        data["associator"]!["expireTime"] = upstream - 2;
-        var none = AccountDetailsSnapshot.Wy(data, UserId, now);
-        Check(none.Membership.Vip == false && none.Membership.ExpiresAt == upstream - 1 && none.RecheckAt == now + 86400000);
-        data["associator"] = "invalid"; data["redplus"] = new JsonObject { ["expireTime"] = "1800000000000" };
-        var unknown = AccountDetailsSnapshot.Wy(data, UserId, now);
-        Check(unknown.Membership.Vip is null && unknown.RecheckAt == 0 && unknown.AudioLevels.Count == 0);
-        return Error(() => Task.FromResult(AccountDetailsSnapshot.Wy(data, "7654321", now)), "IDENTITY_MISMATCH");
-    }
-    private static Task QqSnapshots()
-    {
-        const long now = 1800000000000;
-        var data = new JsonObject { ["svip"] = 1, ["userinfo"] = new JsonObject { ["expire"] = now + 900000 },
-            ["identity"] = new JsonObject { ["HugeVip"] = 1, ["HugeVipEnd"] = now + 50000 } };
-        var result = AccountDetailsSnapshot.Qq(data, now);
-        Check(result.Membership.Tier == "svip" && result.Membership.ExpiresAt == now + 900000 && result.RecheckAt == now + 50000);
-        data["svip"] = 0; data["identity"]!["HugeVipStart"] = now + 20000;
-        result = AccountDetailsSnapshot.Qq(data, now);
-        Check(result.Membership.Vip == false && result.RecheckAt == now + 20000);
-        Check(AccountDetailsSnapshot.Qq(new(), now).Membership.Vip is null, "Python model defaults leaked");
-        Check(AccountDetailsSnapshot.Qq(new() { ["identity"] = new JsonObject { ["huge_vip"] = 1 } }, now).Membership.Vip is null);
-        Check(AccountDetailsSnapshot.Qq(new() { ["star"] = 0, ["ystar"] = "1" }, now).Membership.Vip is null);
-        Check(AccountDetailsSnapshot.Qq(new() { ["star"] = 0, ["ystar"] = true }, now).Membership.Vip is null);
-        foreach (var field in new[] { "HugeVip", "twelve", "eight", "GroupVipFlag", "CPLoverFlag", "ChildVip", "ExpVip", "AdVipFlag" })
-            Check(AccountDetailsSnapshot.Qq(new() { ["identity"] = new JsonObject { [field] = 1 } }, now).Membership.Vip == true, field);
-        var star = AccountDetailsSnapshot.Qq(new() { ["star"] = 1, ["starend"] = now - 1 }, now);
-        Check(star.Membership.Vip == false && star.Membership.ExpiresAt == now - 1 && star.RecheckAt == now + 86400000);
-        return Task.CompletedTask;
-    }
-    private static async Task KgSnapshots()
-    {
-        const long now = 1800000000000;
-        JsonObject Row(string type, int flag, long end) => new() { ["busi_type"] = "concept",
-            ["product_type"] = type, ["is_vip"] = flag, ["vip_end_time"] = end };
-        var row = Row("qvip", 1, now + 120000);
-        var data = new JsonObject { ["userid"] = UserId, ["is_vip"] = 0, ["busi_vip"] = new JsonArray(row) };
-        Check(AccountDetailsSnapshot.Kg(data, UserId, now).Membership.Tier == "concept:qvip");
-        row["vip_begin_time"] = now + 1000;
-        var later = AccountDetailsSnapshot.Kg(data, UserId, now);
-        Check(later.Membership.Vip == false && later.RecheckAt == now + 1000);
-        row["is_vip"] = "1";
-        Check(AccountDetailsSnapshot.Kg(data, UserId, now).Membership.Vip is null);
-        row["userid"] = "7654321";
-        await Error(() => Task.FromResult(AccountDetailsSnapshot.Kg(data, UserId, now)), "IDENTITY_MISMATCH");
-        var unknown = AccountDetailsSnapshot.Kg(new() { ["vip_type"] = 9, ["level"] = 10 }, UserId, now);
-        Check(unknown.Membership.Vip is null && unknown.RecheckAt == 0 && unknown.RetryAt == now + 60000);
-        var noExpiry = AccountDetailsSnapshot.Kg(new() { ["is_vip"] = 1 }, UserId, now);
-        Check(noExpiry.Membership.Vip == true && noExpiry.RecheckAt == now + 86400000 &&
-            noExpiry.Membership.ExpiresAt is null && !noExpiry.VerificationDeferred && noExpiry.RetryAt == 0);
-        var expired = AccountDetailsSnapshot.Kg(new() { ["is_vip"] = 1, ["vip_end_time"] = now - 1000 }, UserId, now);
-        Check(expired.Membership.Vip == false && expired.Membership.ExpiresAt == now - 1000);
-    }
-    private static Task Dates()
-    {
-        long date = new DateTimeOffset(2026, 10, 23, 0, 0, 0, TimeSpan.FromHours(8)).ToUnixTimeMilliseconds();
-        foreach (string value in new[] { "2026-10-23", "2026-10-23 00:00:00", "2026-10-23T00:00:00+08:00", "2026-10-22T16:00:00Z" })
-            Check(AccountDetailsSnapshot.Expiry(JsonValue.Create(value)) == date);
-        Check(AccountDetailsSnapshot.Expiry(JsonValue.Create("2026-10-23T00:00:00")) is null);
-        Check(AccountDetailsSnapshot.Expiry(JsonValue.Create(date / 1000)) == date);
-        Check(AccountDetailsSnapshot.Expiry(JsonValue.Create(date.ToString())) == date);
-        Check(AccountDetailsSnapshot.Expiry(JsonValue.Create("invalid")) is null);
-        return Task.CompletedTask;
-    }
     private static async Task PreserveKnown()
     {
         foreach (string platform in new[] { "wy", "tx" })
         {
             await using var f = new MusicAccountDetailsFixture(platform); await f.Seed(); await f.Refresh();
             string rights = MusicAccountDetailsFixture.DetailsRow(await f.CacheDocument())["rights"]!.ToJsonString();
-            f.Fault = "network";
+            f.UnknownRights = true;
             Check((await f.Refresh()).Membership.Vip is null);
             Check(MusicAccountDetailsFixture.DetailsRow(await f.CacheDocument())["rights"]!.ToJsonString() == rights);
             Check((await f.Owner.ReadDetailsAsync(platform)).Membership.Vip == true);
@@ -285,39 +232,38 @@ public static partial class MusicNativeAccountDetailsTests
         });
         var value = await f.Owner.ReadDetailsAsync("wy");
         Check(value.ProfileFreshness == MusicAccountDetailsFreshness.Stale && value.MembershipFreshness == MusicAccountDetailsFreshness.Stale &&
-            value.Membership.Vip is null && value.Membership.ExpiresAt == expiry && value.AudioLevels.Count == 0 && f.Steps.Count == 2);
+            value.Membership.Vip is null && value.Membership.ExpiresAt == expiry && value.AudioLevels.Count == 0 && f.Steps.Count == 1);
     }
     private static async Task ProfileOutage()
     {
-        await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); f.Fault = "network"; f.FaultStep = "profile";
+        await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); f.FailureCode = "NETWORK_ERROR";
         await Error(() => f.Refresh(), "NETWORK_ERROR");
-        Check((await f.Owner.ReadDetailsAsync("wy")).State == "saved" && f.Wrapper.Writes == 0 && !f.Steps.Contains("rights"));
+        Check((await f.Owner.ReadDetailsAsync("wy")).State == "saved" && f.Wrapper.Writes == 0 && f.Steps.Count == 1);
     }
     private static async Task Coalesce()
     {
-        await using var f = new MusicAccountDetailsFixture("tx"); await f.Seed(); f.HoldStep = "rights";
+        await using var f = new MusicAccountDetailsFixture("tx"); await f.Seed(); f.HoldResponse = true;
         using var firstCancel = new CancellationTokenSource();
         var first = f.Refresh(firstCancel.Token); await Wait(f.Entered.Task);
         int reads = f.Wrapper.Reads;
         var second = f.Refresh(); await Until(() => f.Wrapper.Reads > reads); await Task.Delay(20);
         firstCancel.Cancel(); await Error(() => first, "CANCELLED");
         Check(!f.Cancelled.Task.IsCompleted && !second.IsCompleted);
-        f.Release.TrySetResult(); Check((await second).Membership.Vip == true && f.Wrapper.Writes == 0 && f.Steps.Count == 3);
+        f.Release.TrySetResult(); Check((await second).Membership.Vip == true && f.Wrapper.Writes == 0 && f.Steps.Count == 1);
     }
     private static async Task Close()
     {
-        await using var f = new MusicAccountDetailsFixture("kg"); await f.Seed(); f.HoldStep = "rights";
+        await using var f = new MusicAccountDetailsFixture("kg"); await f.Seed(); f.HoldResponse = true;
         var refresh = f.Refresh(); await Wait(f.Entered.Task);
         var close = f.Owner.DisposeAsync().AsTask(); await Wait(f.Cancelled.Task); await Pending(close); await Pending(refresh);
         f.Release.TrySetResult(); await Error(() => refresh, "CLOSED"); await Wait(close);
         Check(f.Wrapper.Disposals == 0 && f.Wrapper.Writes == 0);
-        using var req = Request("wy");
-        var response = await f.Http.SendAccountDetailsAsync("wy", req, default, TimeSpan.FromSeconds(1));
-        Check(response.Body is not null, "Owner disposed borrowed HTTP");
+        var response = await f.Runtime.Client.CandidateAsync("wy", "song", new { id = "still-borrowed" }, null, "", default);
+        Check(response.ValueKind == JsonValueKind.Object, "Owner disposed borrowed runtime");
     }
     private static async Task DisposeStream()
     {
-        await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); f.HoldDisposal = true;
+        await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); f.HoldResponse = true;
         using var cancellation = new CancellationTokenSource();
         var task = f.Refresh(cancellation.Token); await Wait(f.Entered.Task); cancellation.Cancel();
         await Error(() => task.WaitAsync(TimeSpan.FromSeconds(2)), "CANCELLED");
@@ -326,10 +272,21 @@ public static partial class MusicNativeAccountDetailsTests
     }
     private static async Task Deadline()
     {
-        await using var f = new MusicAccountDetailsFixture("wy", timeout: TimeSpan.FromMilliseconds(70));
-        await f.Seed(); f.HoldStep = "profile";
-        var task = f.Refresh(); await Wait(f.Entered.Task); await Wait(f.Cancelled.Task); await Pending(task);
-        f.Release.TrySetResult(); await Error(() => task, "TIMEOUT");
+        await using var f = new MusicAccountDetailsFixture("wy");
+        await f.Seed(); f.HoldResponse = true;
+        var task = f.Refresh();
+        Task close = Task.CompletedTask;
+        try
+        {
+            await Wait(f.Entered.Task);
+            await f.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await Error(() => task, "TIMEOUT");
+            close = f.Owner.DisposeAsync().AsTask();
+            await Pending(close);
+            Check(f.Wrapper.Disposals == 0 && f.Wrapper.Writes == 0,
+                "the timed-out subscriber does not release the physical owner or its borrowed store");
+        }
+        finally { f.Release.TrySetResult(); await close; }
         Check(f.Steps.Count == 1 && f.Wrapper.Writes == 0);
     }
     private static async Task CancelRead()
@@ -340,9 +297,10 @@ public static partial class MusicNativeAccountDetailsTests
         cancellation.Cancel(); await Pending(task); f.Wrapper.Release.TrySetResult();
         await Error(() => task, "CANCELLED"); Check(f.Steps.Count == 0);
     }
-    private static async Task ExternalReplace()
+    private static Task ExternalReplace() => ExternalReplace("AUTH_EXPIRED");
+    private static async Task ExternalReplace(string code)
     {
-        await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); f.HoldStep = "rights"; f.Fault = "auth";
+        await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); f.HoldResponse = true; f.FailureCode = code;
         var old = f.Refresh(); await Wait(f.Entered.Task);
         await f.Mutate(doc => {
             var account = MusicAccountDetailsFixture.AccountRow(doc);
@@ -356,7 +314,7 @@ public static partial class MusicNativeAccountDetailsTests
     }
     private static async Task Logout()
     {
-        await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); await f.Refresh(); f.HoldStep = "rights";
+        await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed(); await f.Refresh(); f.HoldResponse = true;
         var task = f.Refresh(); await Wait(f.Entered.Task);
         var result = await f.Owner.CallAsync("music.accounts.logout", new { platform = "wy" });
         Check(result.GetProperty("ok").GetBoolean());
@@ -372,7 +330,7 @@ public static partial class MusicNativeAccountDetailsTests
         Check((await f.Refresh()).Membership.Vip == true);
         await f.Cache.DrainAsync();
         Check(f.Wrapper.Writes == 0 && (await f.Document())["entries"]!.AsArray().Count == 1);
-        Check((await f.Owner.ReadDetailsAsync("tx")).State == "verified");
+        Check((await f.Owner.ReadDetailsAsync("tx")).State == "saved");
         Check((await f.Refresh()).Membership.Vip == true);
         await f.Cache.DrainAsync();
         Check(f.Wrapper.Writes == 0);
@@ -384,8 +342,8 @@ public static partial class MusicNativeAccountDetailsTests
         Check((await f.Refresh()).Membership.Vip == true);
         await f.Cache.DrainAsync();
         var read = await f.Owner.ReadDetailsAsync("wy");
-        Check(read.State == "verified" && read.Profile?.DisplayName == "Fresh name" && f.Wrapper.Writes == 0);
-        Check((await f.Refresh()).Membership.Vip == true && f.Steps.Count == 4);
+        Check(read.State == "saved" && read.Profile?.DisplayName == "Fresh name" && f.Wrapper.Writes == 0);
+        Check((await f.Refresh()).Membership.Vip == true && f.Steps.Count == 2);
         await f.Owner.PrepareReadShutdownAsync(); f.Owner.ResumeReads();
         Check(await f.Owner.AcquireAsync("wy") is not null);
     }
@@ -395,7 +353,7 @@ public static partial class MusicNativeAccountDetailsTests
         f.CacheBacking.Hold = true;
         var result = await f.Refresh().WaitAsync(TimeSpan.FromSeconds(4));
         await Wait(f.CacheBacking.Entered.Task);
-        Check(result.Membership.Vip == true && result.State == "verified");
+        Check(result.Membership.Vip == true && result.State == "saved");
         var drain = f.Cache.DrainAsync(); await Pending(drain);
         // The app, not this borrower, drains physical cache I/O at shutdown.
         await f.Owner.PrepareReadShutdownAsync().WaitAsync(TimeSpan.FromSeconds(4));
@@ -412,7 +370,7 @@ public static partial class MusicNativeAccountDetailsTests
     {
         await using var a = new MusicAccountDetailsFixture("kg"); await a.Seed();
         await using var b = new MusicAccountDetailsFixture("kg", a.Root);
-        a.HoldStep = b.HoldStep = "rights";
+        a.HoldResponse = b.HoldResponse = true;
         var first = a.Refresh(); var second = b.Refresh(); await Wait(Task.WhenAll(a.Entered.Task, b.Entered.Task));
         a.Release.TrySetResult(); Check((await first).Membership.Vip == true);
         b.Release.TrySetResult(); Check((await second).Membership.Vip == true);
@@ -429,7 +387,7 @@ public static partial class MusicNativeAccountDetailsTests
         });
         var value = await f.Owner.ReadDetailsAsync("wy");
         Check(value.Generation == 2 && value.Profile?.DisplayName == "New account" && value.Membership.Vip is null &&
-            value.MembershipFreshness == MusicAccountDetailsFreshness.Missing && f.Steps.Count == 2);
+            value.MembershipFreshness == MusicAccountDetailsFreshness.Missing && f.Steps.Count == 1);
     }
     private static async Task Corrupt()
     {
@@ -437,7 +395,7 @@ public static partial class MusicNativeAccountDetailsTests
         await f.MutateCache(doc => MusicAccountDetailsFixture.DetailsRow(doc)["profile"] = "unusable");
         var miss = await f.Owner.ReadDetailsAsync("wy");
         Check(miss.Profile?.DisplayName == "Saved name" && miss.Membership.Vip is null);
-        Check((await f.Refresh()).Membership.Vip == true && f.Steps.Count == 4 && f.Wrapper.Writes == 0);
+        Check((await f.Refresh()).Membership.Vip == true && f.Steps.Count == 2 && f.Wrapper.Writes == 0);
         Check((await f.Owner.ReadDetailsAsync("wy")).Profile?.DisplayName == "Fresh name");
         await using var noRead = new MusicAccountDetailsFixture("wy", f.Root);
         noRead.CacheBacking.FailRead = true;
@@ -451,7 +409,7 @@ public static partial class MusicNativeAccountDetailsTests
         foreach (string field in new[] { "cookie", "token", "scope", "device", "qimei", "SYNTHETIC" })
             Check(!text.Contains(field, StringComparison.OrdinalIgnoreCase), "Sensitive display field");
         Check(result.RecheckAt == Math.Min(result.ProfileExpiresAt, result.MembershipRecheckAt));
-        f.Change = (step, value) => { if (step == "profile") value["profile"]!["nickname"] = "SYNTHETIC_WY_DETAILS_TOKEN"; return value; };
+        f.FailureCode = "INVALID_RESPONSE";
         await Error(() => f.Refresh(), "INVALID_RESPONSE");
         Check(f.Wrapper.Writes == 0);
     }

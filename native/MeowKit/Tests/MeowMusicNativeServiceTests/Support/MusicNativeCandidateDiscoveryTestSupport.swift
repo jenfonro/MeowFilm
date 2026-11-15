@@ -1,6 +1,9 @@
 import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicPlatform
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 enum MusicNativeCandidateDiscoveryFixture {
@@ -14,15 +17,18 @@ enum MusicNativeCandidateDiscoveryFixture {
         if platform == "kg" { data["hash"] = .string(id) }
         return .init(platform: platform, data: data.bytes)
     }
-    static func song() throws -> MJ { try MusicModel.normalize(track()) }
+    static func song() throws -> MJ { try NativeMusicFixture.storedSong(track()) }
     static func store(song: MJ? = nil) throws -> NativeMusicMemoryDocument {
         var document = try MusicDocument(nil, runID: "fixture")
-        let value = try song ?? self.song()
-        document.queue["entries"] = .array([.obj([("id", .string("entry-1")), ("song", value)])])
+        var value = try song ?? self.song()
+        if value["songId"].string.isEmpty { value["songId"] = .string(UUID().uuidString.lowercased()) }
+        if value["duration"].number > 0 { value["baselineDuration"] = value["duration"] }
+        document.library["library"]["songs"][value["songId"].string] = value
+        document.queue["entries"] = .array([.obj([("id", .string("entry-1")), ("songId", value["songId"])])])
         document.queue["currentId"] = .string("entry-1"); document.queue["serial"] = .n(1); document.queue["revision"] = .n(1)
         document.playback["position"] = .obj([("occurrenceId", .string("entry-1")), ("seconds", .n(23))])
         try document.validate()
-        return NativeMusicMemoryDocument(try document.encode(changed: ["queue", "playback"]))
+        return NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue", "playback"]))
     }
     static func target(_ snapshot: MusicCandidateDiscoverySnapshot, platform: String = "wy") -> MusicCandidateDiscoveryTarget? {
         snapshot.options.first { $0.playback.siteId == platform }?.target(quality: "128k")
@@ -70,7 +76,18 @@ actor MusicNativeCandidateDiscoveryBarrier {
     func count() -> Int { calls }
 }
 
-actor MusicNativeCandidateDiscoveryQQ: MusicPublicQQProviding {
+actor MusicNativeCandidateDiscoveryQQ: MusicPlatformFixtureResponding {
+    func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
+        switch request.operation {
+        case "search":
+            return try MusicPlatformFixture.page(await search(query: request.parameters[music: "keyword"].musicText,
+                page: Int(request.parameters[music: "page"].musicNumber ?? 1),
+                limit: Int(request.parameters[music: "limit"].musicNumber ?? 30)), platform: request.platform)
+        case "lyrics": return .object(["text": .string(try await lyrics(mid: request.parameters[music: "musicInfo"][music: "songmid"].musicText).text)])
+        default: throw MusicPlatformFixture.Failure.remote("UNSUPPORTED")
+        }
+    }
+
     let barrier: MusicNativeCandidateDiscoveryBarrier?
     let items: [MusicNativeTrackData]
     var queries: [String] = []
@@ -89,7 +106,7 @@ actor MusicNativeCandidateDiscoveryQQ: MusicPublicQQProviding {
     func calls() -> [String] { queries }
 }
 
-actor MusicNativeCandidateDiscoveryHTTP: MusicNativeHTTPTransport {
+actor MusicNativeDiscoveryPlatforms: MusicPlatformFixtureResponding {
     let barrier: MusicNativeCandidateDiscoveryBarrier?
     let wyStatus: Int
     var empty: Set<String>
@@ -99,47 +116,16 @@ actor MusicNativeCandidateDiscoveryHTTP: MusicNativeHTTPTransport {
          empty: Set<String> = [], failures: [String: MusicServiceError] = [:]) {
         self.barrier = barrier; self.wyStatus = wyStatus; self.empty = empty; self.failures = failures
     }
-    func send(_ request: MusicNativeHTTPRequest) async throws -> MusicNativeHTTPResponse {
-        guard let platform = ["interfacepc.music.163.com": "wy", "gateway.kugou.com": "kg",
-            "search.kuwo.cn": "kw", "jadeite.migu.cn": "mg"][request.url.host ?? ""] else {
-            throw MusicServiceError.invalidRequest
-        }
-        let wy = platform == "wy"
+    func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
+        guard request.operation == "search" else { throw MusicPlatformFixture.Failure.remote("UNSUPPORTED") }
+        let platform = request.platform
         platforms.append(platform)
         if let barrier { await barrier.enter() }
         if let failure = failures[platform] { throw failure }
-        if empty.contains(platform) {
-            let body: MJ
-            if wy {
-                body = .obj([("code", .n(200)), ("result", .obj([("songCount", .n(0)), ("songs", .array([]))]))])
-            } else if platform == "kg" {
-                body = .obj([("status", .n(1)), ("error_code", .n(0)), ("data", .obj([("total", .n(0)), ("lists", .array([]))]))])
-            } else if platform == "kw" {
-                body = MusicNativeKuwoSearchFixture.page([], total: 0)
-            } else {
-                body = MusicNativeMiguSearchFixture.page([], total: 0)
-            }
-            return .init(status: 200, data: body.bytes)
-        }
-        if wy && wyStatus != 200 { return .init(status: wyStatus, data: Data()) }
-        let body: MJ
-        if wy {
-            body = .obj([("code", .n(200)), ("result", .obj([("songCount", .n(1)), ("songs", .array([
-                .obj([("id", .n(321)), ("name", .string("Synthetic recording")), ("dt", .n(180_000)),
-                    ("ar", .array([.obj([("name", .string("Fixture"))])])), ("al", .obj([("id", .n(10)), ("name", .string("Album"))]))])
-            ]))]))])
-        } else if platform == "kg" {
-            body = .obj([("status", .n(1)), ("error_code", .n(0)), ("data", .obj([("total", .n(1)), ("lists", .array([
-                .obj([("FileHash", .string(String(repeating: "A", count: 32))), ("OriSongName", .string("Synthetic recording")),
-                    ("SingerName", .string("Fixture")), ("Duration", .n(180)), ("FileSize", .n(1000)),
-                    ("AlbumID", .string("10")), ("MixSongID", .string("11"))])
-            ]))]))])
-        } else if platform == "kw" {
-            body = MusicNativeKuwoSearchFixture.page([MusicNativeKuwoSearchFixture.song()], total: 1)
-        } else {
-            body = MusicNativeMiguSearchFixture.page([[MusicNativeMiguSearchFixture.song()]], total: 1)
-        }
-        return .init(status: 200, data: body.bytes)
+        if platform == "wy" && wyStatus != 200 { throw MusicPlatformFixture.Failure.remote("UPSTREAM_HTTP") }
+        let id = platform == "kg" ? String(repeating: "A", count: 32) : "321"
+        let rows = empty.contains(platform) ? [] : [MusicNativeCandidateDiscoveryFixture.track(platform, id: id)]
+        return try MusicPlatformFixture.page(rows, platform: platform)
     }
     func calls() -> [String] { platforms }
 }
@@ -152,6 +138,8 @@ actor MusicNativeCandidateDiscoveryScripts: MusicScriptResolving {
     var barrier: MusicNativeCandidateDiscoveryBarrier?
     var mutateAfterResolve = false
     var requests: [MusicScriptRequest] = []
+    private var sourcesBarrier: MusicNativeCandidateDiscoveryBarrier?
+    private var sourcesCount = 0
     func configure(generation: Int = 1, version: String = "1", revision: String = String(repeating: "a", count: 64),
                    barrier: MusicNativeCandidateDiscoveryBarrier? = nil, mutateAfterResolve: Bool = false) {
         self.generation = generation; self.version = version; self.revision = revision
@@ -160,7 +148,13 @@ actor MusicNativeCandidateDiscoveryScripts: MusicScriptResolving {
     func directory(_ state: MusicScriptSourceItem.State) { self.state = state; if state != .ready { generation = 0 } }
     func supported(_ sites: [String]) { self.sites = sites }
     func installed(_ installations: [String]) { self.installations = installations }
-    func sources() -> [MusicScriptSource] { installations.map { snapshot($0) } }
+    func holdSources(_ barrier: MusicNativeCandidateDiscoveryBarrier) { sourcesBarrier = barrier }
+    func sourcesCalls() -> Int { sourcesCount }
+    func sources() async -> [MusicScriptSource] {
+        sourcesCount += 1
+        await sourcesBarrier?.enter()
+        return installations.map { snapshot($0) }
+    }
     func snapshot(_ installation: String) -> MusicScriptSource {
         .init(installationID: installation, generation: generation, enabled: state != .disabled, state: state,
             version: version, contentHash: String(repeating: "a", count: 64), revisionHash: revision,

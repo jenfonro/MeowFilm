@@ -11,7 +11,7 @@ public static partial class MusicNativeLibraryTests
     {
         yield return new("Native music lyric display independent cache preserves plain and true words across restart", LyricDisplayRestart);
         yield return new("Native music local lyrics current schema preserves plain and true words across restart", LocalLyricsRestart);
-        yield return new("Native music local lyric documents reject invalid schemas without writes", LyricSnapshotSchemas);
+        yield return new("Native music current local lyric documents reject damaged schema fields without writes", LyricSnapshotSchemas);
         yield return new("Native music lyric snapshots reject timing fields without writes", LyricSnapshotFields);
     }
 
@@ -73,7 +73,7 @@ public static partial class MusicNativeLibraryTests
         await Ok(owner, "music.lyrics.local.save", new { song, text = PersistedLyricText });
         var saved = f.Store.State("native-local-lyrics");
         var lines = CurrentLyricRows();
-        Check(saved["schema"]!.GetValue<int>() == 2 && JsonNode.DeepEquals(saved["items"]![0]!["lines"], lines));
+        Check(saved["schema"]!.GetValue<int>() == 1 && JsonNode.DeepEquals(saved["items"]![0]!["lines"], lines));
         byte[] bytes = f.Store.Bytes!.ToArray(); int writes = f.Store.Writes;
         await owner.DisposeAsync();
 
@@ -85,22 +85,32 @@ public static partial class MusicNativeLibraryTests
         Check(f.Store.Writes == writes && bytes.SequenceEqual(f.Store.Bytes!));
     }
 
-    private static JsonObject LyricSnapshot(int schema, JsonArray lines) =>
-        O(new { schema, items = new[] {
-            new { songKey = new string('a', 64), songId = "library:local:a", contentHash = new string('b', 64), lines }
-        } });
+    private static async Task<JsonObject> CurrentLocalLyricState()
+    {
+        await using var f = new Fixture(); var owner = f.Owner();
+        var (song, _) = await SeedLyricSong(owner);
+        await Ok(owner, "music.lyrics.local.save", new { song, text = PersistedLyricText });
+        return f.Store.State("native-local-lyrics");
+    }
 
     private static async Task LyricSnapshotSchemas()
     {
-        foreach (int schema in new[] { 1, 3 })
-            await RejectDocument(Document(("native-local-lyrics", LyricSnapshot(schema, CurrentLyricRows()))));
+        var current = await CurrentLocalLyricState();
+        foreach (bool missing in new[] { false, true })
+        {
+            var damaged = current.DeepClone().AsObject();
+            if (missing) damaged.Remove("schema"); else damaged["schema"] = "invalid";
+            await RejectDocument(Document(("native-local-lyrics", damaged)));
+        }
     }
 
     private static async Task LyricSnapshotFields()
     {
         var lines = CurrentLyricRows();
         lines[0]!["timing"] = "word";
-        await RejectDocument(Document(("native-local-lyrics", LyricSnapshot(2, lines))));
+        var current = await CurrentLocalLyricState();
+        current["items"]![0]!["lines"] = lines.DeepClone();
+        await RejectDocument(Document(("native-local-lyrics", current)));
 
         await using var f = new Fixture(); var owner = f.Owner();
         var (song, sourceKey) = await SeedLyricSong(owner);

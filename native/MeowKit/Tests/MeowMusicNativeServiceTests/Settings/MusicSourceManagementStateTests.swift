@@ -282,7 +282,9 @@ final class MusicSourceManagementStateTests: XCTestCase {
             XCTAssertEqual(state.scripts, actual)
             XCTAssertEqual(state.item(item.id)?.enabled, failure != .scriptFailed)
             XCTAssertTrue(state.pending.isEmpty)
-            XCTAssertEqual(state.error, failure?.localizedDescription)
+            XCTAssertNil(state.error, "The retired page cannot publish its late receipt")
+            XCTAssertEqual(model.settingsReceipts.unknown.map(\.setting),
+                failure == .commitUnconfirmed ? ["scripts/" + item.id + "/enabled"] : [])
             state.close(); await model.close(); await native.close()
         }
     }
@@ -299,10 +301,12 @@ final class MusicSourceManagementStateTests: XCTestCase {
         await scripts.hold(gate)
         state.setScript(item.id, enabled: true); await gate.started()
         state.close(); state.start()
+        state.setScript(item.id, enabled: true)
         await gate.release(); await state.flush()
         let actual = await scripts.scriptSources(), cancelled = await scripts.writeWasCancelled
-        let notifications = await service.configurationNotifications
+        let notifications = await service.configurationNotifications, requests = await scripts.enabledRequests
         XCTAssertFalse(cancelled); XCTAssertEqual(notifications, 1)
+        XCTAssertEqual(requests, [true], "Reopening cannot resubmit an accepted write")
         XCTAssertEqual(state.scripts, actual)
         XCTAssertTrue(try XCTUnwrap(state.item(item.id)).enabled)
         XCTAssertTrue(state.pending.isEmpty); XCTAssertNil(state.error)
@@ -325,6 +329,8 @@ final class MusicSourceManagementStateTests: XCTestCase {
         await scripts.holdImport(gate)
         state.importFiles(files); await gate.started()
         state.hide(page); state.show(page)
+        XCTAssertTrue(state.importing)
+        state.importFiles([files[1]])
         await gate.release(); await state.flush()
         let imports = await scripts.importRequests, cancelled = await scripts.writeWasCancelled
         let notifications = await service.configurationNotifications

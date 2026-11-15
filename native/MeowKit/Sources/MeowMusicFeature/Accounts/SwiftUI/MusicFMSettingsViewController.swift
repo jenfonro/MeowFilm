@@ -100,11 +100,11 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
             return
         }
         let state = MusicFMSettingsState(
-            active: model.hasAccess ? owner.activeHomeFM : nil,
+            active: model.hasAccess ? model.selection : nil,
             available: model.hasAccess && owner.isFMActive,
             pendingChoice: model.hasAccess ? model.pendingChoice : nil
         )
-        pageTitle = MusicFMModeChoice.title(for: owner.activeHomeFM)
+        pageTitle = MusicFMModeChoice.title(for: model.selection)
         if rendered?.0 != state || rendered?.1 != theme {
             rendered = (state, theme)
             setContent(MusicFMSettingsContent(

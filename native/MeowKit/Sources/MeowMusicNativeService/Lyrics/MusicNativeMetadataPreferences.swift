@@ -73,13 +73,19 @@ extension NativeMusicService {
         }
         let result: (MusicMetadataPreferences, Bool)
         do {
-            result = try transaction(["playback"]) { d -> (MusicMetadataPreferences, Bool) in
+            result = try transaction(["playback", "library"]) { d -> (MusicMetadataPreferences, Bool) in
                 try musicRequire(d.playback["revision"].int == change.ifRevision, .staleRevision)
                 try musicRequire(change.ifRevision < 9_007_199_254_740_991, .limit)
                 var prefs = try NativeMetadataPreferences(d.playback)
                 let before = prefs
                 try prefs.apply(change, available: enabledPlatforms, to: &d.playback)
                 d.playback["revision"] = .n(change.ifRevision + 1)
+                if before.order != prefs.order || before.enabled != prefs.enabled {
+                    for (id, var song) in d.library["library"]["songs"].fields {
+                        selectSongArtwork(&song, playback: d.playback, force: true)
+                        d.library["library"]["songs"][id] = song
+                    }
+                }
                 return (prefs.visible(revision: change.ifRevision + 1, available: enabledPlatforms),
                         before.order != prefs.order || before.enabled != prefs.enabled)
             }
@@ -98,45 +104,66 @@ extension NativeMusicService {
     }
 
     public func metadataCandidates(occurrenceID: String) async throws -> MusicMetadataCandidates {
-        let own = epoch, d = try read()
         try musicRequire(!occurrenceID.isEmpty)
+        let d = try read()
         try musicRequire(musicSame(d.queue["currentId"].string, occurrenceID), .targetChanged)
         let ref = MusicReference(kind: .queue, id: occurrenceID)
-        let song = try await sharedSongMetadata(playbackSong(ref, d)), track = try MusicModel.track(song, ref)
+        let song = try self.song(ref, d), track = try MusicModel.track(song, ref)
         let prefs = try NativeMetadataPreferences(d.playback)
             .visible(revision: d.playback["revision"].int, available: enabledPlatforms)
         let sources = try MusicModel.sources(song)
-        let rows = song["sources"].array.filter { row in
-            let key = row["sourceKey"].string, info = MusicModel.sourceData(row)
-            return !key.isEmpty && musicSame(key, MusicModel.nativeKey(row)) && MusicModel.compatible(song, row) &&
-                platformEnabled(info["source"].string)
-        }
+        let rows = song["sources"].array.filter { platformEnabled($0["source"].string) }
         var candidates: [MusicMetadataCandidate] = []
         for platform in prefs.platforms where prefs.enabledPlatforms.contains(platform) {
             let ordered = rows.filter { $0["source"].string == platform.rawValue }
                 .sorted { $0["sourceKey"].string.compare($1["sourceKey"].string,
                     locale: Locale(identifier: "en_US")) == .orderedAscending }
-            for row in ordered.prefix(2) {
+            for row in ordered {
                 guard let source = sources.first(where: { musicSame($0.sourceKey, row["sourceKey"].string) }) else { continue }
                 let info = MusicModel.sourceData(row)
                 let cover = info["img"]
-                let artwork = platform == .kuwo || platform == .migu
-                    ? MusicNativePublicBrowseWire.artwork(cover, platform: platform)
-                    : MusicNativePublicBrowseSupport.artwork(cover)
+                let artwork = MusicNativePublicBrowseSupport.artwork(cover)
                 candidates.append(.init(source: source, artwork: artwork))
             }
         }
-        // Recording identity does not change when metadata discovery adds a
-        // locator, renews an artwork URL, or the queue creates a new occurrence.
-        let identity = MJ.array([song["songId"], song["duration"]])
-        let result = MusicMetadataCandidates(occurrenceID: occurrenceID, queueRevision: d.queue["revision"].int,
-            preferences: prefs, track: track, contentRevision: nil,
-            contentFingerprint: identity.stable.digest, candidates: candidates)
-        try check(own)
-        let latest = try read()
-        try musicRequire(latest.queue["currentId"].string == occurrenceID &&
-            latest.queue["revision"] == d.queue["revision"] &&
-            latest.playback["revision"] == d.playback["revision"], .staleRevision)
-        return result
+        return .init(occurrenceID: occurrenceID, queueRevision: d.queue["revision"].int,
+                     preferences: prefs, track: track, candidates: candidates)
+    }
+}
+
+extension NativeMusicService: MusicArtworkSelecting {
+    public func failedArtwork(songID: String, url: URL, attempted: Set<URL>) throws -> URL? {
+        try transaction(["library"]) { document in
+            var song = try repositorySong(songID, document)
+            // A late failed image must not replace a newer authoritative URL.
+            guard song["cover_url"].string == url.absoluteString else {
+                return MusicNativePublicBrowseSupport.artwork(song["cover_url"])
+            }
+            selectSongArtwork(&song, playback: document.playback, force: true,
+                              failedURLs: Set(attempted.map(\.absoluteString)).union([url.absoluteString]))
+            document.library["library"]["songs"][songID] = song
+            return MusicNativePublicBrowseSupport.artwork(song["cover_url"])
+        }
+    }
+    public func succeededArtwork(songID: String, url: URL, replacing requested: URL) throws -> URL? {
+        try transaction(["library"]) { document in
+            var song = try repositorySong(songID, document)
+            let current = song["cover_url"].string
+            // A real bounded rendition or explicit retry may update this
+            // selection. A late success cannot overwrite a newer selection.
+            guard current.isEmpty || current == requested.absoluteString,
+                  MusicArtworkURL.normalized(url.absoluteString) == url,
+                  MusicModel.publicURL(.string(url.absoluteString)).string == url.absoluteString,
+                  let row = song["sources"].array.first(where: {
+                      ($0["sourceKey"] == song["artworkSourceKey"] || $0["musicInfo"]["img"].string == requested.absoluteString)
+                          && platformEnabled($0["source"].string)
+                  }) else { return MusicNativePublicBrowseSupport.artwork(song["cover_url"]) }
+            let preferences = try NativeMetadataPreferences(document.playback)
+            guard let platform = MusicPublicBrowsePlatform(rawValue: row["source"].string),
+                  preferences.enabled.contains(platform) else { return MusicNativePublicBrowseSupport.artwork(song["cover_url"]) }
+            song["artworkSourceKey"] = row["sourceKey"]; song["cover_url"] = .string(url.absoluteString)
+            document.library["library"]["songs"][songID] = song
+            return url
+        }
     }
 }

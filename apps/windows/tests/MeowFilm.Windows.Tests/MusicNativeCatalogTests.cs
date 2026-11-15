@@ -15,6 +15,7 @@ public static partial class MusicNativeCatalogTests
         foreach (var test in NextCases()) yield return test;
         yield return new("Native catalog public boundary borrows platform and library", Boundary);
         yield return new("Native catalog base typed routes preserve UI DTO and continuation", BaseRoutes);
+        yield return new("Native catalog unused canonical branches leave consumed songs and the single repository unchanged", CanonicalExtras);
         foreach (string route in new[] { "personalPlaylists", "daily", "fm", "similar", "heartbeat", "queueRecommendations", "album", "artist" })
             yield return new("Native catalog explicit typed catalog route " + route, () => PersonalRoute(route));
         yield return new("Native catalog artist cancellation remains owned until the typed read settles", ArtistCancellation);
@@ -22,17 +23,18 @@ public static partial class MusicNativeCatalogTests
         foreach (var test in NetworkPlaylistCases()) yield return test;
         yield return new("Native catalog reference save does not request or persist playlist members", ReferenceSave);
         yield return new("Native catalog complete multi-page queue selection and source context", CompleteQueue);
+        yield return new("Native catalog long canonical locator and context survive commit archive and current-format cold read", LongQueueContext);
         yield return new("Native catalog full playlist resolves preview selection by identity and refuses missing songs", CompleteQueueByIdentity);
         yield return new("Native catalog empty reference saves but cannot replace queue", Empty);
-        yield return new("Native catalog duplicate member rejects while equal recording IDs remain legal", Duplicates);
+        yield return new("Native catalog duplicate recordings preserve independent occurrences and permanent repository identity", Duplicates);
         yield return new("Native catalog failed final page leaves existing queue and library unchanged", TailFailure);
         foreach (string defect in new[] { "identity", "page", "length", "total", "snapshot", "name", "strength", "more", "continuation" })
-            yield return new("Native catalog rejects incomplete or changing page " + defect, () => BadPage(defect));
+            yield return new("Native catalog accepts unused canonical result variation " + defect, () => BadPage(defect));
         foreach (string platform in new[] { "tx", "kg" })
         {
-            yield return new("Native catalog fresh full second scan succeeds " + platform, () => SecondScan(platform, "none"));
-            yield return new("Native catalog second-scan tail failure cannot half-write " + platform, () => SecondScan(platform, "failure"));
-            yield return new("Native catalog second-scan changed member cannot half-write " + platform, () => SecondScan(platform, "member"));
+            yield return new("Native catalog full result needs no confirming second scan " + platform, () => SecondScan(platform, "none"));
+            yield return new("Native catalog failed full result cannot half-write " + platform, () => SecondScan(platform, "failure"));
+            yield return new("Native catalog changed actual member is consumed without a second scan " + platform, () => SecondScan(platform, "member"));
         }
         yield return new("Native catalog complete private locator projection and exact 30-member pages", PrivateLocator);
         yield return new("Native catalog private KG sort across pages preserves duplicate hash occurrences", PrivateOrder);
@@ -99,7 +101,8 @@ public static partial class MusicNativeCatalogTests
     {
         int offset = (request.Page - 1) * request.Limit;
         var indices = Enumerable.Range(offset, Math.Max(0, Math.Min(request.Limit, total - offset))).ToArray();
-        bool privateKg = request.Personal?.Kind == MusicPersonalPlaylistKind.KugouOwned;
+        bool privateKg = request.Personal is { } personal && personal.TryGetProperty("kind", out var kind) &&
+            kind.GetString() == "kugou-owned";
         var result = O(E(new
         {
             platform = request.Platform, id = request.Id, name = "Complete fixture", page = request.Page,
@@ -139,12 +142,18 @@ public static partial class MusicNativeCatalogTests
             lock (gate) calls.Add(call);
             if (Handler is not null) return Handler(call);
             token.ThrowIfCancellationRequested();
-            return Task.FromResult(request is MusicPlaylistRequest p ? Pages?.Invoke(p) ?? Page(p, Total)
+            if (request is MusicSongRequest song)
+                return Task.FromResult(MusicSongFixture.Element(MusicSongFixture.Online(
+                    song.Platform, song.Id, "Current song", "Synthetic", duration: 180)));
+            return Task.FromResult(request is MusicPlaylistRequest p
+                ? Pages?.Invoke(method == "playlist.complete" ? p with { Limit = Total } : p) ??
+                    Page(method == "playlist.complete" ? p with { Limit = Total } : p, Total)
                 : E(new { marker = method, items = new[] { "opaque" }, continuation = new { provider = new { cursor = 7 } } }));
         }
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default) => Run("search", r, t);
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Run("song", r, t);
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Run("playlist", r, t);
+        public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Run("playlist.complete", r, t);
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Run("home", r, t);
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken t = default) => Run("channels", r, t);
         public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default) => Run("channel", r, t);
@@ -262,7 +271,7 @@ public static partial class MusicNativeCatalogTests
         Check(typeof(MusicNativeCatalogOwner).GetInterfaces().All(t => t.Name != "IRuntimeClient"));
         Check(typeof(IMusicPlatformCatalog).GetMethod(nameof(IMusicArtistCatalog.ArtistAsync)) is null,
             "Artist capability must remain optional for unrelated platform substitutes");
-        Check(S(Ok(await f.Run("describe")).GetProperty("descriptor"), "platform") == "explicit-fixture");
+        Check(S(Ok(await f.Run("describe")), "platform") == "explicit-fixture");
         Check(f.Store.Bytes is null && f.Platform.Calls.Length == 0);
         await f.Owner.DisposeAsync(); await f.Owner.DisposeAsync();
         Check(!f.Platform.Disposed && !f.Store.Disposed); Ok(await f.Library.ExecuteAsync("music.library.list"));
@@ -271,10 +280,12 @@ public static partial class MusicNativeCatalogTests
     private static async Task BaseRoutes()
     {
         await using var f = new Fixture();
+        var before = await f.Queue();
         var cursor = E(new { opaque = new { position = 7, seen = new[] { "x" } } });
         Ok(await f.Run("search", new { platform = "tx", keyword = "Fixture", kind = "playlists", page = 2, limit = 17, refresh = true }));
         Check(f.Platform.Calls[^1].Request is MusicSearchRequest { Platform: "tx", Kind: MusicSearchKind.Playlists, Page: 2, Limit: 17, Refresh: true });
-        Check(S(Ok(await f.Run("song", new { platform = "wy", id = "5" })).GetProperty("song"), "marker") == "song");
+        Check(MusicSongFixture.NativeId(Ok(await f.Run("song", new { platform = "wy", id = "5" })).GetProperty("song")) == "5" &&
+            f.Platform.Calls[^1].Method == "song");
         Ok(await f.Run("playlist", new { platform = "wy", id = "42", page = 2, limit = 7, snapshot = new string('a', 64) }));
         Check(f.Platform.Calls[^1].Request is MusicPlaylistRequest { Page: 2, Limit: 7, Personal: null });
         Ok(await f.Run("home", new { platform = "kg", continuation = cursor, refresh = true }));
@@ -288,7 +299,63 @@ public static partial class MusicNativeCatalogTests
         Check(Encoding.UTF8.GetByteCount(personalCursor.GetRawText()) > 65536);
         Ok(await f.Run("personalPlaylists", new { platform = "wy", page = 5001, limit = 1, continuation = personalCursor }));
         Check(((MusicPersonalPlaylistsRequest)f.Platform.Calls[^1].Request!).Continuation!.Value.GetRawText() == personalCursor.GetRawText());
-        Check(f.Store.Writes == 0);
+        var after = await f.Queue();
+        Check(f.Store.Writes > 0 && N(after, "version") == N(before, "version") &&
+            S(after, "currentId") == S(before, "currentId") &&
+            JsonElement.DeepEquals(after.GetProperty("entries"), before.GetProperty("entries")),
+            "Real metadata adoption cannot change the queue projection or revision");
+    }
+    private static async Task CanonicalExtras()
+    {
+        await using var f = new Fixture();
+        var before = await f.Queue();
+        var canonical = O(E(new
+        {
+            platform = "wy",
+            sections = new[] { new { id = "songs", title = "Current songs", type = "songs",
+                items = new[] { new { id = "visible-song", song = MusicSongFixture.Online(
+                    "wy", "actual-song", "Actual title", "Actual artist", duration: 180,
+                    cover: "https://images.example.test/actual.png") } } } },
+            more = false
+        }));
+        string? songId = null; int writes = 0;
+        var variants = new[] { "missing", "null", "text", "array", "object" };
+        foreach (string variant in variants)
+        {
+            var response = canonical.DeepClone().AsObject();
+            if (variant != "missing")
+                response["C"] = variant switch
+                {
+                    "null" => null,
+                    "text" => JsonValue.Create("unused"),
+                    "array" => new JsonArray(MusicSongFixture.Online("tx", "ignored-song", "Ignored title")),
+                    _ => new JsonObject
+                    {
+                        ["title"] = "Not a consumed song",
+                        ["sources"] = new JsonObject { ["notAnArray"] = true },
+                        ["nested"] = MusicSongFixture.Online("kg", "ignored-nested", "Ignored nested title")
+                    }
+                };
+            response["D"] = new JsonObject { ["items"] = new JsonArray(new JsonObject
+                { ["title"] = "Unused item", ["sources"] = false }) };
+            f.Platform.Handler = _ => Task.FromResult(J(response));
+            var result = Ok(await f.Run("home", new { platform = "wy", refresh = true }));
+            var card = MusicCatalogDto.Read(result, "wy", "home", "").Single().Items.Single();
+            Check(card.Song is not null && card.Title == "Actual title" && card.Subtitle == "Actual artist" &&
+                card.Cover == "https://images.example.test/actual.png" && Guid.TryParseExact(card.Song.Id, "D", out _),
+                "Unused branches cannot reject or alter the consumed song");
+            songId ??= card.Song!.Id;
+            var songs = (await f.Library.ReadLibrarySyncAsync()).Library.GetProperty("songs");
+            Check(card.Song!.Id == songId && songs.EnumerateObject().Count() == 1 &&
+                songs.GetProperty(songId).GetProperty("songId").GetString() == songId,
+                "Unused branches cannot create another recording or replace its permanent UUID");
+            if (variant == "missing") writes = f.Store.Writes;
+            Check(f.Store.Writes == writes, "Unchanged consumed facts cannot write hidden songs");
+            var queue = await f.Queue();
+            Check(N(queue, "version") == N(before, "version") && S(queue, "currentId") == S(before, "currentId") &&
+                JsonElement.DeepEquals(queue.GetProperty("entries"), before.GetProperty("entries")));
+        }
+        Check(f.Platform.Calls.Length == variants.Length, "Canonical consumption cannot request supplemental confirmation");
     }
     private static async Task PersonalRoute(string route)
     {
@@ -367,22 +434,21 @@ public static partial class MusicNativeCatalogTests
         await using var f = new Fixture();
         foreach (var (route, input) in new (string, object)[]
         {
-            ("daily", new { }), ("daily", new { platform = "all" }), ("daily", new { platform = "wy", branch = "other" }),
+            ("daily", new { }), ("daily", new { platform = "wy", branch = "other" }),
             ("fm", new { platform = "wy", mode = "auto" }), ("personalPlaylists", new { platform = "tx", kind = "other" }),
             ("similar", new { platform = "wy", sourceIds = Array.Empty<string>(), sourceType = "song" }),
             ("similar", new { platform = "wy", sourceIds = new[] { "1" } }),
-            ("similar", new { platform = "wy", sourceIds = new[] { "1" }, sourceType = "" }),
             ("heartbeat", new { platform = "wy" }),
             ("heartbeat", new { platform = "wy", entry = "unknown" }),
             ("heartbeat", new { platform = "wy", entry = "current" }),
-            ("heartbeat", new { platform = "wy", entry = "favorites", songId = "" }),
-            ("album", new { platform = "wy", id = "x", cookie = "synthetic-not-forwarded" }),
-            ("artist", new { platform = "wy", id = "13", cookie = "synthetic-not-forwarded" }),
             ("search", new { platform = "wy", keyword = "x", kind = "unknown" }),
         }) Error(await f.Run(route, input), "INVALID_REQUEST");
-        Error(await f.Run("daily", JsonDocument.Parse("{\"platform\":\"wy\",\"platform\":\"tx\"}").RootElement), "INVALID_REQUEST");
         Error(await f.Run("personal.aggregate", new { platform = "wy" }), "METHOD_UNAVAILABLE");
         Check(f.Platform.Calls.Length == 0 && f.Store.Writes == 0);
+        Ok(await f.Run("album", new { platform = "wy", id = "x", cookie = "synthetic-not-forwarded" }));
+        Ok(await f.Run("artist", new { platform = "wy", id = "13", extra = new { value = 1 } }));
+        Ok(await f.Run("daily", JsonDocument.Parse("{\"platform\":\"wy\",\"platform\":\"tx\"}").RootElement));
+        Check(f.Platform.Calls.Last().Request is MusicDailyRequest { Platform: "tx" } && f.Store.Writes == 0);
     }
     private static async Task ReferenceSave()
     {
@@ -407,58 +473,97 @@ public static partial class MusicNativeCatalogTests
     {
         await using var f = new Fixture();
         var before = await f.Queue(); var stage = await f.Prepare();
-        Check(N(stage, "count") == 235 && f.Store.Writes == 0);
-        Check(f.Platform.Calls.Select(c => ((MusicPlaylistRequest)c.Request!).Page).SequenceEqual([1, 2, 3]));
-        Check(((MusicPlaylistRequest)f.Platform.Calls[0].Request!).Snapshot is null);
-        Check(f.Platform.Calls.Skip(1).All(c => ((MusicPlaylistRequest)c.Request!).Snapshot == S(stage, "snapshot")));
+        Check(N(stage, "count") == 235 && f.Store.Writes == 1 && N(await f.Queue(), "version") == N(before, "version"));
+        Check(f.Platform.Calls.Single().Method == "playlist.complete");
         var reply = Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", index = 101,
-            expectedVersion = N(before, "version"), expectedSongId = S(Song("wy", 101), "songId") }));
+            expectedVersion = N(before, "version") }));
         var queue = await f.Queue();
         Check(N(queue, "total") == 235 && S(queue, "currentId") == S(reply, "currentId") && N(reply, "version") == 1 && N(reply, "mode") == 1);
         Check(MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")) == NativeId("wy", 101));
-        Check(S(queue.GetProperty("source"), "platform") == "wy" && f.Store.Writes == 1);
+        Check(S(queue.GetProperty("source"), "platform") == "wy" && f.Store.Writes == 2);
         var context = queue.GetProperty("current").GetProperty("context");
         Check(!context.TryGetProperty("heartbeatPlaylistId", out _) &&
             !context.TryGetProperty("heartbeatAccountId", out _), "ordinary playlists carry no official heartbeat qualification");
         Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", index = 101,
             expectedVersion = N(queue, "version") }), "CATALOG_TOKEN_EXPIRED");
-        Check(f.Store.Writes == 1 && (await f.Queue()).GetRawText() == queue.GetRawText());
+        Check(f.Store.Writes == 2 && (await f.Queue()).GetRawText() == queue.GetRawText());
     }
     private static async Task CompleteQueueByIdentity()
     {
         await using var f = new Fixture();
         var stage = await f.Prepare(); string token = S(stage, "token");
         Error(await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0,
-            expectedSongId = "absent" }), "SNAPSHOT_CHANGED");
-        Check(N(await f.Queue(), "total") == 0 && f.Store.Writes == 0);
-        var selected = S(Song("wy", 101), "songId");
-        Ok(await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0, expectedSongId = selected }));
+            memberId = "absent" }), "NOT_FOUND");
+        Check(N(await f.Queue(), "total") == 0 && f.Store.Writes == 1);
+        var selected = NativeId("wy", 101);
+        Ok(await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0, memberId = selected }));
         var queue = await f.Queue();
-        Check(N(queue, "total") == 235 && S(queue.GetProperty("current").GetProperty("song"), "songId") == selected);
-        Check(f.Store.Writes == 1);
+        Check(N(queue, "total") == 235 && MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")) == selected);
+        Check(f.Store.Writes == 2);
+    }
+    private static async Task LongQueueContext()
+    {
+        await using var f = new Fixture();
+        f.Platform.Total = 2;
+        string locator = "canonical:" + new string('x', 2300), title = new('歌', 2300),
+            keyword = new('搜', 600), account = new('a', 200);
+        f.Platform.Pages = request =>
+        {
+            var page = O(Page(request, f.Platform.Total));
+            page["id"] = locator; page["name"] = title; page["heartbeatAccountId"] = account;
+            return J(page);
+        };
+        var stage = await f.Prepare(id: locator);
+        Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }));
+        var queue = await f.Queue();
+        var context = queue.GetProperty("current").GetProperty("context");
+        Check(S(context, "sourceId") == locator && S(context, "heartbeatPlaylistId") == locator &&
+            S(context, "heartbeatAccountId") == account && S(queue.GetProperty("source"), "id") == locator &&
+            S(queue.GetProperty("source"), "title") == title);
+        Ok(await f.Library.ExecuteAsync("music.queue.replace",
+            new { songs = new[] { Song("wy", 99) }, index = 0, context = new { searchKeyword = keyword } }));
+        await using var reader = new MusicLibraryOwner(f.Store);
+        var restored = Ok(await reader.ExecuteAsync("music.queue.get"));
+        Check(S(restored.GetProperty("current").GetProperty("context"), "searchKeyword") == keyword);
+        var archives = Ok(await reader.ExecuteAsync("music.history.list", new { kind = "playlists" })).GetProperty("items");
+        Check(archives.GetArrayLength() == 1 && S(archives[0], "title") == title);
+        var archive = Ok(await reader.ExecuteAsync("music.history.detail",
+            new { kind = "playlists", id = S(archives[0], "id") }));
+        Check(S(archive.GetProperty("source"), "id") == locator &&
+            archive.GetProperty("entries").EnumerateArray().All(entry =>
+                S(entry.GetProperty("context"), "sourceId") == locator &&
+                Guid.TryParse(S(entry.GetProperty("song"), "songId"), out _)));
     }
     private static async Task Empty()
     {
         await using var f = new Fixture(); f.Platform.Total = 0;
         var stage = await f.Prepare(); Check(N(stage, "count") == 0);
-        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "INVALID_REQUEST");
+        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "NOT_FOUND");
         var saved = Ok(await f.Run("playlist.save", new { platform = "wy", id = "42", name = "Empty reference", count = 0 }));
         Check(N(saved.GetProperty("collection"), "count") == 0 && f.Store.Writes == 1);
     }
     private static async Task Duplicates()
     {
         await using var f = new Fixture();
+        f.Platform.Total = 101;
         f.Platform.Pages = p => Page(p, 101, i => Song("wy", i == 100 ? 0 : i));
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "PAGINATION_STALLED");
-        f.Platform.Pages = p => Page(p, 101, i => { var song = O(Song("wy", i)); song["songId"] = "song:shared-recording"; return J(song); });
-        var stage = await f.Prepare(); Check(N(stage, "count") == 101 && f.Store.Writes == 0);
+        var stage = await f.Prepare();
+        Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play",
+            memberId = NativeId("wy", 0), memberOccurrence = 1, expectedVersion = 0 }));
+        var queue = Ok(await f.Library.ExecuteAsync("music.queue.get", new { limit = 100 }));
+        var tail = Ok(await f.Library.ExecuteAsync("music.queue.get", new { offset = 100, limit = 100 }));
+        var entries = queue.GetProperty("entries").EnumerateArray().Concat(tail.GetProperty("entries").EnumerateArray()).ToArray();
+        Check(N(stage, "count") == 101 && entries.Length == 101 &&
+            entries.Select(row => S(row, "id")).Distinct().Count() == 101 &&
+            S(entries[0].GetProperty("song"), "songId") == S(entries[100].GetProperty("song"), "songId") &&
+            S(queue, "currentId") == S(entries[100], "id") && f.Store.Writes == 2);
     }
     private static async Task TailFailure()
     {
         await using var f = new Fixture();
         Ok(await f.Library.ReplaceQueueAsync([Song("wy", 999)], 0, null, 0));
         var saved = f.Store.Bytes!.ToArray();
-        f.Platform.Pages = p => p.Page == 3 ? throw new InvalidOperationException("private-error") : Page(p);
+        f.Platform.Pages = _ => throw new InvalidOperationException("private-error");
         Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "INVALID_RESPONSE");
         Check(f.Store.Bytes!.SequenceEqual(saved) && f.Store.Writes == 1 && N(await f.Queue(), "total") == 1);
     }
@@ -467,7 +572,7 @@ public static partial class MusicNativeCatalogTests
         await using var f = new Fixture();
         f.Platform.Pages = p =>
         {
-            var result = O(Page(p)); if (p.Page != 2) return J(result);
+            var result = O(Page(p));
             switch (defect)
             {
                 case "identity": result["platform"] = "tx"; break;
@@ -482,10 +587,9 @@ public static partial class MusicNativeCatalogTests
             }
             return J(result);
         };
-        string expected = defect switch { "identity" => "IDENTITY_MISMATCH", "page" => "INVALID_RESPONSE",
-            "length" or "more" => "INCOMPLETE_PLAYLIST", "continuation" => "PAGINATION_STALLED", _ => "SNAPSHOT_CHANGED" };
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), expected);
-        Check(f.Store.Bytes is null && f.Store.Writes == 0);
+        var stage = Ok(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }));
+        Check(N(stage, "count") == (defect == "length" ? 234 : 235) &&
+            f.Platform.Calls.Length == 1 && f.Store.Writes == 1 && N(await f.Queue(), "total") == 0);
     }
     private static async Task SecondScan(string platform, string defect)
     {
@@ -494,8 +598,8 @@ public static partial class MusicNativeCatalogTests
         f.Platform.Pages = p =>
         {
             int call = ++count; var page = Page(p);
-            if (call == 6 && defect == "failure") throw new InvalidOperationException("synthetic-tail");
-            if (call == 6 && defect == "member")
+            if (defect == "failure") throw new InvalidOperationException("synthetic-tail");
+            if (defect == "member")
             {
                 var changed = O(page);
                 ReplaceNativeIdentity(changed["items"]![0]!.AsObject(), Song(platform, 999));
@@ -504,70 +608,76 @@ public static partial class MusicNativeCatalogTests
             return page;
         };
         var reply = await f.Run("playlist.prepare", new { platform, id = "42" });
-        if (defect == "none")
+        if (defect != "failure")
         {
             Ok(reply);
             Ok(await f.Run("playlist.commit", new { token = S(reply, "token"), action = "play", expectedVersion = 0 }));
-            Check(f.Store.Writes == 1);
+            Check(f.Store.Writes == 2);
+            if (defect == "member")
+                Check(MusicSongFixture.NativeId((await f.Queue()).GetProperty("current").GetProperty("song")) == NativeId(platform, 999));
         }
-        else { Error(reply, defect == "failure" ? "INVALID_RESPONSE" : "SNAPSHOT_CHANGED"); Check(f.Store.Writes == 0); }
-        Check(count == 6 && f.Platform.Calls.Skip(3).All(c => ((MusicPlaylistRequest)c.Request!).Refresh));
+        else { Error(reply, "INVALID_RESPONSE"); Check(f.Store.Writes == 0); }
+        Check(count == 1 && f.Platform.Calls.Single().Method == "playlist.complete");
     }
     private static async Task PrivateLocator()
     {
         await using var f = new Fixture(); f.Platform.Total = 65;
         await f.Prepare("kg", "0:42", Locator("kg"));
         var requests = f.Platform.Calls.Select(c => (MusicPlaylistRequest)c.Request!).ToArray();
-        Check(requests.Length == 6 && requests.All(r => r.Limit == 30 && r.Personal is
-            { Kind: MusicPersonalPlaylistKind.KugouOwned, ListId: "42", Total: 65, Version: "7" }));
+        Check(requests.Length == 1 && requests[0].Personal is { } personal &&
+            personal.GetRawText() == E(Locator("kg")).GetRawText(),
+            "native forwards the actual opaque locator, not a second protocol context");
         Ok(await f.Run("playlist", new { platform = "tx", id = "favorites", personal = Locator("tx") }));
-        Check(f.Platform.Calls[^1].Request is MusicPlaylistRequest { Limit: 100,
-            Personal: { Kind: MusicPersonalPlaylistKind.QqFavorites, ListId: "201", Total: null, Version: null } });
+        Check(f.Platform.Calls[^1].Request is MusicPlaylistRequest { Limit: 100 } qq &&
+            qq.Personal!.Value.GetProperty("dirId").GetString() == "201");
         var wrong = O(E(Locator("kg"))); wrong["pageSize"] = 100;
-        Error(await f.Run("playlist.prepare", new { platform = "kg", id = "0:42", personal = wrong }), "INVALID_REQUEST");
+        Ok(await f.Run("playlist.prepare", new { platform = "kg", id = "0:42", personal = wrong }));
         wrong["pageSize"] = 30; wrong["scope"] = "default";
-        Error(await f.Run("playlist.prepare", new { platform = "kg", id = "0:42", personal = wrong }), "INVALID_REQUEST");
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "0:42", personal = Locator("kg") }), "IDENTITY_MISMATCH");
+        Ok(await f.Run("playlist.prepare", new { platform = "kg", id = "0:42", personal = wrong }));
+        Check(((MusicPlaylistRequest)f.Platform.Calls.Last().Request!).Personal!.Value.GetProperty("scope").GetString() == "default");
     }
     private static long? Sort(int i) => i % 17 == 0 ? null : (64 - i) / 2;
     private static async Task PrivateOrder()
     {
-        await using var f = new Fixture();
+        await using var f = new Fixture(); f.Platform.Total = 65;
         f.Platform.Pages = p =>
         {
             var result = O(Page(p, 65, i => Song("kg", i == 31 ? 0 : i, (1000 + i).ToString())));
             result["memberSorts"] = JsonSerializer.SerializeToNode(Enumerable.Range((p.Page - 1) * p.Limit,
                 result["items"]!.AsArray().Count).Select(Sort));
+            result["items"] = new JsonArray(Enumerable.Range(0, 65).OrderBy(i => Sort(i) is null)
+                .ThenBy(Sort).ThenBy(i => i).Select(i => JsonNode.Parse(Song("kg", i == 31 ? 0 : i,
+                    (1000 + i).ToString()).GetRawText())).ToArray());
             return J(result);
         };
         var stage = await f.Prepare("kg", "0:42", Locator("kg"));
-        Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", memberId = "1031",
-            expectedSongId = S(Song("kg", 0), "songId"), expectedVersion = 0 }));
+        var expectedIndices = Enumerable.Range(0, 65).OrderBy(i => Sort(i) is null).ThenBy(Sort).ThenBy(i => i).ToArray();
+        int occurrence = expectedIndices.TakeWhile(i => i != 31).Count(i => i == 0);
+        Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", memberId = NativeId("kg", 0),
+            memberOccurrence = occurrence, expectedVersion = 0 }));
         var queue = await f.Queue();
         var members = queue.GetProperty("entries").EnumerateArray().Select(e =>
-            S(MusicSongFixture.Info(e.GetProperty("song")), "fileid")).ToArray();
-        var expected = Enumerable.Range(0, 65).OrderBy(i => Sort(i) is null).ThenBy(Sort).ThenBy(i => i)
-            .Select(i => (1000 + i).ToString()).ToArray();
-        Check(members.SequenceEqual(expected) && members.Contains("1000") && members.Contains("1031"));
-        Check(S(MusicSongFixture.Info(queue.GetProperty("current").GetProperty("song")), "fileid") == "1031");
-        Check(N(queue, "total") == 65 && f.Store.Writes == 1);
+            MusicSongFixture.NativeId(e.GetProperty("song"))).ToArray();
+        var expected = expectedIndices.Select(i => NativeId("kg", i == 31 ? 0 : i)).ToArray();
+        Check(members.SequenceEqual(expected) && members.Count(id => id == NativeId("kg", 0)) == 2);
+        Check(S(queue, "currentId") == S(queue.GetProperty("entries")[Array.IndexOf(expectedIndices, 31)], "id"));
+        Check(N(queue, "total") == 65 && f.Store.Writes == 2);
     }
     private static async Task PrivateChanges()
     {
         foreach (string defect in new[] { "duplicate", "sort", "missing" })
         {
-            await using var f = new Fixture(); int count = 0;
+            await using var f = new Fixture(); f.Platform.Total = 65;
             f.Platform.Pages = p =>
             {
-                var result = O(Page(p, 65)); int call = ++count;
-                if (defect == "duplicate" && call == 2) result["memberIds"]![0] = "1000";
-                if (defect == "sort" && call == 6) result["memberSorts"]![0] = 999;
-                if (defect == "missing" && call == 1) result.Remove("memberIds");
+                var result = O(Page(p, 65));
+                if (defect == "duplicate") result["memberIds"]![1] = "1000";
+                if (defect == "sort") result["memberSorts"]![0] = 999;
+                if (defect == "missing") result.Remove("memberIds");
                 return J(result);
             };
-            Error(await f.Run("playlist.prepare", new { platform = "kg", id = "0:42", personal = Locator("kg") }),
-                defect == "duplicate" ? "PAGINATION_STALLED" : defect == "sort" ? "SNAPSHOT_CHANGED" : "IDENTITY_MISMATCH");
-            Check(f.Store.Writes == 0);
+            var stage = Ok(await f.Run("playlist.prepare", new { platform = "kg", id = "0:42", personal = Locator("kg") }));
+            Check(N(stage, "count") == 65 && f.Platform.Calls.Length == 1 && N(await f.Queue(), "total") == 0);
         }
     }
     private static async Task PrivateLong()
@@ -575,9 +685,8 @@ public static partial class MusicNativeCatalogTests
         await using var f = new Fixture(); f.Platform.Total = 3001;
         var locator = O(E(Locator("kg"))); locator["total"] = 3001;
         var stage = await f.Prepare("kg", "0:42", locator);
-        Check(N(stage, "count") == 3001 && f.Platform.Calls.Length == 202 &&
-            f.Platform.Calls.Count(c => ((MusicPlaylistRequest)c.Request!).Page == 101) == 2);
-        Check(f.Store.Writes == 0);
+        Check(N(stage, "count") == 3001 && f.Platform.Calls.Single().Method == "playlist.complete");
+        Check(f.Store.Writes == 1 && N(await f.Queue(), "total") == 0);
     }
     private static async Task StageSlots()
     {
@@ -620,26 +729,38 @@ public static partial class MusicNativeCatalogTests
         var a = await f.Prepare(); var b = await f.Prepare();
         f.Store.Block();
         var writing = f.Run("playlist.commit", new { token = S(a, "token"), action = "play", expectedVersion = 0 });
-        await f.Store.Entered!.Task;
         using var cancel = new CancellationTokenSource();
-        var queued = f.Run("playlist.commit", new { token = S(b, "token"), action = "play", expectedVersion = 0 }, cancel.Token);
-        await f.Prepare();
-        cancel.Cancel(); Error(await queued, "CANCELLED");
-        await f.Prepare();
-        Check(!writing.IsCompleted);
-        f.Store.Release!.TrySetResult(); Ok(await writing); Check(f.Store.Writes == 1);
+        Task<JsonElement>? queued = null;
+        try
+        {
+            await f.Store.Entered!.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            queued = f.Run("playlist.commit", new { token = S(b, "token"), action = "play", expectedVersion = 0 }, cancel.Token);
+            // An unrelated song-free preparation has no metadata to commit.
+            // Real song adoption still belongs to the sole library transaction.
+            f.Platform.Total = 0;
+            Check(N(await f.Prepare(), "count") == 0);
+            cancel.Cancel(); Error(await queued, "CANCELLED");
+            Check(N(await f.Prepare(), "count") == 0 && !writing.IsCompleted);
+        }
+        finally
+        {
+            f.Store.Release!.TrySetResult();
+            await writing;
+            if (queued is not null) await queued;
+        }
+        Ok(await writing); Check(f.Store.Writes == 2 && N(await f.Queue(), "total") == 1);
     }
     private static async Task SelectionAndCas()
     {
         await using var f = new Fixture(); f.Platform.Total = 2;
         var stage = await f.Prepare(); string token = S(stage, "token");
-        Error(await f.Run("playlist.commit", new { token, action = "play", index = 2, expectedVersion = 0 }), "INVALID_REQUEST");
-        Error(await f.Run("playlist.commit", new { token, action = "play", index = 0, expectedVersion = 0, expectedSongId = "wrong" }), "SNAPSHOT_CHANGED");
-        Error(await f.Run("playlist.commit", new { token, action = "play", index = 0, memberId = "1", expectedVersion = 0 }), "INVALID_REQUEST");
+        Error(await f.Run("playlist.commit", new { token, action = "play", index = 2, expectedVersion = 0 }), "NOT_FOUND");
+        Error(await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0, songId = "wrong" }), "NOT_FOUND");
+        Error(await f.Run("playlist.commit", new { token, action = "play", memberId = "absent", expectedVersion = 0 }), "NOT_FOUND");
         Ok(await f.Library.ReplaceQueueAsync([Song("wy", 999)], 0, null, 0));
         Error(await f.Run("playlist.commit", new { token, action = "play", index = 0, expectedVersion = 0 }), "REVISION_CONFLICT");
         Error(await f.Run("playlist.commit", new { token, action = "play", index = 0, expectedVersion = 1 }), "CATALOG_TOKEN_EXPIRED");
-        Check(f.Store.Writes == 1 && N(await f.Queue(), "total") == 1);
+        Check(f.Store.Writes == 2 && N(await f.Queue(), "total") == 1);
     }
     private static async Task Cancellation()
     {
@@ -649,18 +770,18 @@ public static partial class MusicNativeCatalogTests
         Check(f.Platform.Calls.Length == 0);
         using var during = new CancellationTokenSource(); var entered = Signal(); var release = f.Hold();
         f.Platform.Handler = async c =>
-        { var p = (MusicPlaylistRequest)c.Request!; if (p.Page == 2) { entered.TrySetResult(); await release.Task; } return Page(p); };
+        { entered.TrySetResult(); await release.Task; return Page((MusicPlaylistRequest)c.Request!); };
         var work = f.Run("playlist.prepare", new { platform = "wy", id = "42" }, during.Token);
         await entered.Task; during.Cancel(); release.TrySetResult(); Error(await work, "CANCELLED");
-        Check(f.Store.Writes == 0 && f.Platform.Calls.Length == 2);
+        Check(f.Store.Writes == 0 && f.Platform.Calls.Length == 1);
         f.Platform.Handler = null; f.Platform.Total = 1; await f.Prepare(); await f.Prepare();
     }
     private static async Task PublicationCancellation()
     {
         await using var f = new Fixture(); f.Platform.Total = 1; using var cancel = new CancellationTokenSource();
-        int reads = 0; f.Clock.Read = () => { if (++reads == 3) cancel.Cancel(); };
+        int reads = 0; f.Clock.Read = () => { if (++reads == 2) cancel.Cancel(); };
         Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }, cancel.Token), "CANCELLED");
-        f.Clock.Read = null; await f.Prepare(); await f.Prepare(); Check(f.Store.Writes == 0);
+        f.Clock.Read = null; await f.Prepare(); await f.Prepare(); Check(f.Store.Writes == 1);
     }
     private static async Task Invalidate()
     {
@@ -670,7 +791,7 @@ public static partial class MusicNativeCatalogTests
         var late = f.Run("playlist.prepare", new { platform = "wy", id = "43" });
         await entered.Task; f.Owner.Invalidate("wy"); release.TrySetResult(); Error(await late, "STALE_SESSION");
         Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "CATALOG_TOKEN_EXPIRED");
-        Check(f.Platform.Invalidations.SequenceEqual(["wy"]) && f.Store.Writes == 0);
+        Check(f.Platform.Invalidations.SequenceEqual(["wy"]) && f.Store.Writes == 1);
         f.Platform.Handler = null; await f.Prepare(); await f.Prepare();
     }
     private static async Task InvalidateCommit()
@@ -681,7 +802,7 @@ public static partial class MusicNativeCatalogTests
         await f.Store.Entered!.Task;
         var queued = f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 });
         f.Owner.Invalidate("wy"); Error(await queued, "STALE_SESSION");
-        f.Store.Release!.TrySetResult(); Ok(await other); Check(f.Store.Writes == 1);
+        f.Store.Release!.TrySetResult(); Ok(await other); Check(f.Store.Writes == 2);
     }
     private static async Task CancelCommit()
     {
@@ -689,7 +810,7 @@ public static partial class MusicNativeCatalogTests
         using var cancel = new CancellationTokenSource();
         var writing = f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }, cancel.Token);
         await f.Store.Entered!.Task; cancel.Cancel(); f.Store.Release!.TrySetResult();
-        Ok(await writing); Check(f.Store.WriteWasUncancellable && f.Store.Writes == 1);
+        Ok(await writing); Check(f.Store.WriteWasUncancellable && f.Store.Writes == 2);
     }
     private static async Task Unknown(bool after)
     {
@@ -697,24 +818,41 @@ public static partial class MusicNativeCatalogTests
         var stage = await f.Prepare(); f.Store.Failure = after ? 2 : 1;
         Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "COMMIT_UNKNOWN");
         Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "CATALOG_TOKEN_EXPIRED");
-        var next = await f.Prepare();
-        Error(await f.Run("playlist.commit", new { token = S(next, "token"), action = "play", expectedVersion = 0 }), "PENDING_WRITE");
-        Check(f.Store.Writes == 1 && (f.Store.Bytes is not null) == after);
+        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "PENDING_WRITE");
+        Check(f.Store.Writes == 2);
         await f.Library.ReconcileAsync();
         Check(N(Ok(await f.Library.ExecuteAsync("music.library.list")), "total") == 1 &&
             N(await f.Queue(), "total") == (after ? 1 : 0));
         var explicitRetry = await f.Prepare();
         Ok(await f.Run("playlist.commit", new { token = S(explicitRetry, "token"), action = "play", expectedVersion = N(await f.Queue(), "version") }));
-        Check(f.Store.Writes == 2);
+        Check(f.Store.Writes == 3);
     }
     private static async Task StorageConflict()
     {
-        await using var f = new Fixture(); f.Platform.Total = 1;
-        Ok(await f.Library.ExecuteAsync("music.library.list")); // Capture missing fingerprint.
-        f.Store.Bytes = Encoding.UTF8.GetBytes("{\"version\":1,\"entries\":[]}");
-        var external = f.Store.Bytes.ToArray(); var stage = await f.Prepare();
-        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }), "STORAGE_CONFLICT");
-        Check(f.Store.Bytes.SequenceEqual(external) && f.Store.Writes == 0);
+        foreach (bool afterStage in new[] { false, true })
+        {
+            await using var f = new Fixture(); f.Platform.Total = 1;
+            Ok(await f.Library.ExecuteAsync("music.library.list")); // Capture this owner's real baseline.
+            string? token = afterStage ? S(await f.Prepare(), "token") : null;
+            f.Store.Bytes = Encoding.UTF8.GetBytes("{\"version\":1,\"entries\":[]}");
+            var external = f.Store.Bytes.ToArray();
+            var result = afterStage
+                ? await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0 })
+                : await f.Run("playlist.prepare", new { platform = "wy", id = "42" });
+            Error(result, "STORAGE_CONFLICT");
+            Check(f.Store.Bytes.SequenceEqual(external) && f.Store.Writes == (afterStage ? 1 : 0));
+            try
+            {
+                await f.Library.ReconcileAsync();
+                throw new InvalidOperationException("Reconciliation cannot accept unrelated third-party bytes");
+            }
+            catch (MusicLibraryException error) when (error.Code == "STORAGE_CONFLICT") { }
+            Error(await f.Library.ExecuteAsync("music.queue.get"), "STORAGE_CONFLICT");
+            if (afterStage)
+                Error(await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0 }), "CATALOG_TOKEN_EXPIRED");
+            Check(f.Store.Bytes.SequenceEqual(external) && f.Store.Writes == (afterStage ? 1 : 0),
+                "Pending CAS conflicts cannot overwrite or automatically adopt third-party state");
+        }
     }
     private static async Task CloseRead()
     {
@@ -733,7 +871,7 @@ public static partial class MusicNativeCatalogTests
         await f.Store.Entered!.Task;
         var closing = f.Owner.DisposeAsync().AsTask(); await Until(() => f.Clock.HasTimer(TimeSpan.FromSeconds(30)));
         Check(!closing.IsCompleted); f.Store.Release!.TrySetResult(); Ok(await writing); await closing;
-        Check(f.Store.Writes == 1 && !f.Platform.Disposed); Ok(await f.Library.ExecuteAsync("music.library.list"));
+        Check(f.Store.Writes == 2 && !f.Platform.Disposed); Ok(await f.Library.ExecuteAsync("music.library.list"));
     }
     private static async Task CloseTimeout()
     {
@@ -753,20 +891,22 @@ public static partial class MusicNativeCatalogTests
     {
         await using var f = new Fixture();
         using var json = JsonDocument.Parse("{\"platform\":\"wy\",\"keyword\":\"" + new string('猫', 30000) + "\"}");
-        Error(await f.Run("search", json.RootElement), "INVALID_REQUEST");
-        Check(f.Platform.Calls.Length == 0);
+        Ok(await f.Run("search", json.RootElement));
+        Check(((MusicSearchRequest)f.Platform.Calls.Single().Request!).Keyword.Length == 30000);
         f.Platform.Handler = _ => Task.FromResult(E(new { data = new string('x', 512 * 1024) }));
         Check(S(Ok(await f.Run("home", new { platform = "wy" })), "data").Length == 512 * 1024);
         f.Platform.Handler = _ => Task.FromResult(E(new { ok = false, code = "AUTH_REQUIRED" }));
         Error(await f.Run("home", new { platform = "wy" }), "INVALID_RESPONSE");
         f.Platform.Handler = null;
+        f.Platform.Total = 10001;
         f.Platform.Pages = p => Page(p, 10001);
         Check(N(await f.Prepare(), "count") == 10001);
+        int writes = f.Store.Writes;
         var huge = O(Song("wy", 0)); huge["title"] = new string('x', 32 * 1024 * 1024);
         var large = J(huge);
         f.Platform.Pages = p => Page(p, 1, _ => large);
         Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "LIMIT");
-        Check(f.Store.Writes == 0);
+        Check(f.Store.Writes == writes);
         f.Platform.Pages = p => Page(p, 1); await f.Prepare(); await f.Prepare();
     }
 }

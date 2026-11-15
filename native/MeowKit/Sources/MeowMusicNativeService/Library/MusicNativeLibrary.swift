@@ -9,24 +9,27 @@ enum MusicLibraryValidation {
         try musicRequire(lib["version"] == .n(2) && !owner.isEmpty && musicSame(lib["ownerId"].string, owner) &&
             lib["revision"].isInteger && lib["nextId"].isInteger && lib["nextId"].int > 0 &&
             lib["collections"].isArray && lib["networkReferences"].isArray &&
-            lib["collections"].array.count + lib["networkReferences"].array.count <= 2000 &&
-            lib["songs"].isObject && lib["songs"].fields.count <= 20_000 && lib["accounts"].isObject, .corruptDocument)
+            lib["songs"].isObject && lib["accounts"].isObject, .corruptDocument)
         var nativeOwners: [String: String] = [:], collectionIDs = Set<Data>(), remoteBindings = Set<String>()
         let knownSongs = musicIDs(lib["songs"].fields.map(\.0))
         for (id, song) in lib["songs"].fields {
-            try musicRequire(song["songId"].string.utf8.elementsEqual(id.utf8), .songIDConflict)
+            try musicRequire(UUID(uuidString: id) != nil &&
+                song["songId"].string.utf8.elementsEqual(id.utf8), .songIDConflict)
+            try musicRequire(song.isObject && song["sources"].isArray, .corruptDocument)
             let clean = try MusicModel.cleanSong(song)
-            try musicRequire(musicSame(clean["songId"].string, id), .songIDConflict)
-            for source in clean["sources"].array {
+            var seenSources = Set<String>()
+            for (rawSource, source) in zip(song["sources"].array, clean["sources"].array) {
                 let key = source["sourceKey"].string
-                try musicRequire(nativeOwners[key] == nil || musicSame(nativeOwners[key]!, id), .nativeIDConflict)
+                try musicRequire(rawSource["sourceKey"] == source["sourceKey"] &&
+                    seenSources.insert(key).inserted &&
+                    (nativeOwners[key] == nil || musicSame(nativeOwners[key]!, id)), .nativeIDConflict)
                 nativeOwners[key] = id
             }
         }
         for c in lib["collections"].array {
             try c.requireFields(["id", "kind", "name", "order", "revision", "manualOrder", "bindings", "intents", "deleted", "locallyCreated"])
-            let id = try c["id"].text(), name = try c["name"].text(600), ids = c["order"].strings
-            try musicRequire(name.utf16.count <= 200 && collectionIDs.insert(Data(id.utf8)).inserted && ["favorites", "playlist"].contains(c["kind"].string) &&
+            let id = try c["id"].text(), ids = c["order"].strings
+            try musicRequire(c["name"].isString && collectionIDs.insert(Data(id.utf8)).inserted && ["favorites", "playlist"].contains(c["kind"].string) &&
                 c["revision"].isInteger && c["order"].isArray && musicIDs(ids).count == ids.count &&
                 ids.allSatisfy { knownSongs.contains(Data($0.utf8)) } && c["bindings"].isArray && c["intents"].isObject &&
                 c["manualOrder"].isBool, .corruptDocument)
@@ -37,7 +40,8 @@ enum MusicLibraryValidation {
             for b in c["bindings"].array {
                 try b.requireFields(["platform", "accountId", "id", "writable", "baseline", "map", "name"])
                 let key = MJ.array([b["platform"], b["accountId"], b["id"]]).json
-                _ = try b["accountId"].text(); _ = try b["id"].text()
+                try musicRequire(b["accountId"].isString && !b["accountId"].string.isEmpty, .corruptDocument)
+                try musicRequire(b["id"].isString && !b["id"].string.isEmpty, .corruptDocument)
                 try musicRequire(MusicModel.sites.contains(b["platform"].string) && lib["accounts"][b["platform"].string] == b["accountId"] &&
                     bindings.insert(key).inserted && remoteBindings.insert(key).inserted && b["baseline"].isArray &&
                     b["baseline"].array.allSatisfy { $0.isString && !$0.string.isEmpty } &&
@@ -59,7 +63,9 @@ enum MusicLibraryValidation {
         }
         try musicRequire(lib["collections"].array.filter { $0["kind"].string == "favorites" }.count == 1, .favoritesProtected)
         try MusicNativeNetworkPlaylists.validate(lib)
-        for (platform, id) in lib["accounts"].fields { try musicRequire(MusicModel.sites.contains(platform), .corruptDocument); _ = try id.text() }
+        for (platform, id) in lib["accounts"].fields {
+            try musicRequire(MusicModel.sites.contains(platform) && id.isString && !id.string.isEmpty, .corruptDocument)
+        }
     }
 }
 
@@ -74,64 +80,8 @@ extension NativeMusicService {
         .init(id: c["id"].string, title: c["name"].string, kind: c["kind"].string, count: c["order"].array.count, revision: c["revision"].int)
     }
     func upsert(_ input: [MJ], library: inout MJ) throws -> [String] {
-        var songs = library["songs"], rows = songs.fields, result: [String] = []
-        var positions: [Data: Int] = [:]
-        for (offset, row) in rows.enumerated() { positions[Data(row.0.utf8)] = offset }
-        var cleaned: [Data: MJ] = [:]
-        var sourceOwner: [Data: String] = [:]
-        for (id, row) in rows {
-            for source in row["sources"].array {
-                let key = Data(source["sourceKey"].string.utf8)
-                if let owner = sourceOwner[key], !musicSame(owner, id) { throw MusicServiceError.songIDConflict }
-                sourceOwner[key] = id
-            }
-        }
-        var returned = Set<Data>()
-        for raw in input {
-            let songID = raw["songId"].string
-            var song: MJ
-            if !songID.isEmpty, let value = cleaned[Data(songID.utf8)],
-               value["title"] == raw["title"], value["artist"] == raw["artist"],
-               value["album"] == raw["album"], value["duration"] == raw["duration"],
-               value["cover_url"] == raw["cover_url"], value["sources"] == raw["sources"] { song = value }
-            else {
-                song = try MusicModel.cleanSong(raw)
-                if !songID.isEmpty { cleaned[Data(songID.utf8)] = song }
-            }
-            let key = MusicModel.nativeKey(song), firstKey: String? = key.isEmpty ? nil : key
-            let keys = Set(song["sources"].array.map { $0["sourceKey"].string })
-            func compatible(_ known: MJ) -> Bool {
-                MusicModel.compatible(known, song) && known["sources"].array.allSatisfy { MusicModel.compatible($0, song) }
-            }
-            let existingIDs = Set(keys.compactMap { sourceOwner[Data($0.utf8)] })
-            try musicRequire(existingIDs.count <= 1, .songIDConflict)
-            if let existingID = existingIDs.first, let index = positions[Data(existingID.utf8)] {
-                try musicRequire(compatible(rows[index].1), .nativeIDConflict)
-                song["songId"] = rows[index].1["songId"]
-            }
-            var id = try song["songId"].text()
-            if let index = positions[Data(id.utf8)], let firstKey,
-               !compatible(rows[index].1) {
-                let d = MusicModel.descriptor(song)
-                let description = MJ.obj([("title", .string(d.title)), ("artist", .string(d.artist)), ("version", .string(d.version)), ("duration", .number(d.duration))])
-                let fingerprint = MusicModel.fingerprint(song)
-                id = "song:" + MusicModel.hash(fingerprint.isEmpty ? firstKey : fingerprint) + ":" + MusicModel.hash(MJ.array([.string(firstKey), description]).json)
-                song["songId"] = .string(id)
-            }
-            if let index = positions[Data(id.utf8)] {
-                let previous = rows[index].1
-                try musicRequire(firstKey == nil || compatible(previous), .songIDConflict)
-                song = try MusicModel.mergeSources(song, adding: previous["sources"].array)
-                rows[index].1 = song
-            } else {
-                positions[Data(id.utf8)] = rows.count
-                rows.append((id, song))
-            }
-            for source in song["sources"].array { sourceOwner[Data(source["sourceKey"].string.utf8)] = id }
-            if returned.insert(Data(id.utf8)).inserted { result.append(id) }
-        }
-        try musicRequire(rows.count <= 20_000, .limit)
-        songs = .obj(rows); library["songs"] = songs; return result
+        var seen = Set<String>()
+        return try registerSongs(input, library: &library).filter { seen.insert($0).inserted }
     }
     func saveCollection(_ c: MJ, _ d: inout MusicDocument) {
         var library = d.library["library"], rows = library["collections"].array
@@ -167,9 +117,6 @@ extension NativeMusicService {
         let acquired = try await sharedSongMetadata(originals)
         let result = try transaction(["library"]) { d in
             var lib = d.library["library"]
-            try musicRequire(lib["collections"].array.count + lib["networkReferences"].array.count < 2000, .limit)
-            // Revalidate references after the metadata owner's suspensions.
-            try musicRequire(try refs.map { try song($0, d) } == originals, .targetChanged)
             let ids = try upsert(acquired, library: &lib)
             var c = MusicModel.freshCollection("playlist:\(lib["nextId"].int)", name)
             lib["nextId"] = .n(lib["nextId"].int + 1)
@@ -184,20 +131,16 @@ extension NativeMusicService {
     }
     public func editPlaylist(_ requested: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection {
         try musicRequire(requested.networkReference == nil, .unsupported)
-        let acquired: [MJ]?, originals: [MJ]?
+        let acquired: [MJ]?
         if let refs {
             let before = try read()
             let songs = try refs.map { try song($0, before) }
-            originals = songs
             acquired = try await sharedSongMetadata(songs)
-        } else { acquired = nil; originals = nil }
+        } else { acquired = nil }
         let result = try transaction(["library"]) { d in
             var c = try collection(requested.id, d), lib = d.library["library"]
             try musicRequire(c["revision"].int == requested.revision, .revisionConflict)
             let previous = c["order"].strings
-            if let refs, let originals {
-                try musicRequire(try refs.map { try song($0, d) } == originals, .targetChanged)
-            }
             var next = try acquired.map { try upsert($0, library: &lib) } ?? previous
             if let order {
                 try musicRequire(order.count == next.count && musicIDs(order).count == order.count && musicIDs(order) == musicIDs(next))

@@ -669,7 +669,7 @@ final class MusicCollectionTrackCell: UITableViewCell {
         representedActive = active
         if contentChanged {
             configuredTrack = track
-            artwork.load(track.artwork)
+            artwork.load(track)
             titleLabel.text = track.title
             let subtitle = [track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " · ")
             subtitleLabel.text = subtitle

@@ -4,9 +4,9 @@
 
 ## 所有权
 
-- `MusicFeedbackSettingsOwner` 独占反馈设置文档 `music.feedback.v1`；网易安全待发由 `NeteasePlaybackOutbox` 独占原生文档 `music.playback-outbox.v1`，复用同一 App 借用存储。
+- `MusicFeedbackSettingsOwner` 独占反馈设置文档 `music.feedback.v2`；网易安全待发由 `NeteasePlaybackOutbox` 独占原生文档 `music.playback-outbox.v2`，复用同一 App 借用存储。
 - `MusicFeedbackController` 拥有唯一的当前听音事实与计量、平台资格和账号绑定、取消和关闭 drain。平台不各自维护媒体时钟。
-- `NativeMusicFeedbackProtocol` 拥有平台开始／结束协议会话；它显式借用当前账号 owner、固定 HTTP 和[客户端 owner](music-platform-client-context.md)。
+- `NativeMusicFeedbackProtocol` 拥有平台开始／结束协议会话；它显式借用当前账号 owner、同一 [Node 平台客户端](music-platform-client-context.md)。
 - 页面只投影三个平台开关和当前错误，不保存第二份草稿或后台设置。
 
 ## 设置格式
@@ -55,13 +55,11 @@ URL 解析、选择来源、恢复位置、缓存命中、页面打开或 `Play(
 
 ## 平台边界
 
-- 网易采用唯一官方 NCBLv3＋Zstd 文件通道 `https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true`，multipart 唯一 part 名为 `file`，filename 为每次文件随机生成的 `play_<guid>`，没有账号／歌曲等私人标识。普通 HTTP 白名单不开放该主机，Feedback 策略只允许这一精确 POST 地址与 query；身份核对另限 `/weapi/w/nuser/account/get`，不额外读取录音详情或受旧曲长断言约束。旧 Weblog 和重复 BI 写入已移除。
-- 官方事件为 `_plv`／`_pld`；每行是 `epoch整数秒\x01事件名\x01平铺JSON\n`，JSON `_logTime` 是原事件的整数毫秒，歌曲 `id` 为数值。开始的 time／realtime 为 0，结束分别为实际媒体累计／wall 累计整数秒；向下取整只发生在序列化时，`play_speed` 为实际速率，原因保留 `ui`、`playend`、`interrupt` 或 `exception`。自然结束保留播放器的实际 position，不强制曲尾，不用 UI 补齐时长。事件发生时间来自准入/结束事实，不用 dispatch 或恢复上传时刻替代。文件确认必须同时满足数值 `code=200` 与 `data.successfiles` 精确包含本次 filename，HTTP 成功本身不能确认文件。
-- metadata 仅写原账号实际 `MUSIC_U`，Cookie 使用原账号值，User-Agent 是真实 `Meowfilm (Windows)`。官方实包 metadata 的其它版本／应用字段不冒用，不伪造 URS_APPID、appver、buildver、mainsite、refer 或设备。凭据只在本次内存编码／发送期间使用，不进入待发文档。
-- 普通网易歌单 wire source 为 `list`，入队上下文仍保留 `sourceType=playlist`。普通 FM 默认 `userfm`，规则 FM 只保留上游明确来源；真实心动 proof 写 `play_scene=heartbeat`，只携带上游逐曲 source/sourceId 与 alg，不把本地收藏歌单 ID 或 `aiMode` 推成 wire 来源。其它来源使用当前已确认 Context／Recommendation 事实，没有证据的相似推荐标签省略。新增公开来源文本拒绝反射账号凭据，超出既有文本预算时拒绝而不截断算法。
-- `MusicFeedbackStart.Context`／`Recommendation`、原始时间和听音事实交平台适配按证据消费，不能照搬网易来源值或 ACK。元数据的大小、ID、字符校验是输入契约／资源边界，不是听音阈值。
-- QQ 使用当前账号和可撤销设备 lease；QIMEI／匿名 session 由独立客户端 owner 保存，账号 owner 每次实时验证账号后才签发组合 lease。客户端变化只撤销依赖它的反馈，设备过期、身份变化或不确定回执明确失败。
-- 酷狗当前仍拒绝发送：现有精确反馈配方未满足受验证 TLS 协议边界，`NativeMusicFeedbackProtocol` 返回 `UNVERIFIED_TLS_PROTOCOL`。不能降级到 HTTP、猜测网关或用匿名设备冒充账号。
+`NativeMusicFeedbackProtocol` 与 `NeteasePlaybackTransport` 通过同一 `MusicPlatformClient` 消费共同 Node 反馈操作，不保留平台 HTTP、QIMEI 或 NCBL 编码副本。共同事实与协议归属见[真实播放反馈](../common/music/playback-feedback.md)。
+
+- 网易以 `feedback.qualify` 实际核对原账号，`feedback.upload` 提交中性 events；原生 outbox 仍拥有耐久准入、inflight 和恢复。
+- QQ 以 `feedback.prepare` 取得 Node transient session，结束走 `feedback.send`，释放走 `feedback.release`；原生 session 绑定真实账号及 Attempt，不持久设备材料。
+- 酷狗当前 Windows `RunStart` 仍返回 `UNVERIFIED_TLS_PROTOCOL`，没有发送；共同 Node 已有其固定反馈配方不等于 Windows 已接通，也不等于真实上游已验证。该差异是当前集成缺口，不是共同业务规则。
 
 平台独立失败不会停止播放，也不能转换为另一平台成功。错误只保留固定代码，不记录 Cookie、设备标识、请求体、响应正文或 URL。
 
@@ -88,4 +86,4 @@ URL 解析、选择来源、恢复位置、缓存命中、页面打开或 `Play(
 - 7 天、最多 256 个事件、4 MiB 文档、32 KiB 单遍事件资料是资源/隐私边界，不是播放计次或听音阈值；淘汰完整配对，不能产生孤立 end。
 - 禁用、登出、换账号立即撤销网络并串行清理。启动仅在已启用且原账号匹配时恢复；账号未就绪暂缓。持久同意 revision 防止禁用清理写盘失败后再次启用恢复旧数据；本进程已确认保持网易启用的其它平台设置修改可携带现有事实，若在设置提交与待发 revision 结算之间崩溃，保守丢弃而非跨同意恢复。
 
-协议／待发／消费者用例使用合成账号与 HTTP handler。官方实包的精确文件 ACK 证明官方容器／事件通道被接收，不替代本产品仅含 `MUSIC_U` 的 metadata 与最小事件 schema 的线上接收验证；后者当前未覆盖。组件测试与构建不证明个人排行次数、刷新时点或推荐效果。
+协议向量归共同 Node 测试；原生待发／消费者使用合成账号与规范运行器 peer，当前均未执行。官方实包的精确文件 ACK 证明官方容器／事件通道被接收，不替代本产品仅含 `MUSIC_U` 的 metadata 与最小事件 schema 的线上接收验证；后者当前未覆盖。组件测试与构建不证明个人排行次数、刷新时点或推荐效果。

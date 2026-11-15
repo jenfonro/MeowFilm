@@ -79,21 +79,20 @@ public sealed partial class MusicRecommendationCoordinator
                 initial && !s.InitialAppend && (s.Config.Kind != "queue" || s.Config.Restore)
                 ? before.Entries.Where(e => e.Id == seed).Select(e => NativeId(e.Song))
                 : before.Entries.Select(e => NativeId(e.Song));
-            var songs = ParseSongs(response, request, known).ToArray();
+            var songs = ParseSongs(response, known).ToArray();
             bool hasMore = request.Method != "queue-recommendations" ||
                 Bool(response, "hasMore");
             int offset = request.QueueRecommendations is null ? 0 : checked((int)Number(response, "offset"));
             Require(!hasMore || request.QueueRecommendations is null || offset > request.QueueRecommendations.Offset, "PAGINATION_STALLED");
-            var heartbeat = request.Heartbeat is { } intent ? ParseHeartbeat(response, intent) : s.Heartbeat;
+            var heartbeat = request.Heartbeat is not null ? ParseHeartbeat(response) : s.Heartbeat;
             if (initial && s.Config.Kind == "heartbeat" && seed.Length == 0)
             {
                 Require(response.TryGetProperty("entrySong", out var entrySong), "INVALID_RESPONSE");
-                Require(s.Config.Heartbeat!.SongId is null || NativeId(entrySong) == s.Config.Heartbeat.SongId, "IDENTITY_MISMATCH");
                 string entryId = NativeId(entrySong);
                 var first = songs.FirstOrDefault(song => song.NativeId == entryId) is { } returned
                     ? returned with { Value = entrySong.Clone() }
                     : new Song(entrySong.Clone(), entryId, "", "",
-                        response.GetProperty("context").Clone(), Json(new { id = entryId, source = "heartbeat" }));
+                        response.GetProperty("context").Clone(), null);
                 songs = new[] { first }.Concat(songs.Where(song => song.NativeId != entryId)).ToArray();
             }
             if (initial && songs.Length == 0) throw new RecommendationException("EMPTY_RECOMMENDATIONS");
@@ -189,64 +188,51 @@ public sealed partial class MusicRecommendationCoordinator
             Require(s.Heartbeat is not null && snapshot.Entries.Length > 0, "NATIVE_ID_REQUIRED");
             var context = s.Heartbeat!;
             string song = NativeId(snapshot.Entries[^1].Song);
-            Require(ValidId(song), "NATIVE_ID_REQUIRED");
+            Require(song.Length > 0, "NATIVE_ID_REQUIRED");
             return new(s.Config.Heartbeat! with { SongId = song, PlaylistId = context.PlaylistId,
                 Continuation = new(context.PlaylistId, context.StartMusicId, context.AccountId, context.Count) });
         }
-        Require(s.Config.Kind == "queue" && ValidId(s.FixedSeed), "NATIVE_ID_REQUIRED");
+        Require(s.Config.Kind == "queue" && s.FixedSeed.Length > 0, "NATIVE_ID_REQUIRED");
         return new(new MusicQueueRecommendationsRequest(s.Config.Platform, s.FixedSeed, s.Offset));
     }
-    private static IEnumerable<Song> ParseSongs(JsonElement response, MusicRecommendationRequest request, IEnumerable<string> known)
+    private static IEnumerable<Song> ParseSongs(JsonElement response, IEnumerable<string> known)
     {
-        Require(response.ValueKind == JsonValueKind.Object &&
-            System.Text.Encoding.UTF8.GetByteCount(response.GetRawText()) <= 512 * 1024, "INVALID_RESPONSE");
-        Require(Text(response, "platform") == request.Platform && Text(response, "kind") == request.Method, "IDENTITY_MISMATCH");
         Require(response.TryGetProperty("items", out var rows) && rows.ValueKind == JsonValueKind.Array, "INVALID_RESPONSE");
-        if (request.Method == "fm")
-            Require(rows.GetArrayLength() <= (request.Fm!.RuleId is not null || request.Fm.TabTagId is not null ? 5 : 3), "INVALID_RESPONSE");
-        if (request.Method == "similar") Require(rows.GetArrayLength() <= 3, "INVALID_RESPONSE");
-        Require(Number(response, "count") == rows.GetArrayLength(), "INVALID_RESPONSE");
-        Require(response.TryGetProperty("recommendations", out var metadata) && metadata.ValueKind == JsonValueKind.Array &&
-            metadata.GetArrayLength() == rows.GetArrayLength(), "INVALID_RESPONSE");
         JsonElement? context = response.TryGetProperty("context", out var sourceContext) &&
             sourceContext.ValueKind == JsonValueKind.Object ? sourceContext.Clone() : null;
-        var provenance = new Dictionary<string, (string Algorithm, string FeedbackSource, JsonElement Metadata)>(StringComparer.Ordinal);
+        var provenance = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        if (response.TryGetProperty("recommendations", out var metadata) && metadata.ValueKind == JsonValueKind.Array)
         foreach (var item in metadata.EnumerateArray())
         {
-            string id = Text(item, "id");
-            string feedbackSource = Text(item, "feedbackSource", "", 512);
-            Require(ValidId(id) && Text(item, "source") == request.Method &&
-                provenance.TryAdd(id, (Text(item, "alg", "", 4096), feedbackSource, item.Clone())), "IDENTITY_MISMATCH");
+            if (item.ValueKind == JsonValueKind.Object &&
+                item.TryGetProperty("id", out var key) && key.ValueKind == JsonValueKind.String)
+                provenance[key.GetString()!] = item;
         }
         var seen = new HashSet<string>(known.Where(id => id.Length > 0), StringComparer.Ordinal);
         var result = new List<Song>();
         foreach (var song in rows.EnumerateArray())
         {
-            Require(song.ValueKind == JsonValueKind.Object && Text(song, "title", "", 2048).Length > 0 &&
-                Text(song, "artist", "", 2048).Length > 0, "INVALID_RESPONSE");
             string id = NativeId(song);
-            Require(ValidId(id) && provenance.ContainsKey(id), "IDENTITY_MISMATCH");
+            Require(id.Length > 0, "NATIVE_ID_REQUIRED");
             // Identity is the native recording, never just a normalized title/artist.
-            if (seen.Add(id)) result.Add(new(song.Clone(), id, provenance[id].Algorithm, provenance[id].FeedbackSource,
-                context, provenance[id].Metadata));
+            if (seen.Add(id))
+            {
+                bool hasMetadata = provenance.TryGetValue(id, out var info);
+                result.Add(new(song.Clone(), id, hasMetadata ? Text(info, "alg") : "",
+                    hasMetadata ? Text(info, "feedbackSource") : "", context,
+                    hasMetadata ? info.Clone() : null));
+            }
         }
         return result;
     }
-    private static HeartbeatContext ParseHeartbeat(JsonElement response, MusicHeartbeatRequest request)
+    private static HeartbeatContext ParseHeartbeat(JsonElement response)
     {
         Require(response.TryGetProperty("context", out var context) && context.ValueKind == JsonValueKind.Object, "INVALID_RESPONSE");
         string playlist = Text(context, "playlistId"), start = Text(context, "startMusicId"), song = Text(context, "songId"),
             account = Text(context, "accountId");
         bool fromHome = Bool(context, "fromHome");
         long count = Number(context, "count");
-        Require(ValidId(playlist) && ValidId(start) && ValidId(song) &&
-            account.Length is > 0 and <= 20 && account[0] != '0' && account.All(char.IsAsciiDigit) && count > 0 &&
-            fromHome == (request.Entry == MusicHeartbeatEntry.Favorites) &&
-            (request.SongId is null || song == request.SongId) &&
-            (request.PlaylistId is null || playlist == request.PlaylistId) &&
-            (request.Continuation is null ? start == song : playlist == request.Continuation.PlaylistId &&
-                start == request.Continuation.StartMusicId && account == request.Continuation.AccountId &&
-                count == request.Continuation.Count), "IDENTITY_MISMATCH");
+        Require(playlist.Length > 0 && start.Length > 0 && song.Length > 0 && account.Length > 0, "INVALID_RESPONSE");
         return new(playlist, start, song, fromHome, count, account);
     }
     private static JsonElement Context(Session s, HeartbeatContext? heartbeat) =>

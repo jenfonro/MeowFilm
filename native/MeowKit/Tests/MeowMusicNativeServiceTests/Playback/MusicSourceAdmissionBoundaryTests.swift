@@ -163,7 +163,7 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         let scripts = SourceAdmissionBoundaryScripts()
         await scripts.failSources(.scriptRuntimeUnavailable)
-        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts, accounts: accounts, clock: { clock.now() })
         let independent = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
@@ -186,7 +186,7 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
             let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
             await accounts.failOptions(failure)
             let scripts = SourceAdmissionBoundaryScripts()
-            let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+            let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
             let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
                 scripts: scripts, accounts: accounts, clock: { clock.now() })
             let player = SourceAdmissionBoundaryPlayer(), model = MusicViewModel(service: service, player: player)
@@ -202,7 +202,7 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
             let clock = MusicRecoveryTestClock()
             let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
             await accounts.failOptions(failure)
-            let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+            let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
             let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
                 scripts: SourceAdmissionBoundaryScripts(), accounts: accounts, clock: { clock.now() })
             let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
@@ -216,7 +216,7 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
         let clock = MusicRecoveryTestClock()
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         let grant = await accounts.enablePlaybackAuthorization()
-        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
             accounts: accounts, clock: { clock.now() })
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
@@ -250,7 +250,7 @@ private actor SourceAdmissionBoundaryScripts: MusicScriptResolving {
         let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
         await accounts.failOptions(failure)
         let scripts = SourceAdmissionBoundaryScripts()
-        let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
+        let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
         let service = try await NativeMusicFixture.service(MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts, accounts: accounts, clock: { clock.now() })
         let player = SourceAdmissionBoundaryPlayer(), model = MusicViewModel(service: service, player: player)

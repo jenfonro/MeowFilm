@@ -13,7 +13,7 @@ import MeowUI
     }
     private let red: [UInt8] = [240, 45, 55, 255]
     private let green: [UInt8] = [40, 220, 120, 255]
-    private func song(_ id: String) -> MusicAppearanceSongIdentity { .init(platform: "wy", musicID: id) }
+    private func song(_ id: String) -> MusicAppearanceSongIdentity { .init(songID: "song:" + id) }
 
     func testCustomColorPreviewDoesNotPersistAndCancellationRestoresTheSavedPalette() throws {
         try isolated { defaults in
@@ -116,37 +116,35 @@ import MeowUI
         }
     }
 
-    func testFutureOrCorruptDocumentsAreNotSilentlyOverwritten() {
-        for payload in [
-            #"{"version":2,"preferences":{"colorPalette":"mint"}}"#,
-            "{broken"
-        ] {
-            isolated { defaults in
-                let bytes = Data(payload.utf8)
-                defaults.set(bytes, forKey: MusicAppearancePreferencesStore.preferencesKey)
-                defaults.set("untouched", forKey: "music.library.test-marker")
-                let store = MusicAppearancePreferencesStore(defaults: defaults)
-                XCTAssertNotNil(store.persistenceError)
-                XCTAssertFalse(store.set(\.lockLyric, false))
-                XCTAssertEqual(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey), bytes)
-                store.resetPreferences()
-                XCTAssertNil(store.persistenceError)
-                XCTAssertEqual(store.preferences, .init())
-                XCTAssertEqual(defaults.string(forKey: "music.library.test-marker"), "untouched")
-            }
+    func testCorruptCurrentPreferencesAreNotSilentlyOverwritten() {
+        isolated { defaults in
+            let bytes = Data("{broken".utf8)
+            defaults.set(bytes, forKey: MusicAppearancePreferencesStore.preferencesKey)
+            defaults.set("untouched", forKey: "music.library.test-marker")
+            let store = MusicAppearancePreferencesStore(defaults: defaults)
+            XCTAssertNotNil(store.persistenceError)
+            XCTAssertFalse(store.set(\.lockLyric, false))
+            XCTAssertEqual(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey), bytes)
+            store.resetPreferences()
+            XCTAssertNil(store.persistenceError)
+            XCTAssertEqual(store.preferences, .init())
+            XCTAssertEqual(defaults.string(forKey: "music.library.test-marker"), "untouched")
         }
     }
 
-    func testUnknownPreferenceValuesFallbackIndependently() throws {
-        let bytes = Data(#"{"playlistView":"unknown","playerTheme":"missing","colorMode":"invalid","colorPalette":"missing","lockLyric":false,"lyricBackground":false}"#.utf8)
-        let preferences = try JSONDecoder().decode(MusicAppearancePreferences.self, from: bytes)
-        XCTAssertEqual(preferences.playlistView, .grid)
-        XCTAssertEqual(preferences.playerTheme, .starlight)
-        XCTAssertEqual(preferences.colorMode, .song)
-        XCTAssertEqual(preferences.colorPalette, .preset(.lilac))
-        XCTAssertFalse(preferences.lockLyric)
-        XCTAssertFalse(preferences.lyricBackground)
-        XCTAssertTrue(preferences.lyricTranslation)
+    func testMalformedCurrentPreferencesAreNotSilentlyDefaulted() throws {
+        let current = try JSONEncoder().encode(MusicAppearancePreferences())
+        let fields = try XCTUnwrap(try JSONSerialization.jsonObject(with: current) as? [String: Any])
+        for key in ["playlistView", "playerTheme", "colorMode", "colorPalette"] {
+            var malformed = fields
+            malformed[key] = "invalid"
+            let bytes = try JSONSerialization.data(withJSONObject: malformed)
+            XCTAssertThrowsError(try JSONDecoder().decode(MusicAppearancePreferences.self, from: bytes))
+        }
+        var missing = fields
+        missing.removeValue(forKey: "lyricTranslation")
+        XCTAssertThrowsError(try JSONDecoder().decode(MusicAppearancePreferences.self,
+                                                     from: JSONSerialization.data(withJSONObject: missing)))
     }
 
     func testLateCoverCannotRepaintAnotherSongOrANewerCoverOrFixedMode() throws {
@@ -199,7 +197,7 @@ import MeowUI
             let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bytes) as? [String: Any])
             let colors = try XCTUnwrap(json["colors"] as? [[String]])
             XCTAssertEqual(colors.count, 128)
-            XCTAssertEqual(colors.first, ["wy:2", "mint"])
+            XCTAssertEqual(colors.first, ["song:2", "mint"])
             store.selectSong(song("2")) // A cache hit does not reorder the Map.
             XCTAssertEqual(store.effectivePalette, .preset(.mint))
             store.primeCover(rgba: red, for: song("2")) // A changed sample DOES.
@@ -216,7 +214,7 @@ import MeowUI
     func testCacheFilteringAndLongKeysNeverOverwritePreferences() {
         isolated { defaults in
             let key = MusicAppearancePreferencesStore.songColorsKey
-            defaults.set(Data(#"{"version":1,"last":"missing","colors":[["wy:a","mint"],["wy:a","rose"],["wy:b","missing"],["bad"],4]}"#.utf8), forKey: key)
+            defaults.set(Data(#"{"last":"missing","colors":[["song:a","mint"],["song:a","rose"],["song:b","missing"],["bad"],4]}"#.utf8), forKey: key)
             let store = MusicAppearancePreferencesStore(defaults: defaults)
             XCTAssertEqual(store.effectivePalette, .preset(.lilac))
             store.selectSong(song("a"))

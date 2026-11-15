@@ -303,16 +303,17 @@ public static partial class MusicUiTests
                     view.IsEnabled = true;
                 }
             }
-            Equal(0, f.Http.Requests); Equal(0, f.Runtime.Calls.Count);
+            Equal(0, f.Peer.Requests);
+            True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
         });
         yield return Case("platform account card refresh action updates native profile avatar and membership once", async () =>
         {
             await using var f = await DetailsScene.Create();
             await f.Module.ActivateSettingsAsync();
             var row = f.Module.PlatformSettings.Single(item => item.Platform == "wy");
-            f.Http.DisplayName = "Updated native name";
-            f.Http.Avatar = "https://p1.music.126.net/SYNTHETIC_ACCOUNT_AVATAR.png";
-            f.Http.HoldRights = true;
+            f.Peer.DisplayName = "Updated native name";
+            f.Peer.Avatar = "https://p1.music.126.net/SYNTHETIC_ACCOUNT_AVATAR.png";
+            f.Peer.HoldRights = true;
             var view = new MusicAccountsView { DataContext = f.Module };
             var window = AccountCardWindow(view);
             try
@@ -322,23 +323,25 @@ public static partial class MusicUiTests
                 Equal("刷新", (string)refresh.Content);
                 Equal("退出登录", (string)AccountCardButton(view, "网易云音乐退出账号").Content);
                 refresh.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await f.Peer.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 True(!row.CanRefresh && !refresh.IsEnabled && row.RefreshText == "刷新中", "refresh is bounded by its current request");
                 Equal("刷新中", (string)refresh.Content);
                 refresh.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                Equal(2, f.Http.Requests);
-                f.Http.Release.TrySetResult();
-                await SearchUntil(() => row.CanRefresh && row.DisplayName == f.Http.DisplayName);
-                Equal(f.Http.Avatar, row.Avatar);
+                Equal(1, f.Peer.Requests);
+                f.Peer.Release.TrySetResult();
+                await SearchUntil(() => row.CanRefresh && row.DisplayName == f.Peer.DisplayName);
+                Equal(f.Peer.Avatar, row.Avatar);
                 Equal(row.Membership, row.Subtitle);
                 True(row.Membership.StartsWith("VIP有效 · ", StringComparison.Ordinal), "fresh membership is displayed");
                 var avatar = Visuals(view).OfType<ArtworkImage>()
                     .Single(image => AutomationProperties.GetName(image) == "网易云音乐头像");
                 Equal(row.Avatar, avatar.Address);
                 AssertAccountTableImages(view, row, avatarVisible: true);
-                Equal(2, f.Http.Requests); Equal(0, f.Runtime.Calls.Count);
+                Equal(1, f.Peer.Requests);
+                Equal(1, f.Runtime.Requests.Count(call => call.Operation == "account.profile"));
+                True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
             }
-            finally { f.Http.Release.TrySetResult(); window.Close(); await Drain(); }
+            finally { f.Peer.Release.TrySetResult(); window.Close(); await Drain(); }
         });
         yield return Case("platform account logout bubble cancels or confirms the displayed platform without changing selection", async () =>
         {
@@ -361,13 +364,14 @@ public static partial class MusicUiTests
                 AccountCardButton(popup.Child, "取消退出账号").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 await Drain(); await SearchUntil(() => !f.Module.AccountBusy);
                 True(!popup.IsOpen && row.IsLoggedIn, "cancel does not change the account");
-                Equal(0, f.Http.Requests);
+                Equal(0, f.Peer.Requests);
                 logout.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
                 AccountCardButton(popup.Child, "确定退出账号").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 await SearchUntil(() => !row.IsLoggedIn && !f.Module.AccountBusy);
                 True(!popup.IsOpen && row.DisplayName == "未登录", "logout restores the native account state without changing platform identity");
                 Equal("tx", f.Module.SelectedAccountPlatform);
-                Equal(0, f.Http.Requests); Equal(0, f.Runtime.Calls.Count);
+                Equal(0, f.Peer.Requests);
+                True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
             }
             finally { window.Close(); await Drain(); }
         });
@@ -398,7 +402,7 @@ public static partial class MusicUiTests
                 confirm.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 await f.Module.LogoutAccountAsync(old, confirmed: true);
                 True(f.Module.PlatformSettings[0].IsLoggedIn, "old generation cannot log out its replacement");
-                Equal(0, f.Http.Requests);
+                Equal(0, f.Peer.Requests);
             }
             finally { window.Close(); await Drain(); }
         });
@@ -570,7 +574,8 @@ public static partial class MusicUiTests
                 AssertAccountDimension(32d, login.ActualHeight);
                 AssertCardActionBrush(login.Background, (Brush)view.FindResource("MeowFilm.Brush.Accent"));
             }
-            Equal(0, f.Http.Requests); Equal(0, f.Runtime.Calls.Count);
+            Equal(0, f.Peer.Requests);
+            True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
         });
         yield return Case("platform account table shows every platform without terminal rule or vertical wheel capture", async () =>
         {
@@ -620,7 +625,8 @@ public static partial class MusicUiTests
                 confirm.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
                 True(f.Module.PlatformSettings.Single(row => row.Platform == "wy").IsLoggedIn,
                     "a retired confirmation has no logout admission");
-                Equal(0, f.Http.Requests); Equal(0, f.Runtime.Calls.Count);
+                Equal(0, f.Peer.Requests);
+                True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
             }
             finally { window.Close(); await Drain(); }
         });

@@ -2,13 +2,13 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
-using MeowFilm.Core.Runtime;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Platform.Storage;
@@ -19,13 +19,15 @@ public static class MusicKgAccountUiTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("native-account-owner-raster-login-logout-no-node", Login);
-        yield return Case("native-local-raster-fixed-platform-address-only", Raster);
+        yield return Case("native-account-owner-raster-login-logout-no-script", Login);
+        yield return Case("native-local-raster-encodes-protocol-text-without-URI-admission", Raster);
         yield return Case("visible-challenge-only-poll-hide-cancel-no-restart", Visibility);
-        yield return Case("new-device-registration-hidden-seed-persists-no-QR-or-session", PendingRegistration);
+        yield return Case("pending-create-hidden-no-QR-or-session-physical-drain", PendingRegistration);
         yield return Case("manual-and-visible-poll-single-flight-old-result-rejected", SingleFlight);
         yield return Case("platform-switch-no-old-login-publication", Switch);
         yield return Case("expired-terminal-removes-QR-no-session", Expired);
+        yield return Case("display-expiry-waits-for-canonical-terminal-poll", DisplayExpiry);
+        yield return Case("throttled-poll-keeps-same-challenge-for-explicit-retry", Throttled);
         yield return Case("unknown-session-save-explicit-read-no-replay", Unknown);
         yield return Case("loaded-unloaded-and-context-change-stop-polling", Unload);
         yield return Case("minimized-cancels-no-background-recreation", Minimized);
@@ -45,7 +47,8 @@ public static class MusicKgAccountUiTests
         [CallerArgumentExpression(nameof(predicate))] string expression = "",
         [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
     {
-        try { await MusicNativeKgAccountTests.Until(predicate); }
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        try { while (!predicate()) await Task.Delay(20, timeout.Token); }
         catch (OperationCanceledException)
         { throw new TimeoutException($"KG account wait at {member}:{line}: {expression}"); }
     }
@@ -79,26 +82,23 @@ public static class MusicKgAccountUiTests
         Check(!f.Module.HasAccountQr && f.Module.SelectedAccount!.State == "verified" &&
             f.Module.SelectedAccount.UserId == "42" && f.Module.AccountStatus == "会话验证成功");
         await f.Module.LogoutAccountAsync(f.Module.SelectedAccount!, confirmed: true);
-        Check(f.Module.SelectedAccount!.State == "none" && f.Transport.Registrations == 0 && f.Runtime.Calls == 0);
-        Check((await KgAccountFixture.ReadDevice(f.Store))["seed"]!.GetValue<string>() == KgAccountFixture.Seed);
+        Check(f.Module.SelectedAccount!.State == "none" && f.Runtime.Calls.Count == 0);
     }
     private static Task Raster()
     {
-        string url = "https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode=" + KgAccountHandler.QrKey;
-        var image = MusicAccountQrImage.Create(url, "kg");
+        string url = "https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode=SYNTHETIC_QR";
+        var image = MusicAccountQrImage.Create(url);
         Check(image.IsFrozen && image.PixelWidth is > 100 and < 1024);
         byte[] pixels = new byte[image.PixelWidth * image.PixelHeight];
         image.CopyPixels(pixels, image.PixelWidth, 0); Check(pixels.Contains((byte)0) && pixels.Contains((byte)255));
-        foreach (var bad in new[] { url.Replace("h5.kugou.com", "attacker.invalid"), url + "&token=x", url + "#x",
+        foreach (var address in new[] { url.Replace("h5.kugou.com", "attacker.invalid"), url + "&token=x", url + "#x",
             url.Replace("https:", "http:"), url.Replace(".com/", ".com:8443/"), url.Replace("qrcode=", "codekey="),
-            url.Replace("h5.", "user@h5."), url + "%20", url + new string('a', 257) })
+            url.Replace("h5.", "user@h5."), url + "%20", url + new string('a', 257), "file:///fixture", "relative-text" })
         {
-            try { MusicAccountQrImage.Create(bad, "kg"); throw new InvalidOperationException("Expected QR rejection"); }
-            catch (Exception e) when (e.Message == "INVALID_RESPONSE") { }
+            var encoded = MusicAccountQrImage.Create(address);
+            Check(encoded.IsFrozen && encoded.PixelWidth == encoded.PixelHeight && encoded.PixelWidth <= 1024);
         }
         Check(MusicAccountQrImage.Create("https://music.163.com/login?codekey=synthetic").IsFrozen);
-        try { MusicAccountQrImage.Create(url); throw new InvalidOperationException(); }
-        catch (Exception e) when (e.Message == "INVALID_RESPONSE") { }
         return Task.CompletedTask;
     }
     private static Window Offscreen(object content) => new() { Content = content, Width = 500, Height = 700,
@@ -127,7 +127,7 @@ public static class MusicKgAccountUiTests
     }
     private static async Task PendingRegistration()
     {
-        await using var f = await Fixture.Create(seedDevice: false); f.Transport.HoldAt = "register";
+        await using var f = await Fixture.Create(); f.Transport.HoldAt = "qr.create";
         var view = new MusicAccountsView { DataContext = f.Module };
         var window = Offscreen(view);
         try
@@ -135,7 +135,7 @@ public static class MusicKgAccountUiTests
             window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
             OpenLogin(view);
             var begin = f.Module.BeginAccountQrAsync(); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
-            Check(f.Store.Writes == 1 && f.Store.AccountWrites == 0);
+            Check(f.Store.Writes == 0);
             window.Hide(); await begin.WaitAsync(TimeSpan.FromSeconds(4));
             Check(f.Module.AccountBusy);
             var prepare = f.Module.PrepareShutdownAsync();
@@ -143,31 +143,31 @@ public static class MusicKgAccountUiTests
             f.Transport.Release.TrySetResult(); await prepare;
             Check(!f.Module.AccountBusy);
             Check(!f.Module.HasAccountQr && f.Module.Accounts[2].State != "verified" && f.Transport.Calls == 1);
-            Check((await KgAccountFixture.ReadDevice(f.Store))["seed"]!.GetValue<string>().Length == 32);
+            Check(f.Store.Writes == 0);
         }
         finally { f.Transport.Release.TrySetResult(); window.Close(); }
     }
     private static async Task SingleFlight()
     {
-        await using var f = await Fixture.Create(); f.Transport.HoldAt = "poll";
+        await using var f = await Fixture.Create(); f.Transport.HoldAt = "qr.poll";
         await f.Module.BeginAccountQrAsync();
         var poll = f.Module.CheckAccountQrAsync(); await f.Module.CheckAccountQrAsync();
         await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
         Check(f.Transport.Calls == 2);
         var cancel = f.Module.CancelAccountAsync(); f.Transport.Release.TrySetResult();
         await Task.WhenAll(poll, cancel);
-        Check(!f.Module.HasAccountQr && f.Store.AccountWrites == 0);
+        Check(!f.Module.HasAccountQr && f.Store.Writes == 0);
     }
     private static async Task Switch()
     {
-        await using var f = await Fixture.Create(); f.Transport.HoldAt = "profile";
+        await using var f = await Fixture.Create(); f.Transport.HoldAt = "qr.poll";
         await f.Module.BeginAccountQrAsync(); var poll = f.Module.CheckAccountQrAsync();
         await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
         f.Module.SelectedAccount = f.Module.Accounts[0];
         Check(!f.Module.HasAccountQr);
         f.Transport.Release.TrySetResult(); await poll;
         await f.Module.ReadAccountsAsync();
-        Check(f.Module.SelectedAccount!.Platform == "wy" && f.Module.Accounts[2].State == "none" && f.Store.AccountWrites == 0);
+        Check(f.Module.SelectedAccount!.Platform == "wy" && f.Module.Accounts[2].State == "none" && f.Store.Writes == 0);
     }
     private static async Task Expired()
     {
@@ -175,9 +175,37 @@ public static class MusicKgAccountUiTests
         await f.Module.BeginAccountQrAsync(); await f.Module.CheckAccountQrAsync();
         Check(!f.Module.HasAccountQr && !f.Module.CanSaveAccountQr && f.Module.AccountStatus == "二维码已过期");
     }
+    private static async Task DisplayExpiry()
+    {
+        await using var f = await Fixture.Create();
+        f.Transport.ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeMilliseconds();
+        f.Transport.Status = 1;
+        await f.Module.BeginAccountQrAsync();
+        Check(f.Module.HasAccountQr && !f.Module.CanSaveAccountQr && f.Module.CanCheckAccountQr);
+        await f.Module.CheckAccountQrAsync();
+        Check(f.Transport.Polls == 1 && f.Module.HasAccountQr && f.Module.AccountStatus == "等待扫码");
+        f.Transport.Status = 0;
+        await f.Module.CheckAccountQrAsync();
+        Check(f.Transport.Polls == 2 && !f.Module.HasAccountQr && !f.Module.CanSaveAccountQr &&
+            f.Module.AccountStatus == "二维码已过期" && f.Store.Writes == 0);
+    }
+    private static async Task Throttled()
+    {
+        await using var f = await Fixture.Create();
+        await f.Module.BeginAccountQrAsync();
+        var image = f.Module.AccountQrImage;
+        f.Transport.PollFailure = "RATE_LIMITED";
+        await f.Module.CheckAccountQrAsync();
+        Check(f.Module.HasAccountQr && ReferenceEquals(image, f.Module.AccountQrImage) && f.Module.CanCheckAccountQr &&
+            f.Module.AccountStatus == "请求过于频繁，请稍后重试" && f.Store.Writes == 0 && f.Transport.Polls == 1);
+        f.Transport.PollFailure = null;
+        await f.Module.CheckAccountQrAsync();
+        Check(!f.Module.HasAccountQr && f.Module.SelectedAccount!.State == "verified" &&
+            f.Transport.Polls == 2 && f.Store.Writes == 1);
+    }
     private static async Task Unknown()
     {
-        await using var f = await Fixture.Create(); f.Store.LoseReceiptAt = f.Store.Writes + 1;
+        await using var f = await Fixture.Create(); f.Store.LoseReceipt = true;
         await f.Module.BeginAccountQrAsync(); await f.Module.CheckAccountQrAsync();
         Check(!f.Module.HasAccountQr && f.Module.AccountStatus.Contains("未确认") &&
             f.Module.SelectedAccount!.State != "verified" && !f.Module.CanBeginAccountQr);
@@ -293,26 +321,27 @@ public static class MusicKgAccountUiTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        internal readonly string Root = MusicNativeKgAccountTests.DataPath();
-        internal readonly NoRuntime Runtime = new();
-        internal readonly KgAccountHandler Transport = new();
-        internal readonly KgAccountStore Store;
+        internal readonly string Root = TestWorkspace.DataPath("kg-account-ui", Guid.NewGuid().ToString("N"));
+        internal readonly NativeMusicScriptTestRuntime Runtime = new();
+        internal readonly QrScenario Transport = new();
+        internal readonly MusicAccountRuntimeFixture.StoreProbe Store;
         internal readonly Dialogs Dialogs;
         internal readonly MusicAccountFixtureApplication Calls;
         internal readonly MusicCapability Module;
         private Fixture()
         {
+            Directory.CreateDirectory(Root);
             Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Dialogs = new() { Path = System.IO.Path.Combine(Root, "explicit-qr.png") };
-            Calls = new(new MusicNativeApplication(Store, Runtime, Transport));
+            Runtime.Platform.OnRequest = Transport.Read;
+            Calls = new(new MusicNativeApplication(Store, Runtime));
             Module = new(Calls, Store, new Output(), Dialogs);
         }
-        internal static async Task<Fixture> Create(bool seedDevice = true)
+        internal static async Task<Fixture> Create()
         {
             var f = new Fixture();
             try
             {
-                if (seedDevice) await KgAccountFixture.SeedDevice(f.Store.Inner);
                 await f.Module.InitializeAsync(default);
                 // Account fixtures stay on a local page instead of refreshing an unrelated home.
                 await f.Module.NavigateAsync("favorites", default);
@@ -323,8 +352,8 @@ public static class MusicKgAccountUiTests
         public async ValueTask DisposeAsync()
         {
             Transport.Release.TrySetResult(); Store.Release.TrySetResult();
-            try { await Module.DisposeAsync(); Check(Runtime.Calls == 0); }
-            finally { await Store.DisposeAsync(); }
+            try { await Module.DisposeAsync(); Check(Runtime.Calls.Count == 0); }
+            finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
         }
     }
     private sealed class Dialogs : IMusicDialogs, IMusicAccountQrSaveDialog
@@ -337,14 +366,33 @@ public static class MusicKgAccountUiTests
         public string[]? SelectAudioFiles() => null;
         public string? SelectQrPngPath() { Selections++; OnSelect?.Invoke(); return Path; }
     }
-    private sealed class NoRuntime : IRuntimeClient
+    private sealed class QrScenario
     {
-        internal int Calls;
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Native business must not upload script sources"); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Ordinary KG must not start Node"); }
+        internal int Calls, Polls, Status = 4;
+        internal long ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeMilliseconds();
+        internal string? HoldAt, PollFailure;
+        internal readonly TaskCompletionSource Arrived = MusicAccountRuntimeFixture.Signal(), Release = MusicAccountRuntimeFixture.Signal();
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
+        {
+            if (call.Operation == "qr.cancel") return MusicPlatformRuntimeFixture.Json(new { cancelled = true });
+            Calls++;
+            if (HoldAt == call.Operation) { Arrived.TrySetResult(); await Release.Task; }
+            if (call.Operation == "qr.create") return MusicPlatformRuntimeFixture.Json(new {
+                challengeId = call.Parameters.GetProperty("challengeId").GetString(),
+                url = "https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode=SYNTHETIC_QR",
+                imageBase64 = (string?)null,
+                expiresAt = ExpiresAt });
+            if (call.Operation == "qr.poll")
+            {
+                Polls++;
+                if (PollFailure is not null) throw new MeowFilm.Capabilities.Platforms.MusicPlatformException(PollFailure);
+                var account = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation("kg").GetRawText())!.AsObject();
+                account["cookie"] = "userid=42; token=SYNTHETIC_KG_TOKEN; KUGOU_API_MID=123456789; t1=SYNTHETIC_T1";
+                return MusicPlatformRuntimeFixture.Json(new { status = Status switch { 1 => "waiting", 0 => "expired", _ => "authenticated" },
+                    account = Status == 4 ? account : null });
+            }
+            throw new InvalidOperationException(call.Operation);
+        }
     }
     private sealed class Output : IMusicPlayback
     {

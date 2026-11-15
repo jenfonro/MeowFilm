@@ -11,9 +11,10 @@ public final class MusicDailyStyleViewController: HostingPageViewController<Musi
     public init(
         page: MusicPublicBrowseViewModel,
         source: MusicRemoteQueueSource,
+        receipts: MusicSettingsReceiptOwner,
         appearance: MusicAppearancePreferencesStore
     ) {
-        model = MusicDailyStyleViewModel(page: page, source: source)
+        model = MusicDailyStyleViewModel(page: page, source: source, receipts: receipts)
         super.init(
             themeProvider: appearance,
             content: MusicDailyStyleContent(theme: PageTheme(colors: appearance.pagePalette))

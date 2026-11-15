@@ -14,13 +14,13 @@ public static class MusicSearchGroupTests
         yield return Case("current provider vector keeps 3 items from 2 groups and 4 raw variants", Vector);
         yield return Case("expanded native pages preserve group cursor totals and shared ranks", Pages);
         yield return Case("cross-page copyright dedup never rewrites native resource ids", Copyright);
-        yield return Case("other platforms and playlist search cannot opt into group units", OtherKinds);
+        yield return Case("unconsumed group statistics do not gate other platforms or playlist results", OtherKinds);
         yield return Case("ordinary item pages retain their original limits and optional total", ItemPages);
-        yield return Case("group count total and variant statistics must be exact bounded integers", Counts);
-        yield return Case("native group continuation cannot be guessed from expanded item count", Cursors);
-        yield return Case("short group page against a larger total is terminal", ShortTotal);
-        yield return Case("group ranks are required and remain within native group positions", Ranks);
-        yield return Case("copyright identity is required and page duplicates are rejected", Identities);
+        yield return Case("unconsumed group count total and variant statistics do not validate a page", Counts);
+        yield return Case("native group continuation advances independently of expanded item count", Cursors);
+        yield return Case("short group pages follow actual continuation rather than total", ShortTotal);
+        yield return Case("actual group ranks are consumed without a native range proof", Ranks);
+        yield return Case("copyright is optional metadata and does not replace native identity", Identities);
         yield return Case("100 groups 1000 expanded variants remain an accepted bounded page", MaximumPage);
         yield return Case("expanded pages are not truncated", Bytes);
         yield return Case("failed group page keeps its cursor and the next round retries the same native page", Retry);
@@ -54,7 +54,7 @@ public static class MusicSearchGroupTests
         return new JsonObject
         {
             ["rank"] = group + 1,
-            ["song"] = MusicSongFixture.Online("mg", id, "t", "a", "", 1,
+            ["song"] = MusicSongFixture.Online("mg", id, "Track " + id, "a", "", 1,
                 native: new JsonObject { ["copyrightId"] = "c" + id })
         };
     }
@@ -102,11 +102,13 @@ public static class MusicSearchGroupTests
     }
     private static MusicSearchPage Read(JsonObject page, string platform = "mg", MusicSearchKind kind = MusicSearchKind.Songs, int number = 1) =>
         MusicSearchPage.Read(E(page), platform, kind, number);
-    private static void Reject(JsonObject page, string platform = "mg", MusicSearchKind kind = MusicSearchKind.Songs, int number = 1)
+    private static async Task Reject(JsonObject page, string code)
     {
-        try { _ = Read(page, platform, kind, number); }
-        catch (MusicLibraryException) { return; }
-        throw new InvalidOperationException("invalid group page accepted");
+        await using var f = new Fixture(_ => Task.FromResult(E(page)));
+        string id = S(await f.Start(), "id");
+        var result = await f.Idle(id);
+        Check(S(State(result), "error") == code && result.GetProperty("items").GetArrayLength() == 0,
+            "a consumed-field failure must report its actual public error without publishing a partial page");
     }
     private static JsonObject ProviderVector() => Group(1, 2, 3, 2, 4,
         ProviderSong("S1", 1, "C1"), ProviderSong("S2", 1, "C2"), ProviderSong("S3", 2, "C3"));
@@ -125,20 +127,20 @@ public static class MusicSearchGroupTests
             "Provider recording and copyright identities must remain exact");
         foreach (var record in records) CurrentSongSurface(E(record));
         var first = Read(source);
-        Check(first.Items.Length == 3 && first.Total == 3 && first.GroupCount == 2 && first.RawItemCount == 4 &&
-            first.TotalUnit == "groups" && first.More && first.Next == 2);
+        Check(first.Items.Length == 3 && first.More && first.Next == 2);
         Check(first.Items.Select(i => i.Rank).SequenceEqual([1d, 1d, 2d]));
         var secondPage = Group(2, 2, 3, 1, 2, Song("S5", 3, "C5"), Song("S6", 3, "C6"));
         var second = Read(secondPage, number: 2);
-        Check(second.Items.Length == 2 && !second.More && second.Items.All(i => i.Rank == 3) && second.Total == 3);
+        Check(second.Items.Length == 2 && !second.More && second.Items.All(i => i.Rank == 3));
         await using var f = new Fixture(r => Task.FromResult(E(r.Page == 1 ? source : secondPage)));
         string id = S(await f.Start(), "id"); var snapshot = await f.Idle(id); var state = State(snapshot);
         Check(state.GetProperty("count").GetInt32() == 3 && state.GetProperty("page").GetInt32() == 1 &&
             snapshot.GetProperty("more").GetBoolean());
         var song = snapshot.GetProperty("items").EnumerateArray()
             .Single(s => S(MusicSongFixture.Info(s), "songmid") == "S1");
-        Check(S(song, "songId") == records[0]["songId"]!.GetValue<string>(),
-            "Search grouping must preserve the supplied song identity");
+        Check(Guid.TryParseExact(S(song, "songId"), "D", out _) &&
+            f.Library.SongSnapshot(S(song, "songId")) is not null,
+            "Search references the permanent identity assigned by the real repository");
         CurrentSongSurface(song);
         var native = MusicSongFixture.Info(song);
         Check(new[] { "id", "songId", "songmid" }.All(field => S(native, field) == "S1") &&
@@ -181,79 +183,89 @@ public static class MusicSearchGroupTests
             Group(2, 30, 31, 1, 1, Song("differentNative", 31, "CS1V0")))));
         string id = S(await f.Start(), "id"); await f.Idle(id); await f.Call("next", id);
         var result = await f.Idle(id);
-        Check(State(result).GetProperty("count").GetInt32() == 30 && State(result).GetProperty("page").GetInt32() == 2);
+        Check(State(result).GetProperty("count").GetInt32() == 31 && State(result).GetProperty("page").GetInt32() == 2);
         var song = result.GetProperty("items").EnumerateArray()
             .Single(s => S(MusicSongFixture.Info(s), "songmid") == "S1V0");
         Check(S(MusicSongFixture.Info(song), "songmid") == "S1V0" &&
             S(MusicSongFixture.Info(song), "copyrightId") == "CS1V0");
         Check(result.GetProperty("items").EnumerateArray()
-            .All(s => S(MusicSongFixture.Info(s), "songmid") != "differentNative"));
+            .Any(s => S(MusicSongFixture.Info(s), "songmid") == "differentNative"),
+            "the native consumer cannot discard a returned locator using an unrelated copyright field");
     }
     private static Task OtherKinds()
     {
         foreach (string platform in new[] { "wy", "tx", "kw", "kg" })
         {
-            var page = Small(); page["platform"] = platform; Reject(page, platform);
+            var page = Small(); page["platform"] = platform;
+            Check(Read(page, platform).Items.Length == 3);
         }
-        Reject(Small(), kind: MusicSearchKind.Playlists); return Task.CompletedTask;
+        var playlists = new JsonObject { ["items"] = new JsonArray(new JsonObject
+        { ["id"] = "list", ["name"] = "List", ["source"] = "mg" }), ["more"] = false,
+            ["groupCount"] = "unused", ["rawItemCount"] = new JsonObject() };
+        Check(Read(playlists, kind: MusicSearchKind.Playlists).Items.Length == 1);
+        return Task.CompletedTask;
     }
     private static Task ItemPages()
     {
         var page = Small(); page.Remove("totalUnit"); page.Remove("groupCount"); page.Remove("rawItemCount");
         page["items"] = new JsonArray(page["items"]!.AsArray()
             .Select(item => item!["song"]!.DeepClone()).ToArray());
-        Reject(page); // Expanded >limit remains invalid without explicit MG group semantics.
+        Check(Read(page).Items.Length == 3); // A request limit is not a result admission threshold.
         page["limit"] = 3; page["more"] = false; page["continuation"] = null;
         var parsed = Read(page);
-        Check(parsed.TotalUnit == "items" && parsed.GroupCount is null && parsed.RawItemCount is null && parsed.Total == 3);
-        page["totalUnit"] = "songs"; Reject(page); return Task.CompletedTask;
+        Check(parsed.Items.Length == 3 && !parsed.More);
+        page["totalUnit"] = "songs"; Check(Read(page).Items.Length == 3); return Task.CompletedTask;
     }
     private static Task Counts()
     {
         foreach (string field in new[] { "groupCount", "rawItemCount", "total" })
         {
-            var p = Small(); p.Remove(field); Reject(p);
+            var p = Small(); p.Remove(field); Check(Read(p).Items.Length == 3);
             foreach (JsonNode? value in new JsonNode?[] { null, JsonValue.Create("2"), JsonValue.Create(1.5), JsonValue.Create(9007199254740992L) })
-            { p = Small(); p[field] = value; Reject(p); }
+            { p = Small(); p[field] = value?.DeepClone(); Check(Read(p).Items.Length == 3); }
         }
         foreach (var (field, value) in new[] { ("groupCount", 1), ("groupCount", 3), ("rawItemCount", 2),
             ("rawItemCount", -1), ("total", -1), ("limit", 101) })
-        { var p = Small(); p[field] = value; Reject(p); }
-        Reject(Group(1, 2, 1, 1, 0));
-        Reject(Group(1, 2, 1, 1, 1)); // Nonempty raw groups cannot become an empty deduplicated page.
+        { var p = Small(); p[field] = value; Check(Read(p).Items.Length == 3); }
+        Check(Read(Group(1, 2, 1, 1, 0)).Items.Length == 0);
+        Check(Read(Group(1, 2, 1, 1, 1)).Items.Length == 0);
         var emptyFirst = Read(Group(1, 2, 1, 0, 0));
-        Check(emptyFirst.Items.Length == 0 && !emptyFirst.More && emptyFirst.GroupCount == 0);
+        Check(emptyFirst.Items.Length == 0 && !emptyFirst.More);
         var empty = Read(Group(2, 2, 2, 0, 0), number: 2); Check(empty.Items.Length == 0 && !empty.More);
         return Task.CompletedTask;
     }
-    private static Task Cursors()
+    private static async Task Cursors()
     {
-        var p = Small(); p["continuation"] = new JsonObject { ["page"] = 3 }; Reject(p);
-        p = Small(); p["continuation"] = null; Reject(p);
+        var p = Small(); p["continuation"] = new JsonObject { ["page"] = 3 }; Check(Read(p).Next == 3);
+        p = Small(); p["continuation"] = null; await Reject(p, "INVALID_RESPONSE");
         p = Small(); p["more"] = false; p["continuation"] = null;
         Check(Read(p) is { Items.Length: 3, More: false });
-        p = Group(1, 2, 2, 2, 2, Song("1", 1), Song("2", 2)); p["more"] = true; p["continuation"] = new JsonObject { ["page"] = 2 }; Reject(p);
-        return Task.CompletedTask;
+        p = Group(1, 2, 2, 2, 2, Song("1", 1), Song("2", 2)); p["more"] = true; p["continuation"] = new JsonObject { ["page"] = 2 };
+        Check(Read(p).More && Read(p).Next == 2);
+        p["continuation"] = new JsonObject { ["page"] = 1 }; await Reject(p, "PAGINATION_STALLED");
     }
     private static Task ShortTotal()
     {
         var page = Read(Group(1, 30, 100, 1, 1, Song("S1", 1, "C1")));
         Check(page.Items.Length == 1 && !page.More);
+        var advancing = Group(1, 30, 100, 1, 1, Song("S1", 1, "C1"));
+        advancing["more"] = true; advancing["continuation"] = new JsonObject { ["page"] = 2 };
+        Check(Read(advancing).More && Read(advancing).Next == 2);
         return Task.CompletedTask;
     }
-    private static Task Ranks()
+    private static async Task Ranks()
     {
         foreach (double value in new[] { 0, 1.5, 3, -1 })
-        { var p = Small(); p["items"]![0]!["rank"] = value; Reject(p); }
-        var missing = Small(); missing["items"]![0]!.AsObject().Remove("rank"); Reject(missing);
+        { var p = Small(); p["items"]![0]!["rank"] = value; Check(Read(p).Items[0].Rank == value); }
+        var missing = Small(); missing["items"]![0]!.AsObject().Remove("rank"); await Reject(missing, "INVALID_RESPONSE");
         var crowded = Group(1, 2, 2, 2, 34, Enumerable.Range(0, 33).Select(i => Song("x" + i, 1)).Append(Song("last", 2)).ToArray());
-        Check(Read(crowded).Items.Length == 34); return Task.CompletedTask;
+        Check(Read(crowded).Items.Length == 34);
     }
     private static Task Identities()
     {
-        var p = Small(); SetCopyright(p, 0, null); Reject(p);
-        p = Small(); SetCopyright(p, 2, "C1"); Reject(p);
-        p = Small(); SetCopyright(p, 0, new string('x', 513)); Reject(p);
+        var p = Small(); SetCopyright(p, 0, null); Check(Read(p).Items.Length == 3);
+        p = Small(); SetCopyright(p, 2, "C1"); Check(Read(p).Items.Length == 3);
+        p = Small(); SetCopyright(p, 0, new string('x', 513)); Check(Read(p).Items.Length == 3);
         return Task.CompletedTask;
     }
     private static Task MaximumPage()
@@ -262,7 +274,7 @@ public static class MusicSearchGroupTests
             .SelectMany(group => Enumerable.Range(0, 10).Select(variant => CompactSong(group, variant)))
             .ToArray();
         var page = Read(Group(1, 100, 100, 100, 1000, items));
-        Check(page.Items.Length == 1000 && page.Total == 100 && page.RawItemCount == 1000 && !page.More);
+        Check(page.Items.Length == 1000 && !page.More);
         return Task.CompletedTask;
     }
     private static Task Bytes()
@@ -342,14 +354,24 @@ public static class MusicSearchGroupTests
         string id = S(await f.Start(), "id"); await f.Idle(id);
         for (int i = 0; i < 4; i++) { await f.Call("next", id); await f.Idle(id); }
         var state = State(await f.Call("get", id));
-        Check(state.GetProperty("page").GetInt32() == 5 && state.GetProperty("count").GetInt32() == 30 &&
+        Check(state.GetProperty("page").GetInt32() == 5 && state.GetProperty("count").GetInt32() == 150 &&
             S(state, "error") == "" && state.GetProperty("more").GetBoolean());
     }
-    private sealed class Fixture(Func<MusicSearchRequest, Task<JsonElement>> handler) : IAsyncDisposable
+    private sealed class Fixture : IAsyncDisposable
     {
-        internal readonly Catalog Catalog = new(handler);
+        internal readonly Catalog Catalog;
+        internal readonly MusicOfficialAudioTests.MemoryStore Store = new();
+        internal readonly MusicLibraryOwner Library;
+        internal Fixture(Func<MusicSearchRequest, Task<JsonElement>> handler)
+        { Catalog = new(handler); Library = new(Store); }
         private MusicSearchCoordinator? search;
-        internal MusicSearchCoordinator Search => search ??= new(Catalog);
+        internal MusicSearchCoordinator Search => search ??= new(Catalog, searchAsync: async (request, token) =>
+        {
+            long observation = Library.BeginSongObservation();
+            var page = await Catalog.SearchAsync(request, token);
+            token.ThrowIfCancellationRequested();
+            return await Library.AdoptPlatformResultAsync(page, token, observation: observation);
+        }) { SongFactsProjection = value => Library.ProjectRepository(value, MusicLibraryOwner.PlatformSongShape.Page) };
         internal Task<JsonElement> Start() => Search.ExecuteAsync("music.search.start", new { keyword = "group", kind = "songs",
             platforms = new[] { "mg" }, pages = 1, concurrency = 1, cacheMinutes = 60 });
         internal Task<JsonElement> Call(string method, string id) => Search.ExecuteAsync("music.search." + method, new { id });
@@ -362,7 +384,8 @@ public static class MusicSearchGroupTests
             try { Updated(await Call("get", id)); return await done.Task.WaitAsync(TimeSpan.FromSeconds(30)); }
             finally { Search.Changed -= Updated; }
         }
-        public ValueTask DisposeAsync() => Search.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        { await Search.DisposeAsync(); await Library.DisposeAsync(); await Store.DisposeAsync(); }
     }
     private sealed class Catalog(Func<MusicSearchRequest, Task<JsonElement>> handler) : IMusicPlatformCatalog
     {
@@ -374,6 +397,7 @@ public static class MusicSearchGroupTests
         private static Task<JsonElement> Unused() => throw new InvalidOperationException("non-search call");
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Unused();
+        public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default) => Unused();

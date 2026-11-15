@@ -12,7 +12,6 @@ public struct MusicCandidateDiscoveryPolicy: MusicCandidateDiscoverySelecting {
 
     public func plan(_ snapshot: MusicCandidateDiscoverySnapshot,
                      preferred: MusicCandidateDiscoveryTarget? = nil) throws -> [MusicCandidateDiscoveryTarget] {
-        guard snapshot.track.sources.count <= 16 else { throw MusicServiceError.limit }
         let state = snapshot.state
         let order = state.qualityOrder + Self.groups.filter { !state.qualityOrder.contains($0) }
         let spatialOrder = state.spatialOrder + Self.spatial.filter { !state.spatialOrder.contains($0) }
@@ -26,8 +25,7 @@ public struct MusicCandidateDiscoveryPolicy: MusicCandidateDiscoverySelecting {
         let keys = Set(snapshot.track.sources.map(\.sourceKey))
         var candidates: [MusicCandidateDiscoveryTarget] = []
         for option in snapshot.options where keys.contains(option.playback.sourceKey) {
-            guard option.playback.qualities.count <= 10,
-                  let source = snapshot.track.sources.first(where: { $0.sourceKey == option.playback.sourceKey }),
+            guard let source = snapshot.track.sources.first(where: { $0.sourceKey == option.playback.sourceKey }),
                   source.platform == option.playback.siteId else { throw MusicServiceError.invalidResponse }
             for quality in option.playback.qualities {
                 let target = option.target(quality: quality)

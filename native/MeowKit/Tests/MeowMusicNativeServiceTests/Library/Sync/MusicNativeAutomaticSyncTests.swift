@@ -8,9 +8,10 @@ import MeowMusicFeature
     private func enable(_ service: NativeMusicService, favorites: Bool = false,
                         playlists: Bool = true) async throws -> MusicLibrarySyncState {
         let saved = try await service.automaticLibrarySyncPreferences()
-        return try await service.saveAutomaticLibrarySync(
+        let result = try await service.saveAutomaticLibrarySync(
             .init(revision: saved.revision, selections: [.init(platform: .netease, favorites: favorites, playlists: playlists)]),
             requestID: UUID(), authorization: .init())
+        return try result.synchronization.get()
     }
     private func run(_ service: NativeMusicService, _ reason: MusicAutomaticLibrarySyncRequest.Reason = .localMutation) async throws -> MusicLibrarySyncState {
         try await service.synchronizeAutomaticLibrary(.init(reason: reason, authorization: .init()))
@@ -18,6 +19,54 @@ import MeowMusicFeature
     private func playlist(_ service: NativeMusicService, _ id: String) async throws -> MusicCollection {
         let rows = try await service.collections()
         return try XCTUnwrap(rows.first { $0.id == id })
+    }
+
+    func testLongOpaqueAccountIDSurvivesAutomaticBindingSyncAndCurrentColdRead() async throws {
+        for platform in [MusicAccountPlatform.netease, .qq, .kugou] {
+            let accountID = "opaque-" + String(repeating: "u", count: 2300) + "-" + platform.rawValue
+            let scope = "synthetic-install:local-account"
+            XCTAssertGreaterThan(accountID.utf8.count, 2048)
+            let peer = NativeSyncPeer(platform: platform, rows: [NativeSyncFixture.collection()])
+            await peer.switchAccount(uid: accountID, scope: scope)
+            let store = try NativeSyncFixture.store(), service = try await NativeMusicFixture.service(store, accounts: peer)
+            let initial = try await service.automaticLibrarySyncPreferences()
+            let selected = MusicLibrarySyncSelection(platform: platform, playlists: true)
+            let saved = try await service.saveAutomaticLibrarySync(
+                .init(revision: initial.revision, selections: [selected]), requestID: UUID(), authorization: .init())
+            _ = try saved.synchronization.get()
+            let document = try NativeSyncFixture.document(store), ledger = try MusicNativeSyncLedger.load(document.library)
+            XCTAssertEqual(ledger.automatic.bindings[platform.rawValue]?.accountID, accountID)
+            XCTAssertEqual(ledger.automatic.bindings[platform.rawValue]?.scope, scope)
+            XCTAssertEqual(document.library["library"]["accounts"][platform.rawValue].string, accountID)
+            let bindings = document.library["library"]["collections"].array.flatMap { $0["bindings"].array }
+            XCTAssertEqual(bindings.count, 1); XCTAssertEqual(bindings.first?["accountId"].string, accountID)
+            XCTAssertEqual(bindings.first?["platform"].string, platform.rawValue)
+            XCTAssertEqual(bindings.first?["id"].string, "501")
+            let beforeCold = await peer.counts()
+            await service.close()
+            let restored = try await NativeMusicFixture.service(store, accounts: peer)
+            let preferences = try await restored.automaticLibrarySyncPreferences()
+            XCTAssertEqual(preferences, saved.preferences)
+            _ = try await run(restored, .foreground)
+            let current = try NativeSyncFixture.document(store), coldLedger = try MusicNativeSyncLedger.load(current.library)
+            XCTAssertEqual(coldLedger.automatic.bindings[platform.rawValue]?.accountID, accountID)
+            XCTAssertEqual(current.library["library"]["accounts"][platform.rawValue].string, accountID)
+            let coldBindings = current.library["library"]["collections"].array.flatMap { $0["bindings"].array }
+            XCTAssertEqual(coldBindings.map { $0["accountId"].string }, [accountID])
+            let afterCold = await peer.counts()
+            XCTAssertEqual(afterCold.0, beforeCold.0 + 1); XCTAssertEqual(afterCold.1, beforeCold.1 + 1)
+            await peer.switchAccount(uid: accountID + "-other", scope: scope)
+            do { _ = try await run(restored, .foreground); XCTFail("A replacement account inherited the old automatic binding") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
+            let afterReplacement = try NativeSyncFixture.document(store)
+            for field in ["accounts", "collections", "networkReferences", "songs"] {
+                XCTAssertEqual(afterReplacement.library["library"][field], current.library["library"][field])
+            }
+            XCTAssertEqual(try MusicNativeSyncLedger.load(afterReplacement.library).automatic.bindings[platform.rawValue]?.accountID, accountID)
+            let counts = await peer.counts(), mutations = await peer.calls()
+            XCTAssertEqual(counts.1, afterCold.1); XCTAssertTrue(mutations.isEmpty)
+            await restored.close()
+        }
     }
 
     func testNewAndCurrentManualLedgerDefaultsNeverAuthorizeAutomaticNetwork() async throws {
@@ -63,7 +112,7 @@ import MeowMusicFeature
     func testSaveRunsOnceAndAllOffSurvivesColdRestoreWithoutAccountCalls() async throws {
         let a = NativeSyncFixture.member("101"), peer = NativeSyncPeer()
         let store = try NativeSyncFixture.store([a]), service = try await NativeMusicFixture.service(store, accounts: peer)
-        _ = try await service.createPlaylist(name: "Local", refs: NativeSyncFixture.refs([a]))
+        _ = try await service.createPlaylist(name: "Local", refs: try await NativeSyncFixture.refs([a], service: service))
         _ = try await enable(service)
         var writes = await peer.calls()
         XCTAssertEqual(writes.map(\.action), [.create, .add])
@@ -86,7 +135,7 @@ import MeowMusicFeature
         let a = NativeSyncFixture.member("101"), b = NativeSyncFixture.member("102")
         let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection("500", name: "Favorites", kind: .favorites)])
         let service = try await NativeMusicFixture.service(NativeSyncFixture.store([a, b]), accounts: peer)
-        let refs = try NativeSyncFixture.refs([a, b])
+        let refs = try await NativeSyncFixture.refs([a, b], service: service)
         _ = try await enable(service, favorites: true)
         let created = try await service.createPlaylist(name: "Local", refs: [refs[0]])
         _ = try await run(service)

@@ -29,6 +29,8 @@ public sealed class ArtworkImage : Grid
     public event EventHandler<ArtworkLoadEventArgs>? LoadCompleted;
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(nameof(Address), typeof(string),
         typeof(ArtworkImage), new PropertyMetadata("", (value, _) => ((ArtworkImage)value).Restart()));
+    public static readonly DependencyProperty DisplayIdentityProperty = DependencyProperty.Register(nameof(DisplayIdentity), typeof(string),
+        typeof(ArtworkImage), new PropertyMetadata("", (value, _) => ((ArtworkImage)value).Restart()));
     public static readonly DependencyProperty StretchProperty = DependencyProperty.Register(nameof(Stretch), typeof(Stretch),
         typeof(ArtworkImage), new PropertyMetadata(Stretch.UniformToFill, (value, args) => ((ArtworkImage)value).image.Stretch = (Stretch)args.NewValue));
     public static readonly DependencyProperty ShowRetryProperty = DependencyProperty.Register(nameof(ShowRetry), typeof(bool),
@@ -64,6 +66,7 @@ public sealed class ArtworkImage : Grid
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         Visibility = Visibility.Collapsed, Padding = new Thickness(4) };
     private IArtworkLease? lease;
+    private string displayedIdentity = "";
     private CancellationTokenSource? request;
     private Task? requestTask;
     private PresentationLease? presentation;
@@ -71,6 +74,8 @@ public sealed class ArtworkImage : Grid
     private bool loaded, attempted, canRetry, observingLayout;
 
     public string Address { get => (string)GetValue(AddressProperty); set => SetValue(AddressProperty, value); }
+    /// <summary>Only a consumer with a stable display identity retains successful pixels during a resource change.</summary>
+    public string DisplayIdentity { get => (string)GetValue(DisplayIdentityProperty); set => SetValue(DisplayIdentityProperty, value); }
     public Stretch Stretch { get => (Stretch)GetValue(StretchProperty); set => SetValue(StretchProperty, value); }
     public bool ShowRetry { get => (bool)GetValue(ShowRetryProperty); set => SetValue(ShowRetryProperty, value); }
     public ArtworkImage()
@@ -138,16 +143,24 @@ public sealed class ArtworkImage : Grid
     }
     private bool HasDemand() => presentation is not null || InViewport();
     private void OnLayout(object? sender, EventArgs args) => UpdateVisibility();
-    internal void Restart() { Retire(); UpdateVisibility(); }
-    private void Retire()
+    internal void Restart()
+    {
+        Retire(lease is not null && DisplayIdentity.Length > 0 && displayedIdentity == DisplayIdentity && Address.Length > 0);
+        UpdateVisibility();
+    }
+    private void Retire(bool retainImage = false)
     {
         epoch++;
         var priorRequest = request; request = null; requestTask = null; attempted = canRetry = false;
-        var priorLease = lease; lease = null;
-        SetValue(SourcePropertyKey, null); SetValue(AspectRatioPropertyKey, 0d); SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
-        SetValue(PaletteBrushPropertyKey, Brushes.DimGray);
-        SetValue(TopPaletteBrushPropertyKey, Brushes.DimGray);
-        SetValue(HasTopPalettePropertyKey, false);
+        var priorLease = retainImage ? null : lease;
+        if (!retainImage)
+        {
+            lease = null; displayedIdentity = "";
+            SetValue(SourcePropertyKey, null); SetValue(AspectRatioPropertyKey, 0d); SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
+            SetValue(PaletteBrushPropertyKey, Brushes.DimGray);
+            SetValue(TopPaletteBrushPropertyKey, Brushes.DimGray);
+            SetValue(HasTopPalettePropertyKey, false);
+        }
         ClearValue(ToolTipProperty); ClearValue(AutomationProperties.HelpTextProperty);
         UpdateRetryVisibility();
         priorLease?.Dispose();
@@ -248,7 +261,9 @@ public sealed class ArtworkImage : Grid
             {
                 acquired = await loader.AcquireAsync(address, current.Token);
                 if (stamp != epoch || current.IsCancellationRequested || !HasDemand()) return;
-                lease = acquired; acquired = null; SetValue(SourcePropertyKey, lease.Image);
+                var prior = lease;
+                lease = acquired; acquired = null; displayedIdentity = DisplayIdentity;
+                SetValue(SourcePropertyKey, lease.Image); prior?.Dispose();
                 SetValue(AspectRatioPropertyKey, (double)lease.Image.PixelWidth / lease.Image.PixelHeight);
                 var palettes = SamplePalettes(lease.Image);
                 SetValue(RawPaletteBrushPropertyKey, palettes.Raw);

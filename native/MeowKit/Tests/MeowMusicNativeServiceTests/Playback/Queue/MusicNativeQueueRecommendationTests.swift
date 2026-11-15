@@ -1,68 +1,67 @@
 import XCTest
 import MeowMusicFeature
 import MeowStorage
+import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 final class MusicNativeQueueRecommendationTests: XCTestCase {
-    func testPreviewSharesAcquiredMetadataWithoutQueryEvidenceOrPersistingNonmembers() async throws {
+    func testPreviewAdoptsRepositoryMetadataWithoutQueryEvidenceOrPersistingNonmemberChecks() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let metadataDocument = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument }, clock: { NativeMusicFixture.date })
+        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument })
         let owner = SimilarModeAccountFixture([["301"]])
-        let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeCandidateDiscoveryHTTP()
+        let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([SimilarModeAccountFixture.track("100")], platform: "wy")])
         let store = NativeMusicMemoryDocument(try document(["100"]))
-        let service = try await NativeMusicFixture.service(store, accounts: owner, qq: qq, http: http, sourceDiscovery: cache)
+        let service = try await NativeMusicFixture.service(store, accounts: owner, platform: peer, sourceDiscovery: cache)
+        let searched = try await service.search(platform: "wy", query: "Song 100 Synthetic", page: 1, limit: 30)
+        let localID = try XCTUnwrap(searched.items.first).songId
         _ = try await service.createPlaylist(name: "Saved", refs: [.init(kind: .queue, id: "entry-1")])
         await service.flushSourceDiscoveryPersist()
-        let persisted = try XCTUnwrap(metadataDocument.read(key: "records"))
+        let persisted = try XCTUnwrap(metadataDocument.read(key: "checks"))
         let file = root.appendingPathComponent(MusicNativePersistentSourceDiscoveryCache.namespace)
-            .appendingPathComponent("records.json")
+            .appendingPathComponent("checks.json")
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
-        let otherEntrance = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
-            "tx", id: "OtherMID", title: "Song 301", artist: "Synthetic"))
-        let unknown = try await service.cachedSourceDiscoveryState(otherEntrance)
-        XCTAssertTrue(unknown.entries.isEmpty)
         _ = try await startPlaying(service)
-        let before = store.snapshot().0, writes = store.snapshot().2
+        let before = try await service.read()
 
         let previewValue = try await preview(service), preview = try XCTUnwrap(previewValue)
         XCTAssertEqual(preview.candidates.map(\.song.title), ["Song 301"])
-        let acquired = try await service.cachedSourceDiscoveryState(otherEntrance)
-        XCTAssertEqual(Set(acquired.entries.keys), ["wy"])
-        let known = try XCTUnwrap(acquired.entries["wy"])
-        let recommended = try MusicModel.normalize(SimilarModeAccountFixture.track("301"))
-        XCTAssertEqual(known.sources.map(\.sourceKey), [recommended["sources"].array[0]["sourceKey"].string])
-        XCTAssertEqual(known.checkedAt, 0)
-        XCTAssertTrue(known.observations.isEmpty)
-        XCTAssertTrue(acquired.checks.isEmpty)
-
-        let reused = try await service.sharedSongMetadata(otherEntrance)
-        XCTAssertEqual(Set(reused["sources"].array.map { $0["source"].string }), ["tx", "wy"])
-        XCTAssertEqual(reused["sources"].array.first?["sourceKey"], otherEntrance["sources"].array.first?["sourceKey"])
-        let mapped = try XCTUnwrap(reused["sources"].array.first { $0["source"].string == "wy" })
-        XCTAssertEqual(mapped["sourceKey"], recommended["sources"].array[0]["sourceKey"])
-        let unchangedEvidence = try await service.cachedSourceDiscoveryState(otherEntrance)
-        XCTAssertTrue(unchangedEvidence.entries.values.allSatisfy { $0.checkedAt == 0 && $0.observations.isEmpty })
-        XCTAssertTrue(unchangedEvidence.checks.isEmpty)
+        let state = try await service.read()
+        let recommended = try XCTUnwrap(state.library["library"]["songs"].fields.map(\.1).first {
+            $0["sources"].array.contains { $0["source"].string == "wy" && $0["musicInfo"]["songmid"].id == "301" }
+        })
+        let id = recommended["songId"].string
+        XCTAssertNotNil(UUID(uuidString: id))
+        let acquired = try await service.sourceDiscoveryState(recommended)
+        XCTAssertTrue(acquired.entries.isEmpty); XCTAssertTrue(acquired.checks.isEmpty)
+        let projected = try await service.repositoryTracks(songIDs: [id])
+        XCTAssertEqual(projected[id]?.title, "Song 301")
         let cachedPreview = try await service.queueRecommendationSnapshot()
         XCTAssertEqual(cachedPreview?.id, preview.id)
-        let requests = await owner.count(), qqCalls = await qq.calls(), httpCalls = await http.calls()
+        let changes = await service.similarModeChanges()
+        var iterator = changes.makeAsyncIterator()
+        _ = await iterator.next()
+        _ = try await service.adoptSongs([MusicModel.normalize(SimilarModeAccountFixture.track("301", name: "Current candidate"))],
+            authoritative: true)
+        let refreshed = await iterator.next()
+        XCTAssertNotNil(refreshed)
+        let currentPreview = try await service.queueRecommendationSnapshot()
+        XCTAssertEqual(currentPreview?.candidates.map(\.id), preview.candidates.map(\.id))
+        XCTAssertEqual(currentPreview?.candidates.map(\.song.title), ["Current candidate"])
+        let requests = await owner.count(), calls = await peer.calls()
         XCTAssertEqual(requests, 1)
-        XCTAssertTrue(qqCalls.isEmpty)
-        XCTAssertTrue(httpCalls.isEmpty)
-        XCTAssertEqual(store.snapshot().0, before)
-        XCTAssertEqual(store.snapshot().2, writes)
+        XCTAssertEqual(calls.map(\.operation), ["search"])
+        XCTAssertEqual(state.queue, before.queue); XCTAssertEqual(state.playback, before.playback); XCTAssertEqual(state.history, before.history)
 
         await service.flushSourceDiscoveryPersist()
-        XCTAssertEqual(try metadataDocument.read(key: "records"), persisted)
-        let reopened = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument }, clock: { NativeMusicFixture.date })
-        let unsaved = await reopened.entries(fingerprint: MusicModel.fingerprint(otherEntrance), duration: 180)
+        XCTAssertEqual(try metadataDocument.read(key: "checks"), persisted)
+        let reopened = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument })
+        let unsaved = await reopened.entries(songID: id)
         XCTAssertTrue(unsaved.isEmpty)
-        let local = try MusicModel.normalize(SimilarModeAccountFixture.track("100"))
-        let saved = await reopened.entries(fingerprint: MusicModel.fingerprint(local), duration: 180)
-        XCTAssertFalse(try XCTUnwrap(saved["wy"]).sources.isEmpty, "local membership is the durable positive control")
+        let saved = await reopened.entries(songID: localID)
+        XCTAssertFalse(try XCTUnwrap(saved["wy"]).sourceKeys.isEmpty, "saved local query checks are the durable positive control")
         await service.close()
     }
 
@@ -70,20 +69,30 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let ids = ["100"] + Array(repeating: "200", count: 23)
         let owner = SimilarModeAccountFixture([["200", "301", "301", "302", "303", "304", "305"]],
             metadata: true, names: ["200": "Changed old metadata", "301": "Same metadata", "302": "Same metadata"])
-        let store = NativeMusicMemoryDocument(try document(ids))
+        var initial = try MusicDocument(document(ids), runID: "fixture")
+        for id in ["301", "302"] {
+            var track = try MJ.parse(SimilarModeAccountFixture.track(id).data)
+            track["name"] = .string("Same metadata")
+            let song = try NativeMusicFixture.storedSong(.init(platform: "wy", data: track.bytes))
+            initial.library["library"]["songs"][song["songId"].string] = song
+        }
+        let store = NativeMusicMemoryDocument(try initial.encode(changed: ["library", "queue", "playback", "history"]))
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         let initialQueue = try await service.queue()
         _ = try await startPlaying(service)
         _ = try await service.changeQueue(.select(initialQueue.entries.last!.id), expectedRevision: initialQueue.revision)
         _ = try await startPlaying(service)
-        let before = try await service.queue(), bytes = store.snapshot().0, writes = store.snapshot().2
+        let before = try await service.queue(), bytes = store.snapshot().0
+        let beforeDocument = try await service.read()
         let snapshotValue = try await preview(service)
         let snapshot = try XCTUnwrap(snapshotValue)
         XCTAssertEqual(snapshot.candidates.count, 5)
         XCTAssertFalse(snapshot.continueEnabled)
         XCTAssertEqual(snapshot.currentEntryID, before.currentId)
-        XCTAssertEqual(store.snapshot().0, bytes)
-        XCTAssertEqual(store.snapshot().2, writes)
+        let afterPreview = try await service.read()
+        XCTAssertEqual(afterPreview.queue, beforeDocument.queue)
+        XCTAssertEqual(afterPreview.playback, beforeDocument.playback)
+        XCTAssertEqual(afterPreview.history, beforeDocument.history)
         let unchanged = try await service.queue(), mode = try await service.similarModeSnapshot()
         XCTAssertEqual(unchanged.entries.map(\.id), before.entries.map(\.id))
         XCTAssertEqual(unchanged.currentId, before.currentId)
@@ -131,9 +140,11 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         for eligible in [false, true] {
             var d = try MusicDocument(document(["100", "200"]), runID: "fixture")
             var rows = d.queue["entries"].array
-            rows[eligible ? 1 : 0]["song"] = try NativeMusicFixture.song()
+            let foreign = try NativeMusicFixture.song()
+            d.library["library"]["songs"][foreign["songId"].string] = foreign
+            rows[eligible ? 1 : 0]["songId"] = foreign["songId"]
             d.queue["entries"] = .array(rows)
-            let store = NativeMusicMemoryDocument(try d.encode(changed: ["queue", "playback", "history"]))
+            let store = NativeMusicMemoryDocument(try d.encode(changed: ["library", "queue", "playback", "history"]))
             let owner = SimilarModeAccountFixture([["301"]])
             let service = try await NativeMusicFixture.service(store, accounts: owner)
             let snapshot = try await service.queueRecommendationSnapshot()
@@ -287,14 +298,16 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let store = NativeMusicMemoryDocument(try document(["100"]))
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         _ = try await startPlaying(service)
-        let bytes = store.snapshot().0, writes = store.snapshot().2
+        let before = try await service.read()
         let failedValue = try await preview(service), failed = try XCTUnwrap(failedValue)
         XCTAssertEqual(failed.status, .error); XCTAssertEqual(failed.error, .upstreamFailed)
         XCTAssertTrue(failed.canRetry)
         _ = try await service.retryQueueRecommendations(snapshotID: failed.id)
         let retryValue = try await service.queueRecommendationSnapshot(), retry = try XCTUnwrap(retryValue)
         XCTAssertEqual(retry.candidates.count, 4)
-        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, writes)
+        let after = try await service.read()
+        XCTAssertEqual(after.queue, before.queue); XCTAssertEqual(after.playback, before.playback)
+        XCTAssertEqual(after.history, before.history)
         XCTAssertFalse(retry.continueEnabled)
         await service.close()
     }
@@ -305,7 +318,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let service = try await NativeMusicFixture.service(store, accounts: owner), gate = NativeMusicGate()
         await owner.suspendNext(gate)
         _ = try await startPlaying(service); await gate.started()
-        let bytes = store.snapshot().0, writes = store.snapshot().2
+        let before = try await service.read()
         let pending = await service.similarMode.queue?.pending
         let value = await service.similarMode.queue?.lease, lease = try XCTUnwrap(value)
         await service.cancelQueueRecommendationPreview()
@@ -313,7 +326,9 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         await gate.release(); await pending?.value
         let snapshot = try await service.queueRecommendationSnapshot()
         XCTAssertEqual(snapshot?.candidates.count, 2)
-        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, writes)
+        let after = try await service.read()
+        XCTAssertEqual(after.queue, before.queue); XCTAssertEqual(after.playback, before.playback)
+        XCTAssertEqual(after.history, before.history)
         await service.close()
         let ended = await owner.endings; XCTAssertEqual(ended, 1)
     }
@@ -334,13 +349,19 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
             case "replace": _ = try await service.changeQueue(.replace([.init(kind: .queue, id: "entry-1")], index: 0), expectedRevision: queue.revision)
             default: await owner.revoke()
             }
-            let writes = store.snapshot().2
+            let beforeResponse = try await service.read()
             await gate.release(); await pending?.value
             let current = try await service.queueRecommendationSnapshot()
             if change == "select" || change == "reorder" {
                 XCTAssertEqual(current?.id, old?.id); XCTAssertEqual(current?.candidates.count, 2)
             } else { XCTAssertTrue(current?.candidates.isEmpty != false) }
-            XCTAssertEqual(store.snapshot().2, writes)
+            let afterResponse = try await service.read()
+            XCTAssertEqual(afterResponse.queue, beforeResponse.queue)
+            XCTAssertEqual(afterResponse.playback, beforeResponse.playback)
+            XCTAssertEqual(afterResponse.history, beforeResponse.history)
+            if change == "replace" || change == "account" {
+                XCTAssertEqual(afterResponse.library, beforeResponse.library, "A retired owner cannot adopt its late results")
+            }
             let proof = await service.liveRecommendation(entryID: "entry-1"); XCTAssertNil(proof)
             let requests = await owner.requests; XCTAssertEqual(requests, [.songRecommendations(seedID: "100", offset: 0)])
             await service.close()
@@ -352,7 +373,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let store = NativeMusicMemoryDocument(try document(["100"]))
         let controlled = SimilarModeControlledDocument(store)
         let service = NativeMusicService(document: controlled, accounts: owner,
-            qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(), clock: { NativeMusicFixture.date })
+            platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let previewValue = try await preview(service), preview = try XCTUnwrap(previewValue)
         let before = store.snapshot().0, writes = store.snapshot().2
@@ -482,7 +503,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         for mode in [MusicPlaybackMode.loop, .single, .shuffle] {
             let owner = SimilarModeAccountFixture([["301", "302"]])
             let service = NativeMusicService(document: NativeMusicMemoryDocument(try document(["100"])),
-                accounts: owner, qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(),
+                accounts: owner, platformClient: try NativeMusicFixture.client(),
                 clock: { NativeMusicFixture.date })
             try await service.setAccess(available: true, generation: 1)
             _ = try await service.updateSettings(.init(ifRevision: 0, mode: mode))
@@ -533,7 +554,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testShuffleOnlyDrawsForQueueNavigationAndNeverForPlaybackFacts() async throws {
         let owner = SimilarModeAccountFixture([["301", "302"]]), random = RecommendationRandom(0.75)
         let service = NativeMusicService(document: NativeMusicMemoryDocument(try document(["100", "200"])),
-            accounts: owner, qq: NativeMusicQQFixture(), transport: NativeMusicNoNetwork(),
+            accounts: owner, platformClient: try owner.makeClient(),
             clock: { NativeMusicFixture.date }, random: { random.draw() })
         try await service.setAccess(available: true, generation: 1)
         _ = try await service.startSimilarMode(.songRoaming(sourceIDs: ["100"], sourceName: "Seed"))
@@ -569,14 +590,17 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
 
     private func document(_ ids: [String]) throws -> Data {
         var d = try MusicDocument(nil, runID: "fixture")
+        var songs: [String: MJ] = [:]
         d.queue["entries"] = .array(try ids.enumerated().map { index, id in
-            let song = try MusicModel.normalize(SimilarModeAccountFixture.track(id))
-            return .obj([("id", .string("entry-\(index + 1)")), ("key", song["songId"]), ("song", song),
+            let song = try songs[id] ?? NativeMusicFixture.storedSong(SimilarModeAccountFixture.track(id))
+            songs[id] = song
+            return .obj([("id", .string("entry-\(index + 1)")), ("songId", song["songId"]),
                          ("context", .obj([("sourceType", .string("daily")), ("sourceTitle", .string("原始推荐"))]))])
         })
+        d.library["library"]["songs"] = .obj(songs.values.map { ($0["songId"].string, $0) })
         d.queue["currentId"] = .string("entry-1"); d.queue["serial"] = .n(ids.count)
         d.queue["source"] = .obj([("sourceType", .string("search-song")), ("sourceTitle", .string("搜索")), ("seedEntryId", .string("entry-1"))])
-        return try d.encode(changed: ["queue", "playback", "history"])
+        return try d.encode(changed: ["library", "queue", "playback", "history"])
     }
     private func resolve(_ service: NativeMusicService, _ id: String) async throws -> MusicPlaybackCandidate {
         let options = (try await service.sourceAvailability(for: .init(kind: .queue, id: id))).options

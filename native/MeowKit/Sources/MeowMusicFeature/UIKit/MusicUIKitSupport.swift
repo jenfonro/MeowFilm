@@ -14,29 +14,117 @@ public class MusicPageViewController: PageViewController {
 }
 
 @MainActor
-final class MusicArtworkImages {
-    static let shared = MusicArtworkImages()
+public final class MusicArtworkImages {
+    public static let shared = MusicArtworkImages()
     fileprivate let images: ArtworkImages
+    private var selector: (any MusicArtworkSelecting)?
 
     init(http: MusicArtworkHTTP = MusicArtworkHTTP()) {
         images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes) { try await http.read($0) }
     }
 
     func cached(_ url: URL) -> UIImage? { images.cached(url) }
+    var revision: UUID { images.revision }
 
-    func read(_ url: URL, cachedData: Data? = nil) async throws -> (UIImage, Data?) {
-        try await images.read(url, cachedData: cachedData)
+    func configure(cache: any MusicPresentationCaching, selector: (any MusicArtworkSelecting)?) {
+        images.setByteCache(cache); self.selector = selector
     }
+    func read(_ url: URL) async throws -> (UIImage, Data?, URL) {
+        do {
+            let value = try await images.read(url)
+            return (value.0, value.1, url)
+        } catch let error as URLError where error.code == .dataLengthExceedsMaximum {
+            guard let rendition = MusicArtworkHTTP.boundedNeteaseRendition(url) else { throw error }
+            let value = try await images.read(rendition)
+            return (value.0, value.1, rendition)
+        }
+    }
+    func failed(songID: String, url: URL, attempted: Set<URL>) async throws -> URL? {
+        try await selector?.failedArtwork(songID: songID, url: url, attempted: attempted)
+    }
+    func succeeded(songID: String, url: URL, replacing requested: URL) async throws {
+        _ = try await selector?.succeededArtwork(songID: songID, url: url, replacing: requested)
+    }
+    public func close() async { await images.close() }
 }
 
 @MainActor
 final class MusicArtworkView: ArtworkView {
+    private let sharedImages: MusicArtworkImages
+    private var representedSongID: String?
+    private var inputURL: URL?
+    private var requestedURL: URL?
+    private var selectionOriginURL: URL?
+    private var attempted: Set<URL> = []
+    private var selectionTask: Task<Void, Never>?
     init(size: CGFloat = 48, images: MusicArtworkImages = .shared) {
+        sharedImages = images
         super.init(size: size, images: images.images)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func load(_ track: MusicRemoteTrack) {
+        if representedSongID == track.songId, inputURL == track.artwork {
+            loadSelected(requestedURL, songID: track.songId)
+            return
+        }
+        selectionTask?.cancel()
+        representedSongID = track.songId; inputURL = track.artwork; requestedURL = track.artwork
+        selectionOriginURL = track.artwork
+        attempted.removeAll()
+        super.load(track.artwork, displayIdentity: track.songId)
+    }
+    func load(_ url: URL?) {
+        selectionTask?.cancel()
+        representedSongID = nil; inputURL = url; requestedURL = url; selectionOriginURL = url; attempted.removeAll()
+        super.load(url)
+    }
+    override func didLoadImage(_ image: UIImage, data: Data?) {
+        if let songID = representedSongID, let url = requestedURL, let requested = selectionOriginURL {
+            selectionTask?.cancel()
+            selectionTask = Task { [sharedImages] in
+                try? await sharedImages.succeeded(songID: songID, url: url, replacing: requested)
+            }
+        }
+        super.didLoadImage(image, data: data)
+    }
+    override func didFailImage(_ url: URL) {
+        guard let songID = representedSongID, requestedURL == url else { super.didFailImage(url); return }
+        attempted.insert(url)
+        let attempted = attempted, images = sharedImages, origin = selectionOriginURL ?? url
+        selectionTask?.cancel()
+        selectionTask = Task { [weak self] in
+            do {
+                let next = try await images.failed(songID: songID, url: origin, attempted: attempted.union([origin]))
+                guard !Task.isCancelled, let self, self.representedSongID == songID, self.requestedURL == url else { return }
+                self.requestedURL = next; self.selectionOriginURL = next; self.loadSelected(next, songID: songID)
+            } catch {}
+        }
+        super.didFailImage(url)
+    }
+    override func didFailImage(_ url: URL, error: Error) {
+        if (error as? URLError)?.code == .dataLengthExceedsMaximum,
+           let rendition = MusicArtworkHTTP.boundedNeteaseRendition(url) {
+            attempted.insert(url); requestedURL = rendition
+            if let songID = representedSongID { loadSelected(rendition, songID: songID) }
+            else { super.load(rendition) }
+            return
+        }
+        didFailImage(url)
+    }
+    private func loadSelected(_ url: URL?, songID: String) { super.load(url, displayIdentity: songID) }
+
+    override func retryFailedLoad() {
+        if requestedURL == nil, !attempted.isEmpty, let inputURL, let songID = representedSongID {
+            attempted.removeAll(); requestedURL = inputURL; selectionOriginURL = inputURL
+            loadSelected(inputURL, songID: songID)
+        } else {
+            super.retryFailedLoad()
+            if let songID = representedSongID { loadSelected(requestedURL, songID: songID) }
+        }
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -54,6 +142,7 @@ final class MusicArtworkView: ArtworkView {
         (view as? MusicArtworkView)?.retryFailedLoad()
         for child in view.subviews { retryFailedLoads(in: child) }
     }
+    deinit { selectionTask?.cancel() }
 }
 
 @MainActor
@@ -101,7 +190,7 @@ final class MusicTrackCell: UITableViewCell {
 
     func configure(track: MusicRemoteTrack, active: Bool, theme: PageTheme, index: Int? = nil) {
         representedReference = track.ref
-        artwork.load(track.artwork)
+        artwork.load(track)
         titleLabel.text = index.map { "\($0 + 1). \(track.title)" } ?? track.title
         subtitleLabel.text = [track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " · ")
         titleLabel.textColor = UIColor(active ? theme.accent : theme.ink)

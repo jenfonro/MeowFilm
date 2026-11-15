@@ -410,28 +410,23 @@ final class MusicPlaybackLyricCacheTests: XCTestCase {
         catch { XCTAssertEqual(error as? MusicServiceError, .notFound) }
     }
 
-    func testKeysUseContentAndExactSourceNotOccurrenceOrUnicodeNormalization() throws {
+    func testKeysUsePermanentSongAndExactSourceNotOccurrenceOrDisplayFacts() throws {
         let original = try Cache.Key(track: track(), source: source())
         XCTAssertEqual(original, try Cache.Key(track: track(occurrence: "duplicate"), source: source()))
         XCTAssertNotEqual(original, try Cache.Key(track: track(source: "other"), source: source("other")))
-        XCTAssertNotEqual(original, try Cache.Key(track: track(duration: 6), source: source()))
-        XCTAssertNotEqual(original, try Cache.Key(track: track(), source: source(), contentRevision: 2))
+        XCTAssertEqual(original, try Cache.Key(track: track(duration: 6), source: source()))
         let composed = try Cache.Key(track: track(source: "\u{00e9}"), source: source("\u{00e9}"))
         let decomposed = try Cache.Key(track: track(source: "e\u{0301}"), source: source("e\u{0301}"))
         XCTAssertNotEqual(composed, decomposed)
-        XCTAssertThrowsError(try Cache.Key(track: track(), source: source("not-present"))) {
-            XCTAssertEqual($0 as? MusicServiceError, .sourceRequired)
-        }
-        XCTAssertThrowsError(try Cache.Key(track: track(platform: "script"), source: source(platform: "script"))) {
-            XCTAssertEqual($0 as? MusicServiceError, .sourceRequired)
-        }
+        XCTAssertNotEqual(original, try Cache.Key(track: track(), source: source("not-present")))
     }
 
     func testMetadataCandidateKeyIsNotBoundToTheCurrentlyPlayingAudioPlatform() async throws {
         let generation = UUID(), cache = owner(generation)
         let wy = MusicNativeSource(sourceKey: "wy-recording", platform: "wy", nativeId: "1")
         let tx = MusicNativeSource(sourceKey: "tx-recording", platform: "tx", nativeId: "2")
-        let recording = MusicRemoteTrack(ref: .init(kind: .queue, id: "first"), songId: "same-recording",
+        let songID = "C0000000-0000-4000-8000-000000000001"
+        let recording = MusicRemoteTrack(ref: .init(kind: .library, id: songID, occurrence: "first"), songId: songID,
                                         title: "歌", duration: 5, sources: [wy, tx])
         let wyKey = try Cache.Key(track: recording, source: wy)
         // This is a single explicit metadata candidate. The cache neither
@@ -444,8 +439,18 @@ final class MusicPlaybackLyricCacheTests: XCTestCase {
         let wyHit = try await hit(cache, key: wyKey, generation: generation)
         XCTAssertEqual(txHit.lines.first?.text, "QQ lyrics"); XCTAssertEqual(wyHit.lines.first?.text, "WY lyrics")
         XCTAssertEqual(cache.usage.entries, 2)
-        XCTAssertThrowsError(try Cache.Key(track: recording,
-                                           source: .init(sourceKey: tx.sourceKey, platform: "tx", nativeId: "wrong")))
+        let sameKey = try Cache.Key(track: recording,
+                                   source: .init(sourceKey: tx.sourceKey, platform: "tx", nativeId: "different"))
+        XCTAssertEqual(sameKey, txKey)
+        let sameHit = try await hit(cache, key: sameKey, generation: generation)
+        XCTAssertEqual(sameHit.lines, txHit.lines); XCTAssertEqual(cache.usage.entries, 2)
+        let other = MusicRemoteTrack(ref: .init(kind: .library, id: "C0000000-0000-4000-8000-000000000002"),
+                                    songId: "C0000000-0000-4000-8000-000000000002", title: "Other", sources: [tx])
+        let otherKey = try Cache.Key(track: other, source: tx)
+        XCTAssertNotEqual(otherKey, txKey)
+        do { _ = try await hit(cache, key: otherKey, generation: generation); XCTFail("Another permanent song reused these lyrics") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .notFound) }
+        XCTAssertEqual(cache.usage.entries, 2)
     }
 
     func testCloseIsTerminalAndDoesNotAwaitAnUncooperativeProducer() async throws {

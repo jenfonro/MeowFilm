@@ -96,7 +96,8 @@ final class MusicNativeLyricsTimingTests: XCTestCase {
     }
 
     func testKRCExplicitDurationsAndNegativeOffsetSurviveConversion() throws {
-        let raw = try MusicNativeLyricsParser.kugou("[offset:-1100]\n[1000,20]<0,10,0>A<10,0,0>B")
+        // Shared Node conversion supplies generic word timing, not native KRC.
+        let raw = MusicNativeLyrics(text: "[offset:-1100]\n[1000,20](1000,10,0)A(1010,0,0)B")
         let row = try XCTUnwrap(MusicNativeLyricsParser.parse(raw, duration: 180).first)
         XCTAssertEqual(row.time, 0)
         XCTAssertEqual(row.end, 0)

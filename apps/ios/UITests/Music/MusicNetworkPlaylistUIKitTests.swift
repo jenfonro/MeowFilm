@@ -187,10 +187,12 @@ import MeowPlayback
         XCTAssertEqual(list.numberOfRows(inSection: 0), 30)
         page.tableView(list, didSelectRowAt: IndexPath(row: 1, section: 0))
         let played = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
-            model.queue.count == 31 && model.current?.track.songId == "daily-1" && !model.isPreparingRemoteQueue
+            model.queue.count == 31 && model.current?.track.sources.first?.nativeId == "daily-1" && !model.isPreparingRemoteQueue
         } }, evaluatedWith: nil)
         await fulfillment(of: [played], timeout: 4)
-        XCTAssertEqual(model.queue.map(\.track.songId), (0..<31).map { "daily-\($0)" })
+        XCTAssertEqual(model.queue.compactMap(\.track.sources.first?.nativeId), (0..<31).map { "daily-\($0)" })
+        XCTAssertTrue(model.queue.allSatisfy { $0.track.ref.kind == .library && $0.track.ref.id == $0.track.songId })
+        XCTAssertEqual(Set(model.queue.map(\.track.songId)).count, 31)
         XCTAssertEqual(list.numberOfRows(inSection: 0), 30, "未展示的尾页仍必须加入完整播放队列")
         let opened = await service.openedAccountSources, committed = await service.committedSource
         let selected = await service.committedIndex, displayedWrites = await service.displayedQueueWrites
@@ -359,6 +361,11 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
     private(set) var committedSource: UUID?
     private(set) var committedIndex: Int?
     private(set) var displayedQueueWrites = 0
+    private let searchSongID = UUID().uuidString
+    private let dailySongIDs = (0..<31).map { _ in UUID().uuidString }
+    private let styleSongIDs = (0..<12).map { _ in UUID().uuidString }
+    private let styleScope = "wy/account/" + UUID().uuidString
+    private var queueSongs: [String: MusicRemoteTrack] = [:]
     private var playbackQueue = MusicQueueSnapshot(revision: 0, currentId: nil, entries: [])
     private var catalogue: [MusicCollection] =
         [.init(id: "explicit-network-reference", title: "Same", kind: "network", count: 9, revision: 1,
@@ -392,7 +399,7 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
     func queue() -> MusicQueueSnapshot { playbackQueue }
     func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage {
         guard platform == "tx", page == 1 else { throw MusicServiceError.unsupported }
-        let track = MusicRemoteTrack(ref: .init(kind: .handle, id: "search-song"), songId: "search-song",
+        let track = MusicRemoteTrack(ref: .init(kind: .library, id: searchSongID), songId: searchSongID,
             title: "测试录音", artist: "Fixture", duration: 180,
             sources: [.init(sourceKey: "tx:search-song", platform: "tx", nativeId: "search-song")])
         return .init(platform: platform, query: query, page: page, limit: limit, total: 1, nextPage: nil, items: [track])
@@ -403,14 +410,15 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) throws -> MusicPublicBrowseDetail { throw MusicServiceError.unsupported }
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) throws -> MusicPublicBrowsePage { throw MusicServiceError.unsupported }
-    func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind, title: String) throws -> MusicRemoteQueueSource {
+    func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind, title: String) async throws -> MusicRemoteQueueSource {
         guard platform == .netease, kind == .recommendation(kind: "daily") else { throw MusicServiceError.unsupported }
+        let songIDs = dailySongIDs
         let source = MusicRemoteQueueSource(
             context: .init(kind: .recommendation, id: "daily", title: title, platform: "wy"),
             loadPage: { cursor in
                 let start = cursor.flatMap(Int.init) ?? 0, end = min(start + 30, 31)
                 let tracks = (start..<end).map { index in
-                    MusicRemoteTrack(ref: .init(kind: .handle, id: "daily-\(index)"), songId: "daily-\(index)",
+                    MusicRemoteTrack(ref: .init(kind: .library, id: songIDs[index]), songId: songIDs[index],
                         title: "Daily \(index + 1)", artist: "Fixture",
                         sources: [.init(sourceKey: "wy:daily-\(index)", platform: "wy", nativeId: "daily-\(index)")])
                 }
@@ -418,28 +426,52 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
                              total: 31, cursor: end < 31 ? String(end) : nil)
             })
         openedAccountSources.append(source.id)
+        await bindQueueRepository(source)
         return source
     }
     private(set) var styleWrites = 0
     static let styleSelection = MusicDailyStyleSelection(category: "1000", tags: [.init(id: "7", name: "服务标签甲")])
-    func openHomeActionQueue(_ action: MusicHomeAction, title: String) throws -> MusicRemoteQueueSource {
+    func openHomeActionQueue(_ action: MusicHomeAction, title: String) async throws -> MusicRemoteQueueSource {
         guard case .daily(let branch) = action else { throw MusicServiceError.unsupported }
         if branch == .default {
-            return try openAccountQueue(platform: .netease, kind: .recommendation(kind: "daily"), title: title)
+            return try await openAccountQueue(platform: .netease, kind: .recommendation(kind: "daily"), title: title)
         }
-        return MusicRemoteQueueSource(
+        let songIDs = styleSongIDs
+        let source = MusicRemoteQueueSource(
             context: .init(kind: .recommendation, id: "daily-style", title: title, platform: "wy"),
-            loadPage: { _ in try Self.stylePage(Self.styleSelection) },
-            dailyStyle: .init(categories: {
+            loadPage: { _ in try Self.stylePage(Self.styleSelection, songIDs: songIDs) },
+            dailyStyle: .init(scope: styleScope, categories: {
                 [.init(id: "1000", name: "服务分类甲", tags: [
                     .init(id: "7", name: "服务标签甲"), .init(id: "8", name: "服务标签乙"),
                     .init(id: "9", name: "服务返回的长标签")]),
                  .init(id: "2000", name: "服务分类乙", tags: [.init(id: "10", name: "服务标签丙")])]
             }, save: { selection in try await self.saveStyle(selection) }), homeAction: action)
+        await bindQueueRepository(source)
+        return source
     }
-    private static func stylePage(_ selection: MusicDailyStyleSelection) throws -> MusicNativeTrackPage {
+    private func bindQueueRepository(_ source: MusicRemoteQueueSource) async {
+        await source.bindSongRepository(adopt: { try await self.adoptQueueTracks($0, intent: $1) },
+            project: { try await self.projectQueueTracks($0) })
+    }
+    private func adoptQueueTracks(_ rows: [MusicNativeTrackData], intent: MusicQueueAuthorization) throws -> [MusicQueueTrackReference] {
+        try intent.check()
+        return try rows.map { row in
+            let track = try JSONDecoder().decode(MusicRemoteTrack.self, from: row.data)
+            queueSongs[track.songId] = track
+            return .init(songID: track.songId, occurrenceID: UUID().uuidString, platform: row.platform,
+                sourceKey: track.sources.first?.sourceKey ?? track.songId,
+                sourcePosition: row.sourcePosition, byteCount: row.data.count)
+        }
+    }
+    private func projectQueueTracks(_ rows: [MusicQueueTrackReference]) throws -> [MusicNativeTrackData] {
+        try rows.map { row in
+            guard let track = queueSongs[row.songID] else { throw MusicServiceError.notFound }
+            return .init(platform: row.platform, data: try JSONEncoder().encode(track), sourcePosition: row.sourcePosition)
+        }
+    }
+    private static func stylePage(_ selection: MusicDailyStyleSelection, songIDs: [String]) throws -> MusicNativeTrackPage {
         let tracks = (0..<12).map { index in
-            MusicRemoteTrack(ref: .init(kind: .handle, id: "style-\(index)"), songId: "style-\(index)",
+            MusicRemoteTrack(ref: .init(kind: .library, id: songIDs[index]), songId: songIDs[index],
                 title: "风格歌曲 \(index + 1)", artist: "Fixture",
                 sources: [.init(sourceKey: "wy:style-\(index)", platform: "wy", nativeId: "style-\(index)")])
         }
@@ -448,7 +480,7 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
     }
     private func saveStyle(_ selection: MusicDailyStyleSelection) throws -> MusicDailyStyleSave {
         styleWrites += 1
-        return .init(page: try Self.stylePage(selection), saveConfirmed: true, selectionChanged: false)
+        return .init(page: try Self.stylePage(selection, songIDs: styleSongIDs), saveConfirmed: true, selectionChanged: false)
     }
     func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
         let page = try await source.page(cursor: cursor)
@@ -461,9 +493,7 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
         let tracks = try values.map { try JSONDecoder().decode(MusicRemoteTrack.self, from: $0.data) }
         try intent.check(); try source.authorization.check()
         guard expectedRevision == playbackQueue.revision else { throw MusicServiceError.staleRevision }
-        guard tracks.indices.contains(start.index), tracks[start.index].songId == start.songID,
-              let primarySource = tracks[start.index].sources.first,
-              primarySource == start.primarySource else { throw MusicServiceError.targetChanged }
+        guard tracks.indices.contains(start.index) else { throw MusicServiceError.notFound }
         playbackQueue = .init(revision: expectedRevision + 1, currentId: "entry-\(start.index)",
             entries: tracks.enumerated().map {
                 .init(id: "entry-\($0.offset)", track: $0.element, sourceTitle: source.context.title, remoteSessionID: source.id)

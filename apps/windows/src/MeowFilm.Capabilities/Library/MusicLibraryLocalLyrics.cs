@@ -6,22 +6,21 @@ public sealed partial class MusicLibraryOwner
 {
     private const string LocalLyricsArea = "native-local-lyrics";
     private JsonObject LocalLyrics(JsonObject doc) => Value(doc, LocalLyricsArea) as JsonObject ??
-        LJ.Obj(("schema", 2), ("items", new JsonArray()));
+        LJ.Obj(("schema", 1), ("items", new JsonArray()));
 
     private static void ValidateLocalLyrics(JsonObject state)
     {
         LJ.Fields(state, "schema items", "schema items");
-        LJ.Require(LJ.I(state["schema"]) == 2);
+        LJ.Require(LJ.I(state["schema"]) == 1);
         var rows = LJ.Array(state["items"]);
         LJ.Require(rows.Count <= 64 && LJ.Bytes(state).Length <= 2 * 1024 * 1024, "LIMIT");
         var identities = new HashSet<string>(StringComparer.Ordinal);
         foreach (var item in rows)
         {
             var row = LJ.Object(item);
-            LJ.Fields(row, "songKey songId contentHash lines", "songKey songId contentHash lines");
-            LJ.Require(LJ.S(row["songKey"]).Length == 64 && identities.Add(LJ.S(row["songKey"])) &&
+            LJ.Fields(row, "songId contentHash lines", "songId contentHash lines");
+            LJ.Require(Guid.TryParseExact(LJ.S(row["songId"]), "D", out _) && identities.Add(LJ.S(row["songId"])) &&
                 LJ.S(row["contentHash"]).Length == 64, "CORRUPT_STORAGE");
-            _ = LJ.Text(row["songId"], 8192);
             ValidateDisplayLines(LJ.Array(row["lines"]));
             LJ.Require(LJ.Bytes(row).Length <= 256 * 1024, "LIMIT");
         }
@@ -38,7 +37,7 @@ public sealed partial class MusicLibraryOwner
         string key = DisplayKey(song);
         var state = LocalLyrics(doc);
         var items = LJ.Array(state["items"]);
-        var existing = items.OfType<JsonObject>().SingleOrDefault(item => LJ.S(item["songKey"]) == key);
+        var existing = items.OfType<JsonObject>().SingleOrDefault(item => LJ.S(item["songId"]) == key);
         if (method == "music.lyrics.local.get")
         {
             if (!LJ.B(Settings(doc)["lyrics"]))
@@ -60,7 +59,7 @@ public sealed partial class MusicLibraryOwner
             "INVALID_LYRIC_RESPONSE");
         var lines = JsonNode.Parse(MusicLyricTiming.Parse(text, duration: LJ.N(song["duration"])).GetRawText())!.AsArray();
         LJ.Require(lines.Count > 0, "INVALID_LYRIC_RESPONSE");
-        var next = LJ.Obj(("songKey", key), ("songId", song["songId"]),
+        var next = LJ.Obj(("songId", song["songId"]),
             ("contentHash", LJ.Digest(LJ.Obj(("text", text)))), ("lines", lines));
         if (existing is not null && JsonNode.DeepEquals(existing, next))
             return (LJ.Obj(("saved", true)), false);
@@ -76,6 +75,6 @@ public sealed partial class MusicLibraryOwner
         var queue = Queue(doc);
         var entry = LJ.Array(queue["entries"]).OfType<JsonObject>()
             .FirstOrDefault(row => LJ.S(row["id"]) == LJ.S(queue["currentId"]));
-        LJ.Require(entry is not null && DisplayKey(NativeMusicSong.Normalize(entry["song"])) == key, "TARGET_CHANGED");
+        LJ.Require(entry is not null && DisplayKey(EntrySong(doc, entry)) == key, "TARGET_CHANGED");
     }
 }

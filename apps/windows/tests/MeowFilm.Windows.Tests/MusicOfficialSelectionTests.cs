@@ -1,10 +1,8 @@
 using System.ComponentModel;
-using System.Net;
-using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using MeowFilm.Core.Runtime;
+using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
@@ -18,41 +16,80 @@ public static class MusicOfficialSelectionTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("Official selection checks every retained recording including non-official mappings", () =>
+        yield return new("Official selection uses the fixed recording basis including non-official mappings", async () =>
         {
+            await using var store = new MemoryStore();
+            await using var library = new MusicLibraryOwner(store);
             JsonObject Track(string platform, string id, double duration) =>
                 MusicSongFixture.Online(platform, id, "Pairwise", "Artist", duration: duration);
             var song = Track("wy", "root", 103);
             song["sources"]!.AsArray().Add(Track("kw", "mapped", 100)["sources"]![0]!.DeepClone());
-            song = NativeMusicSong.Normalize(song);
+            song = await MusicSongFixture.AdoptAsync(library, song);
             song = Merged(song, Track("tx", "compatible", 103), Track("kg", "conflict", 106));
             var plan = new MusicOfficialCandidates(song);
             var conflict = Track("tx", "remembered-conflict", 106)["sources"]![0]!.AsObject();
             plan.Remember(new JsonObject { ["platform"] = "tx", ["sourceKey"] = conflict["sourceKey"]!.DeepClone(),
                 ["recording"] = conflict.DeepClone(), ["confirmedAt"] = 100L }, "tx");
             var snapshot = plan.Snapshot(["wy", "tx", "kg"]);
-            Check(snapshot["candidates"]!.AsArray().Count == 2 &&
-                !snapshot["candidates"]!.AsArray().Any(candidate => candidate!["platform"]!.GetValue<string>() == "kg"));
-            Check(snapshot["song"]!["sources"]!.AsArray().Count == 3);
+            Check(snapshot["candidates"]!.AsArray().Count == 4 &&
+                snapshot["candidates"]!.AsArray().Any(candidate => candidate!["platform"]!.GetValue<string>() == "kg"));
+            Check(snapshot["song"]!["sources"]!.AsArray().Count == 5);
             Check(JsonNode.DeepEquals(snapshot["song"], NativeMusicSong.Normalize(snapshot["song"])));
             _ = SongRow.Read(JsonSerializer.SerializeToElement(snapshot["song"]));
-            return Task.CompletedTask;
         });
-        yield return new("Official selection candidate limits never discard original song mappings", () =>
+        yield return new("Official selection keeps every accepted recording selectable without another catalog request", () =>
+            MusicQualityConsumerTests.Sta(async () =>
         {
-            var song = SongObject("wy", "9");
-            for (int i = 1; i <= 8; i++) song["sources"]!.AsArray().Add(SongObject("wy", i.ToString())["sources"]![0]!.DeepClone());
-            song = NativeMusicSong.Normalize(song);
+            await using var scene = await Scene.CreateAsync();
+            var song = SongObject("wy", "primary");
+            for (int i = 0; i < 34; i++)
+                song["sources"]!.AsArray().Add(SongObject("wy", "recording-" + i)["sources"]![0]!.DeepClone());
+            song = await MusicSongFixture.AdoptAsync(scene.App, song);
             var plan = new MusicOfficialCandidates(song);
             var original = song.DeepClone(); song["title"] = "external edit";
-            var snapshot = plan.Snapshot(["wy"]);
-            Check(snapshot["candidates"]!.AsArray().Count == 8 && snapshot["song"]!["sources"]!.AsArray().Count == 9);
+            var snapshot = plan.Snapshot(["wy", "tx", "kg"]);
+            string primary = original["sources"]![0]!["sourceKey"]!.GetValue<string>();
+            var keys = original["sources"]!.AsArray().Select(row => row!["sourceKey"]!.GetValue<string>())
+                .OrderBy(key => key == primary ? 0 : 1).ThenBy(key => key, StringComparer.Ordinal).ToArray();
+            Check(snapshot["candidates"]!.AsArray().Select(row => row!["sourceKey"]!.GetValue<string>()).SequenceEqual(keys) &&
+                snapshot["song"]!["sources"]!.AsArray().Count == keys.Length);
             Check(JsonNode.DeepEquals(snapshot["song"], original));
-            return Task.CompletedTask;
-        });
-        yield return new("Official selection recordings reject other editions and duration conflicts", () =>
+            var policy = await scene.Ok("music.quality.settings.get");
+            var candidates = await scene.Ok("music.official.candidates", new { song = original, quality = "128k",
+                qualityPolicySignature = policy.GetProperty("signature").GetString() });
+            Check(candidates.GetProperty("candidates").EnumerateArray()
+                .Select(row => row.GetProperty("sourceKey").GetString()).SequenceEqual(keys) && scene.Runtime.Requests.Count == 0,
+                "the public local candidate consumer must retain the complete ordered collection");
+            var last = candidates.GetProperty("candidates").EnumerateArray().Last();
+            scene.Runtime.OnRequest = (call, _) =>
+            {
+                Check(call.Operation == "audio" && call.Platform == last.GetProperty("platform").GetString());
+                return Task.FromResult(AudioValue(quality: "128k"));
+            };
+            var media = await scene.Ok("music.official.resolve", new { song = original, quality = "128k",
+                platform = last.GetProperty("platform").GetString(), sourceKey = last.GetProperty("sourceKey").GetString() });
+            Check(media.GetProperty("sourceKey").GetString() == last.GetProperty("sourceKey").GetString() &&
+                media.GetProperty("songId").GetString() == original["songId"]!.GetValue<string>() &&
+                scene.Runtime.Requests.Count == 1 && scene.Handler.Searches == 0 && scene.ScriptCalls == 0);
+            var settings = JsonNode.Parse(policy.GetProperty("settings").GetRawText())!.AsObject();
+            settings["ifRevision"] = settings["revision"]!.DeepClone();
+            settings.Remove("schema"); settings.Remove("revision"); settings["request"] = "128k";
+            await scene.Ok("music.quality.settings.save", settings);
+            var output = new Output();
+            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs(), cacheStore: scene.CacheStore);
+            await module.InitializeAsync(default);
+            await scene.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
+            await scene.Ok("music.queue.replace", new { songs = new[] { original }, index = 0 });
+            await module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+            await module.PlayQueueSurfaceItemAsync(module.QueueSurfaceRows.Single());
+            Check(output.HasMedia && output.Opens == 1 && scene.Runtime.Requests.Count == 1 && scene.Handler.Searches == 0 &&
+                scene.ScriptCalls == 0, "the long collection also reaches the real source session and reuses its last cached recording:" + module.Status);
+        }));
+        yield return new("Official selection recordings reject other editions and duration conflicts", async () =>
         {
-            var song = SongObject("wy", "1");
+            await using var store = new MemoryStore();
+            await using var library = new MusicLibraryOwner(store);
+            var song = await MusicSongFixture.AdoptAsync(library, SongObject("wy", "1"));
             var merged = Merged(song, SongObject("tx", "FixtureMID"), SongObject("tx", "Live", title: "Same Song (Live)"),
                 SongObject("tx", "Long", duration: 160), SongObject("tx", "Unknown", duration: 0));
             var plan = new MusicOfficialCandidates(merged);
@@ -61,7 +98,6 @@ public static class MusicOfficialSelectionTests
             Check(snapshot["song"]!["songId"]!.GetValue<string>() == song["songId"]!.GetValue<string>());
             Check(MusicSongFixture.Info(snapshot["song"]!)["source"]!.GetValue<string>() == "wy");
             Check(song["sources"]!.AsArray().Count == 1, "matching must not mutate the input queue song");
-            return Task.CompletedTask;
         });
         yield return new("Official selection source history is account policy request generation and TTL bound without touching reads", async () =>
         {
@@ -89,9 +125,11 @@ public static class MusicOfficialSelectionTests
             clock.Now += MusicSourceCache.HistoryTtl;
             Check(await restarted.ReadHistoryAsync("account", "song", policy, "auto", 7, default) is null);
         });
-        yield return new("Official selection remembers compatible confirmed source before primary but not foreign history", () =>
+        yield return new("Official selection remembers compatible confirmed source before primary but not foreign history", async () =>
         {
-            var song = SongObject("wy", "1"); var other = SongObject("tx", "FixtureMID");
+            await using var store = new MemoryStore();
+            await using var library = new MusicLibraryOwner(store);
+            var song = await MusicSongFixture.AdoptAsync(library, SongObject("wy", "1")); var other = SongObject("tx", "FixtureMID");
             var row = other["sources"]![0]!.AsObject();
             var history = new JsonObject { ["platform"] = "tx", ["sourceKey"] = row["sourceKey"]!.DeepClone(),
                 ["recording"] = row.DeepClone(), ["confirmedAt"] = 100L };
@@ -99,9 +137,8 @@ public static class MusicOfficialSelectionTests
             Check(plan.Snapshot(["wy", "tx"])["candidates"]![0]!["platform"]!.GetValue<string>() == "tx");
             var foreign = new MusicOfficialCandidates(song); foreign.Remember(history, "kg");
             Check(foreign.Snapshot(["wy", "tx"])["candidates"]!.AsArray().Count == 1);
-            return Task.CompletedTask;
         });
-        yield return new("Official candidate lookup is local and discovery uses native QQ catalog without Node or search history", async () =>
+        yield return new("Official candidate lookup is local and discovery uses canonical QQ without scripts or search history", async () =>
         {
             await using var scene = await Scene.CreateAsync();
             await scene.Login();
@@ -110,18 +147,20 @@ public static class MusicOfficialSelectionTests
             var input = SongObject("wy", "1");
             var local = await scene.Candidates(input, policy, false);
             Check(local.GetProperty("candidates").GetArrayLength() == 0 && scene.Handler.Calls == calls &&
-                scene.Store.Writes == writes);
+                scene.Store.Writes > writes);
+            string identity = local.GetProperty("song").GetProperty("songId").GetString()!;
+            Check(Guid.TryParse(identity, out _));
             var discovered = await scene.Candidates(input, policy, true);
             Check(discovered.GetProperty("candidates").GetArrayLength() == 1 &&
                 discovered.GetProperty("candidates")[0].GetProperty("platform").GetString() == "tx");
-            Check(discovered.GetProperty("song").GetProperty("songId").GetString() == input["songId"]!.GetValue<string>());
-            Check(scene.Handler.Searches == 1 && scene.Runtime.Calls == 0 && scene.Store.Writes == writes);
+            Check(discovered.GetProperty("song").GetProperty("songId").GetString() == identity);
+            Check(scene.Handler.Searches == 1 && scene.ScriptCalls == 0 && scene.Store.Writes > writes);
         });
         yield return new("Disabled official QQ is excluded from discovery and rejects every audio and cache entry without HTTP", async () =>
         {
             await using var scene = await Scene.CreateAsync();
             await scene.Login();
-            var song = SongObject("tx", "FixtureMID");
+            var song = await MusicSongFixture.AdoptAsync(scene.App, SongObject("tx", "FixtureMID"));
             var input = new { platform = "tx", song, quality = "320k" };
             var accepted = await scene.Ok("music.official.resolve", input);
             string scope = accepted.GetProperty("scope").GetString()!;
@@ -147,7 +186,7 @@ public static class MusicOfficialSelectionTests
             await scene.Ok("music.official.cacheContext", input);
             Check(scene.App.IsOfficialPlaybackCurrent("tx", scope, generation) && scene.Handler.Calls == calls,
                 "reenabling must reuse the untouched account without a new login");
-            Check(scene.Runtime.Calls == 0);
+            Check(scene.ScriptCalls == 0);
         });
         yield return new("Empty official source selection retains independent QQ search account script and metadata settings", async () =>
         {
@@ -175,15 +214,16 @@ public static class MusicOfficialSelectionTests
             await scene.Ok("music.accounts.validate", new { platform = "tx" });
             var account = (await scene.Ok("music.accounts.list")).GetProperty("items").EnumerateArray()
                 .Single(item => item.GetProperty("platform").GetString() == "tx");
-            Check(account.GetProperty("state").GetString() == "verified" && scene.Runtime.Calls == 0);
+            Check(account.GetProperty("state").GetString() == "verified" && scene.ScriptCalls == 0);
         });
         yield return new("Official source disable discards a late QQ media URL and cannot republish cache authority", async () =>
         {
             await using var scene = await Scene.CreateAsync();
             await scene.Login();
-            var input = new { platform = "tx", song = SongObject("tx", "FixtureMID"), quality = "320k" };
+            var song = await MusicSongFixture.AdoptAsync(scene.App, SongObject("tx", "FixtureMID"));
+            var input = new { platform = "tx", song, quality = "320k" };
             var context = await scene.Ok("music.official.cacheContext", input);
-            scene.Handler.HoldMethod = "UrlGetVkey";
+            scene.Handler.HoldMethod = "audio";
             var pending = scene.App.ExecuteAsync("music.official.resolve", input);
             try
             {
@@ -196,7 +236,8 @@ public static class MusicOfficialSelectionTests
             Check(scene.Handler.Vkeys == 1);
             string scope = context.GetProperty("scope").GetString()!;
             long generation = context.GetProperty("generation").GetInt64();
-            string songId = input.song["songId"]!.GetValue<string>();
+            string songId = (await scene.Candidates(input.song, await scene.Ok("music.quality.settings.get"), false))
+                .GetProperty("song").GetProperty("songId").GetString()!;
             await scene.CacheStore.DrainAsync();
             await using var reopened = new CacheDocumentStore(scene.CacheBacking);
             // An empty invalidation may persist as a fence; it must not publish a URL or history.
@@ -211,13 +252,13 @@ public static class MusicOfficialSelectionTests
             }
             Check(!scene.App.IsOfficialPlaybackCurrent("tx", scope, generation),
                 "late native success cannot restore cache access");
-            Check(scene.Runtime.Calls == 0);
+            Check(scene.ScriptCalls == 0);
         });
         yield return new("Unknown official source CAS fails native admission closed until an explicit settings read", async () =>
         {
             await using var scene = await Scene.CreateAsync();
             await scene.Login();
-            var song = SongObject("tx", "FixtureMID");
+            var song = await MusicSongFixture.AdoptAsync(scene.App, SongObject("tx", "FixtureMID"));
             var input = new { platform = "tx", song, quality = "320k" };
             var context = await scene.Ok("music.official.cacheContext", input);
             var policy = await scene.Ok("music.quality.settings.get");
@@ -240,7 +281,7 @@ public static class MusicOfficialSelectionTests
                 settings.GetProperty("enabled").EnumerateArray().All(value => value.GetString() != "tx"));
             foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
-            Check(scene.Handler.Calls == calls && scene.Store.Writes == writes && scene.Runtime.Calls == 0);
+            Check(scene.Handler.Calls == calls && scene.Store.Writes == writes && scene.ScriptCalls == 0);
         });
         yield return new("Official candidate lookup treats damaged cache as absent without network fallback", async () =>
         {
@@ -250,9 +291,10 @@ public static class MusicOfficialSelectionTests
             byte[] incompatible = "{"u8.ToArray();
             scene.CacheStore.Save(MusicSourceCache.Namespace, incompatible);
             await scene.CacheStore.DrainAsync();
+            var song = await MusicSongFixture.AdoptAsync(scene.App, SongObject("wy", "1"));
             int calls = scene.Handler.Calls, writes = scene.Store.Writes;
             var result = await scene.App.ExecuteAsync("music.official.candidates", new {
-                song = SongObject("wy", "1"), quality = "320k",
+                song, quality = "320k",
                 qualityPolicySignature = policy.GetProperty("signature").GetString()
             });
             Check(result.GetProperty("ok").GetBoolean());
@@ -266,10 +308,26 @@ public static class MusicOfficialSelectionTests
             await scene.Login();
             var song = SongObject("wy", "1");
             var result = await scene.Ok("music.songs.complete", new { song, platforms = new[] { "tx", "kg" } });
-            Check(result.GetProperty("song").GetProperty("songId").GetString() == song["songId"]!.GetValue<string>() &&
-                result.GetProperty("song").GetProperty("sources").EnumerateArray().Any(row =>
-                    row.GetProperty("source").GetString() == "tx") && scene.Handler.Searches == 1 &&
-                scene.Runtime.Calls == 0, "a second platform cannot reuse QQ's account frame or abort its match");
+            var completed = result.GetProperty("song");
+            var sources = completed.GetProperty("sources").EnumerateArray().ToArray();
+            Check(Guid.TryParse(completed.GetProperty("songId").GetString(), out _) &&
+                sources.Single(row => row.GetProperty("source").GetString() == "wy")
+                    .GetProperty("musicInfo").GetProperty("songmid").GetString() == "1" &&
+                sources.Single(row => row.GetProperty("source").GetString() == "tx")
+                    .GetProperty("musicInfo").GetProperty("songmid").GetString() == "FixtureMID" &&
+                sources.Single(row => row.GetProperty("source").GetString() == "kg")
+                    .GetProperty("musicInfo").GetProperty("hash").GetString() == "ABCDEF0123456789ABCDEF0123456789" &&
+                result.GetProperty("failures").GetArrayLength() == 0 && scene.Handler.Searches == 2 &&
+                scene.ScriptCalls == 0, "a second platform cannot reuse QQ's account frame or abort its match");
+            var requests = scene.Runtime.Requests.Where(call => call.Operation == "search").ToArray();
+            Check(requests.Length == 2);
+            var tx = requests.Single(call => call.Platform == "tx").Payload.GetProperty("expectedSession");
+            var published = scene.Runtime.Calls.Last(call => call.Method == "music.platform.session.update" &&
+                call.Platform == "tx" && call.Payload.GetProperty("session").ValueKind == JsonValueKind.Object)
+                .Payload.GetProperty("session");
+            Check(tx.GetProperty("scope").GetString() == published.GetProperty("scope").GetString() &&
+                tx.GetProperty("generation").GetInt64() == published.GetProperty("generation").GetInt64() &&
+                requests.Single(call => call.Platform == "kg").Payload.GetProperty("expectedSession").ValueKind == JsonValueKind.Null);
         });
         yield return new("Official candidate discovery failure is not a successful empty platform and logout fences delayed search", async () =>
         {
@@ -282,12 +340,15 @@ public static class MusicOfficialSelectionTests
                 failed.GetProperty("candidates").GetArrayLength() == 0);
             scene.Handler.FailSearch = false; scene.Handler.HoldSearch = true;
             var pending = scene.App.ExecuteAsync("music.songs.complete", new { song = SongObject("wy", "1"), platforms = new[] { "tx" } });
-            await scene.Handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await scene.Ok("music.accounts.logout", new { platform = "tx" });
-            scene.Handler.Release.TrySetResult();
+            try
+            {
+                await scene.Handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await scene.Ok("music.accounts.logout", new { platform = "tx" });
+            }
+            finally { scene.Handler.Release.TrySetResult(); }
             try { Check(!(await pending).GetProperty("ok").GetBoolean(), "retired account must not publish candidates"); }
             catch (OperationCanceledException) { }
-            Check(scene.Runtime.Calls == 0);
+            Check(scene.ScriptCalls == 0);
         });
         yield return new("Official confirmed discovered recording survives owner restart without URL reuse or new search", async () =>
         {
@@ -328,6 +389,10 @@ public static class MusicOfficialSelectionTests
             await module.InitializeAsync(default); await scene.Login();
             var original = SongObject("wy", "1");
             await scene.Ok("music.queue.replace", new { songs = new[] { original }, index = 0 });
+            var before = await scene.Ok("music.queue.get");
+            var originalEntry = before.GetProperty("current");
+            string songId = originalEntry.GetProperty("song").GetProperty("songId").GetString()!;
+            Check(Guid.TryParse(songId, out _) && originalEntry.GetProperty("key").GetString() == songId);
             await module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             var row = module.QueueSurfaceRows.Single();
             string entry = row.EntryId;
@@ -339,23 +404,41 @@ public static class MusicOfficialSelectionTests
             Check(module.RecordingCandidates.Any(row => row.Platform == "tx") &&
                 module.LyricSources.Any(row => row.Label.StartsWith("tx")), "accepted mappings reach UI consumers");
             int searches = scene.Handler.Searches;
+            scene.Handler.DenyWyMedia = true;
             module.SelectedRecording = module.RecordingCandidates.Single(row => row.Platform == "wy");
-            await module.PlayQueueSurfaceItemAsync(module.QueueSurfaceRows.Single()); // WY has no account: explicit choice cannot silently pick QQ.
-            Check(output.Opens == 1 && scene.Handler.Searches == searches && scene.Runtime.Calls == 0);
+            await module.PlayQueueSurfaceItemAsync(module.QueueSurfaceRows.Single()); // Actual WY resource denial cannot silently select QQ.
+            Check(output.Opens == 1 && scene.Handler.Searches == searches && scene.ScriptCalls == 0);
             var queue = await scene.Ok("music.queue.get");
-            Check(MusicSongFixture.Info(queue.GetProperty("current").GetProperty("song")).GetProperty("source").GetString() == "wy");
+            var current = queue.GetProperty("current");
+            var projected = current.GetProperty("song");
+            Check(queue.GetProperty("currentId").GetString() == before.GetProperty("currentId").GetString() &&
+                queue.GetProperty("version").GetInt64() == before.GetProperty("version").GetInt64() &&
+                queue.GetProperty("mode").GetInt32() == before.GetProperty("mode").GetInt32() &&
+                queue.GetProperty("total").GetInt32() == before.GetProperty("total").GetInt32() &&
+                queue.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText() &&
+                current.GetProperty("id").GetString() == originalEntry.GetProperty("id").GetString() &&
+                current.GetProperty("key").GetString() == songId &&
+                current.GetProperty("context").GetRawText() == originalEntry.GetProperty("context").GetRawText() &&
+                projected.GetProperty("songId").GetString() == songId,
+                "supplementary metadata and a rejected exact manual choice cannot replace queue control facts");
+            var recordings = projected.GetProperty("sources").EnumerateArray().ToArray();
+            Check(recordings.Single(source => source.GetProperty("source").GetString() == "wy")
+                    .GetProperty("musicInfo").GetProperty("songmid").GetString() == "1" &&
+                recordings.Single(source => source.GetProperty("source").GetString() == "tx")
+                    .GetProperty("musicInfo").GetProperty("songmid").GetString() == "FixtureMID",
+                "the current repository projection retains the original locator and the discovered recording");
             module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         }));
-        yield return new("Official native resolve rejects metadata duration mismatch before caching media", async () =>
+        yield return new("Official native resolve uses actual audio facts instead of a metadata duration gate", async () =>
         {
             await using var scene = await Scene.CreateAsync(); await scene.Login();
+            var song = await MusicSongFixture.AdoptAsync(scene.App, SongObject("tx", "FixtureMID", duration: 180));
             var result = await scene.App.ExecuteAsync("music.official.resolve", new {
-                platform = "tx", song = SongObject("tx", "FixtureMID", duration: 180), quality = "320k"
+                platform = "tx", song, quality = "320k"
             });
-            Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == "RECORDING_MISMATCH");
+            Check(result.GetProperty("ok").GetBoolean() && result.GetProperty("duration").GetDouble() == 100);
             await scene.CacheStore.DrainAsync();
-            Check(!scene.CacheBacking.Data.TryGetValue(MusicSourceCache.Namespace, out var bytes) ||
-                !Encoding.UTF8.GetString(bytes).Contains("vkey="), "rejected recording never becomes a URL candidate");
+            Check(scene.Handler.Vkeys == 1, "Usable canonical media was not requested");
         });
         yield return new("Official automatic upstream permission denial reaches the user without a local membership gate", () =>
             MusicQualityConsumerTests.Sta(async () =>
@@ -373,7 +456,7 @@ public static class MusicOfficialSelectionTests
             await module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             await module.PlayQueueSurfaceItemAsync(module.QueueSurfaceRows.Single());
             Check(module.Status == "当前歌曲暂无完整播放权限" && scene.Handler.Vkeys > 0, module.Status);
-            Check(output.Opens == 0 && scene.Runtime.Calls == 0);
+            Check(output.Opens == 0 && scene.ScriptCalls == 0);
             module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         }));
     }
@@ -397,17 +480,25 @@ public static class MusicOfficialSelectionTests
     {
         internal readonly MemoryStore Store;
         internal readonly MemoryStore CacheBacking;
-        internal readonly NoRuntime Runtime = new();
+        internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly Transport Handler = new();
         internal readonly MusicNativeApplication App;
         internal readonly CacheDocumentStore CacheStore;
+        internal int ScriptCalls => Runtime.Calls.Count(c => !c.Method.StartsWith("music.platform.", StringComparison.Ordinal) &&
+            c.Method != "music.script.sources.list");
         private Scene(MemoryStore store, MemoryStore cacheBacking)
-        { Store = store; CacheBacking = cacheBacking; CacheStore = new(CacheBacking); App = new(Store, Runtime, CacheStore, Handler); }
-        internal static async Task<Scene> CreateAsync(MemoryStore? store = null, MemoryStore? cacheBacking = null)
+        {
+            Store = store; CacheBacking = cacheBacking; CacheStore = new(CacheBacking);
+            Runtime.OnRequest = Handler.Read;
+            Runtime.OnOtherCall = (call, _) => call.Method == "music.script.sources.list"
+                ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { ok = true, contract = "music.script.v3", value = new { items = Array.Empty<object>() } }))
+                : throw new InvalidOperationException(call.Method);
+            App = new(Store, Runtime, CacheStore);
+        }
+        internal static Task<Scene> CreateAsync(MemoryStore? store = null, MemoryStore? cacheBacking = null)
         {
             store ??= new();
-            await MusicClientContextFixture.SeedQqAsync(store);
-            return new(store, cacheBacking ?? new());
+            return Task.FromResult(new Scene(store, cacheBacking ?? new()));
         }
         internal Task<JsonElement> Login() => Ok("music.accounts.import",
             new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
@@ -439,76 +530,63 @@ public static class MusicOfficialSelectionTests
         public async ValueTask DisposeAsync()
         {
             try { await App.DisposeAsync(); }
-            finally { await CacheStore.DisposeAsync(); }
+            finally { await Runtime.DisposeAsync(); await CacheStore.DisposeAsync(); }
         }
     }
-    private sealed class NoRuntime : IRuntimeClient
-    {
-        internal int Calls;
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Native business must not upload script sources"); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        {
-            if (method == "music.script.sources.list")
-                return Task.FromResult(JsonSerializer.SerializeToElement(new { ok = true, contract = "music.script.v3", value = new { items = Array.Empty<object>() } }));
-            Calls++; throw new InvalidOperationException("Official selection invoked a script");
-        }
-    }
-    private sealed class Transport : HttpMessageHandler
+    private sealed class Transport
     {
         internal int Calls, Searches, MediaRequests, Vkeys;
         internal bool FailSearch, HoldSearch;
         internal bool Member = true;
         internal bool DenyMedia;
+        internal bool DenyWyMedia;
         internal int LastPage;
         internal string? HoldMethod;
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource MethodEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource MethodRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
             Interlocked.Increment(ref Calls);
-            if (request.Content is null) return new(HttpStatusCode.ServiceUnavailable);
-            var input = JsonNode.Parse(await request.Content.ReadAsStringAsync(token))!;
-            string? method = input["req_0"]?["method"]?.GetValue<string>();
-            if (method == "DoSearchForQQMusicMobile")
+            string method = call.Operation;
+            if (method == "search")
             {
-                Searches++;
-                LastPage = input["req_0"]!["param"]!["page_num"]!.GetValue<int>();
+                Interlocked.Increment(ref Searches);
+                LastPage = call.Parameters.GetProperty("page").GetInt32();
                 if (HoldSearch)
                 {
                     Entered.TrySetResult();
                     await Release.Task.WaitAsync(token);
                 }
-                if (FailSearch) return new(HttpStatusCode.ServiceUnavailable);
-                return Qq(new { meta = new { sum = 1, nextpage = -1 }, body = new { item_song = new[] {
-                    new { mid = "FixtureMID", id = 10, type = 0, title = "Same Song", interval = 100,
-                        singer = new[] { new { name = "Artist" } }, file = new { size_320mp3 = 120 } }
-                } } });
+                if (FailSearch) throw new MusicPlatformException("UPSTREAM_ERROR");
+                return MusicPlatformRuntimeFixture.Json(new { platform = call.Platform, kind = "songs",
+                    items = new[] { SongObject(call.Platform, call.Platform == "tx" ? "FixtureMID" : "kg-id") },
+                    more = false, continuation = (object?)null });
             }
-            if (method is "CgiGetTrackInfo" or "UrlGetVkey") Interlocked.Increment(ref MediaRequests);
-            if (method == "UrlGetVkey") Interlocked.Increment(ref Vkeys);
+            if (method == "audio") { Interlocked.Increment(ref MediaRequests); Interlocked.Increment(ref Vkeys); }
             if (method == HoldMethod && method is not null)
             {
                 MethodEntered.TrySetResult();
                 // Deliberately ignore cancellation to exercise native publication fencing.
                 await MethodRelease.Task;
             }
+            if (method is "account.verify" or "account.profile")
+            {
+                var observation = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation(call.Platform, "123", vip: Member).GetRawText())!.AsObject();
+                if (method == "account.verify")
+                    observation["cookie"] = call.Payload.GetProperty("candidate").GetProperty("cookie").GetString();
+                return MusicPlatformRuntimeFixture.Json(observation);
+            }
             return method switch {
-                "GetLoginUserInfo" => Qq(new { code = 0 }),
-                "GetHomepageHeader" => Qq(new { Info = new { BaseInfo = new { EncryptedUin = "FixtureEUIN", Name = "Synthetic", Avatar = "" } } }),
-                "vip_login_base" => Qq(new { identity = new { vip = Member ? 1 : 0 }, userinfo = new { expire = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds() } }),
-                "CgiGetTrackInfo" => Qq(new { tracks = new[] { new { mid = "FixtureMID", interval = 100, file = new { size_320mp3 = 120 } } } }),
-                "UrlGetVkey" => Qq(new { expiration = 120, midurlinfo = new[] { new { songmid = "FixtureMID", result = 0,
-                    filename = "M800FixtureMIDFixtureMID.mp3", purl = DenyMedia ? "" : "M800FixtureMIDFixtureMID.mp3?vkey=synthetic", ekey = "" } } }),
-                _ => new(HttpStatusCode.ServiceUnavailable)
+                "audio" when call.Platform == "wy" && DenyWyMedia => throw new MusicPlatformException("TRIAL_ONLY"),
+                "audio" when DenyMedia => throw new MusicPlatformException("TRIAL_ONLY"),
+                "audio" => MusicPlatformRuntimeFixture.Json(new { url = "https://isure.stream.qqmusic.qq.com/SYNTHETIC.mp3?vkey=synthetic",
+                    requestQuality = "320k", actualQuality = "320k", qualityVerified = true, duration = 100, size = 120,
+                    full = true, expiresAt = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeMilliseconds() }),
+                _ => throw new InvalidOperationException(method)
             };
         }
-        private static HttpResponseMessage Qq(object body) => new(HttpStatusCode.OK) {
-            Content = new StringContent(JsonSerializer.Serialize(new { code = 0, req_0 = new { code = 0, data = body } }),
-                Encoding.UTF8, "application/json") };
     }
     private sealed class Dialogs : IMusicDialogs
     {

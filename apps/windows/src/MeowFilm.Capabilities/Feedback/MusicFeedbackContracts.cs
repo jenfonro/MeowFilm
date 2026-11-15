@@ -17,7 +17,7 @@ public sealed class MusicFeedbackAttempt
 
 public sealed record MusicFeedbackStart(MusicFeedbackAttempt Attempt, MusicFeedbackRecording Recording,
     double Duration, double Position, double Rate, bool Automatic,
-    string Source = "unknown", string SourceId = "", string SourceType = "", string Algorithm = "",
+    string Source = "unknown", string SourceId = "", string Algorithm = "",
     string Mode = "")
 {
     public Guid PlaybackId { get; init; }
@@ -80,8 +80,9 @@ public interface IMusicFeedbackSession : IAsyncDisposable
     Task FinishAsync(MusicFeedbackEnd end, CancellationToken cancellationToken = default);
 }
 
-public sealed class MusicFeedbackException(string code) : Exception(code)
+public sealed class MusicFeedbackException(string code, string? writeStatus = null) : Exception(code)
 {
     public string Code { get; } = code;
+    internal string? WriteStatus { get; } = writeStatus;
     public override string ToString() => $"{nameof(MusicFeedbackException)}: {Code}";
 }

@@ -1,113 +1,70 @@
 import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicPlatform
 
-private actor MusicQQSongListHTTP: MusicAccountHTTPTransport {
-    private let base: MusicAccountTestHTTP
-    private let count: Int
-    private let repeatsPage: Bool
-    private let wideRows: Bool
-    private var requests: [MusicAccountHTTPRequest] = []
-    init(clock: MusicAccountTestClock, count: Int = 2001, repeatsPage: Bool = false, wideRows: Bool = false) {
-        base = .init(clock: clock); self.count = count
-        self.repeatsPage = repeatsPage; self.wideRows = wideRows
-    }
-    func recorded() -> [MusicAccountHTTPRequest] { requests }
-    func send(_ request: MusicAccountHTTPRequest) async throws -> MusicAccountHTTPResponse {
-        requests.append(request)
-        guard try MusicAccountTestHTTP.method(request) == "CgiGetDiss" else { return try await base.send(request) }
-        let params = try MusicQQWire.object(MusicQQWire.object(MusicAccountTestHTTP.fields(request)["req_0"])["param"])
-        let offset = try MusicQQWire.integer(params["song_begin"])
-        guard try MusicQQWire.integer(params["song_num"]) == 100 else { throw MusicServiceError.invalidRequest }
-        let end = min(offset + 100, count)
-        let rows = (offset..<end).map { position -> [String: Any] in
-            let index = repeatsPage ? position % 100 : position
-            var row = MusicAccountFixture.song("BULK\(index)", id: index + 101)
-            if wideRows {
-                row["title"] = String(repeating: "t", count: 1024)
-                row["singer"] = (0..<3).map { _ in ["name": String(repeating: "s", count: 256)] }
-                var album = row["album"] as? [String: Any] ?? [:]
-                album["name"] = String(repeating: "a", count: 1024); row["album"] = album
-            }
-            return row
+@MainActor final class MusicQQBusinessTests: XCTestCase {
+    func testCanonicalCompleteCollectionKeepsAllOccurrencesWithoutSecondRead() async throws {
+        let ids = (0..<2001).map { "BULK\($0)" } + ["BULK0", "900719925474099312"]
+        let rows = try ids.map { try MusicAccountFixture.track($0) }
+        let fixture = try MusicPlatformFixture { request in
+            XCTAssertEqual(request.operation, "playlist.complete")
+            XCTAssertEqual(request.parameters[music: "id"], .string("canonical-alias"))
+            return try MusicPlatformFixture.page(rows, platform: "tx", total: 9999)
         }
-        return try MusicAccountFixture.rpc([
-            "songlist": rows, "total_song_num": count, "songlist_size": rows.count, "hasmore": end < count ? 1 : 0,
-            "dirinfo": ["tid": 501, "dirId": 7, "creator": ["musicid": 101]]
-        ])
-    }
-}
-
-final class MusicQQBusinessTests: XCTestCase {
-    func testCollectionSongDoubleReadKeepsMoreThanTwoThousandSongsAndExactOffsets() async throws {
-        let clock = MusicAccountTestClock(), http = MusicQQSongListHTTP(clock: clock)
-        let provider = QQMusicAccountAdapter(transport: http, now: { clock.now() })
-        let rows = try await provider.tracks(collectionID: "501", credential: MusicAccountFixture.credential())
-        XCTAssertEqual(rows.count, 2001)
-        let ids = try rows.map { try MusicQQWire.string(MusicQQWire.decode(JSONEncoder().encode($0))["songmid"]) }
-        XCTAssertEqual(ids, (0..<2001).map { "BULK\($0)" })
-        let requests = await http.recorded()
-        let scans = try requests.filter { try MusicAccountTestHTTP.method($0) == "CgiGetDiss" }
-        let offsets = try scans.map {
-            try MusicQQWire.integer(MusicQQWire.object(
-                MusicQQWire.object(MusicAccountTestHTTP.fields($0)["req_0"])["param"])["song_begin"])
-        }
-        let expected = Array(stride(from: 0, to: 2001, by: 100))
-        XCTAssertEqual(offsets, expected + expected)
-        await provider.revoke()
+        let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .qq, client: client)
+        let result = try await provider.tracks(collectionID: "canonical-alias")
+        XCTAssertEqual(try result.map { try MusicPlatformDTO.runtime($0)[music: "songmid"].musicRequiredText() }, ids)
+        XCTAssertEqual(fixture.requests().map(\.operation), ["playlist.complete"])
+        try await client.close(); await fixture.runtime.close()
     }
 
-    func testCollectionSongReadStillRejectsRepeatedPagesAndCumulativeByteOverflow() async throws {
-        for wideRows in [false, true] {
-            let clock = MusicAccountTestClock()
-            let http = MusicQQSongListHTTP(clock: clock, repeatsPage: !wideRows, wideRows: wideRows)
-            let provider = QQMusicAccountAdapter(transport: http, now: { clock.now() })
-            do {
-                _ = try await provider.tracks(collectionID: "501", credential: MusicAccountFixture.credential())
-                XCTFail("invalid full song list")
-            } catch { XCTAssertEqual(error as? MusicServiceError, wideRows ? .limit : .upstreamInvalid) }
-            await provider.revoke()
-        }
+    func testRepeatedCanonicalRowsAndMergedDataAreNotASecondSnapshotOrHopBudget() async throws {
+        let track = MusicNativeTrackData(platform: "tx", data: try RuntimeJSON.encode(.object([
+            "songmid": .string("repeated"), "name": .string(String(repeating: "t", count: 2500)),
+            "singer": .string("Current artist") ])))
+        let rows = Array(repeating: track, count: 2001)
+        let fixture = try MusicPlatformFixture { _ in try MusicPlatformFixture.page(rows, platform: "tx") }
+        let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .qq, client: client)
+        let result = try await provider.tracks(collectionID: "current")
+        XCTAssertEqual(result.count, rows.count)
+        XCTAssertTrue(try result.allSatisfy { try MusicPlatformDTO.runtime($0)[music: "songmid"].musicRequiredText() == "repeated" })
+        XCTAssertGreaterThan(try result.reduce(0) { $0 + (try MusicPlatformDTO.runtime($1).musicData()).count }, 4 * 1024 * 1024)
+        XCTAssertEqual(fixture.requests().count, 1)
+        try await client.close(); await fixture.runtime.close()
     }
 
-    func testRadarRecommendationsContinueBeyondFormerTwoHundredPages() async throws {
-        let clock = MusicAccountTestClock(), http = MusicAccountTestHTTP(clock: clock)
-        await http.replies("GetRadarSong", try MusicAccountFixture.rpc([
-            "HasMore": true, "VecSongs": [["Track": MusicAccountFixture.song()]]
-        ]))
-        let provider = QQMusicAccountAdapter(transport: http, now: { clock.now() })
+    func testRadarUsesCurrentPageAndExplicitContinuationBeyondFormerPageThreshold() async throws {
+        let fixture = try MusicPlatformFixture { request in
+            XCTAssertEqual(request.operation, "recommendations")
+            XCTAssertEqual(request.parameters[music: "kind"], .string("radar"))
+            let page = try MusicPlatformDTO.count(request.parameters[music: "page"])
+            return try MusicPlatformFixture.page([MusicAccountFixture.track("current-\(page)")], platform: "tx",
+                continuation: .object(["page": .number(Double(page + 1))]))
+        }
+        let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .qq, client: client)
         for page in [200, 201] {
-            let result = try await provider.recommendations(kind: "radar", page: page,
-                                                            credential: MusicAccountFixture.credential())
+            let result = try await provider.recommendations(kind: "radar", page: page)
             XCTAssertEqual(result.rows.count, 1); XCTAssertEqual(result.nextPage, page + 1)
+            XCTAssertEqual(try MusicPlatformDTO.runtime(XCTUnwrap(result.rows.first))[music: "songmid"], .string("current-\(page)"))
         }
-        let requests = await http.recorded()
-        let radar = try requests.filter { try MusicAccountTestHTTP.method($0) == "GetRadarSong" }
-        let pages = try radar.map {
-            try MusicQQWire.integer(MusicQQWire.object(
-                MusicQQWire.object(MusicAccountTestHTTP.fields($0)["req_0"])["param"])["Page"])
-        }
-        XCTAssertEqual(pages, [200, 201])
-        await provider.revoke()
+        XCTAssertEqual(fixture.requests().map { $0.parameters[music: "page"] }, [.number(200), .number(201)])
+        try await client.close(); await fixture.runtime.close()
     }
 
-    func testRadarStillRejectsEmptyContinuationAndUnrepresentableNextPage() async throws {
-        let clock = MusicAccountTestClock(), http = MusicAccountTestHTTP(clock: clock)
-        let provider = QQMusicAccountAdapter(transport: http, now: { clock.now() })
-        await http.replies("GetRadarSong", try MusicAccountFixture.rpc(["HasMore": true, "VecSongs": []]))
-        do {
-            _ = try await provider.recommendations(kind: "radar", page: 201, credential: MusicAccountFixture.credential())
-            XCTFail("non-progressing response")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
-        await http.replies("GetRadarSong", try MusicAccountFixture.rpc([
-            "HasMore": true, "VecSongs": [["Track": MusicAccountFixture.song()]]
-        ]))
-        do {
-            _ = try await provider.recommendations(kind: "radar", page: MusicPlatformJSON.maximumInteger,
-                                                    credential: MusicAccountFixture.credential())
-            XCTFail("inexact JSON page number")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
-        await provider.revoke()
+    func testEmptyVisibleCanonicalPageMayStillHaveRealContinuationAndRequiredItemsCannotBeMissing() async throws {
+        let peer = MusicAccountRuntimePeer(clock: MusicAccountTestClock())
+        await peer.replies("recommendations", .object(["items": .array([]), "total": .number(0),
+            "continuation": .object(["page": .number(9)]), "unused": .array([.null])]))
+        let fixture = try MusicPlatformFixture { try await peer.respond($0) }
+        let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .qq, client: client)
+        let result = try await provider.recommendations(kind: "radar", page: 1)
+        XCTAssertTrue(result.rows.isEmpty); XCTAssertEqual(result.nextPage, 9)
+        await peer.replies("recommendations", .object(["items": .null]))
+        do { _ = try await provider.recommendations(kind: "radar", page: 9); XCTFail("Missing consumed items became success") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+        try await client.close(); await fixture.runtime.close()
     }
 }

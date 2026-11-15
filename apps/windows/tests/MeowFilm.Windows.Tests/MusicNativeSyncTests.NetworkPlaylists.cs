@@ -1,4 +1,3 @@
-using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -22,12 +21,14 @@ public static partial class MusicNativeSyncTests
             yield return new($"Music network {p} subscription timeout stays fenced across runs and reopen until its late effect", () => NetworkTimeout(p, false));
             yield return new($"Music network {p} unsubscribe timeout stays fenced across runs and reopen until its late effect", () => NetworkUnsubscribeTimeout(p));
             yield return new($"Music network {p} subscription import rejects previously removed identity handles across reopen", () => NetworkReimportCas(p));
+            yield return new($"Music network {p} opaque references and canonical locators survive both unknown journals and cold read", () => NetworkOpaqueLifecycle(p));
         }
         foreach (string platform in new[] { "wy", "tx" })
         {
             string p = platform;
             yield return new($"Music network {p} owned playlist never dispatches a subscription or token", () => NetworkOwnedTarget(p));
         }
+        yield return new("Music network KG target created by the current account never dispatches a subscription", NetworkKgOwnedTarget);
         yield return new("Music network same-name subscriptions never join managed member fusion", NetworkMixedNames);
         yield return new("Music network first enable imports subscriptions before adding local references", NetworkFirstEnable);
         yield return new("Music network external changes and disabled local intent reconcile separately", NetworkExternalChanges);
@@ -42,7 +43,7 @@ public static partial class MusicNativeSyncTests
         yield return new("Music network unknown before CAS cannot dispatch", () => NetworkUnknownCas(false));
         yield return new("Music network unknown after CAS retains the fence until the desired presence is observed", () => NetworkUnknownCas(true));
         yield return new("Music network KG unsubscribe lost response retains account list fence", NetworkKgUnsubscribeRecovery);
-        yield return new("Music network KG unsubscribe codec targets account list and type one", NetworkKgUnsubscribeRequest);
+        yield return new("Music network KG unsubscribe carries the actual account relation locator", NetworkKgUnsubscribeRequest);
         foreach (string platform in new[] { "tx", "kg" })
             foreach (string defect in new[] { "none", "members", "same-presence", "managed-target", "account", "remote", "locator" })
             {
@@ -114,60 +115,81 @@ public static partial class MusicNativeSyncTests
     private static async Task NetworkSubscription(string platform)
     {
         await using var f = new Fixture(platform); var target = NetworkTarget(f); await f.Enable(false, true);
-        var saved = Ok(await SaveNetwork(f)); Ok(NetworkSync(saved));
+        Ok(NetworkSync(await SaveNetwork(f)));
         Check(f.Server.SubscriptionWrites == 1 && f.Server.Creates == 0 && f.Server.MemberReads == 0 && f.Server.SearchReads == 0);
         var request = f.Server.LastWrite!;
-        if (platform == "wy")
-        {
-            Check(f.Tokens.Calls == 1);
-            CheckWySubscription(f.Server, true, TokenRuntime.Token(1));
-        }
-        else if (platform == "tx")
-        {
-            Check(request["req_0"]!["module"]!.ToString() == "music.musicasset.PlaylistFavWrite" &&
-                request["req_0"]!["method"]!.ToString() == "FavPlaylist");
-            var param = request["req_0"]!["param"]!;
-            Check(param["uin"]!.ToString() == "synthetic-euin" && param["v_playlistId"]!.AsArray().Single()!.ToString() == "301");
-        }
-        else
-        {
-            Check(f.Server.MetadataReads == 1 && request["type"]!.GetValue<int>() == 1 &&
-                request["list_create_gid"]!.ToString() == target.GlobalId &&
-                request["list_create_userid"]!.ToString() == "77" && request["list_create_listid"]!.ToString() == "301");
-        }
+        Check(request["action"]!.GetValue<string>() == "subscribe" && request["id"]!.GetValue<string>() == NetworkRemoteId(platform));
+        if (platform == "wy") Check(f.Server.Preparations == 1 && request["preparationId"]!.GetValue<string>() == "synthetic-preparation-1");
+        if (platform == "kg") Check(request["remote"]!["locator"]!["creatorId"]!.GetValue<string>() == "77" && request["remote"]!["locator"]!["creatorListId"]!.GetValue<string>() == "301");
         var snapshot = await f.Owner.ReadLibrarySyncAsync();
         Check(LocalSongCount(snapshot.Library) == 0 && snapshot.Library.GetProperty("collections").GetArrayLength() == 1);
         var baseline = snapshot.Library.GetProperty("networkPlaylists")[0].GetProperty("subscription");
         Check(baseline.GetProperty("present").GetBoolean() && S(baseline, "accountId") == "42");
         if (platform == "kg") Check(S(baseline.GetProperty("locator"), "listId") == "901");
-        Ok(NetworkSync(await SaveNetwork(f)));
-        Check(f.Server.SubscriptionWrites == 1, "Repeat favorite must not replay a confirmed subscription");
-        if (platform == "wy") Check(f.Tokens.Calls == 1, "Confirmed subscription must not acquire another token");
-        int cloudWrites = 0;
-        if (platform == "kg")
-            await InstallCloud(f, async (message, token) =>
-            {
-                cloudWrites++;
-                Check(message.RequestUri!.AbsolutePath == "/v2/delete_list" &&
-                    CloudQuery(message)["userid"] == "42" && (await message.Content!.ReadAsByteArrayAsync(token)).Length > 0);
-                f.Server.Entries.Remove(target);
-                // The encrypted response is lost; authoritative readback, not this payload, confirms removal.
-                return [1, 2, 3];
-            });
+        Ok(NetworkSync(await SaveNetwork(f))); Check(f.Server.SubscriptionWrites == 1);
         var reference = Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("items")[0];
         Ok(NetworkSync(await RemoveNetwork(f, reference)));
-        Check(!f.Server.Entries.Contains(target) && target.Songs.SequenceEqual([1, 2]) &&
-            f.Server.SubscriptionTargets[NetworkRemoteId(platform)] == target);
-        if (platform == "wy")
+        Check(!f.Server.Entries.Contains(target) && target.Songs.SequenceEqual([1, 2]) && f.Server.SubscriptionTargets[NetworkRemoteId(platform)] == target);
+        Check(f.Server.Operations.SequenceEqual(["subscribe", "unsubscribe"]) && f.Server.MemberReads == 0 && f.Server.Creates == 0);
+        if (platform == "wy") { Check(f.Server.Preparations == 2 && f.Server.LastWrite!["preparationId"]!.GetValue<string>() == "synthetic-preparation-2"); CheckPreparationNotStored(f, "synthetic-preparation-1", "synthetic-preparation-2"); }
+        Check(Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("total").GetInt64() == 0 && (await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending").ValueKind == JsonValueKind.Null);
+    }
+
+    private static async Task NetworkOpaqueLifecycle(string platform)
+    {
+        await using var f = new Fixture(platform);
+        string accountId = "account-" + new string('u', 96);
+        f.Sessions.Values[platform] = Sessions.Make(platform, 1, accountId);
+        f.Server.AccountId = accountId;
+        string remoteId = "id_目录:/ +?" + new string('a', 2300);
+        string name = "  完整名称\n" + new string('名', 2100) + "  ";
+        var target = new Entry(platform == "kg" ? "1:123456789012345678901234567890" : remoteId,
+            name, writable: false)
         {
-            Check(f.Server.Operations.SequenceEqual(["/eapi/playlist/subscribe", "/eapi/playlist/unsubscribe"]) && f.Tokens.Calls == 2);
-            CheckWySubscription(f.Server, false, TokenRuntime.Token(2));
-        }
-        else Check(platform == "tx" ? f.Server.Operations.SequenceEqual(["FavPlaylist", "CancelFavPlaylist"]) : cloudWrites == 1);
-        Check(f.Server.MemberReads == 0 && f.Server.Creates == 0);
-        if (platform == "wy") CheckTokenNotStored(f, TokenRuntime.Token(1), TokenRuntime.Token(2));
-        Check(Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("total").GetInt64() == 0);
-        Check((await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending").ValueKind == JsonValueKind.Null);
+            GlobalId = remoteId, CreatorListId = "123456789012345678901234567890",
+            Cover = "https://art.example.test/opaque.jpg"
+        };
+        target.Add(1); target.Add(2);
+        f.Server.SubscriptionTargets[remoteId] = target;
+        await f.Enable(false, true);
+        f.Server.ThrowAfterSubscription = true;
+        f.Server.FailSubscriptionReadback = true;
+        Code(NetworkSync(await SaveNetwork(f, id: remoteId, name: name)), "UPSTREAM_ERROR");
+        var snapshot = await f.Owner.ReadLibrarySyncAsync();
+        var pending = snapshot.State.GetProperty("pending");
+        Check(S(pending, "accountId") == accountId && S(pending, "remoteId") == remoteId && S(pending, "name") == name &&
+            S(pending, "collectionId") == "network:" + platform + ":" + remoteId &&
+            JsonNode.DeepEquals(JsonNode.Parse(pending.GetProperty("locator").GetRawText()),
+                f.Server.LastWrite!["remote"]!["locator"]));
+        Check(f.Server.SubscriptionWrites == 1);
+        await f.Restart();
+        snapshot = await f.Owner.ReadLibrarySyncAsync();
+        Check(snapshot.State.GetProperty("pending").GetRawText() == pending.GetRawText() &&
+            snapshot.Library.GetProperty("accounts").GetProperty(platform).GetString() == accountId &&
+            snapshot.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").GetProperty("accountId").GetString() == accountId);
+        f.Server.FailReads = false; f.Server.FailSubscriptionReadback = false;
+        Ok(await f.Run());
+        var reference = Ok(await f.Owner.ExecuteAsync("music.library.network.get",
+            new { platform, id = remoteId })).GetProperty("collection");
+        Check(S(reference, "remoteId") == remoteId && S(reference, "name") == name);
+        var subscription = (await f.Owner.ReadLibrarySyncAsync()).Library.GetProperty("networkPlaylists")[0].GetProperty("subscription");
+        Check(S(subscription, "accountId") == accountId);
+        var locator = subscription.GetProperty("locator");
+        f.Server.ThrowAfterSubscription = true; f.Server.FailSubscriptionReadback = true;
+        Code(NetworkSync(await RemoveNetwork(f, reference)), "UPSTREAM_ERROR");
+        pending = (await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending");
+        Check(S(pending, "operation") == "unsubscribe" &&
+            JsonNode.DeepEquals(JsonNode.Parse(pending.GetProperty("locator").GetRawText()),
+                JsonNode.Parse(locator.GetRawText())));
+        await f.Restart();
+        Check((await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending").GetRawText() == pending.GetRawText());
+        f.Server.FailReads = false; f.Server.FailSubscriptionReadback = false;
+        Ok(await f.Run()); Ok(await f.Run());
+        Check(f.Server.Operations.SequenceEqual(["subscribe", "unsubscribe"]) &&
+            f.Server.SubscriptionWrites == 2 && f.Server.MemberReads == 0 && f.Server.SearchReads == 0 &&
+            target.Songs.SequenceEqual([1, 2]) &&
+            Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("total").GetInt64() == 0);
+        if (platform == "wy") Check(f.Server.Preparations == 2, "readback never prepares or replays a write");
     }
 
     private static async Task NetworkMixedNames()
@@ -182,7 +204,7 @@ public static partial class MusicNativeSyncTests
             snapshot.Library.GetProperty("networkPlaylists").GetArrayLength() == 3);
         var managed = snapshot.Library.GetProperty("collections")[1];
         Check(managed.GetProperty("bindings").GetArrayLength() == 1 && S(managed.GetProperty("bindings")[0], "id") == "701");
-        Check(f.Server.SubscriptionMemberReads == 0 && f.Server.MemberReads == 2 && f.Server.SearchReads == 0 &&
+        Check(f.Server.SubscriptionMemberReads == 0 && f.Server.MemberReads == 1 && f.Server.SearchReads == 0 &&
             f.Server.Writes == 0 && f.Server.Creates == 0);
         var list = Ok(await f.Owner.ExecuteAsync("music.library.list")).GetProperty("items");
         Check(list.EnumerateArray().Count(item => S(item, "name") == "Same") == 4);
@@ -198,7 +220,7 @@ public static partial class MusicNativeSyncTests
         var sync = Ok(NetworkSync(saved));
         Check(S(sync.GetProperty("status"), "phase") == "partial");
         Check(sync.GetProperty("status").GetProperty("issues").EnumerateArray().Any(issue => S(issue, "code") == "READ_ONLY"));
-        Check(f.Server.Writes == 0 && f.Server.SubscriptionWrites == 0 && f.Tokens.Calls == 0);
+        Check(f.Server.Writes == 0 && f.Server.SubscriptionWrites == 0 && f.Server.Preparations == 0);
         Check(f.Server.MemberReads == memberReads && f.Server.SubscriptionMemberReads == 0);
         var snapshot = await f.Owner.ReadLibrarySyncAsync();
         Check(snapshot.State.GetProperty("pending").ValueKind == JsonValueKind.Null);
@@ -207,6 +229,22 @@ public static partial class MusicNativeSyncTests
         Check(references.GetArrayLength() == 1 && S(references[0], "remoteId") == "701");
         Check(f.Server.Entries.Contains(owned) && owned.Songs.SequenceEqual([1]));
     }
+    private static async Task NetworkKgOwnedTarget()
+    {
+        await using var f = new Fixture("kg"); var target = NetworkTarget(f); target.Writable = true;
+        await f.Enable(false, true);
+        var saved = Ok(await SaveNetwork(f));
+        var sync = Ok(NetworkSync(saved));
+        Check(S(sync.GetProperty("status"), "phase") == "partial");
+        Check(sync.GetProperty("status").GetProperty("issues").EnumerateArray().Any(issue => S(issue, "code") == "READ_ONLY"));
+        Check(f.Server.MetadataReads == 1 && f.Server.MemberReads == 0 && f.Server.SubscriptionMemberReads == 0);
+        Check(f.Server.Writes == 0 && f.Server.SubscriptionWrites == 0 && f.Server.Preparations == 0);
+        var snapshot = await f.Owner.ReadLibrarySyncAsync();
+        Check(snapshot.State.GetProperty("pending").ValueKind == JsonValueKind.Null);
+        var references = Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("items");
+        Check(references.GetArrayLength() == 1 && S(references[0], "remoteId") == target.GlobalId);
+        Check(!f.Server.Entries.Contains(target) && target.Songs.SequenceEqual([1, 2]));
+    }
     private static async Task NetworkFirstEnable()
     {
         await using var f = new Fixture(); var localTarget = NetworkTarget(f);
@@ -214,7 +252,7 @@ public static partial class MusicNativeSyncTests
         Ok(await SaveNetwork(f));
         await f.Enable(false, true); Ok(await f.Run());
         Check(f.Server.Entries.Contains(official) && f.Server.Entries.Contains(localTarget) &&
-            f.Server.Operations.SequenceEqual(["FavPlaylist"]) && f.Server.SubscriptionMemberReads == 0);
+            f.Server.Operations.SequenceEqual(["subscribe"]) && f.Server.SubscriptionMemberReads == 0);
         var list = Ok(await f.Owner.ExecuteAsync("music.library.network.list"));
         Check(list.GetProperty("total").GetInt64() == 2);
     }
@@ -230,7 +268,7 @@ public static partial class MusicNativeSyncTests
         var removed = Ok(await RemoveNetwork(f, reference)); Check(S(NetworkSync(removed), "state") == "local-only");
         Check(f.Server.Reads == reads && f.Server.SubscriptionWrites == 1 && f.Server.Entries.Contains(target));
         await SetNetworkEnabled(f, true); Ok(await f.Run());
-        Check(f.Server.Operations.SequenceEqual(["FavPlaylist", "CancelFavPlaylist"]) &&
+        Check(f.Server.Operations.SequenceEqual(["subscribe", "unsubscribe"]) &&
             Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("total").GetInt64() == 0);
     }
     private static async Task NetworkReimportCas(string platform)
@@ -267,35 +305,21 @@ public static partial class MusicNativeSyncTests
             }));
         }
         Ok(NetworkSync(await SaveNetwork(f)));
-        Check(f.Server.Operations.SequenceEqual(["FavPlaylist"]) && f.Server.MemberReads == 0 && f.Server.Creates == 0);
+        Check(f.Server.Operations.SequenceEqual(["subscribe"]) && f.Server.MemberReads == 0 && f.Server.Creates == 0);
         var snapshot = await f.Owner.ReadLibrarySyncAsync();
         Check(snapshot.Library.GetProperty("accounts").EnumerateObject().Select(p => p.Name).SequenceEqual(["tx"]));
     }
     private static async Task NetworkRejected()
     {
         await using var f = new Fixture(); var target = NetworkTarget(f); await f.Enable(false, true); f.Server.SubscriptionRejected = true;
-        var sync = NetworkSync(await SaveNetwork(f)); Code(sync, "WRITE_UNCONFIRMED");
-        Check(S(sync.GetProperty("status"), "phase") == "blocked");
-        Check(f.Server.SubscriptionWrites == 1 && !f.Server.Entries.Any(entry => !entry.Writable));
-        Check(Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("total").GetInt64() == 1);
-        var snapshot = await f.Owner.ReadLibrarySyncAsync(); var pending = snapshot.State.GetProperty("pending");
-        Check(S(pending, "operation") == "subscribe" &&
-            snapshot.State.GetProperty("status").GetProperty("issues").EnumerateArray().Any(issue => S(issue, "code") == "WRITE_UNCONFIRMED"));
-        f.Server.SubscriptionRejected = false;
-        for (int reopen = 0; reopen < 2; reopen++)
-        {
-            if (reopen > 0) await f.Restart();
-            Code(await f.Run(), "WRITE_UNCONFIRMED");
-            snapshot = await f.Owner.ReadLibrarySyncAsync();
-            Check(snapshot.State.GetProperty("pending").GetRawText() == pending.GetRawText() &&
-                snapshot.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").GetProperty("present").GetBoolean() &&
-                f.Server.SubscriptionWrites == 1 && !f.Server.Entries.Contains(target));
-        }
-        f.Server.Entries.Add(target); Ok(await f.Run());
+        var sync = Ok(NetworkSync(await SaveNetwork(f)));
+        Check(S(sync.GetProperty("status"), "phase") == "partial" && sync.GetProperty("status").GetProperty("issues").EnumerateArray().Any(issue => S(issue, "code") == "UPSTREAM_ERROR"));
+        var snapshot = await f.Owner.ReadLibrarySyncAsync();
+        Check(f.Server.SubscriptionWrites == 1 && !f.Server.Entries.Contains(target) && snapshot.State.GetProperty("pending").ValueKind == JsonValueKind.Null && snapshot.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").GetProperty("present").GetBoolean());
+        // B07: a definite rejection clears only the dispatched journal. A fresh explicit run may retry the still-local intent.
+        f.Server.SubscriptionRejected = false; await f.Restart(); Ok(await f.Run()); Ok(await f.Run());
         snapshot = await f.Owner.ReadLibrarySyncAsync();
-        Check(snapshot.State.GetProperty("pending").ValueKind == JsonValueKind.Null &&
-            snapshot.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").ValueKind == JsonValueKind.Null &&
-            f.Server.SubscriptionWrites == 1);
+        Check(f.Server.SubscriptionWrites == 2 && f.Server.Entries.Contains(target) && snapshot.State.GetProperty("pending").ValueKind == JsonValueKind.Null && snapshot.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").ValueKind == JsonValueKind.Null);
     }
     private static async Task NetworkMissingAccount()
     {
@@ -335,57 +359,32 @@ public static partial class MusicNativeSyncTests
         Check(f.Server.SubscriptionWrites == 1 && settled.State.GetProperty("pending").ValueKind == JsonValueKind.Null &&
             settled.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").ValueKind == JsonValueKind.Null &&
             settled.Library.GetProperty("networkPlaylists")[0].GetProperty("subscription").GetProperty("present").GetBoolean());
-        if (platform == "wy") Check(f.Tokens.Calls == 1, "Readback must not request a new token or replay");
+        if (platform == "wy") Check(f.Server.Preparations == 1, "Readback must not request a new preparation or replay");
         Check(Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("total").GetInt64() == 1 &&
             f.Server.MemberReads == 0 && f.Server.Creates == 0);
     }
     private static async Task NetworkUnsubscribeTimeout(string platform)
     {
         await using var f = new Fixture(platform); var target = NetworkTarget(f); f.Server.Entries.Add(target);
-        await f.Enable(false, true); Ok(await f.Run()); int cloudWrites = 0;
-        Task<byte[]> Unsubscribe(HttpRequestMessage request, CancellationToken token)
-        {
-            cloudWrites++;
-            Check(request.RequestUri!.AbsolutePath == "/v2/delete_list");
-            if (cloudWrites == 1) f.Server.FailReads = true;
-            return Task.FromResult(new byte[] { 1, 2, 3 });
-        }
-        if (platform == "kg") await InstallCloud(f, Unsubscribe);
-        else { f.Server.DropWrites = true; f.Server.ThrowAfterSubscription = true; f.Server.FailSubscriptionReadback = true; }
+        await f.Enable(false, true); Ok(await f.Run());
+        f.Server.DropWrites = true; f.Server.ThrowAfterSubscription = true; f.Server.FailSubscriptionReadback = true;
         var reference = Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("items")[0];
         Code(NetworkSync(await RemoveNetwork(f, reference)), "UPSTREAM_ERROR");
         var pending = (await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending");
-        Check(S(pending, "operation") == "unsubscribe" && pending.GetProperty("beforePresent").GetBoolean() &&
-            !pending.GetProperty("desiredPresent").GetBoolean());
+        Check(S(pending, "operation") == "unsubscribe" && pending.GetProperty("beforePresent").GetBoolean() && !pending.GetProperty("desiredPresent").GetBoolean());
         if (platform == "kg") Check(S(pending.GetProperty("locator"), "listId") == "901");
         f.Server.FailReads = false; f.Server.FailSubscriptionReadback = false; f.Server.DropWrites = false;
-        for (int reopen = 0; reopen < 2; reopen++)
-        {
-            if (reopen > 0)
-            {
-                await f.Restart();
-                if (platform == "kg") await InstallCloud(f, Unsubscribe);
-            }
-            for (int attempt = 0; attempt < 3; attempt++)
-            {
-                Code(await f.Run(), "WRITE_UNCONFIRMED");
-                var blocked = await f.Owner.ReadLibrarySyncAsync();
-                var current = blocked.Library.GetProperty("networkPlaylists")[0];
-                Check(blocked.State.GetProperty("pending").GetRawText() == pending.GetRawText() &&
-                    !current.GetProperty("present").GetBoolean() && !current.GetProperty("intent").GetProperty("present").GetBoolean() &&
-                    current.GetProperty("subscription").GetProperty("present").GetBoolean() && f.Server.Entries.Contains(target) &&
-                    (platform != "kg" ? f.Server.SubscriptionWrites == 1 : cloudWrites == 1));
+        for (int reopen = 0; reopen < 2; reopen++) {
+            if (reopen > 0) await f.Restart();
+            for (int attempt = 0; attempt < 3; attempt++) {
+                Code(await f.Run(), "WRITE_UNCONFIRMED"); var blocked = await f.Owner.ReadLibrarySyncAsync(); var current = blocked.Library.GetProperty("networkPlaylists")[0];
+                Check(blocked.State.GetProperty("pending").GetRawText() == pending.GetRawText() && !current.GetProperty("present").GetBoolean() && !current.GetProperty("intent").GetProperty("present").GetBoolean() && current.GetProperty("subscription").GetProperty("present").GetBoolean() && f.Server.Entries.Contains(target) && f.Server.SubscriptionWrites == 1);
             }
         }
-        f.Server.Entries.Remove(target); Ok(await f.Run()); Ok(await f.Run());
-        var settled = await f.Owner.ReadLibrarySyncAsync();
-        Check(settled.State.GetProperty("pending").ValueKind == JsonValueKind.Null &&
-            settled.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").ValueKind == JsonValueKind.Null &&
-            !settled.Library.GetProperty("networkPlaylists")[0].GetProperty("subscription").GetProperty("present").GetBoolean() &&
-            (platform != "kg" ? f.Server.SubscriptionWrites == 1 : cloudWrites == 1));
-        Check(Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("total").GetInt64() == 0 &&
-            target.Songs.SequenceEqual([1, 2]) && f.Server.MemberReads == 0 && f.Server.Creates == 0);
-        if (platform == "wy") Check(f.Tokens.Calls == 1, "Unsubscribe recovery must remain read-only");
+        f.Server.Entries.Remove(target); Ok(await f.Run()); Ok(await f.Run()); var settled = await f.Owner.ReadLibrarySyncAsync();
+        Check(settled.State.GetProperty("pending").ValueKind == JsonValueKind.Null && settled.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").ValueKind == JsonValueKind.Null && !settled.Library.GetProperty("networkPlaylists")[0].GetProperty("subscription").GetProperty("present").GetBoolean() && f.Server.SubscriptionWrites == 1);
+        Check(Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("total").GetInt64() == 0 && target.Songs.SequenceEqual([1, 2]) && f.Server.MemberReads == 0 && f.Server.Creates == 0);
+        if (platform == "wy") Check(f.Server.Preparations == 1, "Unsubscribe recovery must remain read-only");
     }
     private static async Task NetworkScheduledPending()
     {
@@ -502,7 +501,7 @@ public static partial class MusicNativeSyncTests
             case "managed-target": pending["collectionId"] = "favorites"; break;
             case "account": pending["accountId"] = "77"; break;
             case "remote": pending["remoteId"] = "999"; break;
-            case "locator": pending["locator"]!["listId"] = "901"; break;
+            case "locator": pending["locator"] = new JsonArray(); break;
         }
         f.Store.Data = LJ.Bytes(document);
         var original = f.Store.Data.ToArray(); int writes = f.Store.Writes, requests = f.Server.Reads + f.Server.Writes;
@@ -511,7 +510,9 @@ public static partial class MusicNativeSyncTests
         if (defect == "none")
         {
             Check(Ok(result).GetProperty("total").GetInt64() == 2);
-            Check(S((await reader.ReadLibrarySyncAsync()).State.GetProperty("pending"), "operation") == "subscribe");
+            var restored = (await reader.ReadLibrarySyncAsync()).State.GetProperty("pending");
+            Check(S(restored, "operation") == "subscribe" &&
+                JsonNode.DeepEquals(JsonNode.Parse(restored.GetProperty("locator").GetRawText()), pending["locator"]));
         }
         else Code(result, "CORRUPT_SYNC");
         Check(f.Store.Data.SequenceEqual(original) && f.Store.Writes == writes &&
@@ -521,30 +522,19 @@ public static partial class MusicNativeSyncTests
     {
         await using var f = new Fixture("kg"); var target = NetworkTarget(f); f.Server.Entries.Add(target);
         await f.Enable(false, true); Ok(await f.Run());
-        var reference = Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("items")[0]; int writes = 0;
-        await InstallCloud(f, (_, _) =>
-        {
-            writes++; f.Server.Entries.Remove(target); f.Server.FailReads = true;
-            return Task.FromResult(new byte[] { 1, 2, 3 });
-        });
+        f.Server.ThrowAfterSubscription = true; f.Server.FailSubscriptionReadback = true;
+        var reference = Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("items")[0];
         Code(NetworkSync(await RemoveNetwork(f, reference)), "UPSTREAM_ERROR");
         var snapshot = await f.Owner.ReadLibrarySyncAsync();
-        Check(S(snapshot.State.GetProperty("pending"), "operation") == "unsubscribe" &&
-            S(snapshot.State.GetProperty("pending").GetProperty("locator"), "listId") == "901");
+        Check(S(snapshot.State.GetProperty("pending"), "operation") == "unsubscribe" && S(snapshot.State.GetProperty("pending").GetProperty("locator"), "listId") == "901");
         await f.Restart(); f.Server.FailReads = false; Ok(await f.Run());
-        Check(writes == 1 && target.Songs.SequenceEqual([1, 2]) &&
-            (await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending").ValueKind == JsonValueKind.Null);
+        Check(f.Server.SubscriptionWrites == 1 && target.Songs.SequenceEqual([1, 2]) && (await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending").ValueKind == JsonValueKind.Null);
     }
     private static async Task NetworkKgUnsubscribeRequest()
     {
-        var body = new JsonObject { ["listid"] = 901, ["total_ver"] = 0, ["type"] = 1 }; int calls = 0;
-        await CloudCall("/v2/delete_list", async (request, token) =>
-        {
-            calls++;
-            string encoded = await request.Content!.ReadAsStringAsync(token);
-            Check(JsonNode.DeepEquals(JsonNode.Parse(CloudDecode(Convert.FromBase64String(encoded))), body));
-            return CloudCipher("""{"status":1,"error_code":0,"data":{}}""");
-        }, body: body);
-        Check(calls == 1);
+        await using var f = new Fixture("kg"); var target = NetworkTarget(f); f.Server.Entries.Add(target); await f.Enable(false, true); Ok(await f.Run());
+        var reference = Ok(await f.Owner.ExecuteAsync("music.library.network.list")).GetProperty("items")[0]; Ok(NetworkSync(await RemoveNetwork(f, reference)));
+        var request = f.Server.LastWrite!; var locator = request["remote"]!["locator"]!;
+        Check(request["action"]!.GetValue<string>() == "unsubscribe" && request["id"]!.GetValue<string>() == target.GlobalId && locator["listId"]!.GetValue<string>() == "901" && f.Server.SubscriptionWrites == 1);
     }
 }

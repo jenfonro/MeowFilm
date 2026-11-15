@@ -9,14 +9,14 @@ async function rejects(f, code) {
   assert.equal(readJSON(join(f.output, 'runtime-manifest.json')).status, 'failed');
 }
 
-test('iOS wrapper packages the eight-module App closure and separate pre-sign framework identity', async t => {
+test('iOS wrapper packages the nine-module App closure and separate pre-sign framework identity', async t => {
   const f = fixture(t), manifest = await f.pack();
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.entry, 'app/ios/entries/aggregate.mjs');
   assert.equal(manifest.platform, 'ios');
   assert.equal(manifest.transport, 'runtime.http.v1');
   assert.equal(manifest.assemblyProfile, 'common-native');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.deepEqual(manifest.target, target);
   assert.deepEqual(manifest.fileHashExcludes, ['runtime-manifest.json']);
   assert.equal(manifest.trustedNative.length, 1);
@@ -44,13 +44,17 @@ test('iOS wrapper packages the eight-module App closure and separate pre-sign fr
   const imports = manifest.relocations.find(file => file.path === manifest.entry).imports;
   assert.ok(imports.some(({ from, to }) => from === '../../../runtime/entry.mjs' && to === '../../entry.mjs'));
   assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/film-playback'));
+  assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/music-platform'));
+  assert.ok(manifest.files.some(file => file.path === 'app/modules/music-platform.mjs'));
+  assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/music-platform/src/index.mjs'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/film-rules.js'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/playback-rules.js'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-search/film-search.js'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/novel-rules/novel-rules.js'));
   assert.ok(manifest.files.some(file => file.path === 'app/modules/source-rules.mjs'));
   for (const license of ['quickjs-ng-LICENSE.txt', 'openssl-LICENSE.txt', 'zlib-LICENSE.txt', 'NOTICE.md',
-    'undici-LICENSE.txt', 'Unicode-3.0.txt', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt'])
+    'undici-LICENSE.txt', 'Unicode-3.0.txt', 'api-enhanced-MIT.txt', 'npm-node-compat-ISC.txt',
+    'Apache-2.0.txt', 'GPL-3.0-only.txt', 'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt'])
     assert.ok(manifest.files.some(file => file.path === `licenses/${license}`));
   assert.deepEqual(readFileSync(join(f.output, 'licenses/undici-LICENSE.txt')),
     readFileSync(join(f.root, f.receipt.catWebValues.license.path)));
@@ -77,6 +81,8 @@ test('iOS wrapper relocates only the fixed internal descriptor helper onto the p
 for (const [name, change, code] of [
   ['an extra platform source', f => f.write('apps/ios/runtime/entries/other.mjs', 'export {};'), 'IOS_CLOSURE'],
   ['a missing platform entry', f => f.remove('apps/ios/runtime/entries/aggregate.mjs'), 'IOS_CLOSURE'],
+  ['a missing music module', f => f.remove('apps/runtime/modules/music-platform.mjs'), 'MISSING_SOURCE'],
+  ['a missing music license', f => f.remove('LICENSES/KuGouMusicApi-MIT.txt'), 'MISSING_SOURCE'],
   ['an unexpected entry import', f => f.write('apps/ios/runtime/entries/aggregate.mjs',
     "import { fork } from 'node:child_process';\n" + readFileSync(join(repository, 'apps/ios/runtime/entries/aggregate.mjs'))), 'IOS_IMPORT'],
   ['a dynamic platform import', f => f.write('apps/ios/runtime/bootstrap.mjs',

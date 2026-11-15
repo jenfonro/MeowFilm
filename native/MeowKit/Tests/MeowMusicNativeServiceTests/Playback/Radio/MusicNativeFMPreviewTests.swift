@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import MeowMusicFeature
+import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 private actor FMPreviewOwner: MusicNativeAccountProviding, MusicNativeFMProviding {
@@ -62,6 +63,52 @@ private actor FMPreviewOwner: MusicNativeAccountProviding, MusicNativeFMProvidin
 
 final class MusicNativeFMPreviewTests: XCTestCase {
     private let fm = MusicHomeAction.fm(mode: .scene, submode: "ELECTRONIC", entry: .channel)
+    func testRepeatedFMSourceAndServiceCloseDrainTheNonCooperativeNativeRead() async throws {
+        let owner = FMPreviewOwner(), document = NativeMusicMemoryDocument()
+        let service = try await NativeMusicFixture.service(document, accounts: owner), gate = NativeMusicGate()
+        await owner.configure(gate: gate)
+        let source = try await service.openHomeActionQueue(fm, title: "FM")
+        let reading = Task { try await source.page(cursor: nil) }
+        await gate.started()
+        let firstReturned = expectation(description: "FM source drains")
+        let secondReturned = expectation(description: "repeated FM source drains")
+        let serviceReturned = expectation(description: "Native service drains FM reader")
+        firstReturned.isInverted = true; secondReturned.isInverted = true; serviceReturned.isInverted = true
+        let first = Task { await source.close(); firstReturned.fulfill() }
+        let second = Task { await source.close(); secondReturned.fulfill() }
+        let closing = Task { await service.close(); serviceReturned.fulfill() }
+        await fulfillment(of: [firstReturned, secondReturned, serviceReturned], timeout: 0.05)
+        await gate.release()
+        await first.value; await second.value; await closing.value
+        do { _ = try await reading.value; XCTFail("closed FM reader published late rows") }
+        catch { XCTAssertTrue(error is CancellationError || [.cancelled, .closed, .staleAccess].contains(error as? MusicServiceError)) }
+        let calls = await owner.calls
+        XCTAssertEqual(calls.count, 1); XCTAssertEqual(document.snapshot().2, 0)
+        XCTAssertFalse(source.authorization.isActive)
+    }
+    func testGuestWithoutAccountOwnerUsesTheSharedFMClientAndRetainsItsSelection() async throws {
+        let track = SimilarModeAccountFixture.track("guest-fm")
+        let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([track], platform: "wy")])
+        let document = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(document, platform: peer)
+        let initial = try await service.rememberedFM()
+        XCTAssertEqual(initial, .fm(mode: .default, submode: "", entry: nil))
+        let preview = try await service.fmPreview(fm)
+        let source = try await service.openHomeActionQueue(fm, title: "Guest FM")
+        let start = try await MusicAccountQueueFixture.start(service, source)
+        _ = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
+        let queue = try await service.queue(), remembered = try await service.rememberedFM()
+        XCTAssertEqual(queue.entries.first?.track.sources.first?.nativeId, "guest-fm")
+        XCTAssertEqual(remembered, fm.fmConfiguration)
+        XCTAssertFalse(preview?.authorization.isActive == true, "preview authority transfers, not a new guest session")
+        let calls = await peer.calls()
+        XCTAssertEqual(calls.map(\.operation), ["fm"])
+        XCTAssertTrue(calls.allSatisfy { $0.candidate == .null })
+        await source.close(); await service.close()
+        let cold = try await NativeMusicFixture.service(document, platform: peer)
+        let restored = try await cold.rememberedFM()
+        XCTAssertEqual(restored, fm.fmConfiguration)
+        await cold.close()
+    }
     func testFMSelectionPersistsAcrossServiceRestartAndIsIsolatedByLocalAccount() async throws {
         let owner = FMPreviewOwner(), store = NativeMusicMemoryDocument()
         await owner.changeAccount(scope: "account-A")
@@ -148,7 +195,7 @@ final class MusicNativeFMPreviewTests: XCTestCase {
         let page = try await read.value; _ = try await preview.value
         let track = try XCTUnwrap(page.items.first)
         XCTAssertEqual(track.sources.first?.nativeId, "1")
-        _ = try await service.replaceRemoteQueue(source, start: .init(index: 0, track: track), expectedRevision: 0, intent: .init())
+        _ = try await service.replaceRemoteQueue(source, start: .init(index: 0), expectedRevision: 0, intent: .init())
         let first = try await service.queue()
         XCTAssertEqual(first.entries.first?.remoteSessionID, source.id)
         let initialCalls = await owner.calls; XCTAssertEqual(initialCalls.count, 1)
@@ -244,7 +291,8 @@ final class MusicNativeFMPreviewTests: XCTestCase {
         func target(_ id: String) async throws -> MusicPlaybackFeedbackTarget {
             let d = try MusicDocument(store.snapshot().0, runID: "fixture")
             let entry = try XCTUnwrap(d.queue["entries"].array.first { $0["id"].string == id })
-            let targets = try await service.similarFeedbackTargets(entry: entry, context: entry["context"])
+            let song = d.library["library"]["songs"][entry["songId"].string]
+            let targets = try await service.similarFeedbackTargets(entry: entry, song: song, context: entry["context"])
             return try XCTUnwrap(targets.first { $0.platform == .netease })
         }
         let first = try await target(firstID)

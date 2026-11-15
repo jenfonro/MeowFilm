@@ -5,11 +5,13 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicCapability
 {
     private string catalogSourcePlatform = "wy", catalogSourceStatus = "";
-    private long catalogSourceRevision;
+    private long catalogSourceRevision, catalogSourceGeneration;
     private bool catalogSourceLoaded, catalogSourceBusy;
     private Task? catalogSourceRead;
     private Task catalogSourceWork = Task.CompletedTask;
-    private CancellationTokenSource? catalogSourceReadCancellation, catalogSourceSaveCancellation;
+    private CancellationTokenSource? catalogSourceReadCancellation;
+    private bool CatalogSourceCurrent(long generation) =>
+        generation == catalogSourceGeneration && !stopping && !disposed;
 
     public MusicCatalogChoice[] CatalogSourceChoices { get; } =
         [new("wy", "网易云音乐"), new("kg", "酷狗音乐")];
@@ -48,6 +50,7 @@ public sealed partial class MusicCapability
         if (catalogSourceLoaded) return Task.CompletedTask;
         if (catalogSourceRead is null)
         {
+            long generation = catalogSourceGeneration;
             var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             catalogSourceReadCancellation = cancellation;
             var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -66,13 +69,13 @@ public sealed partial class MusicCapability
                 {
                     var reply = await CallSettled("music.catalogSource.settings.get", cancellationToken: cancellation.Token);
                     cancellation.Token.ThrowIfCancellationRequested();
-                    AcceptCatalogSourceSettings(reply);
+                    if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(reply);
                 }
                 catch
                 {
-                    catalogSourceLoaded = false;
-                    if (!stopping)
+                    if (CatalogSourceCurrent(generation))
                     {
+                        catalogSourceLoaded = false;
                         catalogSourceStatus = "数据源设置读取失败";
                         CatalogSourceBindings();
                     }
@@ -110,8 +113,7 @@ public sealed partial class MusicCapability
         if (!CanEditCatalogSource || platform is not ("wy" or "kg") || platform == catalogSourcePlatform)
             return Task.CompletedTask;
         var revision = catalogSourceRevision;
-        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-        catalogSourceSaveCancellation = cancellation;
+        long generation = catalogSourceGeneration;
         catalogSourceBusy = true;
         catalogSourceStatus = "";
         CatalogSourceBindings();
@@ -119,44 +121,50 @@ public sealed partial class MusicCapability
         {
             try
             {
-                cancellation.Token.ThrowIfCancellationRequested();
-                AcceptCatalogSourceSettings(await CallSettledReceipt("music.catalogSource.settings.save",
-                    new { ifRevision = revision, platform }, cancellation.Token));
+                var reply = await CallSettledReceipt("music.catalogSource.settings.save",
+                    new { ifRevision = revision, platform }, lifetime.Token);
+                if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(reply);
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
             {
+                if (!CatalogSourceCurrent(generation)) return;
                 try
                 {
-                    AcceptCatalogSourceSettings(await CallSettled("music.catalogSource.settings.get",
-                        cancellationToken: lifetime.Token));
+                    var reply = await CallSettled("music.catalogSource.settings.get",
+                        cancellationToken: lifetime.Token);
+                    if (!CatalogSourceCurrent(generation)) return;
+                    AcceptCatalogSourceSettings(reply);
                     if (catalogSourcePlatform != platform)
                         catalogSourceStatus = error.Code == "REVISION_CONFLICT"
                             ? "数据源设置已更新" : "数据源设置保存失败";
                 }
                 catch
                 {
+                    if (!CatalogSourceCurrent(generation)) return;
                     catalogSourceLoaded = false;
                     catalogSourceStatus = "数据源设置保存失败";
                     RetireCatalogSourcePages();
                 }
             }
-            catch (OperationCanceledException) { catalogSourceStatus = "已取消"; }
-            catch { catalogSourceStatus = "数据源设置保存失败"; }
+            catch (OperationCanceledException) { if (CatalogSourceCurrent(generation)) catalogSourceStatus = "已取消"; }
+            catch { if (CatalogSourceCurrent(generation)) catalogSourceStatus = "数据源设置保存失败"; }
             finally
             {
-                if (ReferenceEquals(catalogSourceSaveCancellation, cancellation))
-                    catalogSourceSaveCancellation = null;
-                cancellation.Dispose();
                 catalogSourceBusy = false;
-                CatalogSourceBindings();
+                if (CatalogSourceCurrent(generation)) CatalogSourceBindings();
             }
         });
     }
 
-    internal async Task DeactivateCatalogSourceSettingsAsync()
+    internal async Task DeactivateCatalogSourceSettingsAsync(bool retirePage = false)
     {
-        catalogSourceSaveCancellation?.Cancel();
+        catalogSourceGeneration++;
+        if (retirePage || catalogSourceBusy || catalogSourceRead is not null) catalogSourceLoaded = false;
+        catalogSourceReadCancellation?.Cancel();
+        catalogSourceReadCancellation = null;
+        catalogSourceRead = null;
+        CatalogSourceBindings();
         await catalogSourceWork;
     }
 }

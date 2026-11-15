@@ -10,7 +10,6 @@ using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Threading;
 using LibVLCSharp.Shared;
-using MeowFilm.Core.Runtime;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
@@ -23,7 +22,7 @@ using static MeowFilm.Windows.Tests.AdaptiveMediaTests;
 namespace MeowFilm.Windows.Tests;
 
 // Real native dummy and real domain modules/owners; only upstream resolution and
-// origin sockets are synthetic. No Node, external accounts or production endpoints.
+// origin sockets are synthetic. Canonical peers do not run scripts or production endpoints.
 public static partial class PlaybackRecoveryTests
 {
     public static IEnumerable<TestCase> Cases()
@@ -179,7 +178,8 @@ public static partial class PlaybackRecoveryTests
             Check(f.App.Resolutions.Take(3).All(r => r.GetProperty("platform").GetString() == "wy") &&
                 f.App.Resolutions.Take(3).Select(r => r.GetProperty("quality").GetString()).SequenceEqual(new[] { "320k", "320k", "192k" }) &&
                 f.App.Resolutions[3].GetProperty("platform").GetString() == "tx", "a representation failure does not exclude the other request level");
-            Check(f.App.HistoryWrites == 1 && f.Runtime.Calls == 0, "one occurrence, no Node");
+            Check(f.App.HistoryWrites == 1 && f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)),
+                "one occurrence, no script execution");
         });
         yield return Test("official automatic all failed sources terminate rather than retrying excluded candidates", async () =>
         {
@@ -381,8 +381,7 @@ public static partial class PlaybackRecoveryTests
                 ? "playlist next cancels an unobserved old peek before queue reconciliation"
                 : "playlist next cancels observed physical preparation before queue reconciliation", async () =>
             {
-                await using var f = await ControlledMusicFixture.Create(playbackCache: true,
-                    catalogHttp: new PlaylistNextHttp());
+                await using var f = await ControlledMusicFixture.Create(playbackCache: true);
                 await f.Module.NavigateAsync("catalog-home", default);
                 await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
                 var card = f.Module.CatalogSections.SelectMany(section => section.Items)
@@ -512,8 +511,9 @@ public static partial class PlaybackRecoveryTests
                 Check(!f.Native.HasMedia && !f.Origin.Requests.Any(r => r.Path == "/other.wav"), "late selection discarded");
                 Check(((MediaPlayer)Field(acceptedSession, "Player")!).NativeReference == IntPtr.Zero,
                     "accepted native player physically released");
-                Check(f.App.Resolutions.Count == 2 && f.App.HistoryWrites == 1 && f.Runtime.Calls == 0,
-                    "late selection cannot retry, record another play or invoke Node");
+                Check(f.App.Resolutions.Count == 2 && f.App.HistoryWrites == 1 &&
+                    f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)),
+                    "late selection cannot retry, record another play or invoke scripts");
             });
         yield return Test("native paused continuation preserves position and releases old player", async () =>
         {
@@ -593,7 +593,8 @@ public static partial class PlaybackRecoveryTests
             SameMusicTarget(fixture.App.Resolutions);
             Check(fixture.App.HistoryWrites == 1, "one real Started history");
             Check(fixture.Origin.Requests.Any(row => row.Path == "/new.wav" && row.Authorized), "fresh headers native direct");
-            Check(fixture.Runtime.Calls == 0, "ordinary domain and media never Node");
+            Check(fixture.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)),
+                "ordinary domain and media never execute scripts");
         });
         yield return Test("music script refresh carries the matched recording without changing the queue song", async () =>
         {
@@ -610,8 +611,9 @@ public static partial class PlaybackRecoveryTests
             Check(fixture.App.Resolutions.Count == 2 && fixture.App.Resolutions.All(Matched),
                 "the shared matcher completes before both initial resolve and exact refresh");
             var queue = await fixture.App.ExecuteAsync("music.queue.get");
-            Check(queue.GetProperty("current").GetProperty("song").GetProperty("sources").GetArrayLength() == 1,
-                "the queue keeps its original song snapshot");
+            Check(queue.GetProperty("current").GetProperty("song").GetProperty("sources").EnumerateArray()
+                    .Any(source => source.GetProperty("source").GetString() == "kw"),
+                "the queue projects completed metadata from its permanent repository reference");
             fixture.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         });
         yield return Test("music repeated HTTP failure stops after one re-resolution", async () =>
@@ -749,7 +751,8 @@ public static partial class PlaybackRecoveryTests
                 f.App.ReleaseRefresh.TrySetResult();
                 await changed.WaitAsync(TimeSpan.FromSeconds(5));
                 Check(f.App.SourceChanges == 1 && f.App.Resolutions.Count == 2, "one admitted mutation and no retry");
-                Check(!f.Origin.Requests.Any(row => row.Path == "/new.wav") && f.Runtime.Calls == 0, "no late native or script open");
+                Check(!f.Origin.Requests.Any(row => row.Path == "/new.wav") &&
+                    f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no late native or script open");
             });
         foreach (var test in UnifiedSourcesCases()) yield return test;
     }
@@ -864,7 +867,7 @@ public static partial class PlaybackRecoveryTests
                 Check(f.Output.NetworkOpens == 1 && f.Output.ReadOpens == 0 &&
                     f.Output.OpenedUris.Single().AbsolutePath ==
                         (scriptWins ? "/" + script.Id + "-wy-" + script.Quality + ".wav" : "/official-wy-flac.wav") &&
-                    f.Runtime.Calls == 0,
+                    f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)),
                     "the better tier wins across provider types; only the chosen source opens media");
             });
         yield return Test("unified first tier of the saved order asks every source before a lower tier", async () =>
@@ -900,7 +903,11 @@ public static partial class PlaybackRecoveryTests
                         ["sources"]![0]!.DeepClone());
                 Check((await f.App.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }))
                     .GetProperty("ok").GetBoolean(), "target recording queue");
-                string original = (await f.App.ExecuteAsync("music.queue.get")).GetProperty("current").GetRawText();
+                var before = await f.App.ExecuteAsync("music.queue.get");
+                var original = before.GetProperty("current");
+                string songId = original.GetProperty("song").GetProperty("songId").GetString()!;
+                Check(Guid.TryParse(songId, out _) && original.GetProperty("key").GetString() == songId,
+                    "the target fixture uses its publicly registered permanent song");
                 await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
                 await f.Module.PlayQueueSurfaceItemAsync(f.Module.QueueSurfaceRows.Single());
                 await Until(() => f.App.HistoryWrites == 1, "target script playback");
@@ -909,9 +916,28 @@ public static partial class PlaybackRecoveryTests
                     f.App.MatchPlatforms.SequenceEqual(mapped ? Array.Empty<string>() : new[] { "tx" }) &&
                     f.App.Discoveries == (mapped ? 0 : 1),
                     "an existing mapping is reused; a missing target platform is completed once, shared by every provider");
+                var queue = await f.App.ExecuteAsync("music.queue.get");
+                var current = queue.GetProperty("current");
+                var projected = current.GetProperty("song");
                 Check(f.Output.OpenedUris.Single().AbsolutePath == "/target-script-tx-320k.wav" &&
-                    (await f.App.ExecuteAsync("music.queue.get")).GetProperty("current").GetRawText() == original,
-                    "matched playback does not replace queue identity or metadata");
+                    f.Output.Identity == original.GetProperty("id").GetString() && f.Output.PositionSeconds == 0 &&
+                    queue.GetProperty("currentId").GetString() == before.GetProperty("currentId").GetString() &&
+                    queue.GetProperty("version").GetInt64() == before.GetProperty("version").GetInt64() &&
+                    queue.GetProperty("mode").GetInt32() == before.GetProperty("mode").GetInt32() &&
+                    queue.GetProperty("total").GetInt32() == before.GetProperty("total").GetInt32() &&
+                    queue.GetProperty("source").GetRawText() == before.GetProperty("source").GetRawText() &&
+                    current.GetProperty("id").GetString() == original.GetProperty("id").GetString() &&
+                    current.GetProperty("key").GetString() == songId &&
+                    current.GetProperty("context").GetRawText() == original.GetProperty("context").GetRawText() &&
+                    projected.GetProperty("songId").GetString() == songId &&
+                    f.App.Resolutions.Single().GetProperty("song").GetProperty("songId").GetString() == songId,
+                    "matched playback preserves the permanent reference, occurrence and queue control facts");
+                var recordings = projected.GetProperty("sources").EnumerateArray().ToArray();
+                Check(recordings.Single(source => source.GetProperty("source").GetString() == "wy")
+                        .GetProperty("musicInfo").GetProperty("songmid").GetString() == "Original" &&
+                    recordings.Single(source => source.GetProperty("source").GetString() == "tx")
+                        .GetProperty("musicInfo").GetProperty("songmid").GetString() == "Matched",
+                    "every consumer reads the current repository with the original and matched platform locators");
             });
         foreach (bool scriptFirst in new[] { false, true })
             yield return Test("unified HTTP recovery crosses from " +
@@ -1075,10 +1101,10 @@ public static partial class PlaybackRecoveryTests
                 f.Output.OpenedUris.Single().AbsolutePath == "/discovery-script-tx-320k.wav" &&
                 f.Output.Identity == entryId && accepted.GetProperty("id").GetString() == entryId &&
                 accepted.GetProperty("song").GetProperty("songId").GetString() == songId &&
-                accepted.GetProperty("song").GetProperty("sources").GetArrayLength() == 1 &&
+                accepted.GetProperty("song").GetProperty("sources").GetArrayLength() == 2 &&
                 accepted.GetProperty("song").GetProperty("sources")[0].GetProperty("source").GetString() == "wy" &&
                 f.Module.CurrentTitle == "本次发现录音",
-                "discovery changes the playback recording without replacing the original queue song or occurrence");
+                "discovery projects both known sources without replacing the permanent song or occurrence");
         });
         yield return Test("unified recovery excludes script installation identity without excluding its shared recording", async () =>
         {
@@ -1367,7 +1393,7 @@ public static partial class PlaybackRecoveryTests
                 officialQuality: "flac", qualityRequest: "flac");
             var song = await f.App.ExecuteAsync("music.online.song", new { platform = "wy", title = "合成歌曲", artist = "fixture",
                 album = "", musicInfo = new { songmid = "42" } });
-            f.App.CacheableSongId = song.GetProperty("song").GetProperty("songId").GetString();
+            f.App.CacheableSongId = (await f.App.AdoptSong(song.GetProperty("song"), default)).GetProperty("songId").GetString();
             await f.Play();
             await Until(() => f.Module.PlaybackCacheFraction == 1, "official file published");
             int resolves = f.App.Resolutions.Count, authorizations = f.App.Authorizations;
@@ -1644,7 +1670,7 @@ public static partial class PlaybackRecoveryTests
                 scripts: [new(script)], qualityRequest: "flac", officialQuality: "flac");
             var song = await f.App.ExecuteAsync("music.online.song", new { platform = "wy", title = "合成歌曲",
                 artist = "fixture", album = "", musicInfo = new { songmid = "42" } });
-            f.App.CacheableSongId = song.GetProperty("song").GetProperty("songId").GetString();
+            f.App.CacheableSongId = (await f.App.AdoptSong(song.GetProperty("song"), default)).GetProperty("songId").GetString();
             await f.Play();
             await Until(() => f.Module.PlaybackCacheFraction == 1, "official complete file");
             f.Module.OpenSourceChoices();
@@ -1822,7 +1848,7 @@ public static partial class PlaybackRecoveryTests
             f.App.PreserveOfficialRequest = true;
             var song = await f.App.ExecuteAsync("music.online.song", new { platform = "wy", title = "合成歌曲",
                 artist = "fixture", album = "", musicInfo = new { songmid = "42" } });
-            f.App.CacheableSongId = song.GetProperty("song").GetProperty("songId").GetString();
+            f.App.CacheableSongId = (await f.App.AdoptSong(song.GetProperty("song"), default)).GetProperty("songId").GetString();
             await f.Play();
             await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
                 "official file committed");
@@ -2174,21 +2200,6 @@ public static partial class PlaybackRecoveryTests
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
-    private sealed class NoRuntime : IRuntimeClient
-    {
-        public int Calls;
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Native business must not upload script sources"); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("NO_NODE_ALLOWED"); }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-    }
-    private sealed class NoHttp : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-            => throw new InvalidOperationException("NO_PUBLIC_HTTP_ALLOWED");
-    }
     private sealed class Dialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
@@ -2200,7 +2211,7 @@ public static partial class PlaybackRecoveryTests
         internal readonly MemoryStore Store = new();
         internal readonly MemoryStore CacheBacking = new();
         internal readonly CacheDocumentStore CacheStore;
-        internal readonly NoRuntime Runtime = new();
+        internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly NativePlayback Native;
         internal readonly MusicApp App;
         internal readonly MusicCapability Module;
@@ -2213,7 +2224,8 @@ public static partial class PlaybackRecoveryTests
                 ? new Reply([]) { Status = 401 } : new Reply(bytes, "audio/wav");
             Native = Player(Origin);
             ScriptSource[] sources = [new("fixture-source", enabled: !official, platforms: platforms)];
-            App = new(new MusicNativeApplication(Store, Runtime, CacheStore, new NoHttp()), Origin, expiry, official, sources);
+            App = new(new MusicNativeApplication(Store, Runtime, CacheStore), Origin, expiry, official, sources);
+            Runtime.OnRequest = App.ReadPlatform;
             Module = new(App, Store, Native, new Dialogs(), cacheStore: CacheStore);
         }
         internal static async Task<MusicFixture> Create(bool firstFails = false, bool bothFail = false, bool expiry = false, bool official = false,
@@ -2235,7 +2247,7 @@ public static partial class PlaybackRecoveryTests
             App.ReleaseRefresh.TrySetResult();
             App.ReleaseExclusion.TrySetResult();
             try { await Module.DisposeAsync(); }
-            finally { await CacheStore.DisposeAsync(); await CacheBacking.DisposeAsync(); await Store.DisposeAsync(); await Native.DisposeAsync(); await Origin.DisposeAsync(); }
+            finally { await Runtime.DisposeAsync(); await CacheStore.DisposeAsync(); await CacheBacking.DisposeAsync(); await Store.DisposeAsync(); await Native.DisposeAsync(); await Origin.DisposeAsync(); }
         }
     }
     public static IEnumerable<TestCase> SelectionRegressionCases()
@@ -2259,7 +2271,7 @@ public static partial class PlaybackRecoveryTests
             await using var f = await ControlledMusicFixture.Create(playbackCache: true, officialQuality: "flac", qualityRequest: "flac");
             var song = await f.App.ExecuteAsync("music.online.song", new { platform = "wy", title = "合成歌曲", artist = "fixture",
                 album = "", musicInfo = new { songmid = "42" } });
-            f.App.CacheableSongId = song.GetProperty("song").GetProperty("songId").GetString();
+            f.App.CacheableSongId = (await f.App.AdoptSong(song.GetProperty("song"), default)).GetProperty("songId").GetString();
             await f.Play();
             await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null, "official file");
             await f.Play();
@@ -2334,8 +2346,10 @@ public static partial class PlaybackRecoveryTests
                 await f.Module.DisposeAsync();
                 await f.CacheStore.DrainAsync();
                 await using var restartedCache = new CacheDocumentStore(f.CacheBacking);
-                var app = new MusicApp(new MusicNativeApplication(f.Store, new NoRuntime(), restartedCache, new NoHttp()), f.Origin,
+                await using var restartedRuntime = new MusicPlatformRuntimeFixture();
+                var app = new MusicApp(new MusicNativeApplication(f.Store, restartedRuntime, restartedCache), f.Origin,
                     expiry: false, official: false, sources: []) { QualityRequest = "flac" };
+                restartedRuntime.OnRequest = app.ReadPlatform;
                 var output = new ControlledPlayback();
                 var cache = new MusicAudioFileCache(f.CacheRoot!, restartedCache);
                 await using (var module = new MusicCapability(app, f.Store, output, cache, new Dialogs(), cacheStore: restartedCache))
@@ -2573,38 +2587,25 @@ public static partial class PlaybackRecoveryTests
     }
 
 
-    // Only upstream catalogue HTTP and receipt timing are controlled. Prepare,
+    // Only canonical catalogue values and receipt timing are controlled. Prepare,
     // token commit/discard, queue persistence and cache production stay native.
-    private sealed class PlaylistNextHttp : HttpMessageHandler
+    private static JsonElement PlaylistNextResult(MusicPlatformRuntimeFixture.Call call)
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        return call.Operation switch
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var uri = request.RequestUri!;
-            Check(uri.Host is "music.163.com" or "interfacepc.music.163.com", "synthetic playlist origin only");
-            object body;
-            if (uri.AbsolutePath.EndsWith("/rcmd/resource/show", StringComparison.Ordinal))
-                body = new { code = 200, data = new { cursor = "1", hasMore = false,
-                    blockCodeOrderList = "[\"PLAYLIST\"]", blocks = new[] {
-                        new { positionCode = "PLAYLIST", uiElement = new { subTitle = new { title = "预取竞态歌单" } },
-                            creatives = new[] { new { resources = new[] {
-                                new { resourceType = "playlist", resourceId = "800", name = "插入歌单" }
-                            } } } }
-                    } } };
-            else if (uri.AbsolutePath.Contains("/playlist/detail", StringComparison.Ordinal))
-                body = new { code = 200, playlist = new { id = "800", name = "插入歌单", trackCount = 2,
-                    trackIds = new[] { new { id = "8001" }, new { id = "8002" } }, updateTime = 1 } };
-            else if (uri.AbsolutePath.Contains("/song/detail", StringComparison.Ordinal))
-                body = new { code = 200, songs = new[] {
-                    new { id = "8001", name = "插入首曲", ar = new[] { new { name = "fixture" } },
-                        al = new { name = "插入专辑" }, dt = 120000 },
-                    new { id = "8002", name = "插入次曲", ar = new[] { new { name = "fixture" } },
-                        al = new { name = "插入专辑" }, dt = 120000 }
-                } };
-            else throw new InvalidOperationException("Unexpected playlist race upstream path: " + uri.AbsolutePath);
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-                { Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json") });
-        }
+            "home" => Element(new { platform = "wy", more = false, sections = new[] {
+                new { id = "PLAYLIST", title = "预取竞态歌单", type = "playlists", items = new[] {
+                    new { id = "800", name = "插入歌单", kind = "playlist", available = true,
+                        action = new { type = "playlist", id = "800" } }
+                } }
+            } }),
+            "playlist.complete" => Element(new { platform = "wy", id = "800", name = "插入歌单",
+                items = new[] {
+                    MusicSongFixture.Online("wy", "8001", "插入首曲", "fixture", "插入专辑", 120),
+                    MusicSongFixture.Online("wy", "8002", "插入次曲", "fixture", "插入专辑", 120)
+                }, count = 2, more = false }),
+            _ => throw new InvalidOperationException("Unexpected canonical playlist operation: " + call.Operation)
+        };
     }
     private sealed class PlaylistNextProbe(bool holdPeek)
     {
@@ -2624,7 +2625,7 @@ public static partial class PlaybackRecoveryTests
         internal readonly MemoryStore Store = new();
         internal readonly MemoryStore CacheBacking = new();
         internal readonly CacheDocumentStore CacheStore;
-        internal readonly NoRuntime Runtime = new();
+        internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly ControlledPlayback Output = new();
         internal readonly MusicApp App;
         internal readonly MusicCapability Module;
@@ -2641,11 +2642,11 @@ public static partial class PlaybackRecoveryTests
         internal MusicAudioFileCache.PreparedFile? Prepared =>
             (MusicAudioFileCache.PreparedFile?)Field(Module, "preparedAudio");
         private ControlledMusicFixture(bool playbackCache, bool official, ScriptSource[] sources,
-            string qualityRequest, string officialQuality, HttpMessageHandler? catalogHttp)
+            string qualityRequest, string officialQuality)
         {
             CacheStore = new(CacheBacking);
             Origin.RequireAuthorization = false;
-            App = new(new MusicNativeApplication(Store, Runtime, CacheStore, catalogHttp ?? new NoHttp()), Origin,
+            App = new(new MusicNativeApplication(Store, Runtime, CacheStore), Origin,
                 expiry: false, official, sources)
             {
                 QualityRequest = qualityRequest,
@@ -2653,6 +2654,7 @@ public static partial class PlaybackRecoveryTests
                 DistinctSourceUrls = sources.Any(source => source.Enabled),
                 OfferAlternate = !sources.Any(source => source.Enabled)
             };
+            Runtime.OnRequest = App.ReadPlatform;
             if (playbackCache)
             {
                 CacheRoot = TestWorkspace.DataPath(
@@ -2666,10 +2668,10 @@ public static partial class PlaybackRecoveryTests
         }
         internal static async Task<ControlledMusicFixture> Create(bool playbackCache = false,
             bool official = true, ScriptSource[]? scripts = null, string qualityRequest = "320k",
-            string officialQuality = "320k", HttpMessageHandler? catalogHttp = null)
+            string officialQuality = "320k")
         {
             var f = new ControlledMusicFixture(playbackCache, official,
-                scripts ?? [new("fixture-source", enabled: false)], qualityRequest, officialQuality, catalogHttp);
+                scripts ?? [new("fixture-source", enabled: false)], qualityRequest, officialQuality);
             try
             {
                 await f.App.InitializeAsync();
@@ -2686,11 +2688,12 @@ public static partial class PlaybackRecoveryTests
                 duration: 120, native: App.QualityRequest == "auto" ? QualityInfo("First") : null);
             var next = MusicSongFixture.Online(nextPlatform, "Next", "下一首", "fixture",
                 duration: 120, native: App.QualityRequest == "auto" ? QualityInfo("Next") : null);
-            NextSongId = next["songId"]!.GetValue<string>();
-            App.CacheableSongId = NextSongId;
             var replaced = await App.ExecuteAsync("music.queue.replace",
                 new { songs = new[] { first, next }, index = 0 });
             Check(replaced.GetProperty("ok").GetBoolean(), "controlled pair queue");
+            var queue = await App.ExecuteAsync("music.queue.get", new { limit = 100 });
+            NextSongId = queue.GetProperty("entries")[1].GetProperty("song").GetProperty("songId").GetString()!;
+            App.CacheableSongId = NextSongId;
             await Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             await Module.PlayQueueSurfaceItemAsync(Module.QueueSurfaceRows.First());
             if (Cache is not null)
@@ -2725,6 +2728,7 @@ public static partial class PlaybackRecoveryTests
             finally
             {
                 Output.Close();
+                await Runtime.DisposeAsync();
                 await CacheStore.DisposeAsync();
                 await CacheBacking.DisposeAsync();
                 await Store.DisposeAsync();
@@ -3003,6 +3007,31 @@ public static partial class PlaybackRecoveryTests
     private sealed class MusicApp(MusicNativeApplication inner, Origin origin, bool expiry, bool official,
         ScriptSource[] sources) : MusicApplicationForwarder(inner)
     {
+        private readonly Dictionary<(string Platform, string Id), JsonElement> platformSongs = [];
+        internal Task<JsonElement> ReadPlatform(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            return Task.FromResult(call.Operation == "song"
+                ? platformSongs[(call.Platform, call.Parameters.GetProperty("id").GetString()!)]
+                : PlaylistNextResult(call));
+        }
+        internal async Task<JsonElement> AdoptSong(JsonElement value, CancellationToken token)
+        {
+            var raw = JsonNode.Parse(value.GetRawText())!.AsObject();
+            JsonElement adopted = value;
+            foreach (var source in raw["sources"]!.AsArray().OfType<JsonObject>())
+            {
+                string platform = LJ.S(source["source"]), id = NativeMusicSong.NativeId(source);
+                var shown = NativeMusicSong.Display(source);
+                var song = NativeMusicSong.CreateOnline(platform, NativeMusicSong.SourceData(source),
+                    shown.Title, shown.Artist, shown.Album, shown.Duration, shown.Cover);
+                platformSongs[(platform, id)] = Element(song);
+                var reply = await inner.ExecuteAsync("music.catalog.song", new { platform, id }, token);
+                Check(reply.GetProperty("ok").GetBoolean(), "canonical completion adoption");
+                adopted = reply.GetProperty("song").Clone();
+            }
+            return inner.SongSnapshot(LJ.S(raw["songId"])) ?? adopted;
+        }
         internal PlaylistNextProbe? PlaylistNext;
         internal readonly List<JsonElement> Resolutions = [];
         internal bool PreserveOfficialRequest;
@@ -3143,7 +3172,7 @@ public static partial class PlaybackRecoveryTests
             }
             // The native owner's complete quality reply and all failure fields
             // remain authoritative; only the existing script/media port is fake.
-            if (official && method == "music.online.song")
+            if (method == "music.online.song")
             {
                 var request = JsonNode.Parse(input.GetRawText())!.AsObject();
                 request["duration"] = 120;
@@ -3211,7 +3240,8 @@ public static partial class PlaybackRecoveryTests
                     var compatible = new NativeMusicSong.Recordings(raw);
                     if (compatible.TryAddSource(other["sources"]![0]!.AsObject())) raw = compatible.ToSong();
                 }
-                return Element(new { ok = true, song = NativeMusicSong.Normalize(CompletionSong?.Invoke(input) ?? raw),
+                raw = NativeMusicSong.Normalize(CompletionSong?.Invoke(input) ?? raw);
+                return Element(new { ok = true, song = await AdoptSong(Element(raw), cancellationToken),
                     failures = Array.Empty<object>() });
             }
             if (method == "music.official.resolve")

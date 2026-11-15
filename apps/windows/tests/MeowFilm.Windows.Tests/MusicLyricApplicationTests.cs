@@ -40,6 +40,25 @@ public static class MusicLyricApplicationTests
             var result = await f.Owner.ExecuteAsync(new { song = Song(), sourceKey = "[\"wy\",\"different\"]" });
             Code(result, "TARGET_CHANGED"); Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls);
         });
+        yield return Case("long selected source locators reach official lyrics unchanged", async f =>
+        {
+            string id = "canonical/" + new string('x', 9000);
+            var song = Song(id: id);
+            string key = song["sources"]![0]!["sourceKey"]!.GetValue<string>();
+            var result = await f.Owner.ExecuteAsync(new { song, sourceKey = key });
+            Ready(result); Equal(key, result.GetProperty("sourceKey").GetString());
+            Equal(id, f.Provider.Requests.Single().RecordingId); Equal(0, f.ScriptCalls);
+        });
+        yield return Case("long selected source locators reach script lyrics unchanged", async f =>
+        {
+            var song = Song("kw", "canonical/" + new string('x', 9000));
+            string key = song["sources"]![0]!["sourceKey"]!.GetValue<string>();
+            f.AddSource("enabled-script", "kw");
+            var result = await f.Owner.ExecuteAsync(new { song, sourceKey = key });
+            Ready(result); Equal(key, result.GetProperty("sourceKey").GetString());
+            Equal(key, f.ScriptInput.GetProperty("sourceKey").GetString());
+            Equal(1, f.ScriptCalls); Equal(0, f.Provider.Requests.Count);
+        });
 
         yield return Case("enabled script platforms do not replace exact official lyric identity", async f =>
         {
@@ -60,7 +79,7 @@ public static class MusicLyricApplicationTests
                 Ready(result); Equal(1, f.ScriptCalls);
                 Equal("enabled-script", f.ScriptInput.GetProperty("installationId").GetString());
                 Equal(platform, f.ScriptInput.GetProperty("platform").GetString());
-                Equal(1L, f.ScriptInput.GetProperty("generation").GetInt64());
+                Equal(1L, f.ScriptRequests.Single().Generation);
                 True(f.ScriptInput.GetProperty("sourceKey").GetString()!.Length > 0);
                 Equal(platform == "wy" ? 1 : 0, f.Provider.Requests.Count);
             });
@@ -76,9 +95,9 @@ public static class MusicLyricApplicationTests
             var result = await f.Lookup(Song());
             Ready(result); Equal("accepted", result.GetProperty("lines")[0].GetProperty("text").GetString());
             True(f.Activated.SequenceEqual(["no-lyrics", "empty", "match"]));
-            True(f.ScriptRequests.Select(input => input.GetProperty("installationId").GetString())
+            True(f.ScriptRequests.Select(read => read.Input.GetProperty("installationId").GetString())
                 .SequenceEqual(["no-lyrics", "empty", "match"]));
-            True(f.ScriptRequests.All(input => input.GetProperty("generation").GetInt64() == 0));
+            True(f.ScriptRequests.All(read => read.Generation == 1));
             Equal(1, f.Provider.Requests.Count);
         });
         foreach (var platform in new[] { "tx", "kg" })
@@ -95,6 +114,7 @@ public static class MusicLyricApplicationTests
             f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
             f.AddSource("disabled", "wy", enabled: false);
             f.AddSource("other-platform", "kg");
+            f.AddSource("no-lyrics", "wy", lyrics: false);
             Equal("none", (await f.Lookup(Song())).GetProperty("state").GetString());
             Equal("none", (await f.Lookup(Song())).GetProperty("state").GetString());
             Equal(0, f.ScriptCalls); Equal(2, f.Provider.Requests.Count); // Empty results are not cached.
@@ -123,13 +143,10 @@ public static class MusicLyricApplicationTests
         {
             f.AddSource("netease-script", "wy");
             var song = Song();
-            var qq = await f.Library.ExecuteAsync("music.online.song", new { platform = "tx",
-                musicInfo = MusicSongFixture.Info(Song("tx", "004exact")), title = "Fixture song",
-                artist = "Fixture artist", album = "Fixture album", duration = 120 });
-            True(qq.GetProperty("ok").GetBoolean());
+            var qq = await MusicSongFixture.AdoptAsync(f.Library, Song("tx", "004exact"));
             // The public contract admits exact normalized source rows, not
             // arbitrary raw songs masquerading as established mappings.
-            song["sources"]!.AsArray().Add(JsonNode.Parse(qq.GetProperty("song").GetRawText())!["sources"]![0]!.DeepClone());
+            song["sources"]!.AsArray().Add(qq["sources"]![0]!.DeepClone());
             True((await f.Library.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0,
                 platforms = new[] { "tx", "wy", "kg", "kw", "mg" }, enabled = new[] { "wy", "tx" } })).GetProperty("ok").GetBoolean());
             Ready(await f.Lookup(song)); Equal("tx", f.Provider.Requests.Single().Platform);
@@ -162,9 +179,10 @@ public static class MusicLyricApplicationTests
         yield return Case("saved local timed text is returned without any provider and is not a fabricated source key", async f =>
         {
             f.AddSource("enabled-script", "wy", idle: true);
-            True((await f.Library.ExecuteAsync("music.queue.replace", new { songs = new[] { Song() }, index = 0 })).GetProperty("ok").GetBoolean());
-            True((await f.Library.ExecuteAsync("music.lyrics.local.save", new { song = Song(), text = "[00:01]chosen\n[00:20]second" })).GetProperty("ok").GetBoolean());
-            var result = await f.Lookup(Song());
+            var song = await MusicSongFixture.AdoptAsync(f.Library, Song());
+            True((await f.Library.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 })).GetProperty("ok").GetBoolean());
+            True((await f.Library.ExecuteAsync("music.lyrics.local.save", new { song, text = "[00:01]chosen\n[00:20]second" })).GetProperty("ok").GetBoolean());
+            var result = await f.Lookup(song);
             Equal("local", result.GetProperty("state").GetString());
             Equal("chosen", result.GetProperty("lines")[0].GetProperty("text").GetString());
             True(!result.TryGetProperty("sourceKey", out _)); Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls);
@@ -205,7 +223,8 @@ public static class MusicLyricApplicationTests
                     fresh.GetProperty("lines")[0].GetProperty("text").GetString());
                 Equal(mutation == "disable" ? "remaining" : "changed",
                     f.ScriptInput.GetProperty("installationId").GetString());
-                Equal(mutation == "disable" ? 1L : 2L, f.ScriptInput.GetProperty("generation").GetInt64());
+                Equal(1L, f.ScriptRequests[0].Generation);
+                Equal(mutation == "disable" ? 1L : 2L, f.ScriptRequests[^1].Generation);
                 Equal(2, f.ScriptCalls);
             });
         yield return Case("cancelled script lookup keeps owned read and never starts the next installation", async f =>
@@ -230,7 +249,7 @@ public static class MusicLyricApplicationTests
             var arrived = Signal(); var release = f.ReleaseGate(); bool physicalCancelled = false;
             f.Provider.Handler = async (request, token) => {
                 using var registration = token.Register(() => physicalCancelled = true);
-                arrived.TrySetResult(); await release.Task.WaitAsync(token); return Payload(request);
+                arrived.TrySetResult(); await release.Task.WaitAsync(token); return Payload();
             };
             using var a = new CancellationTokenSource(); using var b = new CancellationTokenSource();
             var first = f.Lookup(Song(), a.Token); await arrived.Task;
@@ -243,7 +262,7 @@ public static class MusicLyricApplicationTests
             var arrived = Signal(); var release = f.ReleaseGate(); var cancelled = Signal();
             f.Provider.Handler = async (request, token) => {
                 using var registration = token.Register(() => cancelled.TrySetResult());
-                arrived.TrySetResult(); await release.Task; return Payload(request);
+                arrived.TrySetResult(); await release.Task; return Payload();
             };
             using var cancellation = new CancellationTokenSource();
             var first = f.Lookup(Song(), cancellation.Token); await arrived.Task;
@@ -263,15 +282,15 @@ public static class MusicLyricApplicationTests
         {
             var arrived = Signal(); var release = f.ReleaseGate();
             f.Provider.Handler = async (request, _) => {
-                arrived.TrySetResult(); await release.Task; return Payload(request);
+                arrived.TrySetResult(); await release.Task; return Payload();
             };
             var old = f.Lookup(Song()); await arrived.Task;
             f.Owner.Invalidate("wy");
-            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload(request) with { Text = "[00:01]new" });
+            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload() with { Text = "[00:01]new" });
             var fresh = await f.Lookup(Song()); release.TrySetResult();
             Code(await old, "CANCELLED"); Ready(fresh);
             Equal("new", (await f.Lookup(Song())).GetProperty("lines")[0].GetProperty("text").GetString());
-            Equal(2, f.Provider.Requests.Count); Equal(1, f.Provider.Invalidations);
+            Equal(2, f.Provider.Requests.Count);
         });
         yield return Case("successful cache expires after ten minutes without extending expiry on hit", async f =>
         {
@@ -287,20 +306,20 @@ public static class MusicLyricApplicationTests
             Ready(await f.Lookup(Song(id: "101"))); Equal(101, f.Provider.Requests.Count);
             Ready(await f.Lookup(Song(id: "1"))); Equal(102, f.Provider.Requests.Count);
         });
-        yield return Case("provider identity mismatch is a fixed error and is never cached", async f =>
+        yield return Case("canonical provider lyrics are consumed and reused without identity proof", async f =>
         {
-            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload(request) with { RecordingId = "wrong" });
-            Code(await f.Lookup(Song()), "LYRIC_IDENTITY_MISMATCH");
-            Code(await f.Lookup(Song()), "LYRIC_IDENTITY_MISMATCH");
-            Equal(2, f.Provider.Requests.Count);
+            f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(Payload() with { Text = "[00:01]canonical" });
+            var result = await f.Lookup(Song()); Ready(result);
+            Equal("canonical", result.GetProperty("lines")[0].GetProperty("text").GetString());
+            Ready(await f.Lookup(Song())); Equal(1, f.Provider.Requests.Count);
         });
         yield return Case("invalid lyric size rejects without storing a truncated success", async f =>
         {
-            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload(request) with {
+            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload() with {
                 Text = "[00:01]" + new string('x', 65536)
             });
             Code(await f.Lookup(Song()), "INVALID_LYRIC_RESPONSE");
-            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload(request));
+            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload());
             Ready(await f.Lookup(Song())); Equal(2, f.Provider.Requests.Count);
         });
         yield return Case("native lyric owner close physically drains a noncooperative request", async f =>
@@ -308,7 +327,7 @@ public static class MusicLyricApplicationTests
             var arrived = Signal(); var release = f.ReleaseGate(); var cancelled = Signal();
             f.Provider.Handler = async (request, token) => {
                 using var registration = token.Register(() => cancelled.TrySetResult());
-                arrived.TrySetResult(); await release.Task; return Payload(request);
+                arrived.TrySetResult(); await release.Task; return Payload();
             };
             var read = f.Lookup(Song()); await arrived.Task;
             var close = f.Owner.DisposeAsync().AsTask(); await cancelled.Task;
@@ -323,7 +342,7 @@ public static class MusicLyricApplicationTests
             int calls = -1;
             f.Provider.Handler = async (request, _) => {
                 arrived[Interlocked.Increment(ref calls)].TrySetResult();
-                await release.Task; return Payload(request);
+                await release.Task; return Payload();
             };
             var cancellations = new List<CancellationTokenSource>();
             var work = new List<Task<JsonElement>>();
@@ -345,8 +364,8 @@ public static class MusicLyricApplicationTests
     private static TestCase Case(string name, Func<Fixture, Task> body) => new("Native lyric application " + name,
         async () => { await using var fixture = new Fixture(); await body(fixture).WaitAsync(TimeSpan.FromSeconds(10)); });
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private static NativeLyricPayload Payload(NativeLyricRequest request) =>
-        new(request.Platform, request.RecordingId, "[00:01]original", "[00:01]translation", "[00:01]romanized");
+    private static NativeLyricPayload Payload() =>
+        new( "[00:01]original", "[00:01]translation", "[00:01]romanized");
     private static JsonObject Song(string platform = "wy", string id = "42")
     {
         var native = new JsonObject { ["duration"] = 120 };
@@ -375,7 +394,7 @@ public static class MusicLyricApplicationTests
         internal int ScriptCalls, SourceReads;
         internal JsonElement ScriptInput;
         internal Func<CancellationToken, Task>? ScriptHandler;
-        internal readonly List<JsonElement> ScriptRequests = [];
+        internal readonly List<(JsonElement Input, long Generation)> ScriptRequests = [];
         internal readonly List<string> Activated = [];
         private readonly List<ScriptSource> sources = [];
         private readonly List<TaskCompletionSource> releaseOnClose = [];
@@ -409,9 +428,9 @@ public static class MusicLyricApplicationTests
             }
             Equal("music.online.lyrics", method);
             ScriptCalls++; ScriptInput = JsonSerializer.SerializeToElement(input);
-            ScriptRequests.Add(ScriptInput);
-            True(source.Enabled); Equal(source.Generation, parameters.GetProperty("generation").GetInt64());
+            True(source.Enabled); True(!parameters.TryGetProperty("generation", out _));
             if (source.Generation == 0) { source.Generation = 1; Activated.Add(id); }
+            ScriptRequests.Add((ScriptInput, source.Generation));
             if (parameters.GetProperty("platform").GetString() != source.Platform || !source.Lyrics)
                 return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
             string text = source.Text;
@@ -436,8 +455,8 @@ public static class MusicLyricApplicationTests
         internal object View() => new {
             installationId = Id, enabled = Enabled, generation = Generation,
             state = !Enabled ? "disabled" : Generation == 0 ? "idle" : "ready",
-            capabilities = Generation == 0 ? [] : new[] {
-                new { platform = Platform, actions = Lyrics ? new[] { "lyric" } : new[] { "musicUrl" } }
+            capabilities = Generation == 0 ? null : new Dictionary<string, object> {
+                [Platform] = new { actions = Lyrics ? new[] { "lyric" } : new[] { "musicUrl" } }
             }
         };
     }
@@ -445,11 +464,9 @@ public static class MusicLyricApplicationTests
     {
         internal readonly ConcurrentQueue<NativeLyricRequest> Requests = new();
         internal Func<NativeLyricRequest, CancellationToken, Task<NativeLyricPayload?>> Handler =
-            (request, _) => Task.FromResult<NativeLyricPayload?>(Payload(request));
-        internal int Invalidations;
+            (request, _) => Task.FromResult<NativeLyricPayload?>(Payload());
         public Task<NativeLyricPayload?> ReadAsync(NativeLyricRequest request, CancellationToken ct)
         { Requests.Enqueue(request); return Handler(request, ct); }
-        public void Invalidate(string? platform = null) => Invalidations++;
     }
     private sealed class Clock : TimeProvider
     {

@@ -24,10 +24,10 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music collection member edits exact ordering revisions and tombstones", Collections);
         yield return new("Native music favorites protected and local intents persist", Favorites);
         yield return new("Native music collection paging search and invalid paging preserve state", Paging);
-        yield return new("Native music song identity matches existing JS stable IDs", Identity);
-        yield return new("Native music Unicode identity matches emoji ASCII boundaries and default casing", UnicodeIdentity);
+        yield return new("Native music permanent UUID preserves platform locators and current-format reload", Identity);
+        yield return new("Native music Unicode metadata is preserved independently of permanent UUID", UnicodeIdentity);
         yield return new("Native music same native identity enrichment and recording conflicts", Recording);
-        yield return new("Native music current song contract rejects unowned fields credentials and resource URLs", RejectTransientSong);
+        yield return new("Native music song projection ignores unused fields and omits credentials and audio URLs", RejectTransientSong);
         yield return new("Native music catalog full collection handoff uses expected queue version", FullCollection);
         yield return new("Native music duplicate queue occurrences and next priority", Occurrences);
         yield return new("Native music queue rejects modes outside the three global loop choices", InvalidMode);
@@ -49,11 +49,10 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music cancellation after CAS admission observes real result", CancelCommit);
         yield return new("Native music shutdown pending failure and reversible preparation", Shutdown);
         yield return new("Native music online settings revision and exact fields", Settings);
-        yield return new("Native music retired script areas stay unread, unchanged and never block other owners", RetiredAreas);
-        yield return new("Native music non-current envelopes fail every owner entry without writes", NonCurrentDocuments);
+        yield return new("Native music damaged current references and owned areas fail without writes", DamagedDocuments);
         yield return new("Native music plain LRC keeps full text empty words and duplicate timestamps", LyricsLrc);
         yield return new("Native music YRC QRC exact intervals and negative offset", LyricsWords);
-        yield return new("Native music KRC conversion preserves word timestamps and zero durations", LyricsKrc);
+        yield return new("Native music canonical lyric text preserves negative-offset words and zero durations", LyricsCanonicalWords);
         yield return new("Native music word LRC absolute relative tags and trailing markers", LyricsMarkers);
         yield return new("Native music word LRC preserves sub-50ms and zero intervals", LyricsShortMarkers);
         yield return new("Native music word LRC negative offsets retain elapsed word progress", LyricsNegativeMarkers);
@@ -168,7 +167,7 @@ public static partial class MusicNativeLibraryTests
     }
     private static Task Contract()
     {
-        Check(MusicLibraryOwner.ContractVersion == "0.7.0" && MusicLibraryOwner.DocumentNamespace == "music.library.v1");
+        Check(MusicLibraryOwner.ContractVersion == "0.7.0" && MusicLibraryOwner.DocumentNamespace == "music.library.v2");
         return Task.CompletedTask;
     }
     private static async Task Initial()
@@ -186,19 +185,22 @@ public static partial class MusicNativeLibraryTests
         string id = c.GetProperty("id").GetString()!; Check(c.GetProperty("count").GetInt32() == 2);
         await Error(o, "music.library.edit", new { id, ifRevision = 0, name = "Stale" }, "REVISION_CONFLICT");
         await Ok(o, "music.library.addSongs", new { id, ifRevision = 1, songs = new[] { Song("c") } });
+        var songs = (await Ok(o, "music.library.detail", new { id })).GetProperty("songs");
+        string a = songs[0].GetProperty("songId").GetString()!, b = songs[1].GetProperty("songId").GetString()!,
+            cId = songs[2].GetProperty("songId").GetString()!;
         await Ok(o, "music.library.reorderSong", new
         {
             id,
             ifRevision = 2,
-            songId = "library:local:c",
-            targetId = "library:local:b",
+            songId = cId,
+            targetId = b,
             after = false
         });
-        var detail = await Ok(o, "music.library.detail", new { id }); Check(detail.GetProperty("songs")[1].GetProperty("songId").GetString() == "library:local:c");
-        await Ok(o, "music.library.removeSong", new { id, ifRevision = 3, songId = "library:local:b" });
-        await Ok(o, "music.library.edit", new { id, ifRevision = 4, name = "Renamed", order = new[] { "library:local:c", "library:local:a" } });
+        var detail = await Ok(o, "music.library.detail", new { id }); Check(detail.GetProperty("songs")[1].GetProperty("songId").GetString() == cId);
+        await Ok(o, "music.library.removeSong", new { id, ifRevision = 3, songId = b });
+        await Ok(o, "music.library.edit", new { id, ifRevision = 4, name = "Renamed", order = new[] { cId, a } });
         var library = f.Store.State("library")["library"]!;
-        Check(!library["collections"]![1]!["intents"]!.AsObject().ContainsKey("library:local:b"));
+        Check(!library["collections"]![1]!["intents"]!.AsObject().ContainsKey(b));
         await Ok(o, "music.library.remove", new { id, ifRevision = 5 });
         Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 1);
         Check(f.Store.State("library")["library"]!["collections"]![1]!["deleted"]!.GetValue<bool>());
@@ -209,16 +211,17 @@ public static partial class MusicNativeLibraryTests
         await Error(o, "music.library.remove", new { id = "favorites", ifRevision = 0 }, "FAVORITES_PROTECTED");
         await Error(o, "music.library.edit", new { id = "favorites", ifRevision = 0, name = "Name" }, "INVALID_NAME");
         await Ok(o, "music.library.addSongs", new { id = "favorites", ifRevision = 0, songs = new[] { Song() } });
-        var added = f.Store.State("library")["library"]!["collections"]![0]!["intents"]!["library:local:a"]!;
+        string songId = (await Ok(o, "music.library.detail", new { id = "favorites" })).GetProperty("songs")[0].GetProperty("songId").GetString()!;
+        var added = f.Store.State("library")["library"]!["collections"]![0]!["intents"]![songId]!;
         Check(added["present"]!.GetValue<bool>() && added["pending"]!.GetValue<bool>());
-        await Ok(o, "music.library.removeSong", new { id = "favorites", ifRevision = 1, songId = "library:local:a" });
+        await Ok(o, "music.library.removeSong", new { id = "favorites", ifRevision = 1, songId });
         Check(f.Store.State("library")["library"]!["collections"]![0]!["intents"]!.AsObject().Count == 0);
         await o.DisposeAsync();
         var cold = f.Owner();
         var detail = await Ok(cold, "music.library.detail", new { id = "favorites" });
         Check(detail.GetProperty("songs").GetArrayLength() == 0);
         await Ok(cold, "music.library.addSongs", new { id = "favorites", ifRevision = 2, songs = new[] { Song() } });
-        var readded = f.Store.State("library")["library"]!["collections"]![0]!["intents"]!["library:local:a"]!;
+        var readded = f.Store.State("library")["library"]!["collections"]![0]!["intents"]![songId]!;
         Check(readded["present"]!.GetValue<bool>() && readded["pending"]!.GetValue<bool>());
     }
     private static async Task Paging()
@@ -237,38 +240,45 @@ public static partial class MusicNativeLibraryTests
         await using var f = new Fixture(); var o = f.Owner();
         var cases = new[]
         {
-            (MusicSongFixture.Online("wy", "42", "Test (Live)", "B; A", duration: 180,
-                native: O(new { duration = 180 })), "song:18c66609b3825777"),
-            (MusicSongFixture.Online("kg", "42", "Test", "Tester", duration: 180,
-                native: O(new { hash = "ABC" })), "song:566fe39035a3d57a"),
-            (MusicSongFixture.Online("tx", "9223372036854775806", "Unknown", "unknown"),
-                "song:d0a0d45c6ae7a9fa")
+            MusicSongFixture.Online("wy", "42", "Test (Live)", "B; A", duration: 180),
+            MusicSongFixture.Online("kg", "42", "Test", "Tester", duration: 180, native: O(new { hash = "ABC" })),
+            MusicSongFixture.Online("tx", "9223372036854775806", "Unknown", "unknown")
         };
-        foreach (var (song, expected) in cases)
+        var ids = new HashSet<string>();
+        foreach (var song in cases)
         {
             await Ok(o, "music.queue.replace", new { songs = new[] { song }, index = 0 });
             var current = (await Ok(o, "music.queue.get")).GetProperty("current").GetProperty("song");
-            Check(current.GetProperty("songId").GetString() == expected, "JS identity mismatch: " + expected);
+            string id = current.GetProperty("songId").GetString()!;
+            Check(Guid.TryParseExact(id, "D", out _) && ids.Add(id));
+            Check(MusicSongFixture.NativeId(current) == NativeMusicSong.NativeId(song));
+            await Ok(o, "music.queue.replace", new { songs = new[] { song }, index = 0 });
+            Check((await Ok(o, "music.queue.get")).GetProperty("current").GetProperty("song").GetProperty("songId").GetString() == id);
         }
+        await o.DisposeAsync();
+        var reopened = (await Ok(f.Owner(), "music.queue.get")).GetProperty("current").GetProperty("song");
+        Check(ids.Contains(reopened.GetProperty("songId").GetString()!));
     }
     private static async Task UnicodeIdentity()
     {
-        // Exact golden outputs.
         var cases = new[]
         {
-            ("星😀 (Live)", "Ｂ; A", 185, "42", "song:738530dd4024f5df"),
-            ("歌曲live", "艺人", 185, "42", "song:b1d5fc2b8f357441"),
-            ("A\u2028B\u2029C", "A\u0085B", 185, "42", "song:aab6a0c14f208ccb"),
-            ("Any", "Artist", 0, "9007199254740993123", "song:ee628a1de1e9aa73"),
-            ("İSTANBUL", "ΟΣ", 180, "case", "song:b50a579dd05f16a3"),
-            ("ΟΣ́", "İ", 180, "case2", "song:d8a203994447b8df")
+            ("星😀 (Live)", "Ｂ; A", 185, "emoji"),
+            ("歌曲live", "艺人", 185, "unicode"),
+            ("A\u2028B\u2029C", "A\u0085B", 185, "whitespace"),
+            ("Any", "Artist", 0, "9007199254740993123"),
+            ("İSTANBUL", "ΟΣ", 180, "case"),
+            ("ΟΣ́", "İ", 180, "case2")
         };
         await using var f = new Fixture(); var o = f.Owner();
-        foreach (var (title, artist, duration, id, expected) in cases)
+        foreach (var (title, artist, duration, id) in cases)
         {
             var song = MusicSongFixture.Online("wy", id, title, artist, duration: duration);
             await Ok(o, "music.queue.replace", new { songs = new[] { song }, index = 0 });
-            Check((await Ok(o, "music.queue.get")).GetProperty("current").GetProperty("song").GetProperty("songId").GetString() == expected, expected);
+            var current = (await Ok(o, "music.queue.get")).GetProperty("current").GetProperty("song");
+            Check(Guid.TryParseExact(current.GetProperty("songId").GetString(), "D", out _) &&
+                current.GetProperty("title").GetString() == title && current.GetProperty("artist").GetString() == artist &&
+                MusicSongFixture.NativeId(current) == id);
         }
     }
     private static async Task Recording()
@@ -278,25 +288,28 @@ public static partial class MusicNativeLibraryTests
         string id = (await Ok(o, "music.library.detail", new { id = "playlist:1" })).GetProperty("songs")[0].GetProperty("songId").GetString()!;
         await Ok(o, "music.library.addSongs", new { id = "playlist:1", ifRevision = 1, songs = new[] { Online("a", "Corrected") } });
         Check((await Ok(o, "music.library.detail", new { id = "playlist:1" })).GetProperty("songs")[0].GetProperty("songId").GetString() == id);
-        await Error(o, "music.library.create", new { name = "Wrong", songs = new[] { Online("a", "Other recording", "Other singer") } }, "NATIVE_ID_CONFLICT");
+        await Ok(o, "music.library.create", new { name = "Same registered source", songs = new[] { Online("a", "Other recording", "Other singer") } });
+        Check((await Ok(o, "music.library.detail", new { id = "playlist:2" })).GetProperty("songs")[0].GetProperty("songId").GetString() == id);
         await Ok(o, "music.library.create", new { name = "Different take", songs = new[] { Online("b", "Corrected", duration: 250) } });
-        string other = (await Ok(o, "music.library.detail", new { id = "playlist:2" })).GetProperty("songs")[0].GetProperty("songId").GetString()!;
+        string other = (await Ok(o, "music.library.detail", new { id = "playlist:3" })).GetProperty("songs")[0].GetProperty("songId").GetString()!;
         Check(id != other);
     }
     private static async Task RejectTransientSong()
     {
         await using var f = new Fixture(); var o = f.Owner(); var song = Online("a");
-        song["url"] = "https://media.invalid/temporary"; song["cover_url"] = "https://image.invalid/a?signature=synthetic-private";
+        song["url"] = "https://media.invalid/temporary"; song["cover_url"] = "https://image.invalid/a?size=large";
         song["cookie"] = "synthetic-private"; MusicSongFixture.Info(song)["headers"] = O(new { Authorization = "synthetic-private" });
-        await Error(o, "music.queue.replace", new { songs = new[] { song }, index = 0 }, "INVALID_REQUEST");
+        await Ok(o, "music.queue.replace", new { songs = new[] { song }, index = 0 });
+        Check(!Encoding.UTF8.GetString(f.Store.Bytes!).Contains("synthetic-private") &&
+            !Encoding.UTF8.GetString(f.Store.Bytes!).Contains("https://media.invalid/temporary"));
         var fabricated = Online("b"); fabricated["favoriteCount"] = 250_000;
-        await Error(o, "music.queue.replace", new { songs = new[] { fabricated }, index = 0 }, "INVALID_REQUEST");
-        Check(f.Store.Bytes is null && f.Store.Writes == 0);
+        await Ok(o, "music.queue.replace", new { songs = new[] { fabricated }, index = 0 });
+        Check(!(await Ok(o, "music.queue.get")).GetProperty("current").GetProperty("song").TryGetProperty("favoriteCount", out _));
     }
     private static async Task FullCollection()
     {
         await using var f = new Fixture(); var o = f.Owner(); var songs = Enumerable.Range(0, 1001).Select(i => E(Song(i.ToString()))).ToArray();
-        await Error(o, "music.library.create", new { name = "Too many RPC-shaped items", songs }, "LIMIT");
+        await Ok(o, "music.library.create", new { name = "Complete collection", songs });
         var created = await o.CreatePlaylistAsync("Native full collection", songs); Check(created.GetProperty("ok").GetBoolean());
         var q = await Ok(o, "music.queue.get"); long version = q.GetProperty("version").GetInt64();
         var replaced = await o.ReplaceQueueAsync(songs, 1000, null, version); Check(replaced.GetProperty("ok").GetBoolean());
@@ -440,78 +453,14 @@ public static partial class MusicNativeLibraryTests
             entries.Add(new JsonObject { ["key"] = AreaKey(area), ["value"] = value.DeepClone() });
         return JsonSerializer.SerializeToUtf8Bytes(new JsonObject { ["version"] = 1, ["entries"] = entries }, PersistedJson);
     }
-    private static JsonObject CurrentQueue()
+    private static async Task<(JsonObject Library, JsonObject Queue, JsonObject History)> CurrentDocuments()
     {
-        var song = Song();
-        var entry = new JsonObject
-        {
-            ["id"] = "entry-1",
-            ["key"] = "library:local:a",
-            ["song"] = song.DeepClone(),
-            ["context"] = new JsonObject()
-        };
-        return new JsonObject
-        {
-            ["schema"] = 1,
-            ["entries"] = new JsonArray(entry),
-            ["currentId"] = "entry-1",
-            ["priority"] = new JsonArray(),
-            ["source"] = null
-        };
-    }
-    private static JsonObject CurrentHistory()
-    {
-        var played = new JsonObject
-        {
-            ["song"] = Song(),
-            ["context"] = new JsonObject(),
-            ["at"] = 1
-        };
-        var day = new JsonObject
-        {
-            ["date"] = "2026-10-27",
-            ["songs"] = new JsonArray(played)
-        };
-        return new JsonObject
-        {
-            ["schema"] = 1,
-            ["playlists"] = new JsonArray(),
-            ["days"] = new JsonArray(day)
-        };
-    }
-    private static JsonObject CurrentLibraryState()
-    {
-        const string songId = "library:local:a";
-        var favorite = new JsonObject
-        {
-            ["id"] = "favorites",
-            ["name"] = "我的收藏",
-            ["kind"] = "favorites",
-            ["order"] = new JsonArray(JsonValue.Create(songId)),
-            ["revision"] = 0,
-            ["manualOrder"] = false,
-            ["bindings"] = new JsonArray(),
-            ["intents"] = new JsonObject()
-        };
-        var songs = new JsonObject { [songId] = Song() };
-        var library = new JsonObject
-        {
-            ["version"] = 2,
-            ["ownerId"] = "local",
-            ["revision"] = 0,
-            ["nextId"] = 1,
-            ["collections"] = new JsonArray(favorite),
-            ["songs"] = songs,
-            ["accounts"] = new JsonObject(),
-            ["networkPlaylists"] = new JsonArray()
-        };
-        return new JsonObject
-        {
-            ["schema"] = 2,
-            ["scope"] = "local",
-            ["revision"] = 0,
-            ["library"] = library
-        };
+        await using var f = new Fixture(); var owner = f.Owner();
+        await Ok(owner, "music.library.addSongs", new { id = "favorites", ifRevision = 0, songs = new[] { Song() } });
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Song() }, index = 0 });
+        string entryId = (await Ok(owner, "music.queue.get")).GetProperty("currentId").GetString()!;
+        await Ok(owner, "music.history.recordPlayed", new { entryId, at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 1 });
+        return (f.Store.State("library"), f.Store.State("queue"), f.Store.State("history"));
     }
     private static async Task NullAreas()
     {
@@ -554,28 +503,6 @@ public static partial class MusicNativeLibraryTests
         Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 2);
         await o.DisposeAsync(); Check(!f.Store.Disposed); await Error(o, "music.queue.get", null, "CLOSED");
     }
-    /// <summary>Script installations moved to the shared runtime module. Earlier entries are not read,
-    /// migrated or deleted: they ride along unchanged, and even malformed ones never fail other owners.</summary>
-    private static async Task RetiredAreas()
-    {
-        await using var f = new Fixture();
-        var retired = new (string Area, JsonNode Value)[]
-        {
-            ("lx-installations", O(new { schema = 4, revision = 7, installations = new[] { new { id = "old-install" } } })),
-            ("[\"lx-data\",\"old-install\",\"wy\"]", JsonValue.Create("not a current record")!),
-            ("[\"lx-data\",\"missing-installation\",\"tx\"]", O(new { schema = 1, values = Array.Empty<object>() }))
-        };
-        f.Store.Bytes = Document(retired);
-        var o = f.Owner();
-        Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 1);
-        await Ok(o, "music.library.create", new { name = "Kept" });
-        var entries = JsonNode.Parse(f.Store.Bytes!)!["entries"]!.AsArray();
-        foreach (var (area, value) in retired)
-            Check(entries.Any(entry => entry!["key"]!.GetValue<string>() == AreaKey(area) &&
-                JsonNode.DeepEquals(entry["value"], value)), "retired entry must be carried unchanged: " + area);
-        await o.DisposeAsync();
-        Check((await Ok(f.Owner(), "music.library.list")).GetProperty("total").GetInt32() == 2);
-    }
     private static async Task Settings()
     {
         await using var f = new Fixture(); var o = f.Owner();
@@ -609,19 +536,8 @@ public static partial class MusicNativeLibraryTests
         await Throws(expected, async () => await owner.ReadLibrarySyncAsync());
         Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!), "Non-current data changed");
     }
-    private static async Task NonCurrentDocuments()
+    private static async Task DamagedDocuments()
     {
-        string[] storage =
-        [
-            """{"version":1,"entries":[{"key":"[\"meowfilm\",\"music\",1,\"local\",\"future\"]","value":{}}]}""",
-            """{"version":1,"entries":[{"key":"[\"meowfilm\",\"music\",1,\"other\",\"queue\"]","value":{"schema":1,"entries":[],"currentId":null,"priority":[],"source":null}}]}""",
-            """{"version":1,"entries":[{"key":"[\"meowfilm\",\"music\",1.0,\"local\",\"queue\"]","value":{"schema":1,"entries":[],"currentId":null,"priority":[],"source":null}}]}""",
-            """{"version":1.0,"entries":[]}""",
-            """{"version":1e0,"entries":[]}"""
-        ];
-        foreach (string value in storage)
-            await RejectDocument(Encoding.UTF8.GetBytes(value));
-
         static JsonObject Changed(JsonObject value, Action<JsonObject> change)
         {
             var copy = (JsonObject)value.DeepClone();
@@ -629,36 +545,38 @@ public static partial class MusicNativeLibraryTests
             return copy;
         }
 
-        var queue = CurrentQueue();
+        var current = await CurrentDocuments();
+        var queue = current.Queue;
         foreach (var invalid in new[]
         {
-            Changed(queue, q => q["similar"] = new JsonArray()),
+            Changed(queue, q => q["entries"]![0]!["songId"] = Guid.NewGuid().ToString("D")),
             Changed(queue, q => q.Remove("source")),
             Changed(queue, q => q["currentId"] = "entry-2"),
             Changed(queue, q => q["priority"] = new JsonArray(JsonValue.Create("entry-1"))),
             Changed(queue, q => q["extra"] = true)
         })
-            await RejectDocument(Document(("queue", invalid)), "CORRUPT_QUEUE");
+            await RejectDocument(Document(("library", current.Library), ("queue", invalid)), "CORRUPT_QUEUE");
 
-        var history = CurrentHistory();
+        var history = current.History;
         foreach (var invalid in new[]
         {
             Changed(history, h => h.Remove("days")),
             Changed(history, h => h["extra"] = true),
             Changed(history, h => h["days"]![0]!["songs"]![0]!["extra"] = true)
         })
-            await RejectDocument(Document(("history", invalid)), "CORRUPT_HISTORY");
+            await RejectDocument(Document(("library", current.Library), ("history", invalid)), "CORRUPT_HISTORY");
 
-        var library = CurrentLibraryState();
+        var library = current.Library;
+        string songId = library["library"]!["songs"]!.AsObject().First().Key;
         foreach (var invalid in new[]
         {
             Changed(library, state => state["library"]!["extra"] = true),
             Changed(library, state => state["library"]!.AsObject().Remove("accounts")),
-            Changed(library, state => state["library"]!["songs"]!["library:local:a"]!["extra"] = true),
-            Changed(library, state => state["library"]!["songs"]!["library:local:a"]!.AsObject().Remove("sources")),
-            Changed(library, state => state["revision"] = 1),
+            Changed(library, state => state["library"]!["songs"]![songId]!["title"] = new JsonArray()),
+            Changed(library, state => state["library"]!["songs"]![songId]!.AsObject().Remove("sources")),
+            Changed(library, state => state["revision"] = 2),
             Changed(library, state => state["library"]!["accounts"]!["kw"] = "account-a"),
-            Changed(library, state => state["library"]!["accounts"]!["wy"] = new string('a', 65)),
+            Changed(library, state => state["library"]!["accounts"]!["wy"] = new JsonArray()),
             Changed(library, state => state["library"]!["collections"]![0]!["locallyCreated"] = true),
             Changed(library, state =>
             {
@@ -772,16 +690,15 @@ public static partial class MusicNativeLibraryTests
         Check(Math.Abs(expired.GetProperty("words")[0].GetProperty("duration").GetDouble() - .02) < 1e-12);
         return Task.CompletedTask;
     }
-    private static Task LyricsKrc()
+    private static Task LyricsCanonicalWords()
     {
-        var converted = KrcLyrics.Convert("[offset:-1500]\n[1000,20]<0,0,0>A<0,20,0>B\n[2000,0]<0,0,0>Z", default) ??
-            throw new InvalidOperationException("Expected KRC words");
-        var lines = MusicLyricTiming.Parse(converted.Text);
+        var lines = MusicLyricTiming.Parse("[offset:-1500]\n[00:01.000]<00:01.000>A<00:01.000>B<00:01.020>\n[00:02.000]<00:02.000>Z<00:02.000>");
         var words = lines[0].GetProperty("words");
         Check(lines[0].GetProperty("text").GetString() == "AB" && lines[0].GetProperty("time").GetDouble() == 0 &&
             lines[0].GetProperty("end").GetDouble() == 0);
         Check(words[0].GetProperty("time").GetDouble() == -.5 && words[0].GetProperty("duration").GetDouble() == 0 &&
-            words[1].GetProperty("time").GetDouble() == -.5 && words[1].GetProperty("duration").GetDouble() == .02);
+            words[1].GetProperty("time").GetDouble() == -.5 &&
+            Math.Abs(words[1].GetProperty("duration").GetDouble() - .02) < 1e-12);
         Check(lines[1].GetProperty("time").GetDouble() == .5 && lines[1].GetProperty("end").GetDouble() == .5 &&
             lines[1].GetProperty("words")[0].GetProperty("duration").GetDouble() == 0);
         return Task.CompletedTask;

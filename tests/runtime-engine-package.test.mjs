@@ -43,7 +43,7 @@ function sourceFixture() {
   for (const path of new Set(['package.json', 'package-lock.json', policyPath, receiptPath,
     artifactPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
   for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-    'film-rules', 'film-search', 'film-playback', 'netease-token', 'novel-rules']) {
+    'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules']) {
     const location = `packages/${name}`;
     copy(`${location}/package.json`);
     for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
@@ -57,6 +57,8 @@ function sourceFixture() {
     if (path.includes('node_modules/') && !entry.link && !entry.dev && existsSync(join(repository, path))) copy(path);
   }
   copy('apps/runtime');
+  for (const name of ['NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt',
+    'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt']) copy(`LICENSES/${name}`);
   workspace = { root, output, area };
   return workspace;
 }
@@ -122,7 +124,10 @@ test('common native payload preserves exact build, ABI, SDK, source and license 
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.entry, 'app/entry.mjs');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
+  assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/music-platform'));
+  assert.ok(manifest.files.some(file => file.path === 'app/modules/music-platform.mjs'));
+  assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/music-platform/src/index.mjs'));
   assert.equal(manifest.trustedNative.length, 1);
   const native = manifest.trustedNative[0];
   assert.equal(native.path, payloadPath(artifactPath));

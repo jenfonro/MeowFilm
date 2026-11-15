@@ -411,6 +411,33 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
         XCTAssertEqual(afterReturn.count, calls.count, "Completed home does not read beyond the real terminal response")
     }
 
+    func testCompleteHomeReadKeepsDistinctOccurrencesOfTheSameSong() async {
+        let service = HomeLifecycleFixture(), value = model(service)
+        let track = MusicRemoteTrack(ref: .init(kind: .library, id: "same-song"),
+            songId: "same-song", title: "同一首歌")
+        let first = MusicPublicBrowseItem(id: "first:0:same-song", title: track.title, content: .track(track))
+        let second = MusicPublicBrowseItem(id: "next:0:same-song", title: track.title, content: .track(track))
+        await service.setPages([
+            "": .init(sections: [.init(id: "songs", title: "歌曲", items: [first])],
+                cursor: "next", consumed: 1),
+            "next": .init(sections: [.init(id: "songs", title: "歌曲", items: [first, second])],
+                consumed: 2),
+        ])
+        await value.loadIfNeeded()
+        XCTAssertEqual(value.sections.map(\.id), ["songs"])
+        XCTAssertEqual(value.sections.flatMap(\.items).map(\.id), [first.id, second.id])
+        let tracks = value.sections.flatMap(\.items).compactMap { item -> MusicRemoteTrack? in
+            if case .track(let track) = item.content { return track }
+            return nil
+        }
+        XCTAssertEqual(tracks, [track, track])
+        XCTAssertNil(value.nextCursor); XCTAssertNil(value.error)
+        let calls = await service.calls
+        XCTAssertEqual(calls.map { $0.0 }, [nil, "next"])
+        XCTAssertEqual(calls.map { $0.1 }, [true, false])
+        value.disappear()
+    }
+
     func testContinuationFailureRetainsSuccessAndRetryContinuesThroughRemainingBatches() async throws {
         let service = HomeLifecycleFixture(), value = model(service)
         await service.setPages([
@@ -551,15 +578,14 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
         XCTAssertEqual(calls.map { $0.0 }, [nil, "next", nil, "next"])
     }
 
-    func testCyclicOrZeroConsumptionHomeContinuationStopsAtProtocolFailure() async {
+    func testCyclicHomeContinuationStopsAtTheActualProtocolFailure() async {
         let cyclic: [String: MusicPublicBrowsePage] = [
             "": HomeLifecycleFixture.page(["1"], cursor: "a"),
             "a": HomeLifecycleFixture.page(["2"], cursor: "b"),
             "b": HomeLifecycleFixture.page(["3"], cursor: "a"),
         ]
-        let zeroConsumption = ["": HomeLifecycleFixture.page(["1"], cursor: "a", consumed: 0)]
         let cases: [([String: MusicPublicBrowsePage], [String?])] = [
-            (cyclic, [nil, "a", "b"]), (zeroConsumption, [nil]),
+            (cyclic, [nil, "a", "b"]),
         ]
         for (pages, expected) in cases {
             let service = HomeLifecycleFixture(), value = model(service)
@@ -569,5 +595,19 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
             let calls = await service.calls
             XCTAssertEqual(calls.map { $0.0 }, expected)
         }
+    }
+
+    func testZeroConsumptionAndEmptyHomePageStillFollowTheProviderContinuation() async {
+        let service = HomeLifecycleFixture(), value = model(service)
+        await service.setPages([
+            "": HomeLifecycleFixture.page(["1"], cursor: "a", consumed: 0),
+            "a": HomeLifecycleFixture.page([], cursor: "b", consumed: 0),
+            "b": HomeLifecycleFixture.page(["2"], cursor: nil, consumed: 1),
+        ])
+        await value.refresh()
+        XCTAssertNil(value.error); XCTAssertNil(value.nextCursor); XCTAssertFalse(value.isLoading)
+        XCTAssertEqual(value.sections.flatMap(\.items).map(\.id), ["1", "2"])
+        let calls = await service.calls
+        XCTAssertEqual(calls.map { $0.0 }, [nil, "a", "b"])
     }
 }

@@ -7,25 +7,18 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
-    // Accepted player/UI snapshots only. Native candidates own reusable matching state.
-    private readonly Dictionary<string, (string Original, JsonElement Expanded)> officialSongSnapshots = [];
     private long exclusionsRevision, selectionSourcesRevision;
-    private JsonElement KnownOfficialSong(SongRow song) =>
-        officialSongSnapshots.TryGetValue(song.Id, out var known) && known.Original == song.Raw.GetRawText()
-            ? known.Expanded : song.Raw;
+    private JsonElement KnownOfficialSong(SongRow song, JsonElement? snapshot = null) =>
+        application is MusicNativeApplication owner ? owner.SongSnapshot(song.Id) ?? snapshot ?? song.Raw : snapshot ?? song.Raw;
     private void AcceptOfficialSong(SongRow song, MusicOnlineTarget? target)
     {
-        if (target?.RecordingSong is not { } expanded) return;
-        officialSongSnapshots.Remove(song.Id);
-        officialSongSnapshots[song.Id] = (song.Raw.GetRawText(), expanded.Clone());
-        while (officialSongSnapshots.Count > 24) officialSongSnapshots.Remove(officialSongSnapshots.Keys.First());
+        if (target?.RecordingSong is null) return;
         if (current?.EntryId == song.EntryId && current?.Id == song.Id) RefreshCurrentArtwork();
     }
     // The stable queue song is never replaced by a cross-platform search result.
-    // All refresh, chorus and feedback consumers use this accepted recording snapshot.
+    // Refresh, chorus and feedback project current metadata from the same repository.
     private JsonElement PlaybackSong(SongRow song) =>
-        musicRecovery is { Media.Target.RecordingSong: { } recording } state && state.Song.EntryId == song.EntryId &&
-        state.Song.Id == song.Id ? recording : KnownOfficialSong(song);
+        KnownOfficialSong(song);
     private JsonElement FeedbackSong(SongRow song)
     {
         var snapshot = PlaybackSong(song);
@@ -110,6 +103,13 @@ public sealed partial class MusicCapability
         private HashSet<SourceExclusion> exclusions = [];
         private long exclusionsRevision = -1;
         private JsonElement expanded = owner.KnownOfficialSong(song);
+        private void RefreshSong()
+        {
+            var current = owner.KnownOfficialSong(Song, expanded);
+            if (JsonElement.DeepEquals(current, expanded)) return;
+            expanded = current;
+            official.Clear(); exhausted.Clear();
+        }
         private string[] preference = [];
         private bool completed, historyLoaded;
         internal void ReleaseRecording()
@@ -153,6 +153,7 @@ public sealed partial class MusicCapability
             if (historyLoaded || OfficialOnly || owner.audioFileCache is null) return;
             foreach (var info in await owner.audioFileCache.ReadScriptHistoryAsync(Song.Id, token))
             {
+                RefreshSong();
                 string level = MusicDto.Text(info, "quality");
                 var target = new MusicOnlineTarget(MusicDto.Text(info, "installationId"), MusicDto.Text(info, "platform"),
                     0, MusicDto.Text(info, "sourceKey"), level, level, RecordingSong: expanded,
@@ -229,6 +230,7 @@ public sealed partial class MusicCapability
 
         private async Task<MusicOnlineTarget[]> OfficialAsync(string level, CancellationToken token, bool manualSource = false)
         {
+            RefreshSong();
             string cacheKey = level + (manualSource ? ":manual" : ":automatic");
             if (official.TryGetValue(cacheKey, out var known)) return known;
             var reply = await owner.QualityCall("music.official.candidates",
@@ -237,8 +239,8 @@ public sealed partial class MusicCapability
             var decorated = SongRow.Read(reply.GetProperty("song"), Song.EntryId);
             MusicDto.Require(decorated.Id == Song.Id);
             expanded = decorated.Raw.Clone();
+            RefreshSong();
             var candidates = reply.GetProperty("candidates").EnumerateArray().ToArray();
-            MusicDto.Require(candidates.Length <= 24);
             if (preference.Length == 0) preference = candidates.Select(row => MusicDto.Text(row, "sourceKey")).ToArray();
             var targets = candidates.Select(row => new MusicOnlineTarget(null, MusicDto.Text(row, "platform"),
                     MusicDto.Integer(row, "generation"), MusicDto.Text(row, "sourceKey"), level, level, Signature,
@@ -246,12 +248,13 @@ public sealed partial class MusicCapability
                 .Where(target => RecordingAllowed(target.Platform, target.SourceKey, manualSource))
                 .OrderBy(target => target.Platform == preferredPlatform && target.SourceKey == preferredKey ? 0 : 1)
                 .ToArray();
-            official[cacheKey] = targets;
+            if (JsonElement.DeepEquals(expanded, decorated.Raw)) official[cacheKey] = targets;
             return targets;
         }
         private IEnumerable<MusicOnlineTarget> ScriptTargets(string level, bool manualSource = false)
         {
             if (OfficialOnly || !MusicQualityPolicy.LxTypes.Contains(level)) yield break;
+            RefreshSong();
             var recordings = expanded.GetProperty("sources").EnumerateArray()
                 .Where(row => RecordingAllowed(MusicDto.Text(row, "source"), MusicDto.Text(row, "sourceKey"), manualSource))
                 .OrderBy(row => MusicDto.Text(row, "source") == preferredPlatform && MusicDto.Text(row, "sourceKey") == preferredKey ? 0 : 1)
@@ -404,13 +407,15 @@ public sealed partial class MusicCapability
                         site.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "musicUrl"))))
                 .ToArray();
             if (targets.Length == 0) { completed = true; return false; }
+            RefreshSong();
+            string before = expanded.GetProperty("sources").GetRawText();
             var reply = await owner.Call("music.songs.complete",
                 new { song = expanded, platforms = targets, contentFailed = failures.Intersect(targets).ToArray() }, token);
             token.ThrowIfCancellationRequested();
             var merged = SongRow.Read(reply.GetProperty("song"), Song.EntryId);
             MusicDto.Require(merged.Id == Song.Id);
-            string before = expanded.GetProperty("sources").GetRawText();
             expanded = merged.Raw.Clone();
+            RefreshSong();
             // Cancelled/failed requests are not a completed negative search.
             completed = true;
             checkedContent.UnionWith(failures);
@@ -474,6 +479,8 @@ public sealed partial class MusicCapability
         private async Task<ResolvedMusic> RefreshTargetAsync(MusicOnlineTarget target, CancellationToken token)
         {
             await LoadExclusionsAsync(token);
+            RefreshSong();
+            target = target with { RecordingSong = expanded };
             if (Excluded(target)) throw new MusicOperationException("SOURCE_EXCLUDED");
             ResolvedMusic media;
             // Historical media has no current script authority. New parsing must obtain it afresh.
@@ -532,13 +539,15 @@ public sealed partial class MusicCapability
         /// <summary>The next manual-browser group, independent of automatic preference or enablement.</summary>
         internal async Task<bool> ExpandAsync(CancellationToken token)
         {
+            RefreshSong();
             var tier = MusicQualityPolicy.SourceTiers.FirstOrDefault(value => !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
             if (tier is null) return false;
             await TierAsync(tier, collect: true, complete: true, token, exact: true, manualSource: true);
             return true;
         }
-        internal bool CanExpand => MusicQualityPolicy.SourceTiers.Any(value =>
-            !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
+        internal bool CanExpand => !JsonElement.DeepEquals(owner.KnownOfficialSong(Song, expanded), expanded) ||
+            MusicQualityPolicy.SourceTiers.Any(value =>
+                !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
         internal void Exclude(string provider, string platform)
         {
             exclusions.Add(new(provider, platform));

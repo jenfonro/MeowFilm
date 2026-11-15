@@ -11,7 +11,7 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 /// </summary>
 internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? time = null)
 {
-    internal const string Namespace = "music.playback-sources.v1";
+    internal const string Namespace = "music.playback-sources.v2";
     internal const long HistoryTtl = 30L * 86400000;
     private const int MaximumBytes = 1024 * 1024, MaximumScopes = 4;
     private readonly TimeProvider clock = time ?? TimeProvider.System;

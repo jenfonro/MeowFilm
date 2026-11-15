@@ -258,14 +258,21 @@ extension MusicViewModel {
     public func setFMContinue(_ enabled: Bool, sessionID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
         guard isAvailable, !isClosed, fmPlayback?.id == sessionID,
-              let provider = service as? any MusicFMPlaybackServing else { return }
-        do {
+              !Task.isCancelled, let provider = service as? any MusicFMPlaybackServing else { return }
+        let submitted = settingsReceipts.submit(settings: enabled ? ["playback/mode"] : [],
+                                                operation: "保存漫游续播设置") {
             try await provider.setFMContinue(enabled, sessionID: sessionID)
+        }
+        do {
+            try await submitted.value
             try check(own)
             guard searchAccessGeneration == account else { return }
             await loadRecommendationState()
         } catch {
-            if searchAccessGeneration == account, !Task.isCancelled { report(error, epoch: own, operation: "保存漫游续播设置", kind: .settings) }
+            if (error as? MusicServiceError) != .commitUnconfirmed,
+               searchAccessGeneration == account, !Task.isCancelled {
+                report(error, epoch: own, operation: "保存漫游续播设置", kind: .settings)
+            }
         }
     }
     public func startCurrentHeartbeat(occurrenceID: String, expectedRevision: Int) async {
@@ -312,14 +319,20 @@ extension MusicViewModel {
     public func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
         guard isAvailable, !isClosed, similarMode?.id == snapshotID,
-              let provider = service as? any MusicSimilarModeServing else { return }
+              !Task.isCancelled, let provider = service as? any MusicSimilarModeServing else { return }
+        let submitted = settingsReceipts.submit(
+            settings: ["queue/similar/" + snapshotID.uuidString + "/continue"] + (enabled ? ["playback/mode"] : []),
+            operation: "保存推荐续播设置") {
+                try await provider.setSimilarContinue(enabled, snapshotID: snapshotID)
+            }
         do {
-            try await provider.setSimilarContinue(enabled, snapshotID: snapshotID)
+            try await submitted.value
             try check(own)
             guard searchAccessGeneration == account else { return }
             await loadRecommendationState()
         } catch {
-            if searchAccessGeneration == account, !Task.isCancelled {
+            if (error as? MusicServiceError) != .commitUnconfirmed,
+               searchAccessGeneration == account, !Task.isCancelled {
                 report(error, epoch: own, operation: "保存推荐续播设置", kind: .settings)
             }
         }
@@ -348,14 +361,19 @@ extension MusicViewModel {
     public func setQueueRecommendationContinue(_ enabled: Bool, snapshotID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
         guard isAvailable, !isClosed, queueRecommendations?.id == snapshotID,
-              let provider = service as? any MusicQueueRecommendationServing else { return }
-        do {
+              !Task.isCancelled, let provider = service as? any MusicQueueRecommendationServing else { return }
+        let submitted = settingsReceipts.submit(settings: enabled ? ["playback/mode"] : [],
+                                                operation: "保存推荐续播设置") {
             try await provider.setQueueRecommendationContinue(enabled, snapshotID: snapshotID)
+        }
+        do {
+            try await submitted.value
             try check(own)
             guard searchAccessGeneration == account else { return }
             await loadRecommendationState()
         } catch {
-            if searchAccessGeneration == account, !Task.isCancelled {
+            if (error as? MusicServiceError) != .commitUnconfirmed,
+               searchAccessGeneration == account, !Task.isCancelled {
                 report(error, epoch: own, operation: "保存推荐续播设置", kind: .settings)
             }
         }

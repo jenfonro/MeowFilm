@@ -43,15 +43,15 @@ public static partial class MusicLyricDisplayTests
                     owner.Show(); f.Module.AttachDesktopLyricsOwner(owner);
                     var published = new List<string>();
                     f.Module.Lyrics.CollectionChanged += (_, _) => published.AddRange(f.Module.Lyrics.Select(row => row.Text));
-                    f.Http.Text = "OLD_DESKTOP_SOURCE";
-                    f.Http.Block = async () => { arrived.TrySetResult(); await release.Task; };
+                    f.Peer.Text = "OLD_DESKTOP_SOURCE";
+                    f.Peer.Block = async () => { arrived.TrySetResult(); await release.Task; };
                     opening = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                     await arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
                     Check(!f.Module.IsLyrics && f.Module.NeedsLyrics);
                     // Let the accepted source mutation settle before dispatching replacement lookups.
                     // The real native owner still performs every query and invalidation.
                     lookups.HoldLookups = true;
-                    f.Http.Text = "CURRENT_DESKTOP_SOURCE"; f.Http.Block = null;
+                    f.Peer.Text = "CURRENT_DESKTOP_SOURCE"; f.Peer.Block = null;
                     if (mutation == "disable")
                     {
                         await f.Module.SetSourceEnabledAsync(source, false);
@@ -76,7 +76,7 @@ public static partial class MusicLyricDisplayTests
                     Equal("CURRENT_DESKTOP_SOURCE", f.Module.Lyrics[0].Text);
                     Equal("second", f.Module.Lyrics[1].Text);
                     Check(!published.Contains("OLD_DESKTOP_SOURCE"));
-                    Equal(2, f.Http.Calls); Equal(0, f.Runtime.Invocations); Equal(0, f.Playback.Opens);
+                    Equal(2, f.Peer.Calls); Equal(0, f.Runtime.Invocations); Equal(0, f.Playback.Opens);
                     var queue = Ok(await f.Application.ExecuteAsync("music.queue.get"));
                     var saved = Ok(await f.Application.ExecuteAsync("music.lyrics.display.get",
                         new { song = queue.GetProperty("current").GetProperty("song") }));
@@ -97,7 +97,7 @@ public static partial class MusicLyricDisplayTests
             {
                 owner.Show(); f.Module.AttachDesktopLyricsOwner(owner);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
-                Equal(2, f.Module.Lyrics.Count); Equal(1, f.Http.Calls);
+                Equal(2, f.Module.Lyrics.Count); Equal(1, f.Peer.Calls);
                 var platform = f.Module.MetadataPlatforms.Single(row => row.Platform == "wy");
                 await f.Module.SetMetadataEnabledAsync(platform, false);
                 Equal(0, f.Module.Lyrics.Count);

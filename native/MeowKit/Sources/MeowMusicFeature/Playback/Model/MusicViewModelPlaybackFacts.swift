@@ -156,10 +156,8 @@ extension MusicViewModel {
                     case .providerPlatform:
                         return $0.songID == current.track.songId && $0.platform == selection.siteId &&
                             $0.provider == MusicSourceExclusion.providerID(selection.installationId, platform: selection.siteId)
-                    case .recording(let fingerprint, let duration, let sourceKey):
-                        let recording = MusicRecordingIdentity(current.track)
-                        return sourceKey == selection.sourceKey && recording.fingerprint == fingerprint &&
-                            recording.isCompatible(with: .init(title: "", artist: "", duration: duration), sameNative: true)
+                    case .recording(let sourceKey):
+                        return $0.songID == current.track.songId && sourceKey == selection.sourceKey
                     }
                 }) {
                     await replaceExcludedSource(intent: .quality(candidate?.delivery?.quality ?? selection.quality),

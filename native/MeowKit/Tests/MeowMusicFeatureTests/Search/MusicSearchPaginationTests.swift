@@ -31,53 +31,30 @@ import XCTest
             }
         }
     }
-    func testOffsetIsAlwaysPageMinusOneTimesLimitIncludingNetease() throws {
-        for platform in MusicPublicBrowsePlatform.allCases {
-            XCTAssertEqual(try MusicSearchPagination.offset(platform: platform, page: 1, limit: 30), 0)
-            XCTAssertEqual(try MusicSearchPagination.offset(platform: platform, page: 2, limit: 30), 30)
-            XCTAssertEqual(try MusicSearchPagination.offset(platform: platform, page: 4, limit: 30), 90)
-            XCTAssertThrowsError(try MusicSearchPagination.offset(platform: platform, page: .max, limit: 30))
-        }
-        XCTAssertEqual(try (1...10).map {
-            try MusicSearchPagination.offset(platform: .netease, page: $0, limit: 30)
-        }, Array(stride(from: 0, to: 300, by: 30)))
-    }
-    func testNextCursorOnlyAdvancesByOneAndRequiresItems() {
-        XCTAssertTrue(MusicSearchPagination.validNextPage(page: 1, limit: 30, next: 2, hasItems: true))
-        XCTAssertFalse(MusicSearchPagination.validNextPage(page: 1, limit: 30, next: 3, hasItems: true))
-        XCTAssertFalse(MusicSearchPagination.validNextPage(page: 1, limit: 30, next: 2, hasItems: false))
-        XCTAssertFalse(MusicSearchPagination.validNextPage(page: .max, limit: 30, next: .max, hasItems: true))
-        XCTAssertTrue(MusicSearchPagination.validNextPage(page: 1, limit: 30, next: nil, hasItems: false))
-        XCTAssertFalse(MusicSearchPagination.validNextPage(page: 0, limit: 30, next: nil, hasItems: false))
-        XCTAssertFalse(MusicSearchPagination.validNextPage(page: 1, limit: 101, next: nil, hasItems: false))
-    }
-    func testShortEmptyAndFullTotalPagesTerminateWhileFullPageContinues() throws {
-        XCTAssertNil(try MusicSearchPagination.nextPage(page: 1, limit: 30, count: 29, total: 100))
-        XCTAssertNil(try MusicSearchPagination.nextPage(page: 1, limit: 30, count: 0, total: 100))
-        XCTAssertNil(try MusicSearchPagination.nextPage(page: 2, limit: 30, count: 0, total: 0))
-        XCTAssertNil(try MusicSearchPagination.nextPage(page: 1, limit: 30, count: 30, total: 30))
-        XCTAssertNil(try MusicSearchPagination.nextPage(page: 4, limit: 30, count: 30, total: 120))
-        XCTAssertNil(try MusicSearchPagination.nextPage(page: 1, limit: 30, count: 30, total: 29))
-        XCTAssertNil(try MusicSearchPagination.nextPage(page: 2, limit: 30, count: 30, total: 59))
-        XCTAssertEqual(try MusicSearchPagination.nextPage(page: 1, limit: 30, count: 30, total: 61), 2)
-        for (count, total) in [(31, 61), (-1, 61), (0, -1)] {
-            XCTAssertThrowsError(try MusicSearchPagination.nextPage(page: 1, limit: 30, count: count, total: total)) {
-                XCTAssertEqual($0 as? MusicServiceError, .upstreamInvalid)
-            }
+    func testShortEmptyAndExpandedPagesFollowProviderContinuationWithoutCountProof() async throws {
+        for count in [0, 2, 31, 60] {
+            var accepted: [Int] = []
+            try await MusicSearchRoundReader.read(platform: .migu, start: 1, pages: 2, concurrency: 1,
+                load: { request in (Array(repeating: "row", count: count), request.page == 1 ? 2 : nil) },
+                accept: { request, result in
+                    XCTAssertEqual(result.0.count, count)
+                    accepted.append(request.page)
+                    return result.1
+                })
+            XCTAssertEqual(accepted, [1, 2])
         }
     }
-    func testTerminalRawPagesStopEveryPlatformBeforeTheNextSerialRequest() async throws {
+    func testProviderEndStopsEveryPlatformBeforeTheNextSerialRequest() async throws {
         for platform in MusicPublicBrowsePlatform.allCases {
-            for (count, total) in [(0, 100), (2, 100), (30, 30), (30, 29)] {
+            for count in [0, 2, 30, 31] {
                 var loaded: [Int] = [], accepted: [Int] = []
                 try await MusicSearchRoundReader.read(platform: platform, start: 1, pages: 10, concurrency: 1,
                     load: { request in
                         loaded.append(request.page)
-                        return try MusicSearchPagination.nextPage(page: request.page,
-                            limit: request.limit, count: count, total: total)
-                    }, accept: { request, next in
+                        return Array(repeating: "row", count: count)
+                    }, accept: { request, _ in
                         accepted.append(request.page)
-                        return next
+                        return nil
                     })
                 XCTAssertEqual(loaded, [1])
                 XCTAssertEqual(accepted, [1])

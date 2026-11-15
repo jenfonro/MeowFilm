@@ -11,7 +11,7 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 /// <summary>Evictable playback bytes. No DownloadService, export target or durable download task.</summary>
 internal sealed partial class MusicAudioFileCache
 {
-    internal const string Namespace = "music.playback-files.v1";
+    internal const string Namespace = "music.playback-files.v2";
     internal const long Capacity = 256L * 1024 * 1024, Ttl = 30L * 86400000;
     private const int MaximumIndexBytes = 1024 * 1024, MaximumEntries = 2048;
     private static readonly string[] InfoFields =
@@ -39,7 +39,6 @@ internal sealed partial class MusicAudioFileCache
     private readonly Func<string, double, CancellationToken, Task<double>> validate;
     private readonly TimeProvider clock;
     private readonly NativeHttpMediaOptions? httpOptions;
-    private readonly MusicRecordingPresentationCache presentations;
     private readonly object transferState = new();
     private CancellationTokenSource? activeTransfer;
     private PreparedFile? activePrepared;
@@ -120,7 +119,6 @@ internal sealed partial class MusicAudioFileCache
         TimeProvider? clock = null, NativeHttpMediaOptions? httpOptions = null)
     {
         this.root = Path.GetFullPath(root); this.store = store;
-        presentations = new(store, clock);
         this.validate = validate ?? NativeAudioCacheProbe.ValidateAsync; this.clock = clock ?? TimeProvider.System;
         this.httpOptions = httpOptions;
     }
@@ -413,7 +411,6 @@ internal sealed partial class MusicAudioFileCache
             var index = await Read(token, memory: true).ConfigureAwait(false);
             if (!index.Entries.TryGetValue(Key(scope, song), out var entry) || !Accepted(entry, signature, Now)) return;
             entry.ConfirmedAt = Now; await Write(index, token).ConfigureAwait(false);
-            await presentations.TouchAsync(song, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
         catch (DocumentStoreException) { }
@@ -597,7 +594,6 @@ internal sealed partial class MusicAudioFileCache
                 var index = await Read(token, memory: true).ConfigureAwait(false);
                 await Write(new(), token).ConfigureAwait(false);
                 foreach (var entry in index.Entries.Values) TryDelete(entry.File);
-                await presentations.ClearAsync(token).ConfigureAwait(false);
             }
             finally { metadataGate.Release(); }
             return;
@@ -619,7 +615,6 @@ internal sealed partial class MusicAudioFileCache
                     token.ThrowIfCancellationRequested();
                     File.Delete(FilePath(Path.GetFileName(path)));
                 }
-                await presentations.ClearAsync(token).ConfigureAwait(false);
             }
             finally { metadataGate.Release(); }
         }
@@ -686,13 +681,11 @@ internal sealed partial class MusicAudioFileCache
         {
             var index = await Read(token, memory: true).ConfigureAwait(false);
             var removed = new List<string>();
-            var removedSongs = new HashSet<string>(StringComparer.Ordinal);
             foreach (var pair in index.Entries.ToArray())
                 if (!Accepted(pair.Value, pair.Value.Signature, Now))
                 {
                     index.Entries.Remove(pair.Key);
                     removed.Add(pair.Value.File);
-                    removedSongs.Add(pair.Value.Info["songId"]!.GetValue<string>());
                 }
             // LRU eviction also makes headroom for a new complete representation; not a hardcoded song limit.
             long used = index.Entries.Sum(p => p.Value.Size);
@@ -702,7 +695,6 @@ internal sealed partial class MusicAudioFileCache
                 used -= pair.Value.Size;
                 index.Entries.Remove(pair.Key);
                 removed.Add(pair.Value.File);
-                removedSongs.Add(pair.Value.Info["songId"]!.GetValue<string>());
             }
             if (removed.Count > 0) await Write(index, token).ConfigureAwait(false);
             var keep = index.Entries.Values.Select(value => value.File).ToHashSet(StringComparer.Ordinal);
@@ -712,8 +704,6 @@ internal sealed partial class MusicAudioFileCache
                 string name = Path.GetFileName(path);
                 if (!keep.Contains(name)) TryDelete(name);
             }
-            removedSongs.ExceptWith(index.Entries.Values.Select(entry => entry.Info["songId"]!.GetValue<string>()));
-            if (removedSongs.Count > 0) await presentations.RemoveAsync(removedSongs, Now, token).ConfigureAwait(false);
         }
         finally { metadataGate.Release(); }
     }

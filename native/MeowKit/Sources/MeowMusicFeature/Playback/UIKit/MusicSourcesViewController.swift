@@ -10,7 +10,6 @@ final class MusicSourcesViewController: MusicPageViewController,
 {
     private let model: MusicViewModel
     private let tracks: [MusicRemoteTrack]
-    private let refreshTrack: @MainActor (MusicRemoteTrack) async throws -> MusicRemoteTrack
     private let originIsCurrent: @MainActor () -> Bool
     private var fence: MusicReferencePlayerFence
     private let table = UITableView(frame: .zero, style: .plain)
@@ -29,11 +28,9 @@ final class MusicSourcesViewController: MusicPageViewController,
     private var shownReadError: String?
 
     init(model: MusicViewModel, tracks: [MusicRemoteTrack], appearance: MusicAppearancePreferencesStore,
-         originIsCurrent: @escaping @MainActor () -> Bool = { true },
-         refresh: @escaping @MainActor (MusicRemoteTrack) async throws -> MusicRemoteTrack = { $0 }) {
+         originIsCurrent: @escaping @MainActor () -> Bool = { true }) {
         self.model = model
         self.tracks = tracks
-        refreshTrack = refresh
         self.originIsCurrent = originIsCurrent
         fence = .init(occurrence: model.current?.id, attempt: model.activeNativeAttemptID,
                       access: model.accountAccessGeneration, queueRevision: model.state.revision,
@@ -94,8 +91,8 @@ final class MusicSourcesViewController: MusicPageViewController,
         let own = UUID()
         request = own; readError = nil; shownReadError = nil; inspecting = true
         renderState()
-        let model = model, tracks = tracks, refreshTrack = refreshTrack
-        runPageTask { [weak self, model, tracks, refreshTrack] in
+        let model = model, tracks = tracks
+        runPageTask { [weak self, model, tracks] in
             defer {
                 if let self, self.request == own {
                     self.inspecting = false
@@ -108,11 +105,8 @@ final class MusicSourcesViewController: MusicPageViewController,
                 guard let target = model.current.flatMap({ current in
                     tracks.contains { MusicSearchFusion.sameRecording($0, current.track) } ? current.track : nil
                 }) ?? tracks.first else { return }
-                let track: MusicRemoteTrack
-                if self?.canSelect == true { track = target }
-                else { track = try await refreshTrack(target) }
                 guard !Task.isCancelled, self?.request == own, self?.admitted == true else { return }
-                let value = try await model.inspectSources(for: track.ref)
+                let value = try await model.inspectSources(for: target.ref)
                 guard !Task.isCancelled, self?.request == own, self?.admitted == true else {
                     await value.close()
                     return
@@ -220,7 +214,7 @@ final class MusicSourcesViewController: MusicPageViewController,
                   self.originIsCurrent() else { self.dismiss(animated: true); return }
             // Only our explicit adoption may advance this inspection's fence.
             self.fence = self.currentFence
-            if let error = self.model.error { self.showError(error) }
+            if let error = self.model.notices.error { self.showError(error) }
             else { self.dismiss(animated: true) }
         }
     }
@@ -256,7 +250,7 @@ final class MusicSourcesViewController: MusicPageViewController,
                   self.originIsCurrent() else { self.dismiss(animated: true); return }
             // Only our explicit rejection (and its replacement) may advance the fence.
             self.fence = self.currentFence
-            if let error = self.model.error { self.showError(error) }
+            if let error = self.model.notices.error { self.showError(error) }
         }
     }
 

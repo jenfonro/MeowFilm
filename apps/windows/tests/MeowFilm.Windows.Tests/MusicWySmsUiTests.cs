@@ -1,11 +1,12 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
-using MeowFilm.Core.Runtime;
+using MeowFilm.Capabilities.Platforms;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Platform.Storage;
@@ -16,11 +17,11 @@ public static class MusicWySmsUiTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("native-app-same-owner-send-login-reopen-state-logout-no-node", Flow);
+        yield return Case("native-app-same-owner-send-login-reopen-state-logout-no-script", Flow);
         yield return Case("real-WPF-explicit-send-submit-password-clear-and-phone-retained", Controls);
         yield return Case("visible-idle-and-countdown-never-send-or-poll", Idle);
-        yield return Case("hide-send-unconfirmed-clears-input-no-commit-unknown", () => Hide("send"));
-        yield return Case("hide-identity-cancels-no-late-login", () => Hide("status"));
+        yield return Case("hide-send-unconfirmed-clears-input-no-commit-unknown", () => Hide("sms.send"));
+        yield return Case("hide-identity-cancels-no-late-login", () => Hide("sms.login"));
         yield return Case("platform-switch-clears-sensitive-input-and-old-result", Switch);
         yield return Case("data-context-change-retires-old-visible-SMS", Context);
         yield return Case("unloaded-clears-input-and-cancels", Unload);
@@ -28,7 +29,7 @@ public static class MusicWySmsUiTests
         yield return Case("unknown-CAS-explicit-list-recovery-no-replay", Unknown);
         yield return Case("bad-code-retry-login-not-resend", BadCode);
         yield return Case("duplicate-clicks-single-flight-and-cooldown-after-cancel", SingleFlight);
-        yield return Case("UI-input-validation-before-any-native-request", InvalidInput);
+        yield return Case("UI-consumable-strings-dispatch-without-length-gate", DirectInput);
         yield return Case("WY-QR-replaces-SMS-without-late-publication", Qr);
     }
     private static TestCase Case(string name, Func<Task> run) => new("music.accounts.wy.sms.ui." + name, () => Sta(run));
@@ -40,7 +41,8 @@ public static class MusicWySmsUiTests
         [CallerArgumentExpression(nameof(predicate))] string expression = "",
         [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
     {
-        try { await MusicNativeWySmsTests.Until(predicate); }
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        try { while (!predicate()) await Task.Delay(20, timeout.Token); }
         catch (OperationCanceledException)
         { throw new TimeoutException($"WY SMS account wait at {member}:{line}: {expression}"); }
     }
@@ -62,8 +64,8 @@ public static class MusicWySmsUiTests
         await done.Task.WaitAsync(TimeSpan.FromSeconds(35));
         Check(thread.Join(TimeSpan.FromSeconds(5)));
     }
-    private static Task Send(Fixture f) => f.Module.SendAccountSmsAsync(WySmsHandler.Phone);
-    private static Task Login(Fixture f) => f.Module.LoginAccountSmsAsync(WySmsHandler.Phone, "86", WySmsHandler.Captcha);
+    private static Task Send(Fixture f) => f.Module.SendAccountSmsAsync(MusicAccountRuntimeFixture.Phone);
+    private static Task Login(Fixture f) => f.Module.LoginAccountSmsAsync(MusicAccountRuntimeFixture.Phone, "86", MusicAccountRuntimeFixture.Captcha);
     private static async Task Flow()
     {
         await using var f = await Fixture.Create();
@@ -76,7 +78,7 @@ public static class MusicWySmsUiTests
             f.Module.SelectedAccount.UserId == "42" && !f.Module.HasAccountSms && f.Store.Writes == 1);
         await f.Module.ReadAccountsAsync(); Check(f.Module.SelectedAccount!.State == "verified");
         await f.Module.LogoutAccountAsync(f.Module.SelectedAccount!, confirmed: true);
-        Check(f.Module.SelectedAccount!.State == "none" && f.Transport.Calls == 4 && f.Runtime.Calls == 0);
+        Check(f.Module.SelectedAccount!.State == "none" && f.Transport.Calls == 2 && f.Runtime.Calls.Count == 0);
     }
     private static Window Offscreen(object content) => new() { Content = content, Width = 620, Height = 1000,
         Left = -20000, Top = -20000, ShowInTaskbar = false, WindowStyle = WindowStyle.ToolWindow };
@@ -87,8 +89,8 @@ public static class MusicWySmsUiTests
     }
     private static void Fill(MusicAccountsView view)
     {
-        ((TextBox)view.FindName("SmsPhoneInput")).Text = WySmsHandler.Phone;
-        ((PasswordBox)view.FindName("SmsCodeInput")).Password = WySmsHandler.Captcha;
+        ((TextBox)view.FindName("SmsPhoneInput")).Text = MusicAccountRuntimeFixture.Phone;
+        ((PasswordBox)view.FindName("SmsCodeInput")).Password = MusicAccountRuntimeFixture.Captcha;
     }
     private static void Cleared(MusicAccountsView view)
     {
@@ -109,16 +111,16 @@ public static class MusicWySmsUiTests
             await Until(() => f.Module.AccountStatus == "验证码已发送" && !f.Module.AccountBusy);
             await f.Calls.CompleteInternalAccountReadAsync(f.Module, "tx");
             Check(f.Module.AccountStatus == "验证码已发送" && f.Transport.Calls == 1);
-            Check(((TextBox)view.FindName("SmsPhoneInput")).Text == WySmsHandler.Phone);
-            ((PasswordBox)view.FindName("SmsCodeInput")).Password = WySmsHandler.Captcha;
+            Check(((TextBox)view.FindName("SmsPhoneInput")).Text == MusicAccountRuntimeFixture.Phone);
+            ((PasswordBox)view.FindName("SmsCodeInput")).Password = MusicAccountRuntimeFixture.Captcha;
             Click(view, "SmsLoginButton");
             Check(((PasswordBox)view.FindName("SmsCodeInput")).Password == "");
             // The account row is published before the command releases its write
             // fence. This success case must settle before closing the test view;
             // closing while busy deliberately exercises cancellation instead.
             await Until(() => f.Module.SelectedAccount!.State == "verified" && !f.Module.AccountBusy);
-            Check(f.Module.AccountStatus == "会话验证成功" && f.Store.Writes == 1 && f.Transport.Calls == 4);
-            Cleared(view); Check(f.Runtime.Calls == 0);
+            Check(f.Module.AccountStatus == "会话验证成功" && f.Store.Writes == 1 && f.Transport.Calls == 2);
+            Cleared(view); Check(f.Runtime.Calls.Count == 0);
         }
         finally { window.Close(); }
     }
@@ -147,20 +149,23 @@ public static class MusicWySmsUiTests
         try
         {
             window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenSms(view); Fill(view);
-            var operation = step == "send" ? Send(f) : Login(f);
+            var operation = step == "sms.send" ? Send(f) : Login(f);
             await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
             window.Hide(); Cleared(view);
-            await operation.WaitAsync(TimeSpan.FromSeconds(4)); f.Transport.Release.TrySetResult();
+            if (step == "sms.send")
+                Check(!operation.IsCompleted && f.Transport.Calls == 1 && f.Store.Writes == 0);
+            f.Transport.Release.TrySetResult();
+            await operation.WaitAsync(TimeSpan.FromSeconds(4));
             await Until(() => !f.Module.AccountBusy && !f.Module.HasAccountSms);
             await f.Module.ReadAccountsAsync();
-            Check(f.Store.Writes == 0 && f.Module.SelectedAccount!.State == "none");
-            if (step == "send") Check(!f.Module.CanSendAccountSms && f.Module.CanLoginAccountSms);
+            Check(f.Store.Writes == 0 && f.Module.SelectedAccount!.State == "none" && f.Transport.Calls == 1);
+            if (step == "sms.send") Check(!f.Module.CanSendAccountSms && f.Module.CanLoginAccountSms);
         }
         finally { f.Transport.Release.TrySetResult(); window.Close(); }
     }
     private static async Task Switch()
     {
-        await using var f = await Fixture.Create(); f.Transport.HoldAt = "status";
+        await using var f = await Fixture.Create(); f.Transport.HoldAt = "sms.login";
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
@@ -176,7 +181,7 @@ public static class MusicWySmsUiTests
     private static async Task Context()
     {
         await using var f = await Fixture.Create(); await using var other = await Fixture.Create();
-        f.Transport.HoldAt = "send";
+        f.Transport.HoldAt = "sms.send";
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
@@ -228,29 +233,35 @@ public static class MusicWySmsUiTests
     }
     private static async Task BadCode()
     {
-        await using var f = await Fixture.Create(); f.Transport.BusinessCode = 502;
+        await using var f = await Fixture.Create(); f.Transport.FailureCode = "INVALID_CODE";
         await Login(f);
         Check(f.Module.AccountStatus == "验证码无效或已过期" && f.Module.CanLoginAccountSms && f.Store.Writes == 0);
-        f.Transport.BusinessCode = 200; await Login(f);
-        Check(f.Module.SelectedAccount!.State == "verified" && !f.Transport.Steps.Contains("send"));
+        f.Transport.FailureCode = null; await Login(f);
+        Check(f.Module.SelectedAccount!.State == "verified" && !f.Transport.Steps.Contains("sms.send"));
     }
     private static async Task SingleFlight()
     {
-        await using var f = await Fixture.Create(); f.Transport.HoldAt = "send";
+        await using var f = await Fixture.Create(); f.Transport.HoldAt = "sms.send";
         var first = Send(f); await Send(f);
         await f.Transport.Arrived.Task; Check(f.Transport.Calls == 1);
         var cancel = f.Module.CancelAccountAsync(); f.Transport.Release.TrySetResult();
         await Task.WhenAll(first, cancel); Check(!f.Module.CanSendAccountSms && f.Module.CanLoginAccountSms && f.Store.Writes == 0);
         await Send(f); Check(f.Transport.Calls == 1);
     }
-    private static async Task InvalidInput()
+    private static async Task DirectInput()
     {
         await using var f = await Fixture.Create();
         await f.Module.SendAccountSmsAsync("123");
-        await f.Module.LoginAccountSmsAsync(WySmsHandler.Phone, "86", "123");
-        Check(f.Transport.Calls == 0 && f.Module.CanSendAccountSms && !f.Module.HasAccountSms);
+        Check(f.Transport.Calls == 1 && f.Module.HasAccountSms && !f.Module.CanSendAccountSms &&
+            f.Runtime.Platform.Requests.Single().Parameters.GetProperty("phone").GetString() == "123");
+        await f.Module.LoginAccountSmsAsync(MusicAccountRuntimeFixture.Phone, "86", "123");
+        var login = f.Runtime.Platform.Requests.Last();
+        Check(f.Transport.Calls == 2 && login.Operation == "sms.login" &&
+            login.Parameters.GetProperty("phone").GetString() == MusicAccountRuntimeFixture.Phone &&
+            login.Parameters.GetProperty("captcha").GetString() == "123" &&
+            f.Module.SelectedAccount!.State == "verified" && f.Store.Writes == 1 && !f.Module.HasAccountSms);
         f.Module.SelectedAccount = f.Module.Accounts[2]; await Send(f);
-        Check(f.Transport.Calls == 0 && !f.Module.ShowAccountSms);
+        Check(f.Transport.Calls == 2 && !f.Module.ShowAccountSms);
     }
     private static async Task Qr()
     {
@@ -262,16 +273,18 @@ public static class MusicWySmsUiTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        internal readonly NoRuntime Runtime = new();
-        internal readonly WySmsHandler Transport;
-        internal readonly WySmsStore Store;
+        internal readonly NativeMusicScriptTestRuntime Runtime = new();
+        internal readonly SmsScenario Transport = new();
+        internal readonly MusicAccountRuntimeFixture.StoreProbe Store;
         internal readonly MusicAccountFixtureApplication Calls;
         internal readonly MusicCapability Module;
         private Fixture()
         {
-            Store = new(new LocalDocumentStore(MusicNativeWySmsTests.Root(), AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
-            Transport = new(Store.Inner);
-            Calls = new(new MusicNativeApplication(Store, Runtime, Transport));
+            string root = TestWorkspace.DataPath("wy-sms-ui", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            Store = new(new LocalDocumentStore(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
+            Runtime.Platform.OnRequest = Transport.Read;
+            Calls = new(new MusicNativeApplication(Store, Runtime));
             Module = new(Calls, Store, new Output(), new Dialogs());
         }
         internal static async Task<Fixture> Create()
@@ -289,8 +302,8 @@ public static class MusicWySmsUiTests
         public async ValueTask DisposeAsync()
         {
             Transport.Release.TrySetResult(); Store.Release.TrySetResult();
-            try { await Module.DisposeAsync(); Check(Runtime.Calls == 0); }
-            finally { await Store.DisposeAsync(); }
+            try { await Module.DisposeAsync(); Check(Runtime.Calls.Count == 0); }
+            finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
         }
     }
     private sealed class Dialogs : IMusicDialogs
@@ -298,14 +311,31 @@ public static class MusicWySmsUiTests
         public bool Confirm(string message, string title) => true;
         public string[]? SelectAudioFiles() => null;
     }
-    private sealed class NoRuntime : IRuntimeClient
+    private sealed class SmsScenario
     {
         internal int Calls;
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Native business must not upload script sources"); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("WY SMS must not start Node"); }
+        internal string? HoldAt, FailureCode;
+        internal readonly List<string> Steps = [];
+        internal readonly TaskCompletionSource Arrived = MusicAccountRuntimeFixture.Signal(), Release = MusicAccountRuntimeFixture.Signal();
+        internal async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
+        {
+            if (call.Operation == "qr.cancel") return MusicPlatformRuntimeFixture.Json(new { cancelled = true });
+            Calls++; Steps.Add(call.Operation);
+            if (HoldAt == call.Operation) { Arrived.TrySetResult(); await Release.Task; }
+            if (FailureCode is not null) throw new MusicPlatformException(FailureCode);
+            if (call.Operation == "sms.send") return MusicPlatformRuntimeFixture.Json(new { confirmed = true, retryAfterSeconds = 60 });
+            if (call.Operation == "qr.create") return MusicPlatformRuntimeFixture.Json(new {
+                challengeId = call.Parameters.GetProperty("challengeId").GetString(),
+                url = "https://music.163.com/login?codekey=SYNTHETIC_QR", imageBase64 = (string?)null,
+                expiresAt = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeMilliseconds() });
+            if (call.Operation == "sms.login")
+            {
+                var account = JsonNode.Parse(MusicPlatformRuntimeFixture.Observation("wy").GetRawText())!.AsObject();
+                account["cookie"] = "MUSIC_U=SYNTHETIC_WY_SESSION; __csrf=SYNTHETIC_CSRF";
+                return MusicPlatformRuntimeFixture.Json(account);
+            }
+            throw new InvalidOperationException(call.Operation);
+        }
     }
     private sealed class Output : IMusicPlayback
     {

@@ -5,58 +5,66 @@ import MeowMusicFeature
 import MeowJSON
 @testable import MeowMusicPlatform
 
-private actor SyncOwnerProvider: MusicAccountSyncProvider {
+private actor SyncOwnerProvider: MusicAccountSyncProvider, MusicAccountSessionPublishing {
     struct AccountCalls: Equatable, Sendable {
         var verifies = 0, refreshes = 0, logins = 0
     }
     private var gate: MusicAccountTestGate?
     private var sends = 0
     private var accountCallCounts = AccountCalls()
+    private var credential: AccountCredential?
+    func publish(_ credential: AccountCredential, scope: String, generation: Int,
+                 authorization: MusicQueueAuthorization) throws {
+        try authorization.check(); self.credential = credential
+    }
+    private func accountID() throws -> String {
+        guard let credential else { throw MusicServiceError.authRequired }
+        return try nativeID(credential)
+    }
     func hold(_ value: MusicAccountTestGate?) { gate = value }
     func writes() -> Int { sends }
     func accountCalls() -> AccountCalls { accountCallCounts }
     func nativeID(_ credential: AccountCredential) throws -> String {
-        try MusicQQWire.string(MusicQQWire.decode(credential.dataRepresentation())["uid"])
+        try MusicAccountFixture.userID(credential)
     }
-    func verify(_ credential: AccountCredential) throws -> MusicQQVerified {
+    func verify(_ credential: AccountCredential) throws -> MusicAccountVerified {
         accountCallCounts.verifies += 1
         return .init(credential: credential, nickname: "Synthetic", nativeID: try nativeID(credential))
     }
-    func refresh(_ credential: AccountCredential) throws -> MusicQQVerified {
+    func refresh(_ credential: AccountCredential) throws -> MusicAccountVerified {
         accountCallCounts.refreshes += 1
         return .init(credential: credential, nickname: "Synthetic", nativeID: try nativeID(credential))
     }
-    func syncRead(kinds: [MusicLibrarySyncKind], credential: AccountCredential,
+    func syncRead(kinds: [MusicLibrarySyncKind],
                   guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncSnapshot {
         if let gate { await gate.wait() }
         try await authorization.check()
-        return .init(accountID: try nativeID(credential), collections: [], revision: "synthetic")
+        return .init(accountID: try accountID(), collections: [], revision: "synthetic")
     }
-    func syncReadSubscriptions(credential: AccountCredential,
-                               guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncSnapshot {
+    func syncReadSubscriptions(guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncSnapshot {
         if let gate { await gate.wait() }
         try await authorization.check()
-        return .init(accountID: try nativeID(credential), collections: [],
+        return .init(accountID: try accountID(), collections: [],
             subscriptions: [.init(remoteID: "900", relationID: "900", name: "Synthetic")], revision: "synthetic")
     }
-    func syncWrite(_ mutation: MusicLibrarySyncMutation, credential: AccountCredential,
+    func syncWrite(_ mutation: MusicLibrarySyncMutation,
                    guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncWriteResult {
         if let gate { await gate.wait() }
-        try await authorization.check(); sends += 1
+        try await authorization.check(); try authorization.beginDispatch(); sends += 1
         return .acknowledged(createdID: "501", createdName: "Synthetic")
     }
     func createQR(id: UUID) throws -> MusicLoginChallenge {
         accountCallCounts.logins += 1
         throw MusicServiceError.unsupported
     }
-    func pollQR(id: UUID) throws -> MusicQQLoginResult { throw MusicServiceError.unsupported }
+    func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) throws -> MusicQQRecommendation { throw MusicServiceError.unsupported }
-    func collectionRows(credential: AccountCredential) -> [JSONValue] { [] }
-    func tracks(collectionID: String, credential: AccountCredential) -> [JSONValue] { [] }
-    func capabilities(mid: String, credential: AccountCredential) -> [String] { [] }
-    func resolve(mid: String, quality: String, credential: AccountCredential) throws -> JSONValue { throw MusicServiceError.unsupported }
+    func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation { throw MusicServiceError.unsupported }
+    func collectionRows() -> [JSONValue] { [] }
+    func tracks(collectionID: String) -> [JSONValue] { [] }
+    func capabilities(mid: String) -> [String] { [] }
+    func resolve(mid: String, quality: String) throws -> JSONValue { throw MusicServiceError.unsupported }
 }
 
 @MainActor final class MusicAccountSyncOwnerTests: XCTestCase {
@@ -96,8 +104,9 @@ private actor SyncOwnerProvider: MusicAccountSyncProvider {
         clock.advance(1)
         do { try await owner.checkLibrarySync(session); XCTFail("600-second TTL boundary") }
         catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
-        do { _ = try await owner.writeLibrarySync(session, mutation: .init(action: .create, name: "Expired")); XCTFail("expired write") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+        let expired = try await owner.writeLibrarySync(session, mutation: .init(action: .create, name: "Expired"))
+        if case .notDispatched(let failure) = expired { XCTAssertEqual(failure, .staleResult) }
+        else { XCTFail("An expired capability must not dispatch") }
         let sent = await provider.writes(); XCTAssertEqual(sent, 1)
         let expiredAccount = await accounts.snapshot(for: identity)
         XCTAssertEqual(expiredAccount, account)
@@ -137,10 +146,9 @@ private actor SyncOwnerProvider: MusicAccountSyncProvider {
             let external = try XCTUnwrap(store.peek(identity))
             XCTAssertNotEqual(external.revision, original.revision)
             let writes = store.counts().writes, removes = store.counts().removes
-            do {
-                _ = try await owner.writeLibrarySync(session, mutation: .init(action: .create, name: "Obsolete"))
-                XCTFail("changed persistence revision must deny dispatch")
-            } catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
+            let obsolete = try await owner.writeLibrarySync(session, mutation: .init(action: .create, name: "Obsolete"))
+            if case .notDispatched(let failure) = obsolete { XCTAssertEqual(failure, .authRequired) }
+            else { XCTFail("Changed persistence revision must deny dispatch") }
             let invalidated = await accounts.snapshot(for: identity)
             XCTAssertEqual(invalidated.phase, .invalidated)
             XCTAssertEqual(invalidated.failure, .credentialsChanged)
@@ -198,7 +206,10 @@ private actor SyncOwnerProvider: MusicAccountSyncProvider {
             default: _ = await owner.close()
             }
             await gate.release()
-            do { _ = try await task.value; XCTFail("revoked mutation") } catch { XCTAssertNotNil(error as? MusicServiceError) }
+            let result = try await task.value
+            if case .notDispatched(let failure) = result {
+                XCTAssertTrue([.cancelled, .staleResult, .closed, .accessUnavailable, .authRequired].contains(failure))
+            } else { XCTFail("A revoked mutation must not dispatch") }
             let sent = await provider.writes(); XCTAssertEqual(sent, 0)
             _ = await owner.close()
         }
@@ -217,7 +228,9 @@ private actor SyncOwnerProvider: MusicAccountSyncProvider {
         let gate = MusicAccountTestGate(); await provider.hold(gate)
         let task = Task { try await owner.writeLibrarySync(session, mutation: .init(action: .delete)) }
         await gate.started(); task.cancel(); await gate.release()
-        do { _ = try await task.value; XCTFail("cancelled write") } catch { XCTAssertNotNil(error as? MusicServiceError) }
+        let result = try await task.value
+        if case .notDispatched(let failure) = result { XCTAssertEqual(failure, .cancelled) }
+        else { XCTFail("A cancelled write must not dispatch") }
         let sent = await provider.writes(); XCTAssertEqual(sent, 0)
         await owner.endLibrarySync(session); _ = await owner.close()
     }

@@ -118,7 +118,7 @@ public static class UserDataResetHostTests
                                 foreach (string ns in AppIdentity.CacheNamespaces)
                                     Check((await module.Cache.ReadAsync(ns)).Data is null, "new cache owner cannot reuse old bytes");
                                 Check((await module.Store.ReadAsync("film.library.v1")).Data is null, "late old writes cannot survive reset");
-                                Check((await module.Store.ReadAsync("music.accounts.v1")).Data is null, "old account bytes were removed");
+                                Check((await module.Store.ReadAsync("music.accounts.v2")).Data is null, "previous account bytes were removed");
                                 var library = await module.Native.ExecuteAsync("music.library.list", new { });
                                 Check(library.GetProperty("ok").GetBoolean() && library.GetProperty("total").GetInt32() == 1,
                                     "new native library contains only the default favorites");
@@ -144,7 +144,7 @@ public static class UserDataResetHostTests
                                 Check(created.GetProperty("ok").GetBoolean());
                                 await appearance.SaveAsync("#ABCDEF");
                                 Check(appearance.ThemeColor == "#ABCDEF");
-                                await module.Store.WriteAsync("music.accounts.v1", "broken old credentials"u8.ToArray(),
+                                await module.Store.WriteAsync("music.accounts.v2", "corrupt current credentials"u8.ToArray(),
                                     DocumentFingerprint.Missing);
                                 foreach (string directory in new[] { "script-runtime", "music-playback-cache",
                                     "script-runtime/film-metadata", "script-runtime/film-media", "script-runtime/volumes/fixture/tmp" })
@@ -189,7 +189,7 @@ public static class UserDataResetHostTests
                     catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Closed) { }
                     try
                     {
-                        module.Cache.ReadMemory("music.home.v1");
+                        module.Cache.ReadMemory(MusicHomeSnapshotStore.Namespace);
                         throw new InvalidOperationException("retired cache admitted a read");
                     }
                     catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Closed) { }
@@ -241,7 +241,7 @@ public static class UserDataResetHostTests
             await Native.AbortAsync();
             var snapshot = await Store.ReadAsync("film.library.v1");
             await Store.WriteAsync("film.library.v1", "late old generation write"u8.ToArray(), snapshot.Fingerprint);
-            Cache.Save("music.home.v1", "late old generation cache"u8.ToArray());
+            Cache.Save(MusicHomeSnapshotStore.Namespace, "late old generation cache"u8.ToArray());
             Released = true;
         }
     }

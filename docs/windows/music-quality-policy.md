@@ -11,7 +11,7 @@
 
 ## 当前持久格式
 
-- 文档命名空间：`music.library.v1`。
+- 文档命名空间：`music.library.v2`。
 - 区域：`native-quality-policy`。
 - 当前且唯一格式：
 

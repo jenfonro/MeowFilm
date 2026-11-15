@@ -211,7 +211,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             if refresh { await model.load() }
             else { await model.ensureLibraryLoaded() }
             guard !Task.isCancelled, let self, self.request == own, model.accountAccessGeneration == access else { return }
-            self.loading = false; self.loadError = self.model.error
+            self.loading = false; self.loadError = self.model.notices.error
             self.collection.refreshControl?.endRefreshing()
             self.render()
         }

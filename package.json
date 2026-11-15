@@ -12,7 +12,8 @@
     "packages/film-search",
     "packages/novel-rules",
     "packages/film-playback",
-    "packages/netease-token"
+    "packages/netease-token",
+    "packages/music-platform"
   ],
   "engines": {
     "node": "^24.0.0"

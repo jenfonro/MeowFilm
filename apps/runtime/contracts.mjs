@@ -1,7 +1,11 @@
+import { musicPlatformCodes } from '@meowfilm/music-platform';
+
 const metadataCodes = () => new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'NETWORK_ERROR',
   'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'WEB_INTERACTION_REQUIRED', 'STORAGE_ERROR', 'CORRUPT_STORAGE']);
 
 export const contracts = Object.freeze({
+  'music-platform': { contract: 'music.platform.v1', version: '0.1.0', prefix: 'music.platform.',
+    operations: ['request', 'session.update', 'cache.clear', 'describe'], codes: musicPlatformCodes },
   netease: { contract: 'netease.token.v1', version: '0.1.0', prefix: 'netease.token.',
     operations: ['get'],
     codes: new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'TIMEOUT', 'NETWORK_ERROR',

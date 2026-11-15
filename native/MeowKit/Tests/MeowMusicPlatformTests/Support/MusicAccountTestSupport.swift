@@ -3,6 +3,9 @@ import MeowAccounts
 import MeowContracts
 import MeowMusicFeature
 import MeowJSON
+import MeowRuntime
+import MeowStorage
+import MeowMusicTestSupport
 @testable import MeowMusicPlatform
 
 // Entirely synthetic fixtures. Never reads the user's Keychain or contacts a
@@ -64,124 +67,124 @@ enum MusicAccountFixture {
         .init(source: try SourceAddress(installationID: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
                                         siteKey: site), accountID: account)
     }
-    static func auth(_ uid: Int = 101) -> [String: Any] {
-        ["musicid": uid, "musickey": "synthetic-account-key", "encrypt_uin": "synthetic-euin-\(uid)"]
+    static func credential(_ uid: Int = 101, platform: MusicAccountPlatform = .qq) throws -> AccountCredential {
+        let cookie: String
+        switch platform {
+        case .qq:
+            cookie = "musicid=\(uid); musickey=synthetic-account-key; encrypt_uin=synthetic-euin-\(uid)"
+        case .netease:
+            cookie = "MUSIC_U=synthetic-user-\(uid); __csrf=synthetic-csrf; deviceId=synthetic-device; " +
+                "_ntes_nuid=synthetic-nuid; _ntes_nnid=synthetic-nuid,1800000000000; WNMCID=synthetic.1800000000000.01.0"
+        case .kugou:
+            cookie = "userid=\(uid); token=synthetic-token; KUGOU_API_GUID=0123456789abcdef0123456789abcdef; " +
+                "KUGOU_API_MID=176905054734845483393488264506404844848; KUGOU_API_DEV=0123456789; " +
+                "KUGOU_API_MAC=02:00:00:00:00:00; dfid=synthetic-dfid"
+        }
+        return try MusicAccountCredential.make(platform: platform, userID: String(uid), cookie: cookie)
     }
-    static func credential(_ uid: Int = 101) throws -> AccountCredential {
-        try .init(data: MusicQQWire.json(["version": 1, "platform": "tx", "auth": auth(uid)]))
+    static func userID(_ credential: AccountCredential) throws -> String {
+        try MusicAccountCredential.read(credential)[music: "userId"].musicRequiredText()
     }
-    static func song(_ mid: String = "SyntheticMID", id: Int = 101) -> [String: Any] {
-        ["mid": mid, "id": id, "type": 0, "title": "合成歌曲", "interval": 180,
-         "singer": [["name": "合成歌手"]], "album": ["mid": "SyntheticAlbum", "name": "合成专辑"],
-         "file": ["size_128mp3": 100, "size_320mp3": 200, "size_flac": 300, "size_new": [400]]]
+    static func account(_ request: MusicPlatformFixture.Request) throws -> RuntimeValue {
+        let candidate = request.candidate
+        let fallback = try MusicAccountCredential.read(credential(platform:
+            MusicAccountPlatform(rawValue: request.platform) ?? .qq))
+        let uid = candidate[music: "userId"] == .null ? fallback[music: "userId"].musicText : candidate[music: "userId"].musicText
+        let cookie = candidate[music: "cookie"] == .null ? fallback[music: "cookie"].musicText : candidate[music: "cookie"].musicText
+        return .object(["userId": .string(uid), "cookie": .string(cookie),
+            "profile": .object(["displayName": .string("合成昵称")])])
     }
-    static func response(_ fields: [String: Any], status: Int = 200) throws -> MusicAccountHTTPResponse {
-        .init(status: status, data: try MusicQQWire.json(fields))
-    }
-    static func rpc(_ fields: [String: Any]) throws -> MusicAccountHTTPResponse {
-        try response(["code": 0, "req_0": ["code": 0, "data": fields]])
+    static func track(_ mid: String = MusicAccountFixture.mid, platform: String = "tx") throws -> MusicNativeTrackData {
+        .init(platform: platform, data: try RuntimeJSON.encode(.object(["songmid": .string(mid),
+            "name": .string("合成歌曲"), "singer": .string("合成歌手"), "duration": .number(180),
+            "types": .array([.object(["type": .string("128k")])])])))
     }
 }
 
-actor MusicAccountTestHTTP: MusicAccountHTTPTransport {
+actor MusicAccountRuntimePeer: MusicPlatformFixtureResponding {
     let clock: MusicAccountTestClock
-    private var requests: [MusicAccountHTTPRequest] = []
-    private var overrides: [String: MusicAccountHTTPResponse] = [:]
+    private var requests: [MusicPlatformFixture.Request] = []
+    private var overrides: [String: RuntimeValue] = [:]
+    private var failures: [String: String] = [:]
     private var block: (String, MusicAccountTestGate)?
     init(clock: MusicAccountTestClock) { self.clock = clock }
-    func replies(_ method: String, _ response: MusicAccountHTTPResponse) { overrides[method] = response }
-    func hold(_ method: String, _ gate: MusicAccountTestGate) { block = (method, gate) }
-    func recorded() -> [MusicAccountHTTPRequest] { requests }
-    static func fields(_ request: MusicAccountHTTPRequest) throws -> [String: Any] {
-        try MusicQQWire.decode(request.body ?? Data())
-    }
-    static func method(_ request: MusicAccountHTTPRequest) throws -> String {
-        if request.url.host == "u.y.qq.com" {
-            return try MusicQQWire.string(MusicQQWire.object(fields(request)["req_0"])["method"])
-        }
-        return request.url.path
-    }
-    func send(_ request: MusicAccountHTTPRequest) async throws -> MusicAccountHTTPResponse {
+    func replies(_ operation: String, _ value: RuntimeValue) { overrides[operation] = value }
+    func clearReply(_ operation: String) { overrides.removeValue(forKey: operation) }
+    func fail(_ operation: String, code: String) { failures[operation] = code }
+    func clearFailure(_ operation: String) { failures.removeValue(forKey: operation) }
+    func hold(_ operation: String, _ gate: MusicAccountTestGate) { block = (operation, gate) }
+    func recorded() -> [MusicPlatformFixture.Request] { requests }
+    func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
         requests.append(request)
-        let method = try Self.method(request)
-        // Deliberately non-cooperative: access/close must not release its slot.
-        if let block, block.0 == method { await block.1.wait() }
-        if let override = overrides[method] { return override }
-        switch method {
-        case "/ptqrshow":
-            let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVxkAAAAASUVORK5CYII=")!
-            return .init(status: 200, data: png, headers: ["Set-Cookie": "qrsig=synthetic-qr; Path=/; HttpOnly"])
-        case "/ptqrlogin":
-            return .init(status: 200, data: Data("ptuiCB('0','0','https://ssl.ptlogin2.graph.qq.com/check_sig?uin=101&ptsigx=synthetic-sign','0','ok','Synthetic');".utf8))
-        case "/check_sig":
-            return .init(status: 302, data: Data(), headers: ["Set-Cookie":
-                "p_skey=synthetic-pkey; Path=/, p_uin=o000101; Path=/, unexpected=synthetic-not-forwarded"])
-        case "/oauth2.0/authorize":
-            return .init(status: 302, data: Data(), headers: ["Location": "https://y.qq.com/portal/wx_redirect.html?code=synthetic-code"])
-        case "/tme/trpc/proxy":
-            return try MusicAccountFixture.response(["data": "{\"data\":{\"q16\":\"synthetic-q16\",\"q36\":\"synthetic-q36\"}}"])
-        case "GetSession":
-            return try MusicAccountFixture.rpc(["session": ["uid": 123, "sid": "synthetic-device-session"]])
-        case "QQLogin": return try MusicAccountFixture.rpc(MusicAccountFixture.auth())
-        case "GetLoginUserInfo": return try MusicAccountFixture.rpc(["musicid": 101])
-        case "GetHomepageHeader":
-            return try MusicAccountFixture.rpc(["Info": ["BaseInfo": ["EncryptedUin": "synthetic-euin-101", "Name": "合成昵称"]]])
-        case "get_radio_track":
-            return try MusicAccountFixture.rpc(["tracks": [MusicAccountFixture.song()]])
-        case "GetRadarSong":
-            return try MusicAccountFixture.rpc(["HasMore": false, "VecSongs":
-                (0..<35).map { ["Track": MusicAccountFixture.song("SyntheticMID\($0)", id: 101 + $0)] }])
-        case "GetPlaylistByUin":
-            return try MusicAccountFixture.rpc(["v_playlist": [["id": 501, "dirid": 7, "uin": 101, "title": "合成歌单"]],
-                                                "bFinish": 1, "total": 1])
-        case "CgiGetPlaylistFavInfo":
-            return try MusicAccountFixture.rpc(["v_list": [["id": 502, "dirid": 8, "uin": 999, "title": "合成订阅"]],
-                                                "v_failTids": [], "total": 1, "hasmore": 0, "hide": false])
-        case "CgiGetDiss":
-            let params = try MusicQQWire.object(MusicQQWire.object(Self.fields(request)["req_0"])["param"])
-            let id = try MusicQQWire.integer(params["disstid"]), dir = try MusicQQWire.integer(params["dirid"])
-            return try MusicAccountFixture.rpc(["songlist": [MusicAccountFixture.song()], "total_song_num": 1,
-                "songlist_size": 1, "hasmore": 0, "dirinfo": ["tid": id, "dirId": dir, "creator": ["musicid": id == 502 ? 999 : 101]]])
-        case "vip_login_base":
-            return try MusicAccountFixture.rpc(["svip": 1, "userinfo": ["expire": clock.now().timeIntervalSince1970 + 300]])
-        case "CgiGetTrackInfo": return try MusicAccountFixture.rpc(["tracks": [MusicAccountFixture.song()]])
-        case "UrlGetVkey":
-            let params = try MusicQQWire.object(MusicQQWire.object(Self.fields(request)["req_0"])["param"])
-            let file = try MusicQQWire.string((params["filename"] as? [String])?.first)
-            return try MusicAccountFixture.rpc(["expiration": 3600, "midurlinfo":
-                [["songmid": MusicAccountFixture.mid, "filename": file, "result": 0, "purl": file + "?vkey=synthetic-media-grant", "ekey": ""]]])
-        default: throw MusicServiceError.invalidRequest
+        if let block, block.0 == request.operation { await block.1.wait() }
+        if let code = failures[request.operation] { throw MusicPlatformFixture.Failure.remote(code) }
+        if let value = overrides[request.operation] { return value }
+        switch request.operation {
+        case "account.verify", "account.refresh", "sms.login": return try MusicAccountFixture.account(request)
+        case "account.profile":
+            return .object(["profile": .object(["displayName": .string("合成昵称"),
+                "avatar": .string("https://images.invalid/avatar.jpg")]),
+                "entitlements": .object(["membership": .object(["vip": .bool(true)]),
+                    "recheckAt": .number(clock.now().addingTimeInterval(300).timeIntervalSince1970 * 1000)])])
+        case "qr.create":
+            return .object(["url": .string("https://login.invalid/synthetic"),
+                "expiresAt": .number(clock.now().addingTimeInterval(180).timeIntervalSince1970 * 1000)])
+        case "qr.poll": return .object(["status": .string("authenticated"), "account": try MusicAccountFixture.account(request)])
+        case "qr.cancel": return .object(["cancelled": .bool(true)])
+        case "sms.send": return .object(["confirmed": .bool(true), "retryAfterSeconds": .number(60)])
+        case "chorus": return .object(["point": .object(["start": .number(71.2), "end": .number(122.2)])])
+        case "recommendations":
+            return try MusicPlatformFixture.page([MusicAccountFixture.track(platform: request.platform)], platform: request.platform)
+        case "personalPlaylists": return .object(["items": .array([.object(["id": .string("501"),
+            "name": .string("合成歌单"), "count": .number(1), "owned": .bool(true),
+            "action": .object(["type": .string("playlist"), "id": .string("501")])])]), "more": .bool(false)])
+        case "playlist.complete": return try MusicPlatformFixture.page([MusicAccountFixture.track(platform: request.platform)], platform: request.platform)
+        case "audio.options": return .object(["qualities": .array([.string("128k"), .string("320k"), .string("flac")])])
+        case "audio": return .object(["url": .string("https://media.invalid/synthetic.mp3"),
+            "requestQuality": request.parameters[music: "quality"],
+            "actualQuality": request.parameters[music: "quality"], "full": .bool(true),
+            "expiresAt": .number(clock.now().addingTimeInterval(120).timeIntervalSince1970 * 1000)])
+        case "feedback.send":
+            let start = request.parameters[music: "event"] == .string("start")
+            return .object(["status": .string(start && request.platform == "tx" ? "registered" : "confirmed"),
+                "sessionId": start ? .string(UUID().uuidString) : request.parameters[music: "sessionId"]])
+        case "feedback.upload": return .object(["status": .string("confirmed")])
+        case "feedback.release": return .object(["released": .bool(true)])
+        default: throw MusicPlatformFixture.Failure.remote("UNSUPPORTED")
         }
     }
 }
 
 struct MusicNativeFixture {
+    let accountPlatform: MusicAccountPlatform
     let identity: AccountIdentity
     let store = MusicAccountTestStore()
     let clock = MusicAccountTestClock()
-    let http: MusicAccountTestHTTP
+    let platform: MusicAccountRuntimePeer
+    let runtime: MusicPlatformFixture
     let accounts: AccountSessionCoordinator
     let service: NativeMusicAccountService
-    init(restored: Bool = true) throws {
-        identity = try MusicAccountFixture.identity()
-        http = MusicAccountTestHTTP(clock: clock)
+    init(platform accountPlatform: MusicAccountPlatform = .qq, restored: Bool = true,
+         feedbackOutboxStoreFactory: (@Sendable () throws -> DocumentStore)? = nil) throws {
+        self.accountPlatform = accountPlatform
+        identity = try MusicAccountFixture.identity(accountPlatform.rawValue)
+        platform = MusicAccountRuntimePeer(clock: clock)
+        runtime = try MusicPlatformFixture { [platform] in try await platform.respond($0) }
         accounts = AccountSessionCoordinator(store: store)
-        service = NativeMusicAccountService(accounts: accounts, scopes: [.qq: identity],
-                                            transport: http, clock: { [clock] in clock.now() })
-        if restored { try store.write(CredentialRecord(credential: MusicAccountFixture.credential()), for: identity) }
+        service = NativeMusicAccountService(accounts: accounts, scopes: [accountPlatform: identity],
+            platformClient: runtime.makeClient(), feedbackOutboxStoreFactory: feedbackOutboxStoreFactory,
+            clock: { [clock] in clock.now() })
+        if restored { try store.write(CredentialRecord(credential:
+            MusicAccountFixture.credential(platform: accountPlatform)), for: identity) }
     }
     func enable(_ generation: Int = 1) async throws {
         _ = try await service.setAccess(available: true, generation: generation)
     }
     func invoke(_ operation: String, _ fields: [String: JSONValue] = [:]) async throws -> [String: JSONValue] {
-        // A fixture-only assertion envelope over the production native guard.
-        // No method registry, RPC transport or script runtime is involved.
         do {
             var input = fields
-            let requested = try input.removeValue(forKey: "operation").map {
-                try MusicPlatformJSON.string($0, maximum: 32)
-            } ?? operation
-            var reply = try await service.nativeBusiness(requested, platform: .qq, fields: input)
+            let requested = try input.removeValue(forKey: "operation").map { try MusicAccountFields.string($0) } ?? operation
+            var reply = try await service.nativeBusiness(requested, platform: accountPlatform, fields: input)
             reply["version"] = .number(1); reply["ok"] = .bool(true)
             return reply
         } catch let failure as MusicServiceError {
@@ -190,25 +193,55 @@ struct MusicNativeFixture {
     }
 }
 
-/// Synthetic account provider for owner tests. nativeID reads the fixture
-/// credential shapes: QQ `auth.musicid`, other platforms `accountID`.
-actor MusicAccountTestProvider: MusicAccountProvider {
+/// Owner lifecycle tests need a deliberately non-cooperative worker: cancelling
+/// URLSession ends its task and cannot prove an injected worker has drained.
+struct MusicNativeOwnerFixture {
+    let identity: AccountIdentity
+    let store = MusicAccountTestStore()
+    let provider = MusicAccountTestProvider()
+    let accounts: AccountSessionCoordinator
+    let service: NativeMusicAccountService
+    init() throws {
+        identity = try MusicAccountFixture.identity()
+        accounts = AccountSessionCoordinator(store: store)
+        service = NativeMusicAccountService(accounts: accounts, scopes: [.qq: identity], providers: [.qq: provider])
+        try store.write(CredentialRecord(credential: MusicAccountFixture.credential()), for: identity)
+    }
+    func enable() async throws { _ = try await service.setAccess(available: true, generation: 1) }
+}
+
+/// Synthetic provider for local credential-owner tests, with current credentials.
+actor MusicAccountTestProvider: MusicAccountProvider, MusicAccountSMSProvider {
     private(set) var verifications = 0
     private(set) var refreshes = 0
     private(set) var began = 0
-    func counts() -> (verify: Int, refresh: Int, begin: Int) { (verifications, refreshes, began) }
-    func nativeID(_ credential: AccountCredential) throws -> String {
-        let root = try MusicQQWire.decode(credential.dataRepresentation())
-        if root["platform"] as? String == "tx" {
-            return try MusicQQWire.id(MusicQQWire.object(root["auth"])["musicid"])
-        }
-        return try MusicQQWire.id(root["accountID"])
+    private var gate: MusicAccountTestGate?
+    private var failure: MusicServiceError?
+    private var smsGate: MusicAccountTestGate?
+    func configure(gate: MusicAccountTestGate? = nil, failure: MusicServiceError? = nil) {
+        self.gate = gate; self.failure = failure
     }
-    func verify(_ credential: AccountCredential) throws -> MusicQQVerified {
+    func counts() -> (verify: Int, refresh: Int, begin: Int) { (verifications, refreshes, began) }
+    func holdSMS(_ gate: MusicAccountTestGate) { smsGate = gate }
+    func sendSMS(countryCode: String, phone: String, attemptID: UUID) async -> MusicSMSSendReceipt {
+        if let smsGate { await smsGate.wait() }
+        return .init(retryAt: .distantFuture)
+    }
+    func loginSMS(countryCode: String, phone: String, code: String, attemptID: UUID) throws -> MusicAccountVerified {
+        throw MusicServiceError.unsupported
+    }
+    func cancelSMS(_ id: UUID) {}
+    func nativeID(_ credential: AccountCredential) throws -> String {
+        try MusicAccountFixture.userID(credential)
+    }
+    func verify(_ credential: AccountCredential) async throws -> MusicAccountVerified {
         verifications += 1
+        let pending = gate, failed = failure
+        if let pending { await pending.wait() }
+        if let failed { throw failed }
         return .init(credential: credential, nickname: "Synthetic", nativeID: try nativeID(credential))
     }
-    func refresh(_ credential: AccountCredential) throws -> MusicQQVerified {
+    func refresh(_ credential: AccountCredential) throws -> MusicAccountVerified {
         refreshes += 1
         return .init(credential: credential, nickname: "Synthetic", nativeID: try nativeID(credential))
     }
@@ -216,12 +249,12 @@ actor MusicAccountTestProvider: MusicAccountProvider {
         began += 1
         return .init(id: id, platform: .qq, image: Data([0]), expiresAt: Date().addingTimeInterval(180))
     }
-    func pollQR(id: UUID) -> MusicQQLoginResult { .init(progress: .waiting, verified: nil) }
+    func pollQR(id: UUID) -> MusicAccountLoginResult { .init(progress: .waiting, verified: nil) }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func recommendations(kind: String, page: Int, credential: AccountCredential) -> MusicQQRecommendation { .init(rows: [], nextPage: nil) }
-    func collectionRows(credential: AccountCredential) -> [JSONValue] { [] }
-    func tracks(collectionID: String, credential: AccountCredential) -> [JSONValue] { [] }
-    func capabilities(mid: String, credential: AccountCredential) -> [String] { ["128k"] }
-    func resolve(mid: String, quality: String, credential: AccountCredential) -> JSONValue { .null }
+    func recommendations(kind: String, page: Int) -> MusicAccountRecommendation { .init(rows: [], nextPage: nil) }
+    func collectionRows() -> [JSONValue] { [] }
+    func tracks(collectionID: String) -> [JSONValue] { [] }
+    func capabilities(mid: String) -> [String] { ["128k"] }
+    func resolve(mid: String, quality: String) -> JSONValue { .null }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Native adaptations of iWebPlus b900c259 (Apache-2.0). Protocol notices: LICENSES/NOTICE.md.
-using System.Net.Http;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
@@ -19,128 +19,104 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
         ("owner", Owner), ("members", Members.Select(m => new { m.Id, m.Key, m.Sort })), ("locator", Locator)));
 }
 internal sealed record SyncSubscription(string Id, string Name, string Cover, long Count, JsonObject Locator);
-internal sealed record SyncDirectory(string AccountId, IReadOnlyList<SyncRemote> Collections, IReadOnlyList<SyncSubscription> Subscriptions);
+internal sealed record SyncDirectoryEntry(string Id, bool Owned);
+internal sealed record SyncDirectory(string AccountId, IReadOnlyList<SyncRemote> Collections,
+    IReadOnlyList<SyncSubscription> Subscriptions, IReadOnlyList<SyncDirectoryEntry> Directory);
 
-internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlatformHttp http,
-    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client,
-    Func<Task> guard, Action accountGuard, CancellationToken token)
+internal sealed class MusicSyncWriteException(string status, string code) : Exception(code)
 {
-    protected readonly MusicPlatformSession Session = session;
-    protected readonly CancellationToken Token = token;
-    private readonly Func<Task> checkpointGuard = guard;
-    protected readonly MusicPlatformHttp Http = http;
-    protected readonly MusicPlatformClientContextOwner Clients = clients;
-    private MusicPlatformClientContext? clientContext = client;
-    protected MusicWyClientContext WyClient => (MusicWyClientContext)clientContext!;
-    protected MusicKgClientContext KgClient => (MusicKgClientContext)clientContext!;
-    private void GuardClient()
+    internal string Status { get; } = status;
+    internal string Code { get; } = code;
+}
+
+/// <summary>Node platform adapter. The native sync engine owns its journal, preflight and readback.</summary>
+internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatformClient client,
+    Func<Task> checkpointGuard, Action accountGuard, CancellationToken token)
+{
+    internal string Platform => session.Platform;
+    internal string AccountId => session.UserId;
+    private static readonly System.Text.Json.JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
+    private async Task<System.Text.Json.JsonElement> Read(string operation, object parameters)
     {
-        accountGuard();
-        Token.ThrowIfCancellationRequested();
-        if (clientContext is not null)
-            Require(Clients.IsCurrent(clientContext), Clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
+        await checkpointGuard().ConfigureAwait(false); accountGuard(); token.ThrowIfCancellationRequested();
+        var value = await client.RequestAsync(Platform, operation, parameters, session, token, accountGuard).ConfigureAwait(false);
+        await checkpointGuard().ConfigureAwait(false); accountGuard();
+        return value;
     }
-    protected async Task Guard()
+    internal async Task<SyncDirectory> ReadAsync(string[] kinds) =>
+        (await Read("sync.read", new { kinds }).ConfigureAwait(false)).Deserialize<SyncDirectory>(Json)!;
+    internal async Task<SyncRemote?> ReadCollectionAsync(string id)
     {
-        await checkpointGuard().ConfigureAwait(false);
-        GuardClient();
+        var directory = (await Read("sync.read", new { collectionId = id }).ConfigureAwait(false)).Deserialize<SyncDirectory>(Json)!;
+        return directory.Collections.FirstOrDefault();
     }
-    protected async Task AcceptCatalogReadAsync()
+    internal async Task<SyncDirectory> ReadSubscriptionsAsync() =>
+        (await Read("sync.read", new { subscriptionsOnly = true }).ConfigureAwait(false)).Deserialize<SyncDirectory>(Json)!;
+    internal async Task<SyncSubscription> SubscriptionTargetAsync(string id, string name, string cover, long count) =>
+        (await Read("sync.target", new { id, name, cover, count }).ConfigureAwait(false)).Deserialize<SyncSubscription>(Json)!;
+    internal async Task<Func<Task>> PrepareSubscriptionAsync(SyncSubscription target, bool subscribe)
     {
-        accountGuard(); Token.ThrowIfCancellationRequested();
-        if (clientContext is not null)
-            clientContext = await Clients.AcquireAsync(Platform, Token).ConfigureAwait(false);
-        await Guard().ConfigureAwait(false);
+        if (subscribe && Platform == "kg")
+            LJ.Require(LJ.S(target.Locator["creatorId"]) != AccountId, "READ_ONLY");
+        string action = subscribe ? "subscribe" : "unsubscribe";
+        string? preparationId = Platform == "wy" ? (await Read("sync.prepare", new { action, id = target.Id }).ConfigureAwait(false))
+            .GetProperty("preparationId").GetString() : null;
+        return () => Write(new { action, id = target.Id, name = target.Name,
+            remote = new { id = target.Id, name = target.Name, locator = target.Locator }, preparationId });
     }
-    internal string Platform => Session.Platform;
-    internal string AccountId => Session.UserId;
-    protected async Task<JsonObject> Send(HttpRequestMessage request, string? path = null)
+    internal void CheckWriteCapability(string operation)
+    { if (Platform == "tx" && operation == "order") throw new MusicLibraryException("REMOTE_ORDER_UNSUPPORTED"); }
+    internal Task CreateAsync(string name) => Write(new { action = "create", name });
+    internal Task DeleteAsync(SyncRemote remote) => Write(new { action = "delete", remote });
+    internal Task ChangeAsync(SyncRemote remote, bool add, IReadOnlyList<string> ids, IReadOnlyDictionary<string, JsonObject> songs) =>
+        Write(new { action = add ? "add" : "remove", remote, ids, songs,
+            members = remote.Members.Where(member => !add && ids.Contains(member.Id))
+                .Select(member => new { id = member.Id, key = member.Key }).ToArray() });
+    internal Task OrderAsync(SyncRemote remote, IReadOnlyList<string> ids)
     {
-        try { await Guard().ConfigureAwait(false); }
-        catch { request.Dispose(); throw; }
-        var response = await Http.SendAsync(Platform, request, Token).ConfigureAwait(false);
-        await Guard().ConfigureAwait(false);
-        var body = Platform switch { "wy" => PlatformProtocols.WySuccess(response.Body), "tx" => PlatformProtocols.TxSuccess(response.Body),
-            "kg" => PlatformProtocols.KgSuccess(response.Body, path ?? ""), _ => throw new MusicLibraryException("INVALID_PLATFORM") };
-        if (Platform == "wy") clientContext = await Clients.AcceptWyAsync(WyClient, Session.Cookie,
-            response.SetCookieHeaders, GuardClient, Token).ConfigureAwait(false);
-        await Guard().ConfigureAwait(false); return body;
-    }
-    protected Task<JsonObject> Wy(string path, JsonObject body, bool weapi = true) =>
-        Send(MusicPlatformRequests.WyWithCookie(path, body, Session.Cookie, WyClient, weapi));
-    protected Task<JsonObject> Tx(string module, string method, JsonObject body) =>
-        Send(MusicPlatformRequests.TxWithCookie(module, method, body, Session.Cookie));
-    protected Dictionary<string, string> Cookies => PJ.CookieHeader(Session.Cookie);
-    protected Task<JsonObject> Kg(string path, JsonObject query, string? router = "cloudlist.service.kugou.com", JsonObject? body = null) =>
-        Send(MusicPlatformRequests.KgWithCookie(path, query, Session.Cookie, KgClient, router, body), path);
-    protected static JsonObject O(params (string Key, object? Value)[] v) => LJ.Obj(v);
-    protected static JsonArray A(IEnumerable<string> v) => LJ.Arr(v);
-    protected static string Id(JsonNode? v) => PJ.Id(v);
-    protected static long Count(JsonNode? v) => PJ.Count(v);
-    protected static List<JsonObject> Rows(JsonNode? v) => PJ.RowsAll(v);
-    protected static List<JsonObject> Rows(JsonNode? v, int max) => PJ.Rows(v, max);
-    protected static void Require(bool condition, string code = "INCOMPLETE_PAGE") => LJ.Require(condition, code);
-    protected static string Name(JsonNode? n) { string value = PJ.Metadata(n); Require(LJ.Id(value, 200), "INVALID_RESPONSE"); return value; }
-    protected static void Same(IEnumerable<string> a, IEnumerable<string> b) => Require(a.SequenceEqual(b), "SNAPSHOT_CHANGED");
-    internal abstract Task<SyncDirectory> ReadAsync(string[] kinds);
-    internal abstract Task<SyncRemote?> ReadCollectionAsync(string id);
-    internal abstract Task<IReadOnlyList<SyncSubscription>> ReadSubscriptionsAsync();
-    internal virtual Task<SyncSubscription> SubscriptionTargetAsync(string id, string name, string cover, long count) =>
-        Task.FromResult(new SyncSubscription(id, name, cover, count, new()));
-    internal virtual Task<Func<Task>> PrepareSubscriptionAsync(SyncSubscription target, bool subscribe) =>
-        Task.FromResult<Func<Task>>(() => subscribe ? SubscribeAsync(target) : UnsubscribeAsync(target));
-    internal abstract Task SubscribeAsync(SyncSubscription target);
-    internal abstract Task UnsubscribeAsync(SyncSubscription subscription);
-    internal virtual void CheckWriteCapability(string operation) { }
-    internal abstract Task CreateAsync(string name);
-    internal abstract Task DeleteAsync(SyncRemote remote);
-    internal abstract Task ChangeAsync(SyncRemote remote, bool add, IReadOnlyList<string> ids, IReadOnlyDictionary<string, JsonObject> songs);
-    internal abstract Task OrderAsync(SyncRemote remote, IReadOnlyList<string> ids);
-    internal virtual string? NativeId(JsonObject song)
-    {
-        var sd = NativeMusicSong.SourceData(song);
-        if (LJ.S(sd["source"]) != Platform) return null;
-        string id = Platform == "kg" ? LJ.S(sd["hash"]).ToUpperInvariant() : NativeMusicSong.InfoId(sd);
-        return LJ.Id(id, 64) ? id : null;
-    }
-    internal virtual async Task<JsonObject?> ResolveAsync(JsonObject song)
-    {
-        if (LJ.S(song["title"]).Length == 0 || LJ.S(song["artist"]).Length == 0 || LJ.N(song["duration"]) <= 0) return null;
-        // Read-only catalog owned by this round, pinned to this exact lease. No second data writer/cache authority.
-        using var catalog = new MusicPlatformCatalog(new Pinned(Session, checkpointGuard), Http, Clients);
-        string query = (LJ.S(song["title"]) + " " + LJ.S(song["artist"])); query = query[..Math.Min(200, query.Length)];
-        var matches = new Dictionary<string, JsonObject>(); long? total = null; int received = 0;
-        var recordings = new NativeMusicSong.Recordings(song, Token);
-        for (int page = 1; ; page = checked(page + 1))
+        var remaining = remote.Members.GroupBy(member => member.Id).ToDictionary(
+            group => group.Key, group => new Queue<SyncMember>(group), StringComparer.Ordinal);
+        var members = new List<object>();
+        foreach (var id in ids)
         {
-            await Guard().ConfigureAwait(false);
-            var result = await catalog.SearchAsync(new(Platform, query, Page: page, Limit: 30, Refresh: true), Token).ConfigureAwait(false);
-            await AcceptCatalogReadAsync().ConfigureAwait(false);
-            var value = JsonNode.Parse(result.GetRawText())!.AsObject();
-            if (Platform == "kg")
-            {
-                long n = Count(value["total"]);
-                if (total is not null) Require(total == n, "SNAPSHOT_CHANGED");
-                total = n;
-                if (n > 300) return null;
-            }
-            foreach (var candidate in Rows(value["items"], 30))
-            {
-                received++;
-                if (recordings.CanMerge(new(candidate, Token), Token) && NativeId(candidate) is { } id)
-                    matches[id] = candidate;
-            }
-            if (Platform != "kg" || !LJ.B(value["more"])) break;
+            if (!remaining.TryGetValue(id, out var values) || !values.TryDequeue(out var member))
+                throw new MusicSyncWriteException("notSent", "REMOTE_CHANGED");
+            members.Add(new { id = member.Id, key = member.Key });
         }
-        if (Platform == "kg") Require(received == total, "INCOMPLETE_PAGE");
-        if (matches.Count > 1 && LJ.S(song["album"]).Length > 0)
-            matches = matches.Where(p => NativeMusicSong.NormalText(LJ.S(p.Value["album"])) == NativeMusicSong.NormalText(LJ.S(song["album"]))).ToDictionary();
-        return matches.Count == 1 ? matches.Values.Single() : null;
+        return Write(new { action = "order", remote, ids, members });
     }
-    private sealed class Pinned(MusicPlatformSession session, Func<Task> guard) : IMusicPlatformSessionSource
+    private async Task Write(object parameters)
     {
-        public async ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken cancellationToken)
-        { cancellationToken.ThrowIfCancellationRequested(); await guard().ConfigureAwait(false); return platform == session.Platform ? session : null; }
-        public bool IsCurrent(MusicPlatformSession other) => ReferenceEquals(session, other);
+        try { await checkpointGuard().ConfigureAwait(false); accountGuard(); token.ThrowIfCancellationRequested(); }
+        catch (Exception error) { throw new MusicSyncWriteException("notSent", MusicLibrarySyncEngine.Error(error)); }
+        var value = await client.RequestAsync(Platform, "sync.write", parameters, session, token, accountGuard).ConfigureAwait(false);
+        string status = value.TryGetProperty("status", out var receipt) && receipt.ValueKind == JsonValueKind.String
+            ? receipt.GetString()! : "unknown";
+        if (status != "confirmed") throw new MusicSyncWriteException(
+            status is "notSent" or "rejected" ? status : "unknown",
+            value.TryGetProperty("errorCode", out var code) && code.ValueKind == JsonValueKind.String
+                ? code.GetString()! : "WRITE_UNCONFIRMED");
+    }
+    internal string? NativeId(JsonObject song)
+    {
+        var info = NativeMusicSong.SourceData(song);
+        return LJ.S(info["source"]) == Platform ? NativeMusicSong.InfoId(info) : null;
+    }
+    internal async Task<JsonObject?> ResolveAsync(JsonObject song)
+    {
+        if (NativeMusicSong.Fingerprint(song).Length == 0 || LJ.N(song["duration"]) <= 0) return null;
+        var recording = new NativeMusicSong.Recordings(song, token);
+        var matches = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        for (int page = 1;;)
+        {
+            var value = JsonNode.Parse((await Read("search", new { keyword = MusicSongMatcher.Query(song), page, limit = 30,
+                kind = "songs", refresh = true }).ConfigureAwait(false)).GetRawText())!.AsObject();
+            foreach (var candidate in value["items"]!.AsArray().OfType<JsonObject>())
+                if (recording.CanMerge(new(candidate), token) && NativeId(candidate) is { } id) matches[id] = candidate;
+            if (Platform != "kg" || !LJ.B(value["more"])) break;
+            int next = checked((int)LJ.I(value["continuation"]!["page"]));
+            LJ.Require(next != page, "PAGINATION_STALLED"); page = next;
+        }
+        return matches.Count == 1 ? matches.Values.Single() : null;
     }
 }

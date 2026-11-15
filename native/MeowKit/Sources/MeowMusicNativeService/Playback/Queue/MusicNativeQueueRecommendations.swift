@@ -5,7 +5,7 @@ extension NativeMusicService: MusicQueueRecommendationServing {
     public func queueRecommendationSnapshot() async throws -> MusicQueueRecommendationSnapshot? {
         guard let item = try await prepareQueueRecommendations() else { return nil }
         item.currentEntryID = try read().queue["currentId"].string
-        return queueRecommendationDTO(item)
+        return try queueRecommendationDTO(item)
     }
 
     public func previewQueueRecommendations() async throws -> MusicQueueRecommendationSnapshot? {
@@ -15,7 +15,7 @@ extension NativeMusicService: MusicQueueRecommendationServing {
         await pending?.value
         try check()
         try musicRequire(similarMode.queue === item, .targetChanged)
-        return queueRecommendationDTO(item)
+        return try queueRecommendationDTO(item)
     }
 
     public func playQueueRecommendation(snapshotID: UUID, candidateID: String) async throws -> MusicSimilarModeResult {
@@ -46,7 +46,7 @@ extension NativeMusicService: MusicQueueRecommendationServing {
 
     public func retryQueueRecommendations(snapshotID: UUID) async throws -> MusicSimilarModeResult {
         try check()
-        guard let item = similarMode.queue, item.id == snapshotID, queueRecommendationDTO(item).canRetry else {
+        guard let item = similarMode.queue, item.id == snapshotID, try queueRecommendationDTO(item).canRetry else {
             throw MusicServiceError.invalidRequest
         }
         item.exhausted = false; item.error = nil
@@ -74,7 +74,7 @@ extension NativeMusicService {
               d.queue["source"]["sourceType"].string == "search-song",
               let row = d.queue["entries"].array.first(where: { $0["id"] == d.queue["source"]["seedEntryId"] }) else { return nil }
         let navigation = similarMode.navigation
-        let seed = try await sharedSongMetadata(row["song"])
+        let seed = try entrySong(row, d)
         let current = try read()
         if let existing = similarMode.queue { return existing }
         guard navigation == similarMode.navigation, current.queue["source"] == d.queue["source"],
@@ -85,11 +85,12 @@ extension NativeMusicService {
         return item
     }
 
-    func queueRecommendationDTO(_ item: MusicNativeQueueRecommendations) -> MusicQueueRecommendationSnapshot {
-        .init(id: item.id, status: item.status, currentEntryID: item.currentEntryID,
+    func queueRecommendationDTO(_ item: MusicNativeQueueRecommendations) throws -> MusicQueueRecommendationSnapshot {
+        let repository = try read().library["library"]["songs"]
+        return try .init(id: item.id, status: item.status, currentEntryID: item.currentEntryID,
             continueEnabled: item.continueEnabled,
             candidates: item.songs.enumerated().map {
-                .init(id: "\(item.candidateID.uuidString):\($0.offset)", song: MusicNativeSimilarData.display($0.element))
+                try .init(id: "\(item.candidateID.uuidString):\($0.offset)", song: MusicNativeSimilarData.display($0.element, songs: repository))
             }, exhausted: item.exhausted, error: item.error,
             canRetry: item.pending == nil && (item.status == .error || item.exhausted && item.songs.isEmpty),
             active: item.active, errorID: item.errorID)
@@ -161,14 +162,13 @@ extension NativeMusicService {
             try check(own); try lease.authorization.check()
             guard similarMode.queue === item, item.id == token, item.pendingID == requestID else { return }
             guard queueRecommendationsAreCurrent(item, try read()) else { return }
-            let songs = try MusicNativeSimilarData.songs(response)
+            let songs = try adoptSongs(MusicNativeSimilarData.songs(response), authoritative: true)
             let recommendations = try MusicNativeSimilarData.recommendations(response.items)
-            try await retainSongMetadata(songs)
             try check(own); try lease.authorization.check()
             guard similarMode.queue === item, item.id == token, item.pendingID == requestID,
                   queueRecommendationsAreCurrent(item, try read()) else { return }
             let current = try read()
-            let unique = MusicNativeSimilarData.unique(songs, excluding: current.queue["entries"].array.map { $0["song"] })
+            let unique = MusicNativeSimilarData.unique(songs, excluding: current.queue["entries"].array.map { current.library["library"]["songs"][$0["songId"].string] })
             guard let offset = response.offset, response.hasMore != nil else { throw MusicServiceError.invalidResponse }
             item.offset = offset; item.candidateID = UUID()
             item.songs = unique; item.recommendations = recommendations
@@ -224,12 +224,12 @@ extension NativeMusicService {
         let state = try lease.authorization.perform {
             try similarQueueTransaction(selectedIndex == nil ? ["queue"] : ["queue", "playback"]) { draft in
                 try musicRequire(queueRecommendationsAreCurrent(item, draft), .targetChanged)
-                var rows = try makeEntries(item.songs, queue: &draft.queue, context: .obj([
+                var rows = try makeEntries(item.songs, document: &draft, context: .obj([
                     ("sourceType", .string("queue-recommendations")), ("sourceTitle", .string("更多推荐")),
                     ("provider", .string(MusicSimilarModeProvider.queueRecommendations.rawValue))
                 ]))
                 for i in rows.indices {
-                    if let id = MusicNativeSimilarData.nativeID(rows[i]["song"]), let value = item.recommendations[id] {
+                    if let id = MusicNativeSimilarData.nativeID(draft.library["library"]["songs"][rows[i]["songId"].string]), let value = item.recommendations[id] {
                         rows[i]["context"]["recommendation"] = value
                         live[rows[i]["id"].string] = value
                     }
@@ -266,7 +266,7 @@ extension NativeMusicService {
     func liveRecommendation(entryID: String) -> MusicNativeQueueFeedbackOrigin? {
         guard let d = try? read(),
               let entry = d.queue["entries"].array.first(where: { $0["id"].string == entryID }),
-              let nativeID = MusicNativeSimilarData.nativeID(entry["song"]) else { return nil }
+              let nativeID = MusicNativeSimilarData.nativeID(d.library["library"]["songs"][entry["songId"].string]) else { return nil }
         guard let value = queueFeedbackOrigins[entryID], value.authorization.isActive,
               value.value["songId"].id == nativeID else { return nil }
         return value

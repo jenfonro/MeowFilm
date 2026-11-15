@@ -31,9 +31,13 @@ public final class MusicPlayerContentModel {
     private var artworkBinding: MusicSystemMetadataBinding?
     private var artworkContextRevision: UUID?
     private var images: [URL: UIImage] = [:]
+    private var artworkResources: [URL: URL] = [:]
     private var wantedImages: Set<URL> = []
     private var failedImages: Set<URL> = []
-    private var artworkBytes: Data?
+    private var cancelledImages: Set<URL> = []
+    private var artworkDemandRevision: UUID
+    private var retainedArtwork: UIImage?
+    private var retainedSongID: String?
     private var artworkReads: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
     private var playbackTasks: [UUID: Task<Void, Never>] = [:]
     private var cacheProgressSource: UUID?
@@ -89,7 +93,10 @@ public final class MusicPlayerContentModel {
     var accessChanges: AnyPublisher<Void, Never> { accessUpdates.eraseToAnyPublisher() }
     var isAvailable: Bool { model.isAvailable && !model.isClosed }
     var dockExpanded: Bool { mini.expanded }
-    var artwork: UIImage? { artworkIdentity?.url.flatMap { images[$0] } }
+    var artwork: UIImage? {
+        artworkIdentity?.url.flatMap { images[$0] } ??
+            (retainedSongID == model.displayTrack?.songId ? retainedArtwork : nil)
+    }
     var controlTheme: PageTheme { .init(colors: appearance.preferences.colorPalette, dark: false) }
     var fence: MusicReferencePlayerFence {
         .init(occurrence: model.current?.id, attempt: model.activeNativeAttemptID,
@@ -112,6 +119,7 @@ public final class MusicPlayerContentModel {
         self.appearance = appearance
         self.presentation = presentation
         self.artworkImages = artworkImages
+        artworkDemandRevision = artworkImages.revision
         favorites = model.favorites
         accessGeneration = model.searchAccessGeneration
         foreground = UIApplication.shared.applicationState == .active
@@ -159,10 +167,15 @@ public final class MusicPlayerContentModel {
                 [weak self] notification in
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    let wasForeground = self.foreground
                     self.foreground = notification.name == UIApplication.didBecomeActiveNotification
                     if notification.name == UIApplication.didBecomeActiveNotification {
                         self.artworkAdmission.becameActive()
-                        self.acceptArtwork()
+                        if !wasForeground {
+                            self.artworkDemandRevision = self.artworkImages.revision
+                            self.cancelledImages.removeAll()
+                            self.reconcileArtwork()
+                        } else { self.acceptArtwork() }
                         self.updateClock()
                     } else {
                         self.artworkAdmission.suspendRendering()
@@ -176,7 +189,7 @@ public final class MusicPlayerContentModel {
 
     func artwork(for entry: MusicQueueEntry?) -> UIImage? {
         if entry?.id == model.current?.id { return artwork }
-        return entry?.track.artwork.flatMap { images[$0] }
+        return entry?.track.artwork.flatMap { images[artworkResources[$0] ?? $0] }
     }
 
     func collapseDock() {
@@ -308,8 +321,10 @@ public final class MusicPlayerContentModel {
             artworkAdmission.deactivate()
             artworkIdentity = nil
             images.removeAll()
+            artworkResources.removeAll()
             failedImages.removeAll()
-            artworkBytes = nil
+            cancelledImages.removeAll()
+            retainedArtwork = nil; retainedSongID = nil
             for read in artworkReads.values { read.task.cancel() }
             artworkUpdates.send()
         }
@@ -343,7 +358,11 @@ public final class MusicPlayerContentModel {
             }
         }
         if lastFullPresentation != full {
-            if full, case .failed = chorusSettlement?.result { chorusSettlement = nil }
+            if full {
+                artworkDemandRevision = artworkImages.revision
+                cancelledImages.removeAll()
+                if case .failed = chorusSettlement?.result { chorusSettlement = nil }
+            }
             lastFullPresentation = full
             dockUpdates.send()
         }
@@ -361,6 +380,9 @@ public final class MusicPlayerContentModel {
 
     private func reconcileArtwork() {
         let request = MusicNowPlayingArtworkRequest(track: isAvailable ? model.displayTrack : nil)
+        let songID = isAvailable ? model.displayTrack?.songId : nil
+        if retainedSongID != songID { retainedArtwork = nil }
+        retainedSongID = songID
         let binding = currentArtworkBinding, context = appearance.displayedArtworkRevision
         var changed = request != artworkIdentity
         let scopeChanged = artworkBinding != binding || artworkContextRevision != context
@@ -370,7 +392,6 @@ public final class MusicPlayerContentModel {
         }
         if changed {
             artworkIdentity = request
-            artworkBytes = nil
             if isAvailable { artworkAdmission.activate(request, appearance: appearance, rendering: foreground) }
             else { artworkAdmission.deactivate() }
         } else if scopeChanged {
@@ -383,25 +404,30 @@ public final class MusicPlayerContentModel {
             }
         }
         for (url, read) in artworkReads where !wantedImages.contains(url) { read.task.cancel() }
-        images = images.filter { wantedImages.contains($0.key) }
+        artworkResources = artworkResources.filter { wantedImages.contains($0.key) }
+        let wantedResources = Set(wantedImages.map { artworkResources[$0] ?? $0 })
+        images = images.filter { wantedResources.contains($0.key) }
         failedImages.formIntersection(wantedImages)
-        for url in wantedImages where images[url] == nil && artworkReads[url] == nil && !failedImages.contains(url) {
-            let data = url == request.url ? model.metadataArtworkData : nil
-            if data == nil, let cached = artworkImages.cached(url) {
-                images[url] = cached
+        cancelledImages.formIntersection(wantedImages)
+        for url in wantedImages where images[artworkResources[url] ?? url] == nil && artworkReads[url] == nil &&
+            !failedImages.contains(url) && !cancelledImages.contains(url) {
+            let resourceURL = artworkResources[url] ?? url
+            if let cached = artworkImages.cached(resourceURL) {
+                images[resourceURL] = cached
                 changed = true
-            } else { readArtwork(url, cachedData: data) }
+            } else { readArtwork(url) }
         }
         if !foreground { artworkAdmission.suspendRendering() }
         acceptArtwork()
         if changed { artworkUpdates.send() }
     }
 
-    private func readArtwork(_ url: URL, cachedData: Data?) {
+    private func readArtwork(_ url: URL) {
         let id = UUID()
         let access = model.searchAccessGeneration, expected = artworkIdentity
         let revision = artworkAdmission.artworkRevision, binding = artworkBinding
         let context = artworkContextRevision
+        let demand = artworkImages.revision
         let task = Task { [weak self] in
             defer {
                 if self?.artworkReads[url]?.id == id {
@@ -411,25 +437,58 @@ public final class MusicPlayerContentModel {
             }
             do {
                 guard let artworkImages = self?.artworkImages else { return }
-                let (image, data) = try await artworkImages.read(url, cachedData: cachedData)
+                let (image, _, resourceURL) = try await artworkImages.read(url)
                 try Task.checkCancellation()
-                guard let self, self.wantedImages.contains(url), self.isAvailable,
-                      self.model.searchAccessGeneration == access,
-                      self.artworkReads[url]?.id == id, self.artworkAdmission.artworkRevision == revision,
-                      self.currentArtworkBinding == binding, self.appearance.displayedArtworkRevision == context,
-                      MusicNowPlayingArtworkRequest(track: self.model.displayTrack) == expected else { return }
-                self.images[url] = image
-                if self.artworkIdentity?.url == url {
-                    self.artworkBytes = data
-                    self.acceptArtwork()
+                let previewSongIDs: Set<String>
+                if let self, self.wantedImages.contains(url), self.isAvailable,
+                   self.model.searchAccessGeneration == access,
+                   self.artworkReads[url]?.id == id, self.artworkAdmission.artworkRevision == revision,
+                   self.currentArtworkBinding == binding, self.appearance.displayedArtworkRevision == context,
+                   MusicNowPlayingArtworkRequest(track: self.model.displayTrack) == expected {
+                    // Never register rendition bytes under the original URL.
+                    self.images[resourceURL] = image
+                    if resourceURL != url { self.artworkResources[url] = resourceURL }
+                    if self.artworkIdentity?.url == url {
+                        self.retainedArtwork = image
+                        self.model.artworkLoaded(url, resourceURL: resourceURL)
+                        if resourceURL == url { self.acceptArtwork() }
+                    }
+                    let currentSongID = self.artworkIdentity?.url == url ? self.model.displayTrack?.songId : nil
+                    previewSongIDs = resourceURL != url && self.presentation.isFullPlayerPresented ?
+                        Set([MusicDirection.previous, .next].compactMap { direction in
+                            guard let preview = self.model.recordPreview(direction), preview.track.artwork == url,
+                                  preview.track.songId != currentSongID else { return nil }
+                            return preview.track.songId
+                        }) : []
+                    self.artworkUpdates.send()
+                } else { return }
+                for songID in previewSongIDs {
+                    try Task.checkCancellation()
+                    guard self?.isAvailable == true, self?.model.searchAccessGeneration == access,
+                          self?.presentation.isFullPlayerPresented == true,
+                          [MusicDirection.previous, .next].contains(where: { direction in
+                              let preview = self?.model.recordPreview(direction)
+                              return preview?.track.songId == songID && preview?.track.artwork == url
+                          }) else { continue }
+                    try? await artworkImages.succeeded(songID: songID, url: resourceURL, replacing: url)
                 }
-                self.artworkUpdates.send()
             } catch {
                 guard !Task.isCancelled, let self, self.wantedImages.contains(url), self.isAvailable,
                       self.model.searchAccessGeneration == access,
                       self.artworkReads[url]?.id == id, self.artworkAdmission.artworkRevision == revision,
                       self.currentArtworkBinding == binding, self.appearance.displayedArtworkRevision == context,
                       MusicNowPlayingArtworkRequest(track: self.model.displayTrack) == expected else { return }
+                // A cleared cache epoch can cancel the shared producer without
+                // cancelling this subscriber. It is not an artwork failure and
+                // stays blocked until a new explicit visible demand.
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    // A demand before the clear cannot authorize a refill.
+                    if self.artworkDemandRevision == demand ||
+                        self.artworkDemandRevision != self.artworkImages.revision {
+                        self.cancelledImages.insert(url)
+                    }
+                    return
+                }
                 self.failedImages.insert(url)
                 if self.artworkIdentity?.url == url { self.model.artworkFailed(url) }
             }
@@ -438,19 +497,14 @@ public final class MusicPlayerContentModel {
     }
 
     private func acceptArtwork() {
-        guard let image = artwork else { return }
+        guard let url = artworkIdentity?.url, let image = images[url] else { return }
+        retainedArtwork = image
         let revision = artworkAdmission.samplingRevision
         _ = artworkAdmission.deliverImage(revision: revision) { }
         if let artworkBinding, artworkBinding == currentArtworkBinding,
            artworkContextRevision == appearance.displayedArtworkRevision {
             _ = artworkAdmission.captureArtwork(revision: artworkAdmission.artworkRevision) {
                 image.jpegData(compressionQuality: 0.85)
-            }
-        }
-        if let artworkBytes {
-            _ = artworkAdmission.captureDisplay(revision: revision, encode: { artworkBytes }) { [weak self] data in
-                guard let self else { return }
-                self.model.capturedArtwork(data, url: self.artworkIdentity?.url)
             }
         }
         _ = artworkAdmission.sample(revision: revision) {

@@ -169,5 +169,5 @@ public interface IMusicAccountTransferSource
 
 internal interface IMusicAccountTransferProtocol
 {
-    Task<MusicAccountDetailsObservation> ValidateTransferAsync(string platform, string cookie, CancellationToken token);
+    Task<MusicAccountVerifiedCredential> ValidateTransferAsync(string platform, string cookie, CancellationToken token);
 }

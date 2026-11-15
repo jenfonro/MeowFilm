@@ -460,8 +460,8 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
             let tracks = selectedTracks
             guard !tracks.isEmpty else { return }
             performRemote(page: page, operation: "下一首播放", kind: .queue) { [weak self, weak page] in
-                guard let self, let page else { return }
-                await self.owner.insertNext(try await page.refreshedActionTracks(tracks))
+                guard let self, page != nil else { return }
+                await self.owner.insertNext(tracks)
             }
         }
     }
@@ -488,8 +488,8 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
                 case .remote(let page):
                     self.performRemote(page: page, operation: "收藏到歌单", kind: .library) {
                         [weak self, weak page] in
-                        guard let self, let page else { return }
-                        await self.owner.add(try await page.refreshedActionTracks(tracks), to: target)
+                        guard let self, page != nil else { return }
+                        await self.owner.add(tracks, to: target)
                     }
                 }
             })

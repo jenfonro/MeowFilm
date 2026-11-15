@@ -9,11 +9,11 @@ public protocol MusicNativeDocumentStoring: Sendable {
     func compareAndSwap(expected: Data?, replacement: Data) throws
 }
 
-/// The sole native writer for namespace music.library.v1, an ordinary JSON
+/// The sole native writer for namespace music.library.v3, an ordinary JSON
 /// document. Construction is passive; the service's access admission controls use.
 public final class MusicNativeLibraryDocument: MusicNativeDocumentStoring, @unchecked Sendable {
-    public static let namespace = "music.library.v1"
-    public static let key = "music.library.v1"
+    public static let namespace = "music.library.v3"
+    public static let key = "music.library.v3"
     private let lock = NSLock()
     private var store: DocumentStore?
     private let storeFactory: (@Sendable () throws -> DocumentStore)?
