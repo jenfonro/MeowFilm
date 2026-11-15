@@ -249,7 +249,7 @@
       <Grid Width="50" Height="50" HorizontalAlignment="Left" local:CardClip.Radius="8">
        <art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}"/>
        <Border Background="#40000000" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=SongRow}">
-        <Path Data="M 0,0 L 0,22 L 18,11 Z" Fill="White" Width="18" Height="22" Stretch="Fill" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        <local:CardPlayGlyph IsBusy="{Binding IsPreparing}" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
        </Border>
       </Grid>
       <StackPanel Grid.Column="1" VerticalAlignment="Center">
