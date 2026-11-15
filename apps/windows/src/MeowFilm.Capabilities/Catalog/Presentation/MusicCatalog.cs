@@ -188,7 +188,7 @@ public sealed partial class MusicCapability
     public Task LoadMoreCatalogPlaylistAsync() =>
         CanLoadMoreCatalogPlaylist ? CatalogPageAsync(1) : Task.CompletedTask;
     private bool ContainsCatalogCard(MusicCatalogCard card) =>
-        HasChannelTabs && ChannelTabs.Any(item => ReferenceEquals(item, card)) || CatalogSections.Any(section =>
+        HasChannelTabs && ChannelTabs.Any(item => ReferenceEquals(item, card)) || DisplayCatalogSections.Any(section =>
         ReferenceEquals(section.Action, card) || section.Items.Any(item => ReferenceEquals(item, card)));
     public Task OpenCatalogCardAsync(MusicCatalogCard card)
     {
@@ -806,16 +806,12 @@ public sealed partial class MusicCapability
                 if (IsCatalogHome && !append && homeDisplaySections.Count > 0)
                     HomeContentReplacing?.Invoke(this, EventArgs.Empty);
                 ReconcileSections(CatalogSections, state.Sections);
-                if (IsCatalogHome)
-                {
-                    var display = state.Sections.Select(source => homeProjection.TryGetValue(source, out var existing)
-                        ? existing : homeProjection[source] = source.DisplayableCards()).Where(section => section.Items.Count > 0).ToArray();
-                    foreach (var obsolete in homeProjection.Keys.Where(source => !state.Sections.Contains(source, ReferenceEqualityComparer.Instance)).ToArray())
-                        homeProjection.Remove(obsolete);
-                    ReconcileSections(homeDisplaySections, display);
-                }
             }
-            if (IsCatalogHome) { publishedHomeState = state; homePage = number; homePlatform = platform; }
+            if (IsCatalogHome)
+            {
+                publishedHomeState = state; homePage = number; homePlatform = platform;
+                RefreshHomeDisplay();
+            }
             else if (IsChannelLanding) publishedChannelState = state;
             if (!CatalogTags.SequenceEqual(state.Tags))
             {

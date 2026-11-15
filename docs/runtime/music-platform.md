@@ -15,6 +15,8 @@
 
 以上返回沿现有 HTTP module envelope `{ok,contract,value}`；失败沿现有有限 code。`candidate` 只用于候选账号认证交接，session 材料不进入普通展示 DTO 或日志。operation 以 providers、accounts 和 mutations 的实际公开派发为准，不另建第二份配方表。
 
+`operation:"home"` 返回当前平台的 `entries`、`sections` 及真实 `continuation`，顶部入口无需另行查询目录或在客户端拼固定列表。网易首页入口及 Cube 推荐组统一附带 `requiresAccount`、`display`、`available`；其中账号入口的显示声明取自原生已发布 session。登录／退出沿既有 session 更新失效缓存和旧请求，下一次首页读取返回当前声明。显示隐藏不替代 `daily`、`heartbeat` 等操作自身的实际账号准入。
+
 两端 aggregate 按 `music, cat, source, pan, tmdb, douban, film, netease, music-platform` 顺序装配九模块。`connectMusicPlatform` 从已装配 netease 的真实 `netease.token.get` 能力借用 token；不创建第二个 SDK owner。通用 `createRuntime` 默认仍三模块，仅显式 `musicPlatform` 选项连接此模块。
 
 ## 数据与生命周期

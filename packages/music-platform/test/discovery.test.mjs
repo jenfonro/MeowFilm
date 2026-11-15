@@ -32,6 +32,65 @@ test('WY dynamic home preserves current sections and actions, without layout or 
   assert.equal(f.requests.length, 2); await f.close();
 });
 
+test('WY home declares account-only entrances from the published session and invalidates guest cache on login and logout', async t => {
+  const f = fixture(request => {
+    assert.equal(eapi(request).path, '/api/link/page/rcmd/resource/show');
+    return response({ code: 200, data: { blocks: [{ positionCode: 'actions', creatives: [{ resources: [
+      { resourceType: 'dailysongs', resourceId: 'daily', name: '每日推荐' },
+      { resourceType: 'dailysongs', resourceId: 'style', name: '风格日推', action: 'orpheus://nm/play/dailySong?tab=style' },
+      { resourceType: 'star', resourceId: 'heartbeat', name: '心动推荐' },
+      { resourceType: 'fm', resourceId: 'fm', name: '私人漫游' },
+      { resourceType: 'similarsong', resourceId: 'similar', name: '相似歌曲',
+        action: 'orpheus://nm/play/similarFM?sourceId=%5B%22123%22%5D&sourceType=song' },
+      { resourceType: 'playlist', resourceId: '456', name: '歌单' },
+    ] }] }], hasMore: false } });
+  });
+  t.after(() => f.close());
+  const check = (page, loggedIn) => {
+    assert.deepEqual(page.entries.map(row => row.name), ['每日推荐', '风格日推', '心动推荐', '私人漫游', '相似歌曲', '歌单']);
+    assert.deepEqual(page.entries.map(row => row.requiresAccount), [true, true, true, false, false, false]);
+    assert.deepEqual(page.entries.map(row => row.display), [loggedIn, loggedIn, loggedIn, true, true, true]);
+    assert.deepEqual(page.entries.map(row => row.available), [loggedIn, loggedIn, loggedIn, true, true, true]);
+    assert.deepEqual(page.entries.map(row => row.errorCode), [
+      ...Array(3).fill(loggedIn ? undefined : 'AUTH_REQUIRED'), undefined, undefined, undefined,
+    ]);
+    assert.deepEqual(page.entries[1].action, { type: 'daily', branch: 'style' });
+  };
+  check(await f.request('wy', 'home'), false);
+  check(await f.request('wy', 'home'), false);
+  assert.equal(f.requests.length, 1);
+  await f.session('wy');
+  check(await f.request('wy', 'home'), true);
+  assert.equal(f.requests.length, 2);
+  await f.owner.sessionUpdate({ platform: 'wy', session: null });
+  check(await f.request('wy', 'home'), false);
+  check(await f.request('wy', 'home'), false);
+  assert.equal(f.requests.length, 3);
+  await assert.rejects(f.request('wy', 'daily'), { code: 'AUTH_REQUIRED' });
+  assert.equal(f.requests.length, 3, 'a hidden daily entrance cannot dispatch an account read');
+});
+
+test('WY channel recommendation tabs use the same account visibility declaration as home', async t => {
+  fixedEntropy(t);
+  const f = fixture(request => {
+    assert.equal(new URL(request.url).pathname, '/weapi/cube/render/page/protocol');
+    return response({ code: 200, data: { pageProtocol: { pages: [{ id: 'recommendations',
+      props: { recommendModule: [{ title: '推荐', modules: [
+        { type: 'dailysongs', id: 'daily', name: '每日推荐' },
+        { type: 'dailysongs', id: 'style', name: '风格日推', action: 'orpheus://songrcmd?type=style' },
+        { type: 'fm', id: 'fm', name: '私人漫游' },
+      ] }] } }] } } });
+  });
+  t.after(() => f.close());
+  const params = { id: 'custom', pageCode: 'PAGE' };
+  const guest = await f.request('wy', 'channel', params);
+  assert.deepEqual(guest.sections[0].items.map(row => row.display), [false, false, true]);
+  assert.deepEqual(guest.sections[0].items.map(row => row.requiresAccount), [true, true, false]);
+  await f.session('wy');
+  const member = await f.request('wy', 'channel', params);
+  assert.deepEqual(member.sections[0].items.map(row => row.display), [true, true, true]);
+});
+
 test('WY nested home actions, DSL and play buttons retain exact IDs through the public similar action', async t => {
   fixedEntropy(t);
   const firstId = '900719925474099313', secondId = '900719925474099312';

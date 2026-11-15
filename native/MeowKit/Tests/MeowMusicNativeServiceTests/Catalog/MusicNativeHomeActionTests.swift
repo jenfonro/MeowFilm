@@ -94,7 +94,11 @@ final class MusicNativeHomeActionTests: XCTestCase {
         let values: [RuntimeValue] = ["default", "style"].map { .object(["type": .string("daily"), "branch": .string($0)]) }
         let (service, peer, page) = try await load(values)
         XCTAssertEqual(try page.sections[0].items.map(action), [.daily(branch: .default), .daily(branch: .style)])
-        XCTAssertTrue(try page.sections[0].items.allSatisfy { try action($0).requiresAccount })
+        for branch in [MusicHomeAction.DailyBranch.default, .style] {
+            await assertMusicFailure(.authRequired) {
+                _ = try await service.openHomeActionQueue(.daily(branch: branch), title: "实际入口")
+            }
+        }
         let calls = await peer.calls(); XCTAssertEqual(calls.count, 1); await service.close()
     }
     func testDailyStyleEditorUsesStableOwnerScopeAcrossDistinctQueueLeases() async throws {
@@ -151,7 +155,7 @@ final class MusicNativeHomeActionTests: XCTestCase {
         let (service, _, page) = try await load([.object(["type": .string("similar"), "sourceType": .string("artist"),
             "sourceIds": .array([.string("9"), .string("2")]), "sourceName": .string("实际艺人")])])
         XCTAssertEqual(try action(page.sections[0].items[0]), .similarArtist(sourceIDs: ["9", "2"], sourceName: "实际艺人"))
-        XCTAssertFalse(try action(page.sections[0].items[0]).requiresAccount); await service.close()
+        await service.close()
     }
     func testGuestSimilarHomeActionsReadAndCommitWithoutAnAccountWhileHeartbeatStillRequiresOne() async throws {
         for artist in [false, true] {
@@ -182,7 +186,7 @@ final class MusicNativeHomeActionTests: XCTestCase {
         let ids = ["3", "1", "3"] + (1...1001).map(String.init)
         let (service, _, page) = try await load([.object(["type": .string("song-collection"), "ids": .array(ids.map(RuntimeValue.string))])])
         XCTAssertEqual(try action(page.sections[0].items[0]), .songCollection(ids: ids))
-        XCTAssertFalse(try action(page.sections[0].items[0]).requiresAccount); await service.close()
+        await service.close()
     }
     func testDescriptorCurrentFormatCodableRoundTripsTypedFieldsWithoutBusinessBounds() throws {
         let values: [MusicHomeAction] = [

@@ -42,7 +42,7 @@ public sealed partial class MusicCapability
     private void InitializeCatalogEntries()
     {
         if (stopping || !IsCatalogPage) return;
-        var cards = CatalogSections.SelectMany(section => section.Items)
+        var cards = DisplayCatalogSections.SelectMany(section => section.Items)
             .Where(card => card.CanRequestPreview && !card.HasPreview && initializedEntries.Add(card)).ToArray();
         if (cards.Length == 0) return;
         catalogPreviewCancellation ??= CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);

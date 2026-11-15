@@ -12,6 +12,23 @@ public static partial class MusicNativePlatformTests
             Equal(2, (await f.Catalog.HomeAsync(new("wy", Refresh: true))).GetProperty("entries").GetArrayLength());
             Equal(2, f.Requests.Count);
         });
+        yield return Case("home preserves declared entry display independently from action availability", async () =>
+        {
+            var value = Json(new { platform = "wy", entries = new object[]
+            {
+                new { id = "daily", requiresAccount = true, display = false, available = false,
+                    errorCode = "AUTH_REQUIRED", action = new { type = "daily", branch = "default" } },
+                new { id = "fm", requiresAccount = false, display = true, available = false,
+                    errorCode = "FORBIDDEN", action = new { type = "fm" } }
+            } });
+            await using var f = Peer(call =>
+            {
+                Equal("home", call.Operation); True(call.Parameters.GetProperty("refresh").GetBoolean());
+                return value;
+            });
+            Equal(value.GetRawText(), (await f.Catalog.HomeAsync(new("wy", Refresh: true))).GetRawText());
+            Equal(1, f.Requests.Count);
+        });
         yield return Case("heartbeat uses the action seed and forwards actual progression without snapshot checks", async () =>
         {
             var continuation = new MusicHeartbeatContinuation("playlist-alias", "first-seed", Huge, 2);

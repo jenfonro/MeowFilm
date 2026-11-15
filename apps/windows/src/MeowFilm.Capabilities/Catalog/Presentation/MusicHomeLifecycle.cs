@@ -181,12 +181,45 @@ public sealed partial class MusicCapability
 
     private long CatalogAccountObservation(string platform) => catalogAccountObservations.GetValueOrDefault(platform);
 
+    private void RefreshHomeDisplay()
+    {
+        if (homePlatform.Length == 0) return;
+        // Fresh replies own visibility. Retained display has no account authority;
+        // its declared private entries require a settled current native account.
+        bool includeAccountEntries = publishedHomeState?.AccountStamp == CatalogAccountKey(homePlatform) ||
+            accountsLoaded && loadedAccountObservation == Volatile.Read(ref accountObservation) &&
+            accountOperationPlatform != homePlatform &&
+            Accounts.Single(account => account.Platform == homePlatform).State is "saved" or "verified";
+        var display = homeSections.Select(source =>
+        {
+            var projected = source.DisplayableCards(includeAccountEntries);
+            if (homeProjection.TryGetValue(source, out var existing) &&
+                existing.Items.SequenceEqual(projected.Items, ReferenceEqualityComparer.Instance) &&
+                ReferenceEquals(existing.Action, projected.Action)) return existing;
+            return homeProjection[source] = projected;
+        }).Where(section => section.Items.Count > 0).ToArray();
+        foreach (var obsolete in homeProjection.Keys.Where(source =>
+            !homeSections.Contains(source, ReferenceEqualityComparer.Instance)).ToArray())
+            homeProjection.Remove(obsolete);
+        ReconcileSections(homeDisplaySections, display);
+        if (!IsCatalogHome) return;
+        var songs = display.SelectMany(section => section.Items).Select(card => card.Song).OfType<SongRow>().ToArray();
+        if (!Songs.SequenceEqual(songs, ReferenceEqualityComparer.Instance))
+        { Songs.Clear(); foreach (var song in songs) Songs.Add(song); }
+        if (status is "" or "暂无内容")
+        {
+            status = display.Length == 0 ? "暂无内容" : "";
+            Changed(nameof(Status));
+        }
+    }
+
     private void RetireHomeAuthority()
     {
         homeRefreshRequired = true;
         homePage = 1; homeCursors = [null];
         if (publishedHomeState is { } home)
             publishedHomeState = home with { More = false, Next = null, AccountStamp = "", ExpiresAt = null };
+        RefreshHomeDisplay();
     }
 
     private void BeginHomeAccountRecovery(bool forceRead)

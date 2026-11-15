@@ -15,7 +15,7 @@ import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
 import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';
 import { createMusicPlatformModule } from '../apps/runtime/modules/music-platform.mjs';
 import { createMusicTransport } from '../packages/music-platform/src/transport.mjs';
-import { eapi, weapi, fixedEntropy, huge, nativeHTTP } from '../packages/music-platform/test/support.mjs';
+import { eapi, weapi, fixedEntropy, huge, nativeHTTP, response } from '../packages/music-platform/test/support.mjs';
 import { deferred, turn, until, rawRequest } from '../packages/runtime-bridge/test/http-fixture.js';
 import { lxScript } from '../packages/script-host/test/fixtures.js';
 
@@ -255,6 +255,34 @@ test('the real music platform module exposes its common contract without fetchin
   });
   await runtime.close();
   await runtime.close();
+});
+
+test('music platform HTTP home publishes session-dependent entrance visibility to both native consumers', async t => {
+  const dataRoot = temporaryData();
+  const module = createMusicPlatformModule({ dataRoot, transport: createMusicTransport({ fetch: async () =>
+    response({ code: 200, data: { blocks: [{ positionCode: 'actions', creatives: [{ resources: [
+      { resourceType: 'dailysongs', resourceId: 'daily', name: '每日推荐' },
+      { resourceType: 'fm', resourceId: 'fm', name: '私人漫游' },
+    ] }] }], hasMore: false } }),
+  }) });
+  const { runtime, client } = await connect(t, [module]);
+  t.after(async () => { await runtime.close(); rmSync(dataRoot, { recursive: true }); });
+  async function visibility() {
+    const reply = await client.call('music.platform.request', { platform: 'wy', operation: 'home' });
+    assert.equal(reply.ok, true); assert.equal(reply.contract, 'music.platform.v1');
+    return reply.value.entries.map(row => ({ display: row.display, requiresAccount: row.requiresAccount }));
+  }
+  const guest = [{ display: false, requiresAccount: true }, { display: true, requiresAccount: false }];
+  assert.deepEqual(await visibility(), guest);
+  const published = await client.call('music.platform.session.update', { platform: 'wy',
+    session: { scope: 'synthetic:42', generation: 1, userId: '42', cookie: 'MUSIC_U=synthetic-music-u' } });
+  assert.equal(published.ok, true);
+  assert.deepEqual(await visibility(), [
+    { display: true, requiresAccount: true }, { display: true, requiresAccount: false },
+  ]);
+  const retired = await client.call('music.platform.session.update', { platform: 'wy', session: null });
+  assert.equal(retired.ok, true);
+  assert.deepEqual(await visibility(), guest);
 });
 
 test('default music platform HTTP executes integer wires and lossless responses without newer JSON APIs or fetch',

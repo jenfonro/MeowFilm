@@ -92,6 +92,7 @@ import MeowRuntime
         await model.loadIfNeeded()
         XCTAssertNil(model.error); XCTAssertTrue(model.loaded)
         XCTAssertEqual(homeAccountCollectionIDs(model.sections), ["11"])
+        XCTAssertEqual(model.sections.flatMap(\.items).filter(\.requiresAccount).map(\.id), ["account-daily"])
         let verified = await fixture.accounts.snapshot(for: fixture.identity)
         XCTAssertEqual(verified.phase, .signedIn)
         XCTAssertEqual(verified.generation, prepared.generation, "Home must validate the locally prepared session")
@@ -135,9 +136,11 @@ import MeowRuntime
         XCTAssertEqual(fixture.credentials.snapshot().removes, 1)
         XCTAssertTrue(model.isLoading); XCTAssertTrue(model.loaded)
         XCTAssertEqual(homeAccountCollectionIDs(model.sections), ["11"])
+        XCTAssertFalse(model.sections.flatMap(\.items).contains(where: \.requiresAccount))
         XCTAssertEqual(fixture.snapshot.read(), saved)
         let retained = try await fixture.service.restoredHome()
         XCTAssertEqual(homeAccountCollectionIDs(retained), ["11"])
+        XCTAssertFalse(retained?.sections.flatMap(\.items).contains(where: \.requiresAccount) ?? true)
 
         let expected = guestFailure == nil ? ["90"] : ["11"]
         let settled = expectation(description: "guest home result published and loading settled")
@@ -149,6 +152,7 @@ import MeowRuntime
         await fulfillment(of: [settled], timeout: 3)
         XCTAssertFalse(model.isLoading); XCTAssertTrue(model.loaded)
         XCTAssertEqual(homeAccountCollectionIDs(model.sections), expected)
+        XCTAssertFalse(model.sections.flatMap(\.items).contains(where: \.requiresAccount))
         XCTAssertEqual(model.error, guestFailure)
         let restored = try await fixture.service.restoredHome()
         XCTAssertEqual(homeAccountCollectionIDs(restored), expected)
@@ -298,7 +302,9 @@ private actor HomeAccountIntegrationProvider: MusicAccountProvider, MusicNetease
 
 private func homeAccountPayload(id: Int) -> Data {
     Data("""
-    {"sections":[{"id":"playlists","type":"playlists","items":[
+    {"entries":[{"key":"account-daily","name":"Synthetic entry","requiresAccount":true,
+    "display":\(id == 11),"available":\(id == 11),"action":{"type":"daily","branch":"default"}}],
+    "sections":[{"id":"playlists","type":"playlists","items":[
     {"id":"\(id)","name":"Synthetic \(id)","cover":"https://p1.music.126.net/\(id).jpg","action":{"type":"playlist"}}
     ]}]}
     """.utf8)

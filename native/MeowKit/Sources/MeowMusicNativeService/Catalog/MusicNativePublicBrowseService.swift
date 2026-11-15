@@ -187,7 +187,8 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
                    updateFrequency: ranking.updateFrequency)
             }
             return .init(id: item.id, title: title, subtitle: subtitle, artwork: artwork, content: content,
-                ranking: ranking, previewSongs: preview, recommendationReason: item.recommendationReason, coverLabel: item.coverLabel)
+                ranking: ranking, previewSongs: preview, recommendationReason: item.recommendationReason,
+                coverLabel: item.coverLabel, requiresAccount: item.requiresAccount)
         }
     }
 }

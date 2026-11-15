@@ -7,15 +7,6 @@ enum MusicNativePublicBrowseContent: Sendable {
     case collection(MusicPublicBrowseCollection), song(MusicNativeTrackData), record(String)
     case channel(MusicPublicBrowseChannel), daily, unavailable
     case action(MusicHomeAction)
-
-    var requiresAccount: Bool {
-        switch self {
-        case .action(let action): return action.requiresAccount
-        case .daily: return true
-        case .channel(let channel): return [.vip, .artistActivity].contains(channel.kind)
-        default: return false
-        }
-    }
 }
 struct MusicNativePublicBrowseItem: Sendable {
     let id: String
@@ -28,6 +19,7 @@ struct MusicNativePublicBrowseItem: Sendable {
     var recommendationReason = ""
     var coverLabel = ""
     var previewSongIDs: [String] = []
+    var requiresAccount = false
 }
 struct MusicNativePublicBrowseSectionTab: Sendable {
     let id: String

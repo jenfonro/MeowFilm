@@ -3181,7 +3181,7 @@ public static partial class MusicCatalogTests
                 var entries = new List<object>();
                 if (Number("detailLimit") > 0) entries.Add(Playlist(platform, (600 + cursor).ToString(), "入口歌单"));
                 entries.Add(new { id = "daily", name = "每日推荐", kind = "daily", cover = "https://art.example.test/private-daily.jpg",
-                    action = new { type = "daily", branch = "default" }, presentation = "preview", requiresAccount = true, available = false, errorCode = "AUTH_REQUIRED" });
+                    action = new { type = "daily", branch = "default" }, presentation = "preview", requiresAccount = true, display = false, available = false, errorCode = "AUTH_REQUIRED" });
                 entries.Add(new { song = Track(platform, 1001 + cursor), action = new { type = "song", id = (1001 + cursor).ToString() } });
                 result = new { platform, sections = new[] {
                     Section("PLAYLIST", "推荐歌单", "playlists", new[] { Playlist(platform, (Number("homePlaylistStart", 500) + cursor).ToString(), "合成歌单", "https://art.example.test/public-playlist.jpg") }),

@@ -550,6 +550,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         guard lhs.id == rhs.id, lhs.title == rhs.title, lhs.subtitle == rhs.subtitle,
               lhs.artwork == rhs.artwork, lhs.previewSongs == rhs.previewSongs,
               lhs.recommendationReason == rhs.recommendationReason, lhs.coverLabel == rhs.coverLabel,
+              lhs.requiresAccount == rhs.requiresAccount,
               sameRanking(lhs.ranking, rhs.ranking) else { return false }
         switch (lhs.content, rhs.content) {
         case (.collection(let lhs), .collection(let rhs)): return lhs == rhs
