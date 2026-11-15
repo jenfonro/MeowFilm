@@ -5,7 +5,7 @@ public enum SettingsVisualMetrics {
     public static let cardCornerRadius: CGFloat = 10
     public static let cardBorderWidth: CGFloat = 0.7
     public static let cardHorizontalInset: CGFloat = 16
-    public static let rowHeight: CGFloat = 56
+    public static let rowHeight: CGFloat = 44
     public static let rowHorizontalPadding: CGFloat = 20
     public static let rowVerticalPadding: CGFloat = 12
     public static let separatorHeight: CGFloat = 0.5
@@ -70,7 +70,15 @@ public final class SettingsRowBackgroundView: UIView {
             ? (selected ? settings.selected : settings.surface) : theme.surface
         let border = usesSettingsColors ? settings.border : theme.border
         fill.fillColor = UIColor(surface).cgColor
-        outline.colors = (usesSettingsColors ? [0.55, 0.72, 1] : [0.12, 0.24, 0.52]).map {
+        // Fade only at the group's upper edge; subsequent segments continue
+        // that fade's terminal opacity instead of restarting it at every row.
+        let opacities: [CGFloat]
+        if usesSettingsColors {
+            opacities = first ? [0.55, 0.72, 1] : [1, 1, 1]
+        } else {
+            opacities = first ? [0.12, 0.24, 0.52] : [0.52, 0.52, 0.52]
+        }
+        outline.colors = opacities.map {
             UIColor(border).withAlphaComponent($0).cgColor
         }
         separator.backgroundColor = UIColor(usesSettingsColors ? settings.separator : theme.border).cgColor

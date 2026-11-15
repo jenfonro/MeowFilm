@@ -7,9 +7,6 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
     override var usesSettingsTable: Bool { false }
     let manager = ManagementListView()
     private var query = ""
-    private lazy var sortButton = ManagementListView.icon("management.sort", label: "排序视频源") { [weak self] in
-        self?.openOrder()
-    }
     private var detection: Task<Void, Never>?
     private(set) var detecting = false
     private var detectingKeys = Set<FilmSourceKey>()
@@ -25,8 +22,7 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
         manager.onSelection = { [weak self] in self?.updateFooterMenu() }
         manager.onDelete = { [weak self] in self?.removeSelected() }
         manager.footerMoreNeedsSelection = false
-        sortButton.accessibilityIdentifier = "film.videos.sort"
-        manager.tools.addArrangedSubview(sortButton)
+        manager.configureToolbar(showsSearch: true, buttons: [])
         view.addSubview(manager); manager.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             manager.topAnchor.constraint(equalTo: contentTopAnchor),
@@ -46,7 +42,6 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
                 .contains { $0.localizedCaseInsensitiveContains(normalizedQuery) }
         }
         let detectable = Set((snapshot?.cats ?? []).filter(\.canDetect).map(\.installationId))
-        sortButton.isEnabled = !busy && !detecting && allVideos.count > 1
         let rows = videos.map { video in
             let identifier = rowID(video.key)
             let checking = detectingKeys.contains(video.key)
@@ -110,15 +105,6 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
         guard !busy, !detecting else { return }
         let keys = (snapshot?.videos ?? []).filter { manager.selected.contains(rowID($0.key)) }.map(\.key)
         remove(keys)
-    }
-
-    private func openOrder() {
-        guard let videos = snapshot?.videos, videos.count > 1,
-              let navigationController, navigationController.topViewController === self else { return }
-        navigationController.pushViewController(
-            FilmVideoSourceOrderController(service: service, videos: videos, themeProvider: themeProvider),
-            animated: true
-        )
     }
 
     private func remove(_ keys: [FilmSourceKey]) {
@@ -252,105 +238,4 @@ final class FilmVideoDetailController: FilmSourcePageController {
     override func viewWillAppear(_ animated: Bool) { super.viewWillAppear(animated); render() }
 }
 
-@MainActor
-final class FilmVideoSourceOrderController: FilmSourcePageController {
-    private var ordered: [FilmVideoSource]
-    private var saving = false
-
-    init(service: FilmSourceService, videos: [FilmVideoSource],
-         themeProvider: any PageThemeProviding) {
-        ordered = videos
-        super.init(service: service, themeProvider: themeProvider)
-        pageTitle = "视频源排序"
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.accessibilityIdentifier = "film.videos.order"
-        render()
-    }
-
-    override func pageDidBecomeVisible() {
-        if !saving, let snapshot { ordered = snapshot.videos }
-        render()
-    }
-
-    override func render() {
-        sections = [.init(title: "", rows: ordered.enumerated().map { index, video in
-            let title = UILabel()
-            title.text = video.name
-            title.textColor = UIColor(theme.settings.ink)
-            title.font = .preferredFont(forTextStyle: .body)
-            title.adjustsFontForContentSizeCategory = true
-            title.numberOfLines = 0
-
-            let up = PageHeaderButton(image: UIImage(systemName: "chevron.up")!,
-                accessibilityLabel: "\(video.name) 上移") { [weak self] in
-                    self?.move(from: index, to: index - 1)
-                }
-            up.accessibilityIdentifier = "film.video.order.\(index).up"
-            up.isEnabled = !saving && index > 0
-            up.tintColor = UIColor(theme.settings.ink)
-
-            let down = PageHeaderButton(image: UIImage(systemName: "chevron.down")!,
-                accessibilityLabel: "\(video.name) 下移") { [weak self] in
-                    self?.move(from: index, to: index + 1)
-                }
-            down.accessibilityIdentifier = "film.video.order.\(index).down"
-            down.isEnabled = !saving && index + 1 < ordered.count
-            down.tintColor = UIColor(theme.settings.ink)
-
-            let controls = UIStackView(arrangedSubviews: [up, down])
-            controls.axis = .horizontal
-            controls.spacing = 0
-            controls.setContentHuggingPriority(.required, for: .horizontal)
-            let row = UIStackView(arrangedSubviews: [title, controls])
-            row.axis = .horizontal
-            row.alignment = .center
-            row.spacing = 12
-            return FilmSettingsRow(title: video.name, detail: "第 \(index + 1) 位",
-                id: "film.video.order.\(index)", enabled: !saving, content: row)
-        })]
-        super.render()
-    }
-
-    private func move(from: Int, to: Int) {
-        guard isPageActive, isPageVisible, !saving,
-              ordered.indices.contains(from), ordered.indices.contains(to) else { return }
-        ordered.swapAt(from, to)
-        save()
-    }
-
-    private func save() {
-        guard !saving else { return }
-        let values = ordered
-        let generation = sourcePageGeneration
-        saving = true
-        render()
-        Task { [weak self, service] in
-            do {
-                for (index, video) in values.enumerated() {
-                    guard self?.canContinueSourceBatch(generation) == true else { break }
-                    let current = await service.snapshot
-                    guard self?.canContinueSourceBatch(generation) == true else { break }
-                    guard let source = current.videos.first(where: { $0.key == video.key }) else {
-                        throw FilmSourceError(code: "NOT_FOUND")
-                    }
-                    if source.order != index {
-                        try await service.saveVideoOptions(source.key, options: source.options, order: index)
-                    }
-                }
-                guard let self else { return }
-                ordered = (await service.snapshot).videos
-                saving = false
-                render()
-            } catch {
-                guard let self else { return }
-                saving = false
-                render()
-                failure(error, retry: { [weak self] in self?.save() })
-            }
-        }
-    }
-}
 #endif

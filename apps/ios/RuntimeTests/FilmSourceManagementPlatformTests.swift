@@ -127,31 +127,42 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
         let navigation = PageNavigationController(themeProvider: theme)
         navigation.setViewControllers([page], animated: false)
         let window = try await host(navigation); defer { unhost(window) }
-        await eventually { page.snapshot?.videos.count == 2 }
-        let sort = try ManagementListTestUI.button("film.videos.sort", in: page.manager)
-        XCTAssertTrue(sort.isEnabled); sort.sendActions(for: .touchUpInside)
-        await eventually { (navigation.topViewController as? FilmVideoSourceOrderController)?.canPresentPageAlert == true }
-        let order = try XCTUnwrap(navigation.topViewController as? FilmVideoSourceOrderController)
-        XCTAssertEqual(order.pageTitle, "视频源排序")
-        XCTAssertEqual(order.sections.flatMap(\.rows).map(\.title), saved.videos.map(\.name))
-        let down = try XCTUnwrap(descendants(order.view).compactMap { $0 as? PageHeaderButton }.first {
-            $0.accessibilityIdentifier == "film.video.order.0.down"
-        })
-        XCTAssertTrue(down.isEnabled); down.sendActions(for: .touchUpInside)
-        await eventually {
-            order.sections.flatMap(\.rows).map(\.title) == saved.videos.reversed().map(\.name) &&
-            self.descendants(order.view).compactMap { $0 as? PageHeaderButton }.contains {
-                $0.accessibilityIdentifier == "film.video.order.0.down" && $0.isEnabled
+        await eventually { page.snapshot?.videos == saved.videos && page.canPresentPageAlert }
+        for (index, target) in saved.videos.reversed().enumerated() {
+            try ManagementListTestUI.open("film.video.\(target.key.installationId).\(target.key.siteKey)", in: page.manager)
+            await eventually {
+                (navigation.topViewController as? FilmVideoDetailController)?.canPresentPageAlert == true &&
+                (navigation.topViewController as? FilmVideoDetailController)?.snapshot?.videos == page.snapshot?.videos
             }
+            let detail = try XCTUnwrap(navigation.topViewController as? FilmVideoDetailController)
+            XCTAssertEqual(detail.pageTitle, target.name)
+            XCTAssertEqual(try row(detail, "film.video.order").detail, String(target.order))
+            XCTAssertFalse(detail.table.visibleCells.isEmpty)
+            for cell in detail.table.visibleCells { XCTAssertTrue(cell is SettingsTableCell) }
+            try row(detail, "film.video.order").action?()
+            let dialog = try XCTUnwrap(detail.presentedViewController as? ManagementDialog)
+            let input = try XCTUnwrap(descendants(dialog.view).first {
+                $0.accessibilityIdentifier == "film.video.order.input"
+            } as? UITextField)
+            await eventually { dialog.view.window != nil && !dialog.isBeingPresented }
+            XCTAssertEqual(input.text, String(target.order))
+            input.text = String(index)
+            try XCTUnwrap(descendants(dialog.view).compactMap { $0 as? UIButton }.first {
+                $0.accessibilityIdentifier == "management.dialog.confirm"
+            }).sendActions(for: .touchUpInside)
+            await eventually {
+                detail.presentedViewController == nil &&
+                detail.snapshot?.videos.first { $0.key == target.key }?.order == index
+            }
+            let current = await fixture.service.snapshot
+            navigation.popViewController(animated: false)
+            await eventually { page.snapshot?.videos == current.videos && page.canPresentPageAlert }
         }
         let reordered = await fixture.service.snapshot
         XCTAssertEqual(reordered.videos.map(\.key), saved.videos.reversed().map(\.key))
         for source in reordered.videos {
             XCTAssertEqual(source.options, saved.videos.first { $0.key == source.key }?.options)
         }
-        for cell in order.table.visibleCells { XCTAssertTrue(cell is SettingsTableCell) }
-        navigation.popViewController(animated: false)
-        await eventually { page.snapshot?.videos == reordered.videos && page.canPresentPageAlert }
         XCTAssertEqual(ManagementListTestUI.rowIDs(in: page.manager),
                        reordered.videos.map { "management.row.film.video.\($0.key.installationId).\($0.key.siteKey)" })
 
@@ -159,7 +170,7 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
         try ManagementListTestUI.open("film.video.\(target.key.installationId).\(target.key.siteKey)", in: page.manager)
         await eventually { navigation.topViewController is FilmVideoDetailController }
         let detail = try XCTUnwrap(navigation.topViewController as? FilmVideoDetailController)
-        await eventually { detail.sections.flatMap(\.rows).contains { $0.id == "film.video.order" } }
+        await eventually { detail.canPresentPageAlert && detail.sections.flatMap(\.rows).contains { $0.id == "film.video.order" } }
         try row(detail, "film.video.order").action?()
         let dialog = try XCTUnwrap(detail.presentedViewController as? ManagementDialog)
         let input = try XCTUnwrap(descendants(dialog.view).first {
@@ -179,6 +190,8 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
             } as? UILabel)?.text == "排序必须是整数"
         }
         XCTAssertTrue(detail.presentedViewController === dialog)
+        let invalid = await fixture.service.snapshot
+        XCTAssertEqual(invalid.videos, reordered.videos)
         input.text = "7"
         try XCTUnwrap(descendants(dialog.view).compactMap { $0 as? UIButton }.first {
             $0.accessibilityIdentifier == "management.dialog.confirm"
@@ -187,6 +200,97 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
             detail.presentedViewController == nil &&
             detail.snapshot?.videos.first { $0.key == target.key }?.order == 7
         }
+        let manual = await fixture.service.snapshot
+        XCTAssertEqual(manual.videos.map(\.key), saved.videos.map(\.key))
+        for source in manual.videos {
+            XCTAssertEqual(source.options, saved.videos.first { $0.key == source.key }?.options)
+        }
+        XCTAssertEqual(manual.videos.filter { $0.key != target.key },
+                       reordered.videos.filter { $0.key != target.key })
+        navigation.popViewController(animated: false)
+        await eventually { page.snapshot?.videos == manual.videos && page.canPresentPageAlert }
+        XCTAssertEqual(ManagementListTestUI.rowIDs(in: page.manager),
+                       manual.videos.map { "management.row.film.video.\($0.key.installationId).\($0.key.siteKey)" })
+        await fixture.service.close()
+    }
+
+    func testCatHeaderImportMenuPreservesLocalCancelAndBusyVisibilityGuards() async throws {
+        let fixture = try makeFixture()
+        try await fixture.service.refresh()
+        let theme = SourceListTheme()
+        let page = FilmCatSourcesViewController(service: fixture.service, themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme)
+        navigation.setViewControllers([page], animated: false)
+        let window = try await host(navigation); defer { unhost(window) }
+        await eventually { page.snapshot?.cats.count == 2 && page.canPresentPageAlert }
+        let add = try XCTUnwrap(descendants(page.pageHeader).compactMap { $0 as? PageHeaderButton }.first {
+            $0.accessibilityLabel == "导入猫源"
+        })
+        page.view.layoutIfNeeded()
+        XCTAssertEqual(page.pageHeader.trailingCount, 1)
+        XCTAssertTrue(add.window === window)
+        XCTAssertFalse(add.isHidden)
+        XCTAssertTrue(add.showsMenuAsPrimaryAction)
+        XCTAssertEqual(add.tintColor, UIColor(page.theme.ink))
+        XCTAssertEqual(add.menu?.children.compactMap { ($0 as? UIAction)?.title }, ["本地导入", "网络导入"])
+        let buttonFrame = add.convert(add.bounds, to: page.pageHeader)
+        let headerFrame = page.pageHeader.contentFrame
+        XCTAssertGreaterThan(buttonFrame.width, 0)
+        XCTAssertGreaterThan(buttonFrame.height, 0)
+        XCTAssertGreaterThanOrEqual(buttonFrame.minX, headerFrame.midX)
+        XCTAssertLessThanOrEqual(buttonFrame.maxX, headerFrame.maxX)
+        XCTAssertGreaterThanOrEqual(buttonFrame.minY, headerFrame.minY)
+        XCTAssertLessThanOrEqual(buttonFrame.maxY, headerFrame.maxY)
+        let pendingImports = try ["本地导入", "网络导入"].map {
+            try ManagementListTestUI.menuAction($0, on: add)
+        }
+        try ManagementListTestUI.select("film.cat.a", in: page.manager)
+        let sourceIDs = ManagementListTestUI.rowIDs(in: page.manager)
+        try ManagementListTestUI.activateMenu("本地导入", on: add)
+        await eventually { (navigation.topViewController as? FilmCatEditorController)?.canPresentPageAlert == true }
+        let editor = try XCTUnwrap(navigation.topViewController as? FilmCatEditorController)
+        if case .importSource(let local) = editor.mode { XCTAssertTrue(local) }
+        else { XCTFail("The local menu action must open a local import") }
+        XCTAssertNotNil(try row(editor, "film.cat.editor.file").action)
+        navigation.popViewController(animated: false)
+        await eventually { page.canPresentPageAlert && !editor.isPageActive }
+        XCTAssertEqual(ManagementListTestUI.rowIDs(in: page.manager), sourceIDs)
+        XCTAssertEqual(page.manager.selected, ["film.cat.a"])
+        let afterCancel = await fixture.runtime.mutations
+        XCTAssertTrue(afterCancel.isEmpty)
+
+        let successor = UIViewController()
+        navigation.pushViewController(successor, animated: false)
+        await eventually { !page.isPageVisible }
+        for title in ["本地导入", "网络导入"] {
+            try ManagementListTestUI.activateMenu(title, on: add)
+        }
+        XCTAssertTrue(navigation.topViewController === successor)
+        XCTAssertEqual(navigation.viewControllers.count, 2)
+        XCTAssertNil(page.presentedViewController)
+        navigation.popViewController(animated: false)
+        await eventually { page.canPresentPageAlert }
+        let content = try ManagementListTestUI.cell("film.cat.a", in: page.manager).contentView
+        let more = try ManagementListTestUI.button("management.more.film.cat.a", in: content)
+        let entered = expectation(description: "restart admitted")
+        await fixture.runtime.pause("restart") { entered.fulfill() }
+        try ManagementListTestUI.activateMenu("重启", on: more)
+        await fulfillment(of: [entered], timeout: 5)
+        XCTAssertTrue(page.busy)
+        XCTAssertFalse(add.isEnabled)
+        // A menu action captured before the write must still honor the busy guard.
+        for action in pendingImports {
+            let trigger = UIButton()
+            trigger.addAction(action, for: .touchUpInside)
+            trigger.sendActions(for: .touchUpInside)
+        }
+        XCTAssertTrue(navigation.topViewController === page)
+        XCTAssertNil(page.presentedViewController)
+        await fixture.runtime.release()
+        await eventually { !page.busy && add.isEnabled }
+        let mutations = await fixture.runtime.mutations
+        XCTAssertEqual(mutations.map(\.0), ["restart"])
+        XCTAssertEqual(mutations.map(\.1), ["a"])
         await fixture.service.close()
     }
 
@@ -202,13 +306,18 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
         let background = page.view
         let sourceIDs = ManagementListTestUI.rowIDs(in: page.manager)
         XCTAssertEqual(sourceIDs.count, 2)
-        page.importSource(local: false)
+        let add = try XCTUnwrap(descendants(page.pageHeader).compactMap { $0 as? PageHeaderButton }.first {
+            $0.accessibilityLabel == "导入猫源"
+        })
+        try ManagementListTestUI.activateMenu("网络导入", on: add)
         await eventually {
             (page.presentedViewController as? FilmFloatingEditorController)?.viewIfLoaded?.window != nil &&
             page.presentedViewController?.isBeingPresented == false
         }
         let modal = try XCTUnwrap(page.presentedViewController as? FilmFloatingEditorController)
         let editor = try XCTUnwrap(modal.children.compactMap { $0 as? FilmCatEditorController }.first)
+        if case .importSource(let local) = editor.mode { XCTAssertFalse(local) }
+        else { XCTFail("The network menu action must open a network import") }
         XCTAssertEqual(modal.modalPresentationStyle, .overFullScreen)
         XCTAssertTrue(navigation.topViewController === page)
         XCTAssertTrue(page.view === background)

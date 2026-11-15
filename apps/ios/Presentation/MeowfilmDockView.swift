@@ -140,12 +140,16 @@ final class MeowfilmDockView: UIView {
         playerSurfaceVisible = visible
         surfaceHost.isHidden = !visible
         surfaceHeight.constant = visible ? surface.dockHeight : 0
+        updateBackdrop()
         setNeedsLayout()
     }
 
     /// The recommend page fades its content out beside the capsule; every other
     /// page ends its content above the capsule.
     func updateBackdrop() {
+        opaqueBackdrop.isHidden = !occupiesBottom
+        fadedBackdrop.isHidden = !occupiesBottom
+        isUserInteractionEnabled = occupiesBottom
         opaqueBackdrop.alpha = navigationVisible && selected == .recommend ? 0 : 1
     }
 

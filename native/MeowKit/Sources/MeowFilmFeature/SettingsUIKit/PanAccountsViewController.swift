@@ -105,6 +105,7 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
                 var attributes = $0
                 attributes.foregroundColor = foreground
+                attributes.font = .preferredFont(forTextStyle: .body)
                 return attributes
             }
             configuration.titleLineBreakMode = .byWordWrapping
@@ -112,7 +113,7 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             let button = UIButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
                 self?.perform(action, provider: row.id)
             })
-            button.titleLabel?.font = .preferredFont(forTextStyle: .subheadline)
+            button.titleLabel?.font = .preferredFont(forTextStyle: .body)
             button.titleLabel?.numberOfLines = 0
             button.titleLabel?.adjustsFontForContentSizeCategory = true
             button.accessibilityIdentifier = "pan.accounts.\(row.id.rawValue).\(suffix)"

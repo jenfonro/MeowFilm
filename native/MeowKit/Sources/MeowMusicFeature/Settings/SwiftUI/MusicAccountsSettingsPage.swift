@@ -321,11 +321,15 @@ struct MusicAccountsSettingsContent: View {
             }
             .listSectionSeparator(.hidden)
             Section {
-                Button("导入账号", action: importAccounts)
+                Button(action: importAccounts) {
+                    Text("导入账号").font(.body.weight(.regular))
+                }
                     .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .accessibilityIdentifier("music.accounts.import")
                     .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: false))
-                Button("导出账号", action: exportAccounts)
+                Button(action: exportAccounts) {
+                    Text("导出账号").font(.body.weight(.regular))
+                }
                     .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .accessibilityIdentifier("music.accounts.export")
                     .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: !transfer.busy))
@@ -365,7 +369,7 @@ private struct MusicPlatformAccountRow: View {
             if let account = summary?.account {
                 if account.phase == .signedOut, account.canLogin {
                     Text("登录")
-                        .font(.subheadline)
+                        .font(.body)
                         .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                         .frame(minWidth: 44, minHeight: 44)
                         .fixedSize(horizontal: true, vertical: false)

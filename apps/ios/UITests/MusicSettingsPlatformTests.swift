@@ -10,6 +10,68 @@ import MeowPlayback
 
 @MainActor
 final class MusicSettingsPlatformTests: XCTestCase {
+    func testSettingsRowsShareUIKitTypeGeometryAndDoNotRepeatTheHeaderInset() throws {
+        let domain = "MusicSettingsRowGeometry." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let page = HostingPageViewController(themeProvider: appearance,
+            content: MusicSettingsContent(theme: PageTheme(palette: .sky)))
+        page.pageTitle = "音乐设置"
+        try withSettingsComponent(page) {
+            let window = try XCTUnwrap(page.view.window)
+            let width = try XCTUnwrap(page.view.constraints.first {
+                $0.firstAttribute == .width && $0.secondItem == nil
+            })
+            @MainActor func visibleRows() -> [SettingsRowBackgroundView] {
+                settingsDescendants(page.view).compactMap { $0 as? UICollectionView }
+                    .flatMap(\.visibleCells).flatMap { settingsDescendants($0) }
+                    .compactMap { $0 as? SettingsRowBackgroundView }
+                    .filter { $0.bounds.width > 0 }
+            }
+            for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+                page.traitOverrides.preferredContentSizeCategory = category
+                width.constant = category == .large ? 390 : 320
+                for dark in [false, true] {
+                    page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+                    page.setContent(MusicSettingsContent(theme: PageTheme(palette: .sky, dark: dark)))
+                    waitForSettingsComponent("settings rows laid out for current type and theme") {
+                        window.layoutIfNeeded(); page.view.layoutIfNeeded()
+                        return !visibleRows().isEmpty &&
+                            page.traitCollection.preferredContentSizeCategory == category
+                    }
+                    let rows = visibleRows()
+                        .sorted { $0.convert($0.bounds, to: page.view).minY < $1.convert($1.bounds, to: page.view).minY }
+                    let first = try XCTUnwrap(rows.first)
+                    let frame = first.convert(first.bounds, to: page.view)
+                    XCTAssertEqual(frame.minX, SettingsVisualMetrics.cardHorizontalInset, accuracy: 0.5)
+                    XCTAssertEqual(frame.maxX, page.view.bounds.maxX - SettingsVisualMetrics.cardHorizontalInset, accuracy: 0.5)
+                    let headerBottom = page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY
+                    XCTAssertGreaterThanOrEqual(frame.minY, headerBottom)
+                    XCTAssertLessThanOrEqual(frame.minY - headerBottom, SettingsVisualMetrics.sectionSpacing,
+                        "The SwiftUI list must not add a second header-sized gap")
+                    let title = UILabel()
+                    title.font = .preferredFont(forTextStyle: .body, compatibleWith: page.traitCollection)
+                    title.numberOfLines = 0; title.text = "平台账号"
+                    let labelWidth = frame.width - SettingsVisualMetrics.rowHorizontalPadding * 2 - 24 - 12 - 16 - 12
+                    let bodyHeight = title.sizeThatFits(CGSize(width: labelWidth, height: .greatestFiniteMagnitude)).height
+                    XCTAssertEqual(frame.height, max(SettingsVisualMetrics.rowHeight,
+                        ceil(bodyHeight) + SettingsVisualMetrics.rowVerticalPadding * 2), accuracy: 1)
+                    for row in rows {
+                        let bounds = row.convert(row.bounds, to: page.view)
+                        XCTAssertGreaterThanOrEqual(bounds.minX, 0)
+                        XCTAssertLessThanOrEqual(bounds.maxX, page.view.bounds.width)
+                    }
+                    let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
+                        XCTAssertTrue(page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true))
+                    })
+                    screenshot.name = "settings-shared-type-\(category.rawValue)-\(dark ? "dark" : "light")"
+                    screenshot.lifetime = .keepAlways; add(screenshot)
+                }
+            }
+        }
+    }
+
     func testAccountLoginFormKeepsDraftAndReadableControlsAcrossAppearances() throws {
         let appearance = MusicAppearancePreferencesStore()
         let service = makeService()
@@ -70,6 +132,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
                 waitForSettingsComponent("settings appearance propagated") { page.theme.dark == dark }
                 for palette in [PagePalette.preset(.coral), .custom(0xffff00)] {
                     appearance.selectFixedPalette(palette)
+                    try showLockLyricRow(in: page)
                     let accent = SettingsTheme(dark: dark).accent
                     let expected = UIColor(accent)
                     waitForSettingsComponent("settings switch rendered after palette change") {
@@ -113,6 +176,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
         let page = MusicSettingsViewController(model: owner, appearance: appearance, router: router)
         try withSettingsComponent(page) {
             XCTAssertEqual(page.pageTitle, "音乐设置")
+            try showLockLyricRow(in: page)
             waitForSettingsComponent("direct lock lyric switch visible") {
                 self.settingsDescendants(page.view).compactMap { $0 as? UISwitch }.count == 1
             }
@@ -125,6 +189,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
             let corrupt = Data("invalid-preferences".utf8)
             defaults.set(corrupt, forKey: MusicAppearancePreferencesStore.preferencesKey)
             waitForSettingsComponent("music page ready for error feedback") { page.canPresentPageAlert }
+            try showLockLyricRow(in: page)
             let current = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UISwitch }.first)
             current.setOn(true, animated: false); current.sendActions(for: .valueChanged)
             waitForSettingsComponent("failed lock lyric write reported") { page.presentedViewController is UIAlertController }
@@ -239,6 +304,9 @@ final class MusicSettingsPlatformTests: XCTestCase {
     }
 
     func testSourceManagementRendersBuiltInAndScriptSwitchesTogetherAndWritesThroughBindings() throws {
+        let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
+        performAccountPageAction { runner.activate() }
+        waitForSettingsComponent("source search host foreground") { UIApplication.shared.applicationState == .active }
         let domain = "MusicSourceSettings." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
@@ -253,9 +321,20 @@ final class MusicSettingsPlatformTests: XCTestCase {
         XCTAssertEqual(MusicSettingsDestination.sources.accessibilityIdentifier, "music.settings.sources")
         let host = UIHostingController(rootView: MusicSourceManagementContent(state: state, theme: PageTheme(colors: appearance.pagePalette)))
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let container = UIViewController()
+        container.addChild(host)
+        container.view.addSubview(host.view)
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        let width = host.view.widthAnchor.constraint(equalToConstant: 390)
+        NSLayoutConstraint.activate([
+            host.view.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
+            host.view.topAnchor.constraint(equalTo: container.view.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: container.view.bottomAnchor), width
+        ])
+        host.didMove(toParent: container)
         let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
-        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
-        window.rootViewController = host; window.makeKeyAndVisible()
+        window.frame = scene?.screen.bounds ?? window.frame
+        window.rootViewController = container; window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }
         func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
         let switchesReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -274,13 +353,53 @@ final class MusicSettingsPlatformTests: XCTestCase {
         wait(for: [saved], timeout: 3)
         XCTAssertFalse(state.officialEnabled(.netease))
         XCTAssertEqual(state.scripts.first?.state, .ready)
+        let manager = try XCTUnwrap(views(host.view).compactMap { $0 as? ManagementListView }.first)
+        let table = try XCTUnwrap(views(manager).compactMap { $0 as? UITableView }.first)
+        XCTAssertEqual(manager.convert(manager.bounds, to: host.view).maxY, host.view.bounds.maxY, accuracy: 0.5)
+        XCTAssertEqual(table.frame.maxY, manager.bounds.maxY, accuracy: 0.5)
+        XCTAssertFalse(manager.search.isHidden)
+        XCTAssertGreaterThan(manager.search.searchTextField.bounds.width, manager.bounds.width / 2)
+        manager.setSelection(["fixture"])
+        manager.onSelection?()
+        for query in ["fixture", "official:" + MusicAccountPlatform.netease.rawValue, ""] {
+            manager.search.text = query
+            manager.search.delegate?.searchBar?(manager.search, textDidChange: query)
+            XCTAssertEqual(table.numberOfRows(inSection: 0), query.isEmpty ? 4 : 1)
+            if !query.isEmpty {
+                table.layoutIfNeeded()
+                let row = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)))
+                XCTAssertEqual(row.accessibilityIdentifier, "management.row.\(query)")
+            }
+            XCTAssertEqual(state.selected, ["fixture"], "Search must preserve selected source identities")
+        }
+        let searchInput = runner.searchFields["搜索音源"]
+        XCTAssertTrue(searchInput.waitForExistence(timeout: 3))
+        performAccountPageAction { searchInput.tap(); searchInput.typeText("fixture") }
+        waitForSettingsComponent("typed source search and keyboard layout applied") {
+            host.view.layoutIfNeeded(); manager.layoutIfNeeded()
+            return table.numberOfRows(inSection: 0) == 1 &&
+                manager.keyboardLayoutGuide.layoutFrame.height > manager.safeAreaInsets.bottom + 1
+        }
+        let footer = try XCTUnwrap(views(manager).first {
+            $0.accessibilityIdentifier == "management.selectAll"
+        }?.superview)
+        XCTAssertLessThanOrEqual(footer.frame.maxY, manager.keyboardLayoutGuide.layoutFrame.minY - 12 + 0.5)
+        XCTAssertEqual(table.frame.maxY, manager.bounds.maxY, accuracy: 0.5)
+        XCTAssertEqual(state.selected, ["fixture"])
+        performAccountPageAction { window.endEditing(true) }
+        manager.search.text = ""
+        manager.search.delegate?.searchBar?(manager.search, textDidChange: "")
+        waitForSettingsComponent("source search keyboard dismissed") {
+            window.layoutIfNeeded(); host.view.layoutIfNeeded(); manager.layoutIfNeeded()
+            return manager.keyboardLayoutGuide.layoutFrame.height <= manager.safeAreaInsets.bottom + 1
+        }
         let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: host.view.bounds).image { context in
             host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
         })
         screenshot.name = "Unified music sources"; screenshot.lifetime = .keepAlways
         add(screenshot)
         host.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
-        window.frame = CGRect(x: 0, y: 0, width: 320, height: 844)
+        width.constant = 320
         waitForSettingsComponent("narrow large type sources laid out") {
             window.layoutIfNeeded(); host.view.layoutIfNeeded()
             return host.view.window === window && host.view.bounds.width == 320 &&
@@ -576,6 +695,19 @@ final class MusicSettingsPlatformTests: XCTestCase {
             XCTAssertEqual(page.pageTitle, "平台账号")
             XCTAssertTrue(runner.staticTexts["平台账号"].exists)
             XCTAssertFalse(runner.staticTexts["音乐平台"].exists)
+            let rows = settingsDescendants(page.view).compactMap { $0 as? SettingsRowBackgroundView }
+                .filter { $0.bounds.width > 0 }
+            XCTAssertGreaterThanOrEqual(rows.count, 5)
+            for row in rows {
+                XCTAssertGreaterThanOrEqual(row.bounds.height, SettingsVisualMetrics.rowHeight)
+                XCTAssertEqual(row.bounds.width, page.view.bounds.width - SettingsVisualMetrics.cardHorizontalInset * 2,
+                    accuracy: 0.5)
+            }
+            let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
+                XCTAssertTrue(page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true))
+            })
+            screenshot.name = "settings-platform-accounts-shared-type"
+            screenshot.lifetime = .keepAlways; add(screenshot)
         }
         let closed = expectation(description: "account page closed")
         Task { await owner.close(); closed.fulfill() }
@@ -796,6 +928,24 @@ final class MusicSettingsPlatformTests: XCTestCase {
         [view] + view.subviews.flatMap(settingsDescendants)
     }
 
+    private func showLockLyricRow(in page: UIViewController) throws {
+        waitForSettingsComponent("music settings sections laid out") {
+            page.view.layoutIfNeeded()
+            return self.settingsDescendants(page.view).compactMap { $0 as? UICollectionView }.contains {
+                $0.numberOfSections > 1 && $0.numberOfItems(inSection: 1) == 1
+            }
+        }
+        let list = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UICollectionView }.first)
+        let row = IndexPath(item: 0, section: 1)
+        list.scrollToItem(at: row, at: .centeredVertically, animated: false)
+        waitForSettingsComponent("lock lyric row scrolled into view") {
+            list.layoutIfNeeded()
+            guard list.indexPathsForVisibleItems.contains(row),
+                  let cell = list.cellForItem(at: row) else { return false }
+            return self.settingsDescendants(cell).compactMap { $0 as? UISwitch }.count == 1
+        }
+    }
+
     private func waitForSettingsComponent(_ description: String, until predicate: @escaping @MainActor () -> Bool) {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             MainActor.assumeIsolated { predicate() }
@@ -807,9 +957,20 @@ final class MusicSettingsPlatformTests: XCTestCase {
     private func withSettingsComponent(_ page: PageViewController, body: () throws -> Void) rethrows {
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         let previousWindow = scene?.windows.first { $0.isKeyWindow }
+        let container = UIViewController()
+        container.addChild(page)
+        container.view.addSubview(page.view)
+        page.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            page.view.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
+            page.view.topAnchor.constraint(equalTo: container.view.topAnchor),
+            page.view.bottomAnchor.constraint(equalTo: container.view.bottomAnchor),
+            page.view.widthAnchor.constraint(equalToConstant: 390)
+        ])
+        page.didMove(toParent: container)
         let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
-        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
-        window.rootViewController = page; window.makeKeyAndVisible()
+        window.frame = scene?.screen.bounds ?? window.frame
+        window.rootViewController = container; window.makeKeyAndVisible()
         defer {
             PageViewController.invalidatePages(in: page)
             window.isHidden = true; window.rootViewController = nil

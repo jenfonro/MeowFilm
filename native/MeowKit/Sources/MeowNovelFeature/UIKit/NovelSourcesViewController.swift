@@ -37,7 +37,9 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
     override func viewDidLoad() {
         super.viewDidLoad(); view.accessibilityIdentifier = "novel.sources"
         manager.search.placeholder = "搜索书源"; manager.onSearch = { [weak self] in self?.query = $0; self?.render() }
-        for button in [sortButton, groupButton, moreButton] { button.showsMenuAsPrimaryAction = true; manager.tools.addArrangedSubview(button) }
+        let buttons = [sortButton, groupButton, moreButton]
+        for button in buttons { button.showsMenuAsPrimaryAction = true }
+        manager.configureToolbar(showsSearch: true, buttons: buttons)
         manager.onSelection = { [weak self] in self?.menus() }
         manager.onDelete = { [weak self] in guard let self else { return }; remove(feature.sources.filter { self.manager.selected.contains($0.id) }) }
         render()

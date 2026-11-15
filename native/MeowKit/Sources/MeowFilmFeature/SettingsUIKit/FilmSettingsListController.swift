@@ -72,7 +72,10 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
     }
     func tableView(_ tableView: UITableView, willDisplayHeaderView view: UIView, forSection section: Int) {
         if usesSettingsColors {
-            (view as? UITableViewHeaderFooterView)?.textLabel?.textColor = UIColor(theme.settings.muted)
+            let label = (view as? UITableViewHeaderFooterView)?.textLabel
+            label?.font = .preferredFont(forTextStyle: .subheadline)
+            label?.adjustsFontForContentSizeCategory = true
+            label?.textColor = UIColor(theme.settings.muted)
         }
     }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {

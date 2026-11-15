@@ -211,6 +211,7 @@ struct MusicSourceManagementContent: View {
     var body: some View {
         MusicSourceManagementList(state: state, theme: theme, openScript: openScript,
                                   edit: edit, update: update, removeSelected: removeSelected)
+            .ignoresSafeArea(.container, edges: .bottom)
     }
     static func origin(_ item: MusicScriptSourceItem) -> String { if case .file = item.origin { return "本地" }; return "网络" }
     static func detail(_ item: MusicScriptSourceItem) -> String { origin(item) + " · " + item.version }
@@ -397,12 +398,14 @@ struct MusicScriptSourceDetailContent: View {
                     if let check = item.check { row("检测时间", check.checkedAt.formatted(), last: true) }
                 }
                 .listSectionSeparator(.hidden)
-                Section("平台检测") {
+                Section {
                     ForEach(MusicPublicBrowsePlatform.allCases) { platform in
                         row(platform.title, MusicSourceManagementContent.healthName(item.check?.platforms[platform.rawValue]),
                             first: platform == MusicPublicBrowsePlatform.allCases.first,
                             last: platform == MusicPublicBrowsePlatform.allCases.last)
                     }
+                } header: {
+                    MusicSettingsSectionHeader(title: "平台检测", theme: theme)
                 }
                 .listSectionSeparator(.hidden)
                 if state.details[id]?.rollbackAvailable == true {
@@ -432,7 +435,8 @@ struct MusicScriptSourceDetailContent: View {
         return layout {
             Text(title).foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
             if !typeSize.isAccessibilitySize { Spacer(minLength: 12) }
-            Text(value).multilineTextAlignment(typeSize.isAccessibilitySize ? .leading : .trailing)
+            Text(value).font(.subheadline)
+                .multilineTextAlignment(typeSize.isAccessibilitySize ? .leading : .trailing)
                 .textSelection(.enabled)
         }
         .accessibilityElement(children: .combine)

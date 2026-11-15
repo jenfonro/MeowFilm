@@ -38,7 +38,7 @@ public struct AccountPlatformLabel: View {
     public var body: some View {
         HStack(spacing: 12) {
             AccountPlatformMark(assetName: assetName, symbol: symbol, size: size, theme: theme)
-            Text(title).fixedSize(horizontal: false, vertical: true)
+            Text(title).font(.body.weight(.regular)).fixedSize(horizontal: false, vertical: true)
         }
     }
 }
